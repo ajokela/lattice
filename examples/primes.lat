@@ -1,0 +1,153 @@
+// Prime number algorithms: sieve, factorization, primality testing.
+// Demonstrates: arrays, nested loops, math, formatted output.
+
+fn is_prime(n: Int) -> Bool {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 { return false }
+    if n % 3 == 0 { return false }
+    flux i = 5
+    while i * i <= n {
+        if n % i == 0 { return false }
+        if n % (i + 2) == 0 { return false }
+        i += 6
+    }
+    return true
+}
+
+// Sieve of Eratosthenes up to limit
+fn sieve(limit: Int) -> [Int] {
+    // Build a boolean-like array (1 = prime candidate, 0 = composite)
+    flux flags = []
+    flux i = 0
+    while i <= limit {
+        if i < 2 {
+            flags.push(0)
+        } else {
+            flags.push(1)
+        }
+        i += 1
+    }
+
+    // Sieve
+    flux p = 2
+    while p * p <= limit {
+        if flags[p] == 1 {
+            flux j = p * p
+            while j <= limit {
+                flags[j] = 0
+                j += p
+            }
+        }
+        p += 1
+    }
+
+    // Collect primes
+    flux primes = []
+    flux k = 0
+    while k <= limit {
+        if flags[k] == 1 {
+            primes.push(k)
+        }
+        k += 1
+    }
+    return primes
+}
+
+fn prime_factorize(n: Int) -> [Int] {
+    flux factors = []
+    flux num = n
+    flux d = 2
+    while d * d <= num {
+        while num % d == 0 {
+            factors.push(d)
+            num = num / d
+        }
+        d += 1
+    }
+    if num > 1 {
+        factors.push(num)
+    }
+    return factors
+}
+
+fn gcd(a: Int, b: Int) -> Int {
+    flux x = a
+    flux y = b
+    while y != 0 {
+        let temp = y
+        y = x % y
+        x = temp
+    }
+    return x
+}
+
+fn lcm(a: Int, b: Int) -> Int {
+    return (a / gcd(a, b)) * b
+}
+
+fn goldbach(n: Int) -> String {
+    // Every even number > 2 as sum of two primes (Goldbach's conjecture)
+    flux p = 2
+    while p <= n / 2 {
+        if is_prime(p) {
+            if is_prime(n - p) {
+                return to_string(n) + " = " + to_string(p) + " + " + to_string(n - p)
+            }
+        }
+        p += 1
+    }
+    return to_string(n) + " = no decomposition found"
+}
+
+fn main() {
+    print("=== Prime Numbers ===")
+    print("")
+
+    // Sieve
+    let limit = 100
+    let primes = sieve(limit)
+    print("Primes up to " + to_string(limit) + " (" + to_string(primes.len()) + " found):")
+    print(to_string(primes))
+    print("")
+
+    // Primality testing
+    print("Primality tests:")
+    let test_nums = [1, 2, 17, 42, 97, 100, 541, 1000, 7919]
+    for n in test_nums {
+        let result = if is_prime(n) { "prime" } else { "composite" }
+        print("  " + to_string(n) + " -> " + result)
+    }
+    print("")
+
+    // Prime factorization
+    print("Prime factorizations:")
+    let factor_nums = [12, 60, 97, 100, 360, 1024, 7919, 12345]
+    for n in factor_nums {
+        let factors = prime_factorize(n)
+        flux display = to_string(n) + " = "
+        let pairs = factors.enumerate()
+        for pair in pairs {
+            if pair[0] > 0 { display += " × " }
+            display += to_string(pair[1])
+        }
+        print("  " + display)
+    }
+    print("")
+
+    // GCD and LCM
+    print("GCD and LCM:")
+    print("  gcd(48, 18) = " + to_string(gcd(48, 18)))
+    print("  gcd(100, 75) = " + to_string(gcd(100, 75)))
+    print("  lcm(12, 18) = " + to_string(lcm(12, 18)))
+    print("  lcm(7, 13) = " + to_string(lcm(7, 13)))
+    print("")
+
+    // Goldbach's conjecture for even numbers
+    print("Goldbach decompositions:")
+    flux n = 4
+    while n <= 30 {
+        print("  " + goldbach(n))
+        n += 2
+    }
+}

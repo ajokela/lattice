@@ -1,0 +1,118 @@
+// Sorting algorithms implemented in Lattice.
+// Demonstrates: recursion, array manipulation, closures, higher-order functions.
+
+// Bubble sort (in-place on a fluid array)
+fn bubble_sort(arr: [Int]) -> [Int] {
+    flux result = clone(arr)
+    let n = result.len()
+    flux i = 0
+    while i < n {
+        flux j = 0
+        while j < n - i - 1 {
+            if result[j] > result[j + 1] {
+                // Swap
+                let tmp = result[j]
+                result[j] = result[j + 1]
+                result[j + 1] = tmp
+            }
+            j += 1
+        }
+        i += 1
+    }
+    return result
+}
+
+// Selection sort
+fn selection_sort(arr: [Int]) -> [Int] {
+    flux result = clone(arr)
+    let n = result.len()
+    flux i = 0
+    while i < n - 1 {
+        flux min_idx = i
+        flux j = i + 1
+        while j < n {
+            if result[j] < result[min_idx] {
+                min_idx = j
+            }
+            j += 1
+        }
+        if min_idx != i {
+            let tmp = result[i]
+            result[i] = result[min_idx]
+            result[min_idx] = tmp
+        }
+        i += 1
+    }
+    return result
+}
+
+// Insertion sort
+fn insertion_sort(arr: [Int]) -> [Int] {
+    flux result = clone(arr)
+    let n = result.len()
+    flux i = 1
+    while i < n {
+        let key = result[i]
+        flux j = i - 1
+        while j >= 0 {
+            if result[j] > key {
+                result[j + 1] = result[j]
+                j -= 1
+            } else {
+                break
+            }
+        }
+        result[j + 1] = key
+        i += 1
+    }
+    return result
+}
+
+fn is_sorted(arr: [Int]) -> Bool {
+    flux i = 0
+    while i < arr.len() - 1 {
+        if arr[i] > arr[i + 1] { return false }
+        i += 1
+    }
+    return true
+}
+
+fn main() {
+    print("=== Sorting Algorithms ===")
+    print("")
+
+    let data = [64, 25, 12, 22, 11, 90, 1, 55, 34, 87, 3, 42]
+    print("Input:  " + to_string(data))
+    print("")
+
+    let b = bubble_sort(data)
+    print("Bubble:    " + to_string(b) + "  sorted=" + to_string(is_sorted(b)))
+
+    let s = selection_sort(data)
+    print("Selection: " + to_string(s) + "  sorted=" + to_string(is_sorted(s)))
+
+    let ins = insertion_sort(data)
+    print("Insertion: " + to_string(ins) + "  sorted=" + to_string(is_sorted(ins)))
+
+    // Sort strings by length using a generic approach
+    print("")
+    print("=== Sorting Words by Length ===")
+    let words = ["lattice", "is", "a", "crystallization", "based", "language"]
+    print("Input: " + to_string(words))
+
+    // Extract lengths and indices, sort by length
+    let indexed = words.enumerate()
+    // Manual sort by word length
+    flux sorted_words = []
+    flux min_len = 0
+    while min_len < 20 {
+        for pair in indexed {
+            let word = pair[1]
+            if word.len() == min_len {
+                sorted_words.push(word)
+            }
+        }
+        min_len += 1
+    }
+    print("By length: " + to_string(sorted_words))
+}

@@ -1,0 +1,71 @@
+// Demonstration of Lattice's unique phase system.
+// Shows fluid/crystal states, freeze/thaw, forge blocks, and strict mode.
+
+#mode strict
+
+fn demonstrate_phases() {
+    print("=== Phase System Demo ===")
+    print("")
+
+    // Fluid: mutable, can be changed
+    flux counter = 0
+    print("1. Fluid variable (flux):")
+    print("   counter = " + to_string(counter) + "  phase=" + phase_of(counter))
+    counter += 1
+    counter += 1
+    print("   after increments: " + to_string(counter))
+    print("")
+
+    // Crystal: immutable, frozen in place
+    fix pi = freeze(3.14159)
+    print("2. Crystal variable (fix):")
+    print("   pi = " + to_string(pi) + "  phase=" + phase_of(pi))
+
+    // Attempting to modify a crystal value would error
+    fix message = freeze("immutable string")
+    print("   message = " + message + "  phase=" + phase_of(message))
+    print("")
+
+    // Freeze a complex structure
+    print("3. Freezing arrays:")
+    flux data = [1, 2, 3, 4, 5]
+    print("   before freeze: phase=" + phase_of(data))
+    fix frozen_data = freeze(data)
+    print("   after freeze:  phase=" + phase_of(frozen_data))
+    print("   frozen: " + to_string(frozen_data))
+    print("")
+
+    // Thaw to make it mutable again
+    print("4. Thaw to unfreeze:")
+    flux thawed = thaw(frozen_data)
+    print("   thawed phase=" + phase_of(thawed))
+    thawed.push(6)
+    print("   after push(6): " + to_string(thawed))
+    print("")
+
+    // Deep clone creates an independent copy
+    print("5. Deep clone:")
+    flux original = [10, 20, 30]
+    flux copy = clone(original)
+    copy.push(40)
+    print("   original: " + to_string(original))
+    print("   clone:    " + to_string(copy))
+    print("")
+
+    // Forge blocks for controlled mutation
+    print("6. Forge blocks:")
+    fix config = forge {
+        flux temp = Map::new()
+        temp.set("host", "localhost")
+        temp.set("port", "8080")
+        temp.set("debug", "true")
+        freeze(temp)
+    }
+    print("   config phase=" + phase_of(config))
+    print("   host=" + config.get("host"))
+    print("   port=" + config.get("port"))
+}
+
+fn main() {
+    demonstrate_phases()
+}

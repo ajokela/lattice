@@ -1,0 +1,128 @@
+// String manipulation tools: ROT13, Caesar cipher, word stats.
+// Demonstrates: string methods, closures, maps, character operations.
+
+fn rot13(text: String) -> String {
+    let chars = text.chars()
+    flux result = ""
+    for ch in chars {
+        let code = ord(ch)
+        if code >= 65 {
+            if code <= 90 {
+                // Uppercase A-Z
+                result += chr(((code - 65 + 13) % 26) + 65)
+            } else {
+                if code >= 97 {
+                    if code <= 122 {
+                        // Lowercase a-z
+                        result += chr(((code - 97 + 13) % 26) + 97)
+                    } else {
+                        result += ch
+                    }
+                } else {
+                    result += ch
+                }
+            }
+        } else {
+            result += ch
+        }
+    }
+    return result
+}
+
+fn caesar_encrypt(text: String, shift: Int) -> String {
+    let chars = text.chars()
+    flux result = ""
+    for ch in chars {
+        let code = ord(ch)
+        if code >= 65 {
+            if code <= 90 {
+                result += chr(((code - 65 + shift) % 26) + 65)
+            } else {
+                if code >= 97 {
+                    if code <= 122 {
+                        result += chr(((code - 97 + shift) % 26) + 97)
+                    } else {
+                        result += ch
+                    }
+                } else {
+                    result += ch
+                }
+            }
+        } else {
+            result += ch
+        }
+    }
+    return result
+}
+
+fn caesar_decrypt(text: String, shift: Int) -> String {
+    return caesar_encrypt(text, 26 - shift)
+}
+
+fn word_count(text: String) -> Map {
+    let words = text.to_lower().split(" ")
+    flux counts = Map::new()
+    for word in words {
+        let trimmed = word.trim()
+        if trimmed.len() > 0 {
+            if counts.has(trimmed) {
+                let current = counts.get(trimmed)
+                counts.set(trimmed, current + 1)
+            } else {
+                counts.set(trimmed, 1)
+            }
+        }
+    }
+    return counts
+}
+
+fn is_palindrome(text: String) -> Bool {
+    let clean = text.to_lower().replace(" ", "")
+    return clean == clean.reverse()
+}
+
+fn main() {
+    print("=== String Tools ===")
+    print("")
+
+    // ROT13
+    print("--- ROT13 ---")
+    let original = "Hello, World!"
+    let encoded = rot13(original)
+    let decoded = rot13(encoded)
+    print("Original: " + original)
+    print("Encoded:  " + encoded)
+    print("Decoded:  " + decoded)
+    print("")
+
+    // Caesar cipher
+    print("--- Caesar Cipher (shift=3) ---")
+    let secret = "The quick brown fox jumps over the lazy dog"
+    let encrypted = caesar_encrypt(secret, 3)
+    let decrypted = caesar_decrypt(encrypted, 3)
+    print("Plain:     " + secret)
+    print("Encrypted: " + encrypted)
+    print("Decrypted: " + decrypted)
+    print("")
+
+    // Word frequency
+    print("--- Word Frequency ---")
+    let text = "the cat sat on the mat the cat wore a hat on the mat"
+    print("Text: \"" + text + "\"")
+    let freq = word_count(text)
+    let keys = freq.keys()
+    for key in keys {
+        let count = freq.get(key)
+        let bar = "*".repeat(count)
+        print("  " + key + ": " + bar + " (" + to_string(count) + ")")
+    }
+    print("")
+
+    // Palindrome checker
+    print("--- Palindrome Checker ---")
+    let tests = ["racecar", "hello", "madam", "A man a plan a canal Panama", "lattice"]
+    for word in tests {
+        let result = if is_palindrome(word) { "yes" } else { "no" }
+        print("  \"" + word + "\" -> " + result)
+    }
+}

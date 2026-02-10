@@ -1,0 +1,80 @@
+// Fibonacci sequence: iterative and recursive approaches.
+// Demonstrates: arrays, loops, recursion, formatted output, float math.
+
+fn fib_recursive(n: Int) -> Int {
+    if n <= 1 { return n }
+    return fib_recursive(n - 1) + fib_recursive(n - 2)
+}
+
+fn fib_iterative(n: Int) -> Int {
+    if n <= 1 { return n }
+    flux a = 0
+    flux b = 1
+    flux i = 2
+    while i <= n {
+        let temp = a + b
+        a = b
+        b = temp
+        i += 1
+    }
+    return b
+}
+
+fn fib_sequence(count: Int) -> [Int] {
+    flux result = []
+    flux a = 0
+    flux b = 1
+    flux i = 0
+    while i < count {
+        result.push(a)
+        let temp = a + b
+        a = b
+        b = temp
+        i += 1
+    }
+    return result
+}
+
+fn main() {
+    print("=== Fibonacci Numbers ===")
+    print("")
+
+    // Generate first 30 numbers iteratively
+    let fibs = fib_sequence(30)
+    print("First 30 Fibonacci numbers:")
+    for pair in fibs.enumerate() {
+        print("  fib(" + to_string(pair[0]) + ") = " + to_string(pair[1]))
+    }
+    print("")
+
+    // Verify recursive matches iterative for small values
+    print("Recursive vs Iterative verification:")
+    for i in 0..15 {
+        let r = fib_recursive(i)
+        let it = fib_iterative(i)
+        let match = if r == it { "match" } else { "MISMATCH" }
+        print("  fib(" + to_string(i) + ") = " + to_string(r) + " (" + match + ")")
+    }
+    print("")
+
+    // Golden ratio approximation
+    let a = fib_iterative(29)
+    let b = fib_iterative(28)
+    let ratio = parse_float(to_string(a)) / parse_float(to_string(b))
+    print("fib(29)/fib(28) = " + to_string(a) + "/" + to_string(b))
+    print("                ≈ " + to_string(ratio))
+    print("Golden ratio    ≈ 1.61803...")
+    print("")
+
+    // Fibonacci identity: fib(m+n) = fib(m)*fib(n+1) + fib(m-1)*fib(n)
+    print("Fibonacci identity check: fib(m+n) = fib(m)*fib(n+1) + fib(m-1)*fib(n)")
+    let pairs = [[5, 7], [3, 10], [8, 6], [4, 9]]
+    for p in pairs {
+        let m = p[0]
+        let n = p[1]
+        let lhs = fib_iterative(m + n)
+        let rhs = fib_iterative(m) * fib_iterative(n + 1) + fib_iterative(m - 1) * fib_iterative(n)
+        let ok = if lhs == rhs { "✓" } else { "✗" }
+        print("  fib(" + to_string(m) + "+" + to_string(n) + ") = fib(" + to_string(m + n) + ") = " + to_string(lhs) + " " + ok)
+    }
+}

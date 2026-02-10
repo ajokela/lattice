@@ -1,0 +1,152 @@
+// Entity Component System (ECS) — a game architecture pattern.
+// Demonstrates: arrays, structs, closures, nested data, iteration,
+// and complex data flow with value semantics.
+//
+// Components are stored as arrays of structs. Systems are functions
+// that transform the world state.
+
+struct Entity {
+    id: Int,
+    name: String,
+    x: Int,
+    y: Int,
+    dx: Int,
+    dy: Int,
+    hp: Int,
+    max_hp: Int,
+    tag: String
+}
+
+fn make_entity(id: Int, name: String, tag: String) -> Entity {
+    return Entity {
+        id: id, name: name,
+        x: 0, y: 0, dx: 0, dy: 0,
+        hp: 0, max_hp: 0, tag: tag
+    }
+}
+
+fn render_entity(e: Entity) {
+    flux line = "  [" + to_string(e.id) + "] " + e.name
+    line += " at (" + to_string(e.x) + "," + to_string(e.y) + ")"
+    if e.max_hp > 0 {
+        line += " HP:" + to_string(e.hp) + "/" + to_string(e.max_hp)
+    }
+    line += " <" + e.tag + ">"
+    print(line)
+}
+
+fn render_all(entities: [Entity]) {
+    for e in entities {
+        render_entity(e)
+    }
+}
+
+// System: apply velocity to position
+fn movement_system(entities: [Entity]) -> [Entity] {
+    flux result = []
+    for e in entities {
+        flux moved = e
+        moved.x = e.x + e.dx
+        moved.y = e.y + e.dy
+        result.push(moved)
+    }
+    return result
+}
+
+// System: find player position and apply damage from colliding enemies
+fn collision_system(entities: [Entity], damage: Int) -> [Entity] {
+    // Find player position
+    flux player_x = 0
+    flux player_y = 0
+    flux has_player = false
+    for e in entities {
+        if e.tag == "player" {
+            player_x = e.x
+            player_y = e.y
+            has_player = true
+        }
+    }
+
+    if !has_player { return entities }
+
+    // Check if any enemy is at player position
+    flux enemy_collision = false
+    for e in entities {
+        if e.tag == "enemy" {
+            if e.x == player_x {
+                if e.y == player_y {
+                    enemy_collision = true
+                }
+            }
+        }
+    }
+
+    if !enemy_collision { return entities }
+
+    // Apply damage to player
+    flux result = []
+    for e in entities {
+        if e.tag == "player" {
+            flux damaged = e
+            damaged.hp = e.hp - damage
+            if damaged.hp < 0 { damaged.hp = 0 }
+            result.push(damaged)
+        } else {
+            result.push(e)
+        }
+    }
+    return result
+}
+
+fn main() {
+    print("=== Entity Component System ===")
+    print("")
+
+    // Spawn player
+    flux player = make_entity(0, "Hero", "player")
+    player.x = 0
+    player.y = 0
+    player.dx = 1
+    player.dy = 1
+    player.hp = 100
+    player.max_hp = 100
+
+    // Spawn enemies
+    flux goblin = make_entity(1, "Goblin", "enemy")
+    goblin.x = 3
+    goblin.y = 3
+    goblin.dx = -1
+    goblin.dy = -1
+    goblin.hp = 30
+    goblin.max_hp = 30
+
+    flux orc = make_entity(2, "Orc", "enemy")
+    orc.x = 5
+    orc.y = 2
+    orc.dx = -1
+    orc.dy = 0
+    orc.hp = 50
+    orc.max_hp = 50
+
+    // Spawn a static item
+    flux chest = make_entity(3, "Treasure Chest", "item")
+    chest.x = 5
+    chest.y = 5
+
+    // Build world
+    flux entities = [player, goblin, orc, chest]
+
+    // Run simulation
+    flux tick = 0
+    while tick < 5 {
+        print("--- Tick " + to_string(tick) + " ---")
+        render_all(entities)
+        entities = movement_system(entities)
+        entities = collision_system(entities, 10)
+        print("")
+        tick += 1
+    }
+
+    print("--- Final State ---")
+    render_all(entities)
+}

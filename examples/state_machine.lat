@@ -1,0 +1,104 @@
+// State machine: a simple vending machine simulator.
+// Demonstrates: structs with callable fields, maps, match-like dispatch,
+// mutable state, and error handling with try/catch.
+
+struct VendingMachine {
+    balance: Int,
+    inventory: Map,
+    state: String,
+    insert_coin: Fn,
+    select_item: Fn,
+    dispense: Fn,
+    display: Fn
+}
+
+fn make_vending_machine() -> VendingMachine {
+    flux inv = Map::new()
+    inv.set("cola", 150)
+    inv.set("chips", 100)
+    inv.set("candy", 75)
+    inv.set("water", 125)
+
+    return VendingMachine {
+        balance: 0,
+        inventory: inv,
+        state: "idle",
+        insert_coin: |self, amount| {
+            self.balance + amount
+        },
+        select_item: |self, item| {
+            if !self.inventory.has(item) {
+                "error: unknown item"
+            } else {
+                let price = self.inventory.get(item)
+                if self.balance < price {
+                    "error: insufficient funds (need " + to_string(price) + " cents, have " + to_string(self.balance) + ")"
+                } else {
+                    "ok:" + item
+                }
+            }
+        },
+        dispense: |self, item| {
+            let price = self.inventory.get(item)
+            let change = self.balance - price
+            "Dispensing " + item + "! Change: " + to_string(change) + " cents"
+        },
+        display: |self| {
+            let items = self.inventory.keys()
+            flux lines = "--- Menu ---\n"
+            for item in items {
+                let price = self.inventory.get(item)
+                lines += "  " + item + ": " + to_string(price) + " cents\n"
+            }
+            lines += "Balance: " + to_string(self.balance) + " cents"
+            lines
+        }
+    }
+}
+
+fn main() {
+    print("=== Vending Machine ===")
+    print("")
+
+    flux vm = make_vending_machine()
+
+    // Display menu
+    print(vm.display())
+    print("")
+
+    // Simulate a transaction
+    let actions = [
+        "insert:25", "insert:25", "insert:25",
+        "select:candy",
+        "insert:100", "insert:50",
+        "select:cola",
+        "insert:100",
+        "select:chips"
+    ]
+
+    for action in actions {
+        let parts = action.split(":")
+        let cmd = parts[0]
+        let arg = parts[1]
+
+        if cmd == "insert" {
+            let amount = parse_int(arg)
+            vm.balance = vm.insert_coin(amount)
+            print("> Inserted " + arg + " cents (balance: " + to_string(vm.balance) + ")")
+        }
+        if cmd == "select" {
+            let result = vm.select_item(arg)
+            if result.starts_with("error") {
+                print("> " + result)
+            } else {
+                let msg = vm.dispense(arg)
+                print("> " + msg)
+                let price = vm.inventory.get(arg)
+                vm.balance = vm.balance - price
+            }
+        }
+    }
+
+    print("")
+    print("Final balance: " + to_string(vm.balance) + " cents")
+}

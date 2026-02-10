@@ -1,0 +1,180 @@
+// Matrix operations using nested arrays.
+// Demonstrates: nested data structures, mathematical computation,
+// function composition, and formatted output.
+
+fn mat_new(rows: Int, cols: Int) -> [[Int]] {
+    flux m = []
+    flux r = 0
+    while r < rows {
+        flux row = []
+        flux c = 0
+        while c < cols {
+            row.push(0)
+            c += 1
+        }
+        m.push(row)
+        r += 1
+    }
+    return m
+}
+
+fn mat_identity(n: Int) -> [[Int]] {
+    flux m = mat_new(n, n)
+    flux i = 0
+    while i < n {
+        m[i][i] = 1
+        i += 1
+    }
+    return m
+}
+
+fn mat_add(a: [[Int]], b: [[Int]]) -> [[Int]] {
+    let rows = a.len()
+    let cols = a[0].len()
+    flux result = mat_new(rows, cols)
+    flux r = 0
+    while r < rows {
+        flux c = 0
+        while c < cols {
+            result[r][c] = a[r][c] + b[r][c]
+            c += 1
+        }
+        r += 1
+    }
+    return result
+}
+
+fn mat_mul(a: [[Int]], b: [[Int]]) -> [[Int]] {
+    let rows_a = a.len()
+    let cols_a = a[0].len()
+    let cols_b = b[0].len()
+    flux result = mat_new(rows_a, cols_b)
+    flux r = 0
+    while r < rows_a {
+        flux c = 0
+        while c < cols_b {
+            flux sum = 0
+            flux k = 0
+            while k < cols_a {
+                sum += a[r][k] * b[k][c]
+                k += 1
+            }
+            result[r][c] = sum
+            c += 1
+        }
+        r += 1
+    }
+    return result
+}
+
+fn mat_transpose(m: [[Int]]) -> [[Int]] {
+    let rows = m.len()
+    let cols = m[0].len()
+    flux result = mat_new(cols, rows)
+    flux r = 0
+    while r < rows {
+        flux c = 0
+        while c < cols {
+            result[c][r] = m[r][c]
+            c += 1
+        }
+        r += 1
+    }
+    return result
+}
+
+fn mat_scalar_mul(m: [[Int]], s: Int) -> [[Int]] {
+    let rows = m.len()
+    let cols = m[0].len()
+    flux result = mat_new(rows, cols)
+    flux r = 0
+    while r < rows {
+        flux c = 0
+        while c < cols {
+            result[r][c] = m[r][c] * s
+            c += 1
+        }
+        r += 1
+    }
+    return result
+}
+
+fn mat_trace(m: [[Int]]) -> Int {
+    let n = m.len()
+    flux sum = 0
+    flux i = 0
+    while i < n {
+        sum += m[i][i]
+        i += 1
+    }
+    return sum
+}
+
+fn mat_print(name: String, m: [[Int]]) {
+    print(name + ":")
+    for row in m {
+        flux line = "  ["
+        let pairs = row.enumerate()
+        for pair in pairs {
+            if pair[0] > 0 { line += ", " }
+            let val = pair[1]
+            // Right-align numbers in a 4-char field
+            flux s = to_string(val)
+            while s.len() < 4 {
+                s = " " + s
+            }
+            line += s
+        }
+        line += " ]"
+        print(line)
+    }
+}
+
+fn main() {
+    print("=== Matrix Operations ===")
+    print("")
+
+    // Create matrices
+    flux a = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    flux b = [[9, 8, 7], [6, 5, 4], [3, 2, 1]]
+
+    mat_print("A", a)
+    print("")
+    mat_print("B", b)
+    print("")
+
+    // Addition
+    let sum = mat_add(a, b)
+    mat_print("A + B", sum)
+    print("")
+
+    // Multiplication
+    let product = mat_mul(a, b)
+    mat_print("A × B", product)
+    print("")
+
+    // Transpose
+    let at = mat_transpose(a)
+    mat_print("A^T", at)
+    print("")
+
+    // Scalar multiplication
+    let scaled = mat_scalar_mul(a, 3)
+    mat_print("3 × A", scaled)
+    print("")
+
+    // Identity matrix
+    let id = mat_identity(3)
+    mat_print("I(3)", id)
+    print("")
+
+    // Verify A × I = A
+    let ai = mat_mul(a, id)
+    mat_print("A × I", ai)
+    print("")
+
+    // Trace
+    print("trace(A) = " + to_string(mat_trace(a)))
+    print("trace(B) = " + to_string(mat_trace(b)))
+    print("trace(A×B) = " + to_string(mat_trace(product)))
+}

@@ -1,0 +1,140 @@
+// A todo list manager with persistence via file I/O.
+// Demonstrates: maps, arrays, file read/write, string parsing,
+// error handling, and structured data management.
+//
+// Note: Maps in Lattice are value types, so all mutations are
+// done directly on the variable in scope.
+
+fn display_items(items: String) {
+    if items == "" {
+        print("  (no items)")
+        return
+    }
+
+    let lines = items.split("\n")
+    for line in lines {
+        let parts = line.split("|")
+        let id = parts[0]
+        let title = parts[1]
+        let status = parts[2]
+        let marker = if status == "done" { "✓" } else { " " }
+        print("  [" + marker + "] #" + id + " " + title)
+    }
+}
+
+fn mark_complete(items: String, target_id: Int) -> String {
+    if items == "" { return "" }
+
+    let lines = items.split("\n")
+    flux new_lines = []
+
+    for line in lines {
+        let parts = line.split("|")
+        let id = parse_int(parts[0])
+        if id == target_id {
+            new_lines.push(parts[0] + "|" + parts[1] + "|done")
+        } else {
+            new_lines.push(line)
+        }
+    }
+
+    return new_lines.join("\n")
+}
+
+fn remove_item(items: String, target_id: Int) -> String {
+    if items == "" { return "" }
+
+    let lines = items.split("\n")
+    flux new_lines = []
+
+    for line in lines {
+        let parts = line.split("|")
+        let id = parse_int(parts[0])
+        if id != target_id {
+            new_lines.push(line)
+        }
+    }
+
+    return new_lines.join("\n")
+}
+
+fn count_by_status(items: String, target_status: String) -> Int {
+    if items == "" { return 0 }
+
+    let lines = items.split("\n")
+    flux count = 0
+    for line in lines {
+        let parts = line.split("|")
+        if parts[2] == target_status {
+            count += 1
+        }
+    }
+    return count
+}
+
+fn main() {
+    print("=== Todo List Manager ===")
+    print("")
+
+    flux items = ""
+    flux next_id = 1
+
+    // Add some tasks
+    let titles = [
+        "Implement block closures",
+        "Add readline support",
+        "Write is_complete builtin",
+        "Build self-hosted REPL",
+        "Create example programs",
+        "Write documentation"
+    ]
+
+    for title in titles {
+        let entry = to_string(next_id) + "|" + title + "|pending"
+        if items == "" {
+            items = entry
+        } else {
+            items = items + "\n" + entry
+        }
+        next_id += 1
+    }
+
+    print("Added " + to_string(titles.len()) + " tasks:")
+    display_items(items)
+    print("")
+
+    // Complete some tasks
+    items = mark_complete(items, 1)
+    items = mark_complete(items, 2)
+    items = mark_complete(items, 3)
+    items = mark_complete(items, 4)
+
+    print("After completing tasks 1-4:")
+    display_items(items)
+    print("")
+
+    // Remove a task
+    items = remove_item(items, 6)
+    print("After removing #6:")
+    display_items(items)
+    print("")
+
+    // Stats
+    let pending = count_by_status(items, "pending")
+    let done = count_by_status(items, "done")
+    print("Stats: " + to_string(done) + " done, " + to_string(pending) + " pending")
+
+    // Save to file
+    let path = "/tmp/lattice_todos.txt"
+    write_file(path, items)
+    print("")
+    print("Saved to " + path)
+
+    // Read it back to verify
+    let contents = read_file(path)
+    print("Verified file contents:")
+    let lines = contents.split("\n")
+    for line in lines {
+        print("  " + line)
+    }
+}
