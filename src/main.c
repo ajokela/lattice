@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <editline/readline.h>
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -106,39 +107,69 @@ static int run_file(const char *path, bool show_stats) {
     return result;
 }
 
+/* Check if input has balanced brackets/parens/braces.
+ * Returns true if the input appears complete (balanced or has errors
+ * that more input won't fix). Returns false if more input is needed. */
+static bool input_is_complete(const char *source) {
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        /* Lexer error (e.g. unclosed string) means incomplete */
+        free(lex_err);
+        lat_vec_free(&tokens);
+        return false;
+    }
+    int depth = 0;
+    for (size_t i = 0; i < tokens.len; i++) {
+        Token *t = lat_vec_get(&tokens, i);
+        switch (t->type) {
+            case TOK_LBRACE: case TOK_LPAREN: case TOK_LBRACKET:
+                depth++;
+                break;
+            case TOK_RBRACE: case TOK_RPAREN: case TOK_RBRACKET:
+                depth--;
+                break;
+            default:
+                break;
+        }
+    }
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    return depth <= 0;
+}
+
 static void repl(void) {
-    printf("Lattice v0.1.0 (C) — crystallization-based programming language\n");
+    printf("Lattice v%s — crystallization-based programming language\n", LATTICE_VERSION);
+    printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
 
-    char line[4096];
     char accumulated[65536];
     accumulated[0] = '\0';
 
     for (;;) {
-        if (accumulated[0] == '\0')
-            printf("lattice> ");
-        else
-            printf("    ...> ");
-        fflush(stdout);
-
-        if (!fgets(line, sizeof(line), stdin)) {
+        const char *prompt = (accumulated[0] == '\0') ? "lattice> " : "    ...> ";
+        char *line = readline(prompt);
+        if (!line) {
             printf("\n");
             break;
         }
 
+        if (accumulated[0] != '\0')
+            strcat(accumulated, "\n");
         strcat(accumulated, line);
 
+        if (line[0] != '\0')
+            add_history(line);
+        free(line);
+
+        if (!input_is_complete(accumulated))
+            continue;
+
         int result = run_source(accumulated, false);
-        if (result == 0) {
-            accumulated[0] = '\0';
-        } else {
-            /* Simple heuristic: if it's an EOF-type error, keep reading */
-            if (strstr(line, "\n") && line[0] != '\n') {
-                /* Try again next line */
-            } else {
-                accumulated[0] = '\0';
-            }
-        }
+        (void)result;
+        accumulated[0] = '\0';
     }
 }
 

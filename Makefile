@@ -1,6 +1,6 @@
 CC      = cc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -Iinclude
-LDFLAGS =
+LDFLAGS = -ledit
 
 SRC_DIR    = src
 BUILD_DIR  = build

@@ -4,27 +4,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <editline/readline.h>
 
 /* ── builtin_input ── */
 
 char *builtin_input(const char *prompt) {
-    if (prompt != NULL) {
-        printf("%s", prompt);
-        fflush(stdout);
-    }
-
-    char buf[4096];
-    if (fgets(buf, sizeof(buf), stdin) == NULL) {
-        return NULL;
-    }
-
-    /* Strip trailing newline if present */
-    size_t len = strlen(buf);
-    if (len > 0 && buf[len - 1] == '\n') {
-        buf[len - 1] = '\0';
-    }
-
-    return strdup(buf);
+    char *line = readline(prompt ? prompt : "");
+    if (line == NULL) return NULL;
+    if (line[0] != '\0') add_history(line);
+    return line;
 }
 
 /* ── builtin_read_file ── */
