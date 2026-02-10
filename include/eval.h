@@ -60,6 +60,7 @@ typedef struct Evaluator {
     DualHeap   *heap;
     LatVec      gc_roots;      /* shadow stack of LatValue* */
     bool        gc_stress;
+    size_t      lat_eval_scope; /* when > 0, top-level lat_eval bindings go here */
 } Evaluator;
 
 /* Create a new evaluator */

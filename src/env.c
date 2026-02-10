@@ -53,13 +53,17 @@ void env_pop_scope(Env *env) {
 
 void env_define(Env *env, const char *name, LatValue value) {
     if (env->count == 0) return;
-    Scope *top = &env->scopes[env->count - 1];
-    /* If already exists, free old value */
-    LatValue *existing = lat_map_get(top, name);
+    env_define_at(env, env->count - 1, name, value);
+}
+
+void env_define_at(Env *env, size_t scope_idx, const char *name, LatValue value) {
+    if (scope_idx >= env->count) return;
+    Scope *scope = &env->scopes[scope_idx];
+    LatValue *existing = lat_map_get(scope, name);
     if (existing) {
         value_free(existing);
     }
-    lat_map_set(top, name, &value);
+    lat_map_set(scope, name, &value);
 }
 
 bool env_get(const Env *env, const char *name, LatValue *out) {

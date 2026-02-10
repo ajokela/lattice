@@ -1,4 +1,5 @@
 #include "eval.h"
+#include "lattice.h"
 #include "string_ops.h"
 #include "builtins.h"
 #include "lexer.h"
@@ -528,6 +529,41 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(line));
                 }
 
+                if (strcmp(fn_name, "is_complete") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_complete() expects 1 string argument")); }
+                    const char *source = args[0].as.str_val;
+                    Lexer lex = lexer_new(source);
+                    char *lex_err = NULL;
+                    LatVec toks = lexer_tokenize(&lex, &lex_err);
+                    if (lex_err) {
+                        /* Lex error (unclosed string etc.) = incomplete */
+                        free(lex_err);
+                        lat_vec_free(&toks);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_ok(value_bool(false));
+                    }
+                    int depth = 0;
+                    for (size_t j = 0; j < toks.len; j++) {
+                        Token *t = lat_vec_get(&toks, j);
+                        switch (t->type) {
+                            case TOK_LBRACE: case TOK_LPAREN: case TOK_LBRACKET:
+                                depth++;
+                                break;
+                            case TOK_RBRACE: case TOK_RPAREN: case TOK_RBRACKET:
+                                depth--;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
+                    lat_vec_free(&toks);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_bool(depth <= 0));
+                }
+
                 if (strcmp(fn_name, "typeof") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("typeof() expects 1 argument")); }
                     const char *tn = builtin_typeof_str(&args[0]);
@@ -608,6 +644,20 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                         free(args);
                         return eval_err(parse_err);
                     }
+                    /* Register functions and structs (same as evaluator_run) */
+                    for (size_t j = 0; j < prog.item_count; j++) {
+                        if (prog.items[j].tag == ITEM_STRUCT) {
+                            StructDecl *ptr = &prog.items[j].as.struct_decl;
+                            lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+                        } else if (prog.items[j].tag == ITEM_FUNCTION) {
+                            FnDecl *ptr = &prog.items[j].as.fn_decl;
+                            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+                        }
+                    }
+                    /* Execute statements — set lat_eval_scope so top-level
+                     * bindings persist in the caller's scope */
+                    size_t saved_scope = ev->lat_eval_scope;
+                    ev->lat_eval_scope = ev->env->count;
                     EvalResult eval_r = eval_ok(value_unit());
                     for (size_t j = 0; j < prog.item_count; j++) {
                         if (prog.items[j].tag == ITEM_STMT) {
@@ -616,7 +666,18 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                             if (!IS_OK(eval_r)) break;
                         }
                     }
-                    program_free(&prog);
+                    ev->lat_eval_scope = saved_scope;
+                    /* Free statement items. If fn/struct decls were registered,
+                     * keep the items array alive (decls live inline in it).
+                     * Otherwise free the whole program. */
+                    bool has_decls = false;
+                    for (size_t j = 0; j < prog.item_count; j++) {
+                        if (prog.items[j].tag == ITEM_STMT)
+                            stmt_free(prog.items[j].as.stmt);
+                        else
+                            has_decls = true;
+                    }
+                    if (!has_decls) free(prog.items);
                     for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
                     lat_vec_free(&toks);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -709,6 +770,12 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     exit(code);
+                }
+
+                if (strcmp(fn_name, "version") == 0) {
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string(LATTICE_VERSION));
                 }
 
                 if (strcmp(fn_name, "print_raw") == 0) {
@@ -1235,7 +1302,12 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 }
             }
             stats_binding(&ev->stats);
-            env_define(ev->env, stmt->as.binding.name, vr.value);
+            /* In lat_eval context, top-level bindings go to the root scope
+             * so they persist across calls (needed for REPL) */
+            if (ev->lat_eval_scope > 0 && ev->env->count == ev->lat_eval_scope)
+                env_define_at(ev->env, 0, stmt->as.binding.name, vr.value);
+            else
+                env_define(ev->env, stmt->as.binding.name, vr.value);
             return eval_ok(value_unit());
         }
 
@@ -1738,7 +1810,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 LatValue *full_args = malloc(total * sizeof(LatValue));
                 full_args[0] = value_deep_clone(&obj);
                 for (size_t j = 0; j < arg_count; j++) {
-                    full_args[j + 1] = args[j];
+                    full_args[j + 1] = value_deep_clone(&args[j]);
                 }
                 EvalResult r = call_closure(ev,
                     cl->as.closure.param_names, cl->as.closure.param_count,

@@ -1,6 +1,8 @@
 #ifndef LATTICE_H
 #define LATTICE_H
 
+#define LATTICE_VERSION "0.1.1"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>

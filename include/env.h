@@ -29,6 +29,9 @@ void env_pop_scope(Env *env);
 /* Define a new binding in the current scope */
 void env_define(Env *env, const char *name, LatValue value);
 
+/* Define a new binding at a specific scope index */
+void env_define_at(Env *env, size_t scope_idx, const char *name, LatValue value);
+
 /* Look up a name. Returns a deep clone if found, or a zero-type (VAL_UNIT with type=-1 sentinel) if not. */
 /* Returns true if found and writes to *out */
 bool env_get(const Env *env, const char *name, LatValue *out);
