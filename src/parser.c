@@ -571,6 +571,18 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
         return e;
     }
+    if (tt == TOK_LBRACE) {
+        advance(p);
+        size_t count;
+        Stmt **stmts = parse_block_stmts(p, &count, err);
+        if (!stmts && *err) return NULL;
+        if (!expect(p, TOK_RBRACE, err)) {
+            for (size_t i = 0; i < count; i++) stmt_free(stmts[i]);
+            free(stmts);
+            return NULL;
+        }
+        return expr_block(stmts, count);
+    }
     if (tt == TOK_PIPE) {
         /* Closure: |params| expr */
         advance(p);
