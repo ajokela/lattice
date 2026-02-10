@@ -1,0 +1,47 @@
+fn main() {
+    print("Lattice v" + version() + " — crystallization-based programming language")
+    print("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.")
+    print("Type expressions to evaluate. Ctrl-D to exit.")
+    print("")
+
+    flux buf = ""
+
+    loop {
+        let prompt = if buf == "" { "lattice> " } else { "    ...> " }
+        let line = input(prompt)
+
+        // EOF
+        if typeof(line) == "Unit" {
+            print("")
+            break
+        }
+
+        // Empty line on fresh prompt — skip
+        if buf == "" {
+            if line == "" { continue }
+        }
+
+        // Accumulate
+        if buf != "" {
+            buf += "\n"
+        }
+        buf += line
+
+        // Wait for more input if incomplete
+        if !is_complete(buf) { continue }
+
+        // Evaluate
+        let result = try {
+            lat_eval(buf)
+        } catch e {
+            print("error: " + e)
+        }
+
+        // Print non-unit results
+        if typeof(result) != "Unit" {
+            print(result)
+        }
+
+        buf = ""
+    }
+}
