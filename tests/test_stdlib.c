@@ -1165,6 +1165,186 @@ static void test_callable_struct_non_closure_field(void) {
 }
 
 /* ======================================================================
+ * Block Closures and Block Expressions
+ * ====================================================================== */
+
+/* 66. test_block_closure_basic - |x| { let y = x + 1; y } */
+static void test_block_closure_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let f = |x| { let y = x + 1; y }\n"
+        "    print(f(5))\n"
+        "}\n",
+        "6"
+    );
+}
+
+/* 67. test_block_closure_multi_stmt - multiple statements, last is return value */
+static void test_block_closure_multi_stmt(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let f = |x| {\n"
+        "        let a = x * 2\n"
+        "        let b = a + 3\n"
+        "        b\n"
+        "    }\n"
+        "    print(f(10))\n"
+        "}\n",
+        "23"
+    );
+}
+
+/* 68. test_block_closure_in_map - arr.map(|x| { let sq = x * x; sq }) */
+static void test_block_closure_in_map(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let arr = [1, 2, 3]\n"
+        "    let result = arr.map(|x| { let sq = x * x; sq })\n"
+        "    print(result)\n"
+        "}\n",
+        "[1, 4, 9]"
+    );
+}
+
+/* 69. test_block_expr_standalone - let x = { let a = 1; a + 2 } */
+static void test_block_expr_standalone(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = { let a = 1; a + 2 }\n"
+        "    print(x)\n"
+        "}\n",
+        "3"
+    );
+}
+
+/* 70. test_callable_field_block_body - struct field closure with block body */
+static void test_callable_field_block_body(void) {
+    ASSERT_OUTPUT(
+        "struct Doubler { factor: Int, compute: Fn }\n"
+        "fn main() {\n"
+        "    let d = Doubler { factor: 3, compute: |self, x| {\n"
+        "        let result = self.factor * x\n"
+        "        result\n"
+        "    }}\n"
+        "    print(d.compute(7))\n"
+        "}\n",
+        "21"
+    );
+}
+
+
+/* ======================================================================
+ * is_complete Builtin
+ * ====================================================================== */
+
+/* 71. test_is_complete_true - complete expression returns true */
+static void test_is_complete_true(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(is_complete(\"print(1)\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* 72. test_is_complete_unclosed_brace - "fn main() {" returns false */
+static void test_is_complete_unclosed_brace(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(is_complete(\"fn main() {\"))\n"
+        "}\n",
+        "false"
+    );
+}
+
+/* 73. test_is_complete_unclosed_paren - "print(" returns false */
+static void test_is_complete_unclosed_paren(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(is_complete(\"print(\"))\n"
+        "}\n",
+        "false"
+    );
+}
+
+/* 74. test_is_complete_balanced - complete but invalid code returns true */
+static void test_is_complete_balanced(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(is_complete(\"let x = }\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+
+/* ======================================================================
+ * lat_eval Persistence (REPL support)
+ * ====================================================================== */
+
+/* 75. test_lat_eval_var_persistence - variables persist across lat_eval calls */
+static void test_lat_eval_var_persistence(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    lat_eval(\"let x = 42\")\n"
+        "    let result = lat_eval(\"x + 10\")\n"
+        "    print(result)\n"
+        "}\n",
+        "52"
+    );
+}
+
+/* 76. test_lat_eval_fn_persistence - functions persist across lat_eval calls */
+static void test_lat_eval_fn_persistence(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    lat_eval(\"fn add(a: Int, b: Int) -> Int { return a + b }\")\n"
+        "    let result = lat_eval(\"add(3, 4)\")\n"
+        "    print(result)\n"
+        "}\n",
+        "7"
+    );
+}
+
+/* 77. test_lat_eval_struct_persistence - structs persist across lat_eval calls */
+static void test_lat_eval_struct_persistence(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    lat_eval(\"struct Point { x: Int, y: Int }\")\n"
+        "    lat_eval(\"let p = Point { x: 3, y: 4 }\")\n"
+        "    let result = lat_eval(\"p.x + p.y\")\n"
+        "    print(result)\n"
+        "}\n",
+        "7"
+    );
+}
+
+/* 78. test_lat_eval_mutable_var - mutable variables can be updated across calls */
+static void test_lat_eval_mutable_var(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    lat_eval(\"flux counter = 0\")\n"
+        "    lat_eval(\"counter += 1\")\n"
+        "    lat_eval(\"counter += 1\")\n"
+        "    let result = lat_eval(\"counter\")\n"
+        "    print(result)\n"
+        "}\n",
+        "2"
+    );
+}
+
+/* 79. test_lat_eval_version - version() returns a string */
+static void test_lat_eval_version(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(version())\n"
+        "}\n",
+        "0.1.1"
+    );
+}
+
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -1257,4 +1437,24 @@ void register_stdlib_tests(void) {
     register_test("test_callable_struct_field_with_args", test_callable_struct_field_with_args);
     register_test("test_callable_struct_field_returns", test_callable_struct_field_returns);
     register_test("test_callable_struct_non_closure_field", test_callable_struct_non_closure_field);
+
+    /* Block closures and block expressions */
+    register_test("test_block_closure_basic", test_block_closure_basic);
+    register_test("test_block_closure_multi_stmt", test_block_closure_multi_stmt);
+    register_test("test_block_closure_in_map", test_block_closure_in_map);
+    register_test("test_block_expr_standalone", test_block_expr_standalone);
+    register_test("test_callable_field_block_body", test_callable_field_block_body);
+
+    /* is_complete builtin */
+    register_test("test_is_complete_true", test_is_complete_true);
+    register_test("test_is_complete_unclosed_brace", test_is_complete_unclosed_brace);
+    register_test("test_is_complete_unclosed_paren", test_is_complete_unclosed_paren);
+    register_test("test_is_complete_balanced", test_is_complete_balanced);
+
+    /* lat_eval persistence (REPL support) */
+    register_test("test_lat_eval_var_persistence", test_lat_eval_var_persistence);
+    register_test("test_lat_eval_fn_persistence", test_lat_eval_fn_persistence);
+    register_test("test_lat_eval_struct_persistence", test_lat_eval_struct_persistence);
+    register_test("test_lat_eval_mutable_var", test_lat_eval_mutable_var);
+    register_test("test_lat_eval_version", test_lat_eval_version);
 }
