@@ -1,0 +1,47 @@
+// Low-level TLS client example using tls_* builtins directly
+// Demonstrates: tls_connect, tls_write, tls_read, tls_close, tls_available
+// Usage: ./clat examples/tls_client.lat
+
+fn main() {
+    print("=== TLS Client ===")
+    print("TLS available: " + to_string(tls_available()))
+    print("")
+
+    // Connect to httpbin.org over TLS
+    let host = "httpbin.org"
+    let port = 443
+    print("Connecting to " + host + ":" + to_string(port) + " ...")
+    let conn = tls_connect(host, port)
+    print("Connected (fd=" + to_string(conn) + ")")
+
+    // Send a raw HTTP request over the TLS connection
+    let request = "GET /get HTTP/1.1\r\n"
+        + "Host: " + host + "\r\n"
+        + "Connection: close\r\n"
+        + "\r\n"
+    tls_write(conn, request)
+    print("Request sent")
+    print("")
+
+    // Read the full response (server closes connection after response)
+    flux response = ""
+    loop {
+        let chunk = tls_read(conn)
+        if len(chunk) == 0 { break }
+        response += chunk
+    }
+
+    tls_close(conn)
+
+    // Parse and display
+    let first_line = response.split("\r\n")[0]
+    print("Response: " + first_line)
+
+    let idx = response.index_of("\r\n\r\n")
+    if idx >= 0 {
+        let body = response.substring(idx + 4, len(response))
+        print("")
+        print("Body:")
+        print(body)
+    }
+}
