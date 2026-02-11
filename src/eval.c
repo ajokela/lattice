@@ -1,9 +1,21 @@
 #include "eval.h"
 #include "lattice.h"
 #include "string_ops.h"
+#include "format_ops.h"
 #include "builtins.h"
+#include "array_ops.h"
 #include "net.h"
 #include "tls.h"
+#include "json.h"
+#include "math_ops.h"
+#include "env_ops.h"
+#include "time_ops.h"
+#include "datetime_ops.h"
+#include "type_ops.h"
+#include "fs_ops.h"
+#include "path_ops.h"
+#include "regex_ops.h"
+#include "crypto_ops.h"
 #include "lexer.h"
 #include "parser.h"
 #include <stdlib.h>
@@ -818,6 +830,93 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                if (strcmp(fn_name, "file_exists") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("file_exists() expects 1 string argument")); }
+                    bool exists = fs_file_exists(args[0].as.str_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_bool(exists));
+                }
+
+                if (strcmp(fn_name, "delete_file") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("delete_file() expects 1 string argument")); }
+                    char *df_err = NULL;
+                    bool df_ok = fs_delete_file(args[0].as.str_val, &df_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!df_ok) { char *e = df_err; return eval_err(e); }
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "list_dir") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("list_dir() expects 1 string argument")); }
+                    char *ld_err = NULL;
+                    size_t ld_count = 0;
+                    char **ld_entries = fs_list_dir(args[0].as.str_val, &ld_count, &ld_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!ld_entries) { char *e = ld_err; return eval_err(e); }
+                    LatValue *elems = malloc(ld_count * sizeof(LatValue));
+                    for (size_t i = 0; i < ld_count; i++) {
+                        elems[i] = value_string(ld_entries[i]);
+                        free(ld_entries[i]);
+                    }
+                    free(ld_entries);
+                    LatValue arr = value_array(elems, ld_count);
+                    free(elems);
+                    return eval_ok(arr);
+                }
+
+                if (strcmp(fn_name, "append_file") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("append_file() expects 2 string arguments")); }
+                    char *af_err = NULL;
+                    bool af_ok = fs_append_file(args[0].as.str_val, args[1].as.str_val, &af_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!af_ok) { char *e = af_err; return eval_err(e); }
+                    return eval_ok(value_bool(true));
+                }
+
+                /* ── Path builtins ── */
+
+                if (strcmp(fn_name, "path_join") == 0) {
+                    if (argc < 1) { free(args); return eval_err(strdup("path_join() expects at least 1 argument")); }
+                    for (size_t i = 0; i < argc; i++) {
+                        if (args[i].type != VAL_STR) { for (size_t j = 0; j < argc; j++) value_free(&args[j]); free(args); return eval_err(strdup("path_join() expects String arguments")); }
+                    }
+                    const char **parts = malloc(argc * sizeof(char*));
+                    for (size_t i = 0; i < argc; i++) parts[i] = args[i].as.str_val;
+                    char *result = path_join(parts, argc);
+                    free(parts);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "path_dir") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_dir() expects 1 String argument")); }
+                    char *result = path_dir(args[0].as.str_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "path_base") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_base() expects 1 String argument")); }
+                    char *result = path_base(args[0].as.str_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "path_ext") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_ext() expects 1 String argument")); }
+                    char *result = path_ext(args[0].as.str_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string_owned(result));
+                }
+
                 if (strcmp(fn_name, "require") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("require() expects 1 string argument")); }
                     const char *raw_path = args[0].as.str_val;
@@ -1271,6 +1370,292 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_available() expects no arguments")); }
                     free(args);
                     return eval_ok(value_bool(net_tls_available()));
+                }
+
+                /* ── JSON builtins ── */
+
+                if (strcmp(fn_name, "json_parse") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("json_parse() expects (String)")); }
+                    char *jerr = NULL;
+                    LatValue result = json_parse(args[0].as.str_val, &jerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (jerr) return eval_err(jerr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "json_stringify") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("json_stringify() expects (value)")); }
+                    char *jerr = NULL;
+                    char *json = json_stringify(&args[0], &jerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!json) return eval_err(jerr);
+                    return eval_ok(value_string_owned(json));
+                }
+
+                /* ── Math builtins ── */
+
+                if (strcmp(fn_name, "abs") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("abs() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_abs(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "floor") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("floor() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_floor(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "ceil") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("ceil() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_ceil(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "round") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("round() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_round(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "sqrt") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sqrt() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_sqrt(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "pow") == 0) {
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pow() expects (Int|Float, Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_pow(&args[0], &args[1], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "min") == 0) {
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("min() expects (Int|Float, Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_min(&args[0], &args[1], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "max") == 0) {
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("max() expects (Int|Float, Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_max(&args[0], &args[1], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "random") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("random() expects no arguments")); }
+                    free(args);
+                    return eval_ok(math_random());
+                }
+
+                if (strcmp(fn_name, "random_int") == 0) {
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("random_int() expects (Int, Int)")); }
+                    char *merr = NULL;
+                    LatValue result = math_random_int(&args[0], &args[1], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                /* ── Type coercion builtins ── */
+
+                if (strcmp(fn_name, "to_int") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_int() expects (value)")); }
+                    char *terr = NULL;
+                    LatValue result = type_to_int(&args[0], &terr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (terr) return eval_err(terr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "to_float") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_float() expects (value)")); }
+                    char *terr = NULL;
+                    LatValue result = type_to_float(&args[0], &terr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (terr) return eval_err(terr);
+                    return eval_ok(result);
+                }
+
+                /* ── Environment variable builtins ── */
+
+                if (strcmp(fn_name, "env") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env() expects (String)")); }
+                    char *val = envvar_get(args[0].as.str_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!val) return eval_ok(value_unit());
+                    return eval_ok(value_string_owned(val));
+                }
+
+                if (strcmp(fn_name, "env_set") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env_set() expects (String, String)")); }
+                    char *eerr = NULL;
+                    bool ok = envvar_set(args[0].as.str_val, args[1].as.str_val, &eerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!ok) return eval_err(eerr);
+                    return eval_ok(value_unit());
+                }
+
+                /* ── Time builtins ── */
+
+                if (strcmp(fn_name, "time") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time() expects no arguments")); }
+                    free(args);
+                    return eval_ok(value_int(time_now_ms()));
+                }
+
+                if (strcmp(fn_name, "sleep") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sleep() expects (Int milliseconds)")); }
+                    char *terr = NULL;
+                    bool ok = time_sleep_ms(args[0].as.int_val, &terr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!ok) return eval_err(terr);
+                    return eval_ok(value_unit());
+                }
+
+                /* ── Regex builtins ── */
+
+                if (strcmp(fn_name, "regex_match") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_match() expects (String pattern, String str)")); }
+                    char *rerr = NULL;
+                    LatValue result = regex_match(args[0].as.str_val, args[1].as.str_val, &rerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (rerr) return eval_err(rerr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "regex_find_all") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_find_all() expects (String pattern, String str)")); }
+                    char *rerr = NULL;
+                    LatValue result = regex_find_all(args[0].as.str_val, args[1].as.str_val, &rerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (rerr) return eval_err(rerr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "regex_replace") == 0) {
+                    if (argc != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_replace() expects (String pattern, String str, String replacement)")); }
+                    char *rerr = NULL;
+                    char *result = regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, &rerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (rerr) return eval_err(rerr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "format") == 0) {
+                    if (argc < 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("format() expects (String fmt, ...)")); }
+                    char *ferr = NULL;
+                    char *result = format_string(args[0].as.str_val, args + 1, argc - 1, &ferr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (ferr) return eval_err(ferr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                /* ── Crypto builtins ── */
+
+                if (strcmp(fn_name, "sha256") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sha256() expects (String)")); }
+                    char *cerr = NULL;
+                    char *result = crypto_sha256(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (cerr) return eval_err(cerr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "md5") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("md5() expects (String)")); }
+                    char *cerr = NULL;
+                    char *result = crypto_md5(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (cerr) return eval_err(cerr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "base64_encode") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("base64_encode() expects (String)")); }
+                    char *result = crypto_base64_encode(args[0].as.str_val, strlen(args[0].as.str_val));
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "base64_decode") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("base64_decode() expects (String)")); }
+                    char *cerr = NULL;
+                    size_t decoded_len = 0;
+                    char *result = crypto_base64_decode(args[0].as.str_val, strlen(args[0].as.str_val), &decoded_len, &cerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (cerr) return eval_err(cerr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                /* ── Date/time formatting builtins ── */
+
+                if (strcmp(fn_name, "time_format") == 0) {
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_format() expects (Int epoch_ms, String fmt)")); }
+                    char *terr = NULL;
+                    char *result = datetime_format(args[0].as.int_val, args[1].as.str_val, &terr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (terr) return eval_err(terr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                if (strcmp(fn_name, "time_parse") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_parse() expects (String datetime, String fmt)")); }
+                    char *terr = NULL;
+                    int64_t result = datetime_parse(args[0].as.str_val, args[1].as.str_val, &terr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (terr) return eval_err(terr);
+                    return eval_ok(value_int(result));
                 }
 
                 /* ── Named function lookup ── */
@@ -2234,6 +2619,51 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         LatValue arr = value_array(pairs, n);
         free(pairs);
         return eval_ok(arr);
+    }
+    /* ── Array: sort ── */
+    if (strcmp(method, "sort") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".sort() takes no arguments"));
+        char *sort_err = NULL;
+        LatValue sorted = array_sort(&obj, &sort_err);
+        if (sort_err) return eval_err(sort_err);
+        return eval_ok(sorted);
+    }
+    /* ── Array: flat ── */
+    if (strcmp(method, "flat") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".flat() takes no arguments"));
+        return eval_ok(array_flat(&obj));
+    }
+    /* ── Array: reduce ── */
+    if (strcmp(method, "reduce") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 2) return eval_err(strdup(".reduce() expects 2 arguments (closure, initial_value)"));
+        if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".reduce() first argument must be a closure"));
+        LatValue acc = value_deep_clone(&args[1]);
+        GC_PUSH(ev, &acc);
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            LatValue call_args[2];
+            call_args[0] = acc;
+            call_args[1] = value_deep_clone(&obj.as.array.elems[i]);
+            EvalResult r = call_closure(ev,
+                args[0].as.closure.param_names,
+                args[0].as.closure.param_count,
+                args[0].as.closure.body,
+                args[0].as.closure.captured_env,
+                call_args, 2);
+            if (!IS_OK(r)) { GC_POP(ev); return r; }
+            acc = r.value;
+        }
+        GC_POP(ev);
+        return eval_ok(acc);
+    }
+    /* ── Array: slice ── */
+    if (strcmp(method, "slice") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 2) return eval_err(strdup(".slice() expects 2 arguments (start, end)"));
+        if (args[0].type != VAL_INT || args[1].type != VAL_INT)
+            return eval_err(strdup(".slice() arguments must be integers"));
+        char *slice_err = NULL;
+        LatValue sliced = array_slice(&obj, args[0].as.int_val, args[1].as.int_val, &slice_err);
+        if (slice_err) return eval_err(slice_err);
+        return eval_ok(sliced);
     }
     /* ── Map methods ── */
     if (obj.type == VAL_MAP) {

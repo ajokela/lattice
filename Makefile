@@ -36,7 +36,20 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/string_ops.c \
        $(SRC_DIR)/builtins.c \
        $(SRC_DIR)/net.c \
-       $(SRC_DIR)/tls.c
+       $(SRC_DIR)/tls.c \
+       $(SRC_DIR)/json.c \
+       $(SRC_DIR)/math_ops.c \
+       $(SRC_DIR)/env_ops.c \
+       $(SRC_DIR)/time_ops.c \
+       $(SRC_DIR)/fs_ops.c \
+       $(SRC_DIR)/process_ops.c \
+       $(SRC_DIR)/type_ops.c \
+       $(SRC_DIR)/datetime_ops.c \
+       $(SRC_DIR)/regex_ops.c \
+       $(SRC_DIR)/format_ops.c \
+       $(SRC_DIR)/path_ops.c \
+       $(SRC_DIR)/crypto_ops.c \
+       $(SRC_DIR)/array_ops.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))

@@ -13,6 +13,11 @@
 #include "builtins.h"
 #include "net.h"
 #include "tls.h"
+#include "json.h"
+#include "math_ops.h"
+#include "env_ops.h"
+#include "time_ops.h"
+#include "fs_ops.h"
 
 /* Import test harness from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
@@ -1346,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.1.3"
+        "0.1.5"
     );
 }
 
@@ -1698,6 +1703,1185 @@ static void test_tls_error_handling(void) {
 
 
 /* ======================================================================
+ * JSON Tests
+ * ====================================================================== */
+
+static void test_json_parse_object(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let obj = json_parse(\"{\\\"name\\\": \\\"Alice\\\", \\\"age\\\": 30}\")\n"
+        "    print(obj[\"name\"])\n"
+        "    print(to_string(obj[\"age\"]))\n"
+        "}\n",
+        "Alice\n30"
+    );
+}
+
+static void test_json_parse_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let arr = json_parse(\"[1, 2, 3]\")\n"
+        "    print(to_string(len(arr)))\n"
+        "    print(to_string(arr[0]))\n"
+        "    print(to_string(arr[2]))\n"
+        "}\n",
+        "3\n1\n3"
+    );
+}
+
+static void test_json_parse_nested(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let data = json_parse(\"{\\\"items\\\": [1, 2], \\\"ok\\\": true}\")\n"
+        "    print(to_string(data[\"ok\"]))\n"
+        "    print(to_string(len(data[\"items\"])))\n"
+        "}\n",
+        "true\n2"
+    );
+}
+
+static void test_json_parse_primitives(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(to_string(json_parse(\"42\")))\n"
+        "    print(to_string(json_parse(\"3.14\")))\n"
+        "    print(to_string(json_parse(\"true\")))\n"
+        "    print(to_string(json_parse(\"false\")))\n"
+        "    print(to_string(json_parse(\"null\")))\n"
+        "}\n",
+        "42\n3.14\ntrue\nfalse\n()"
+    );
+}
+
+static void test_json_stringify_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(json_stringify(42))\n"
+        "    print(json_stringify(\"hello\"))\n"
+        "    print(json_stringify(true))\n"
+        "    print(json_stringify(false))\n"
+        "}\n",
+        "42\n\"hello\"\ntrue\nfalse"
+    );
+}
+
+static void test_json_stringify_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(json_stringify([1, 2, 3]))\n"
+        "}\n",
+        "[1,2,3]"
+    );
+}
+
+static void test_json_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let json = \"{\\\"a\\\": 1}\"\n"
+        "    let obj = json_parse(json)\n"
+        "    let back = json_stringify(obj)\n"
+        "    let obj2 = json_parse(back)\n"
+        "    print(to_string(obj2[\"a\"]))\n"
+        "}\n",
+        "1"
+    );
+}
+
+static void test_json_parse_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    json_parse(\"{bad json}\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_json_stringify_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    json_stringify(123, 456)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* ======================================================================
+ * Math Tests
+ * ====================================================================== */
+
+static void test_math_abs(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(to_string(abs(-5)))\n"
+        "    print(to_string(abs(5)))\n"
+        "    print(to_string(abs(-3.14)))\n"
+        "}\n",
+        "5\n5\n3.14"
+    );
+}
+
+static void test_math_floor_ceil_round(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(to_string(floor(3.7)))\n"
+        "    print(to_string(ceil(3.2)))\n"
+        "    print(to_string(round(3.5)))\n"
+        "    print(to_string(round(3.4)))\n"
+        "}\n",
+        "3\n4\n4\n3"
+    );
+}
+
+static void test_math_sqrt(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(to_string(sqrt(9)))\n"
+        "    print(to_string(sqrt(4)))\n"
+        "}\n",
+        "3\n2"
+    );
+}
+
+static void test_math_sqrt_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    sqrt(-1)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_math_pow(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(to_string(pow(2, 10)))\n"
+        "    print(to_string(pow(3, 0)))\n"
+        "}\n",
+        "1024\n1"
+    );
+}
+
+static void test_math_min_max(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(to_string(min(3, 7)))\n"
+        "    print(to_string(max(3, 7)))\n"
+        "    print(to_string(min(1.5, 2.5)))\n"
+        "    print(to_string(max(1.5, 2.5)))\n"
+        "}\n",
+        "3\n7\n1.5\n2.5"
+    );
+}
+
+static void test_math_random(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = random()\n"
+        "    if r >= 0.0 {\n"
+        "        if r < 1.0 {\n"
+        "            print(\"ok\")\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_math_random_int(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = random_int(1, 10)\n"
+        "    if r >= 1 {\n"
+        "        if r <= 10 {\n"
+        "            print(\"ok\")\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+        "ok"
+    );
+}
+
+/* ======================================================================
+ * Environment Variable Tests
+ * ====================================================================== */
+
+static void test_env_get(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let path = env(\"PATH\")\n"
+        "    if len(path) > 0 {\n"
+        "        print(\"ok\")\n"
+        "    }\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_env_get_missing(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let val = env(\"LATTICE_NONEXISTENT_VAR_12345\")\n"
+        "    print(to_string(val))\n"
+        "}\n",
+        "()"
+    );
+}
+
+static void test_env_set_get(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    env_set(\"LATTICE_TEST_VAR\", \"hello\")\n"
+        "    print(env(\"LATTICE_TEST_VAR\"))\n"
+        "}\n",
+        "hello"
+    );
+}
+
+static void test_env_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    env(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    env_set(123, \"val\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* ======================================================================
+ * Time Tests
+ * ====================================================================== */
+
+static void test_time_now(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = time()\n"
+        "    if t > 0 {\n"
+        "        print(\"ok\")\n"
+        "    }\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_time_sleep(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let before = time()\n"
+        "    sleep(50)\n"
+        "    let after = time()\n"
+        "    if after - before >= 40 {\n"
+        "        print(\"ok\")\n"
+        "    }\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_time_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    sleep(\"bad\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    time(1)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+
+/* ======================================================================
+ * Filesystem Operations
+ * ====================================================================== */
+
+/* test_file_exists - file_exists returns true for existing file, false otherwise */
+static void test_file_exists(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    write_file(\"/tmp/lattice_test_exists.txt\", \"hi\")\n"
+        "    print(file_exists(\"/tmp/lattice_test_exists.txt\"))\n"
+        "    print(file_exists(\"/tmp/lattice_test_no_such_file_xyz.txt\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+    (void)remove("/tmp/lattice_test_exists.txt");
+}
+
+/* test_delete_file - delete_file removes an existing file */
+static void test_delete_file(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    write_file(\"/tmp/lattice_test_del.txt\", \"bye\")\n"
+        "    print(file_exists(\"/tmp/lattice_test_del.txt\"))\n"
+        "    delete_file(\"/tmp/lattice_test_del.txt\")\n"
+        "    print(file_exists(\"/tmp/lattice_test_del.txt\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+/* test_delete_file_error - deleting nonexistent file produces error */
+static void test_delete_file_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    delete_file(\"/tmp/lattice_test_no_such_file_xyz.txt\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* test_list_dir - list_dir returns array of filenames */
+static void test_list_dir(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    write_file(\"/tmp/lattice_test_listdir_a.txt\", \"a\")\n"
+        "    write_file(\"/tmp/lattice_test_listdir_b.txt\", \"b\")\n"
+        "    let entries = list_dir(\"/tmp\")\n"
+        "    // entries should be an array with at least 2 elements\n"
+        "    print(typeof(entries))\n"
+        "    let found_a = entries.contains(\"lattice_test_listdir_a.txt\")\n"
+        "    let found_b = entries.contains(\"lattice_test_listdir_b.txt\")\n"
+        "    print(found_a)\n"
+        "    print(found_b)\n"
+        "}\n",
+        "Array\ntrue\ntrue"
+    );
+    (void)remove("/tmp/lattice_test_listdir_a.txt");
+    (void)remove("/tmp/lattice_test_listdir_b.txt");
+}
+
+/* test_list_dir_error - listing nonexistent directory produces error */
+static void test_list_dir_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    list_dir(\"/tmp/lattice_no_such_dir_xyz\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* test_append_file - append_file adds data to existing file */
+static void test_append_file(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    write_file(\"/tmp/lattice_test_append.txt\", \"hello\")\n"
+        "    append_file(\"/tmp/lattice_test_append.txt\", \" world\")\n"
+        "    let content = read_file(\"/tmp/lattice_test_append.txt\")\n"
+        "    print(content)\n"
+        "}\n",
+        "hello world"
+    );
+    (void)remove("/tmp/lattice_test_append.txt");
+}
+
+/* test_append_file_creates - append_file creates file if it doesn't exist */
+static void test_append_file_creates(void) {
+    (void)remove("/tmp/lattice_test_append_new.txt");
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    append_file(\"/tmp/lattice_test_append_new.txt\", \"new content\")\n"
+        "    let content = read_file(\"/tmp/lattice_test_append_new.txt\")\n"
+        "    print(content)\n"
+        "}\n",
+        "new content"
+    );
+    (void)remove("/tmp/lattice_test_append_new.txt");
+}
+
+/* test_fs_error_handling - bad arg types produce eval errors */
+static void test_fs_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    file_exists(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    delete_file(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    list_dir(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    append_file(123, \"data\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+
+/* ======================================================================
+ * Regex Builtins
+ * ====================================================================== */
+
+/* regex_match: pattern matches */
+static void test_regex_match_true(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(regex_match(\"[0-9]+\", \"abc123\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* regex_match: pattern does not match */
+static void test_regex_match_false(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(regex_match(\"^[0-9]+$\", \"abc\"))\n"
+        "}\n",
+        "false"
+    );
+}
+
+/* regex_match: full string anchor */
+static void test_regex_match_anchored(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(regex_match(\"^hello$\", \"hello\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* regex_find_all: multiple matches */
+static void test_regex_find_all_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let matches = regex_find_all(\"[0-9]+\", \"a1b22c333\")\n"
+        "    print(matches)\n"
+        "}\n",
+        "[1, 22, 333]"
+    );
+}
+
+/* regex_find_all: no matches returns empty array */
+static void test_regex_find_all_no_match(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let matches = regex_find_all(\"[0-9]+\", \"abc\")\n"
+        "    print(len(matches))\n"
+        "}\n",
+        "0"
+    );
+}
+
+/* regex_find_all: word matches */
+static void test_regex_find_all_words(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let matches = regex_find_all(\"[a-z]+\", \"foo123bar456baz\")\n"
+        "    print(matches)\n"
+        "}\n",
+        "[foo, bar, baz]"
+    );
+}
+
+/* regex_replace: basic replacement */
+static void test_regex_replace_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(regex_replace(\"[0-9]+\", \"a1b2\", \"X\"))\n"
+        "}\n",
+        "aXbX"
+    );
+}
+
+/* regex_replace: no match returns original */
+static void test_regex_replace_no_match(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(regex_replace(\"[0-9]+\", \"abc\", \"X\"))\n"
+        "}\n",
+        "abc"
+    );
+}
+
+/* regex_replace: replace all whitespace */
+static void test_regex_replace_whitespace(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(regex_replace(\"[ ]+\", \"hello   world   foo\", \"-\"))\n"
+        "}\n",
+        "hello-world-foo"
+    );
+}
+
+/* regex_match: bad pattern returns error */
+static void test_regex_match_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    print(regex_match(\"[\", \"test\"))\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* regex_replace: empty replacement (deletion) */
+static void test_regex_replace_delete(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(regex_replace(\"[0-9]\", \"a1b2c3\", \"\"))\n"
+        "}\n",
+        "abc"
+    );
+}
+
+
+/* ======================================================================
+ * format() Builtin
+ * ====================================================================== */
+
+static void test_format_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"Hello, {}!\", \"world\"))\n"
+        "}\n",
+        "Hello, world!"
+    );
+}
+
+static void test_format_multiple(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"{} + {} = {}\", 1, 2, 3))\n"
+        "}\n",
+        "1 + 2 = 3"
+    );
+}
+
+static void test_format_no_placeholders(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"empty\"))\n"
+        "}\n",
+        "empty"
+    );
+}
+
+static void test_format_escaped_braces(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"{{literal}}\"))\n"
+        "}\n",
+        "{literal}"
+    );
+}
+
+static void test_format_bool(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"{}\", true))\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_format_too_few_args(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    format(\"{} {}\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_format_mixed_types(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"{} is {} and {}\", \"pi\", 3.14, true))\n"
+        "}\n",
+        "pi is 3.14 and true"
+    );
+}
+
+static void test_format_error_non_string_fmt(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    format(42)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+
+/* ======================================================================
+ * Crypto / Base64 Tests
+ * ====================================================================== */
+
+#ifdef LATTICE_HAS_TLS
+static void test_sha256_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(sha256(\"\"))\n"
+        "}\n",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
+static void test_sha256_hello(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(sha256(\"hello\"))\n"
+        "}\n",
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+}
+
+static void test_md5_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(md5(\"\"))\n"
+        "}\n",
+        "d41d8cd98f00b204e9800998ecf8427e"
+    );
+}
+
+static void test_md5_hello(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(md5(\"hello\"))\n"
+        "}\n",
+        "5d41402abc4b2a76b9719d911017c592"
+    );
+}
+#endif
+
+static void test_sha256_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    sha256(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_md5_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    md5(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_base64_encode_hello(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_encode(\"Hello\"))\n"
+        "}\n",
+        "SGVsbG8="
+    );
+}
+
+static void test_base64_encode_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_encode(\"\"))\n"
+        "}\n",
+        ""
+    );
+}
+
+static void test_base64_decode_hello(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_decode(\"SGVsbG8=\"))\n"
+        "}\n",
+        "Hello"
+    );
+}
+
+static void test_base64_decode_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_decode(\"\"))\n"
+        "}\n",
+        ""
+    );
+}
+
+static void test_base64_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_decode(base64_encode(\"test\")))\n"
+        "}\n",
+        "test"
+    );
+}
+
+static void test_base64_roundtrip_longer(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_decode(base64_encode(\"Hello, World!\")))\n"
+        "}\n",
+        "Hello, World!"
+    );
+}
+
+static void test_base64_encode_padding(void) {
+    /* 1 byte -> 4 chars with == padding */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_encode(\"a\"))\n"
+        "}\n",
+        "YQ=="
+    );
+    /* 2 bytes -> 4 chars with = padding */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_encode(\"ab\"))\n"
+        "}\n",
+        "YWI="
+    );
+    /* 3 bytes -> 4 chars, no padding */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(base64_encode(\"abc\"))\n"
+        "}\n",
+        "YWJj"
+    );
+}
+
+static void test_base64_decode_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    base64_decode(\"!!!\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_base64_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    base64_encode(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    base64_decode(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+
+/* ======================================================================
+ * Array: sort, flat, reduce, slice
+ * ====================================================================== */
+
+static void test_array_sort_int(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([3, 1, 2].sort())\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_array_sort_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([\"c\", \"a\", \"b\"].sort())\n"
+        "}\n",
+        "[a, b, c]"
+    );
+}
+
+static void test_array_sort_float(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([3.1, 1.5, 2.7].sort())\n"
+        "}\n",
+        "[1.5, 2.7, 3.1]"
+    );
+}
+
+static void test_array_sort_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([].sort())\n"
+        "}\n",
+        "[]"
+    );
+}
+
+static void test_array_sort_mixed_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    [1, \"a\"].sort()\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_array_flat_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, [2, 3], [4]].flat())\n"
+        "}\n",
+        "[1, 2, 3, 4]"
+    );
+}
+
+static void test_array_flat_no_nesting(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3].flat())\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_array_flat_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([].flat())\n"
+        "}\n",
+        "[]"
+    );
+}
+
+static void test_array_reduce_sum(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3].reduce(|acc, x| { acc + x }, 0))\n"
+        "}\n",
+        "6"
+    );
+}
+
+static void test_array_reduce_product(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4].reduce(|acc, x| { acc * x }, 1))\n"
+        "}\n",
+        "24"
+    );
+}
+
+static void test_array_reduce_string_concat(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([\"a\", \"b\", \"c\"].reduce(|acc, x| { acc + x }, \"\"))\n"
+        "}\n",
+        "abc"
+    );
+}
+
+static void test_array_reduce_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([].reduce(|acc, x| { acc + x }, 42))\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_array_slice_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4, 5].slice(1, 3))\n"
+        "}\n",
+        "[2, 3]"
+    );
+}
+
+static void test_array_slice_full(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3].slice(0, 3))\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_array_slice_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3].slice(1, 1))\n"
+        "}\n",
+        "[]"
+    );
+}
+
+static void test_array_slice_clamped(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3].slice(0, 100))\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+
+/* ======================================================================
+ * Date/Time Formatting Tests
+ * ====================================================================== */
+
+/* time_parse returns a positive Int for a valid date */
+static void test_time_parse_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ms = time_parse(\"2024-01-15\", \"%Y-%m-%d\")\n"
+        "    print(ms > 0)\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* time_format produces a non-empty string */
+static void test_time_format_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = time_format(0, \"%Y\")\n"
+        "    print(s.len() == 4)\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* Round-trip: format then parse should recover the same timestamp (to second precision) */
+static void test_time_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ms = time_parse(\"2024-06-15 12:30:45\", \"%Y-%m-%d %H:%M:%S\")\n"
+        "    let formatted = time_format(ms, \"%Y-%m-%d %H:%M:%S\")\n"
+        "    let ms2 = time_parse(formatted, \"%Y-%m-%d %H:%M:%S\")\n"
+        "    print(ms == ms2)\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* time_format with ISO date format produces expected length (10 chars for YYYY-MM-DD) */
+static void test_time_format_iso_date(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = time_format(1000000000000, \"%Y-%m-%d\")\n"
+        "    print(s.len() == 10)\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* time_parse error: invalid date string */
+static void test_time_parse_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    time_parse(\"not-a-date\", \"%Y-%m-%d\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* time_format error: wrong arg types */
+static void test_time_format_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    time_format(\"bad\", \"%Y\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* time_parse error: wrong arg types */
+static void test_time_parse_type_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    time_parse(123, \"%Y\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* time_format with time components */
+static void test_time_format_time_components(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = time_format(1000000000000, \"%H:%M:%S\")\n"
+        "    print(s.len() == 8)\n"
+        "}\n",
+        "true"
+    );
+}
+
+
+/* ======================================================================
+ * Path Operations
+ * ====================================================================== */
+
+/* test_path_join - join path components */
+static void test_path_join(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_join(\"foo\", \"bar\", \"baz.txt\"))\n"
+        "}\n",
+        "foo/bar/baz.txt"
+    );
+    /* Single argument */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_join(\"hello\"))\n"
+        "}\n",
+        "hello"
+    );
+    /* Avoid double slashes */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_join(\"foo/\", \"/bar\"))\n"
+        "}\n",
+        "foo/bar"
+    );
+    /* Absolute path */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_join(\"/usr\", \"local\", \"bin\"))\n"
+        "}\n",
+        "/usr/local/bin"
+    );
+}
+
+/* test_path_dir - extract directory portion */
+static void test_path_dir(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_dir(\"/foo/bar.txt\"))\n"
+        "}\n",
+        "/foo"
+    );
+    /* No slash returns "." */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_dir(\"bar.txt\"))\n"
+        "}\n",
+        "."
+    );
+    /* Root path */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_dir(\"/\"))\n"
+        "}\n",
+        "/"
+    );
+    /* Nested */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_dir(\"/a/b/c/d.txt\"))\n"
+        "}\n",
+        "/a/b/c"
+    );
+}
+
+/* test_path_base - extract base filename */
+static void test_path_base(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_base(\"/foo/bar.txt\"))\n"
+        "}\n",
+        "bar.txt"
+    );
+    /* No directory */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_base(\"file.txt\"))\n"
+        "}\n",
+        "file.txt"
+    );
+    /* Trailing slash returns empty */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_base(\"/foo/\"))\n"
+        "}\n",
+        ""
+    );
+}
+
+/* test_path_ext - extract file extension */
+static void test_path_ext(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_ext(\"file.tar.gz\"))\n"
+        "}\n",
+        ".gz"
+    );
+    /* No extension */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_ext(\"Makefile\"))\n"
+        "}\n",
+        ""
+    );
+    /* Hidden file (dot-prefixed, no extension) */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_ext(\".hidden\"))\n"
+        "}\n",
+        ""
+    );
+    /* Simple extension */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_ext(\"foo.txt\"))\n"
+        "}\n",
+        ".txt"
+    );
+    /* Extension in path with directory */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(path_ext(\"/usr/local/foo.c\"))\n"
+        "}\n",
+        ".c"
+    );
+}
+
+/* test_path_error_handling - bad arg types produce eval errors */
+static void test_path_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    path_join(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    path_dir(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    path_base(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    path_ext(123)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -1764,6 +2948,22 @@ void register_stdlib_tests(void) {
     register_test("test_array_contains", test_array_contains);
     register_test("test_array_reverse", test_array_reverse);
     register_test("test_array_enumerate", test_array_enumerate);
+    register_test("test_array_sort_int", test_array_sort_int);
+    register_test("test_array_sort_string", test_array_sort_string);
+    register_test("test_array_sort_float", test_array_sort_float);
+    register_test("test_array_sort_empty", test_array_sort_empty);
+    register_test("test_array_sort_mixed_error", test_array_sort_mixed_error);
+    register_test("test_array_flat_basic", test_array_flat_basic);
+    register_test("test_array_flat_no_nesting", test_array_flat_no_nesting);
+    register_test("test_array_flat_empty", test_array_flat_empty);
+    register_test("test_array_reduce_sum", test_array_reduce_sum);
+    register_test("test_array_reduce_product", test_array_reduce_product);
+    register_test("test_array_reduce_string_concat", test_array_reduce_string_concat);
+    register_test("test_array_reduce_empty", test_array_reduce_empty);
+    register_test("test_array_slice_basic", test_array_slice_basic);
+    register_test("test_array_slice_full", test_array_slice_full);
+    register_test("test_array_slice_empty", test_array_slice_empty);
+    register_test("test_array_slice_clamped", test_array_slice_clamped);
 
     /* Parsing & utility built-ins */
     register_test("test_parse_int", test_parse_int);
@@ -1836,4 +3036,105 @@ void register_stdlib_tests(void) {
     register_test("test_tls_invalid_fd", test_tls_invalid_fd);
     register_test("test_tls_lattice_integration", test_tls_lattice_integration);
     register_test("test_tls_error_handling", test_tls_error_handling);
+
+    /* JSON */
+    register_test("test_json_parse_object", test_json_parse_object);
+    register_test("test_json_parse_array", test_json_parse_array);
+    register_test("test_json_parse_nested", test_json_parse_nested);
+    register_test("test_json_parse_primitives", test_json_parse_primitives);
+    register_test("test_json_stringify_basic", test_json_stringify_basic);
+    register_test("test_json_stringify_array", test_json_stringify_array);
+    register_test("test_json_roundtrip", test_json_roundtrip);
+    register_test("test_json_parse_error", test_json_parse_error);
+    register_test("test_json_stringify_error", test_json_stringify_error);
+
+    /* Math */
+    register_test("test_math_abs", test_math_abs);
+    register_test("test_math_floor_ceil_round", test_math_floor_ceil_round);
+    register_test("test_math_sqrt", test_math_sqrt);
+    register_test("test_math_sqrt_error", test_math_sqrt_error);
+    register_test("test_math_pow", test_math_pow);
+    register_test("test_math_min_max", test_math_min_max);
+    register_test("test_math_random", test_math_random);
+    register_test("test_math_random_int", test_math_random_int);
+
+    /* Environment variables */
+    register_test("test_env_get", test_env_get);
+    register_test("test_env_get_missing", test_env_get_missing);
+    register_test("test_env_set_get", test_env_set_get);
+    register_test("test_env_error_handling", test_env_error_handling);
+
+    /* Time */
+    register_test("test_time_now", test_time_now);
+    register_test("test_time_sleep", test_time_sleep);
+    register_test("test_time_error_handling", test_time_error_handling);
+
+    /* Filesystem operations */
+    register_test("test_file_exists", test_file_exists);
+    register_test("test_delete_file", test_delete_file);
+    register_test("test_delete_file_error", test_delete_file_error);
+    register_test("test_list_dir", test_list_dir);
+    register_test("test_list_dir_error", test_list_dir_error);
+    register_test("test_append_file", test_append_file);
+    register_test("test_append_file_creates", test_append_file_creates);
+    register_test("test_fs_error_handling", test_fs_error_handling);
+
+    /* Regex */
+    register_test("test_regex_match_true", test_regex_match_true);
+    register_test("test_regex_match_false", test_regex_match_false);
+    register_test("test_regex_match_anchored", test_regex_match_anchored);
+    register_test("test_regex_find_all_basic", test_regex_find_all_basic);
+    register_test("test_regex_find_all_no_match", test_regex_find_all_no_match);
+    register_test("test_regex_find_all_words", test_regex_find_all_words);
+    register_test("test_regex_replace_basic", test_regex_replace_basic);
+    register_test("test_regex_replace_no_match", test_regex_replace_no_match);
+    register_test("test_regex_replace_whitespace", test_regex_replace_whitespace);
+    register_test("test_regex_match_error", test_regex_match_error);
+    register_test("test_regex_replace_delete", test_regex_replace_delete);
+
+    /* format() */
+    register_test("test_format_basic", test_format_basic);
+    register_test("test_format_multiple", test_format_multiple);
+    register_test("test_format_no_placeholders", test_format_no_placeholders);
+    register_test("test_format_escaped_braces", test_format_escaped_braces);
+    register_test("test_format_bool", test_format_bool);
+    register_test("test_format_too_few_args", test_format_too_few_args);
+    register_test("test_format_mixed_types", test_format_mixed_types);
+    register_test("test_format_error_non_string_fmt", test_format_error_non_string_fmt);
+
+    /* Crypto / Base64 */
+#ifdef LATTICE_HAS_TLS
+    register_test("test_sha256_empty", test_sha256_empty);
+    register_test("test_sha256_hello", test_sha256_hello);
+    register_test("test_md5_empty", test_md5_empty);
+    register_test("test_md5_hello", test_md5_hello);
+#endif
+    register_test("test_sha256_error_handling", test_sha256_error_handling);
+    register_test("test_md5_error_handling", test_md5_error_handling);
+    register_test("test_base64_encode_hello", test_base64_encode_hello);
+    register_test("test_base64_encode_empty", test_base64_encode_empty);
+    register_test("test_base64_decode_hello", test_base64_decode_hello);
+    register_test("test_base64_decode_empty", test_base64_decode_empty);
+    register_test("test_base64_roundtrip", test_base64_roundtrip);
+    register_test("test_base64_roundtrip_longer", test_base64_roundtrip_longer);
+    register_test("test_base64_encode_padding", test_base64_encode_padding);
+    register_test("test_base64_decode_error", test_base64_decode_error);
+    register_test("test_base64_error_handling", test_base64_error_handling);
+
+    /* Date/time formatting */
+    register_test("test_time_parse_basic", test_time_parse_basic);
+    register_test("test_time_format_basic", test_time_format_basic);
+    register_test("test_time_roundtrip", test_time_roundtrip);
+    register_test("test_time_format_iso_date", test_time_format_iso_date);
+    register_test("test_time_parse_error", test_time_parse_error);
+    register_test("test_time_format_error", test_time_format_error);
+    register_test("test_time_parse_type_error", test_time_parse_type_error);
+    register_test("test_time_format_time_components", test_time_format_time_components);
+
+    /* Path operations */
+    register_test("test_path_join", test_path_join);
+    register_test("test_path_dir", test_path_dir);
+    register_test("test_path_base", test_path_base);
+    register_test("test_path_ext", test_path_ext);
+    register_test("test_path_error_handling", test_path_error_handling);
 }
