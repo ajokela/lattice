@@ -1,0 +1,16 @@
+// HTTPS client example using http_fetch()
+// Usage: ./clat examples/https_client.lat
+
+require("lib/http")
+
+fn main() {
+    print("Fetching https://httpbin.org/get ...")
+
+    let raw = http_fetch("https://httpbin.org/get")
+    let status = http_parse_status(raw)
+    let body = http_parse_body(raw)
+
+    print("Status: " + to_string(status))
+    print("Body:")
+    print(body)
+}

@@ -2,10 +2,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
 #include "eval.h"
+#include "builtins.h"
+#include "net.h"
+#include "tls.h"
 
 /* Import test harness from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
@@ -1345,6 +1352,352 @@ static void test_lat_eval_version(void) {
 
 
 /* ======================================================================
+ * TCP Networking
+ * ====================================================================== */
+
+/* 80. test_tcp_listen_close - create a listening socket and close it */
+static void test_tcp_listen_close(void) {
+    char *err = NULL;
+    int fd = net_tcp_listen("127.0.0.1", 0, &err);
+    ASSERT(fd >= 0);
+    ASSERT(err == NULL);
+    net_tcp_close(fd);
+}
+
+/* 81. test_tcp_connect_write_read - full loopback send/receive */
+static void test_tcp_connect_write_read(void) {
+    char *err = NULL;
+
+    /* Listen on a random port — use port 0 and read back the assigned port */
+    int server = net_tcp_listen("127.0.0.1", 0, &err);
+    ASSERT(server >= 0);
+    ASSERT(err == NULL);
+
+    /* Get the port the OS assigned */
+    struct sockaddr_in addr;
+    socklen_t alen = sizeof(addr);
+    getsockname(server, (struct sockaddr *)&addr, &alen);
+    int port = ntohs(addr.sin_port);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+
+    if (pid == 0) {
+        /* Child: connect and send */
+        usleep(10000); /* 10ms — let parent call accept */
+        char *cerr = NULL;
+        int cfd = net_tcp_connect("127.0.0.1", port, &cerr);
+        if (cfd < 0) _exit(1);
+        net_tcp_write(cfd, "hello", 5, &cerr);
+        net_tcp_close(cfd);
+        _exit(0);
+    }
+
+    /* Parent: accept and read */
+    int client = net_tcp_accept(server, &err);
+    ASSERT(client >= 0);
+
+    char *data = net_tcp_read(client, &err);
+    ASSERT(data != NULL);
+    ASSERT_STR_EQ(data, "hello");
+    free(data);
+
+    net_tcp_close(client);
+    net_tcp_close(server);
+
+    int status;
+    waitpid(pid, &status, 0);
+    ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+/* 82. test_tcp_peer_addr - verify peer address string format */
+static void test_tcp_peer_addr(void) {
+    char *err = NULL;
+
+    int server = net_tcp_listen("127.0.0.1", 0, &err);
+    ASSERT(server >= 0);
+
+    struct sockaddr_in addr;
+    socklen_t alen = sizeof(addr);
+    getsockname(server, (struct sockaddr *)&addr, &alen);
+    int port = ntohs(addr.sin_port);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+
+    if (pid == 0) {
+        usleep(10000);
+        char *cerr = NULL;
+        int cfd = net_tcp_connect("127.0.0.1", port, &cerr);
+        if (cfd < 0) _exit(1);
+        usleep(50000);
+        net_tcp_close(cfd);
+        _exit(0);
+    }
+
+    int client = net_tcp_accept(server, &err);
+    ASSERT(client >= 0);
+
+    char *peer = net_tcp_peer_addr(client, &err);
+    ASSERT(peer != NULL);
+    /* Should start with 127.0.0.1: */
+    ASSERT(strncmp(peer, "127.0.0.1:", 10) == 0);
+    free(peer);
+
+    net_tcp_close(client);
+    net_tcp_close(server);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+/* 83. test_tcp_set_timeout - set timeout on a socket */
+static void test_tcp_set_timeout(void) {
+    char *err = NULL;
+    int fd = net_tcp_listen("127.0.0.1", 0, &err);
+    ASSERT(fd >= 0);
+
+    bool ok = net_tcp_set_timeout(fd, 1, &err);
+    ASSERT(ok);
+    ASSERT(err == NULL);
+
+    net_tcp_close(fd);
+}
+
+/* 84. test_tcp_invalid_fd - operations on non-tracked fd produce errors */
+static void test_tcp_invalid_fd(void) {
+    char *err = NULL;
+    int result = net_tcp_accept(999, &err);
+    ASSERT(result == -1);
+    ASSERT(err != NULL);
+    free(err);
+
+    err = NULL;
+    char *data = net_tcp_read(999, &err);
+    ASSERT(data == NULL);
+    ASSERT(err != NULL);
+    free(err);
+}
+
+/* 85. test_tcp_lattice_integration - test TCP builtins from Lattice code */
+static void test_tcp_lattice_integration(void) {
+    /* Test that tcp_listen and tcp_close work from Lattice */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let server = tcp_listen(\"127.0.0.1\", 0)\n"
+        "    print(server >= 0)\n"
+        "    tcp_close(server)\n"
+        "    print(\"done\")\n"
+        "}\n",
+        "true\ndone"
+    );
+}
+
+/* 86. test_tcp_error_handling - bad args produce eval errors */
+static void test_tcp_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    tcp_listen(123, 80)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    tcp_read(\"bad\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+
+/* ======================================================================
+ * require()
+ * ====================================================================== */
+
+/* 87. test_require_basic - require a file and call its function */
+static void test_require_basic(void) {
+    /* Write a library file */
+    builtin_write_file("/tmp/lattice_test_lib.lat",
+        "fn helper() -> Int { return 42 }\n");
+
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    require(\"/tmp/lattice_test_lib\")\n"
+        "    print(helper())\n"
+        "}\n",
+        "42"
+    );
+    (void)remove("/tmp/lattice_test_lib.lat");
+}
+
+/* 88. test_require_with_extension - require with .lat extension works */
+static void test_require_with_extension(void) {
+    builtin_write_file("/tmp/lattice_test_lib2.lat",
+        "fn helper2() -> Int { return 99 }\n");
+
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    require(\"/tmp/lattice_test_lib2.lat\")\n"
+        "    print(helper2())\n"
+        "}\n",
+        "99"
+    );
+    (void)remove("/tmp/lattice_test_lib2.lat");
+}
+
+/* 89. test_require_dedup - requiring same file twice is a no-op */
+static void test_require_dedup(void) {
+    builtin_write_file("/tmp/lattice_test_dedup.lat",
+        "fn dedup_fn() -> Int { return 7 }\n");
+
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    require(\"/tmp/lattice_test_dedup\")\n"
+        "    require(\"/tmp/lattice_test_dedup\")\n"
+        "    require(\"/tmp/lattice_test_dedup.lat\")\n"
+        "    print(dedup_fn())\n"
+        "}\n",
+        "7"
+    );
+    (void)remove("/tmp/lattice_test_dedup.lat");
+}
+
+/* 90. test_require_structs - require a file that defines structs */
+static void test_require_structs(void) {
+    builtin_write_file("/tmp/lattice_test_structs.lat",
+        "struct Pair { a: Int, b: Int }\n"
+        "fn make_pair(x: Int, y: Int) -> Pair {\n"
+        "    return Pair { a: x, b: y }\n"
+        "}\n");
+
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    require(\"/tmp/lattice_test_structs\")\n"
+        "    let p = make_pair(3, 4)\n"
+        "    print(p.a + p.b)\n"
+        "}\n",
+        "7"
+    );
+    (void)remove("/tmp/lattice_test_structs.lat");
+}
+
+/* 91. test_require_missing - require a nonexistent file produces error */
+static void test_require_missing(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    require(\"/tmp/lattice_no_such_file_xyz\")\n"
+        "}\n",
+        "EVAL_ERROR:require: cannot find"
+    );
+}
+
+/* 92. test_require_nested - transitive require */
+static void test_require_nested(void) {
+    builtin_write_file("/tmp/lattice_test_base.lat",
+        "fn base_fn() -> Int { return 10 }\n");
+    builtin_write_file("/tmp/lattice_test_mid.lat",
+        "require(\"/tmp/lattice_test_base\")\n"
+        "fn mid_fn() -> Int { return base_fn() + 5 }\n");
+
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    require(\"/tmp/lattice_test_mid\")\n"
+        "    print(mid_fn())\n"
+        "}\n",
+        "15"
+    );
+    (void)remove("/tmp/lattice_test_base.lat");
+    (void)remove("/tmp/lattice_test_mid.lat");
+}
+
+
+/* ======================================================================
+ * TLS Networking
+ * ====================================================================== */
+
+/* 93. test_tls_available - tls_available matches build config */
+static void test_tls_available(void) {
+#ifdef LATTICE_HAS_TLS
+    ASSERT(net_tls_available() == true);
+#else
+    ASSERT(net_tls_available() == false);
+#endif
+}
+
+/* 94. test_tls_connect_read - connect to httpbin.org:443 and read response */
+#ifdef LATTICE_HAS_TLS
+static void test_tls_connect_read(void) {
+    char *err = NULL;
+    int fd = net_tls_connect("httpbin.org", 443, &err);
+    ASSERT(fd >= 0);
+    ASSERT(err == NULL);
+
+    const char *req = "GET /get HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
+    bool ok = net_tls_write(fd, req, strlen(req), &err);
+    ASSERT(ok);
+    ASSERT(err == NULL);
+
+    char *data = net_tls_read(fd, &err);
+    ASSERT(data != NULL);
+    ASSERT(strncmp(data, "HTTP/1.1", 8) == 0);
+    free(data);
+
+    net_tls_close(fd);
+}
+#endif
+
+/* 95. test_tls_invalid_fd - operations on bad fd return errors */
+static void test_tls_invalid_fd(void) {
+    char *err = NULL;
+    char *data = net_tls_read(999, &err);
+    ASSERT(data == NULL);
+    ASSERT(err != NULL);
+    free(err);
+
+    err = NULL;
+    bool ok = net_tls_write(999, "hi", 2, &err);
+    ASSERT(!ok);
+    ASSERT(err != NULL);
+    free(err);
+}
+
+/* 96. test_tls_lattice_integration - tls_available() from Lattice code */
+static void test_tls_lattice_integration(void) {
+#ifdef LATTICE_HAS_TLS
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(tls_available())\n"
+        "}\n",
+        "true"
+    );
+#else
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(tls_available())\n"
+        "}\n",
+        "false"
+    );
+#endif
+}
+
+/* 97. test_tls_error_handling - bad arg types produce eval errors */
+static void test_tls_error_handling(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    tls_connect(123, 443)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    tls_read(\"bad\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -1457,4 +1810,30 @@ void register_stdlib_tests(void) {
     register_test("test_lat_eval_struct_persistence", test_lat_eval_struct_persistence);
     register_test("test_lat_eval_mutable_var", test_lat_eval_mutable_var);
     register_test("test_lat_eval_version", test_lat_eval_version);
+
+    /* require() */
+    register_test("test_require_basic", test_require_basic);
+    register_test("test_require_with_extension", test_require_with_extension);
+    register_test("test_require_dedup", test_require_dedup);
+    register_test("test_require_structs", test_require_structs);
+    register_test("test_require_missing", test_require_missing);
+    register_test("test_require_nested", test_require_nested);
+
+    /* TCP networking */
+    register_test("test_tcp_listen_close", test_tcp_listen_close);
+    register_test("test_tcp_connect_write_read", test_tcp_connect_write_read);
+    register_test("test_tcp_peer_addr", test_tcp_peer_addr);
+    register_test("test_tcp_set_timeout", test_tcp_set_timeout);
+    register_test("test_tcp_invalid_fd", test_tcp_invalid_fd);
+    register_test("test_tcp_lattice_integration", test_tcp_lattice_integration);
+    register_test("test_tcp_error_handling", test_tcp_error_handling);
+
+    /* TLS networking */
+    register_test("test_tls_available", test_tls_available);
+#ifdef LATTICE_HAS_TLS
+    register_test("test_tls_connect_read", test_tls_connect_read);
+#endif
+    register_test("test_tls_invalid_fd", test_tls_invalid_fd);
+    register_test("test_tls_lattice_integration", test_tls_lattice_integration);
+    register_test("test_tls_error_handling", test_tls_error_handling);
 }

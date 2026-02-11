@@ -76,6 +76,8 @@ typedef struct Evaluator {
     bool        gc_stress;
     bool        no_regions;    /* baseline mode: skip region registration */
     size_t      lat_eval_scope; /* when > 0, top-level lat_eval bindings go here */
+    LatMap      required_files; /* set of resolved paths already require()'d */
+    char       *script_dir;    /* directory of the main script (for require) */
 } Evaluator;
 
 /* Create a new evaluator */
@@ -89,6 +91,9 @@ void evaluator_set_gc_stress(Evaluator *ev, bool enabled);
 
 /* Enable baseline mode (no region allocator, crystal stays in fluid heap) */
 void evaluator_set_no_regions(Evaluator *ev, bool enabled);
+
+/* Set the script directory for resolving require() paths */
+void evaluator_set_script_dir(Evaluator *ev, const char *dir);
 
 /* Evaluate a program. Returns heap-allocated error string or NULL on success. */
 char *evaluator_run(Evaluator *ev, const Program *prog);

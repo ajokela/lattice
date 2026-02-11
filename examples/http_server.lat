@@ -1,0 +1,54 @@
+// Simple HTTP server in Lattice
+// Run: ./clat examples/http_server.lat
+// Test: curl http://localhost:8080
+
+fn build_response(status: Int, status_text: String, content_type: String, body: String) -> String {
+    let header = "HTTP/1.1 " + to_string(status) + " " + status_text + "\r\n"
+        + "Content-Type: " + content_type + "\r\n"
+        + "Content-Length: " + to_string(len(body)) + "\r\n"
+        + "Connection: close\r\n"
+        + "\r\n"
+    return header + body
+}
+
+fn handle_request(method: String, path: String) -> String {
+    if path == "/" {
+        let body = "<html><body><h1>Hello from Lattice!</h1><p>A simple HTTP server written in Lattice.</p></body></html>"
+        return build_response(200, "OK", "text/html", body)
+    }
+
+    if path == "/json" {
+        let body = "{\"message\": \"Hello from Lattice!\", \"status\": \"ok\"}"
+        return build_response(200, "OK", "application/json", body)
+    }
+
+    let body = "<html><body><h1>404 Not Found</h1><p>The path " + path + " was not found.</p></body></html>"
+    return build_response(404, "Not Found", "text/html", body)
+}
+
+fn main() {
+    let port = 8080
+    let server = tcp_listen("0.0.0.0", port)
+    print("Listening on http://localhost:" + to_string(port))
+
+    loop {
+        let conn = tcp_accept(server)
+        let raw = tcp_read(conn)
+
+        if len(raw) > 0 {
+            // Parse the request line: "GET /path HTTP/1.1\r\n..."
+            let lines = raw.split("\r\n")
+            let request_line = lines[0]
+            let parts = request_line.split(" ")
+            let method = parts[0]
+            let path = if len(parts) > 1 { parts[1] } else { "/" }
+
+            print(method + " " + path)
+
+            let response = handle_request(method, path)
+            tcp_write(conn, response)
+        }
+
+        tcp_close(conn)
+    }
+}

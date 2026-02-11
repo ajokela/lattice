@@ -1,0 +1,110 @@
+// HTTP client library for Lattice
+// Usage: require("lib/http")
+
+fn http_get(host: String, port: Int, path: String) -> String {
+    let conn = tcp_connect(host, port)
+
+    let request = "GET " + path + " HTTP/1.1\r\n"
+        + "Host: " + host + "\r\n"
+        + "Connection: close\r\n"
+        + "\r\n"
+    tcp_write(conn, request)
+
+    // Read the full response (server will close connection)
+    flux response = ""
+    loop {
+        let chunk = tcp_read(conn)
+        if len(chunk) == 0 { break }
+        response += chunk
+    }
+
+    tcp_close(conn)
+    return response
+}
+
+fn http_parse_status(raw: String) -> Int {
+    // Status line: "HTTP/1.1 200 OK\r\n..."
+    let first_line = raw.split("\r\n")[0]
+    let parts = first_line.split(" ")
+    if len(parts) >= 2 {
+        return parse_int(parts[1])
+    }
+    return 0
+}
+
+fn http_parse_body(raw: String) -> String {
+    // Headers and body are separated by \r\n\r\n
+    let idx = raw.index_of("\r\n\r\n")
+    if idx >= 0 {
+        return raw.substring(idx + 4, len(raw))
+    }
+    return ""
+}
+
+fn http_parse_header(raw: String, name: String) -> String {
+    let lines = raw.split("\r\n")
+    let lower_name = name.to_lower()
+    for line in lines {
+        if line.to_lower().starts_with(lower_name + ":") {
+            return line.substring(len(name) + 1, len(line)).trim()
+        }
+    }
+    return ""
+}
+
+fn https_get(host: String, port: Int, path: String) -> String {
+    let conn = tls_connect(host, port)
+
+    let request = "GET " + path + " HTTP/1.1\r\n"
+        + "Host: " + host + "\r\n"
+        + "Connection: close\r\n"
+        + "\r\n"
+    tls_write(conn, request)
+
+    // Read the full response (server will close connection)
+    flux response = ""
+    loop {
+        let chunk = tls_read(conn)
+        if len(chunk) == 0 { break }
+        response += chunk
+    }
+
+    tls_close(conn)
+    return response
+}
+
+fn http_fetch(url: String) -> String {
+    // Determine scheme
+    flux scheme = "http"
+    flux rest = url
+    if url.starts_with("https://") {
+        scheme = "https"
+        rest = url.substring(8, len(url))
+    } else if url.starts_with("http://") {
+        scheme = "http"
+        rest = url.substring(7, len(url))
+    }
+
+    // Split host and path
+    flux host = rest
+    flux path = "/"
+    let slash_idx = rest.index_of("/")
+    if slash_idx >= 0 {
+        host = rest.substring(0, slash_idx)
+        path = rest.substring(slash_idx, len(rest))
+    }
+
+    // Extract port from host if present (e.g. "example.com:8080")
+    flux port = 80
+    if scheme == "https" { port = 443 }
+    let colon_idx = host.index_of(":")
+    if colon_idx >= 0 {
+        port = parse_int(host.substring(colon_idx + 1, len(host)))
+        host = host.substring(0, colon_idx)
+    }
+
+    if scheme == "https" {
+        return https_get(host, port, path)
+    }
+    return http_get(host, port, path)
+}

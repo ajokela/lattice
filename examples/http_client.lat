@@ -1,0 +1,50 @@
+// Simple HTTP client in Lattice
+// Demonstrates: require(), tcp_connect, tcp_write, tcp_read, string parsing.
+// Usage: ./clat examples/http_client.lat
+
+require("lib/http")
+
+fn main() {
+    print("=== HTTP Client ===")
+    print("")
+
+    // Fetch from httpbin.org (a public HTTP test service)
+    let host = "httpbin.org"
+    let port = 80
+
+    // GET /get - returns request info as JSON
+    print("--- GET " + host + "/get ---")
+    let raw = http_get(host, port, "/get")
+    let status = http_parse_status(raw)
+    let body = http_parse_body(raw)
+    let content_type = http_parse_header(raw, "Content-Type")
+    print("Status: " + to_string(status))
+    print("Content-Type: " + content_type)
+    print("Body (first 200 chars):")
+    if len(body) > 200 {
+        print(body.substring(0, 200) + "...")
+    } else {
+        print(body)
+    }
+    print("")
+
+    // GET /status/418 - the famous teapot
+    print("--- GET " + host + "/status/418 ---")
+    let raw2 = http_get(host, port, "/status/418")
+    let status2 = http_parse_status(raw2)
+    print("Status: " + to_string(status2))
+    let body2 = http_parse_body(raw2)
+    if len(body2) > 0 {
+        print(body2)
+    }
+    print("")
+
+    // GET /headers - echoes back request headers
+    print("--- GET " + host + "/headers ---")
+    let raw3 = http_get(host, port, "/headers")
+    let status3 = http_parse_status(raw3)
+    let body3 = http_parse_body(raw3)
+    print("Status: " + to_string(status3))
+    print("Body:")
+    print(body3)
+}

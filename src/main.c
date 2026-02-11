@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libgen.h>
 #ifndef __EMSCRIPTEN__
 #include <editline/readline.h>
 #endif
@@ -26,7 +27,7 @@ static char *read_file(const char *path) {
 static bool gc_stress_mode = false;
 static bool no_regions_mode = false;
 
-static int run_source(const char *source, bool show_stats) {
+static int run_source(const char *source, bool show_stats, const char *script_dir) {
     /* Lex */
     Lexer lex = lexer_new(source);
     char *lex_err = NULL;
@@ -76,6 +77,8 @@ static int run_source(const char *source, bool show_stats) {
         evaluator_set_gc_stress(ev, true);
     if (no_regions_mode)
         evaluator_set_no_regions(ev, true);
+    if (script_dir)
+        evaluator_set_script_dir(ev, script_dir);
     char *eval_err = evaluator_run(ev, &prog);
     if (eval_err) {
         fprintf(stderr, "error: %s\n", eval_err);
@@ -107,7 +110,11 @@ static int run_file(const char *path, bool show_stats) {
         fprintf(stderr, "error: cannot read '%s'\n", path);
         return 1;
     }
-    int result = run_source(source, show_stats);
+    /* Extract directory of the script for require() resolution */
+    char *path_copy = strdup(path);
+    char *dir = dirname(path_copy);
+    int result = run_source(source, show_stats, dir);
+    free(path_copy);
     free(source);
     return result;
 }
@@ -172,7 +179,7 @@ static void repl(void) {
         if (!input_is_complete(accumulated))
             continue;
 
-        int result = run_source(accumulated, false);
+        int result = run_source(accumulated, false, NULL);
         (void)result;
         accumulated[0] = '\0';
     }

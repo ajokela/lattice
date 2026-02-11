@@ -6,6 +6,19 @@ SRC_DIR    = src
 BUILD_DIR  = build
 TEST_DIR   = tests
 
+# ── Optional TLS (OpenSSL) ──
+TLS_AVAILABLE := $(shell pkg-config --exists openssl 2>/dev/null && echo yes || echo no)
+ifeq ($(TLS_AVAILABLE),yes)
+    TLS_CFLAGS  := $(shell pkg-config --cflags openssl) -DLATTICE_HAS_TLS
+    TLS_LDFLAGS := $(shell pkg-config --libs openssl)
+endif
+ifeq ($(TLS),0)
+    TLS_CFLAGS  :=
+    TLS_LDFLAGS :=
+endif
+CFLAGS  += $(TLS_CFLAGS)
+LDFLAGS += $(TLS_LDFLAGS)
+
 # Source files
 SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/ds/str.c \
@@ -21,7 +34,9 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/memory.c \
        $(SRC_DIR)/phase_check.c \
        $(SRC_DIR)/string_ops.c \
-       $(SRC_DIR)/builtins.c
+       $(SRC_DIR)/builtins.c \
+       $(SRC_DIR)/net.c \
+       $(SRC_DIR)/tls.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))

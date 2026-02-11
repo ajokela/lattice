@@ -2,12 +2,16 @@
 #include "lattice.h"
 #include "string_ops.h"
 #include "builtins.h"
+#include "net.h"
+#include "tls.h"
 #include "lexer.h"
 #include "parser.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <limits.h>
+#include <libgen.h>
 #include <sys/resource.h>
 
 /* Monotonic clock in nanoseconds */
@@ -814,6 +818,133 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                if (strcmp(fn_name, "require") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("require() expects 1 string argument")); }
+                    const char *raw_path = args[0].as.str_val;
+                    /* Build the file path: append .lat if not already present */
+                    size_t plen = strlen(raw_path);
+                    char *file_path;
+                    if (plen >= 4 && strcmp(raw_path + plen - 4, ".lat") == 0) {
+                        file_path = strdup(raw_path);
+                    } else {
+                        file_path = malloc(plen + 5);
+                        memcpy(file_path, raw_path, plen);
+                        memcpy(file_path + plen, ".lat", 5);
+                    }
+                    /* Resolve to an absolute path for dedup.
+                     * Try cwd-relative first, then script_dir-relative. */
+                    char resolved[PATH_MAX];
+                    bool found = (realpath(file_path, resolved) != NULL);
+                    if (!found && ev->script_dir && file_path[0] != '/') {
+                        /* Try relative to the script's directory */
+                        char script_rel[PATH_MAX];
+                        snprintf(script_rel, sizeof(script_rel), "%s/%s",
+                                 ev->script_dir, file_path);
+                        found = (realpath(script_rel, resolved) != NULL);
+                    }
+                    if (!found) {
+                        char errbuf[512];
+                        snprintf(errbuf, sizeof(errbuf), "require: cannot find '%s'", file_path);
+                        free(file_path);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup(errbuf));
+                    }
+                    free(file_path);
+                    /* Skip if already required */
+                    if (lat_map_get(&ev->required_files, resolved)) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_ok(value_bool(true));
+                    }
+                    /* Mark as required before evaluating (guards against circular requires) */
+                    bool marker = true;
+                    lat_map_set(&ev->required_files, resolved, &marker);
+                    /* Read the file */
+                    char *source = builtin_read_file(resolved);
+                    if (!source) {
+                        char errbuf[512];
+                        snprintf(errbuf, sizeof(errbuf), "require: cannot read '%s'", resolved);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup(errbuf));
+                    }
+                    /* Lex */
+                    Lexer req_lex = lexer_new(source);
+                    char *req_lex_err = NULL;
+                    LatVec req_toks = lexer_tokenize(&req_lex, &req_lex_err);
+                    free(source);
+                    if (req_lex_err) {
+                        char errbuf[1024];
+                        snprintf(errbuf, sizeof(errbuf), "require '%s': %s", resolved, req_lex_err);
+                        free(req_lex_err);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup(errbuf));
+                    }
+                    /* Parse */
+                    Parser req_parser = parser_new(&req_toks);
+                    char *req_parse_err = NULL;
+                    Program req_prog = parser_parse(&req_parser, &req_parse_err);
+                    if (req_parse_err) {
+                        char errbuf[1024];
+                        snprintf(errbuf, sizeof(errbuf), "require '%s': %s", resolved, req_parse_err);
+                        free(req_parse_err);
+                        program_free(&req_prog);
+                        for (size_t j = 0; j < req_toks.len; j++) token_free(lat_vec_get(&req_toks, j));
+                        lat_vec_free(&req_toks);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup(errbuf));
+                    }
+                    /* Register functions and structs */
+                    for (size_t j = 0; j < req_prog.item_count; j++) {
+                        if (req_prog.items[j].tag == ITEM_STRUCT) {
+                            StructDecl *ptr = &req_prog.items[j].as.struct_decl;
+                            lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+                        } else if (req_prog.items[j].tag == ITEM_FUNCTION) {
+                            FnDecl *ptr = &req_prog.items[j].as.fn_decl;
+                            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+                        }
+                    }
+                    /* Set script_dir to the required file's directory for nested requires */
+                    char *prev_script_dir = ev->script_dir;
+                    char *resolved_copy = strdup(resolved);
+                    ev->script_dir = strdup(dirname(resolved_copy));
+                    free(resolved_copy);
+                    /* Execute top-level statements */
+                    size_t saved_scope = ev->lat_eval_scope;
+                    ev->lat_eval_scope = ev->env->count;
+                    EvalResult req_r = eval_ok(value_unit());
+                    for (size_t j = 0; j < req_prog.item_count; j++) {
+                        if (req_prog.items[j].tag == ITEM_STMT) {
+                            value_free(&req_r.value);
+                            req_r = eval_stmt(ev, req_prog.items[j].as.stmt);
+                            if (!IS_OK(req_r)) break;
+                        }
+                    }
+                    ev->lat_eval_scope = saved_scope;
+                    /* Restore previous script_dir */
+                    free(ev->script_dir);
+                    ev->script_dir = prev_script_dir;
+                    /* Cleanup: free statements, keep decl items alive */
+                    bool req_has_decls = false;
+                    for (size_t j = 0; j < req_prog.item_count; j++) {
+                        if (req_prog.items[j].tag == ITEM_STMT)
+                            stmt_free(req_prog.items[j].as.stmt);
+                        else
+                            req_has_decls = true;
+                    }
+                    if (!req_has_decls) free(req_prog.items);
+                    for (size_t j = 0; j < req_toks.len; j++) token_free(lat_vec_get(&req_toks, j));
+                    lat_vec_free(&req_toks);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!IS_OK(req_r)) return req_r;
+                    value_free(&req_r.value);
+                    return eval_ok(value_bool(true));
+                }
+
                 if (strcmp(fn_name, "lat_eval") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lat_eval() expects 1 string argument")); }
                     const char *source = args[0].as.str_val;
@@ -994,6 +1125,152 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_unit());
+                }
+
+                /* ── TCP networking builtins ── */
+
+                if (strcmp(fn_name, "tcp_listen") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_listen() expects (String host, Int port)")); }
+                    char *net_err = NULL;
+                    int fd = net_tcp_listen(args[0].as.str_val, (int)args[1].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (fd < 0) return eval_err(net_err);
+                    return eval_ok(value_int(fd));
+                }
+
+                if (strcmp(fn_name, "tcp_accept") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_accept() expects (Int server_fd)")); }
+                    char *net_err = NULL;
+                    int fd = net_tcp_accept((int)args[0].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (fd < 0) return eval_err(net_err);
+                    return eval_ok(value_int(fd));
+                }
+
+                if (strcmp(fn_name, "tcp_connect") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_connect() expects (String host, Int port)")); }
+                    char *net_err = NULL;
+                    int fd = net_tcp_connect(args[0].as.str_val, (int)args[1].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (fd < 0) return eval_err(net_err);
+                    return eval_ok(value_int(fd));
+                }
+
+                if (strcmp(fn_name, "tcp_read") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_read() expects (Int fd)")); }
+                    char *net_err = NULL;
+                    char *data = net_tcp_read((int)args[0].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!data) return eval_err(net_err);
+                    return eval_ok(value_string_owned(data));
+                }
+
+                if (strcmp(fn_name, "tcp_read_bytes") == 0) {
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_read_bytes() expects (Int fd, Int n)")); }
+                    char *net_err = NULL;
+                    char *data = net_tcp_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!data) return eval_err(net_err);
+                    return eval_ok(value_string_owned(data));
+                }
+
+                if (strcmp(fn_name, "tcp_write") == 0) {
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_write() expects (Int fd, String data)")); }
+                    char *net_err = NULL;
+                    bool ok = net_tcp_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!ok) return eval_err(net_err);
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "tcp_close") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_close() expects (Int fd)")); }
+                    net_tcp_close((int)args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                if (strcmp(fn_name, "tcp_peer_addr") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_peer_addr() expects (Int fd)")); }
+                    char *net_err = NULL;
+                    char *addr = net_tcp_peer_addr((int)args[0].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!addr) return eval_err(net_err);
+                    return eval_ok(value_string_owned(addr));
+                }
+
+                if (strcmp(fn_name, "tcp_set_timeout") == 0) {
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_set_timeout() expects (Int fd, Int secs)")); }
+                    char *net_err = NULL;
+                    bool ok = net_tcp_set_timeout((int)args[0].as.int_val, (int)args[1].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!ok) return eval_err(net_err);
+                    return eval_ok(value_bool(true));
+                }
+
+                /* ── TLS networking builtins ── */
+
+                if (strcmp(fn_name, "tls_connect") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_connect() expects (String host, Int port)")); }
+                    char *net_err = NULL;
+                    int fd = net_tls_connect(args[0].as.str_val, (int)args[1].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (fd < 0) return eval_err(net_err);
+                    return eval_ok(value_int(fd));
+                }
+
+                if (strcmp(fn_name, "tls_read") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_read() expects (Int fd)")); }
+                    char *net_err = NULL;
+                    char *data = net_tls_read((int)args[0].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!data) return eval_err(net_err);
+                    return eval_ok(value_string_owned(data));
+                }
+
+                if (strcmp(fn_name, "tls_read_bytes") == 0) {
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_read_bytes() expects (Int fd, Int n)")); }
+                    char *net_err = NULL;
+                    char *data = net_tls_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!data) return eval_err(net_err);
+                    return eval_ok(value_string_owned(data));
+                }
+
+                if (strcmp(fn_name, "tls_write") == 0) {
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_write() expects (Int fd, String data)")); }
+                    char *net_err = NULL;
+                    bool ok = net_tls_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &net_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!ok) return eval_err(net_err);
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "tls_close") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_close() expects (Int fd)")); }
+                    net_tls_close((int)args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                if (strcmp(fn_name, "tls_available") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_available() expects no arguments")); }
+                    free(args);
+                    return eval_ok(value_bool(net_tls_available()));
                 }
 
                 /* ── Named function lookup ── */
@@ -2135,15 +2412,19 @@ Evaluator *evaluator_new(void) {
     ev->saved_envs = lat_vec_new(sizeof(Env *));
     ev->gc_stress = false;
     ev->no_regions = false;
+    ev->required_files = lat_map_new(sizeof(bool));
     value_set_heap(ev->heap);
     return ev;
 }
 
 void evaluator_free(Evaluator *ev) {
     if (!ev) return;
+    net_tls_cleanup();
     env_free(ev->env);            /* lat_free → fluid_dealloc removes from heap */
     lat_map_free(&ev->struct_defs);
     lat_map_free(&ev->fn_defs);
+    lat_map_free(&ev->required_files);
+    free(ev->script_dir);
     value_set_heap(NULL);         /* disconnect before freeing the heap itself */
     dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
     lat_vec_free(&ev->gc_roots);
@@ -2157,6 +2438,11 @@ void evaluator_set_gc_stress(Evaluator *ev, bool enabled) {
 
 void evaluator_set_no_regions(Evaluator *ev, bool enabled) {
     ev->no_regions = enabled;
+}
+
+void evaluator_set_script_dir(Evaluator *ev, const char *dir) {
+    free(ev->script_dir);
+    ev->script_dir = dir ? strdup(dir) : NULL;
 }
 
 char *evaluator_run(Evaluator *ev, const Program *prog) {
