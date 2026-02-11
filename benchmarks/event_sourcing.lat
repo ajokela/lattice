@@ -1,0 +1,51 @@
+// Benchmark: Event Sourcing
+// Models an event-sourced ledger. Events are frozen immediately upon creation.
+// State is rebuilt by replaying frozen events from the log. Exercises freeze
+// heavily (one per event) with long-lived crystal values and periodic replay.
+
+struct Event { kind: String, amount: Int, seq: Int }
+struct Account { balance: Int, tx_count: Int }
+
+fn apply_event(acct: Account, evt: Event) -> Account {
+    if evt.kind == "deposit" {
+        return Account { balance: acct.balance + evt.amount, tx_count: acct.tx_count + 1 }
+    }
+    if evt.kind == "withdraw" {
+        return Account { balance: acct.balance - evt.amount, tx_count: acct.tx_count + 1 }
+    }
+    return acct
+}
+
+fn replay(events: Array, count: Int) -> Account {
+    let acct = Account { balance: 0, tx_count: 0 }
+    for i in 0..count {
+        let evt = thaw(events[i])
+        acct = apply_event(acct, evt)
+    }
+    return acct
+}
+
+fn main() {
+    let event_log = []
+    let checksum = 0
+
+    // Generate 200 frozen events
+    for i in 0..200 {
+        let kind = "deposit"
+        if i % 3 == 0 {
+            kind = "withdraw"
+        }
+        let evt = Event { kind: kind, amount: (i % 50) + 1, seq: i }
+        let frozen_evt = freeze(evt)
+        event_log.push(frozen_evt)
+    }
+
+    // Replay full log at periodic intervals to simulate read-heavy workload
+    for checkpoint in 0..5 {
+        let count = (checkpoint + 1) * 40
+        let state = replay(event_log, count)
+        checksum = checksum + state.balance
+    }
+
+    print(checksum)
+}

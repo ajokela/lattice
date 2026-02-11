@@ -1,0 +1,97 @@
+// Benchmark: Game State Rollback
+// Simulates a game loop with periodic checkpointing. Every N frames, the
+// game state is frozen. On "desync", we rollback to a checkpoint and replay.
+// Exercises freeze (checkpoints), thaw (rollback), and mixed mutable/frozen data.
+
+struct GameState {
+    frame: Int,
+    score: Int,
+    player_x: Int,
+    player_y: Int,
+    hp: Int,
+    entities: Array,
+}
+
+struct Entity { id: Int, x: Int, y: Int, active: Bool }
+
+fn make_entities(n: Int) -> Array {
+    let ents = []
+    for i in 0..n {
+        ents.push(Entity { id: i, x: i * 3, y: i * 2, active: true })
+    }
+    return ents
+}
+
+fn tick(state: GameState) -> GameState {
+    let f = state.frame + 1
+    let new_ents = []
+    for i in 0..state.entities.len() {
+        let e = state.entities[i]
+        let nx = e.x + 1
+        let ny = e.y + (f % 3)
+        let active = e.active
+        if nx > 500 {
+            active = false
+        }
+        new_ents.push(Entity { id: e.id, x: nx, y: ny, active: active })
+    }
+    // Score based on active entities
+    let active_count = 0
+    for i in 0..new_ents.len() {
+        if new_ents[i].active {
+            active_count = active_count + 1
+        }
+    }
+    return GameState {
+        frame: f,
+        score: state.score + active_count,
+        player_x: state.player_x + (f % 5) - 2,
+        player_y: state.player_y + (f % 3) - 1,
+        hp: state.hp,
+        entities: new_ents,
+    }
+}
+
+fn main() {
+    let checkpoints = []
+    let state = GameState {
+        frame: 0,
+        score: 0,
+        player_x: 100,
+        player_y: 100,
+        hp: 100,
+        entities: make_entities(20),
+    }
+
+    let checkpoint_interval = 25
+    let total_frames = 500
+    let rollback_count = 0
+
+    for f in 0..total_frames {
+        state = tick(state)
+
+        // Checkpoint every N frames
+        if state.frame % checkpoint_interval == 0 {
+            let cp = freeze(clone(state))
+            checkpoints.push(cp)
+        }
+
+        // Simulate desync every 100 frames — rollback to last checkpoint
+        if state.frame % 100 == 0 {
+            if checkpoints.len() > 1 {
+                let idx = checkpoints.len() - 2
+                state = thaw(checkpoints[idx])
+                rollback_count = rollback_count + 1
+                // Replay from checkpoint to current frame
+                let target = f + 1
+                for r in 0..(target - state.frame) {
+                    state = tick(state)
+                }
+            }
+        }
+    }
+
+    print(state.score)
+    print(rollback_count)
+    print(checkpoints.len())
+}

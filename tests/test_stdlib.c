@@ -1339,7 +1339,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.1.1"
+        "0.1.3"
     );
 }
 

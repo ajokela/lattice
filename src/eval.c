@@ -7,6 +7,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
+#include <sys/resource.h>
+
+/* Monotonic clock in nanoseconds */
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 
 /* ── Memory stats helpers ── */
 
@@ -68,12 +77,38 @@ static EvalResult eval_signal(ControlFlowTag tag, LatValue v) {
 #define IS_ERR(r) (!(r).ok && (r).error != NULL)
 #define IS_SIGNAL(r) (!(r).ok && (r).error == NULL)
 
+/* ── Shadow stack macros ── */
+#define GC_PUSH(ev, vptr) lat_vec_push(&(ev)->gc_roots, &(LatValue*){(vptr)})
+#define GC_POP(ev)        lat_vec_pop(&(ev)->gc_roots, NULL)
+#define GC_POP_N(ev, n)   do { for (size_t _i = 0; _i < (n); _i++) GC_POP(ev); } while(0)
+
 /* Forward declarations */
-static EvalResult eval_expr(Evaluator *ev, const Expr *expr);
+static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr);
 static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt);
 static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count);
 
+/* eval_expr now directly calls eval_expr_inner; temporaries are protected
+ * by GC_PUSH/GC_POP at individual expression sites instead of the blunt
+ * gc_inhibit hammer. */
+static inline EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
+    return eval_expr_inner(ev, expr);
+}
+
 /* ── Garbage Collector ── */
+
+/* Forward declaration for mutual recursion with gc_mark_env_value */
+static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions);
+
+/* Callback for env_iter_values to mark each value */
+typedef struct {
+    FluidHeap *fh;
+    LatVec    *reachable_regions;
+} GcMarkCtx;
+
+static void gc_mark_env_value(LatValue *v, void *ctx) {
+    GcMarkCtx *mc = (GcMarkCtx *)ctx;
+    gc_mark_value(mc->fh, v, mc->reachable_regions);
+}
 
 /*
  * Mark a single LatValue as reachable, recursively marking contained
@@ -81,6 +116,11 @@ static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count);
  * IDs into the supplied vector.
  */
 static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions) {
+    /* Crystal values have no fluid pointers — just record the region ID */
+    if (v->phase == VTAG_CRYSTAL && v->region_id != (size_t)-1) {
+        lat_vec_push(reachable_regions, &v->region_id);
+        return;
+    }
     switch (v->type) {
         case VAL_STR:
             if (v->as.str_val)
@@ -119,22 +159,16 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
             /* Mark captured env's values recursively */
             if (v->as.closure.captured_env) {
                 Env *cenv = v->as.closure.captured_env;
-                for (size_t s = 0; s < cenv->count; s++) {
-                    /* Iterate the scope map and mark each value */
-                    /* We use a small trampoline via env_iter_values pattern */
-                }
+                GcMarkCtx cctx = { fh, reachable_regions };
+                env_iter_values(cenv, gc_mark_env_value, &cctx);
             }
             break;
         case VAL_MAP:
             if (v->as.map.map) {
+                fluid_mark(fh, v->as.map.map);
                 for (size_t i = 0; i < v->as.map.map->cap; i++) {
                     if (v->as.map.map->entries[i].state == MAP_OCCUPIED) {
-                        if (v->as.map.map->entries[i].key)
-                            fluid_mark(fh, v->as.map.map->entries[i].key);
-                        if (v->as.map.map->entries[i].value) {
-                            fluid_mark(fh, v->as.map.map->entries[i].value);
-                            gc_mark_value(fh, (LatValue *)v->as.map.map->entries[i].value, reachable_regions);
-                        }
+                        gc_mark_value(fh, (LatValue *)v->as.map.map->entries[i].value, reachable_regions);
                     }
                 }
             }
@@ -144,16 +178,74 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
     }
 }
 
-/* Callback for env_iter_values to mark each value */
-typedef struct {
-    FluidHeap *fh;
-    LatVec    *reachable_regions;
-} GcMarkCtx;
-
-static void gc_mark_env_value(LatValue *v, void *ctx) {
-    GcMarkCtx *mc = (GcMarkCtx *)ctx;
-    gc_mark_value(mc->fh, v, mc->reachable_regions);
+#ifndef NDEBUG
+#include <assert.h>
+/*
+ * Debug assertion: verify that no crystal value's heap pointers appear
+ * in the fluid alloc list.  Violation would mean freeze didn't properly
+ * untrack the pointer, risking a double-free during sweep.
+ */
+static bool ptr_in_fluid(FluidHeap *fh, void *ptr) {
+    if (!ptr) return false;
+    for (FluidAlloc *a = fh->allocs; a; a = a->next) {
+        if (a->ptr == ptr) return true;
+    }
+    return false;
 }
+
+static void assert_crystal_not_fluid(LatValue *v, void *ctx) {
+    FluidHeap *fh = (FluidHeap *)ctx;
+    if (v->phase != VTAG_CRYSTAL || v->region_id == (size_t)-1) return;
+    switch (v->type) {
+        case VAL_STR:
+            assert(!ptr_in_fluid(fh, v->as.str_val) &&
+                   "crystal string in fluid heap");
+            break;
+        case VAL_ARRAY:
+            assert(!ptr_in_fluid(fh, v->as.array.elems) &&
+                   "crystal array elems in fluid heap");
+            break;
+        case VAL_STRUCT:
+            assert(!ptr_in_fluid(fh, v->as.strct.name) &&
+                   "crystal struct name in fluid heap");
+            assert(!ptr_in_fluid(fh, v->as.strct.field_names) &&
+                   "crystal struct field_names in fluid heap");
+            assert(!ptr_in_fluid(fh, v->as.strct.field_values) &&
+                   "crystal struct field_values in fluid heap");
+            for (size_t i = 0; i < v->as.strct.field_count; i++) {
+                assert(!ptr_in_fluid(fh, v->as.strct.field_names[i]) &&
+                       "crystal struct field_name string in fluid heap");
+            }
+            break;
+        case VAL_CLOSURE:
+            assert(!ptr_in_fluid(fh, v->as.closure.param_names) &&
+                   "crystal closure param_names in fluid heap");
+            for (size_t i = 0; i < v->as.closure.param_count; i++) {
+                assert(!ptr_in_fluid(fh, v->as.closure.param_names[i]) &&
+                       "crystal closure param_name string in fluid heap");
+            }
+            break;
+        case VAL_MAP:
+            if (v->as.map.map) {
+                assert(!ptr_in_fluid(fh, v->as.map.map) &&
+                       "crystal map struct in fluid heap");
+                assert(!ptr_in_fluid(fh, v->as.map.map->entries) &&
+                       "crystal map entries in fluid heap");
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static void assert_dual_heap_invariant(Evaluator *ev) {
+    env_iter_values(ev->env, assert_crystal_not_fluid, ev->heap->fluid);
+    for (size_t i = 0; i < ev->saved_envs.len; i++) {
+        Env **ep = lat_vec_get(&ev->saved_envs, i);
+        env_iter_values(*ep, assert_crystal_not_fluid, ev->heap->fluid);
+    }
+}
+#endif /* NDEBUG */
 
 /*
  * Run a full GC cycle: mark all roots, sweep unreachable.
@@ -161,6 +253,10 @@ static void gc_mark_env_value(LatValue *v, void *ctx) {
 static void gc_cycle(Evaluator *ev) {
     FluidHeap *fh = ev->heap->fluid;
     LatVec reachable_regions = lat_vec_new(sizeof(RegionId));
+
+    /* 0. Advance epoch — groups frozen values by GC generation */
+    if (!ev->no_regions)
+        region_advance_epoch(ev->heap->regions);
 
     /* 1. Clear all marks */
     fluid_unmark_all(fh);
@@ -175,21 +271,38 @@ static void gc_cycle(Evaluator *ev) {
         if (*vp) gc_mark_value(fh, *vp, &reachable_regions);
     }
 
-    /* 4. Sweep unmarked fluid allocations */
+    /* 4. Mark values from saved caller environments (closure env swap) */
+    for (size_t i = 0; i < ev->saved_envs.len; i++) {
+        Env **ep = lat_vec_get(&ev->saved_envs, i);
+        env_iter_values(*ep, gc_mark_env_value, &ctx);
+    }
+
+    /* 5. Sweep unmarked fluid allocations */
+    size_t fluid_before = fh->total_bytes;
     size_t swept_fluid = fluid_sweep(fh);
+    ev->stats.gc_bytes_swept += fluid_before - fh->total_bytes;
 
-    /* 5. Collect unreachable crystal regions */
-    size_t swept_regions = region_collect(
-        ev->heap->regions,
-        (RegionId *)reachable_regions.data,
-        reachable_regions.len);
+    /* 6. Collect unreachable crystal regions */
+    size_t swept_regions = 0;
+    if (!ev->no_regions) {
+        swept_regions = region_collect(
+            ev->heap->regions,
+            (RegionId *)reachable_regions.data,
+            reachable_regions.len);
+    }
 
-    /* 6. Update stats */
+    /* 7. Update stats */
     ev->stats.gc_cycles++;
     ev->stats.gc_swept_fluid += swept_fluid;
     ev->stats.gc_swept_regions += swept_regions;
 
     lat_vec_free(&reachable_regions);
+
+#ifndef NDEBUG
+    /* 8. Verify dual-heap invariant: no crystal pointers in fluid heap */
+    if (!ev->no_regions)
+        assert_dual_heap_invariant(ev);
+#endif
 }
 
 /*
@@ -199,8 +312,80 @@ static void gc_cycle(Evaluator *ev) {
 static void gc_maybe_collect(Evaluator *ev) {
     if (ev->gc_stress ||
         ev->heap->fluid->total_bytes >= ev->heap->fluid->gc_threshold) {
+        uint64_t t0 = now_ns();
         gc_cycle(ev);
+        ev->stats.gc_total_ns += now_ns() - t0;
     }
+}
+
+/*
+ * Recursively set region_id on a value and all nested values.
+ * Must walk into closure captured environments so that GC knows
+ * every arena pointer belongs to this region.
+ */
+static void set_region_id_env(Env *env, RegionId rid);
+
+static void set_region_id_recursive(LatValue *v, RegionId rid) {
+    v->region_id = rid;
+    switch (v->type) {
+        case VAL_ARRAY:
+            for (size_t i = 0; i < v->as.array.len; i++)
+                set_region_id_recursive(&v->as.array.elems[i], rid);
+            break;
+        case VAL_STRUCT:
+            for (size_t i = 0; i < v->as.strct.field_count; i++)
+                set_region_id_recursive(&v->as.strct.field_values[i], rid);
+            break;
+        case VAL_CLOSURE:
+            if (v->as.closure.captured_env)
+                set_region_id_env(v->as.closure.captured_env, rid);
+            break;
+        case VAL_MAP:
+            if (v->as.map.map) {
+                for (size_t i = 0; i < v->as.map.map->cap; i++) {
+                    if (v->as.map.map->entries[i].state == MAP_OCCUPIED) {
+                        LatValue *mv = (LatValue *)v->as.map.map->entries[i].value;
+                        set_region_id_recursive(mv, rid);
+                    }
+                }
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static void set_region_id_env_value(LatValue *v, void *ctx) {
+    RegionId rid = *(RegionId *)ctx;
+    set_region_id_recursive(v, rid);
+}
+
+static void set_region_id_env(Env *env, RegionId rid) {
+    env_iter_values(env, set_region_id_env_value, &rid);
+}
+
+/*
+ * Freeze support: deep-clone value into a new arena-backed region,
+ * set region_id recursively, free the original fluid-heap value,
+ * and replace it with the arena clone.
+ *
+ * In no-regions baseline mode, crystal values stay in the fluid heap.
+ */
+static void freeze_to_region(Evaluator *ev, LatValue *v) {
+    if (ev->no_regions) return;
+
+    CrystalRegion *region = region_create(ev->heap->regions);
+
+    value_set_arena(region);
+    LatValue clone = value_deep_clone(v);
+    value_set_arena(NULL);
+
+    ev->heap->regions->cumulative_data_bytes += region->total_bytes;
+
+    set_region_id_recursive(&clone, region->id);
+
+    value_free(v);
+    *v = clone;
 }
 
 /*
@@ -234,12 +419,17 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
         return NULL;
     }
     if (expr->tag == EXPR_INDEX) {
+        /* Evaluate the index expression BEFORE resolving the parent lvalue.
+         * eval_expr may trigger GC or scope-map mutations (lat_map_set →
+         * rehash), which would invalidate any raw pointer returned by
+         * resolve_lvalue.  By evaluating first we avoid stale pointers. */
+        EvalResult idxr = eval_expr(ev, expr->as.index.index);
+        if (!IS_OK(idxr)) { *err = idxr.error; return NULL; }
+
         LatValue *parent = resolve_lvalue(ev, expr->as.index.object, err);
-        if (!parent) return NULL;
+        if (!parent) { value_free(&idxr.value); return NULL; }
+
         if (parent->type == VAL_MAP) {
-            /* Map indexing for lvalue */
-            EvalResult idxr = eval_expr(ev, expr->as.index.index);
-            if (!IS_OK(idxr)) { *err = idxr.error; return NULL; }
             if (idxr.value.type != VAL_STR) {
                 value_free(&idxr.value);
                 *err = strdup("map key must be a string");
@@ -255,29 +445,24 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
             value_free(&idxr.value);
             return target;
         }
-        if (parent->type != VAL_ARRAY) {
-            (void)asprintf(err, "cannot index into %s", value_type_name(parent));
-            return NULL;
-        }
-        /* Evaluate the index expression */
-        EvalResult idxr = eval_expr(ev, expr->as.index.index);
-        if (!IS_OK(idxr)) {
-            *err = idxr.error;
-            return NULL;
-        }
-        if (idxr.value.type != VAL_INT) {
+        if (parent->type == VAL_ARRAY) {
+            if (idxr.value.type != VAL_INT) {
+                value_free(&idxr.value);
+                *err = strdup("array index must be an integer");
+                return NULL;
+            }
+            size_t idx = (size_t)idxr.value.as.int_val;
             value_free(&idxr.value);
-            *err = strdup("array index must be an integer");
-            return NULL;
+            if (idx >= parent->as.array.len) {
+                (void)asprintf(err, "index %zu out of bounds (length %zu)",
+                               idx, parent->as.array.len);
+                return NULL;
+            }
+            return &parent->as.array.elems[idx];
         }
-        size_t idx = (size_t)idxr.value.as.int_val;
         value_free(&idxr.value);
-        if (idx >= parent->as.array.len) {
-            (void)asprintf(err, "index %zu out of bounds (length %zu)",
-                           idx, parent->as.array.len);
-            return NULL;
-        }
-        return &parent->as.array.elems[idx];
+        (void)asprintf(err, "cannot index into %s", value_type_name(parent));
+        return NULL;
     }
     *err = strdup("invalid lvalue expression");
     return NULL;
@@ -347,8 +532,9 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
     }
     stats_closure_call(&ev->stats);
 
-    /* Swap environments */
+    /* Swap environments — save caller env so GC can still mark it */
     Env *saved = ev->env;
+    lat_vec_push(&ev->saved_envs, &saved);
     ev->env = closure_env;
     stats_scope_push(&ev->stats);
     env_push_scope(ev->env);
@@ -359,6 +545,7 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
     env_pop_scope(ev->env);
     stats_scope_pop(&ev->stats);
     ev->env = saved;
+    lat_vec_pop(&ev->saved_envs, NULL);
 
     if (IS_SIGNAL(result) && result.cf.tag == CF_RETURN) {
         return eval_ok(result.cf.value);
@@ -464,7 +651,7 @@ static EvalResult eval_unaryop(UnaryOpKind op, LatValue *val) {
 
 /* ── Expression evaluation ── */
 
-static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
+static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
     switch (expr->tag) {
         case EXPR_INT_LIT:    return eval_ok(value_int(expr->as.int_val));
         case EXPR_FLOAT_LIT:  return eval_ok(value_float(expr->as.float_val));
@@ -484,7 +671,9 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
         case EXPR_BINOP: {
             EvalResult lr = eval_expr(ev, expr->as.binop.left);
             if (!IS_OK(lr)) return lr;
+            GC_PUSH(ev, &lr.value);
             EvalResult rr = eval_expr(ev, expr->as.binop.right);
+            GC_POP(ev);
             if (!IS_OK(rr)) { value_free(&lr.value); return rr; }
             EvalResult res = eval_binop(expr->as.binop.op, &lr.value, &rr.value);
             value_free(&lr.value);
@@ -507,12 +696,15 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
             for (size_t i = 0; i < argc; i++) {
                 EvalResult ar = eval_expr(ev, expr->as.call.args[i]);
                 if (!IS_OK(ar)) {
+                    GC_POP_N(ev, i);
                     for (size_t j = 0; j < i; j++) value_free(&args[j]);
                     free(args);
                     return ar;
                 }
                 args[i] = ar.value;
+                GC_PUSH(ev, &args[i]);
             }
+            GC_POP_N(ev, argc);
             /* Check for named function or built-in */
             if (expr->as.call.func->tag == EXPR_IDENT) {
                 const char *fn_name = expr->as.call.func->as.str_val;
@@ -832,8 +1024,10 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                     return res;
                 }
             }
-            /* Otherwise evaluate callee */
+            /* Otherwise evaluate callee — re-protect args since eval may trigger GC */
+            for (size_t i = 0; i < argc; i++) GC_PUSH(ev, &args[i]);
             EvalResult callee_r = eval_expr(ev, expr->as.call.func);
+            GC_POP_N(ev, argc);
             if (!IS_OK(callee_r)) {
                 for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                 free(args);
@@ -847,12 +1041,17 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                 free(args);
                 return eval_err(err);
             }
+            /* Root callee and args so GC inside block-body closures won't sweep them */
+            GC_PUSH(ev, &callee_r.value);
+            for (size_t i = 0; i < argc; i++) GC_PUSH(ev, &args[i]);
             EvalResult res = call_closure(ev,
                 callee_r.value.as.closure.param_names,
                 callee_r.value.as.closure.param_count,
                 callee_r.value.as.closure.body,
                 callee_r.value.as.closure.captured_env,
                 args, argc);
+            GC_POP_N(ev, argc);
+            GC_POP(ev);
             /* Don't free captured_env since closure still owns it - just cleanup */
             callee_r.value.as.closure.captured_env = NULL;
             value_free(&callee_r.value);
@@ -880,13 +1079,20 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                     value_free(&existing);
                     return eval_err(strdup("cannot push to a crystal array"));
                 }
+                GC_PUSH(ev, &existing);
                 EvalResult ar = eval_expr(ev, expr->as.method_call.args[0]);
+                GC_POP(ev);
                 if (!IS_OK(ar)) { value_free(&existing); return ar; }
                 /* Grow the array */
                 if (existing.as.array.len >= existing.as.array.cap) {
-                    existing.as.array.cap = existing.as.array.cap < 4 ? 4 : existing.as.array.cap * 2;
-                    existing.as.array.elems = realloc(existing.as.array.elems,
+                    size_t old_cap = existing.as.array.cap;
+                    existing.as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
+                    LatValue *new_buf = fluid_alloc(ev->heap->fluid,
                         existing.as.array.cap * sizeof(LatValue));
+                    memcpy(new_buf, existing.as.array.elems, old_cap * sizeof(LatValue));
+                    if (!fluid_dealloc(ev->heap->fluid, existing.as.array.elems))
+                        free(existing.as.array.elems);
+                    existing.as.array.elems = new_buf;
                 }
                 existing.as.array.elems[existing.as.array.len++] = ar.value;
                 env_set(ev->env, var_name, existing);
@@ -904,7 +1110,9 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                         value_free(&kr.value);
                         return eval_err(strdup(".set() key must be a string"));
                     }
+                    GC_PUSH(ev, &kr.value);
                     EvalResult vr = eval_expr(ev, expr->as.method_call.args[1]);
+                    GC_POP(ev);
                     if (!IS_OK(vr)) { value_free(&kr.value); return vr; }
                     /* Free old value if key exists */
                     LatValue *old = (LatValue *)lat_map_get(map_lv->as.map.map, kr.value.as.str_val);
@@ -938,19 +1146,25 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
             }
             EvalResult objr = eval_expr(ev, expr->as.method_call.object);
             if (!IS_OK(objr)) return objr;
+            GC_PUSH(ev, &objr.value);
             size_t argc = expr->as.method_call.arg_count;
             LatValue *args = malloc((argc < 1 ? 1 : argc) * sizeof(LatValue));
             for (size_t i = 0; i < argc; i++) {
                 EvalResult ar = eval_expr(ev, expr->as.method_call.args[i]);
                 if (!IS_OK(ar)) {
+                    GC_POP_N(ev, i);  /* args */
+                    GC_POP(ev);       /* objr */
                     for (size_t j = 0; j < i; j++) value_free(&args[j]);
                     free(args);
                     value_free(&objr.value);
                     return ar;
                 }
                 args[i] = ar.value;
+                GC_PUSH(ev, &args[i]);
             }
             EvalResult res = eval_method_call(ev, objr.value, expr->as.method_call.method, args, argc);
+            GC_POP_N(ev, argc);  /* args */
+            GC_POP(ev);          /* objr */
             value_free(&objr.value);
             for (size_t i = 0; i < argc; i++) value_free(&args[i]);
             free(args);
@@ -983,7 +1197,9 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
         case EXPR_INDEX: {
             EvalResult objr = eval_expr(ev, expr->as.index.object);
             if (!IS_OK(objr)) return objr;
+            GC_PUSH(ev, &objr.value);
             EvalResult idxr = eval_expr(ev, expr->as.index.index);
+            GC_POP(ev);
             if (!IS_OK(idxr)) { value_free(&objr.value); return idxr; }
             if (objr.value.type == VAL_ARRAY && idxr.value.type == VAL_INT) {
                 size_t idx = (size_t)idxr.value.as.int_val;
@@ -1044,14 +1260,16 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
             for (size_t i = 0; i < n; i++) {
                 EvalResult er = eval_expr(ev, expr->as.array.elems[i]);
                 if (!IS_OK(er)) {
+                    GC_POP_N(ev, i);
                     for (size_t j = 0; j < i; j++) value_free(&elems[j]);
                     free(elems);
                     return er;
                 }
                 elems[i] = er.value;
+                GC_PUSH(ev, &elems[i]);
             }
+            GC_POP_N(ev, n);
             stats_array(&ev->stats);
-            gc_maybe_collect(ev);
             LatValue arr = value_array(elems, n);
             free(elems);
             return eval_ok(arr);
@@ -1084,14 +1302,16 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
                 names[i] = expr->as.struct_lit.fields[i].name;
                 EvalResult er = eval_expr(ev, expr->as.struct_lit.fields[i].value);
                 if (!IS_OK(er)) {
+                    GC_POP_N(ev, i);
                     for (size_t j = 0; j < i; j++) value_free(&vals[j]);
                     free(names); free(vals);
                     return er;
                 }
                 vals[i] = er.value;
+                GC_PUSH(ev, &vals[i]);
             }
+            GC_POP_N(ev, fc);
             stats_struct(&ev->stats);
-            gc_maybe_collect(ev);
             LatValue st = value_struct(sname, names, vals, fc);
             free(names); free(vals);
             return eval_ok(st);
@@ -1099,29 +1319,72 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
 
         case EXPR_FREEZE: {
             stats_freeze(&ev->stats);
-            /* In strict mode, consuming freeze on ident */
-            if (ev->mode == MODE_STRICT && expr->as.freeze_expr->tag == EXPR_IDENT) {
+            if (expr->as.freeze_expr->tag == EXPR_IDENT) {
                 const char *name = expr->as.freeze_expr->as.str_val;
+                if (ev->mode == MODE_STRICT) {
+                    /* Strict mode: consuming freeze removes the binding */
+                    LatValue val;
+                    if (!env_remove(ev->env, name, &val)) {
+                        char *err = NULL;
+                        (void)asprintf(&err, "undefined variable '%s'", name);
+                        return eval_err(err);
+                    }
+                    uint64_t ft0 = now_ns();
+                    val = value_freeze(val);
+                    freeze_to_region(ev, &val);
+                    ev->stats.freeze_total_ns += now_ns() - ft0;
+                    return eval_ok(val);
+                }
+                /* Casual mode: freeze the binding in-place */
                 LatValue val;
-                if (!env_remove(ev->env, name, &val)) {
+                if (!env_get(ev->env, name, &val)) {
                     char *err = NULL;
                     (void)asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
                 }
-                return eval_ok(value_freeze(val));
+                uint64_t ft0 = now_ns();
+                val = value_freeze(val);
+                freeze_to_region(ev, &val);
+                ev->stats.freeze_total_ns += now_ns() - ft0;
+                LatValue ret = value_deep_clone(&val);
+                env_set(ev->env, name, val);
+                return eval_ok(ret);
             }
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
             if (!IS_OK(er)) return er;
-            return eval_ok(value_freeze(er.value));
+            { uint64_t ft0 = now_ns();
+            er.value = value_freeze(er.value);
+            freeze_to_region(ev, &er.value);
+            ev->stats.freeze_total_ns += now_ns() - ft0; }
+            return eval_ok(er.value);
         }
 
         case EXPR_THAW: {
             stats_thaw(&ev->stats);
+            if (expr->as.freeze_expr->tag == EXPR_IDENT) {
+                const char *name = expr->as.freeze_expr->as.str_val;
+                /* Thaw the binding in-place */
+                LatValue val;
+                if (!env_get(ev->env, name, &val)) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "undefined variable '%s'", name);
+                    return eval_err(err);
+                }
+                uint64_t tt0 = now_ns();
+                LatValue thawed = value_thaw(&val);
+                ev->stats.thaw_total_ns += now_ns() - tt0;
+                value_free(&val);
+                LatValue ret = value_deep_clone(&thawed);
+                env_set(ev->env, name, thawed);
+                return eval_ok(ret);
+            }
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
             if (!IS_OK(er)) return er;
+            { uint64_t tt0 = now_ns();
             LatValue thawed = value_thaw(&er.value);
+            ev->stats.thaw_total_ns += now_ns() - tt0;
             value_free(&er.value);
-            return eval_ok(thawed);
+            return eval_ok(thawed); }
         }
 
         case EXPR_CLONE: {
@@ -1142,10 +1405,18 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
             stats_scope_pop(&ev->stats);
             stats_freeze(&ev->stats);
             if (IS_OK(result)) {
-                return eval_ok(value_freeze(result.value));
+                uint64_t ft0 = now_ns();
+                result.value = value_freeze(result.value);
+                freeze_to_region(ev, &result.value);
+                ev->stats.freeze_total_ns += now_ns() - ft0;
+                return eval_ok(result.value);
             }
             if (IS_SIGNAL(result) && result.cf.tag == CF_RETURN) {
-                return eval_ok(value_freeze(result.cf.value));
+                uint64_t ft0 = now_ns();
+                result.cf.value = value_freeze(result.cf.value);
+                freeze_to_region(ev, &result.cf.value);
+                ev->stats.freeze_total_ns += now_ns() - ft0;
+                return eval_ok(result.cf.value);
             }
             return result;
         }
@@ -1198,7 +1469,9 @@ static EvalResult eval_expr(Evaluator *ev, const Expr *expr) {
         case EXPR_RANGE: {
             EvalResult sr = eval_expr(ev, expr->as.range.start);
             if (!IS_OK(sr)) return sr;
+            GC_PUSH(ev, &sr.value);
             EvalResult er = eval_expr(ev, expr->as.range.end);
+            GC_POP(ev);
             if (!IS_OK(er)) { value_free(&sr.value); return er; }
             if (sr.value.type != VAL_INT || er.value.type != VAL_INT) {
                 value_free(&sr.value); value_free(&er.value);
@@ -1272,7 +1545,10 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     case PHASE_FLUID: vr.value.phase = VTAG_FLUID; break;
                     case PHASE_CRYSTAL:
                         stats_freeze(&ev->stats);
+                        { uint64_t ft0 = now_ns();
                         vr.value = value_freeze(vr.value);
+                        freeze_to_region(ev, &vr.value);
+                        ev->stats.freeze_total_ns += now_ns() - ft0; }
                         break;
                     case PHASE_UNSPECIFIED: break;
                 }
@@ -1290,7 +1566,10 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         break;
                     case PHASE_CRYSTAL:
                         stats_freeze(&ev->stats);
+                        { uint64_t ft0 = now_ns();
                         vr.value = value_freeze(vr.value);
+                        freeze_to_region(ev, &vr.value);
+                        ev->stats.freeze_total_ns += now_ns() - ft0; }
                         break;
                     case PHASE_UNSPECIFIED: {
                         char *err = NULL;
@@ -1389,6 +1668,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     value_free(&r.value);
                 }
             } else if (iter_r.value.type == VAL_ARRAY) {
+                GC_PUSH(ev, &iter_r.value);
                 size_t len = iter_r.value.as.array.len;
                 for (size_t i = 0; i < len; i++) {
                     stats_scope_push(&ev->stats);
@@ -1401,12 +1681,14 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     stats_scope_pop(&ev->stats);
                     if (IS_SIGNAL(r) && r.cf.tag == CF_BREAK) break;
                     if (IS_SIGNAL(r) && r.cf.tag == CF_CONTINUE) continue;
-                    if (!IS_OK(r)) { value_free(&iter_r.value); return r; }
+                    if (!IS_OK(r)) { GC_POP(ev); value_free(&iter_r.value); return r; }
                     value_free(&r.value);
                 }
+                GC_POP(ev);
                 value_free(&iter_r.value);
             } else if (iter_r.value.type == VAL_MAP) {
                 /* Iterate over map keys */
+                GC_PUSH(ev, &iter_r.value);
                 for (size_t i = 0; i < iter_r.value.as.map.map->cap; i++) {
                     if (iter_r.value.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
                     stats_scope_push(&ev->stats);
@@ -1419,9 +1701,10 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     stats_scope_pop(&ev->stats);
                     if (IS_SIGNAL(r) && r.cf.tag == CF_BREAK) break;
                     if (IS_SIGNAL(r) && r.cf.tag == CF_CONTINUE) continue;
-                    if (!IS_OK(r)) { value_free(&iter_r.value); return r; }
+                    if (!IS_OK(r)) { GC_POP(ev); value_free(&iter_r.value); return r; }
                     value_free(&r.value);
                 }
+                GC_POP(ev);
                 value_free(&iter_r.value);
             } else {
                 char *err = NULL;
@@ -1476,12 +1759,15 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
 static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
     LatValue last = value_unit();
+    GC_PUSH(ev, &last);
     for (size_t i = 0; i < count; i++) {
+        gc_maybe_collect(ev);
         value_free(&last);
         EvalResult r = eval_stmt(ev, stmts[i]);
-        if (!IS_OK(r)) return r;
+        if (!IS_OK(r)) { GC_POP(ev); return r; }
         last = r.value;
     }
+    GC_POP(ev);
     return eval_ok(last);
 }
 
@@ -1525,12 +1811,15 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.captured_env,
                 &elem, 1);
             if (!IS_OK(r)) {
+                GC_POP_N(ev, i);  /* accumulated results */
                 for (size_t j = 0; j < i; j++) value_free(&results[j]);
                 free(results);
                 return r;
             }
             results[i] = r.value;
+            GC_PUSH(ev, &results[i]);
         }
+        GC_POP_N(ev, n);  /* accumulated results */
         LatValue arr = value_array(results, n);
         free(results);
         return eval_ok(arr);
@@ -1579,15 +1868,18 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.captured_env,
                 &elem, 1);
             if (!IS_OK(r)) {
+                GC_POP_N(ev, rcount);  /* accumulated results */
                 for (size_t j = 0; j < rcount; j++) value_free(&results[j]);
                 free(results);
                 return r;
             }
             if (value_is_truthy(&r.value)) {
                 results[rcount++] = value_deep_clone(&obj.as.array.elems[i]);
+                GC_PUSH(ev, &results[rcount - 1]);
             }
             value_free(&r.value);
         }
+        GC_POP_N(ev, rcount);  /* accumulated results */
         LatValue arr = value_array(results, rcount);
         free(results);
         return eval_ok(arr);
@@ -1840,22 +2132,31 @@ Evaluator *evaluator_new(void) {
     stats_init(&ev->stats);
     ev->heap = dual_heap_new();
     ev->gc_roots = lat_vec_new(sizeof(LatValue *));
+    ev->saved_envs = lat_vec_new(sizeof(Env *));
     ev->gc_stress = false;
+    ev->no_regions = false;
+    value_set_heap(ev->heap);
     return ev;
 }
 
 void evaluator_free(Evaluator *ev) {
     if (!ev) return;
-    env_free(ev->env);
+    env_free(ev->env);            /* lat_free → fluid_dealloc removes from heap */
     lat_map_free(&ev->struct_defs);
     lat_map_free(&ev->fn_defs);
-    dual_heap_free(ev->heap);
+    value_set_heap(NULL);         /* disconnect before freeing the heap itself */
+    dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
     lat_vec_free(&ev->gc_roots);
+    lat_vec_free(&ev->saved_envs);
     free(ev);
 }
 
 void evaluator_set_gc_stress(Evaluator *ev, bool enabled) {
     ev->gc_stress = enabled;
+}
+
+void evaluator_set_no_regions(Evaluator *ev, bool enabled) {
+    ev->no_regions = enabled;
 }
 
 char *evaluator_run(Evaluator *ev, const Program *prog) {
@@ -1893,7 +2194,51 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
     return NULL; /* success */
 }
 
+char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
+    ev->mode = prog->mode;
+
+    /* First pass: register structs and functions */
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag == ITEM_STRUCT) {
+            StructDecl *ptr = &prog->items[i].as.struct_decl;
+            lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_FUNCTION) {
+            FnDecl *ptr = &prog->items[i].as.fn_decl;
+            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+        }
+    }
+
+    /* Second pass: execute top-level statements (no auto-main) */
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag == ITEM_STMT) {
+            EvalResult r = eval_stmt(ev, prog->items[i].as.stmt);
+            if (IS_ERR(r)) return r.error;
+            if (IS_SIGNAL(r)) return strdup("unexpected control flow at top level");
+            value_free(&r.value);
+        }
+    }
+
+    return NULL; /* success */
+}
+
 const MemoryStats *evaluator_stats(const Evaluator *ev) {
+    /* Finalize snapshot metrics from heap state */
+    MemoryStats *s = (MemoryStats *)&ev->stats;
+    s->fluid_peak_bytes = ev->heap->fluid->peak_bytes;
+    s->fluid_live_bytes = ev->heap->fluid->total_bytes;
+    s->fluid_cumulative_bytes = ev->heap->fluid->cumulative_bytes;
+    s->region_peak_count = ev->heap->regions->peak_count;
+    s->region_live_count = ev->heap->regions->count;
+    s->region_live_data_bytes = region_live_data_bytes(ev->heap->regions);
+    s->region_cumulative_data_bytes = ev->heap->regions->cumulative_data_bytes;
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+#ifdef __linux__
+        s->rss_peak_kb = (size_t)ru.ru_maxrss;
+#else
+        s->rss_peak_kb = (size_t)ru.ru_maxrss / 1024;
+#endif
+    }
     return &ev->stats;
 }
 
@@ -1908,6 +2253,21 @@ void memory_stats_print(const MemoryStats *s, FILE *out) {
     fprintf(out, "  structs:      %zu\n", s->struct_allocs);
     fprintf(out, "  closures:     %zu\n", s->closure_allocs);
     fprintf(out, "  total:        %zu\n", s->array_allocs + s->struct_allocs + s->closure_allocs);
+    fprintf(out, "\nMemory footprint:\n");
+    fprintf(out, "  fluid peak:   %zu bytes (%.2f KB)\n",
+        s->fluid_peak_bytes, (double)s->fluid_peak_bytes / 1024.0);
+    fprintf(out, "  fluid live:   %zu bytes\n", s->fluid_live_bytes);
+    fprintf(out, "  fluid total:  %zu bytes (%.2f KB)\n",
+        s->fluid_cumulative_bytes, (double)s->fluid_cumulative_bytes / 1024.0);
+    if (s->fluid_peak_bytes > 0)
+        fprintf(out, "  churn ratio:  %.1fx\n",
+            (double)s->fluid_cumulative_bytes / (double)s->fluid_peak_bytes);
+    fprintf(out, "  region peak:  %zu\n", s->region_peak_count);
+    fprintf(out, "  region live:  %zu (%zu bytes data)\n",
+        s->region_live_count, s->region_live_data_bytes);
+    fprintf(out, "  region total: %zu bytes data\n", s->region_cumulative_data_bytes);
+    if (s->rss_peak_kb > 0)
+        fprintf(out, "  RSS peak:     %zu KB\n", s->rss_peak_kb);
     fprintf(out, "\nScope lifecycle:\n");
     fprintf(out, "  pushes:       %zu\n", s->scope_pushes);
     fprintf(out, "  pops:         %zu\n", s->scope_pops);
@@ -1919,6 +2279,16 @@ void memory_stats_print(const MemoryStats *s, FILE *out) {
     fprintf(out, "\nForge blocks:   %zu\n", s->forge_blocks);
     fprintf(out, "\nGarbage collection:\n");
     fprintf(out, "  gc cycles:    %zu\n", s->gc_cycles);
-    fprintf(out, "  swept fluid:  %zu\n", s->gc_swept_fluid);
+    fprintf(out, "  swept fluid:  %zu (%zu bytes)\n", s->gc_swept_fluid, s->gc_bytes_swept);
     fprintf(out, "  swept regions:%zu\n", s->gc_swept_regions);
+    if (s->gc_cycles > 0)
+        fprintf(out, "  avg/cycle:    %.2f KB swept\n",
+            (double)s->gc_bytes_swept / 1024.0 / (double)s->gc_cycles);
+    fprintf(out, "\nTiming:\n");
+    fprintf(out, "  gc total:     %.3f ms\n", (double)s->gc_total_ns / 1e6);
+    fprintf(out, "  freeze total: %.3f ms\n", (double)s->freeze_total_ns / 1e6);
+    fprintf(out, "  thaw total:   %.3f ms\n", (double)s->thaw_total_ns / 1e6);
+    if (s->gc_cycles > 0)
+        fprintf(out, "  avg gc cycle: %.3f ms\n",
+            (double)s->gc_total_ns / 1e6 / (double)s->gc_cycles);
 }

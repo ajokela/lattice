@@ -1,4 +1,5 @@
 #include "env.h"
+#include "memory.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +24,7 @@ Env *env_new(void) {
     Env *env = malloc(sizeof(Env));
     env->cap = INITIAL_SCOPE_CAP;
     env->count = 1;
+    env->arena_backed = false;
     env->scopes = malloc(env->cap * sizeof(Scope));
     env->scopes[0] = scope_new();
     return env;
@@ -30,6 +32,7 @@ Env *env_new(void) {
 
 void env_free(Env *env) {
     if (!env) return;
+    if (env->arena_backed) return;
     for (size_t i = 0; i < env->count; i++) {
         scope_free(&env->scopes[i]);
     }
@@ -109,7 +112,7 @@ bool env_remove(Env *env, const char *name, LatValue *out) {
     return false;
 }
 
-/* Deep clone helper */
+/* Deep clone helper — normal (non-arena) path */
 typedef struct {
     Env *dest;
     size_t scope_idx;
@@ -122,10 +125,44 @@ static void clone_entry(const char *key, void *value, void *ctx) {
     lat_map_set(&cc->dest->scopes[cc->scope_idx], key, &cloned);
 }
 
+/* Arena-routed clone: build scope map internals directly via arena alloc */
+static Env *env_clone_arena(const Env *env) {
+    Env *new_env = lat_alloc_routed(sizeof(Env));
+    new_env->cap = env->cap;
+    new_env->count = env->count;
+    new_env->scopes = lat_alloc_routed(new_env->cap * sizeof(Scope));
+
+    new_env->arena_backed = true;
+    for (size_t i = 0; i < env->count; i++) {
+        const LatMap *src = &env->scopes[i];
+        LatMap *dst = &new_env->scopes[i];
+        dst->value_size = src->value_size;
+        dst->cap = src->cap;
+        dst->count = src->live;  /* only OCCUPIED entries are copied */
+        dst->live = src->live;
+        dst->entries = lat_calloc_routed(src->cap, sizeof(LatMapEntry));
+        for (size_t j = 0; j < src->cap; j++) {
+            if (src->entries[j].state == MAP_OCCUPIED) {
+                dst->entries[j].state = MAP_OCCUPIED;
+                dst->entries[j].key = lat_strdup_routed(src->entries[j].key);
+                LatValue *sv = (LatValue *)src->entries[j].value;
+                LatValue cloned = value_deep_clone(sv);
+                LatValue *dv = lat_alloc_routed(sizeof(LatValue));
+                *dv = cloned;
+                dst->entries[j].value = dv;
+            }
+        }
+    }
+    return new_env;
+}
+
 Env *env_clone(const Env *env) {
+    if (value_get_arena()) return env_clone_arena(env);
+
     Env *new_env = malloc(sizeof(Env));
     new_env->cap = env->cap;
     new_env->count = env->count;
+    new_env->arena_backed = false;
     new_env->scopes = malloc(new_env->cap * sizeof(Scope));
 
     CloneCtx ctx;

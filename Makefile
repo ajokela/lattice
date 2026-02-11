@@ -41,7 +41,16 @@ TEST_SRCS = $(TEST_DIR)/test_main.c \
 TEST_OBJS   = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/tests/%.o)
 TEST_TARGET = $(BUILD_DIR)/test_runner
 
-.PHONY: all clean test asan
+# WASM build
+WASM_SRCS   = $(LIB_SRCS) $(SRC_DIR)/wasm_api.c
+WASM_OUT    = lattice-lang.org/lattice.js
+WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinclude -O2 \
+              -sEXPORTED_FUNCTIONS=_lat_init,_lat_run_line,_lat_is_complete,_lat_destroy,_free \
+              -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString \
+              -sMODULARIZE=1 -sEXPORT_NAME=createLattice \
+              -sALLOW_MEMORY_GROWTH=1
+
+.PHONY: all clean test asan wasm bench bench-stress
 
 all: $(TARGET)
 
@@ -66,6 +75,15 @@ asan: CFLAGS += -fsanitize=address,undefined -g -O1
 asan: LDFLAGS += -fsanitize=address,undefined
 asan: clean $(TEST_TARGET)
 	./$(BUILD_DIR)/test_runner
+
+wasm:
+	emcc $(WASM_FLAGS) -o $(WASM_OUT) $(WASM_SRCS)
+
+bench: $(TARGET)
+	@for f in benchmarks/*.lat; do echo "--- $$f ---"; ./clat --stats "$$f"; done
+
+bench-stress: $(TARGET)
+	@for f in benchmarks/*.lat; do echo "--- $$f ---"; ./clat --gc-stress --stats "$$f"; done
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

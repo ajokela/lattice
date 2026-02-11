@@ -1,0 +1,58 @@
+// Benchmark: Undo/Redo with Frozen Snapshots
+// Models a document editor where each edit produces a frozen snapshot for
+// undo/redo. Exercises freeze (per-edit snapshot), thaw (undo/redo restore),
+// and long-lived crystal values (snapshot history).
+
+struct DocState { content: Array, cursor: Int, version: Int }
+
+fn make_state(version: Int) -> DocState {
+    let lines = []
+    for i in 0..10 {
+        lines.push("v" + to_string(version) + "_line" + to_string(i))
+    }
+    return DocState { content: lines, cursor: version % 10, version: version }
+}
+
+fn main() {
+    let history = []
+    for i in 0..50 {
+        let state = make_state(i)
+        let snap = freeze(clone(state))
+        history.push(snap)
+    }
+
+    let pos = history.len() - 1
+    let redo_stack = []
+    let checksum = 0
+
+    // Undo 25 times
+    for i in 0..25 {
+        redo_stack.push(history[pos])
+        pos = pos - 1
+        let restored = thaw(history[pos])
+        checksum = checksum + restored.version
+    }
+
+    // Redo 10 times
+    for i in 0..10 {
+        let snap = redo_stack[redo_stack.len() - 1 - i]
+        pos = pos + 1
+        let restored = thaw(snap)
+        checksum = checksum + restored.version
+    }
+
+    // Continue editing from current position
+    let base_version = pos
+    for i in 0..25 {
+        let state = make_state(base_version + i + 1)
+        let snap = freeze(clone(state))
+        history.push(snap)
+    }
+
+    // Verify final state
+    let final_snap = thaw(history[history.len() - 1])
+    checksum = checksum + final_snap.version
+
+    print(checksum)
+    print(history.len())
+}

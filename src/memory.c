@@ -32,10 +32,13 @@ void *fluid_alloc(FluidHeap *h, size_t size) {
     h->allocs = a;
     h->total_bytes += size;
     h->alloc_count++;
+    h->cumulative_bytes += size;
+    if (h->total_bytes > h->peak_bytes)
+        h->peak_bytes = h->total_bytes;
     return ptr;
 }
 
-void fluid_dealloc(FluidHeap *h, void *ptr) {
+bool fluid_dealloc(FluidHeap *h, void *ptr) {
     FluidAlloc **prev = &h->allocs;
     for (FluidAlloc *a = h->allocs; a; a = a->next) {
         if (a->ptr == ptr) {
@@ -44,10 +47,11 @@ void fluid_dealloc(FluidHeap *h, void *ptr) {
             h->alloc_count--;
             free(a->ptr);
             free(a);
-            return;
+            return true;
         }
         prev = &a->next;
     }
+    return false;
 }
 
 size_t fluid_live_count(const FluidHeap *h) {
@@ -96,23 +100,83 @@ size_t fluid_sweep(FluidHeap *h) {
     return freed;
 }
 
+/* ── Arena Pages ── */
+
+static ArenaPage *arena_page_new(size_t cap) {
+    ArenaPage *p = malloc(sizeof(ArenaPage));
+    p->data = malloc(cap);
+    p->used = 0;
+    p->cap = cap;
+    p->next = NULL;
+    return p;
+}
+
+static void arena_page_free_list(ArenaPage *p) {
+    while (p) {
+        ArenaPage *next = p->next;
+        free(p->data);
+        free(p);
+        p = next;
+    }
+}
+
 /* ── Crystal Region ── */
 
-static CrystalRegion *crystal_region_new(RegionId id, Epoch epoch, size_t initial_cap) {
+static CrystalRegion *crystal_region_new(RegionId id, Epoch epoch) {
     CrystalRegion *r = calloc(1, sizeof(CrystalRegion));
     r->id = id;
     r->epoch = epoch;
-    r->ref_count = 1;
-    r->cap = initial_cap < 256 ? 256 : initial_cap;
-    r->data = malloc(r->cap);
-    r->used = 0;
+    r->pages = arena_page_new(ARENA_PAGE_SIZE);
+    r->total_bytes = 0;
     return r;
 }
 
 static void crystal_region_free(CrystalRegion *r) {
     if (!r) return;
-    free(r->data);
+    arena_page_free_list(r->pages);
     free(r);
+}
+
+/* ── Arena allocation ── */
+
+void *arena_alloc(CrystalRegion *r, size_t size) {
+    /* 8-byte alignment */
+    size_t aligned = (size + 7) & ~(size_t)7;
+
+    /* Try to fit in the current head page */
+    ArenaPage *head = r->pages;
+    if (head && head->used + aligned <= head->cap) {
+        void *ptr = head->data + head->used;
+        head->used += aligned;
+        r->total_bytes += aligned;
+        return ptr;
+    }
+
+    /* Need a new page — oversized allocs get a dedicated page */
+    size_t page_cap = aligned > ARENA_PAGE_SIZE ? aligned : ARENA_PAGE_SIZE;
+    ArenaPage *np = arena_page_new(page_cap);
+    np->next = r->pages;
+    r->pages = np;
+
+    void *ptr = np->data;
+    np->used = aligned;
+    r->total_bytes += aligned;
+    return ptr;
+}
+
+void *arena_calloc(CrystalRegion *r, size_t count, size_t size) {
+    if (count > 0 && size > SIZE_MAX / count) return NULL;
+    size_t total = count * size;
+    void *ptr = arena_alloc(r, total);
+    memset(ptr, 0, total);
+    return ptr;
+}
+
+char *arena_strdup(CrystalRegion *r, const char *s) {
+    size_t len = strlen(s) + 1;
+    char *ptr = arena_alloc(r, len);
+    memcpy(ptr, s, len);
+    return ptr;
 }
 
 /* ── Region Manager ── */
@@ -141,72 +205,17 @@ Epoch region_current_epoch(const RegionManager *rm) {
     return rm->current_epoch;
 }
 
-static CrystalRegion *find_or_create_epoch_region(RegionManager *rm, Epoch epoch) {
-    for (size_t i = 0; i < rm->count; i++) {
-        if (rm->regions[i]->epoch == epoch)
-            return rm->regions[i];
-    }
-    /* Create new */
+CrystalRegion *region_create(RegionManager *rm) {
     if (rm->count >= rm->cap) {
         rm->cap *= 2;
         rm->regions = realloc(rm->regions, rm->cap * sizeof(CrystalRegion *));
     }
-    CrystalRegion *r = crystal_region_new(rm->next_id++, epoch, 4096);
+    CrystalRegion *r = crystal_region_new(rm->next_id++, rm->current_epoch);
     rm->regions[rm->count++] = r;
-    return r;
-}
-
-RegionId region_allocate(RegionManager *rm, const void *data, size_t size) {
-    CrystalRegion *r = find_or_create_epoch_region(rm, rm->current_epoch);
-    /* Ensure capacity */
-    while (r->used + size > r->cap) {
-        r->cap *= 2;
-        r->data = realloc(r->data, r->cap);
-    }
-    memcpy(r->data + r->used, data, size);
-    r->used += size;
     rm->total_allocs++;
-    return r->id;
-}
-
-void *region_get_data(const RegionManager *rm, RegionId id, size_t offset, size_t size) {
-    for (size_t i = 0; i < rm->count; i++) {
-        if (rm->regions[i]->id == id) {
-            if (offset + size <= rm->regions[i]->used) {
-                return rm->regions[i]->data + offset;
-            }
-            return NULL;
-        }
-    }
-    return NULL;
-}
-
-CrystalRegion *region_get(const RegionManager *rm, RegionId id) {
-    for (size_t i = 0; i < rm->count; i++) {
-        if (rm->regions[i]->id == id) return rm->regions[i];
-    }
-    return NULL;
-}
-
-void region_retain(RegionManager *rm, RegionId id) {
-    CrystalRegion *r = region_get(rm, id);
-    if (r) r->ref_count++;
-}
-
-bool region_release(RegionManager *rm, RegionId id) {
-    for (size_t i = 0; i < rm->count; i++) {
-        if (rm->regions[i]->id == id) {
-            rm->regions[i]->ref_count--;
-            if (rm->regions[i]->ref_count == 0) {
-                crystal_region_free(rm->regions[i]);
-                rm->regions[i] = rm->regions[rm->count - 1];
-                rm->count--;
-                return true;
-            }
-            return false;
-        }
-    }
-    return false;
+    if (rm->count > rm->peak_count)
+        rm->peak_count = rm->count;
+    return r;
 }
 
 size_t region_collect(RegionManager *rm, const RegionId *reachable, size_t reachable_count) {
@@ -238,6 +247,13 @@ size_t region_count(const RegionManager *rm) {
 
 size_t region_total_allocs(const RegionManager *rm) {
     return rm->total_allocs;
+}
+
+size_t region_live_data_bytes(const RegionManager *rm) {
+    size_t total = 0;
+    for (size_t i = 0; i < rm->count; i++)
+        total += rm->regions[i]->total_bytes;
+    return total;
 }
 
 /* ── Dual Heap ── */

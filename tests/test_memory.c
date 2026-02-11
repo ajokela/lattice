@@ -154,61 +154,47 @@ TEST(region_manager_starts_empty) {
     region_manager_free(rm);
 }
 
-TEST(region_allocate_creates_region) {
+TEST(region_create_creates_region) {
     RegionManager *rm = region_manager_new();
 
-    int data = 0xBEEF;
-    RegionId rid = region_allocate(rm, &data, sizeof(data));
+    CrystalRegion *r = region_create(rm);
+    ASSERT(r != NULL);
     ASSERT_EQ_INT(region_count(rm), 1);
     ASSERT_EQ_INT(region_total_allocs(rm), 1);
-
-    CrystalRegion *r = region_get(rm, rid);
-    ASSERT(r != NULL);
     ASSERT_EQ_INT(r->epoch, 0);
-    ASSERT_EQ_INT(r->ref_count, 1);
+    ASSERT(r->pages != NULL);
 
     region_manager_free(rm);
 }
 
-TEST(region_multiple_allocs_same_epoch_share_region) {
+TEST(region_create_separate_regions) {
     RegionManager *rm = region_manager_new();
 
-    int a = 10, b = 20, c = 30;
-    RegionId r1 = region_allocate(rm, &a, sizeof(a));
-    RegionId r2 = region_allocate(rm, &b, sizeof(b));
-    RegionId r3 = region_allocate(rm, &c, sizeof(c));
+    CrystalRegion *r0 = region_create(rm);
+    CrystalRegion *r1 = region_create(rm);
 
-    /* All allocations in the same epoch should share a region. */
-    ASSERT_EQ_INT(r1, r2);
-    ASSERT_EQ_INT(r2, r3);
-    ASSERT_EQ_INT(region_count(rm), 1);
-    ASSERT_EQ_INT(region_total_allocs(rm), 3);
+    /* Each region_create makes an independent region. */
+    ASSERT(r0->id != r1->id);
+    ASSERT_EQ_INT(region_count(rm), 2);
+    ASSERT_EQ_INT(region_total_allocs(rm), 2);
 
     region_manager_free(rm);
 }
 
-TEST(region_advance_epoch_creates_separate_regions) {
+TEST(region_advance_epoch_creates_separate_epochs) {
     RegionManager *rm = region_manager_new();
 
-    int data = 1;
-    RegionId r0 = region_allocate(rm, &data, sizeof(data));
+    CrystalRegion *r0 = region_create(rm);
 
     Epoch e1 = region_advance_epoch(rm);
     ASSERT_EQ_INT(e1, 1);
 
-    data = 2;
-    RegionId r1 = region_allocate(rm, &data, sizeof(data));
+    CrystalRegion *r1 = region_create(rm);
 
-    /* Different epochs produce different regions. */
-    ASSERT(r0 != r1);
+    ASSERT(r0->id != r1->id);
     ASSERT_EQ_INT(region_count(rm), 2);
-
-    CrystalRegion *reg0 = region_get(rm, r0);
-    CrystalRegion *reg1 = region_get(rm, r1);
-    ASSERT(reg0 != NULL);
-    ASSERT(reg1 != NULL);
-    ASSERT_EQ_INT(reg0->epoch, 0);
-    ASSERT_EQ_INT(reg1->epoch, 1);
+    ASSERT_EQ_INT(r0->epoch, 0);
+    ASSERT_EQ_INT(r1->epoch, 1);
 
     region_manager_free(rm);
 }
@@ -223,81 +209,26 @@ TEST(region_epochs_advance_monotonically) {
     region_manager_free(rm);
 }
 
-TEST(region_retain_increments_ref_count) {
-    RegionManager *rm = region_manager_new();
-
-    int data = 42;
-    RegionId rid = region_allocate(rm, &data, sizeof(data));
-    ASSERT_EQ_INT(region_get(rm, rid)->ref_count, 1);
-
-    region_retain(rm, rid);
-    ASSERT_EQ_INT(region_get(rm, rid)->ref_count, 2);
-
-    region_retain(rm, rid);
-    ASSERT_EQ_INT(region_get(rm, rid)->ref_count, 3);
-
-    region_manager_free(rm);
-}
-
-TEST(region_release_decrements_ref_count) {
-    RegionManager *rm = region_manager_new();
-
-    int data = 42;
-    RegionId rid = region_allocate(rm, &data, sizeof(data));
-    region_retain(rm, rid);  /* ref_count = 2 */
-
-    bool freed = region_release(rm, rid);
-    ASSERT(!freed);
-    ASSERT_EQ_INT(region_get(rm, rid)->ref_count, 1);
-
-    region_manager_free(rm);
-}
-
-TEST(region_release_to_zero_frees_region) {
-    RegionManager *rm = region_manager_new();
-
-    int data = 42;
-    RegionId rid = region_allocate(rm, &data, sizeof(data));
-    ASSERT_EQ_INT(region_count(rm), 1);
-
-    bool freed = region_release(rm, rid);
-    ASSERT(freed);
-    ASSERT_EQ_INT(region_count(rm), 0);
-    ASSERT(region_get(rm, rid) == NULL);
-
-    region_manager_free(rm);
-}
-
-TEST(region_release_nonexistent_returns_false) {
-    RegionManager *rm = region_manager_new();
-    bool freed = region_release(rm, 999);
-    ASSERT(!freed);
-    region_manager_free(rm);
-}
-
 TEST(region_collect_frees_unreachable) {
     RegionManager *rm = region_manager_new();
 
-    int data = 1;
-    RegionId r0 = region_allocate(rm, &data, sizeof(data));
+    CrystalRegion *r0 = region_create(rm);
+    RegionId id0 = r0->id;
 
     region_advance_epoch(rm);
-    data = 2;
-    RegionId r1 = region_allocate(rm, &data, sizeof(data));
+    CrystalRegion *r1 = region_create(rm);
+    RegionId id1 = r1->id;
 
     region_advance_epoch(rm);
-    data = 3;
-    region_allocate(rm, &data, sizeof(data));  /* r2: unreachable */
+    region_create(rm);  /* unreachable */
 
     ASSERT_EQ_INT(region_count(rm), 3);
 
     /* Only r0 and r1 are reachable; r2 should be collected. */
-    RegionId reachable[] = { r0, r1 };
+    RegionId reachable[] = { id0, id1 };
     size_t freed = region_collect(rm, reachable, 2);
     ASSERT_EQ_INT(freed, 1);
     ASSERT_EQ_INT(region_count(rm), 2);
-    ASSERT(region_get(rm, r0) != NULL);
-    ASSERT(region_get(rm, r1) != NULL);
 
     region_manager_free(rm);
 }
@@ -305,11 +236,9 @@ TEST(region_collect_frees_unreachable) {
 TEST(region_collect_empty_reachable_frees_all) {
     RegionManager *rm = region_manager_new();
 
-    int data = 1;
-    region_allocate(rm, &data, sizeof(data));
+    region_create(rm);
     region_advance_epoch(rm);
-    data = 2;
-    region_allocate(rm, &data, sizeof(data));
+    region_create(rm);
 
     ASSERT_EQ_INT(region_count(rm), 2);
 
@@ -323,13 +252,13 @@ TEST(region_collect_empty_reachable_frees_all) {
 TEST(region_collect_all_reachable_frees_none) {
     RegionManager *rm = region_manager_new();
 
-    int data = 1;
-    RegionId r0 = region_allocate(rm, &data, sizeof(data));
+    CrystalRegion *r0 = region_create(rm);
+    RegionId id0 = r0->id;
     region_advance_epoch(rm);
-    data = 2;
-    RegionId r1 = region_allocate(rm, &data, sizeof(data));
+    CrystalRegion *r1 = region_create(rm);
+    RegionId id1 = r1->id;
 
-    RegionId reachable[] = { r0, r1 };
+    RegionId reachable[] = { id0, id1 };
     size_t freed = region_collect(rm, reachable, 2);
     ASSERT_EQ_INT(freed, 0);
     ASSERT_EQ_INT(region_count(rm), 2);
@@ -337,195 +266,146 @@ TEST(region_collect_all_reachable_frees_none) {
     region_manager_free(rm);
 }
 
-TEST(region_total_allocs_span_epochs) {
-    RegionManager *rm = region_manager_new();
-
-    int data = 0;
-    region_allocate(rm, &data, sizeof(data));
-    region_allocate(rm, &data, sizeof(data));
-    region_advance_epoch(rm);
-    region_allocate(rm, &data, sizeof(data));
-
-    ASSERT_EQ_INT(region_total_allocs(rm), 3);
-
-    region_manager_free(rm);
-}
-
 /* ══════════════════════════════════════════════════════════════════════════
- * region_get_data tests
+ * Arena allocation tests
  * ══════════════════════════════════════════════════════════════════════════ */
 
-TEST(region_get_data_retrieves_stored_value) {
+TEST(arena_alloc_alignment) {
     RegionManager *rm = region_manager_new();
+    CrystalRegion *r = region_create(rm);
 
-    int value = 0xDEAD;
-    RegionId rid = region_allocate(rm, &value, sizeof(value));
+    void *p1 = arena_alloc(r, 1);
+    void *p2 = arena_alloc(r, 1);
 
-    int *retrieved = (int *)region_get_data(rm, rid, 0, sizeof(int));
-    ASSERT(retrieved != NULL);
-    ASSERT_EQ_INT(*retrieved, 0xDEAD);
+    /* Both pointers should be 8-byte aligned */
+    ASSERT(((size_t)p1 & 7) == 0);
+    ASSERT(((size_t)p2 & 7) == 0);
+
+    /* Second allocation should be 8 bytes after the first (due to alignment) */
+    ASSERT_EQ_INT((char *)p2 - (char *)p1, 8);
 
     region_manager_free(rm);
 }
 
-TEST(region_get_data_multiple_values) {
+TEST(arena_alloc_oversized) {
     RegionManager *rm = region_manager_new();
+    CrystalRegion *r = region_create(rm);
 
-    int v1 = 111;
-    RegionId rid = region_allocate(rm, &v1, sizeof(v1));
+    /* Allocate more than ARENA_PAGE_SIZE — should get a dedicated page */
+    size_t big_size = ARENA_PAGE_SIZE * 2;
+    void *p = arena_alloc(r, big_size);
+    ASSERT(p != NULL);
 
-    int v2 = 222;
-    region_allocate(rm, &v2, sizeof(v2));  /* Same epoch, same region. */
+    /* Write to the full range to verify memory is valid */
+    memset(p, 0xAB, big_size);
 
-    /* First value at offset 0. */
-    int *r1 = (int *)region_get_data(rm, rid, 0, sizeof(int));
-    ASSERT(r1 != NULL);
-    ASSERT_EQ_INT(*r1, 111);
-
-    /* Second value at offset sizeof(int). */
-    int *r2 = (int *)region_get_data(rm, rid, sizeof(int), sizeof(int));
-    ASSERT(r2 != NULL);
-    ASSERT_EQ_INT(*r2, 222);
+    /* total_bytes should reflect the aligned size */
+    ASSERT(r->total_bytes >= big_size);
 
     region_manager_free(rm);
 }
 
-TEST(region_get_data_out_of_bounds_returns_null) {
+TEST(arena_alloc_multi_page) {
     RegionManager *rm = region_manager_new();
+    CrystalRegion *r = region_create(rm);
 
-    int value = 42;
-    RegionId rid = region_allocate(rm, &value, sizeof(value));
+    /* Fill up the first page */
+    size_t alloc_size = ARENA_PAGE_SIZE / 2;
+    void *p1 = arena_alloc(r, alloc_size);
+    ASSERT(p1 != NULL);
 
-    /* Request data beyond what was written. */
-    void *data = region_get_data(rm, rid, sizeof(int), sizeof(int));
-    ASSERT(data == NULL);
+    /* This should require a new page */
+    void *p2 = arena_alloc(r, alloc_size + 1);
+    ASSERT(p2 != NULL);
+
+    /* The two pages should have the data */
+    ASSERT(r->pages != NULL);
+    ASSERT(r->pages->next != NULL);
+
+    /* total_bytes should reflect both allocations */
+    ASSERT(r->total_bytes > alloc_size);
 
     region_manager_free(rm);
 }
 
-TEST(region_get_data_invalid_id_returns_null) {
+TEST(arena_strdup_copies_string) {
     RegionManager *rm = region_manager_new();
-    void *data = region_get_data(rm, 999, 0, 4);
-    ASSERT(data == NULL);
-    region_manager_free(rm);
-}
+    CrystalRegion *r = region_create(rm);
 
-TEST(region_get_data_struct_roundtrip) {
-    typedef struct {
-        int x;
-        int y;
-        double z;
-    } Point3;
+    char *s = arena_strdup(r, "hello world");
+    ASSERT(s != NULL);
+    ASSERT(strcmp(s, "hello world") == 0);
 
-    RegionManager *rm = region_manager_new();
-
-    Point3 p = { .x = 10, .y = 20, .z = 3.14 };
-    RegionId rid = region_allocate(rm, &p, sizeof(p));
-
-    Point3 *retrieved = (Point3 *)region_get_data(rm, rid, 0, sizeof(Point3));
-    ASSERT(retrieved != NULL);
-    ASSERT_EQ_INT(retrieved->x, 10);
-    ASSERT_EQ_INT(retrieved->y, 20);
-    ASSERT(retrieved->z > 3.13 && retrieved->z < 3.15);
+    /* Modify and verify independence */
+    s[0] = 'H';
+    ASSERT(strcmp(s, "Hello world") == 0);
 
     region_manager_free(rm);
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
- * Multiple epochs with different regions
- * ══════════════════════════════════════════════════════════════════════════ */
-
-TEST(multiple_epochs_isolate_data) {
+TEST(arena_calloc_zeroed) {
     RegionManager *rm = region_manager_new();
+    CrystalRegion *r = region_create(rm);
 
-    /* Epoch 0: store value 100. */
-    int v0 = 100;
-    RegionId r0 = region_allocate(rm, &v0, sizeof(v0));
+    int *arr = arena_calloc(r, 10, sizeof(int));
+    ASSERT(arr != NULL);
 
-    /* Epoch 1: store value 200. */
-    region_advance_epoch(rm);
-    int v1 = 200;
-    RegionId r1 = region_allocate(rm, &v1, sizeof(v1));
+    /* Verify all elements are zero */
+    for (int i = 0; i < 10; i++) {
+        ASSERT_EQ_INT(arr[i], 0);
+    }
 
-    /* Epoch 2: store value 300. */
-    region_advance_epoch(rm);
-    int v2 = 300;
-    RegionId r2 = region_allocate(rm, &v2, sizeof(v2));
-
-    ASSERT_EQ_INT(region_count(rm), 3);
-    ASSERT(r0 != r1);
-    ASSERT(r1 != r2);
-    ASSERT(r0 != r2);
-
-    /* Verify data is correctly stored per epoch. */
-    int *d0 = (int *)region_get_data(rm, r0, 0, sizeof(int));
-    int *d1 = (int *)region_get_data(rm, r1, 0, sizeof(int));
-    int *d2 = (int *)region_get_data(rm, r2, 0, sizeof(int));
-    ASSERT(d0 != NULL);
-    ASSERT(d1 != NULL);
-    ASSERT(d2 != NULL);
-    ASSERT_EQ_INT(*d0, 100);
-    ASSERT_EQ_INT(*d1, 200);
-    ASSERT_EQ_INT(*d2, 300);
-
-    /* Verify epoch assignments. */
-    ASSERT_EQ_INT(region_get(rm, r0)->epoch, 0);
-    ASSERT_EQ_INT(region_get(rm, r1)->epoch, 1);
-    ASSERT_EQ_INT(region_get(rm, r2)->epoch, 2);
+    /* Write and verify */
+    arr[5] = 42;
+    ASSERT_EQ_INT(arr[5], 42);
 
     region_manager_free(rm);
 }
 
-TEST(multiple_epochs_collect_old_keep_new) {
+TEST(arena_region_free_frees_all_pages) {
     RegionManager *rm = region_manager_new();
+    CrystalRegion *r = region_create(rm);
 
-    int data = 0;
-    region_allocate(rm, &data, sizeof(data));  /* epoch 0 */
+    /* Make several allocations across multiple pages */
+    for (int i = 0; i < 100; i++) {
+        void *p = arena_alloc(r, 100);
+        memset(p, (int)(unsigned char)i, 100);
+    }
 
-    region_advance_epoch(rm);
-    region_allocate(rm, &data, sizeof(data));  /* epoch 1 */
-
-    region_advance_epoch(rm);
-    RegionId r2 = region_allocate(rm, &data, sizeof(data));  /* epoch 2 */
-
-    region_advance_epoch(rm);
-    RegionId r3 = region_allocate(rm, &data, sizeof(data));  /* epoch 3 */
-
-    ASSERT_EQ_INT(region_count(rm), 4);
-
-    /* Keep only the latest two epochs. */
-    RegionId reachable[] = { r2, r3 };
-    size_t freed = region_collect(rm, reachable, 2);
-    ASSERT_EQ_INT(freed, 2);
-    ASSERT_EQ_INT(region_count(rm), 2);
-
-    ASSERT(region_get(rm, r2) != NULL);
-    ASSERT(region_get(rm, r3) != NULL);
+    /* Collecting with empty reachable set frees all pages — no leaks under ASAN */
+    region_collect(rm, NULL, 0);
+    ASSERT_EQ_INT(region_count(rm), 0);
 
     region_manager_free(rm);
 }
 
-TEST(multiple_epochs_alloc_counts_accumulate) {
+TEST(arena_total_bytes_tracks) {
     RegionManager *rm = region_manager_new();
+    CrystalRegion *r = region_create(rm);
 
-    int data = 0;
+    ASSERT_EQ_INT(r->total_bytes, 0);
 
-    /* Epoch 0: 2 allocations. */
-    region_allocate(rm, &data, sizeof(data));
-    region_allocate(rm, &data, sizeof(data));
+    arena_alloc(r, 10);  /* aligned to 16 */
+    ASSERT(r->total_bytes >= 10);
+    size_t after_first = r->total_bytes;
 
-    /* Epoch 1: 3 allocations. */
-    region_advance_epoch(rm);
-    region_allocate(rm, &data, sizeof(data));
-    region_allocate(rm, &data, sizeof(data));
-    region_allocate(rm, &data, sizeof(data));
+    arena_alloc(r, 20);  /* aligned to 24 */
+    ASSERT(r->total_bytes > after_first);
 
-    /* Epoch 2: 1 allocation. */
-    region_advance_epoch(rm);
-    region_allocate(rm, &data, sizeof(data));
+    region_manager_free(rm);
+}
 
-    ASSERT_EQ_INT(region_count(rm), 3);
-    ASSERT_EQ_INT(region_total_allocs(rm), 6);
+TEST(region_live_data_bytes_sums_arena) {
+    RegionManager *rm = region_manager_new();
+    CrystalRegion *r0 = region_create(rm);
+    CrystalRegion *r1 = region_create(rm);
+
+    arena_alloc(r0, 100);
+    arena_alloc(r1, 200);
+
+    size_t live = region_live_data_bytes(rm);
+    ASSERT(live >= 300);
+    ASSERT_EQ_INT(live, r0->total_bytes + r1->total_bytes);
 
     region_manager_free(rm);
 }
@@ -557,9 +437,10 @@ TEST(dual_heap_fluid_and_crystal_independent) {
     ASSERT_EQ_INT(fluid_live_count(dh->fluid), 2);
     ASSERT_EQ_INT(fluid_total_bytes(dh->fluid), 192);
 
-    /* Allocate in crystal regions. */
-    int data = 0xCAFE;
-    RegionId rid = region_allocate(dh->regions, &data, sizeof(data));
+    /* Create a crystal region with arena data. */
+    CrystalRegion *r = region_create(dh->regions);
+    int *data = arena_alloc(r, sizeof(int));
+    *data = 0xCAFE;
     ASSERT_EQ_INT(region_count(dh->regions), 1);
     ASSERT_EQ_INT(region_total_allocs(dh->regions), 1);
 
@@ -572,43 +453,7 @@ TEST(dual_heap_fluid_and_crystal_independent) {
     ASSERT_EQ_INT(region_count(dh->regions), 1);
 
     /* Verify crystal data. */
-    int *crystal_val = (int *)region_get_data(dh->regions, rid, 0, sizeof(int));
-    ASSERT(crystal_val != NULL);
-    ASSERT_EQ_INT(*crystal_val, 0xCAFE);
-
-    dual_heap_free(dh);
-}
-
-TEST(dual_heap_simulate_freeze_thaw_cycle) {
-    DualHeap *dh = dual_heap_new();
-
-    /*
-     * Simulate the Lattice crystallization lifecycle:
-     * 1. Allocate mutable data in fluid heap.
-     * 2. Freeze: deallocate from fluid, store in crystal region.
-     * 3. Thaw: read from crystal, allocate back in fluid.
-     */
-
-    /* Phase 1: create mutable data. */
-    int *val = (int *)fluid_alloc(dh->fluid, sizeof(int));
-    *val = 42;
-    ASSERT_EQ_INT(fluid_live_count(dh->fluid), 1);
-
-    /* Phase 2: freeze -- move to crystal region. */
-    RegionId rid = region_allocate(dh->regions, val, sizeof(int));
-    fluid_dealloc(dh->fluid, val);
-    ASSERT_EQ_INT(fluid_live_count(dh->fluid), 0);
-    ASSERT_EQ_INT(region_count(dh->regions), 1);
-
-    /* Phase 3: thaw -- copy back to fluid. */
-    int *crystal_data = (int *)region_get_data(dh->regions, rid, 0, sizeof(int));
-    ASSERT(crystal_data != NULL);
-    int *thawed = (int *)fluid_alloc(dh->fluid, sizeof(int));
-    *thawed = *crystal_data;
-    ASSERT_EQ_INT(*thawed, 42);
-    ASSERT_EQ_INT(fluid_live_count(dh->fluid), 1);
-    /* Crystal remains intact (thaw is a copy, not a move). */
-    ASSERT_EQ_INT(region_count(dh->regions), 1);
+    ASSERT_EQ_INT(*data, 0xCAFE);
 
     dual_heap_free(dh);
 }
@@ -616,21 +461,20 @@ TEST(dual_heap_simulate_freeze_thaw_cycle) {
 TEST(dual_heap_gc_cycle) {
     DualHeap *dh = dual_heap_new();
 
-    int data = 0;
-
     /* Create regions across three epochs. */
-    RegionId r0 = region_allocate(dh->regions, &data, sizeof(data));
+    CrystalRegion *r0 = region_create(dh->regions);
+    RegionId id0 = r0->id;
 
     region_advance_epoch(dh->regions);
-    region_allocate(dh->regions, &data, sizeof(data));  /* r1: will be unreachable */
+    region_create(dh->regions);  /* will be unreachable */
 
     region_advance_epoch(dh->regions);
-    region_allocate(dh->regions, &data, sizeof(data));  /* r2: will be unreachable */
+    region_create(dh->regions);  /* will be unreachable */
 
     ASSERT_EQ_INT(region_count(dh->regions), 3);
 
     /* Only r0 is reachable; the other two should be collected. */
-    RegionId reachable[] = { r0 };
+    RegionId reachable[] = { id0 };
     size_t freed = region_collect(dh->regions, reachable, 1);
     ASSERT_EQ_INT(freed, 2);
     ASSERT_EQ_INT(region_count(dh->regions), 1);
@@ -638,55 +482,6 @@ TEST(dual_heap_gc_cycle) {
     /* Fluid heap is independent of crystal GC. */
     fluid_alloc(dh->fluid, 32);
     ASSERT_EQ_INT(fluid_live_count(dh->fluid), 1);
-
-    dual_heap_free(dh);
-}
-
-TEST(dual_heap_full_lifecycle) {
-    DualHeap *dh = dual_heap_new();
-
-    /* Phase 1: create mutable data in fluid heap. */
-    int *a = (int *)fluid_alloc(dh->fluid, sizeof(int));
-    int *b = (int *)fluid_alloc(dh->fluid, sizeof(int));
-    *a = 10;
-    *b = 20;
-    ASSERT_EQ_INT(fluid_live_count(dh->fluid), 2);
-
-    /* Phase 2: freeze both into epoch 0. */
-    RegionId r0a = region_allocate(dh->regions, a, sizeof(int));
-    RegionId r0b = region_allocate(dh->regions, b, sizeof(int));
-    fluid_dealloc(dh->fluid, a);
-    fluid_dealloc(dh->fluid, b);
-    ASSERT_EQ_INT(r0a, r0b);  /* Same epoch, same region. */
-    ASSERT_EQ_INT(fluid_live_count(dh->fluid), 0);
-    ASSERT_EQ_INT(region_count(dh->regions), 1);
-
-    /* Phase 3: advance epoch, create and freeze more. */
-    region_advance_epoch(dh->regions);
-    int *c = (int *)fluid_alloc(dh->fluid, sizeof(int));
-    *c = 30;
-    RegionId r1 = region_allocate(dh->regions, c, sizeof(int));
-    fluid_dealloc(dh->fluid, c);
-    ASSERT(r0a != r1);
-    ASSERT_EQ_INT(region_count(dh->regions), 2);
-
-    /* Phase 4: thaw a crystal value for mutation. */
-    int *crystal_a = (int *)region_get_data(dh->regions, r0a, 0, sizeof(int));
-    int *thawed = (int *)fluid_alloc(dh->fluid, sizeof(int));
-    *thawed = *crystal_a;
-    ASSERT_EQ_INT(*thawed, 10);
-    ASSERT_EQ_INT(fluid_live_count(dh->fluid), 1);
-
-    /* Phase 5: GC -- only epoch 1 region is reachable. */
-    RegionId reachable[] = { r1 };
-    size_t freed = region_collect(dh->regions, reachable, 1);
-    ASSERT_EQ_INT(freed, 1);
-    ASSERT_EQ_INT(region_count(dh->regions), 1);
-
-    /* Phase 6: release the remaining region via refcounting. */
-    bool removed = region_release(dh->regions, r1);
-    ASSERT(removed);
-    ASSERT_EQ_INT(region_count(dh->regions), 0);
 
     dual_heap_free(dh);
 }

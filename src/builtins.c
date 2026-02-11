@@ -4,15 +4,22 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#ifndef __EMSCRIPTEN__
 #include <editline/readline.h>
+#endif
 
 /* ── builtin_input ── */
 
 char *builtin_input(const char *prompt) {
+#ifdef __EMSCRIPTEN__
+    (void)prompt;
+    return NULL;
+#else
     char *line = readline(prompt ? prompt : "");
     if (line == NULL) return NULL;
     if (line[0] != '\0') add_history(line);
     return line;
+#endif
 }
 
 /* ── builtin_read_file ── */

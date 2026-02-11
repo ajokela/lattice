@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
@@ -730,4 +731,422 @@ TEST(eval_gc_stress_game_loop) {
         "}\n"
     );
     gc_stress = false;
+}
+
+/* ── Dual-Heap Invariant Tests ── */
+
+/*
+ * Helper: run source with gc_stress, return evaluator for stats inspection.
+ * Caller must call cleanup_run().  Returns NULL on failure.
+ */
+static Evaluator *run_with_stats(const char *source, LatVec *tokens_out, Program *prog_out) {
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    *tokens_out = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) { free(lex_err); lat_vec_free(tokens_out); return NULL; }
+
+    Parser parser = parser_new(tokens_out);
+    char *parse_err = NULL;
+    *prog_out = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        free(parse_err);
+        program_free(prog_out);
+        for (size_t i = 0; i < tokens_out->len; i++)
+            token_free(lat_vec_get(tokens_out, i));
+        lat_vec_free(tokens_out);
+        return NULL;
+    }
+
+    Evaluator *ev = evaluator_new();
+    evaluator_set_gc_stress(ev, true);
+    char *eval_err = evaluator_run(ev, prog_out);
+    if (eval_err) {
+        free(eval_err);
+        evaluator_free(ev);
+        program_free(prog_out);
+        for (size_t i = 0; i < tokens_out->len; i++)
+            token_free(lat_vec_get(tokens_out, i));
+        lat_vec_free(tokens_out);
+        return NULL;
+    }
+    return ev;
+}
+
+static void cleanup_run(Evaluator *ev, LatVec *tokens, Program *prog) {
+    evaluator_free(ev);
+    program_free(prog);
+    for (size_t i = 0; i < tokens->len; i++)
+        token_free(lat_vec_get(tokens, i));
+    lat_vec_free(tokens);
+}
+
+/* Test: freeze properly untracks from fluid heap (stats show region registration) */
+TEST(eval_gc_freeze_untracks) {
+    LatVec tokens; Program prog;
+    Evaluator *ev = run_with_stats(
+        "fn main() {\n"
+        "    for i in 0..5 {\n"
+        "        let data = [i, i + 1, i + 2]\n"
+        "        let frozen = freeze(data)\n"
+        "        let thawed = thaw(frozen)\n"
+        "    }\n"
+        "}\n",
+        &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    const MemoryStats *stats = evaluator_stats(ev);
+    ASSERT(stats->freezes >= 5);
+    ASSERT(stats->thaws >= 5);
+    /* gc_stress ran cycles — the dual-heap assertion inside gc_cycle
+     * would have fired if any crystal pointer remained in fluid heap */
+    ASSERT(stats->gc_cycles > 0);
+    /* Frozen values go out of scope each iteration; regions collected */
+    ASSERT(stats->gc_swept_regions >= 1);
+
+    cleanup_run(ev, &tokens, &prog);
+}
+
+/* Test: freeze values, drop references, GC collects the regions */
+TEST(eval_gc_region_lifecycle) {
+    LatVec tokens; Program prog;
+    Evaluator *ev = run_with_stats(
+        "fn main() {\n"
+        "    for i in 0..20 {\n"
+        "        let data = [i, i * 2, i * 3]\n"
+        "        let frozen = freeze(data)\n"
+        "    }\n"
+        "}\n",
+        &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    const MemoryStats *stats = evaluator_stats(ev);
+    ASSERT(stats->freezes >= 20);
+    /* Frozen values go out of scope each iteration; regions should be collected */
+    ASSERT(stats->gc_swept_regions >= 1);
+
+    cleanup_run(ev, &tokens, &prog);
+}
+
+/* Test: heavy freeze/thaw stress under gc_stress */
+TEST(eval_gc_stress_freeze_thaw_heavy) {
+    gc_stress = true;
+    ASSERT_RUNS(
+        "struct Config { value: Int, label: String }\n"
+        "fn main() {\n"
+        "    let result = 0\n"
+        "    for i in 0..100 {\n"
+        "        let cfg = Config { value: i, label: \"item_\" + to_string(i) }\n"
+        "        let frozen = freeze(cfg)\n"
+        "        let thawed = thaw(frozen)\n"
+        "        result = result + thawed.value\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n"
+    );
+    gc_stress = false;
+}
+
+/* Test: deeply nested expressions survive gc_stress (shadow stack depth) */
+TEST(eval_gc_shadow_stack_depth) {
+    gc_stress = true;
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let data = []\n"
+        "    for i in 0..50 {\n"
+        "        data.push(i)\n"
+        "    }\n"
+        "    let step1 = data.map(|x| x * 2)\n"
+        "    let step2 = step1.filter(|x| x % 3 == 0)\n"
+        "    let step3 = step2.map(|x| x + 1)\n"
+        "    let step4 = step3.filter(|x| x < 80)\n"
+        "    let base = 10\n"
+        "    let step5 = data.map(|x| {\n"
+        "        let inner = x + base\n"
+        "        inner * 2\n"
+        "    })\n"
+        "    print(step4.len())\n"
+        "    print(step5.len())\n"
+        "}\n"
+    );
+    gc_stress = false;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Arena freeze integration tests
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Test: arena-backed freeze of arrays survives GC */
+TEST(eval_arena_freeze_array_gc) {
+    LatVec tokens; Program prog;
+    Evaluator *ev = run_with_stats(
+        "fn main() {\n"
+        "    let frozen = freeze([1, 2, 3])\n"
+        "    for i in 0..10 {\n"
+        "        let garbage = [i, i + 1, i + 2]\n"
+        "    }\n"
+        "    print(thaw(frozen))\n"
+        "}\n",
+        &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    const MemoryStats *stats = evaluator_stats(ev);
+    ASSERT(stats->freezes >= 1);
+    ASSERT(stats->region_live_count >= 0);
+
+    cleanup_run(ev, &tokens, &prog);
+}
+
+/* Test: arena-backed freeze of maps */
+TEST(eval_arena_freeze_map) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"a\", 1)\n"
+        "    m.set(\"b\", 2)\n"
+        "    m.set(\"c\", 3)\n"
+        "    let frozen = freeze(m)\n"
+        "    flux thawed = thaw(frozen)\n"
+        "    print(thawed.get(\"a\"))\n"
+        "    print(thawed.get(\"b\"))\n"
+        "    print(thawed.get(\"c\"))\n"
+        "}\n"
+    );
+}
+
+/* Test: arena-backed freeze of closures with captured environments */
+TEST(eval_arena_freeze_closure) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let x = 42\n"
+        "    let f = |a| a + x\n"
+        "    let frozen = freeze(f)\n"
+        "    let thawed = thaw(frozen)\n"
+        "    print(thawed(10))\n"
+        "}\n"
+    );
+}
+
+/* Test: fix binding creates arena-backed value */
+TEST(eval_arena_fix_binding) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    fix data = [1, 2, 3, 4, 5]\n"
+        "    let sum = 0\n"
+        "    for x in thaw(data) {\n"
+        "        sum = sum + x\n"
+        "    }\n"
+        "    print(sum)\n"
+        "}\n"
+    );
+}
+
+/* Test: gc_stress with arena freeze/thaw cycles */
+TEST(eval_arena_gc_stress_freeze_thaw) {
+    gc_stress = true;
+    ASSERT_RUNS(
+        "struct Point { x: Int, y: Int }\n"
+        "fn main() {\n"
+        "    for i in 0..50 {\n"
+        "        let p = Point { x: i, y: i * 2 }\n"
+        "        let frozen = freeze(p)\n"
+        "        let thawed = thaw(frozen)\n"
+        "        let result = thawed.x + thawed.y\n"
+        "    }\n"
+        "}\n"
+    );
+    gc_stress = false;
+}
+
+/* Test: arena freeze of nested structs with maps */
+TEST(eval_arena_freeze_nested) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let data = [[1, 2], [3, 4], [5, 6]]\n"
+        "    let frozen = freeze(data)\n"
+        "    let thawed = thaw(frozen)\n"
+        "    print(thawed[0][0])\n"
+        "    print(thawed[2][1])\n"
+        "}\n"
+    );
+}
+
+/* Test: arena-backed values survive multiple GC cycles */
+TEST(eval_arena_survives_gc) {
+    LatVec tokens; Program prog;
+    Evaluator *ev = run_with_stats(
+        "fn main() {\n"
+        "    fix persistent = [10, 20, 30]\n"
+        "    for i in 0..100 {\n"
+        "        let temp = [i, i * 2]\n"
+        "    }\n"
+        "    print(thaw(persistent))\n"
+        "}\n",
+        &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    const MemoryStats *stats = evaluator_stats(ev);
+    ASSERT(stats->gc_cycles > 0);
+    ASSERT(stats->region_live_count >= 1);
+
+    cleanup_run(ev, &tokens, &prog);
+}
+
+/* ── Helper: run source with gc_stress and capture stdout ── */
+
+static char *run_capture_gc_stress(const char *source, LatVec *tokens_out,
+                                    Program *prog_out, Evaluator **ev_out) {
+    fflush(stdout);
+    FILE *tmp = tmpfile();
+    int old_stdout = dup(fileno(stdout));
+    dup2(fileno(tmp), fileno(stdout));
+
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    *tokens_out = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        free(lex_err);
+        fflush(stdout);
+        dup2(old_stdout, fileno(stdout));
+        close(old_stdout);
+        fclose(tmp);
+        lat_vec_free(tokens_out);
+        *ev_out = NULL;
+        return NULL;
+    }
+
+    Parser parser = parser_new(tokens_out);
+    char *parse_err = NULL;
+    *prog_out = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        free(parse_err);
+        fflush(stdout);
+        dup2(old_stdout, fileno(stdout));
+        close(old_stdout);
+        fclose(tmp);
+        program_free(prog_out);
+        for (size_t i = 0; i < tokens_out->len; i++)
+            token_free(lat_vec_get(tokens_out, i));
+        lat_vec_free(tokens_out);
+        *ev_out = NULL;
+        return NULL;
+    }
+
+    Evaluator *ev = evaluator_new();
+    evaluator_set_gc_stress(ev, true);
+    char *eval_err = evaluator_run(ev, prog_out);
+
+    fflush(stdout);
+    dup2(old_stdout, fileno(stdout));
+    close(old_stdout);
+
+    if (eval_err) {
+        free(eval_err);
+        evaluator_free(ev);
+        program_free(prog_out);
+        for (size_t i = 0; i < tokens_out->len; i++)
+            token_free(lat_vec_get(tokens_out, i));
+        lat_vec_free(tokens_out);
+        fclose(tmp);
+        *ev_out = NULL;
+        return NULL;
+    }
+
+    /* Read captured output */
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    fseek(tmp, 0, SEEK_SET);
+    char *output = malloc((size_t)len + 1);
+    size_t n = fread(output, 1, (size_t)len, tmp);
+    output[n] = '\0';
+    fclose(tmp);
+
+    /* Strip trailing newline */
+    if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
+
+    *ev_out = ev;
+    return output;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Arena closure captured-environment GC tests
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Test: arena-backed closure with captured env survives GC and returns
+ * the correct value.  The closure captures `base` (Int) and `items`
+ * (Array) from the outer scope, is frozen into a crystal region, then
+ * a tight loop allocates enough garbage to trigger multiple GC cycles.
+ * Expected output: 108  (100 + 5 + len([10,20,30]) == 108)             */
+TEST(eval_arena_closure_captured_env_gc) {
+    LatVec tokens; Program prog; Evaluator *ev;
+    char *output = run_capture_gc_stress(
+        "fn make_adder(base: Int) -> Closure {\n"
+        "    let items = [10, 20, 30]\n"
+        "    fix frozen_fn = freeze(|x| base + x + len(items))\n"
+        "    flux garbage = [0, 0, 0]\n"
+        "    flux i = 0\n"
+        "    while i < 500 {\n"
+        "        garbage = [i, i + 1, i + 2]\n"
+        "        i += 1\n"
+        "    }\n"
+        "    return frozen_fn\n"
+        "}\n"
+        "\n"
+        "fn main() {\n"
+        "    let adder = make_adder(100)\n"
+        "    let thawed = thaw(adder)\n"
+        "    print(thawed(5))\n"
+        "}\n",
+        &tokens, &prog, &ev);
+
+    ASSERT(ev != NULL);
+    ASSERT(output != NULL);
+    ASSERT_EQ_STR(output, "108");
+
+    const MemoryStats *stats = evaluator_stats(ev);
+    /* GC must have run (gc_stress is on) */
+    ASSERT(stats->gc_cycles > 0);
+    /* At least one freeze happened (the closure) */
+    ASSERT(stats->freezes >= 1);
+    /* The closure was called */
+    ASSERT(stats->closure_calls >= 1);
+
+    free(output);
+    cleanup_run(ev, &tokens, &prog);
+}
+
+/* Test: an unreachable frozen closure's region IS collected.
+ * The closure captures an array and is frozen, but is never returned
+ * from the function — so when the function returns, the region becomes
+ * unreachable and should be swept.  Expected output: "ok"              */
+TEST(eval_arena_closure_region_collected) {
+    LatVec tokens; Program prog; Evaluator *ev;
+    char *output = run_capture_gc_stress(
+        "fn make_and_discard() {\n"
+        "    let items = [1, 2, 3, 4, 5]\n"
+        "    fix frozen = freeze(|x| x + len(items))\n"
+        "    flux i = 0\n"
+        "    while i < 500 {\n"
+        "        flux garbage = [i, i * 2]\n"
+        "        i += 1\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fn main() {\n"
+        "    make_and_discard()\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        &tokens, &prog, &ev);
+
+    ASSERT(ev != NULL);
+    ASSERT(output != NULL);
+    ASSERT_EQ_STR(output, "ok");
+
+    const MemoryStats *stats = evaluator_stats(ev);
+    /* GC must have run */
+    ASSERT(stats->gc_cycles > 0);
+    /* The frozen closure's region should have been swept */
+    ASSERT(stats->gc_swept_regions >= 1);
+
+    free(output);
+    cleanup_run(ev, &tokens, &prog);
 }

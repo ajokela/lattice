@@ -1,0 +1,15 @@
+// Benchmark: Freeze/thaw cycles
+// Repeatedly freezes and thaws values to stress region alloc/collection.
+
+struct Config { value: Int, label: String }
+
+fn main() {
+    let result = 0
+    for i in 0..1000 {
+        let cfg = Config { value: i, label: "item_" + to_string(i) }
+        let frozen = freeze(cfg)
+        let thawed = thaw(frozen)
+        result = result + thawed.value
+    }
+    print(result)
+}

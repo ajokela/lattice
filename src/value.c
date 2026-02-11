@@ -1,8 +1,57 @@
 #include "value.h"
 #include "env.h"
+#include "memory.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+/* ── Heap-tracked allocation wrappers ── */
+
+static DualHeap *g_heap = NULL;
+static CrystalRegion *g_arena = NULL;
+
+void value_set_heap(DualHeap *heap) { g_heap = heap; }
+void value_set_arena(CrystalRegion *region) { g_arena = region; }
+CrystalRegion *value_get_arena(void) { return g_arena; }
+
+static void *lat_alloc(size_t size) {
+    if (g_arena) return arena_alloc(g_arena, size);
+    if (g_heap) return fluid_alloc(g_heap->fluid, size);
+    return malloc(size);
+}
+
+static void *lat_calloc(size_t count, size_t size) {
+    if (count > 0 && size > SIZE_MAX / count) return NULL;
+    if (g_arena) return arena_calloc(g_arena, count, size);
+    if (g_heap) {
+        size_t total = count * size;
+        void *ptr = fluid_alloc(g_heap->fluid, total);
+        memset(ptr, 0, total);
+        return ptr;
+    }
+    return calloc(count, size);
+}
+
+static char *lat_strdup(const char *s) {
+    if (g_arena) return arena_strdup(g_arena, s);
+    size_t len = strlen(s) + 1;
+    char *p = lat_alloc(len);
+    memcpy(p, s, len);
+    return p;
+}
+
+static void lat_free(void *ptr) {
+    if (!ptr) return;
+    if (g_arena) return;  /* no-op during arena clone */
+    if (g_heap && fluid_dealloc(g_heap->fluid, ptr)) return;
+    free(ptr);
+}
+
+/* ── Arena-routed allocation (public, for env.c) ── */
+
+void *lat_alloc_routed(size_t size) { return lat_alloc(size); }
+void *lat_calloc_routed(size_t count, size_t size) { return lat_calloc(count, size); }
+char *lat_strdup_routed(const char *s) { return lat_strdup(s); }
 
 /* ── Constructors ── */
 
@@ -11,6 +60,7 @@ LatValue value_int(int64_t v) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_INT;
     val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
     val.as.int_val = v;
     return val;
 }
@@ -20,6 +70,7 @@ LatValue value_float(double v) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_FLOAT;
     val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
     val.as.float_val = v;
     return val;
 }
@@ -29,6 +80,7 @@ LatValue value_bool(bool v) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_BOOL;
     val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
     val.as.bool_val = v;
     return val;
 }
@@ -38,7 +90,8 @@ LatValue value_string(const char *s) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_STR;
     val.phase = VTAG_UNPHASED;
-    val.as.str_val = strdup(s);
+    val.region_id = (size_t)-1;
+    val.as.str_val = lat_strdup(s);
     return val;
 }
 
@@ -47,6 +100,7 @@ LatValue value_string_owned(char *s) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_STR;
     val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
     val.as.str_val = s;
     return val;
 }
@@ -56,8 +110,9 @@ LatValue value_array(LatValue *elems, size_t len) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_ARRAY;
     val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
     size_t cap = len < 4 ? 4 : len;
-    val.as.array.elems = malloc(cap * sizeof(LatValue));
+    val.as.array.elems = lat_alloc(cap * sizeof(LatValue));
     memcpy(val.as.array.elems, elems, len * sizeof(LatValue));
     val.as.array.len = len;
     val.as.array.cap = cap;
@@ -69,11 +124,12 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
     memset(&val, 0, sizeof(val));
     val.type = VAL_STRUCT;
     val.phase = VTAG_UNPHASED;
-    val.as.strct.name = strdup(name);
-    val.as.strct.field_names = malloc(count * sizeof(char *));
-    val.as.strct.field_values = malloc(count * sizeof(LatValue));
+    val.region_id = (size_t)-1;
+    val.as.strct.name = lat_strdup(name);
+    val.as.strct.field_names = lat_alloc(count * sizeof(char *));
+    val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
     for (size_t i = 0; i < count; i++) {
-        val.as.strct.field_names[i] = strdup(field_names[i]);
+        val.as.strct.field_names[i] = lat_strdup(field_names[i]);
         val.as.strct.field_values[i] = field_values[i];
     }
     val.as.strct.field_count = count;
@@ -85,9 +141,10 @@ LatValue value_closure(char **param_names, size_t param_count, struct Expr *body
     memset(&val, 0, sizeof(val));
     val.type = VAL_CLOSURE;
     val.phase = VTAG_UNPHASED;
-    val.as.closure.param_names = malloc(param_count * sizeof(char *));
+    val.region_id = (size_t)-1;
+    val.as.closure.param_names = lat_alloc(param_count * sizeof(char *));
     for (size_t i = 0; i < param_count; i++) {
-        val.as.closure.param_names[i] = strdup(param_names[i]);
+        val.as.closure.param_names[i] = lat_strdup(param_names[i]);
     }
     val.as.closure.param_count = param_count;
     val.as.closure.body = body;       /* borrowed reference */
@@ -100,6 +157,7 @@ LatValue value_unit(void) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_UNIT;
     val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
     return val;
 }
 
@@ -108,6 +166,7 @@ LatValue value_range(int64_t start, int64_t end) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_RANGE;
     val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
     val.as.range.start = start;
     val.as.range.end = end;
     return val;
@@ -118,7 +177,8 @@ LatValue value_map_new(void) {
     memset(&val, 0, sizeof(val));
     val.type = VAL_MAP;
     val.phase = VTAG_UNPHASED;
-    val.as.map.map = malloc(sizeof(LatMap));
+    val.region_id = (size_t)-1;
+    val.as.map.map = lat_alloc(sizeof(LatMap));
     *val.as.map.map = lat_map_new(sizeof(LatValue));
     return val;
 }
@@ -135,16 +195,17 @@ LatValue value_deep_clone(const LatValue *v) {
     memset(&out, 0, sizeof(out));
     out.type = v->type;
     out.phase = v->phase;
+    out.region_id = (size_t)-1;  /* clone is a new value, not in any region */
 
     switch (v->type) {
         case VAL_INT:   out.as.int_val = v->as.int_val; break;
         case VAL_FLOAT: out.as.float_val = v->as.float_val; break;
         case VAL_BOOL:  out.as.bool_val = v->as.bool_val; break;
-        case VAL_STR:   out.as.str_val = strdup(v->as.str_val); break;
+        case VAL_STR:   out.as.str_val = lat_strdup(v->as.str_val); break;
         case VAL_ARRAY: {
             size_t len = v->as.array.len;
             size_t cap = v->as.array.cap;
-            out.as.array.elems = malloc(cap * sizeof(LatValue));
+            out.as.array.elems = lat_alloc(cap * sizeof(LatValue));
             for (size_t i = 0; i < len; i++) {
                 out.as.array.elems[i] = value_deep_clone(&v->as.array.elems[i]);
             }
@@ -154,11 +215,11 @@ LatValue value_deep_clone(const LatValue *v) {
         }
         case VAL_STRUCT: {
             size_t fc = v->as.strct.field_count;
-            out.as.strct.name = strdup(v->as.strct.name);
-            out.as.strct.field_names = malloc(fc * sizeof(char *));
-            out.as.strct.field_values = malloc(fc * sizeof(LatValue));
+            out.as.strct.name = lat_strdup(v->as.strct.name);
+            out.as.strct.field_names = lat_alloc(fc * sizeof(char *));
+            out.as.strct.field_values = lat_alloc(fc * sizeof(LatValue));
             for (size_t i = 0; i < fc; i++) {
-                out.as.strct.field_names[i] = strdup(v->as.strct.field_names[i]);
+                out.as.strct.field_names[i] = lat_strdup(v->as.strct.field_names[i]);
                 out.as.strct.field_values[i] = value_deep_clone(&v->as.strct.field_values[i]);
             }
             out.as.strct.field_count = fc;
@@ -166,9 +227,9 @@ LatValue value_deep_clone(const LatValue *v) {
         }
         case VAL_CLOSURE: {
             size_t pc = v->as.closure.param_count;
-            out.as.closure.param_names = malloc(pc * sizeof(char *));
+            out.as.closure.param_names = lat_alloc(pc * sizeof(char *));
             for (size_t i = 0; i < pc; i++) {
-                out.as.closure.param_names[i] = strdup(v->as.closure.param_names[i]);
+                out.as.closure.param_names[i] = lat_strdup(v->as.closure.param_names[i]);
             }
             out.as.closure.param_count = pc;
             out.as.closure.body = v->as.closure.body;  /* borrowed */
@@ -181,14 +242,38 @@ LatValue value_deep_clone(const LatValue *v) {
             out.as.range.end = v->as.range.end;
             break;
         case VAL_MAP: {
-            out.as.map.map = malloc(sizeof(LatMap));
-            *out.as.map.map = lat_map_new(sizeof(LatValue));
-            /* Iterate source map and deep_clone each value */
-            for (size_t i = 0; i < v->as.map.map->cap; i++) {
-                if (v->as.map.map->entries[i].state == MAP_OCCUPIED) {
-                    LatValue *src = (LatValue *)v->as.map.map->entries[i].value;
-                    LatValue cloned = value_deep_clone(src);
-                    lat_map_set(out.as.map.map, v->as.map.map->entries[i].key, &cloned);
+            LatMap *src = v->as.map.map;
+            if (g_arena) {
+                /* Arena mode: build map internals through lat_alloc/lat_calloc
+                 * so everything goes into the arena. No rehashing possible. */
+                LatMap *dst = lat_alloc(sizeof(LatMap));
+                dst->value_size = src->value_size;
+                dst->cap = src->cap;
+                dst->count = src->live;  /* only OCCUPIED entries are copied */
+                dst->live = src->live;
+                dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
+                for (size_t i = 0; i < src->cap; i++) {
+                    if (src->entries[i].state == MAP_OCCUPIED) {
+                        dst->entries[i].state = MAP_OCCUPIED;
+                        dst->entries[i].key = lat_strdup(src->entries[i].key);
+                        LatValue *sv = (LatValue *)src->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        LatValue *dv = lat_alloc(sizeof(LatValue));
+                        *dv = cloned;
+                        dst->entries[i].value = dv;
+                    }
+                }
+                out.as.map.map = dst;
+            } else {
+                /* Normal path: lat_map_new + lat_map_set */
+                out.as.map.map = lat_alloc(sizeof(LatMap));
+                *out.as.map.map = lat_map_new(sizeof(LatValue));
+                for (size_t i = 0; i < src->cap; i++) {
+                    if (src->entries[i].state == MAP_OCCUPIED) {
+                        LatValue *sv = (LatValue *)src->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        lat_map_set(out.as.map.map, src->entries[i].key, &cloned);
+                    }
                 }
             }
             break;
@@ -430,29 +515,39 @@ bool value_eq(const LatValue *a, const LatValue *b) {
 
 /* ── Free ── */
 
+static void val_dealloc(LatValue *v, void *ptr) {
+    if (!ptr) return;
+    if (v->region_id != (size_t)-1) return;  /* arena-backed: no-op */
+    lat_free(ptr);
+}
+
 void value_free(LatValue *v) {
+    if (v->region_id != (size_t)-1) {
+        memset(v, 0, sizeof(*v));  /* arena owns everything */
+        return;
+    }
     switch (v->type) {
         case VAL_STR:
-            free(v->as.str_val);
+            val_dealloc(v, v->as.str_val);
             break;
         case VAL_ARRAY:
             for (size_t i = 0; i < v->as.array.len; i++)
                 value_free(&v->as.array.elems[i]);
-            free(v->as.array.elems);
+            val_dealloc(v, v->as.array.elems);
             break;
         case VAL_STRUCT:
-            free(v->as.strct.name);
+            val_dealloc(v, v->as.strct.name);
             for (size_t i = 0; i < v->as.strct.field_count; i++) {
-                free(v->as.strct.field_names[i]);
+                val_dealloc(v, v->as.strct.field_names[i]);
                 value_free(&v->as.strct.field_values[i]);
             }
-            free(v->as.strct.field_names);
-            free(v->as.strct.field_values);
+            val_dealloc(v, v->as.strct.field_names);
+            val_dealloc(v, v->as.strct.field_values);
             break;
         case VAL_CLOSURE:
             for (size_t i = 0; i < v->as.closure.param_count; i++)
-                free(v->as.closure.param_names[i]);
-            free(v->as.closure.param_names);
+                val_dealloc(v, v->as.closure.param_names[i]);
+            val_dealloc(v, v->as.closure.param_names);
             if (v->as.closure.captured_env)
                 env_free(v->as.closure.captured_env);
             break;
@@ -466,7 +561,7 @@ void value_free(LatValue *v) {
                     }
                 }
                 lat_map_free(v->as.map.map);
-                free(v->as.map.map);
+                val_dealloc(v, v->as.map.map);
             }
             break;
         default:

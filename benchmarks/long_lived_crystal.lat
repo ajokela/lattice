@@ -1,0 +1,29 @@
+// Benchmark: Long-lived crystal values
+// Freezes values early, keeps them alive across many GC cycles, then drops.
+// Tests region lifecycle and GC interaction.
+
+fn main() {
+    // Create long-lived frozen values
+    let snapshots = []
+    for i in 0..50 {
+        let data = [i, i * 2, i * 3]
+        let frozen = freeze(data)
+        snapshots.push(frozen)
+    }
+
+    // Do lots of allocation work while snapshots are alive
+    let sum = 0
+    for i in 0..5000 {
+        let temp = [i, i + 1, i + 2]
+        let s = "iter_" + to_string(i)
+        sum = sum + temp[0]
+    }
+
+    // Access snapshots to verify they survived
+    for i in 0..50 {
+        let snap = thaw(snapshots[i])
+        sum = sum + snap[0]
+    }
+
+    print(sum)
+}

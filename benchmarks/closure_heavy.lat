@@ -1,0 +1,31 @@
+// Benchmark: Closure-heavy computation
+// Deep closure nesting with map/filter chains to stress shadow stack depth.
+
+fn main() {
+    let data = []
+    for i in 0..500 {
+        data.push(i)
+    }
+
+    // Chain of map/filter operations
+    let step1 = data.map(|x| x * 2)
+    let step2 = step1.filter(|x| x % 3 == 0)
+    let step3 = step2.map(|x| x + 1)
+    let step4 = step3.filter(|x| x < 500)
+    let step5 = step4.map(|x| x * x)
+
+    // Nested closures with captured variables
+    let base = 10
+    let transformed = data.map(|x| {
+        let inner = x + base
+        inner * 2
+    })
+
+    let filtered = transformed.filter(|x| {
+        let threshold = 100
+        x > threshold
+    })
+
+    print(step5.len())
+    print(filtered.len())
+}

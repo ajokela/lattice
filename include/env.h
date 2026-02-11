@@ -12,6 +12,7 @@ struct Env {
     Scope  *scopes;
     size_t  count;
     size_t  cap;
+    bool    arena_backed;
 };
 
 /* Create a new environment with one (root) scope */

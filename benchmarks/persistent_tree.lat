@@ -1,0 +1,53 @@
+// Benchmark: Persistent Versioned Collection
+// Simulates a versioned key-value store where each mutation produces a frozen
+// snapshot. Queries can read from any historical version. Exercises freeze
+// (per-mutation snapshot), thaw (version access), and long-lived crystal values.
+
+struct Version { data: Array, id: Int }
+
+fn main() {
+    let versions = []
+
+    // Build 200 versions, each with a fresh 20-element array
+    for i in 0..200 {
+        let data = []
+        for j in 0..20 {
+            data.push((i * 37 + j * 13) % 500)
+        }
+        let ver = Version { data: data, id: i }
+        let snap = freeze(clone(ver))
+        versions.push(snap)
+    }
+
+    let found = 0
+    let queries = 0
+
+    // Query across historical versions
+    for v in 0..20 {
+        let version_idx = v * 10
+        let ver = thaw(versions[version_idx])
+        let data = ver.data
+
+        // Linear search for values in each sampled version
+        for q in 0..20 {
+            let target = (q * 23 + v * 7) % 500
+            for k in 0..data.len() {
+                if data[k] == target {
+                    found = found + 1
+                }
+            }
+            queries = queries + 1
+        }
+    }
+
+    // Verify latest version
+    let latest = thaw(versions[versions.len() - 1])
+    let sum = 0
+    for i in 0..latest.data.len() {
+        sum = sum + latest.data[i]
+    }
+
+    print(found)
+    print(queries)
+    print(sum)
+}

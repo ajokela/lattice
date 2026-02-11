@@ -1,0 +1,24 @@
+// Benchmark: Allocation churn
+// Creates and drops arrays/structs in a tight loop to stress GC sweep.
+
+struct Particle { x: Float, y: Float, vx: Float, vy: Float }
+
+fn make_particle(i: Int) -> Particle {
+    return Particle {
+        x: i * 1.0,
+        y: i * 2.0,
+        vx: 0.1,
+        vy: 0.2,
+    }
+}
+
+fn main() {
+    let total = 0
+    for i in 0..10000 {
+        let p = make_particle(i)
+        let arr = [i, i + 1, i + 2, i + 3]
+        let name = "particle_" + to_string(i)
+        total = total + arr[0]
+    }
+    print(total)
+}

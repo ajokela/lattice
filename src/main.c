@@ -6,7 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef __EMSCRIPTEN__
 #include <editline/readline.h>
+#endif
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -22,6 +24,7 @@ static char *read_file(const char *path) {
 }
 
 static bool gc_stress_mode = false;
+static bool no_regions_mode = false;
 
 static int run_source(const char *source, bool show_stats) {
     /* Lex */
@@ -71,6 +74,8 @@ static int run_source(const char *source, bool show_stats) {
     Evaluator *ev = evaluator_new();
     if (gc_stress_mode)
         evaluator_set_gc_stress(ev, true);
+    if (no_regions_mode)
+        evaluator_set_no_regions(ev, true);
     char *eval_err = evaluator_run(ev, &prog);
     if (eval_err) {
         fprintf(stderr, "error: %s\n", eval_err);
@@ -182,10 +187,12 @@ int main(int argc, char **argv) {
             show_stats = true;
         else if (strcmp(argv[i], "--gc-stress") == 0)
             gc_stress_mode = true;
+        else if (strcmp(argv[i], "--no-regions") == 0)
+            no_regions_mode = true;
         else if (!file)
             file = argv[i];
         else {
-            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [file.lat]\n");
+            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [file.lat]\n");
             return 1;
         }
     }

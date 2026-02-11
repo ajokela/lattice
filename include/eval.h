@@ -40,6 +40,19 @@ typedef struct {
     size_t gc_cycles;
     size_t gc_swept_fluid;
     size_t gc_swept_regions;
+    size_t gc_bytes_swept;
+    uint64_t gc_total_ns;
+    uint64_t freeze_total_ns;
+    uint64_t thaw_total_ns;
+    /* Memory footprint (finalized by evaluator_stats) */
+    size_t fluid_peak_bytes;
+    size_t fluid_live_bytes;
+    size_t fluid_cumulative_bytes;
+    size_t region_peak_count;
+    size_t region_live_count;
+    size_t region_live_data_bytes;
+    size_t region_cumulative_data_bytes;
+    size_t rss_peak_kb;
 } MemoryStats;
 
 /* Evaluator result */
@@ -59,7 +72,9 @@ typedef struct Evaluator {
     MemoryStats stats;
     DualHeap   *heap;
     LatVec      gc_roots;      /* shadow stack of LatValue* */
+    LatVec      saved_envs;    /* stack of Env* saved during closure calls */
     bool        gc_stress;
+    bool        no_regions;    /* baseline mode: skip region registration */
     size_t      lat_eval_scope; /* when > 0, top-level lat_eval bindings go here */
 } Evaluator;
 
@@ -72,8 +87,16 @@ void evaluator_free(Evaluator *ev);
 /* Enable GC stress mode (GC after every allocation) */
 void evaluator_set_gc_stress(Evaluator *ev, bool enabled);
 
+/* Enable baseline mode (no region allocator, crystal stays in fluid heap) */
+void evaluator_set_no_regions(Evaluator *ev, bool enabled);
+
 /* Evaluate a program. Returns heap-allocated error string or NULL on success. */
 char *evaluator_run(Evaluator *ev, const Program *prog);
+
+/* Evaluate a program incrementally (REPL mode): registers declarations and
+ * executes statements, but does NOT auto-call main(). The evaluator persists
+ * state between calls so bindings/functions/structs accumulate. */
+char *evaluator_run_repl(Evaluator *ev, const Program *prog);
 
 /* Get memory stats */
 const MemoryStats *evaluator_stats(const Evaluator *ev);

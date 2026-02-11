@@ -26,6 +26,7 @@ struct Expr;
 struct LatValue {
     ValueType type;
     PhaseTag  phase;
+    size_t    region_id;  /* Crystal region ID ((size_t)-1 = not in a region) */
     union {
         int64_t int_val;
         double  float_val;
@@ -91,6 +92,18 @@ const char *value_type_name(const LatValue *v);
 
 /* ── Equality ── */
 bool value_eq(const LatValue *a, const LatValue *b);
+
+/* ── Heap integration ── */
+struct DualHeap;
+struct CrystalRegion;
+void value_set_heap(struct DualHeap *heap);
+void value_set_arena(struct CrystalRegion *region);
+struct CrystalRegion *value_get_arena(void);
+
+/* ── Arena-routed allocation (for use by env.c) ── */
+void *lat_alloc_routed(size_t size);
+void *lat_calloc_routed(size_t count, size_t size);
+char *lat_strdup_routed(const char *s);
 
 /* ── Destructor ── */
 void value_free(LatValue *v);
