@@ -80,9 +80,10 @@ fn http_fetch(url: String) -> String {
     if url.starts_with("https://") {
         scheme = "https"
         rest = url.substring(8, len(url))
-    } else if url.starts_with("http://") {
-        scheme = "http"
-        rest = url.substring(7, len(url))
+    } else {
+        if url.starts_with("http://") {
+            rest = url.substring(7, len(url))
+        }
     }
 
     // Split host and path
