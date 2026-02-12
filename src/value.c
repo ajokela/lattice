@@ -224,6 +224,17 @@ LatValue value_enum(const char *enum_name, const char *variant_name,
     return val;
 }
 
+LatValue value_set_new(void) {
+    LatValue val;
+    memset(&val, 0, sizeof(val));
+    val.type = VAL_SET;
+    val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
+    val.as.set.map = lat_alloc(sizeof(LatMap));
+    *val.as.set.map = lat_map_new(sizeof(LatValue));
+    return val;
+}
+
 /* ── Phase helpers ── */
 
 bool value_is_fluid(const LatValue *v) { return v->phase == VTAG_FLUID; }
@@ -339,6 +350,40 @@ LatValue value_deep_clone(const LatValue *v) {
             }
             break;
         }
+        case VAL_SET: {
+            LatMap *src = v->as.set.map;
+            if (g_arena) {
+                LatMap *dst = lat_alloc(sizeof(LatMap));
+                dst->value_size = src->value_size;
+                dst->cap = src->cap;
+                dst->count = src->live;
+                dst->live = src->live;
+                dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
+                for (size_t i = 0; i < src->cap; i++) {
+                    if (src->entries[i].state == MAP_OCCUPIED) {
+                        dst->entries[i].state = MAP_OCCUPIED;
+                        dst->entries[i].key = lat_strdup(src->entries[i].key);
+                        LatValue *sv = (LatValue *)src->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        LatValue *dv = lat_alloc(sizeof(LatValue));
+                        *dv = cloned;
+                        dst->entries[i].value = dv;
+                    }
+                }
+                out.as.set.map = dst;
+            } else {
+                out.as.set.map = lat_alloc(sizeof(LatMap));
+                *out.as.set.map = lat_map_new(sizeof(LatValue));
+                for (size_t i = 0; i < src->cap; i++) {
+                    if (src->entries[i].state == MAP_OCCUPIED) {
+                        LatValue *sv = (LatValue *)src->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        lat_map_set(out.as.set.map, src->entries[i].key, &cloned);
+                    }
+                }
+            }
+            break;
+        }
     }
     return out;
 }
@@ -365,6 +410,13 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
     } else if (v->type == VAL_ENUM) {
         for (size_t i = 0; i < v->as.enm.payload_count; i++)
             set_phase_recursive(&v->as.enm.payload[i], phase);
+    } else if (v->type == VAL_SET) {
+        for (size_t i = 0; i < v->as.set.map->cap; i++) {
+            if (v->as.set.map->entries[i].state == MAP_OCCUPIED) {
+                LatValue *sv = (LatValue *)v->as.set.map->entries[i].value;
+                set_phase_recursive(sv, phase);
+            }
+        }
     }
 }
 
@@ -511,6 +563,28 @@ char *value_display(const LatValue *v) {
             }
             break;
         }
+        case VAL_SET: {
+            size_t cap2 = 64;
+            buf = malloc(cap2);
+            size_t pos2 = 0;
+            memcpy(buf, "Set{", 4); pos2 = 4;
+            bool sfirst = true;
+            for (size_t i = 0; i < v->as.set.map->cap; i++) {
+                if (v->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                if (!sfirst) { while (pos2 + 3 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); } buf[pos2++] = ','; buf[pos2++] = ' '; }
+                sfirst = false;
+                LatValue *sv = (LatValue *)v->as.set.map->entries[i].value;
+                char *elem = value_display(sv);
+                size_t elen = strlen(elem);
+                while (pos2 + elen + 4 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); }
+                memcpy(buf + pos2, elem, elen); pos2 += elen;
+                free(elem);
+            }
+            while (pos2 + 2 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); }
+            buf[pos2++] = '}';
+            buf[pos2] = '\0';
+            break;
+        }
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
@@ -560,6 +634,7 @@ const char *value_type_name(const LatValue *v) {
         case VAL_MAP:     return "Map";
         case VAL_CHANNEL: return "Channel";
         case VAL_ENUM:    return "Enum";
+        case VAL_SET:     return "Set";
     }
     return "?";
 }
@@ -612,6 +687,15 @@ bool value_eq(const LatValue *a, const LatValue *b) {
                 LatValue *av = (LatValue *)a->as.map.map->entries[i].value;
                 LatValue *bv = (LatValue *)lat_map_get(b->as.map.map, key);
                 if (!bv || !value_eq(av, bv)) return false;
+            }
+            return true;
+        }
+        case VAL_SET: {
+            if (lat_map_len(a->as.set.map) != lat_map_len(b->as.set.map)) return false;
+            for (size_t i = 0; i < a->as.set.map->cap; i++) {
+                if (a->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                const char *key = a->as.set.map->entries[i].key;
+                if (!lat_map_contains(b->as.set.map, key)) return false;
             }
             return true;
         }
@@ -683,6 +767,18 @@ void value_free(LatValue *v) {
                 val_dealloc(v, v->as.enm.payload);
             }
             break;
+        case VAL_SET:
+            if (v->as.set.map) {
+                for (size_t i = 0; i < v->as.set.map->cap; i++) {
+                    if (v->as.set.map->entries[i].state == MAP_OCCUPIED) {
+                        LatValue *sv = (LatValue *)v->as.set.map->entries[i].value;
+                        value_free(sv);
+                    }
+                }
+                lat_map_free(v->as.set.map);
+                val_dealloc(v, v->as.set.map);
+            }
+            break;
         default:
             break;
     }
@@ -699,6 +795,7 @@ bool value_is_truthy(const LatValue *v) {
         case VAL_STR:   return v->as.str_val[0] != '\0';
         case VAL_UNIT:  return false;
         case VAL_MAP:     return lat_map_len(v->as.map.map) > 0;
+        case VAL_SET:     return lat_map_len(v->as.set.map) > 0;
         case VAL_CHANNEL: return true;
         default:          return true;
     }

@@ -4628,6 +4628,154 @@ static void test_enum_typeof(void) {
     );
 }
 
+/* ------ Set Data Type ------ */
+
+static void test_set_new(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = Set::new()\n"
+        "    print(s.len())\n"
+        "    print(typeof(s))\n"
+        "}\n",
+        "0\nSet"
+    );
+}
+
+static void test_set_from(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = Set::from([1, 2, 2, 3])\n"
+        "    print(s.len())\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_set_add_has(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux s = Set::new()\n"
+        "    s.add(42)\n"
+        "    s.add(\"hello\")\n"
+        "    print(s.has(42))\n"
+        "    print(s.has(\"hello\"))\n"
+        "    print(s.has(99))\n"
+        "}\n",
+        "true\ntrue\nfalse"
+    );
+}
+
+static void test_set_remove(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux s = Set::from([1, 2, 3])\n"
+        "    s.remove(2)\n"
+        "    print(s.len())\n"
+        "    print(s.has(2))\n"
+        "}\n",
+        "2\nfalse"
+    );
+}
+
+static void test_set_to_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = Set::from([42])\n"
+        "    let arr = s.to_array()\n"
+        "    print(arr[0])\n"
+        "    print(len(arr))\n"
+        "}\n",
+        "42\n1"
+    );
+}
+
+static void test_set_union(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s1 = Set::from([1, 2])\n"
+        "    let s2 = Set::from([2, 3])\n"
+        "    let u = s1.union(s2)\n"
+        "    print(u.len())\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_set_intersection(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s1 = Set::from([1, 2, 3])\n"
+        "    let s2 = Set::from([2, 3, 4])\n"
+        "    let i = s1.intersection(s2)\n"
+        "    print(i.len())\n"
+        "    print(i.has(2))\n"
+        "    print(i.has(1))\n"
+        "}\n",
+        "2\ntrue\nfalse"
+    );
+}
+
+static void test_set_difference(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s1 = Set::from([1, 2, 3])\n"
+        "    let s2 = Set::from([2, 3, 4])\n"
+        "    let d = s1.difference(s2)\n"
+        "    print(d.len())\n"
+        "    print(d.has(1))\n"
+        "}\n",
+        "1\ntrue"
+    );
+}
+
+static void test_set_subset_superset(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s1 = Set::from([1, 2])\n"
+        "    let s2 = Set::from([1, 2, 3])\n"
+        "    print(s1.is_subset(s2))\n"
+        "    print(s2.is_superset(s1))\n"
+        "    print(s2.is_subset(s1))\n"
+        "}\n",
+        "true\ntrue\nfalse"
+    );
+}
+
+static void test_set_for_in(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = Set::from([10])\n"
+        "    for item in s {\n"
+        "        print(item)\n"
+        "    }\n"
+        "}\n",
+        "10"
+    );
+}
+
+static void test_set_duplicate_add(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux s = Set::new()\n"
+        "    s.add(1)\n"
+        "    s.add(1)\n"
+        "    s.add(1)\n"
+        "    print(s.len())\n"
+        "}\n",
+        "1"
+    );
+}
+
+static void test_set_typeof(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = Set::new()\n"
+        "    print(typeof(s))\n"
+        "}\n",
+        "Set"
+    );
+}
+
 /* ======================================================================
  * Test Registration
  * ====================================================================== */
@@ -5083,4 +5231,18 @@ void register_stdlib_tests(void) {
     register_test("test_enum_is_variant", test_enum_is_variant);
     register_test("test_enum_payload", test_enum_payload);
     register_test("test_enum_typeof", test_enum_typeof);
+
+    /* Set data type */
+    register_test("test_set_new", test_set_new);
+    register_test("test_set_from", test_set_from);
+    register_test("test_set_add_has", test_set_add_has);
+    register_test("test_set_remove", test_set_remove);
+    register_test("test_set_to_array", test_set_to_array);
+    register_test("test_set_union", test_set_union);
+    register_test("test_set_intersection", test_set_intersection);
+    register_test("test_set_difference", test_set_difference);
+    register_test("test_set_subset_superset", test_set_subset_superset);
+    register_test("test_set_for_in", test_set_for_in);
+    register_test("test_set_duplicate_add", test_set_duplicate_add);
+    register_test("test_set_typeof", test_set_typeof);
 }

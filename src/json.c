@@ -485,6 +485,7 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
         case VAL_RANGE:
         case VAL_CHANNEL:
         case VAL_ENUM:
+        case VAL_SET:
             *err = strdup("json_stringify: unsupported value type");
             return false;
     }

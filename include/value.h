@@ -17,6 +17,7 @@ typedef enum {
     VAL_MAP,
     VAL_CHANNEL,
     VAL_ENUM,
+    VAL_SET,
 } ValueType;
 
 /* Forward declarations */
@@ -70,6 +71,9 @@ struct LatValue {
             LatValue *payload;
             size_t    payload_count;
         } enm;
+        struct {
+            LatMap *map;     /* heap-allocated, keys=display strings, values=LatValue */
+        } set;
     } as;
 };
 
@@ -88,6 +92,7 @@ LatValue value_range(int64_t start, int64_t end);
 LatValue value_map_new(void);
 LatValue value_channel(struct LatChannel *ch);
 LatValue value_enum(const char *enum_name, const char *variant_name, LatValue *payload, size_t count);
+LatValue value_set_new(void);
 
 /* ── Phase helpers ── */
 bool value_is_fluid(const LatValue *v);

@@ -204,6 +204,21 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
                     gc_mark_value(fh, &v->as.enm.payload[i], reachable_regions);
             }
             break;
+        case VAL_SET:
+            if (v->as.set.map) {
+                fluid_mark(fh, v->as.set.map);
+                if (v->as.set.map->entries) {
+                    fluid_mark(fh, v->as.set.map->entries);
+                    for (size_t i = 0; i < v->as.set.map->cap; i++) {
+                        if (v->as.set.map->entries[i].state == MAP_OCCUPIED) {
+                            fluid_mark(fh, v->as.set.map->entries[i].key);
+                            fluid_mark(fh, v->as.set.map->entries[i].value);
+                            gc_mark_value(fh, (LatValue *)v->as.set.map->entries[i].value, reachable_regions);
+                        }
+                    }
+                }
+            }
+            break;
         default:
             break;
     }
@@ -262,6 +277,14 @@ static void assert_crystal_not_fluid(LatValue *v, void *ctx) {
                        "crystal map struct in fluid heap");
                 assert(!ptr_in_fluid(fh, v->as.map.map->entries) &&
                        "crystal map entries in fluid heap");
+            }
+            break;
+        case VAL_SET:
+            if (v->as.set.map) {
+                assert(!ptr_in_fluid(fh, v->as.set.map) &&
+                       "crystal set struct in fluid heap");
+                assert(!ptr_in_fluid(fh, v->as.set.map->entries) &&
+                       "crystal set entries in fluid heap");
             }
             break;
         default:
@@ -384,6 +407,16 @@ static void set_region_id_recursive(LatValue *v, RegionId rid) {
         case VAL_ENUM:
             for (size_t i = 0; i < v->as.enm.payload_count; i++)
                 set_region_id_recursive(&v->as.enm.payload[i], rid);
+            break;
+        case VAL_SET:
+            if (v->as.set.map) {
+                for (size_t i = 0; i < v->as.set.map->cap; i++) {
+                    if (v->as.set.map->entries[i].state == MAP_OCCUPIED) {
+                        LatValue *sv = (LatValue *)v->as.set.map->entries[i].value;
+                        set_region_id_recursive(sv, rid);
+                    }
+                }
+            }
             break;
         default:
             break;
@@ -1668,6 +1701,39 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(val);
                 }
 
+                /// @builtin Set::new() -> Set
+                /// @category Type Constructors
+                /// Create a new empty set.
+                /// @example Set::new()  // Set{}
+                if (strcmp(fn_name, "Set::new") == 0) {
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_set_new());
+                }
+
+                /// @builtin Set::from(array: Array) -> Set
+                /// @category Type Constructors
+                /// Create a set from an array (duplicates removed).
+                /// @example Set::from([1, 2, 2, 3])  // Set{1, 2, 3}
+                if (strcmp(fn_name, "Set::from") == 0) {
+                    if (argc != 1 || args[0].type != VAL_ARRAY) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("Set::from() expects 1 array argument"));
+                    }
+                    LatValue set = value_set_new();
+                    for (size_t i = 0; i < args[0].as.array.len; i++) {
+                        LatValue *elem = &args[0].as.array.elems[i];
+                        char *key = value_display(elem);
+                        LatValue cloned = value_deep_clone(elem);
+                        lat_map_set(set.as.set.map, key, &cloned);
+                        free(key);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(set);
+                }
+
                 /// @builtin parse_int(s: String) -> Int
                 /// @category Type Conversion
                 /// Parse a string as an integer.
@@ -1732,6 +1798,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (args[0].type == VAL_STR) l = (int64_t)strlen(args[0].as.str_val);
                     else if (args[0].type == VAL_ARRAY) l = (int64_t)args[0].as.array.len;
                     else if (args[0].type == VAL_MAP) l = (int64_t)lat_map_len(args[0].as.map.map);
+                    else if (args[0].type == VAL_SET) l = (int64_t)lat_map_len(args[0].as.set.map);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (l < 0) return eval_err(strdup("len() not supported on this type"));
@@ -3494,6 +3561,51 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
                 if (lv_err) free(lv_err);
             }
+
+            /// @method Set.add(value: Any) -> Unit
+            /// @category Set Methods
+            /// Add an element to the set (mutates in place).
+            /// @example s.add(42)
+            if (strcmp(expr->as.method_call.method, "add") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *set_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (set_lv && set_lv->type == VAL_SET) {
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(vr)) return vr;
+                    char *key = value_display(&vr.value);
+                    /* If key already exists, free old value */
+                    LatValue *old = (LatValue *)lat_map_get(set_lv->as.set.map, key);
+                    if (old) value_free(old);
+                    lat_map_set(set_lv->as.set.map, key, &vr.value);
+                    free(key);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+
+            /// @method Set.remove(value: Any) -> Unit
+            /// @category Set Methods
+            /// Remove an element from the set (mutates in place).
+            /// @example s.remove(42)
+            if (strcmp(expr->as.method_call.method, "remove") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *set_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (set_lv && set_lv->type == VAL_SET) {
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(vr)) return vr;
+                    char *key = value_display(&vr.value);
+                    LatValue *old = (LatValue *)lat_map_get(set_lv->as.set.map, key);
+                    if (old) value_free(old);
+                    lat_map_remove(set_lv->as.set.map, key);
+                    free(key);
+                    value_free(&vr.value);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+
             EvalResult objr = eval_expr(ev, expr->as.method_call.object);
             if (!IS_OK(objr)) return objr;
             GC_PUSH(ev, &objr.value);
@@ -4374,6 +4486,26 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 }
                 GC_POP(ev);
                 value_free(&iter_r.value);
+            } else if (iter_r.value.type == VAL_SET) {
+                /* Iterate over set elements */
+                GC_PUSH(ev, &iter_r.value);
+                for (size_t i = 0; i < iter_r.value.as.set.map->cap; i++) {
+                    if (iter_r.value.as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                    stats_scope_push(&ev->stats);
+                    env_push_scope(ev->env);
+                    LatValue *sv = (LatValue *)iter_r.value.as.set.map->entries[i].value;
+                    env_define(ev->env, stmt->as.for_loop.var, value_deep_clone(sv));
+                    EvalResult r = eval_block_stmts(ev, stmt->as.for_loop.body,
+                                                     stmt->as.for_loop.body_count);
+                    env_pop_scope(ev->env);
+                    stats_scope_pop(&ev->stats);
+                    if (IS_SIGNAL(r) && r.cf.tag == CF_BREAK) break;
+                    if (IS_SIGNAL(r) && r.cf.tag == CF_CONTINUE) continue;
+                    if (!IS_OK(r)) { GC_POP(ev); value_free(&iter_r.value); return r; }
+                    value_free(&r.value);
+                }
+                GC_POP(ev);
+                value_free(&iter_r.value);
             } else {
                 char *err = NULL;
                 (void)asprintf(&err, "cannot iterate over %s", value_type_name(&iter_r.value));
@@ -4597,6 +4729,146 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         char *err2 = NULL;
         (void)asprintf(&err2, "Enum has no method '%s'", method);
+        return eval_err(err2);
+    }
+
+    /* ── Set methods ── */
+    if (obj.type == VAL_SET) {
+        /// @method Set.has(value: Any) -> Bool
+        /// @category Set Methods
+        /// Check if the set contains the value.
+        /// @example s.has(42)
+        if (strcmp(method, "has") == 0) {
+            if (arg_count != 1) return eval_err(strdup(".has() expects 1 argument"));
+            char *key = value_display(&args[0]);
+            bool result = lat_map_contains(obj.as.set.map, key);
+            free(key);
+            return eval_ok(value_bool(result));
+        }
+        /// @method Set.len() -> Int
+        /// @category Set Methods
+        /// Return the number of elements in the set.
+        /// @example s.len()
+        if (strcmp(method, "len") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".len() takes no arguments"));
+            return eval_ok(value_int((int64_t)lat_map_len(obj.as.set.map)));
+        }
+        /// @method Set.to_array() -> Array
+        /// @category Set Methods
+        /// Convert the set to an array of its elements.
+        /// @example s.to_array()
+        if (strcmp(method, "to_array") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".to_array() takes no arguments"));
+            size_t n = lat_map_len(obj.as.set.map);
+            LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            size_t ei = 0;
+            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
+                if (obj.as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
+                elems[ei++] = value_deep_clone(sv);
+            }
+            LatValue arr = value_array(elems, ei);
+            free(elems);
+            return eval_ok(arr);
+        }
+        /// @method Set.union(other: Set) -> Set
+        /// @category Set Methods
+        /// Return a new set containing all elements from both sets.
+        /// @example s1.union(s2)
+        if (strcmp(method, "union") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_SET)
+                return eval_err(strdup(".union() expects 1 Set argument"));
+            LatValue result = value_set_new();
+            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
+                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
+                    LatValue cloned = value_deep_clone(sv);
+                    lat_map_set(result.as.set.map, obj.as.set.map->entries[i].key, &cloned);
+                }
+            }
+            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
+                if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    if (!lat_map_contains(result.as.set.map, args[0].as.set.map->entries[i].key)) {
+                        LatValue *sv = (LatValue *)args[0].as.set.map->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        lat_map_set(result.as.set.map, args[0].as.set.map->entries[i].key, &cloned);
+                    }
+                }
+            }
+            return eval_ok(result);
+        }
+        /// @method Set.intersection(other: Set) -> Set
+        /// @category Set Methods
+        /// Return a new set containing only elements in both sets.
+        /// @example s1.intersection(s2)
+        if (strcmp(method, "intersection") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_SET)
+                return eval_err(strdup(".intersection() expects 1 Set argument"));
+            LatValue result = value_set_new();
+            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
+                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    const char *key = obj.as.set.map->entries[i].key;
+                    if (lat_map_contains(args[0].as.set.map, key)) {
+                        LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        lat_map_set(result.as.set.map, key, &cloned);
+                    }
+                }
+            }
+            return eval_ok(result);
+        }
+        /// @method Set.difference(other: Set) -> Set
+        /// @category Set Methods
+        /// Return a new set with elements in this set but not in other.
+        /// @example s1.difference(s2)
+        if (strcmp(method, "difference") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_SET)
+                return eval_err(strdup(".difference() expects 1 Set argument"));
+            LatValue result = value_set_new();
+            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
+                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    const char *key = obj.as.set.map->entries[i].key;
+                    if (!lat_map_contains(args[0].as.set.map, key)) {
+                        LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        lat_map_set(result.as.set.map, key, &cloned);
+                    }
+                }
+            }
+            return eval_ok(result);
+        }
+        /// @method Set.is_subset(other: Set) -> Bool
+        /// @category Set Methods
+        /// Check if this set is a subset of other.
+        /// @example s1.is_subset(s2)
+        if (strcmp(method, "is_subset") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_SET)
+                return eval_err(strdup(".is_subset() expects 1 Set argument"));
+            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
+                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    if (!lat_map_contains(args[0].as.set.map, obj.as.set.map->entries[i].key))
+                        return eval_ok(value_bool(false));
+                }
+            }
+            return eval_ok(value_bool(true));
+        }
+        /// @method Set.is_superset(other: Set) -> Bool
+        /// @category Set Methods
+        /// Check if this set is a superset of other.
+        /// @example s1.is_superset(s2)
+        if (strcmp(method, "is_superset") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_SET)
+                return eval_err(strdup(".is_superset() expects 1 Set argument"));
+            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
+                if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    if (!lat_map_contains(obj.as.set.map, args[0].as.set.map->entries[i].key))
+                        return eval_ok(value_bool(false));
+                }
+            }
+            return eval_ok(value_bool(true));
+        }
+        char *err2 = NULL;
+        (void)asprintf(&err2, "Set has no method '%s'", method);
         return eval_err(err2);
     }
 
