@@ -136,19 +136,73 @@ static Param *parse_params(Parser *p, size_t *count, char **err) {
     size_t cap = 4;
     size_t n = 0;
     Param *params = malloc(cap * sizeof(Param));
+    bool seen_default = false;
+    bool seen_variadic = false;
 
     while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
         if (n >= cap) { cap *= 2; params = realloc(params, cap * sizeof(Param)); }
+        if (seen_variadic) {
+            *err = strdup("variadic parameter must be last");
+            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            free(params);
+            return NULL;
+        }
+        /* Check for variadic: ...name */
+        bool is_variadic = false;
+        if (peek_type(p) == TOK_DOTDOTDOT) {
+            advance(p);
+            is_variadic = true;
+            seen_variadic = true;
+        }
         params[n].name = expect_ident(p, err);
-        if (!params[n].name) { free(params); return NULL; }
-        if (!expect(p, TOK_COLON, err)) { free(params[n].name); free(params); return NULL; }
+        if (!params[n].name) {
+            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            free(params);
+            return NULL;
+        }
+        if (!expect(p, TOK_COLON, err)) {
+            free(params[n].name);
+            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            free(params);
+            return NULL;
+        }
         TypeExpr *te = parse_type_expr(p, err);
-        if (!te) { free(params[n].name); free(params); return NULL; }
+        if (!te) {
+            free(params[n].name);
+            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            free(params);
+            return NULL;
+        }
         params[n].ty = *te;
         free(te);
+        params[n].is_variadic = is_variadic;
+        params[n].default_value = NULL;
+        /* Check for default value: = expr */
+        if (!is_variadic && peek_type(p) == TOK_EQ) {
+            advance(p);
+            seen_default = true;
+            Expr *def = parse_expr(p, err);
+            if (!def) {
+                free(params[n].name);
+                for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+                free(params);
+                return NULL;
+            }
+            params[n].default_value = def;
+        } else if (seen_default && !is_variadic) {
+            *err = strdup("required parameter cannot follow a parameter with a default value");
+            free(params[n].name);
+            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            free(params);
+            return NULL;
+        }
         n++;
         if (peek_type(p) != TOK_RPAREN) {
-            if (!expect(p, TOK_COMMA, err)) { free(params); return NULL; }
+            if (!expect(p, TOK_COMMA, err)) {
+                for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+                free(params);
+                return NULL;
+            }
         }
     }
     *count = n;
@@ -641,40 +695,85 @@ static Expr *parse_primary(Parser *p, char **err) {
         return expr_block(stmts, count);
     }
     if (tt == TOK_PIPE) {
-        /* Closure: |params| expr */
+        /* Closure: |params| expr  or  |a, b = 1, ...rest| expr */
         advance(p);
         size_t cap = 4;
         size_t n = 0;
         char **params = malloc(cap * sizeof(char *));
+        Expr **defaults = calloc(cap, sizeof(Expr *));
+        bool has_variadic = false;
+        bool seen_default = false;
         while (peek_type(p) != TOK_PIPE && !at_eof(p)) {
-            char *name = expect_ident(p, err);
-            if (!name) {
-                for (size_t i = 0; i < n; i++) free(params[i]);
-                free(params);
+            if (has_variadic) {
+                *err = strdup("variadic parameter must be last");
+                for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
+                free(params); free(defaults);
                 return NULL;
             }
-            if (n >= cap) { cap *= 2; params = realloc(params, cap * sizeof(char *)); }
-            params[n++] = name;
+            /* Check for variadic: ...name */
+            bool is_variadic = false;
+            if (peek_type(p) == TOK_DOTDOTDOT) {
+                advance(p);
+                is_variadic = true;
+                has_variadic = true;
+            }
+            char *name = expect_ident(p, err);
+            if (!name) {
+                for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
+                free(params); free(defaults);
+                return NULL;
+            }
+            if (n >= cap) {
+                cap *= 2;
+                params = realloc(params, cap * sizeof(char *));
+                defaults = realloc(defaults, cap * sizeof(Expr *));
+                for (size_t i = n; i < cap; i++) defaults[i] = NULL;
+            }
+            params[n] = name;
+            defaults[n] = NULL;
+            /* Check for default value: = expr (not for variadic params) */
+            if (!is_variadic && peek_type(p) == TOK_EQ) {
+                advance(p);
+                seen_default = true;
+                Expr *def = parse_expr(p, err);
+                if (!def) {
+                    for (size_t i = 0; i <= n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
+                    free(params); free(defaults);
+                    return NULL;
+                }
+                defaults[n] = def;
+            } else if (seen_default && !is_variadic) {
+                *err = strdup("required parameter cannot follow a parameter with a default value");
+                free(name);
+                for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
+                free(params); free(defaults);
+                return NULL;
+            }
+            n++;
             if (peek_type(p) != TOK_PIPE) {
                 if (!expect(p, TOK_COMMA, err)) {
-                    for (size_t i = 0; i < n; i++) free(params[i]);
-                    free(params);
+                    for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
+                    free(params); free(defaults);
                     return NULL;
                 }
             }
         }
         if (!expect(p, TOK_PIPE, err)) {
-            for (size_t i = 0; i < n; i++) free(params[i]);
-            free(params);
+            for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
+            free(params); free(defaults);
             return NULL;
         }
         Expr *body = parse_expr(p, err);
         if (!body) {
-            for (size_t i = 0; i < n; i++) free(params[i]);
-            free(params);
+            for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
+            free(params); free(defaults);
             return NULL;
         }
-        return expr_closure(params, n, body);
+        /* Check if any defaults were actually used */
+        bool any_defaults = false;
+        for (size_t i = 0; i < n; i++) { if (defaults[i]) { any_defaults = true; break; } }
+        if (!any_defaults && !has_variadic) { free(defaults); defaults = NULL; }
+        return expr_closure(params, n, body, defaults, has_variadic);
     }
     if (tt == TOK_IDENT) {
         Token *t = advance(p);
@@ -955,6 +1054,28 @@ static bool parse_struct_decl(Parser *p, StructDecl *out, char **err) {
     return true;
 }
 
+/* ── Test declaration ── */
+
+static bool parse_test_decl(Parser *p, TestDecl *out, char **err) {
+    if (!expect(p, TOK_TEST, err)) return false;
+    if (peek_type(p) != TOK_STRING_LIT) {
+        *err = strdup("expected string literal for test name");
+        return false;
+    }
+    Token *name_tok = advance(p);
+    out->name = strdup(name_tok->as.str_val);
+    if (!expect(p, TOK_LBRACE, err)) { free(out->name); return false; }
+    out->body = parse_block_stmts(p, &out->body_count, err);
+    if (!out->body && *err) { free(out->name); return false; }
+    if (!expect(p, TOK_RBRACE, err)) {
+        free(out->name);
+        for (size_t i = 0; i < out->body_count; i++) stmt_free(out->body[i]);
+        free(out->body);
+        return false;
+    }
+    return true;
+}
+
 /* ── Program ── */
 
 Program parser_parse(Parser *p, char **err) {
@@ -992,6 +1113,12 @@ Program parser_parse(Parser *p, char **err) {
         } else if (peek_type(p) == TOK_STRUCT) {
             prog.items[n].tag = ITEM_STRUCT;
             if (!parse_struct_decl(p, &prog.items[n].as.struct_decl, err)) {
+                prog.item_count = n;
+                return prog;
+            }
+        } else if (peek_type(p) == TOK_TEST) {
+            prog.items[n].tag = ITEM_TEST;
+            if (!parse_test_decl(p, &prog.items[n].as.test_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }

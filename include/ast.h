@@ -92,7 +92,11 @@ struct Expr {
             Stmt **then_stmts; size_t then_count;
             Stmt **else_stmts; size_t else_count;
         } if_expr;
-        struct { char **params; size_t param_count; Expr *body; } closure;
+        struct {
+            char **params; size_t param_count; Expr *body;
+            Expr **default_values;  /* param_count entries, NULL for required params */
+            bool has_variadic;      /* last param is variadic */
+        } closure;
         struct { Expr *start; Expr *end; } range;
         struct { Expr **args; size_t arg_count; } print;
         struct {
@@ -140,6 +144,8 @@ struct Stmt {
 typedef struct {
     char *name;
     TypeExpr ty;
+    Expr *default_value;  /* nullable — default parameter value */
+    bool is_variadic;     /* true for ...rest parameters */
 } Param;
 
 /* Function declaration */
@@ -165,8 +171,15 @@ typedef struct {
     size_t     field_count;
 } StructDecl;
 
+/* Test declaration */
+typedef struct {
+    char   *name;
+    Stmt  **body;
+    size_t  body_count;
+} TestDecl;
+
 /* Top-level item */
-typedef enum { ITEM_FUNCTION, ITEM_STRUCT, ITEM_STMT } ItemTag;
+typedef enum { ITEM_FUNCTION, ITEM_STRUCT, ITEM_STMT, ITEM_TEST } ItemTag;
 
 typedef struct {
     ItemTag tag;
@@ -174,6 +187,7 @@ typedef struct {
         FnDecl     fn_decl;
         StructDecl struct_decl;
         Stmt      *stmt;
+        TestDecl   test_decl;
     } as;
 } Item;
 
@@ -204,7 +218,8 @@ Expr *expr_clone(Expr *inner);
 Expr *expr_forge(Stmt **stmts, size_t count);
 Expr *expr_if(Expr *cond, Stmt **then_s, size_t then_n, Stmt **else_s, size_t else_n);
 Expr *expr_block(Stmt **stmts, size_t count);
-Expr *expr_closure(char **params, size_t param_count, Expr *body);
+Expr *expr_closure(char **params, size_t param_count, Expr *body,
+                   Expr **default_values, bool has_variadic);
 Expr *expr_range(Expr *start, Expr *end);
 Expr *expr_print(Expr **args, size_t arg_count);
 Expr *expr_spawn(Stmt **stmts, size_t count);
@@ -232,6 +247,7 @@ void stmt_free(Stmt *s);
 void type_expr_free(TypeExpr *t);
 void fn_decl_free(FnDecl *f);
 void struct_decl_free(StructDecl *s);
+void test_decl_free(TestDecl *t);
 void item_free(Item *item);
 void program_free(Program *p);
 

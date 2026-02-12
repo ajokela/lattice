@@ -509,23 +509,60 @@ static StructDecl *find_struct(Evaluator *ev, const char *name) {
 
 static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, size_t arg_count,
                           LatValue **writeback_out) {
-    if (arg_count != decl->param_count) {
+    /* Determine required count (params without defaults and not variadic) */
+    size_t required = 0;
+    bool has_variadic = false;
+    for (size_t i = 0; i < decl->param_count; i++) {
+        if (decl->params[i].is_variadic) { has_variadic = true; }
+        else if (!decl->params[i].default_value) required++;
+    }
+    size_t max_positional = has_variadic ? decl->param_count - 1 : decl->param_count;
+    if (arg_count < required || (!has_variadic && arg_count > max_positional)) {
         char *err = NULL;
-        (void)asprintf(&err, "function '%s' expects %zu arguments, got %zu",
-                       decl->name, decl->param_count, arg_count);
+        if (has_variadic)
+            (void)asprintf(&err, "function '%s' expects at least %zu arguments, got %zu",
+                           decl->name, required, arg_count);
+        else if (required < max_positional)
+            (void)asprintf(&err, "function '%s' expects %zu to %zu arguments, got %zu",
+                           decl->name, required, max_positional, arg_count);
+        else
+            (void)asprintf(&err, "function '%s' expects %zu arguments, got %zu",
+                           decl->name, required, arg_count);
         return eval_err(err);
     }
     stats_fn_call(&ev->stats);
     stats_scope_push(&ev->stats);
     env_push_scope(ev->env);
-    for (size_t i = 0; i < arg_count; i++) {
-        env_define(ev->env, decl->params[i].name, args[i]);
+    for (size_t i = 0; i < decl->param_count; i++) {
+        if (decl->params[i].is_variadic) {
+            /* Collect remaining args into an array */
+            size_t rest_count = (arg_count > i) ? arg_count - i : 0;
+            LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
+            for (size_t j = 0; j < rest_count; j++)
+                rest_elems[j] = args[i + j];
+            LatValue arr = value_array(rest_elems, rest_count);
+            free(rest_elems);
+            env_define(ev->env, decl->params[i].name, arr);
+        } else if (i < arg_count) {
+            env_define(ev->env, decl->params[i].name, args[i]);
+        } else {
+            /* Use default value */
+            EvalResult def = eval_expr(ev, decl->params[i].default_value);
+            if (!IS_OK(def)) {
+                env_pop_scope(ev->env);
+                stats_scope_pop(&ev->stats);
+                return def;
+            }
+            env_define(ev->env, decl->params[i].name, def.value);
+        }
     }
     EvalResult result = eval_block_stmts(ev, decl->body, decl->body_count);
 
     /* Before popping the scope, capture fluid parameter values for write-back */
     if (writeback_out) {
-        for (size_t i = 0; i < arg_count; i++) {
+        size_t wb_count = has_variadic ? decl->param_count - 1 : decl->param_count;
+        if (wb_count > arg_count) wb_count = arg_count;
+        for (size_t i = 0; i < wb_count; i++) {
             if (decl->params[i].ty.phase == PHASE_FLUID) {
                 LatValue val;
                 if (env_get(ev->env, decl->params[i].name, &val)) {
@@ -546,10 +583,23 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
 }
 
 static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
-                               const Expr *body, Env *closure_env, LatValue *args, size_t arg_count) {
-    if (arg_count != param_count) {
+                               const Expr *body, Env *closure_env, LatValue *args, size_t arg_count,
+                               Expr **default_values, bool has_variadic) {
+    /* Determine required count */
+    size_t required = 0;
+    for (size_t i = 0; i < param_count; i++) {
+        if (has_variadic && i == param_count - 1) break;
+        if (!default_values || !default_values[i]) required++;
+    }
+    size_t max_positional = has_variadic ? param_count - 1 : param_count;
+    if (arg_count < required || (!has_variadic && arg_count > max_positional)) {
         char *err = NULL;
-        (void)asprintf(&err, "closure expects %zu arguments, got %zu", param_count, arg_count);
+        if (has_variadic)
+            (void)asprintf(&err, "closure expects at least %zu arguments, got %zu", required, arg_count);
+        else if (required < max_positional)
+            (void)asprintf(&err, "closure expects %zu to %zu arguments, got %zu", required, max_positional, arg_count);
+        else
+            (void)asprintf(&err, "closure expects %zu arguments, got %zu", param_count, arg_count);
         return eval_err(err);
     }
     stats_closure_call(&ev->stats);
@@ -560,8 +610,30 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
     ev->env = closure_env;
     stats_scope_push(&ev->stats);
     env_push_scope(ev->env);
-    for (size_t i = 0; i < arg_count; i++) {
-        env_define(ev->env, params[i], args[i]);
+    for (size_t i = 0; i < param_count; i++) {
+        if (has_variadic && i == param_count - 1) {
+            /* Collect remaining args into an array */
+            size_t rest_count = (arg_count > i) ? arg_count - i : 0;
+            LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
+            for (size_t j = 0; j < rest_count; j++)
+                rest_elems[j] = args[i + j];
+            LatValue arr = value_array(rest_elems, rest_count);
+            free(rest_elems);
+            env_define(ev->env, params[i], arr);
+        } else if (i < arg_count) {
+            env_define(ev->env, params[i], args[i]);
+        } else if (default_values && default_values[i]) {
+            /* Evaluate default in the closure environment */
+            EvalResult def = eval_expr(ev, default_values[i]);
+            if (!IS_OK(def)) {
+                env_pop_scope(ev->env);
+                stats_scope_pop(&ev->stats);
+                ev->env = saved;
+                lat_vec_pop(&ev->saved_envs, NULL);
+                return def;
+            }
+            env_define(ev->env, params[i], def.value);
+        }
     }
     EvalResult result = eval_expr(ev, body);
     env_pop_scope(ev->env);
@@ -3060,7 +3132,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             args[i].as.closure.param_count,
                             args[i].as.closure.body,
                             args[i].as.closure.captured_env,
-                            &call_arg, 1);
+                            &call_arg, 1,
+                            args[i].as.closure.default_values, args[i].as.closure.has_variadic);
                         if (!IS_OK(r)) {
                             for (size_t j = 0; j < argc; j++) value_free(&args[j]);
                             free(args);
@@ -3102,7 +3175,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                     char **params = malloc(sizeof(char *));
                     params[0] = strdup("x");
-                    LatValue closure = value_closure(params, 1, body, cenv);
+                    LatValue closure = value_closure(params, 1, body, cenv, NULL, false);
 
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -3162,7 +3235,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 callee_r.value.as.closure.param_count,
                 callee_r.value.as.closure.body,
                 callee_r.value.as.closure.captured_env,
-                args, argc);
+                args, argc,
+                callee_r.value.as.closure.default_values, callee_r.value.as.closure.has_variadic);
             GC_POP_N(ev, argc);
             GC_POP(ev);
             /* Don't free captured_env since closure still owns it - just cleanup */
@@ -3718,7 +3792,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.closure.params,
                 expr->as.closure.param_count,
                 expr->as.closure.body,
-                captured));
+                captured,
+                expr->as.closure.default_values,
+                expr->as.closure.has_variadic));
         }
 
         case EXPR_RANGE: {
@@ -4210,7 +4286,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) {
                 GC_POP_N(ev, i);  /* accumulated results */
                 for (size_t j = 0; j < i; j++) value_free(&results[j]);
@@ -4274,7 +4351,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) {
                 GC_POP_N(ev, rcount);  /* accumulated results */
                 for (size_t j = 0; j < rcount; j++) value_free(&results[j]);
@@ -4306,7 +4384,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) return r;
             value_free(&r.value);
         }
@@ -4327,7 +4406,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) return r;
             if (value_is_truthy(&r.value)) {
                 value_free(&r.value);
@@ -4425,7 +4505,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                call_args, 2);
+                call_args, 2,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) { GC_POP(ev); return r; }
             acc = r.value;
         }
@@ -4539,7 +4620,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) return r;
             if (value_is_truthy(&r.value)) {
                 value_free(&r.value);
@@ -4564,7 +4646,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) return r;
             if (!value_is_truthy(&r.value)) {
                 value_free(&r.value);
@@ -4685,7 +4768,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                     args[0].as.closure.param_count,
                     args[0].as.closure.body,
                     args[0].as.closure.captured_env,
-                    call_args, 2);
+                    call_args, 2,
+                    args[0].as.closure.default_values, args[0].as.closure.has_variadic);
                 if (!IS_OK(r)) {
                     for (size_t k = 0; k < j; k++) value_free(&buf[k]);
                     value_free(&key);
@@ -4730,7 +4814,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) {
                 for (size_t j = 0; j < i; j++) value_free(&mapped[j]);
                 free(mapped);
@@ -4808,7 +4893,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 args[0].as.closure.param_count,
                 args[0].as.closure.body,
                 args[0].as.closure.captured_env,
-                &elem, 1);
+                &elem, 1,
+                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
             if (!IS_OK(r)) {
                 value_free(&grp_map);
                 return r;
@@ -5061,7 +5147,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                         args[0].as.closure.param_count,
                         args[0].as.closure.body,
                         args[0].as.closure.captured_env,
-                        call_args, 2);
+                        call_args, 2,
+                        args[0].as.closure.default_values, args[0].as.closure.has_variadic);
                     if (!IS_OK(r)) return r;
                     value_free(&r.value);
                 }
@@ -5086,7 +5173,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                         args[0].as.closure.param_count,
                         args[0].as.closure.body,
                         args[0].as.closure.captured_env,
-                        call_args, 2);
+                        call_args, 2,
+                        args[0].as.closure.default_values, args[0].as.closure.has_variadic);
                     if (!IS_OK(r)) { value_free(&result); return r; }
                     if (value_is_truthy(&r.value)) {
                         LatValue cloned = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
@@ -5115,7 +5203,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                         args[0].as.closure.param_count,
                         args[0].as.closure.body,
                         args[0].as.closure.captured_env,
-                        call_args, 2);
+                        call_args, 2,
+                        args[0].as.closure.default_values, args[0].as.closure.has_variadic);
                     if (!IS_OK(r)) { value_free(&result); return r; }
                     lat_map_set(result.as.map.map, obj.as.map.map->entries[i].key, &r.value);
                 }
@@ -5397,7 +5486,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 EvalResult r = call_closure(ev,
                     cl->as.closure.param_names, cl->as.closure.param_count,
                     cl->as.closure.body, cl->as.closure.captured_env,
-                    full_args, total);
+                    full_args, total,
+                    cl->as.closure.default_values, cl->as.closure.has_variadic);
                 /* call_closure takes ownership of args via env_define;
                    env_pop_scope frees them — do NOT value_free here */
                 free(full_args);
@@ -5545,6 +5635,97 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
     }
 
     return NULL; /* success */
+}
+
+int evaluator_run_tests(Evaluator *ev, const Program *prog) {
+    ev->mode = prog->mode;
+
+    /* First pass: register structs and functions */
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag == ITEM_STRUCT) {
+            StructDecl *ptr = &prog->items[i].as.struct_decl;
+            lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_FUNCTION) {
+            FnDecl *ptr = &prog->items[i].as.fn_decl;
+            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+        }
+    }
+
+    /* Second pass: execute top-level statements (setup code) */
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag == ITEM_STMT) {
+            EvalResult r = eval_stmt(ev, prog->items[i].as.stmt);
+            if (IS_ERR(r)) {
+                fprintf(stderr, "setup error: %s\n", r.error);
+                free(r.error);
+                return 1;
+            }
+            if (IS_SIGNAL(r)) {
+                fprintf(stderr, "setup error: unexpected control flow at top level\n");
+                return 1;
+            }
+            value_free(&r.value);
+        }
+    }
+
+    /* Count tests */
+    size_t test_count = 0;
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag == ITEM_TEST)
+            test_count++;
+    }
+
+    if (test_count == 0) {
+        printf("No tests found.\n");
+        return 0;
+    }
+
+    printf("Running %zu test%s...\n\n", test_count, test_count == 1 ? "" : "s");
+
+    /* Third pass: run tests */
+    size_t passed = 0, failed = 0;
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag != ITEM_TEST) continue;
+        TestDecl *td = &prog->items[i].as.test_decl;
+
+        stats_scope_push(&ev->stats);
+        env_push_scope(ev->env);
+
+        bool ok = true;
+        char *errmsg = NULL;
+        for (size_t j = 0; j < td->body_count; j++) {
+            EvalResult r = eval_stmt(ev, td->body[j]);
+            if (IS_ERR(r)) {
+                ok = false;
+                errmsg = r.error;
+                break;
+            }
+            if (IS_SIGNAL(r)) {
+                ok = false;
+                errmsg = strdup("unexpected control flow in test");
+                break;
+            }
+            value_free(&r.value);
+        }
+
+        env_pop_scope(ev->env);
+        stats_scope_pop(&ev->stats);
+
+        if (ok) {
+            passed++;
+            printf("  ok: %s\n", td->name);
+        } else {
+            failed++;
+            printf("  FAIL: %s\n", td->name);
+            if (errmsg) {
+                printf("        %s\n", errmsg);
+                free(errmsg);
+            }
+        }
+    }
+
+    printf("\nResults: %zu passed, %zu failed, %zu total\n", passed, failed, test_count);
+    return failed > 0 ? 1 : 0;
 }
 
 char *evaluator_run_repl(Evaluator *ev, const Program *prog) {

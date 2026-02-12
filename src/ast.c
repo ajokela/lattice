@@ -144,11 +144,14 @@ Expr *expr_block(Stmt **stmts, size_t count) {
     return e;
 }
 
-Expr *expr_closure(char **params, size_t param_count, Expr *body) {
+Expr *expr_closure(char **params, size_t param_count, Expr *body,
+                   Expr **default_values, bool has_variadic) {
     Expr *e = expr_alloc(EXPR_CLOSURE);
     e->as.closure.params = params;
     e->as.closure.param_count = param_count;
     e->as.closure.body = body;
+    e->as.closure.default_values = default_values;
+    e->as.closure.has_variadic = has_variadic;
     return e;
 }
 
@@ -375,6 +378,12 @@ void expr_free(Expr *e) {
             for (size_t i = 0; i < e->as.closure.param_count; i++)
                 free(e->as.closure.params[i]);
             free(e->as.closure.params);
+            if (e->as.closure.default_values) {
+                for (size_t i = 0; i < e->as.closure.param_count; i++)
+                    if (e->as.closure.default_values[i])
+                        expr_free(e->as.closure.default_values[i]);
+                free(e->as.closure.default_values);
+            }
             expr_free(e->as.closure.body);
             break;
         case EXPR_RANGE:
@@ -458,6 +467,8 @@ void fn_decl_free(FnDecl *f) {
     for (size_t i = 0; i < f->param_count; i++) {
         free(f->params[i].name);
         type_expr_free(&f->params[i].ty);
+        if (f->params[i].default_value)
+            expr_free(f->params[i].default_value);
     }
     free(f->params);
     if (f->return_type) {
@@ -478,6 +489,13 @@ void struct_decl_free(StructDecl *s) {
     free(s->fields);
 }
 
+void test_decl_free(TestDecl *t) {
+    free(t->name);
+    for (size_t i = 0; i < t->body_count; i++)
+        stmt_free(t->body[i]);
+    free(t->body);
+}
+
 void item_free(Item *item) {
     switch (item->tag) {
         case ITEM_FUNCTION:
@@ -488,6 +506,9 @@ void item_free(Item *item) {
             break;
         case ITEM_STMT:
             stmt_free(item->as.stmt);
+            break;
+        case ITEM_TEST:
+            test_decl_free(&item->as.test_decl);
             break;
     }
 }

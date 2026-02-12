@@ -206,11 +206,89 @@ static void repl(void) {
     }
 }
 
+static int run_test_file(const char *path) {
+    char *source = read_file(path);
+    if (!source) {
+        fprintf(stderr, "error: cannot read '%s'\n", path);
+        return 1;
+    }
+    char *path_copy = strdup(path);
+    char *dir = dirname(path_copy);
+
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        fprintf(stderr, "error: %s\n", lex_err);
+        free(lex_err);
+        lat_vec_free(&tokens);
+        free(path_copy);
+        free(source);
+        return 1;
+    }
+
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        fprintf(stderr, "error: %s\n", parse_err);
+        free(parse_err);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        free(path_copy);
+        free(source);
+        return 1;
+    }
+
+    Evaluator *ev = evaluator_new();
+    if (gc_stress_mode)
+        evaluator_set_gc_stress(ev, true);
+    if (no_regions_mode)
+        evaluator_set_no_regions(ev, true);
+    evaluator_set_script_dir(ev, dir);
+    evaluator_set_argv(ev, saved_argc, saved_argv);
+
+    int result = evaluator_run_tests(ev, &prog);
+
+    evaluator_free(ev);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    free(path_copy);
+    free(source);
+    return result;
+}
+
 int main(int argc, char **argv) {
     saved_argc = argc;
     saved_argv = argv;
     bool show_stats = false;
     const char *file = NULL;
+
+    /* Check for 'test' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "test") == 0) {
+        const char *test_path = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--gc-stress") == 0)
+                gc_stress_mode = true;
+            else if (strcmp(argv[i], "--no-regions") == 0)
+                no_regions_mode = true;
+            else if (!test_path)
+                test_path = argv[i];
+            else {
+                fprintf(stderr, "usage: clat test [file.lat]\n");
+                return 1;
+            }
+        }
+        if (!test_path) {
+            fprintf(stderr, "usage: clat test <file.lat>\n");
+            return 1;
+        }
+        return run_test_file(test_path);
+    }
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--stats") == 0)

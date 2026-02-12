@@ -4170,6 +4170,171 @@ static void test_interp_nested_braces(void) {
 }
 
 /* ======================================================================
+ * Default Parameters
+ * ====================================================================== */
+
+static void test_closure_default_param(void) {
+    ASSERT_OUTPUT(
+        "let greet = |name, greeting = \"hello\"| \"${greeting}, ${name}!\"\n"
+        "fn main() { print(greet(\"world\")) }\n",
+        "hello, world!"
+    );
+}
+
+static void test_closure_default_param_override(void) {
+    ASSERT_OUTPUT(
+        "let greet = |name, greeting = \"hello\"| \"${greeting}, ${name}!\"\n"
+        "fn main() { print(greet(\"world\", \"hi\")) }\n",
+        "hi, world!"
+    );
+}
+
+static void test_closure_multiple_defaults(void) {
+    ASSERT_OUTPUT(
+        "let f = |a = 1, b = 2, c = 3| a + b + c\n"
+        "fn main() { print(f()) }\n",
+        "6"
+    );
+}
+
+static void test_closure_partial_defaults(void) {
+    ASSERT_OUTPUT(
+        "let f = |a, b = 10| a + b\n"
+        "fn main() { print(f(5)) }\n",
+        "15"
+    );
+}
+
+static void test_fn_default_param(void) {
+    ASSERT_OUTPUT(
+        "fn greet(name: String, greeting: String = \"hi\") {\n"
+        "    print(\"${greeting} ${name}\")\n"
+        "}\n"
+        "fn main() { greet(\"world\") }\n",
+        "hi world"
+    );
+}
+
+static void test_fn_default_param_override(void) {
+    ASSERT_OUTPUT(
+        "fn greet(name: String, greeting: String = \"hi\") {\n"
+        "    print(\"${greeting} ${name}\")\n"
+        "}\n"
+        "fn main() { greet(\"world\", \"hey\") }\n",
+        "hey world"
+    );
+}
+
+/* ======================================================================
+ * Variadic Functions
+ * ====================================================================== */
+
+static void test_closure_variadic_basic(void) {
+    ASSERT_OUTPUT(
+        "let sum = |...nums| {\n"
+        "    let total = 0\n"
+        "    for n in nums { total = total + n }\n"
+        "    total\n"
+        "}\n"
+        "fn main() { print(sum(1, 2, 3)) }\n",
+        "6"
+    );
+}
+
+static void test_closure_variadic_empty(void) {
+    ASSERT_OUTPUT(
+        "let f = |...args| args.len()\n"
+        "fn main() { print(f()) }\n",
+        "0"
+    );
+}
+
+static void test_closure_variadic_with_required(void) {
+    ASSERT_OUTPUT(
+        "let f = |first, ...rest| \"${first}: ${rest}\"\n"
+        "fn main() { print(f(\"a\", \"b\", \"c\")) }\n",
+        "a: [b, c]"
+    );
+}
+
+static void test_fn_variadic_basic(void) {
+    ASSERT_OUTPUT(
+        "fn sum(...nums: Array) {\n"
+        "    let total = 0\n"
+        "    for n in nums { total = total + n }\n"
+        "    return total\n"
+        "}\n"
+        "fn main() { print(sum(10, 20, 30)) }\n",
+        "60"
+    );
+}
+
+static void test_fn_variadic_empty(void) {
+    ASSERT_OUTPUT(
+        "fn count(...items: Array) { return items.len() }\n"
+        "fn main() { print(count()) }\n",
+        "0"
+    );
+}
+
+static void test_closure_default_and_variadic(void) {
+    ASSERT_OUTPUT(
+        "let f = |prefix = \"log\", ...items| \"${prefix}: ${items}\"\n"
+        "fn main() {\n"
+        "    print(f(\"err\", 1, 2))\n"
+        "    print(f())\n"
+        "}\n",
+        "err: [1, 2]\nlog: []"
+    );
+}
+
+static void test_fn_default_and_variadic(void) {
+    ASSERT_OUTPUT(
+        "fn f(tag: String = \"info\", ...vals: Array) {\n"
+        "    print(\"${tag}: ${vals.len()}\")\n"
+        "}\n"
+        "fn main() {\n"
+        "    f(\"warn\", 1, 2, 3)\n"
+        "    f()\n"
+        "}\n",
+        "warn: 3\ninfo: 0"
+    );
+}
+
+static void test_dotdotdot_token(void) {
+    ASSERT_OUTPUT(
+        "let f = |...x| x.len()\n"
+        "fn main() { print(f(1, 2)) }\n",
+        "2"
+    );
+}
+
+/* ======================================================================
+ * Test Framework (test blocks parsed but ignored in normal exec)
+ * ====================================================================== */
+
+static void test_test_block_ignored(void) {
+    /* test blocks should be silently skipped in normal execution */
+    ASSERT_OUTPUT(
+        "test \"should be ignored\" {\n"
+        "    assert(false)\n"
+        "}\n"
+        "fn main() { print(\"ok\") }\n",
+        "ok"
+    );
+}
+
+static void test_test_block_with_fn(void) {
+    /* test blocks alongside normal functions */
+    ASSERT_OUTPUT(
+        "fn add(a: Int, b: Int) { return a + b }\n"
+        "test \"add works\" { assert(add(1, 2) == 3) }\n"
+        "fn main() { print(add(5, 3)) }\n",
+        "8"
+    );
+}
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -4572,4 +4737,26 @@ void register_stdlib_tests(void) {
     register_test("test_interp_only_expr", test_interp_only_expr);
     register_test("test_interp_method_call", test_interp_method_call);
     register_test("test_interp_nested_braces", test_interp_nested_braces);
+
+    /* Default parameters */
+    register_test("test_closure_default_param", test_closure_default_param);
+    register_test("test_closure_default_param_override", test_closure_default_param_override);
+    register_test("test_closure_multiple_defaults", test_closure_multiple_defaults);
+    register_test("test_closure_partial_defaults", test_closure_partial_defaults);
+    register_test("test_fn_default_param", test_fn_default_param);
+    register_test("test_fn_default_param_override", test_fn_default_param_override);
+
+    /* Variadic functions */
+    register_test("test_closure_variadic_basic", test_closure_variadic_basic);
+    register_test("test_closure_variadic_empty", test_closure_variadic_empty);
+    register_test("test_closure_variadic_with_required", test_closure_variadic_with_required);
+    register_test("test_fn_variadic_basic", test_fn_variadic_basic);
+    register_test("test_fn_variadic_empty", test_fn_variadic_empty);
+    register_test("test_closure_default_and_variadic", test_closure_default_and_variadic);
+    register_test("test_fn_default_and_variadic", test_fn_default_and_variadic);
+    register_test("test_dotdotdot_token", test_dotdotdot_token);
+
+    /* Test framework */
+    register_test("test_test_block_ignored", test_test_block_ignored);
+    register_test("test_test_block_with_fn", test_test_block_with_fn);
 }

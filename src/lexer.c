@@ -109,6 +109,7 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "try") == 0)      return TOK_TRY;
     if (strcmp(ident, "catch") == 0)    return TOK_CATCH;
     if (strcmp(ident, "scope") == 0)    return TOK_SCOPE;
+    if (strcmp(ident, "test") == 0)     return TOK_TEST;
     return TOK_IDENT;
 }
 
@@ -248,7 +249,11 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
             else { *out = token_simple(TOK_MINUS, line, col); }
             return true;
         case '.':
-            if (lex_peek(lex) == '.') { lex_advance(lex); *out = token_simple(TOK_DOTDOT, line, col); }
+            if (lex_peek(lex) == '.') {
+                lex_advance(lex);
+                if (lex_peek(lex) == '.') { lex_advance(lex); *out = token_simple(TOK_DOTDOTDOT, line, col); }
+                else { *out = token_simple(TOK_DOTDOT, line, col); }
+            }
             else { *out = token_simple(TOK_DOT, line, col); }
             return true;
         case ':':

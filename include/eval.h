@@ -108,6 +108,9 @@ char *evaluator_run(Evaluator *ev, const Program *prog);
  * state between calls so bindings/functions/structs accumulate. */
 char *evaluator_run_repl(Evaluator *ev, const Program *prog);
 
+/* Run tests from a parsed program. Returns exit code (0 = all pass). */
+int evaluator_run_tests(Evaluator *ev, const Program *prog);
+
 /* Get memory stats */
 const MemoryStats *evaluator_stats(const Evaluator *ev);
 

@@ -12,6 +12,7 @@ typedef enum {
     TOK_SPAWN, TOK_TRUE, TOK_FALSE, TOK_CLONE, TOK_PRINT,
     TOK_TRY, TOK_CATCH,
     TOK_SCOPE,
+    TOK_TEST,
 
     /* Mode directive */
     TOK_MODE_DIRECTIVE,   /* #mode casual / #mode strict */
@@ -40,6 +41,7 @@ typedef enum {
     TOK_BANG,      /* ! */
     TOK_DOT,       /* . */
     TOK_DOTDOT,    /* .. */
+    TOK_DOTDOTDOT, /* ... */
     TOK_ARROW,     /* -> */
     TOK_FATARROW,  /* => */
     TOK_PIPE,      /* | */

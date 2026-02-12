@@ -50,6 +50,8 @@ struct LatValue {
             size_t  param_count;
             struct Expr *body;     /* borrowed from AST, not owned */
             Env   *captured_env;   /* owned, deep-cloned */
+            struct Expr **default_values;  /* borrowed, param_count entries, NULL for required */
+            bool   has_variadic;
         } closure;
         struct {
             int64_t start;
@@ -72,7 +74,8 @@ LatValue value_string(const char *s);
 LatValue value_string_owned(char *s);
 LatValue value_array(LatValue *elems, size_t len);
 LatValue value_struct(const char *name, char **field_names, LatValue *field_values, size_t count);
-LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured);
+LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured,
+                       struct Expr **default_values, bool has_variadic);
 LatValue value_unit(void);
 LatValue value_range(int64_t start, int64_t end);
 LatValue value_map_new(void);

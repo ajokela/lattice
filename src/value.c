@@ -142,7 +142,8 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
     return val;
 }
 
-LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured) {
+LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured,
+                       struct Expr **default_values, bool has_variadic) {
     LatValue val;
     memset(&val, 0, sizeof(val));
     val.type = VAL_CLOSURE;
@@ -155,6 +156,8 @@ LatValue value_closure(char **param_names, size_t param_count, struct Expr *body
     val.as.closure.param_count = param_count;
     val.as.closure.body = body;       /* borrowed reference */
     val.as.closure.captured_env = captured;
+    val.as.closure.default_values = default_values;  /* borrowed from AST */
+    val.as.closure.has_variadic = has_variadic;
     return val;
 }
 
@@ -251,6 +254,8 @@ LatValue value_deep_clone(const LatValue *v) {
             out.as.closure.param_count = pc;
             out.as.closure.body = v->as.closure.body;  /* borrowed */
             out.as.closure.captured_env = env_clone(v->as.closure.captured_env);
+            out.as.closure.default_values = v->as.closure.default_values;  /* borrowed */
+            out.as.closure.has_variadic = v->as.closure.has_variadic;
             break;
         }
         case VAL_UNIT: break;

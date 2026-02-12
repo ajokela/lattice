@@ -171,6 +171,11 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             return PHASE_UNSPECIFIED;
 
         case EXPR_CLOSURE:
+            if (expr->as.closure.default_values) {
+                for (size_t i = 0; i < expr->as.closure.param_count; i++)
+                    if (expr->as.closure.default_values[i])
+                        pc_check_expr(pc, expr->as.closure.default_values[i]);
+            }
             return PHASE_UNSPECIFIED;
 
         case EXPR_RANGE:
@@ -410,6 +415,10 @@ LatVec phase_check(const Program *prog) {
                 break;
             case ITEM_STMT:
                 pc_check_stmt(&pc, prog->items[i].as.stmt);
+                break;
+            case ITEM_TEST:
+                for (size_t j = 0; j < prog->items[i].as.test_decl.body_count; j++)
+                    pc_check_stmt(&pc, prog->items[i].as.test_decl.body[j]);
                 break;
         }
     }
