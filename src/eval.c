@@ -4311,6 +4311,126 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
         case STMT_BREAK:    return eval_signal(CF_BREAK, value_unit());
         case STMT_CONTINUE: return eval_signal(CF_CONTINUE, value_unit());
+
+        case STMT_DESTRUCTURE: {
+            EvalResult vr = eval_expr(ev, stmt->as.destructure.value);
+            if (!IS_OK(vr)) return vr;
+
+            if (stmt->as.destructure.kind == DESTRUCT_ARRAY) {
+                if (vr.value.type != VAL_ARRAY) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "cannot destructure %s as array",
+                                   value_type_name(&vr.value));
+                    value_free(&vr.value);
+                    return eval_err(err);
+                }
+                size_t arr_len = vr.value.as.array.len;
+                size_t name_count = stmt->as.destructure.name_count;
+                bool has_rest = (stmt->as.destructure.rest_name != NULL);
+
+                if (!has_rest && arr_len != name_count) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "array destructure: expected %zu elements, got %zu",
+                                   name_count, arr_len);
+                    value_free(&vr.value);
+                    return eval_err(err);
+                }
+                if (has_rest && arr_len < name_count) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "array destructure: expected at least %zu elements, got %zu",
+                                   name_count, arr_len);
+                    value_free(&vr.value);
+                    return eval_err(err);
+                }
+
+                /* Bind named elements */
+                for (size_t i = 0; i < name_count; i++) {
+                    LatValue elem = value_deep_clone(&vr.value.as.array.elems[i]);
+                    /* Apply phase */
+                    if (stmt->as.destructure.phase == PHASE_FLUID)
+                        elem.phase = VTAG_FLUID;
+                    else if (stmt->as.destructure.phase == PHASE_CRYSTAL) {
+                        stats_freeze(&ev->stats);
+                        elem = value_freeze(elem);
+                        freeze_to_region(ev, &elem);
+                    }
+                    stats_binding(&ev->stats);
+                    env_define(ev->env, stmt->as.destructure.names[i], elem);
+                }
+
+                /* Bind rest */
+                if (has_rest) {
+                    size_t rest_count = arr_len - name_count;
+                    LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
+                    for (size_t i = 0; i < rest_count; i++)
+                        rest_elems[i] = value_deep_clone(&vr.value.as.array.elems[name_count + i]);
+                    LatValue rest_arr = value_array(rest_elems, rest_count);
+                    free(rest_elems);
+                    if (stmt->as.destructure.phase == PHASE_FLUID)
+                        rest_arr.phase = VTAG_FLUID;
+                    else if (stmt->as.destructure.phase == PHASE_CRYSTAL) {
+                        stats_freeze(&ev->stats);
+                        rest_arr = value_freeze(rest_arr);
+                        freeze_to_region(ev, &rest_arr);
+                    }
+                    stats_binding(&ev->stats);
+                    env_define(ev->env, stmt->as.destructure.rest_name, rest_arr);
+                }
+                value_free(&vr.value);
+
+            } else {
+                /* DESTRUCT_STRUCT */
+                if (vr.value.type != VAL_STRUCT && vr.value.type != VAL_MAP) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "cannot destructure %s as struct",
+                                   value_type_name(&vr.value));
+                    value_free(&vr.value);
+                    return eval_err(err);
+                }
+
+                for (size_t i = 0; i < stmt->as.destructure.name_count; i++) {
+                    const char *fname = stmt->as.destructure.names[i];
+                    LatValue elem = value_unit();
+                    bool found = false;
+
+                    if (vr.value.type == VAL_STRUCT) {
+                        for (size_t j = 0; j < vr.value.as.strct.field_count; j++) {
+                            if (strcmp(vr.value.as.strct.field_names[j], fname) == 0) {
+                                elem = value_deep_clone(&vr.value.as.strct.field_values[j]);
+                                found = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        /* VAL_MAP */
+                        LatValue *mval = lat_map_get(vr.value.as.map.map, fname);
+                        if (mval) {
+                            elem = value_deep_clone(mval);
+                            found = true;
+                        }
+                    }
+
+                    if (!found) {
+                        char *err = NULL;
+                        (void)asprintf(&err, "destructure: field '%s' not found", fname);
+                        value_free(&vr.value);
+                        return eval_err(err);
+                    }
+
+                    if (stmt->as.destructure.phase == PHASE_FLUID)
+                        elem.phase = VTAG_FLUID;
+                    else if (stmt->as.destructure.phase == PHASE_CRYSTAL) {
+                        stats_freeze(&ev->stats);
+                        elem = value_freeze(elem);
+                        freeze_to_region(ev, &elem);
+                    }
+                    stats_binding(&ev->stats);
+                    env_define(ev->env, fname, elem);
+                }
+                value_free(&vr.value);
+            }
+            return eval_ok(value_unit());
+        }
     }
     return eval_err(strdup("unknown statement type"));
 }

@@ -80,10 +80,14 @@ typedef enum {
 } ExprTag;
 
 /* Statement types */
+/* Destructure target kind */
+typedef enum { DESTRUCT_ARRAY, DESTRUCT_STRUCT } DestructKind;
+
 typedef enum {
     STMT_BINDING, STMT_ASSIGN, STMT_EXPR,
     STMT_RETURN, STMT_FOR, STMT_WHILE, STMT_LOOP,
     STMT_BREAK, STMT_CONTINUE,
+    STMT_DESTRUCTURE,
 } StmtTag;
 
 /* Struct field in a struct literal */
@@ -169,6 +173,14 @@ struct Stmt {
         struct {
             Stmt **body; size_t body_count;
         } loop;
+        struct {
+            AstPhase phase;
+            DestructKind kind;
+            char **names;       /* variable names to bind */
+            size_t name_count;
+            char *rest_name;    /* nullable, for ...rest in arrays */
+            Expr *value;
+        } destructure;
     } as;
 };
 
@@ -279,6 +291,8 @@ Stmt *stmt_while(Expr *cond, Stmt **body, size_t count);
 Stmt *stmt_loop(Stmt **body, size_t count);
 Stmt *stmt_break(void);
 Stmt *stmt_continue(void);
+Stmt *stmt_destructure(AstPhase phase, DestructKind kind, char **names, size_t name_count,
+                       char *rest_name, Expr *value);
 
 /* ── Clone (for lvalue AST expressions in desugaring) ── */
 Expr *expr_clone_ast(const Expr *e);

@@ -306,6 +306,17 @@ static void pc_check_stmt(PhaseChecker *pc, const Stmt *stmt) {
         case STMT_BREAK:
         case STMT_CONTINUE:
             break;
+        case STMT_DESTRUCTURE: {
+            pc_check_expr(pc, stmt->as.destructure.value);
+            AstPhase eff = stmt->as.destructure.phase;
+            if (pc->mode == MODE_STRICT && eff == PHASE_UNSPECIFIED)
+                pc_error(pc, "strict mode: destructure requires explicit phase (flux/fix)");
+            for (size_t i = 0; i < stmt->as.destructure.name_count; i++)
+                pc_define(pc, stmt->as.destructure.names[i], eff);
+            if (stmt->as.destructure.rest_name)
+                pc_define(pc, stmt->as.destructure.rest_name, eff);
+            break;
+        }
     }
 }
 

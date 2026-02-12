@@ -344,6 +344,18 @@ Stmt *stmt_loop(Stmt **body, size_t count) {
 Stmt *stmt_break(void) { return stmt_alloc(STMT_BREAK); }
 Stmt *stmt_continue(void) { return stmt_alloc(STMT_CONTINUE); }
 
+Stmt *stmt_destructure(AstPhase phase, DestructKind kind, char **names, size_t name_count,
+                       char *rest_name, Expr *value) {
+    Stmt *s = stmt_alloc(STMT_DESTRUCTURE);
+    s->as.destructure.phase = phase;
+    s->as.destructure.kind = kind;
+    s->as.destructure.names = names;
+    s->as.destructure.name_count = name_count;
+    s->as.destructure.rest_name = rest_name;
+    s->as.destructure.value = value;
+    return s;
+}
+
 /* ── Destructors ── */
 
 void type_expr_free(TypeExpr *t) {
@@ -524,6 +536,13 @@ void stmt_free(Stmt *s) {
             break;
         case STMT_BREAK:
         case STMT_CONTINUE:
+            break;
+        case STMT_DESTRUCTURE:
+            for (size_t i = 0; i < s->as.destructure.name_count; i++)
+                free(s->as.destructure.names[i]);
+            free(s->as.destructure.names);
+            free(s->as.destructure.rest_name);
+            expr_free(s->as.destructure.value);
             break;
     }
     free(s);

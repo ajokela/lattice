@@ -998,6 +998,59 @@ static Expr *parse_primary(Parser *p, char **err) {
 
 static Stmt *parse_binding(Parser *p, AstPhase phase, char **err) {
     advance(p); /* consume flux/fix/let */
+
+    /* Array destructuring: let [a, b, ...rest] = expr */
+    if (peek_type(p) == TOK_LBRACKET) {
+        advance(p);
+        size_t cap = 4, n = 0;
+        char **names = malloc(cap * sizeof(char *));
+        char *rest_name = NULL;
+        while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
+            if (n >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
+            if (peek_type(p) == TOK_DOTDOTDOT) {
+                advance(p);
+                rest_name = expect_ident(p, err);
+                if (!rest_name) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+                break;
+            }
+            names[n] = expect_ident(p, err);
+            if (!names[n]) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+            n++;
+            if (peek_type(p) != TOK_RBRACKET && peek_type(p) != TOK_DOTDOTDOT) {
+                if (!expect(p, TOK_COMMA, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
+            }
+        }
+        if (!expect(p, TOK_RBRACKET, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
+        if (!expect(p, TOK_EQ, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
+        Expr *value = parse_expr(p, err);
+        if (!value) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
+        eat_semicolon(p);
+        return stmt_destructure(phase, DESTRUCT_ARRAY, names, n, rest_name, value);
+    }
+
+    /* Struct destructuring: let { x, y } = expr */
+    if (peek_type(p) == TOK_LBRACE) {
+        advance(p);
+        size_t cap = 4, n = 0;
+        char **names = malloc(cap * sizeof(char *));
+        while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+            if (n >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
+            names[n] = expect_ident(p, err);
+            if (!names[n]) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+            n++;
+            if (peek_type(p) != TOK_RBRACE) {
+                if (!expect(p, TOK_COMMA, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+            }
+        }
+        if (!expect(p, TOK_RBRACE, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+        if (!expect(p, TOK_EQ, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+        Expr *value = parse_expr(p, err);
+        if (!value) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+        eat_semicolon(p);
+        return stmt_destructure(phase, DESTRUCT_STRUCT, names, n, NULL, value);
+    }
+
+    /* Normal binding: let name = expr */
     char *name = expect_ident(p, err);
     if (!name) return NULL;
 

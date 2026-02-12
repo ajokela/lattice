@@ -4427,6 +4427,105 @@ static void test_match_block_body(void) {
     );
 }
 
+/* ── Destructuring ── */
+
+static void test_destructure_array_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let [a, b, c] = [1, 2, 3]\n"
+        "    print(a)\n"
+        "    print(b)\n"
+        "    print(c)\n"
+        "}\n",
+        "1\n2\n3"
+    );
+}
+
+static void test_destructure_array_rest(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let [first, ...rest] = [10, 20, 30, 40]\n"
+        "    print(first)\n"
+        "    print(rest)\n"
+        "}\n",
+        "10\n[20, 30, 40]"
+    );
+}
+
+static void test_destructure_array_rest_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let [a, b, ...rest] = [1, 2]\n"
+        "    print(a)\n"
+        "    print(b)\n"
+        "    print(rest)\n"
+        "}\n",
+        "1\n2\n[]"
+    );
+}
+
+static void test_destructure_struct_basic(void) {
+    ASSERT_OUTPUT(
+        "struct Point { x: Int, y: Int }\n"
+        "fn main() {\n"
+        "    let p = Point { x: 10, y: 20 }\n"
+        "    let { x, y } = p\n"
+        "    print(x)\n"
+        "    print(y)\n"
+        "}\n",
+        "10\n20"
+    );
+}
+
+static void test_destructure_map(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"name\", \"Alice\")\n"
+        "    m.set(\"age\", 30)\n"
+        "    let { name, age } = m\n"
+        "    print(name)\n"
+        "    print(age)\n"
+        "}\n",
+        "Alice\n30"
+    );
+}
+
+static void test_destructure_flux(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux [a, b] = [1, 2]\n"
+        "    a = 99\n"
+        "    print(a)\n"
+        "    print(b)\n"
+        "}\n",
+        "99\n2"
+    );
+}
+
+static void test_destructure_array_from_fn(void) {
+    ASSERT_OUTPUT(
+        "fn pair() { return [\"hello\", \"world\"] }\n"
+        "fn main() {\n"
+        "    let [a, b] = pair()\n"
+        "    print(a)\n"
+        "    print(b)\n"
+        "}\n",
+        "hello\nworld"
+    );
+}
+
+static void test_destructure_nested_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let [a, b, ...rest] = [1, 2, 3, 4, 5]\n"
+        "    print(a + b)\n"
+        "    print(rest.len())\n"
+        "}\n",
+        "3\n3"
+    );
+}
+
 /* ======================================================================
  * Test Registration
  * ====================================================================== */
@@ -4862,4 +4961,14 @@ void register_stdlib_tests(void) {
     register_test("test_match_binding", test_match_binding);
     register_test("test_match_negative_literal", test_match_negative_literal);
     register_test("test_match_block_body", test_match_block_body);
+
+    /* Destructuring */
+    register_test("test_destructure_array_basic", test_destructure_array_basic);
+    register_test("test_destructure_array_rest", test_destructure_array_rest);
+    register_test("test_destructure_array_rest_empty", test_destructure_array_rest_empty);
+    register_test("test_destructure_struct_basic", test_destructure_struct_basic);
+    register_test("test_destructure_map", test_destructure_map);
+    register_test("test_destructure_flux", test_destructure_flux);
+    register_test("test_destructure_array_from_fn", test_destructure_array_from_fn);
+    register_test("test_destructure_nested_array", test_destructure_nested_array);
 }
