@@ -4335,6 +4335,99 @@ static void test_test_block_with_fn(void) {
 }
 
 /* ======================================================================
+ * Pattern Matching
+ * ====================================================================== */
+
+static void test_match_literal_int(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match 2 { 1 => \"one\", 2 => \"two\", _ => \"other\" }\n"
+        "    print(r)\n"
+        "}\n",
+        "two"
+    );
+}
+
+static void test_match_wildcard(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match 99 { 1 => \"one\", _ => \"default\" }\n"
+        "    print(r)\n"
+        "}\n",
+        "default"
+    );
+}
+
+static void test_match_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match \"hi\" { \"hello\" => 1, \"hi\" => 2, _ => 0 }\n"
+        "    print(r)\n"
+        "}\n",
+        "2"
+    );
+}
+
+static void test_match_range(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match 5 { 1..3 => \"low\", 4..6 => \"mid\", _ => \"high\" }\n"
+        "    print(r)\n"
+        "}\n",
+        "mid"
+    );
+}
+
+static void test_match_guard(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match 15 {\n"
+        "        x if x % 3 == 0 => \"fizz\",\n"
+        "        _ => \"nope\"\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "fizz"
+    );
+}
+
+static void test_match_binding(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match 42 { x => x + 1 }\n"
+        "    print(r)\n"
+        "}\n",
+        "43"
+    );
+}
+
+static void test_match_negative_literal(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match -5 { -5 => \"yes\", _ => \"no\" }\n"
+        "    print(r)\n"
+        "}\n",
+        "yes"
+    );
+}
+
+static void test_match_block_body(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = match 3 {\n"
+        "        x if x > 0 => {\n"
+        "            let doubled = x * 2\n"
+        "            doubled\n"
+        "        },\n"
+        "        _ => 0\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "6"
+    );
+}
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -4759,4 +4852,14 @@ void register_stdlib_tests(void) {
     /* Test framework */
     register_test("test_test_block_ignored", test_test_block_ignored);
     register_test("test_test_block_with_fn", test_test_block_with_fn);
+
+    /* Pattern matching */
+    register_test("test_match_literal_int", test_match_literal_int);
+    register_test("test_match_wildcard", test_match_wildcard);
+    register_test("test_match_string", test_match_string);
+    register_test("test_match_range", test_match_range);
+    register_test("test_match_guard", test_match_guard);
+    register_test("test_match_binding", test_match_binding);
+    register_test("test_match_negative_literal", test_match_negative_literal);
+    register_test("test_match_block_body", test_match_block_body);
 }

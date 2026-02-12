@@ -647,6 +647,20 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
     return result;
 }
 
+/* ── Value equality (for pattern matching) ── */
+
+static bool value_equal(const LatValue *a, const LatValue *b) {
+    if (a->type != b->type) return false;
+    switch (a->type) {
+        case VAL_INT:   return a->as.int_val == b->as.int_val;
+        case VAL_FLOAT: return a->as.float_val == b->as.float_val;
+        case VAL_BOOL:  return a->as.bool_val == b->as.bool_val;
+        case VAL_STR:   return strcmp(a->as.str_val, b->as.str_val) == 0;
+        case VAL_UNIT:  return true;
+        default:        return false;
+    }
+}
+
 /* ── Binary operations ── */
 
 static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
@@ -3991,6 +4005,86 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             buf_len += lplen;
             buf[buf_len] = '\0';
             return eval_ok(value_string_owned(buf));
+        }
+        case EXPR_MATCH: {
+            EvalResult scr = eval_expr(ev, expr->as.match_expr.scrutinee);
+            if (!IS_OK(scr)) return scr;
+            GC_PUSH(ev, &scr.value);
+
+            for (size_t i = 0; i < expr->as.match_expr.arm_count; i++) {
+                MatchArm *arm = &expr->as.match_expr.arms[i];
+                bool matched = false;
+                char *bind_name = NULL;
+                LatValue bind_val = value_unit();
+
+                switch (arm->pattern->tag) {
+                    case PAT_WILDCARD:
+                        matched = true;
+                        break;
+                    case PAT_BINDING:
+                        matched = true;
+                        bind_name = arm->pattern->as.binding_name;
+                        bind_val = value_deep_clone(&scr.value);
+                        break;
+                    case PAT_LITERAL: {
+                        EvalResult pr = eval_expr(ev, arm->pattern->as.literal);
+                        if (!IS_OK(pr)) { GC_POP(ev); value_free(&scr.value); return pr; }
+                        matched = value_equal(&scr.value, &pr.value);
+                        value_free(&pr.value);
+                        break;
+                    }
+                    case PAT_RANGE: {
+                        EvalResult sr = eval_expr(ev, arm->pattern->as.range.start);
+                        if (!IS_OK(sr)) { GC_POP(ev); value_free(&scr.value); return sr; }
+                        EvalResult er = eval_expr(ev, arm->pattern->as.range.end);
+                        if (!IS_OK(er)) { GC_POP(ev); value_free(&scr.value); value_free(&sr.value); return er; }
+                        if (scr.value.type == VAL_INT && sr.value.type == VAL_INT && er.value.type == VAL_INT) {
+                            matched = scr.value.as.int_val >= sr.value.as.int_val &&
+                                      scr.value.as.int_val <= er.value.as.int_val;
+                        }
+                        value_free(&sr.value);
+                        value_free(&er.value);
+                        break;
+                    }
+                }
+
+                if (!matched) continue;
+
+                /* Check guard */
+                if (arm->guard) {
+                    env_push_scope(ev->env);
+                    if (bind_name) env_define(ev->env, bind_name, value_deep_clone(&bind_val));
+                    EvalResult gr = eval_expr(ev, arm->guard);
+                    env_pop_scope(ev->env);
+                    if (!IS_OK(gr)) {
+                        if (bind_name) value_free(&bind_val);
+                        GC_POP(ev); value_free(&scr.value);
+                        return gr;
+                    }
+                    bool guard_pass = gr.value.type == VAL_BOOL && gr.value.as.bool_val;
+                    value_free(&gr.value);
+                    if (!guard_pass) {
+                        if (bind_name) value_free(&bind_val);
+                        continue;
+                    }
+                }
+
+                /* Execute arm body */
+                env_push_scope(ev->env);
+                if (bind_name) env_define(ev->env, bind_name, bind_val);
+                EvalResult result = eval_ok(value_unit());
+                for (size_t j = 0; j < arm->body_count; j++) {
+                    value_free(&result.value);
+                    result = eval_stmt(ev, arm->body[j]);
+                    if (!IS_OK(result)) break;
+                }
+                env_pop_scope(ev->env);
+                GC_POP(ev); value_free(&scr.value);
+                return result;
+            }
+
+            GC_POP(ev); value_free(&scr.value);
+            return eval_err(strdup("no matching pattern in match expression"));
         }
     }
     return eval_err(strdup("unknown expression type"));

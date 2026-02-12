@@ -35,6 +35,32 @@ struct TypeExpr {
 /* Forward declare */
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
+typedef struct Pattern Pattern;
+
+/* Pattern types for match expressions */
+typedef enum {
+    PAT_LITERAL,    /* 0, "hello", true */
+    PAT_WILDCARD,   /* _ */
+    PAT_BINDING,    /* x (binds value to name) */
+    PAT_RANGE,      /* 1..10 */
+} PatternTag;
+
+struct Pattern {
+    PatternTag tag;
+    union {
+        Expr *literal;          /* PAT_LITERAL */
+        char *binding_name;     /* PAT_BINDING */
+        struct { Expr *start; Expr *end; } range; /* PAT_RANGE */
+    } as;
+};
+
+/* Match arm: pattern [if guard] => body */
+typedef struct {
+    Pattern *pattern;
+    Expr *guard;        /* nullable */
+    Stmt **body;
+    size_t body_count;
+} MatchArm;
 
 /* Expression types */
 typedef enum {
@@ -50,6 +76,7 @@ typedef enum {
     EXPR_SCOPE,
     EXPR_TRY_CATCH,
     EXPR_INTERP_STRING,
+    EXPR_MATCH,
 } ExprTag;
 
 /* Statement types */
@@ -109,6 +136,11 @@ struct Expr {
             Expr **exprs;       /* count interpolated expressions */
             size_t count;       /* number of interpolated expressions */
         } interp;
+        struct {
+            Expr *scrutinee;
+            MatchArm *arms;
+            size_t arm_count;
+        } match_expr;
     } as;
 };
 
@@ -227,6 +259,16 @@ Expr *expr_scope(Stmt **stmts, size_t count);
 Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
                      Stmt **catch_stmts, size_t catch_count);
 Expr *expr_interp_string(char **parts, Expr **exprs, size_t count);
+Expr *expr_match(Expr *scrutinee, MatchArm *arms, size_t arm_count);
+
+/* Pattern constructors */
+Pattern *pattern_literal(Expr *lit);
+Pattern *pattern_wildcard(void);
+Pattern *pattern_binding(char *name);
+Pattern *pattern_range(Expr *start, Expr *end);
+
+/* Pattern destructor */
+void pattern_free(Pattern *p);
 
 Stmt *stmt_binding(AstPhase phase, char *name, TypeExpr *ty, Expr *value);
 Stmt *stmt_assign(Expr *target, Expr *value);

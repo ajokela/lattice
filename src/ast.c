@@ -202,6 +202,61 @@ Expr *expr_interp_string(char **parts, Expr **exprs, size_t count) {
     return e;
 }
 
+Expr *expr_match(Expr *scrutinee, MatchArm *arms, size_t arm_count) {
+    Expr *e = expr_alloc(EXPR_MATCH);
+    e->as.match_expr.scrutinee = scrutinee;
+    e->as.match_expr.arms = arms;
+    e->as.match_expr.arm_count = arm_count;
+    return e;
+}
+
+Pattern *pattern_literal(Expr *lit) {
+    Pattern *p = calloc(1, sizeof(Pattern));
+    p->tag = PAT_LITERAL;
+    p->as.literal = lit;
+    return p;
+}
+
+Pattern *pattern_wildcard(void) {
+    Pattern *p = calloc(1, sizeof(Pattern));
+    p->tag = PAT_WILDCARD;
+    return p;
+}
+
+Pattern *pattern_binding(char *name) {
+    Pattern *p = calloc(1, sizeof(Pattern));
+    p->tag = PAT_BINDING;
+    p->as.binding_name = name;
+    return p;
+}
+
+Pattern *pattern_range(Expr *start, Expr *end) {
+    Pattern *p = calloc(1, sizeof(Pattern));
+    p->tag = PAT_RANGE;
+    p->as.range.start = start;
+    p->as.range.end = end;
+    return p;
+}
+
+void pattern_free(Pattern *p) {
+    if (!p) return;
+    switch (p->tag) {
+        case PAT_LITERAL:
+            expr_free(p->as.literal);
+            break;
+        case PAT_WILDCARD:
+            break;
+        case PAT_BINDING:
+            free(p->as.binding_name);
+            break;
+        case PAT_RANGE:
+            expr_free(p->as.range.start);
+            expr_free(p->as.range.end);
+            break;
+    }
+    free(p);
+}
+
 /* ── Clone (for lvalue AST expressions in desugaring) ── */
 
 Expr *expr_clone_ast(const Expr *e) {
@@ -411,6 +466,18 @@ void expr_free(Expr *e) {
             for (size_t i = 0; i < e->as.interp.count; i++)
                 expr_free(e->as.interp.exprs[i]);
             free(e->as.interp.exprs);
+            break;
+        case EXPR_MATCH:
+            expr_free(e->as.match_expr.scrutinee);
+            for (size_t i = 0; i < e->as.match_expr.arm_count; i++) {
+                MatchArm *arm = &e->as.match_expr.arms[i];
+                pattern_free(arm->pattern);
+                if (arm->guard) expr_free(arm->guard);
+                for (size_t j = 0; j < arm->body_count; j++)
+                    stmt_free(arm->body[j]);
+                free(arm->body);
+            }
+            free(e->as.match_expr.arms);
             break;
     }
     free(e);

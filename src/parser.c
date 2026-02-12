@@ -604,6 +604,148 @@ static Expr *parse_primary(Parser *p, char **err) {
         }
         return expr_try_catch(try_stmts, try_count, catch_var, catch_stmts, catch_count);
     }
+    if (tt == TOK_MATCH) {
+        advance(p);
+        Expr *scrutinee = parse_expr(p, err);
+        if (!scrutinee) return NULL;
+        if (!expect(p, TOK_LBRACE, err)) { expr_free(scrutinee); return NULL; }
+
+        size_t cap = 4, n = 0;
+        MatchArm *arms = malloc(cap * sizeof(MatchArm));
+
+        while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+            if (n >= cap) { cap *= 2; arms = realloc(arms, cap * sizeof(MatchArm)); }
+
+            /* Parse pattern */
+            Pattern *pat = NULL;
+            TokenType pt = peek_type(p);
+            if (pt == TOK_INT_LIT) {
+                Token *t = advance(p);
+                /* Check for range pattern: int..int */
+                if (peek_type(p) == TOK_DOTDOT) {
+                    advance(p);
+                    Expr *start = expr_int_lit(t->as.int_val);
+                    Expr *end = parse_expr(p, err);
+                    if (!end) { expr_free(start); goto match_fail; }
+                    pat = pattern_range(start, end);
+                } else {
+                    pat = pattern_literal(expr_int_lit(t->as.int_val));
+                }
+            } else if (pt == TOK_FLOAT_LIT) {
+                Token *t = advance(p);
+                pat = pattern_literal(expr_float_lit(t->as.float_val));
+            } else if (pt == TOK_STRING_LIT) {
+                Token *t = advance(p);
+                pat = pattern_literal(expr_string_lit(strdup(t->as.str_val)));
+            } else if (pt == TOK_TRUE) {
+                advance(p);
+                pat = pattern_literal(expr_bool_lit(true));
+            } else if (pt == TOK_FALSE) {
+                advance(p);
+                pat = pattern_literal(expr_bool_lit(false));
+            } else if (pt == TOK_IDENT) {
+                Token *t = advance(p);
+                if (strcmp(t->as.str_val, "_") == 0) {
+                    pat = pattern_wildcard();
+                } else {
+                    /* Check for range: ident..expr */
+                    if (peek_type(p) == TOK_DOTDOT) {
+                        advance(p);
+                        Expr *start = expr_ident(strdup(t->as.str_val));
+                        Expr *end = parse_expr(p, err);
+                        if (!end) { expr_free(start); goto match_fail; }
+                        pat = pattern_range(start, end);
+                    } else {
+                        pat = pattern_binding(strdup(t->as.str_val));
+                    }
+                }
+            } else if (pt == TOK_MINUS) {
+                /* Negative literal: -1, -3.14 */
+                advance(p);
+                if (peek_type(p) == TOK_INT_LIT) {
+                    Token *t = advance(p);
+                    pat = pattern_literal(expr_int_lit(-t->as.int_val));
+                } else if (peek_type(p) == TOK_FLOAT_LIT) {
+                    Token *t = advance(p);
+                    pat = pattern_literal(expr_float_lit(-t->as.float_val));
+                } else {
+                    *err = strdup("expected number after '-' in pattern");
+                    goto match_fail;
+                }
+            } else {
+                *err = strdup("expected pattern in match arm");
+                goto match_fail;
+            }
+
+            /* Optional guard: if expr */
+            Expr *guard = NULL;
+            if (peek_type(p) == TOK_IF) {
+                advance(p);
+                guard = parse_expr(p, err);
+                if (!guard) { pattern_free(pat); goto match_fail; }
+            }
+
+            /* => */
+            if (!expect(p, TOK_FATARROW, err)) {
+                pattern_free(pat);
+                if (guard) expr_free(guard);
+                goto match_fail;
+            }
+
+            /* Arm body: either { stmts } block or single expression */
+            Stmt **body = NULL;
+            size_t body_count = 0;
+            if (peek_type(p) == TOK_LBRACE) {
+                advance(p);
+                body = parse_block_stmts(p, &body_count, err);
+                if (!body && *err) {
+                    pattern_free(pat);
+                    if (guard) expr_free(guard);
+                    goto match_fail;
+                }
+                if (!expect(p, TOK_RBRACE, err)) {
+                    pattern_free(pat);
+                    if (guard) expr_free(guard);
+                    for (size_t i = 0; i < body_count; i++) stmt_free(body[i]);
+                    free(body);
+                    goto match_fail;
+                }
+            } else {
+                Expr *arm_expr = parse_expr(p, err);
+                if (!arm_expr) {
+                    pattern_free(pat);
+                    if (guard) expr_free(guard);
+                    goto match_fail;
+                }
+                body = malloc(sizeof(Stmt *));
+                body[0] = stmt_expr(arm_expr);
+                body_count = 1;
+            }
+
+            arms[n].pattern = pat;
+            arms[n].guard = guard;
+            arms[n].body = body;
+            arms[n].body_count = body_count;
+            n++;
+
+            /* Optional comma between arms */
+            if (peek_type(p) == TOK_COMMA) advance(p);
+        }
+
+        if (!expect(p, TOK_RBRACE, err)) {
+            match_fail:
+            for (size_t i = 0; i < n; i++) {
+                pattern_free(arms[i].pattern);
+                if (arms[i].guard) expr_free(arms[i].guard);
+                for (size_t j = 0; j < arms[i].body_count; j++) stmt_free(arms[i].body[j]);
+                free(arms[i].body);
+            }
+            free(arms);
+            expr_free(scrutinee);
+            return NULL;
+        }
+        return expr_match(scrutinee, arms, n);
+    }
     if (tt == TOK_IF) {
         advance(p);
         Expr *cond = parse_expr(p, err);

@@ -110,6 +110,7 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "catch") == 0)    return TOK_CATCH;
     if (strcmp(ident, "scope") == 0)    return TOK_SCOPE;
     if (strcmp(ident, "test") == 0)     return TOK_TEST;
+    if (strcmp(ident, "match") == 0)    return TOK_MATCH;
     return TOK_IDENT;
 }
 

@@ -225,6 +225,16 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
                 pc_pop_scope(pc);
             }
             return PHASE_UNSPECIFIED;
+
+        case EXPR_MATCH:
+            pc_check_expr(pc, expr->as.match_expr.scrutinee);
+            for (size_t i = 0; i < expr->as.match_expr.arm_count; i++) {
+                MatchArm *arm = &expr->as.match_expr.arms[i];
+                if (arm->guard) pc_check_expr(pc, arm->guard);
+                for (size_t j = 0; j < arm->body_count; j++)
+                    pc_check_stmt(pc, arm->body[j]);
+            }
+            return PHASE_UNSPECIFIED;
     }
     return PHASE_UNSPECIFIED;
 }
