@@ -16,15 +16,21 @@
 #include "path_ops.h"
 #include "regex_ops.h"
 #include "crypto_ops.h"
+#include "process_ops.h"
 #include "lexer.h"
 #include "parser.h"
+#include "channel.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
 #include <limits.h>
+#include <ctype.h>
 #include <libgen.h>
 #include <sys/resource.h>
+#ifndef __EMSCRIPTEN__
+#include <pthread.h>
+#endif
 
 /* Monotonic clock in nanoseconds */
 static uint64_t now_ns(void) {
@@ -665,6 +671,98 @@ static EvalResult eval_unaryop(UnaryOpKind op, LatValue *val) {
     return eval_err(err);
 }
 
+/* ── Concurrency infrastructure ── */
+
+#ifndef __EMSCRIPTEN__
+typedef struct {
+    Stmt      **stmts;
+    size_t      stmt_count;
+    Evaluator  *child_ev;
+    char       *error;       /* NULL on success */
+    pthread_t   thread;
+} SpawnTask;
+
+static Evaluator *create_child_evaluator(Evaluator *parent) {
+    Evaluator *child = calloc(1, sizeof(Evaluator));
+    child->env = env_clone(parent->env);
+    child->mode = parent->mode;
+    /* Share AST pointers (borrowed, immutable after parse) */
+    child->struct_defs = lat_map_new(sizeof(StructDecl *));
+    for (size_t i = 0; i < parent->struct_defs.cap; i++) {
+        if (parent->struct_defs.entries[i].state == MAP_OCCUPIED) {
+            lat_map_set(&child->struct_defs,
+                        parent->struct_defs.entries[i].key,
+                        parent->struct_defs.entries[i].value);
+        }
+    }
+    child->fn_defs = lat_map_new(sizeof(FnDecl *));
+    for (size_t i = 0; i < parent->fn_defs.cap; i++) {
+        if (parent->fn_defs.entries[i].state == MAP_OCCUPIED) {
+            lat_map_set(&child->fn_defs,
+                        parent->fn_defs.entries[i].key,
+                        parent->fn_defs.entries[i].value);
+        }
+    }
+    stats_init(&child->stats);
+    child->heap = dual_heap_new();
+    child->gc_roots = lat_vec_new(sizeof(LatValue *));
+    child->saved_envs = lat_vec_new(sizeof(Env *));
+    child->gc_stress = parent->gc_stress;
+    child->no_regions = parent->no_regions;
+    child->required_files = lat_map_new(sizeof(bool));
+    child->script_dir = parent->script_dir ? strdup(parent->script_dir) : NULL;
+    return child;
+}
+
+static void free_child_evaluator(Evaluator *child) {
+    if (!child) return;
+    env_free(child->env);
+    lat_map_free(&child->struct_defs);
+    lat_map_free(&child->fn_defs);
+    lat_map_free(&child->required_files);
+    free(child->script_dir);
+    value_set_heap(NULL);
+    dual_heap_free(child->heap);
+    lat_vec_free(&child->gc_roots);
+    lat_vec_free(&child->saved_envs);
+    free(child);
+}
+
+static void *spawn_thread_fn(void *arg) {
+    SpawnTask *task = (SpawnTask *)arg;
+    Evaluator *child = task->child_ev;
+
+    /* Set thread-local heap for this child evaluator */
+    value_set_heap(child->heap);
+    value_set_arena(NULL);
+
+    EvalResult result = eval_block_stmts(child, task->stmts, task->stmt_count);
+
+    if (IS_ERR(result)) {
+        task->error = result.error;  /* transfer ownership */
+    } else if (IS_SIGNAL(result)) {
+        switch (result.cf.tag) {
+            case CF_RETURN:
+                task->error = strdup("cannot use 'return' inside spawn");
+                value_free(&result.cf.value);
+                break;
+            case CF_BREAK:
+                task->error = strdup("cannot use 'break' inside spawn");
+                break;
+            case CF_CONTINUE:
+                task->error = strdup("cannot use 'continue' inside spawn");
+                break;
+            default:
+                break;
+        }
+    } else {
+        value_free(&result.value);
+    }
+
+    return NULL;
+}
+#endif /* __EMSCRIPTEN__ */
+
 /* ── Expression evaluation ── */
 
 static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
@@ -875,6 +973,136 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(args);
                     if (!af_ok) { char *e = af_err; return eval_err(e); }
                     return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "mkdir") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("mkdir() expects 1 string argument")); }
+                    char *mk_err = NULL;
+                    bool mk_ok = fs_mkdir(args[0].as.str_val, &mk_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!mk_ok) { free(mk_err); return eval_ok(value_bool(false)); }
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "rename") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rename() expects 2 string arguments")); }
+                    char *rn_err = NULL;
+                    bool rn_ok = fs_rename(args[0].as.str_val, args[1].as.str_val, &rn_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!rn_ok) { free(rn_err); return eval_ok(value_bool(false)); }
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "is_dir") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_dir() expects 1 string argument")); }
+                    bool result = fs_is_dir(args[0].as.str_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_bool(result));
+                }
+
+                if (strcmp(fn_name, "is_file") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_file() expects 1 string argument")); }
+                    bool result = fs_is_file(args[0].as.str_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_bool(result));
+                }
+
+                if (strcmp(fn_name, "rmdir") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rmdir() expects 1 string argument")); }
+                    char *rm_err = NULL;
+                    bool rm_ok = fs_rmdir(args[0].as.str_val, &rm_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!rm_ok) { char *e = rm_err; return eval_err(e); }
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "glob") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("glob() expects 1 string argument")); }
+                    char *gl_err = NULL;
+                    size_t gl_count = 0;
+                    char **gl_entries = fs_glob(args[0].as.str_val, &gl_count, &gl_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (gl_err) { return eval_err(gl_err); }
+                    /* Build array of strings */
+                    LatValue *elems = NULL;
+                    if (gl_count > 0) {
+                        elems = malloc(gl_count * sizeof(LatValue));
+                        for (size_t i = 0; i < gl_count; i++) {
+                            elems[i] = value_string_owned(gl_entries[i]);
+                        }
+                        free(gl_entries);
+                    }
+                    LatValue arr = value_array(elems, gl_count);
+                    free(elems);
+                    return eval_ok(arr);
+                }
+
+                if (strcmp(fn_name, "stat") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("stat() expects 1 string argument")); }
+                    int64_t st_size = 0, st_mtime = 0, st_mode = 0;
+                    const char *st_type = NULL;
+                    char *st_err = NULL;
+                    bool st_ok = fs_stat(args[0].as.str_val, &st_size, &st_mtime, &st_mode, &st_type, &st_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!st_ok) { return eval_err(st_err); }
+                    /* Build result Map — lat_map_set does shallow memcpy,
+                     * so the map takes ownership of internal pointers.
+                     * Do NOT value_free the temporaries. */
+                    LatValue map = value_map_new();
+                    LatValue sz = value_int(st_size);
+                    lat_map_set(map.as.map.map, "size", &sz);
+                    LatValue mt = value_int(st_mtime);
+                    lat_map_set(map.as.map.map, "mtime", &mt);
+                    LatValue ty = value_string(st_type);
+                    lat_map_set(map.as.map.map, "type", &ty);
+                    LatValue pm = value_int(st_mode);
+                    lat_map_set(map.as.map.map, "permissions", &pm);
+                    return eval_ok(map);
+                }
+
+                if (strcmp(fn_name, "copy_file") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("copy_file() expects 2 string arguments")); }
+                    char *cp_err = NULL;
+                    bool cp_ok = fs_copy_file(args[0].as.str_val, args[1].as.str_val, &cp_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!cp_ok) { return eval_err(cp_err); }
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "realpath") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("realpath() expects 1 string argument")); }
+                    char *rp_err = NULL;
+                    char *rp_result = fs_realpath(args[0].as.str_val, &rp_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!rp_result) { return eval_err(rp_err); }
+                    return eval_ok(value_string_owned(rp_result));
+                }
+
+                if (strcmp(fn_name, "tempdir") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tempdir() expects no arguments")); }
+                    free(args);
+                    char *td_err = NULL;
+                    char *td_result = fs_tempdir(&td_err);
+                    if (!td_result) { return eval_err(td_err); }
+                    return eval_ok(value_string_owned(td_result));
+                }
+
+                if (strcmp(fn_name, "tempfile") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tempfile() expects no arguments")); }
+                    free(args);
+                    char *tf_err = NULL;
+                    char *tf_result = fs_tempfile(&tf_err);
+                    if (!tf_result) { return eval_err(tf_err); }
+                    return eval_ok(value_string_owned(tf_result));
                 }
 
                 /* ── Path builtins ── */
@@ -1152,6 +1380,15 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_map_new());
+                }
+
+                if (strcmp(fn_name, "Channel::new") == 0) {
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    LatChannel *ch = channel_new();
+                    LatValue val = value_channel(ch);
+                    channel_release(ch);  /* value_channel retained; drop our creation ref */
+                    return eval_ok(val);
                 }
 
                 if (strcmp(fn_name, "parse_int") == 0) {
@@ -1492,6 +1729,145 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                if (strcmp(fn_name, "log") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_log(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "log2") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log2() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_log2(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "log10") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log10() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_log10(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "sin") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sin() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_sin(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "cos") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cos() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_cos(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "tan") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tan() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_tan(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "atan2") == 0) {
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("atan2() expects (Int|Float, Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_atan2(&args[0], &args[1], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "clamp") == 0) {
+                    if (argc != 3) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("clamp() expects (Int|Float, Int|Float, Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_clamp(&args[0], &args[1], &args[2], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "math_pi") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("math_pi() expects no arguments")); }
+                    free(args);
+                    return eval_ok(math_pi());
+                }
+
+                if (strcmp(fn_name, "math_e") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("math_e() expects no arguments")); }
+                    free(args);
+                    return eval_ok(math_e());
+                }
+
+                /* ── range() builtin ── */
+
+                if (strcmp(fn_name, "range") == 0) {
+                    if (argc < 2 || argc > 3) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("range() expects 2 or 3 integer arguments (start, end, step?)"));
+                    }
+                    if (args[0].type != VAL_INT || args[1].type != VAL_INT) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("range() start and end must be integers"));
+                    }
+                    int64_t rstart = args[0].as.int_val;
+                    int64_t rend = args[1].as.int_val;
+                    int64_t rstep = (rstart <= rend) ? 1 : -1;
+                    if (argc == 3) {
+                        if (args[2].type != VAL_INT) {
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                            free(args);
+                            return eval_err(strdup("range() step must be an integer"));
+                        }
+                        rstep = args[2].as.int_val;
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (rstep == 0) {
+                        return eval_err(strdup("range() step cannot be 0"));
+                    }
+                    /* Calculate count and build array */
+                    size_t rcount = 0;
+                    if (rstep > 0 && rstart < rend) {
+                        rcount = (size_t)((rend - rstart + rstep - 1) / rstep);
+                    } else if (rstep < 0 && rstart > rend) {
+                        rcount = (size_t)((rstart - rend + (-rstep) - 1) / (-rstep));
+                    }
+                    LatValue *relems = malloc((rcount > 0 ? rcount : 1) * sizeof(LatValue));
+                    int64_t rcur = rstart;
+                    for (size_t ri = 0; ri < rcount; ri++) {
+                        relems[ri] = value_int(rcur);
+                        rcur += rstep;
+                    }
+                    LatValue range_arr = value_array(relems, rcount);
+                    free(relems);
+                    return eval_ok(range_arr);
+                }
+
                 /* ── Type coercion builtins ── */
 
                 if (strcmp(fn_name, "to_int") == 0) {
@@ -1551,6 +1927,60 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(args);
                     if (!ok) return eval_err(terr);
                     return eval_ok(value_unit());
+                }
+
+                /* ── Process/system builtins ── */
+
+                if (strcmp(fn_name, "cwd") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cwd() expects no arguments")); }
+                    free(args);
+                    char *cwd_err = NULL;
+                    char *dir = process_cwd(&cwd_err);
+                    if (!dir) return eval_err(cwd_err);
+                    return eval_ok(value_string_owned(dir));
+                }
+
+                if (strcmp(fn_name, "exec") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exec() expects 1 argument")); }
+                    if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exec() expects a string command")); }
+                    char *exec_err = NULL;
+                    LatValue result = process_exec(args[0].as.str_val, &exec_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (exec_err) return eval_err(exec_err);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "shell") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("shell() expects 1 argument")); }
+                    if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("shell() expects a string command")); }
+                    char *shell_err = NULL;
+                    LatValue result = process_shell(args[0].as.str_val, &shell_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (shell_err) return eval_err(shell_err);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "args") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("args() expects no arguments")); }
+                    free(args);
+#ifdef __EMSCRIPTEN__
+                    LatValue arr = value_array(NULL, 0);
+                    return eval_ok(arr);
+#else
+                    int ac = ev->prog_argc;
+                    char **av = ev->prog_argv;
+                    LatValue *elems = NULL;
+                    if (ac > 0) {
+                        elems = malloc((size_t)ac * sizeof(LatValue));
+                        for (int i = 0; i < ac; i++)
+                            elems[i] = value_string(av[i]);
+                    }
+                    LatValue arr = value_array(elems, (size_t)ac);
+                    free(elems);
+                    return eval_ok(arr);
+#endif
                 }
 
                 /* ── Regex builtins ── */
@@ -1656,6 +2086,26 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(args);
                     if (terr) return eval_err(terr);
                     return eval_ok(value_int(result));
+                }
+
+                /* ── Assertion builtin ── */
+
+                if (strcmp(fn_name, "assert") == 0) {
+                    if (argc < 1 || argc > 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("assert() expects 1 or 2 arguments")); }
+                    bool truthy = value_is_truthy(&args[0]);
+                    if (!truthy) {
+                        char *msg = NULL;
+                        if (argc == 2 && args[1].type == VAL_STR)
+                            msg = strdup(args[1].as.str_val);
+                        else
+                            msg = strdup("assertion failed");
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
                 }
 
                 /* ── Named function lookup ── */
@@ -1781,6 +2231,116 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (old) value_free(old);
                     lat_map_set(map_lv->as.map.map, kr.value.as.str_val, &vr.value);
                     value_free(&kr.value);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            /* Handle .pop() on arrays - needs mutation */
+            if (strcmp(expr->as.method_call.method, "pop") == 0 &&
+                expr->as.method_call.arg_count == 0) {
+                char *lv_err = NULL;
+                LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (arr_lv && arr_lv->type == VAL_ARRAY) {
+                    if (value_is_crystal(arr_lv))
+                        return eval_err(strdup("cannot pop from a crystal array"));
+                    if (arr_lv->as.array.len == 0)
+                        return eval_err(strdup("pop on empty array"));
+                    LatValue popped = arr_lv->as.array.elems[--arr_lv->as.array.len];
+                    return eval_ok(popped);
+                }
+                if (lv_err) free(lv_err);
+            }
+            /* Handle .insert() on arrays - needs mutation */
+            if (strcmp(expr->as.method_call.method, "insert") == 0 &&
+                expr->as.method_call.arg_count == 2) {
+                char *lv_err = NULL;
+                LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (arr_lv && arr_lv->type == VAL_ARRAY) {
+                    if (value_is_crystal(arr_lv))
+                        return eval_err(strdup("cannot insert into a crystal array"));
+                    EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ir)) return ir;
+                    if (ir.value.type != VAL_INT) {
+                        value_free(&ir.value);
+                        return eval_err(strdup(".insert() index must be an integer"));
+                    }
+                    int64_t idx = ir.value.as.int_val;
+                    value_free(&ir.value);
+                    if (idx < 0 || (size_t)idx > arr_lv->as.array.len)
+                        return eval_err(strdup(".insert() index out of bounds"));
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[1]);
+                    if (!IS_OK(vr)) return vr;
+                    /* Grow if needed */
+                    if (arr_lv->as.array.len >= arr_lv->as.array.cap) {
+                        size_t old_cap = arr_lv->as.array.cap;
+                        arr_lv->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
+                        LatValue *new_buf = fluid_alloc(ev->heap->fluid,
+                            arr_lv->as.array.cap * sizeof(LatValue));
+                        memcpy(new_buf, arr_lv->as.array.elems, old_cap * sizeof(LatValue));
+                        if (!fluid_dealloc(ev->heap->fluid, arr_lv->as.array.elems))
+                            free(arr_lv->as.array.elems);
+                        arr_lv->as.array.elems = new_buf;
+                    }
+                    /* Shift elements right */
+                    memmove(&arr_lv->as.array.elems[(size_t)idx + 1],
+                            &arr_lv->as.array.elems[(size_t)idx],
+                            (arr_lv->as.array.len - (size_t)idx) * sizeof(LatValue));
+                    arr_lv->as.array.elems[(size_t)idx] = vr.value;
+                    arr_lv->as.array.len++;
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            /* Handle .remove_at() on arrays - needs mutation */
+            if (strcmp(expr->as.method_call.method, "remove_at") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (arr_lv && arr_lv->type == VAL_ARRAY) {
+                    if (value_is_crystal(arr_lv))
+                        return eval_err(strdup("cannot remove from a crystal array"));
+                    EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ir)) return ir;
+                    if (ir.value.type != VAL_INT) {
+                        value_free(&ir.value);
+                        return eval_err(strdup(".remove_at() index must be an integer"));
+                    }
+                    int64_t idx = ir.value.as.int_val;
+                    value_free(&ir.value);
+                    if (idx < 0 || (size_t)idx >= arr_lv->as.array.len)
+                        return eval_err(strdup(".remove_at() index out of bounds"));
+                    LatValue removed = arr_lv->as.array.elems[(size_t)idx];
+                    /* Shift elements left */
+                    memmove(&arr_lv->as.array.elems[(size_t)idx],
+                            &arr_lv->as.array.elems[(size_t)idx + 1],
+                            (arr_lv->as.array.len - (size_t)idx - 1) * sizeof(LatValue));
+                    arr_lv->as.array.len--;
+                    return eval_ok(removed);
+                }
+                if (lv_err) free(lv_err);
+            }
+            /* Handle .merge() on maps - needs mutation */
+            if (strcmp(expr->as.method_call.method, "merge") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (map_lv && map_lv->type == VAL_MAP) {
+                    EvalResult mr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(mr)) return mr;
+                    if (mr.value.type != VAL_MAP) {
+                        value_free(&mr.value);
+                        return eval_err(strdup(".merge() argument must be a Map"));
+                    }
+                    LatMap *other = mr.value.as.map.map;
+                    for (size_t i = 0; i < other->cap; i++) {
+                        if (other->entries[i].state == MAP_OCCUPIED) {
+                            LatValue cloned = value_deep_clone((LatValue *)other->entries[i].value);
+                            LatValue *old = (LatValue *)lat_map_get(map_lv->as.map.map, other->entries[i].key);
+                            if (old) value_free(old);
+                            lat_map_set(map_lv->as.map.map, other->entries[i].key, &cloned);
+                        }
+                    }
+                    value_free(&mr.value);
                     return eval_ok(value_unit());
                 }
                 if (lv_err) free(lv_err);
@@ -1991,6 +2551,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         (void)asprintf(&err, "undefined variable '%s'", name);
                         return eval_err(err);
                     }
+                    if (val.type == VAL_CHANNEL) {
+                        value_free(&val);
+                        return eval_err(strdup("cannot freeze a Channel"));
+                    }
                     uint64_t ft0 = now_ns();
                     val = value_freeze(val);
                     freeze_to_region(ev, &val);
@@ -2004,6 +2568,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     (void)asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
                 }
+                if (val.type == VAL_CHANNEL) {
+                    value_free(&val);
+                    return eval_err(strdup("cannot freeze a Channel"));
+                }
                 uint64_t ft0 = now_ns();
                 val = value_freeze(val);
                 freeze_to_region(ev, &val);
@@ -2014,6 +2582,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             }
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
             if (!IS_OK(er)) return er;
+            if (er.value.type == VAL_CHANNEL) {
+                value_free(&er.value);
+                return eval_err(strdup("cannot freeze a Channel"));
+            }
             { uint64_t ft0 = now_ns();
             er.value = value_freeze(er.value);
             freeze_to_region(ev, &er.value);
@@ -2189,6 +2761,101 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 return eval_ok(result.cf.value);
             }
             return result;
+        }
+
+        case EXPR_SCOPE: {
+#ifdef __EMSCRIPTEN__
+            /* WASM fallback: run as a regular block */
+            stats_scope_push(&ev->stats);
+            env_push_scope(ev->env);
+            EvalResult result = eval_block_stmts(ev, expr->as.block.stmts, expr->as.block.count);
+            env_pop_scope(ev->env);
+            stats_scope_pop(&ev->stats);
+            return result;
+#else
+            /* Count spawn statements */
+            size_t total = expr->as.block.count;
+            size_t spawn_count = 0;
+            for (size_t i = 0; i < total; i++) {
+                Stmt *s = expr->as.block.stmts[i];
+                if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)
+                    spawn_count++;
+            }
+
+            if (spawn_count == 0) {
+                /* No spawns — run as regular block */
+                stats_scope_push(&ev->stats);
+                env_push_scope(ev->env);
+                EvalResult result = eval_block_stmts(ev, expr->as.block.stmts, total);
+                env_pop_scope(ev->env);
+                stats_scope_pop(&ev->stats);
+                return result;
+            }
+
+            /* Run non-spawn statements synchronously, spawn tasks in parallel */
+            SpawnTask *tasks = calloc(spawn_count, sizeof(SpawnTask));
+            size_t task_idx = 0;
+            char *first_error = NULL;
+
+            stats_scope_push(&ev->stats);
+            env_push_scope(ev->env);
+
+            /* Execute non-spawn statements first, create tasks for spawns */
+            for (size_t i = 0; i < total; i++) {
+                Stmt *s = expr->as.block.stmts[i];
+                if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN) {
+                    Expr *spawn_expr = s->as.expr;
+                    tasks[task_idx].stmts = spawn_expr->as.block.stmts;
+                    tasks[task_idx].stmt_count = spawn_expr->as.block.count;
+                    tasks[task_idx].child_ev = create_child_evaluator(ev);
+                    tasks[task_idx].error = NULL;
+                    task_idx++;
+                } else {
+                    if (!first_error) {
+                        EvalResult r = eval_stmt(ev, s);
+                        if (IS_ERR(r)) {
+                            first_error = r.error;
+                        } else if (IS_SIGNAL(r)) {
+                            first_error = strdup("unexpected control flow in scope");
+                            value_free(&r.cf.value);
+                        } else {
+                            value_free(&r.value);
+                        }
+                    }
+                }
+            }
+
+            /* Launch all spawn threads */
+            for (size_t i = 0; i < task_idx; i++) {
+                pthread_create(&tasks[i].thread, NULL, spawn_thread_fn, &tasks[i]);
+            }
+
+            /* Join all threads */
+            for (size_t i = 0; i < task_idx; i++) {
+                pthread_join(tasks[i].thread, NULL);
+            }
+
+            /* Restore parent TLS heap */
+            value_set_heap(ev->heap);
+            value_set_arena(NULL);
+
+            /* Collect first error from child threads */
+            for (size_t i = 0; i < task_idx; i++) {
+                if (tasks[i].error && !first_error) {
+                    first_error = tasks[i].error;
+                } else if (tasks[i].error) {
+                    free(tasks[i].error);
+                }
+                free_child_evaluator(tasks[i].child_ev);
+            }
+            free(tasks);
+
+            env_pop_scope(ev->env);
+            stats_scope_pop(&ev->stats);
+
+            if (first_error) return eval_err(first_error);
+            return eval_ok(value_unit());
+#endif
         }
     }
     return eval_err(strdup("unknown expression type"));
@@ -2457,8 +3124,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
         return eval_err(strdup(".len() is not defined on this type"));
     }
-    if (strcmp(method, "map") == 0) {
-        if (obj.type != VAL_ARRAY) return eval_err(strdup(".map() is not defined on non-array"));
+    if (strcmp(method, "map") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1) return eval_err(strdup(".map() expects exactly 1 argument (a closure)"));
         if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".map() argument must be a closure"));
 
@@ -2515,8 +3181,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         return eval_ok(value_string_owned(result));
     }
     /* ── Array: filter ── */
-    if (strcmp(method, "filter") == 0) {
-        if (obj.type != VAL_ARRAY) return eval_err(strdup(".filter() is not defined on non-array"));
+    if (strcmp(method, "filter") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE) return eval_err(strdup(".filter() expects 1 closure argument"));
         size_t n = obj.as.array.len;
         LatValue *results = malloc((n > 0 ? n : 1) * sizeof(LatValue));
@@ -2547,8 +3212,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         return eval_ok(arr);
     }
     /* ── Array: for_each ── */
-    if (strcmp(method, "for_each") == 0) {
-        if (obj.type != VAL_ARRAY) return eval_err(strdup(".for_each() is not defined on non-array"));
+    if (strcmp(method, "for_each") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE) return eval_err(strdup(".for_each() expects 1 closure argument"));
         for (size_t i = 0; i < obj.as.array.len; i++) {
             LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
@@ -2665,6 +3329,384 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (slice_err) return eval_err(slice_err);
         return eval_ok(sliced);
     }
+    /* ── Array: pop ── */
+    if (strcmp(method, "pop") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".pop() takes no arguments"));
+        if (obj.as.array.len == 0) return eval_err(strdup("pop on empty array"));
+        LatValue removed = value_deep_clone(&obj.as.array.elems[obj.as.array.len - 1]);
+        return eval_ok(removed);
+    }
+    /* ── Array: index_of ── */
+    if (strcmp(method, "index_of") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1) return eval_err(strdup(".index_of() expects 1 argument"));
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            if (value_eq(&obj.as.array.elems[i], &args[0])) {
+                return eval_ok(value_int((int64_t)i));
+            }
+        }
+        return eval_ok(value_int(-1));
+    }
+    /* ── Array: any ── */
+    if (strcmp(method, "any") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+            return eval_err(strdup(".any() expects 1 closure argument"));
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
+            EvalResult r = call_closure(ev,
+                args[0].as.closure.param_names,
+                args[0].as.closure.param_count,
+                args[0].as.closure.body,
+                args[0].as.closure.captured_env,
+                &elem, 1);
+            if (!IS_OK(r)) return r;
+            if (value_is_truthy(&r.value)) {
+                value_free(&r.value);
+                return eval_ok(value_bool(true));
+            }
+            value_free(&r.value);
+        }
+        return eval_ok(value_bool(false));
+    }
+    /* ── Array: all ── */
+    if (strcmp(method, "all") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+            return eval_err(strdup(".all() expects 1 closure argument"));
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
+            EvalResult r = call_closure(ev,
+                args[0].as.closure.param_names,
+                args[0].as.closure.param_count,
+                args[0].as.closure.body,
+                args[0].as.closure.captured_env,
+                &elem, 1);
+            if (!IS_OK(r)) return r;
+            if (!value_is_truthy(&r.value)) {
+                value_free(&r.value);
+                return eval_ok(value_bool(false));
+            }
+            value_free(&r.value);
+        }
+        return eval_ok(value_bool(true));
+    }
+    /* ── Array: zip ── */
+    if (strcmp(method, "zip") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1) return eval_err(strdup(".zip() expects 1 argument"));
+        if (args[0].type != VAL_ARRAY) return eval_err(strdup(".zip() argument must be an array"));
+        size_t n = obj.as.array.len < args[0].as.array.len
+                 ? obj.as.array.len : args[0].as.array.len;
+        LatValue *pairs = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        for (size_t i = 0; i < n; i++) {
+            LatValue pair_elems[2];
+            pair_elems[0] = value_deep_clone(&obj.as.array.elems[i]);
+            pair_elems[1] = value_deep_clone(&args[0].as.array.elems[i]);
+            pairs[i] = value_array(pair_elems, 2);
+        }
+        LatValue arr = value_array(pairs, n);
+        free(pairs);
+        return eval_ok(arr);
+    }
+    /* ── Array: unique ── */
+    if (strcmp(method, "unique") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".unique() takes no arguments"));
+        size_t n = obj.as.array.len;
+        LatValue *results = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        size_t rcount = 0;
+        for (size_t i = 0; i < n; i++) {
+            bool found = false;
+            for (size_t j = 0; j < rcount; j++) {
+                if (value_eq(&obj.as.array.elems[i], &results[j])) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                results[rcount++] = value_deep_clone(&obj.as.array.elems[i]);
+            }
+        }
+        LatValue arr = value_array(results, rcount);
+        free(results);
+        return eval_ok(arr);
+    }
+    /* ── Array: insert ── */
+    if (strcmp(method, "insert") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 2) return eval_err(strdup(".insert() expects 2 arguments (index, value)"));
+        if (args[0].type != VAL_INT) return eval_err(strdup(".insert() index must be an integer"));
+        int64_t idx = args[0].as.int_val;
+        size_t len = obj.as.array.len;
+        if (idx < 0 || (size_t)idx > len) {
+            char *err = NULL;
+            (void)asprintf(&err, ".insert() index %lld out of bounds (length %zu)",
+                           (long long)idx, len);
+            return eval_err(err);
+        }
+        return eval_ok(value_unit());
+    }
+    /* ── Array: remove_at ── */
+    if (strcmp(method, "remove_at") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1) return eval_err(strdup(".remove_at() expects 1 argument (index)"));
+        if (args[0].type != VAL_INT) return eval_err(strdup(".remove_at() index must be an integer"));
+        int64_t idx = args[0].as.int_val;
+        size_t len = obj.as.array.len;
+        if (idx < 0 || (size_t)idx >= len) {
+            char *err = NULL;
+            (void)asprintf(&err, ".remove_at() index %lld out of bounds (length %zu)",
+                           (long long)idx, len);
+            return eval_err(err);
+        }
+        LatValue removed = value_deep_clone(&obj.as.array.elems[(size_t)idx]);
+        return eval_ok(removed);
+    }
+    /* ── Array: sort_by ── */
+    if (strcmp(method, "sort_by") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+            return eval_err(strdup(".sort_by() expects 1 closure argument"));
+        size_t n = obj.as.array.len;
+        /* Deep-clone elements into a working buffer */
+        LatValue *buf = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        for (size_t i = 0; i < n; i++) {
+            buf[i] = value_deep_clone(&obj.as.array.elems[i]);
+        }
+        /* Insertion sort using the closure as comparator */
+        for (size_t i = 1; i < n; i++) {
+            LatValue key = buf[i];
+            size_t j = i;
+            while (j > 0) {
+                LatValue call_args[2];
+                call_args[0] = value_deep_clone(&key);
+                call_args[1] = value_deep_clone(&buf[j - 1]);
+                EvalResult r = call_closure(ev,
+                    args[0].as.closure.param_names,
+                    args[0].as.closure.param_count,
+                    args[0].as.closure.body,
+                    args[0].as.closure.captured_env,
+                    call_args, 2);
+                if (!IS_OK(r)) {
+                    for (size_t k = 0; k < j; k++) value_free(&buf[k]);
+                    value_free(&key);
+                    for (size_t k = j + 1; k < n; k++) value_free(&buf[k]);
+                    free(buf);
+                    return r;
+                }
+                if (r.value.type != VAL_INT) {
+                    value_free(&r.value);
+                    for (size_t k = 0; k < j; k++) value_free(&buf[k]);
+                    value_free(&key);
+                    for (size_t k = j + 1; k < n; k++) value_free(&buf[k]);
+                    free(buf);
+                    return eval_err(strdup(".sort_by() comparator must return an Int"));
+                }
+                int64_t cmp = r.value.as.int_val;
+                value_free(&r.value);
+                if (cmp >= 0) break;
+                buf[j] = buf[j - 1];
+                j--;
+            }
+            buf[j] = key;
+        }
+        LatValue arr = value_array(buf, n);
+        free(buf);
+        return eval_ok(arr);
+    }
+    /* ── Array: flat_map ── */
+    if (strcmp(method, "flat_map") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+            return eval_err(strdup(".flat_map() expects 1 closure argument"));
+        size_t n = obj.as.array.len;
+        LatValue *mapped = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        for (size_t i = 0; i < n; i++) {
+            LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
+            EvalResult r = call_closure(ev,
+                args[0].as.closure.param_names,
+                args[0].as.closure.param_count,
+                args[0].as.closure.body,
+                args[0].as.closure.captured_env,
+                &elem, 1);
+            if (!IS_OK(r)) {
+                for (size_t j = 0; j < i; j++) value_free(&mapped[j]);
+                free(mapped);
+                return r;
+            }
+            mapped[i] = r.value;
+        }
+        size_t total = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (mapped[i].type == VAL_ARRAY)
+                total += mapped[i].as.array.len;
+            else
+                total += 1;
+        }
+        LatValue *fm_buf = malloc((total > 0 ? total : 1) * sizeof(LatValue));
+        size_t fm_pos = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (mapped[i].type == VAL_ARRAY) {
+                for (size_t j = 0; j < mapped[i].as.array.len; j++) {
+                    fm_buf[fm_pos++] = value_deep_clone(&mapped[i].as.array.elems[j]);
+                }
+            } else {
+                fm_buf[fm_pos++] = value_deep_clone(&mapped[i]);
+            }
+        }
+        for (size_t i = 0; i < n; i++) value_free(&mapped[i]);
+        free(mapped);
+        LatValue fm_arr = value_array(fm_buf, fm_pos);
+        free(fm_buf);
+        return eval_ok(fm_arr);
+    }
+    /* ── Array: chunk ── */
+    if (strcmp(method, "chunk") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_INT)
+            return eval_err(strdup(".chunk() expects 1 integer argument"));
+        int64_t chunk_size = args[0].as.int_val;
+        if (chunk_size <= 0)
+            return eval_err(strdup(".chunk() size must be positive"));
+        size_t n = obj.as.array.len;
+        size_t num_chunks = (n > 0) ? (n + (size_t)chunk_size - 1) / (size_t)chunk_size : 0;
+        LatValue *chunks = malloc((num_chunks > 0 ? num_chunks : 1) * sizeof(LatValue));
+        for (size_t ci = 0; ci < num_chunks; ci++) {
+            size_t cstart = ci * (size_t)chunk_size;
+            size_t cend = cstart + (size_t)chunk_size;
+            if (cend > n) cend = n;
+            size_t clen = cend - cstart;
+            LatValue *celems = malloc(clen * sizeof(LatValue));
+            for (size_t j = 0; j < clen; j++) {
+                celems[j] = value_deep_clone(&obj.as.array.elems[cstart + j]);
+            }
+            chunks[ci] = value_array(celems, clen);
+            free(celems);
+        }
+        LatValue chunk_arr = value_array(chunks, num_chunks);
+        free(chunks);
+        return eval_ok(chunk_arr);
+    }
+    /* ── Array: group_by ── */
+    if (strcmp(method, "group_by") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+            return eval_err(strdup(".group_by() expects 1 closure argument"));
+        LatValue grp_map = value_map_new();
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
+            EvalResult r = call_closure(ev,
+                args[0].as.closure.param_names,
+                args[0].as.closure.param_count,
+                args[0].as.closure.body,
+                args[0].as.closure.captured_env,
+                &elem, 1);
+            if (!IS_OK(r)) {
+                value_free(&grp_map);
+                return r;
+            }
+            char *grp_key = value_display(&r.value);
+            value_free(&r.value);
+            LatValue *existing = (LatValue *)lat_map_get(grp_map.as.map.map, grp_key);
+            if (existing) {
+                size_t old_len = existing->as.array.len;
+                LatValue *new_elems = malloc((old_len + 1) * sizeof(LatValue));
+                for (size_t j = 0; j < old_len; j++) {
+                    new_elems[j] = value_deep_clone(&existing->as.array.elems[j]);
+                }
+                new_elems[old_len] = value_deep_clone(&obj.as.array.elems[i]);
+                LatValue new_grp_arr = value_array(new_elems, old_len + 1);
+                free(new_elems);
+                lat_map_set(grp_map.as.map.map, grp_key, &new_grp_arr);
+            } else {
+                LatValue cloned = value_deep_clone(&obj.as.array.elems[i]);
+                LatValue new_grp_arr = value_array(&cloned, 1);
+                lat_map_set(grp_map.as.map.map, grp_key, &new_grp_arr);
+            }
+            free(grp_key);
+        }
+        return eval_ok(grp_map);
+    }
+    /* ── Array: sum ── */
+    if (strcmp(method, "sum") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".sum() takes no arguments"));
+        bool sum_has_float = false;
+        int64_t isum = 0;
+        double fsum = 0.0;
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            if (obj.as.array.elems[i].type == VAL_INT) {
+                isum += obj.as.array.elems[i].as.int_val;
+                fsum += (double)obj.as.array.elems[i].as.int_val;
+            } else if (obj.as.array.elems[i].type == VAL_FLOAT) {
+                sum_has_float = true;
+                fsum += obj.as.array.elems[i].as.float_val;
+            } else {
+                return eval_err(strdup(".sum() requires all elements to be numeric"));
+            }
+        }
+        if (sum_has_float) return eval_ok(value_float(fsum));
+        return eval_ok(value_int(isum));
+    }
+    /* ── Array: min ── */
+    if (strcmp(method, "min") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".min() takes no arguments"));
+        if (obj.as.array.len == 0) return eval_err(strdup(".min() on empty array"));
+        bool min_has_float = false;
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            if (obj.as.array.elems[i].type == VAL_FLOAT) min_has_float = true;
+            else if (obj.as.array.elems[i].type != VAL_INT)
+                return eval_err(strdup(".min() requires all elements to be numeric"));
+        }
+        if (min_has_float) {
+            double fmin = (obj.as.array.elems[0].type == VAL_FLOAT)
+                ? obj.as.array.elems[0].as.float_val
+                : (double)obj.as.array.elems[0].as.int_val;
+            for (size_t i = 1; i < obj.as.array.len; i++) {
+                double v = (obj.as.array.elems[i].type == VAL_FLOAT)
+                    ? obj.as.array.elems[i].as.float_val
+                    : (double)obj.as.array.elems[i].as.int_val;
+                if (v < fmin) fmin = v;
+            }
+            return eval_ok(value_float(fmin));
+        }
+        int64_t imin = obj.as.array.elems[0].as.int_val;
+        for (size_t i = 1; i < obj.as.array.len; i++) {
+            if (obj.as.array.elems[i].as.int_val < imin)
+                imin = obj.as.array.elems[i].as.int_val;
+        }
+        return eval_ok(value_int(imin));
+    }
+    /* ── Array: max ── */
+    if (strcmp(method, "max") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".max() takes no arguments"));
+        if (obj.as.array.len == 0) return eval_err(strdup(".max() on empty array"));
+        bool max_has_float = false;
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            if (obj.as.array.elems[i].type == VAL_FLOAT) max_has_float = true;
+            else if (obj.as.array.elems[i].type != VAL_INT)
+                return eval_err(strdup(".max() requires all elements to be numeric"));
+        }
+        if (max_has_float) {
+            double fmax = (obj.as.array.elems[0].type == VAL_FLOAT)
+                ? obj.as.array.elems[0].as.float_val
+                : (double)obj.as.array.elems[0].as.int_val;
+            for (size_t i = 1; i < obj.as.array.len; i++) {
+                double v = (obj.as.array.elems[i].type == VAL_FLOAT)
+                    ? obj.as.array.elems[i].as.float_val
+                    : (double)obj.as.array.elems[i].as.int_val;
+                if (v > fmax) fmax = v;
+            }
+            return eval_ok(value_float(fmax));
+        }
+        int64_t imax = obj.as.array.elems[0].as.int_val;
+        for (size_t i = 1; i < obj.as.array.len; i++) {
+            if (obj.as.array.elems[i].as.int_val > imax)
+                imax = obj.as.array.elems[i].as.int_val;
+        }
+        return eval_ok(value_int(imax));
+    }
+    /* ── Array: first ── */
+    if (strcmp(method, "first") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".first() takes no arguments"));
+        if (obj.as.array.len == 0) return eval_ok(value_unit());
+        return eval_ok(value_deep_clone(&obj.as.array.elems[0]));
+    }
+    /* ── Array: last ── */
+    if (strcmp(method, "last") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 0) return eval_err(strdup(".last() takes no arguments"));
+        if (obj.as.array.len == 0) return eval_ok(value_unit());
+        return eval_ok(value_deep_clone(&obj.as.array.elems[obj.as.array.len - 1]));
+    }
     /* ── Map methods ── */
     if (obj.type == VAL_MAP) {
         if (strcmp(method, "get") == 0) {
@@ -2706,6 +3748,101 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         if (strcmp(method, "len") == 0) {
             return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
+        }
+        if (strcmp(method, "entries") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".entries() takes no arguments"));
+            size_t n = lat_map_len(obj.as.map.map);
+            LatValue *entries = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            size_t ei = 0;
+            for (size_t i = 0; i < obj.as.map.map->cap; i++) {
+                if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
+                    LatValue pair_elems[2];
+                    pair_elems[0] = value_string(obj.as.map.map->entries[i].key);
+                    pair_elems[1] = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
+                    entries[ei++] = value_array(pair_elems, 2);
+                }
+            }
+            LatValue arr = value_array(entries, ei);
+            free(entries);
+            return eval_ok(arr);
+        }
+        if (strcmp(method, "merge") == 0) {
+            if (arg_count != 1) return eval_err(strdup(".merge() expects exactly 1 argument"));
+            if (args[0].type != VAL_MAP) return eval_err(strdup(".merge() argument must be a Map"));
+            LatMap *other = args[0].as.map.map;
+            for (size_t i = 0; i < other->cap; i++) {
+                if (other->entries[i].state == MAP_OCCUPIED) {
+                    LatValue cloned = value_deep_clone((LatValue *)other->entries[i].value);
+                    lat_map_set(obj.as.map.map, other->entries[i].key, &cloned);
+                }
+            }
+            return eval_ok(value_unit());
+        }
+        if (strcmp(method, "for_each") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+                return eval_err(strdup(".for_each() expects 1 closure argument"));
+            for (size_t i = 0; i < obj.as.map.map->cap; i++) {
+                if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
+                    LatValue call_args[2];
+                    call_args[0] = value_string(obj.as.map.map->entries[i].key);
+                    call_args[1] = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
+                    EvalResult r = call_closure(ev,
+                        args[0].as.closure.param_names,
+                        args[0].as.closure.param_count,
+                        args[0].as.closure.body,
+                        args[0].as.closure.captured_env,
+                        call_args, 2);
+                    if (!IS_OK(r)) return r;
+                    value_free(&r.value);
+                }
+            }
+            return eval_ok(value_unit());
+        }
+        if (strcmp(method, "filter") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+                return eval_err(strdup(".filter() expects 1 closure argument"));
+            LatValue result = value_map_new();
+            for (size_t i = 0; i < obj.as.map.map->cap; i++) {
+                if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
+                    LatValue call_args[2];
+                    call_args[0] = value_string(obj.as.map.map->entries[i].key);
+                    call_args[1] = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
+                    EvalResult r = call_closure(ev,
+                        args[0].as.closure.param_names,
+                        args[0].as.closure.param_count,
+                        args[0].as.closure.body,
+                        args[0].as.closure.captured_env,
+                        call_args, 2);
+                    if (!IS_OK(r)) { value_free(&result); return r; }
+                    if (value_is_truthy(&r.value)) {
+                        LatValue cloned = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
+                        lat_map_set(result.as.map.map, obj.as.map.map->entries[i].key, &cloned);
+                    }
+                    value_free(&r.value);
+                }
+            }
+            return eval_ok(result);
+        }
+        if (strcmp(method, "map") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+                return eval_err(strdup(".map() expects 1 closure argument"));
+            LatValue result = value_map_new();
+            for (size_t i = 0; i < obj.as.map.map->cap; i++) {
+                if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
+                    LatValue call_args[2];
+                    call_args[0] = value_string(obj.as.map.map->entries[i].key);
+                    call_args[1] = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
+                    EvalResult r = call_closure(ev,
+                        args[0].as.closure.param_names,
+                        args[0].as.closure.param_count,
+                        args[0].as.closure.body,
+                        args[0].as.closure.captured_env,
+                        call_args, 2);
+                    if (!IS_OK(r)) { value_free(&result); return r; }
+                    lat_map_set(result.as.map.map, obj.as.map.map->entries[i].key, &r.value);
+                }
+            }
+            return eval_ok(result);
         }
     }
     /* ── String methods ── */
@@ -2782,6 +3919,84 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 return eval_err(strdup(".repeat() expects 1 integer argument"));
             return eval_ok(value_string_owned(lat_str_repeat(obj.as.str_val, (size_t)args[0].as.int_val)));
         }
+        if (strcmp(method, "trim_start") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".trim_start() takes no arguments"));
+            const char *s = obj.as.str_val;
+            size_t len = strlen(s);
+            size_t start = 0;
+            while (start < len && isspace((unsigned char)s[start])) start++;
+            char *result = malloc(len - start + 1);
+            memcpy(result, s + start, len - start);
+            result[len - start] = '\0';
+            return eval_ok(value_string_owned(result));
+        }
+        if (strcmp(method, "trim_end") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".trim_end() takes no arguments"));
+            const char *s = obj.as.str_val;
+            size_t len = strlen(s);
+            size_t end = len;
+            while (end > 0 && isspace((unsigned char)s[end - 1])) end--;
+            char *result = malloc(end + 1);
+            memcpy(result, s, end);
+            result[end] = '\0';
+            return eval_ok(value_string_owned(result));
+        }
+        if (strcmp(method, "pad_left") == 0) {
+            if (arg_count != 2) return eval_err(strdup(".pad_left() expects 2 arguments (n, ch)"));
+            if (args[0].type != VAL_INT) return eval_err(strdup(".pad_left() first argument must be an integer"));
+            if (args[1].type != VAL_STR) return eval_err(strdup(".pad_left() second argument must be a string"));
+            if (strlen(args[1].as.str_val) != 1) return eval_err(strdup(".pad_left() padding must be a single character"));
+            const char *s = obj.as.str_val;
+            size_t slen = strlen(s);
+            size_t target = (size_t)args[0].as.int_val;
+            if (slen >= target) return eval_ok(value_string(s));
+            size_t pad_count = target - slen;
+            char *result = malloc(target + 1);
+            char ch = args[1].as.str_val[0];
+            memset(result, ch, pad_count);
+            memcpy(result + pad_count, s, slen);
+            result[target] = '\0';
+            return eval_ok(value_string_owned(result));
+        }
+        if (strcmp(method, "pad_right") == 0) {
+            if (arg_count != 2) return eval_err(strdup(".pad_right() expects 2 arguments (n, ch)"));
+            if (args[0].type != VAL_INT) return eval_err(strdup(".pad_right() first argument must be an integer"));
+            if (args[1].type != VAL_STR) return eval_err(strdup(".pad_right() second argument must be a string"));
+            if (strlen(args[1].as.str_val) != 1) return eval_err(strdup(".pad_right() padding must be a single character"));
+            const char *s = obj.as.str_val;
+            size_t slen = strlen(s);
+            size_t target = (size_t)args[0].as.int_val;
+            if (slen >= target) return eval_ok(value_string(s));
+            size_t pad_count = target - slen;
+            char *result = malloc(target + 1);
+            memcpy(result, s, slen);
+            char ch = args[1].as.str_val[0];
+            memset(result + slen, ch, pad_count);
+            result[target] = '\0';
+            return eval_ok(value_string_owned(result));
+        }
+        if (strcmp(method, "count") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_STR)
+                return eval_err(strdup(".count() expects 1 string argument"));
+            const char *haystack = obj.as.str_val;
+            const char *needle = args[0].as.str_val;
+            size_t needle_len = strlen(needle);
+            int64_t count = 0;
+            if (needle_len == 0) {
+                return eval_err(strdup(".count() substring must not be empty"));
+            }
+            const char *p = haystack;
+            while ((p = strstr(p, needle)) != NULL) {
+                count++;
+                p += needle_len;
+            }
+            return eval_ok(value_int(count));
+        }
+        if (strcmp(method, "is_empty") == 0) {
+            if (arg_count != 0)
+                return eval_err(strdup(".is_empty() takes no arguments"));
+            return eval_ok(value_bool(obj.as.str_val[0] == '\0'));
+        }
     }
 
     if (strcmp(method, "get") == 0) {
@@ -2820,6 +4035,43 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 free(full_args);
                 return r;
             }
+        }
+    }
+
+    /* ── Channel methods ── */
+    if (obj.type == VAL_CHANNEL) {
+        LatChannel *ch = obj.as.channel.ch;
+        if (strcmp(method, "send") == 0) {
+            if (arg_count != 1)
+                return eval_err(strdup(".send() expects exactly 1 argument"));
+            if (!value_is_crystal(&args[0]) && args[0].type != VAL_INT &&
+                args[0].type != VAL_FLOAT && args[0].type != VAL_BOOL &&
+                args[0].type != VAL_UNIT) {
+                return eval_err(strdup("can only send crystal (frozen) values on a channel"));
+            }
+            /* Deep-clone into malloc-backed memory (no heap/arena pointers) */
+            DualHeap *saved_heap = ev->heap;
+            value_set_heap(NULL);
+            value_set_arena(NULL);
+            LatValue detached = value_deep_clone(&args[0]);
+            value_set_heap(saved_heap);
+            bool ok = channel_send(ch, detached);
+            if (!ok) return eval_err(strdup("cannot send on a closed channel"));
+            return eval_ok(value_unit());
+        }
+        if (strcmp(method, "recv") == 0) {
+            if (arg_count != 0)
+                return eval_err(strdup(".recv() takes no arguments"));
+            bool ok;
+            LatValue val = channel_recv(ch, &ok);
+            if (!ok) return eval_ok(value_unit());
+            return eval_ok(val);
+        }
+        if (strcmp(method, "close") == 0) {
+            if (arg_count != 0)
+                return eval_err(strdup(".close() takes no arguments"));
+            channel_close(ch);
+            return eval_ok(value_unit());
         }
     }
 
@@ -2873,6 +4125,11 @@ void evaluator_set_no_regions(Evaluator *ev, bool enabled) {
 void evaluator_set_script_dir(Evaluator *ev, const char *dir) {
     free(ev->script_dir);
     ev->script_dir = dir ? strdup(dir) : NULL;
+}
+
+void evaluator_set_argv(Evaluator *ev, int argc, char **argv) {
+    ev->prog_argc = argc;
+    ev->prog_argv = argv;
 }
 
 char *evaluator_run(Evaluator *ev, const Program *prog) {

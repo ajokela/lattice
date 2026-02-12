@@ -1,4 +1,7 @@
 #include "net.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #ifndef __EMSCRIPTEN__
 
@@ -9,9 +12,6 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <signal.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <errno.h>
 
 /* ── Socket tracking ── */

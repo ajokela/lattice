@@ -16,5 +16,15 @@ LatValue math_min(const LatValue *a, const LatValue *b, char **err);
 LatValue math_max(const LatValue *a, const LatValue *b, char **err);
 LatValue math_random(void);      /* returns Float in [0, 1) */
 LatValue math_random_int(const LatValue *low, const LatValue *high, char **err); /* returns Int in [low, high] */
+LatValue math_log(const LatValue *v, char **err);
+LatValue math_log2(const LatValue *v, char **err);
+LatValue math_log10(const LatValue *v, char **err);
+LatValue math_sin(const LatValue *v, char **err);
+LatValue math_cos(const LatValue *v, char **err);
+LatValue math_tan(const LatValue *v, char **err);
+LatValue math_atan2(const LatValue *y, const LatValue *x, char **err);
+LatValue math_clamp(const LatValue *val, const LatValue *lo, const LatValue *hi, char **err);
+LatValue math_pi(void);
+LatValue math_e(void);
 
 #endif

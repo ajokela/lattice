@@ -1,14 +1,20 @@
 #include "value.h"
 #include "env.h"
 #include "memory.h"
+#include "channel.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 /* ── Heap-tracked allocation wrappers ── */
 
+#ifdef __EMSCRIPTEN__
 static DualHeap *g_heap = NULL;
 static CrystalRegion *g_arena = NULL;
+#else
+static _Thread_local DualHeap *g_heap = NULL;
+static _Thread_local CrystalRegion *g_arena = NULL;
+#endif
 
 void value_set_heap(DualHeap *heap) { g_heap = heap; }
 void value_set_arena(CrystalRegion *region) { g_arena = region; }
@@ -183,6 +189,17 @@ LatValue value_map_new(void) {
     return val;
 }
 
+LatValue value_channel(struct LatChannel *ch) {
+    LatValue val;
+    memset(&val, 0, sizeof(val));
+    val.type = VAL_CHANNEL;
+    val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
+    channel_retain(ch);
+    val.as.channel.ch = ch;
+    return val;
+}
+
 /* ── Phase helpers ── */
 
 bool value_is_fluid(const LatValue *v) { return v->phase == VTAG_FLUID; }
@@ -240,6 +257,10 @@ LatValue value_deep_clone(const LatValue *v) {
         case VAL_RANGE:
             out.as.range.start = v->as.range.start;
             out.as.range.end = v->as.range.end;
+            break;
+        case VAL_CHANNEL:
+            channel_retain(v->as.channel.ch);
+            out.as.channel.ch = v->as.channel.ch;
             break;
         case VAL_MAP: {
             LatMap *src = v->as.map.map;
@@ -417,6 +438,9 @@ char *value_display(const LatValue *v) {
         case VAL_RANGE:
             (void)asprintf(&buf, "%lld..%lld", (long long)v->as.range.start, (long long)v->as.range.end);
             break;
+        case VAL_CHANNEL:
+            buf = strdup("<Channel>");
+            break;
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
@@ -464,6 +488,7 @@ const char *value_type_name(const LatValue *v) {
         case VAL_UNIT:    return "Unit";
         case VAL_RANGE:   return "Range";
         case VAL_MAP:     return "Map";
+        case VAL_CHANNEL: return "Channel";
     }
     return "?";
 }
@@ -498,6 +523,8 @@ bool value_eq(const LatValue *a, const LatValue *b) {
             }
             return true;
         case VAL_CLOSURE: return false;
+        case VAL_CHANNEL:
+            return a->as.channel.ch == b->as.channel.ch;
         case VAL_MAP: {
             if (lat_map_len(a->as.map.map) != lat_map_len(b->as.map.map)) return false;
             for (size_t i = 0; i < a->as.map.map->cap; i++) {
@@ -564,6 +591,10 @@ void value_free(LatValue *v) {
                 val_dealloc(v, v->as.map.map);
             }
             break;
+        case VAL_CHANNEL:
+            if (v->as.channel.ch)
+                channel_release(v->as.channel.ch);
+            break;
         default:
             break;
     }
@@ -579,7 +610,8 @@ bool value_is_truthy(const LatValue *v) {
         case VAL_FLOAT: return v->as.float_val != 0.0;
         case VAL_STR:   return v->as.str_val[0] != '\0';
         case VAL_UNIT:  return false;
-        case VAL_MAP:   return lat_map_len(v->as.map.map) > 0;
-        default:        return true;
+        case VAL_MAP:     return lat_map_len(v->as.map.map) > 0;
+        case VAL_CHANNEL: return true;
+        default:          return true;
     }
 }

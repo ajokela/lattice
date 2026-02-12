@@ -195,6 +195,13 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             pc_pop_scope(pc);
             return PHASE_UNSPECIFIED;
 
+        case EXPR_SCOPE:
+            pc_push_scope(pc);
+            for (size_t i = 0; i < expr->as.block.count; i++)
+                pc_check_stmt(pc, expr->as.block.stmts[i]);
+            pc_pop_scope(pc);
+            return PHASE_UNSPECIFIED;
+
         case EXPR_SPAWN:
             if (pc->mode == MODE_STRICT) {
                 pc_push_scope(pc);

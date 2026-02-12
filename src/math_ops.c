@@ -220,3 +220,153 @@ LatValue math_random_int(const LatValue *low, const LatValue *high, char **err) 
     int64_t result = lo + (int64_t)((uint64_t)rand() % range);
     return value_int(result);
 }
+
+/* ── log (natural logarithm) ── */
+
+LatValue math_log(const LatValue *v, char **err) {
+    double x = 0.0;
+    if (v->type == VAL_INT) {
+        x = (double)v->as.int_val;
+    } else if (v->type == VAL_FLOAT) {
+        x = v->as.float_val;
+    } else {
+        *err = strdup("log() expects Int or Float");
+        return value_unit();
+    }
+    if (x <= 0.0) {
+        *err = strdup("log() domain error: argument must be > 0");
+        return value_unit();
+    }
+    return value_float(log(x));
+}
+
+/* ── log2 ── */
+
+LatValue math_log2(const LatValue *v, char **err) {
+    double x = 0.0;
+    if (v->type == VAL_INT) {
+        x = (double)v->as.int_val;
+    } else if (v->type == VAL_FLOAT) {
+        x = v->as.float_val;
+    } else {
+        *err = strdup("log2() expects Int or Float");
+        return value_unit();
+    }
+    if (x <= 0.0) {
+        *err = strdup("log2() domain error: argument must be > 0");
+        return value_unit();
+    }
+    return value_float(log2(x));
+}
+
+/* ── log10 ── */
+
+LatValue math_log10(const LatValue *v, char **err) {
+    double x = 0.0;
+    if (v->type == VAL_INT) {
+        x = (double)v->as.int_val;
+    } else if (v->type == VAL_FLOAT) {
+        x = v->as.float_val;
+    } else {
+        *err = strdup("log10() expects Int or Float");
+        return value_unit();
+    }
+    if (x <= 0.0) {
+        *err = strdup("log10() domain error: argument must be > 0");
+        return value_unit();
+    }
+    return value_float(log10(x));
+}
+
+/* ── sin ── */
+
+LatValue math_sin(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(sin((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(sin(v->as.float_val));
+    }
+    *err = strdup("sin() expects Int or Float");
+    return value_unit();
+}
+
+/* ── cos ── */
+
+LatValue math_cos(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(cos((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(cos(v->as.float_val));
+    }
+    *err = strdup("cos() expects Int or Float");
+    return value_unit();
+}
+
+/* ── tan ── */
+
+LatValue math_tan(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(tan((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(tan(v->as.float_val));
+    }
+    *err = strdup("tan() expects Int or Float");
+    return value_unit();
+}
+
+/* ── atan2 ── */
+
+LatValue math_atan2(const LatValue *y, const LatValue *x, char **err) {
+    if ((y->type != VAL_INT && y->type != VAL_FLOAT) ||
+        (x->type != VAL_INT && x->type != VAL_FLOAT)) {
+        *err = strdup("atan2() expects (Int|Float, Int|Float)");
+        return value_unit();
+    }
+    double dy = to_double(y);
+    double dx = to_double(x);
+    return value_float(atan2(dy, dx));
+}
+
+/* ── clamp ── */
+
+LatValue math_clamp(const LatValue *val, const LatValue *lo, const LatValue *hi, char **err) {
+    if ((val->type != VAL_INT && val->type != VAL_FLOAT) ||
+        (lo->type != VAL_INT && lo->type != VAL_FLOAT) ||
+        (hi->type != VAL_INT && hi->type != VAL_FLOAT)) {
+        *err = strdup("clamp() expects (Int|Float, Int|Float, Int|Float)");
+        return value_unit();
+    }
+
+    /* All Int: integer clamp */
+    if (val->type == VAL_INT && lo->type == VAL_INT && hi->type == VAL_INT) {
+        int64_t v = val->as.int_val;
+        int64_t l = lo->as.int_val;
+        int64_t h = hi->as.int_val;
+        if (v < l) v = l;
+        if (v > h) v = h;
+        return value_int(v);
+    }
+
+    /* Otherwise: float clamp */
+    double v = to_double(val);
+    double l = to_double(lo);
+    double h = to_double(hi);
+    if (v < l) v = l;
+    if (v > h) v = h;
+    return value_float(v);
+}
+
+/* ── math_pi ── */
+
+LatValue math_pi(void) {
+    return value_float(3.14159265358979323846);
+}
+
+/* ── math_e ── */
+
+LatValue math_e(void) {
+    return value_float(2.71828182845904523536);
+}

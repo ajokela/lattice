@@ -1,10 +1,36 @@
 CC      = cc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -Iinclude
-LDFLAGS = -ledit
+LDFLAGS =
 
 SRC_DIR    = src
 BUILD_DIR  = build
 TEST_DIR   = tests
+
+# ── Optional libedit / readline ──
+EDIT_AVAILABLE := $(shell pkg-config --exists libedit 2>/dev/null && echo yes || echo no)
+ifeq ($(EDIT_AVAILABLE),yes)
+    EDIT_CFLAGS  := $(shell pkg-config --cflags libedit) -DLATTICE_HAS_EDITLINE
+    EDIT_LDFLAGS := $(shell pkg-config --libs libedit)
+else
+    # Try linking -ledit directly (macOS ships it without pkg-config on some setups)
+    EDIT_TEST := $(shell echo 'int main(){return 0;}' | $(CC) -x c - -ledit -o /dev/null 2>/dev/null && echo yes || echo no)
+    ifeq ($(EDIT_TEST),yes)
+        EDIT_CFLAGS  := -DLATTICE_HAS_EDITLINE
+        EDIT_LDFLAGS := -ledit
+    else
+        # Try libreadline as a fallback
+        EDIT_TEST_RL := $(shell echo 'int main(){return 0;}' | $(CC) -x c - -lreadline -o /dev/null 2>/dev/null && echo yes || echo no)
+        ifeq ($(EDIT_TEST_RL),yes)
+            EDIT_CFLAGS  := -DLATTICE_HAS_READLINE
+            EDIT_LDFLAGS := -lreadline
+        else
+            EDIT_CFLAGS  :=
+            EDIT_LDFLAGS :=
+        endif
+    endif
+endif
+CFLAGS  += $(EDIT_CFLAGS)
+LDFLAGS += $(EDIT_LDFLAGS)
 
 # ── Optional TLS (OpenSSL) ──
 TLS_AVAILABLE := $(shell pkg-config --exists openssl 2>/dev/null && echo yes || echo no)
@@ -18,6 +44,12 @@ ifeq ($(TLS),0)
 endif
 CFLAGS  += $(TLS_CFLAGS)
 LDFLAGS += $(TLS_LDFLAGS)
+
+# ── pthreads (Linux needs -lpthread, macOS includes it) ──
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+    LDFLAGS += -lpthread -lm
+endif
 
 # Source files
 SRCS = $(SRC_DIR)/main.c \
@@ -49,7 +81,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/format_ops.c \
        $(SRC_DIR)/path_ops.c \
        $(SRC_DIR)/crypto_ops.c \
-       $(SRC_DIR)/array_ops.c
+       $(SRC_DIR)/array_ops.c \
+       $(SRC_DIR)/channel.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))

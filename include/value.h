@@ -15,12 +15,14 @@ typedef enum {
     VAL_INT, VAL_FLOAT, VAL_BOOL, VAL_STR, VAL_ARRAY,
     VAL_STRUCT, VAL_CLOSURE, VAL_UNIT, VAL_RANGE,
     VAL_MAP,
+    VAL_CHANNEL,
 } ValueType;
 
 /* Forward declarations */
 typedef struct LatValue LatValue;
 typedef struct Env Env;
 struct Expr;
+struct LatChannel;
 
 /* Runtime value */
 struct LatValue {
@@ -56,6 +58,9 @@ struct LatValue {
         struct {
             LatMap *map;     /* heap-allocated */
         } map;
+        struct {
+            struct LatChannel *ch;
+        } channel;
     } as;
 };
 
@@ -71,6 +76,7 @@ LatValue value_closure(char **param_names, size_t param_count, struct Expr *body
 LatValue value_unit(void);
 LatValue value_range(int64_t start, int64_t end);
 LatValue value_map_new(void);
+LatValue value_channel(struct LatChannel *ch);
 
 /* ── Phase helpers ── */
 bool value_is_fluid(const LatValue *v);

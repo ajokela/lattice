@@ -450,6 +450,19 @@ static Expr *parse_primary(Parser *p, char **err) {
         }
         return expr_spawn(stmts, count);
     }
+    if (tt == TOK_SCOPE) {
+        advance(p);
+        if (!expect(p, TOK_LBRACE, err)) return NULL;
+        size_t count;
+        Stmt **stmts = parse_block_stmts(p, &count, err);
+        if (!stmts && *err) return NULL;
+        if (!expect(p, TOK_RBRACE, err)) {
+            for (size_t i = 0; i < count; i++) stmt_free(stmts[i]);
+            free(stmts);
+            return NULL;
+        }
+        return expr_scope(stmts, count);
+    }
     if (tt == TOK_TRY) {
         advance(p);
         if (!expect(p, TOK_LBRACE, err)) return NULL;

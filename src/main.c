@@ -8,7 +8,25 @@
 #include <string.h>
 #include <libgen.h>
 #ifndef __EMSCRIPTEN__
-#include <editline/readline.h>
+  #if defined(LATTICE_HAS_EDITLINE)
+    #include <editline/readline.h>
+  #elif defined(LATTICE_HAS_READLINE)
+    #include <readline/readline.h>
+    #include <readline/history.h>
+  #else
+    /* Minimal fallback: no line editing, no history */
+    static char *readline(const char *prompt) {
+        if (prompt) fputs(prompt, stdout);
+        fflush(stdout);
+        char *buf = malloc(4096);
+        if (!buf) return NULL;
+        if (!fgets(buf, 4096, stdin)) { free(buf); return NULL; }
+        size_t len = strlen(buf);
+        if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+        return buf;
+    }
+    static void add_history(const char *line) { (void)line; }
+  #endif
 #endif
 
 static char *read_file(const char *path) {
@@ -26,6 +44,8 @@ static char *read_file(const char *path) {
 
 static bool gc_stress_mode = false;
 static bool no_regions_mode = false;
+static int  saved_argc = 0;
+static char **saved_argv = NULL;
 
 static int run_source(const char *source, bool show_stats, const char *script_dir) {
     /* Lex */
@@ -79,6 +99,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         evaluator_set_no_regions(ev, true);
     if (script_dir)
         evaluator_set_script_dir(ev, script_dir);
+    evaluator_set_argv(ev, saved_argc, saved_argv);
     char *eval_err = evaluator_run(ev, &prog);
     if (eval_err) {
         fprintf(stderr, "error: %s\n", eval_err);
@@ -186,6 +207,8 @@ static void repl(void) {
 }
 
 int main(int argc, char **argv) {
+    saved_argc = argc;
+    saved_argv = argv;
     bool show_stats = false;
     const char *file = NULL;
 

@@ -78,6 +78,8 @@ typedef struct Evaluator {
     size_t      lat_eval_scope; /* when > 0, top-level lat_eval bindings go here */
     LatMap      required_files; /* set of resolved paths already require()'d */
     char       *script_dir;    /* directory of the main script (for require) */
+    int         prog_argc;     /* argc from main() for args() builtin */
+    char      **prog_argv;     /* argv from main() for args() builtin */
 } Evaluator;
 
 /* Create a new evaluator */
@@ -94,6 +96,9 @@ void evaluator_set_no_regions(Evaluator *ev, bool enabled);
 
 /* Set the script directory for resolving require() paths */
 void evaluator_set_script_dir(Evaluator *ev, const char *dir);
+
+/* Store argc/argv for the args() builtin */
+void evaluator_set_argv(Evaluator *ev, int argc, char **argv);
 
 /* Evaluate a program. Returns heap-allocated error string or NULL on success. */
 char *evaluator_run(Evaluator *ev, const Program *prog);

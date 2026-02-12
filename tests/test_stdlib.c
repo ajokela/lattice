@@ -2882,6 +2882,896 @@ static void test_path_error_handling(void) {
 
 
 /* ======================================================================
+ * Channel & Scope Tests
+ * ====================================================================== */
+
+static void test_channel_basic_send_recv(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.send(freeze(42))\n"
+        "    let val = ch.recv()\n"
+        "    print(val)\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_scope_two_spawns_channels(void) {
+    ASSERT_OUTPUT(
+        "fn compute_a() -> Int { return 10 }\n"
+        "fn compute_b() -> Int { return 20 }\n"
+        "fn main() {\n"
+        "    let ch1 = Channel::new()\n"
+        "    let ch2 = Channel::new()\n"
+        "    scope {\n"
+        "        spawn { ch1.send(freeze(compute_a())) }\n"
+        "        spawn { ch2.send(freeze(compute_b())) }\n"
+        "    }\n"
+        "    let a = ch1.recv()\n"
+        "    let b = ch2.recv()\n"
+        "    print(a + b)\n"
+        "}\n",
+        "30"
+    );
+}
+
+static void test_channel_close_recv_unit(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.send(freeze(1))\n"
+        "    ch.close()\n"
+        "    let a = ch.recv()\n"
+        "    let b = ch.recv()\n"
+        "    print(a)\n"
+        "    print(typeof(b))\n"
+        "}\n",
+        "1\nUnit"
+    );
+}
+
+static void test_channel_crystal_only_send(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    flux arr = [1, 2, 3]\n"
+        "    ch.send(arr)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_scope_no_spawns_sequential(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = scope {\n"
+        "        let a = 10\n"
+        "        let b = 20\n"
+        "        a + b\n"
+        "    }\n"
+        "    print(x)\n"
+        "}\n",
+        "30"
+    );
+}
+
+static void test_spawn_outside_scope(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = spawn {\n"
+        "        let a = 5\n"
+        "        let b = 10\n"
+        "        return a + b\n"
+        "    }\n"
+        "    print(x)\n"
+        "}\n",
+        "15"
+    );
+}
+
+static void test_channel_multiple_sends_fifo(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.send(freeze(1))\n"
+        "    ch.send(freeze(2))\n"
+        "    ch.send(freeze(3))\n"
+        "    print(ch.recv())\n"
+        "    print(ch.recv())\n"
+        "    print(ch.recv())\n"
+        "}\n",
+        "1\n2\n3"
+    );
+}
+
+static void test_scope_spawn_error_propagates(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn bad() -> Int {\n"
+        "    let x = 1 / 0\n"
+        "    return x\n"
+        "}\n"
+        "fn main() {\n"
+        "    scope {\n"
+        "        spawn { bad() }\n"
+        "    }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_cannot_freeze_channel(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    let frozen = freeze(ch)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_channel_typeof(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    print(typeof(ch))\n"
+        "}\n",
+        "Channel"
+    );
+}
+
+/* ── Array method tests ── */
+
+static void test_array_pop(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux arr = [1, 2, 3]\n"
+        "    print(arr.pop())\n"
+        "    print(arr)\n"
+        "}\n",
+        "3\n[1, 2]"
+    );
+}
+
+static void test_array_index_of(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let arr = [10, 20, 30]\n"
+        "    print(arr.index_of(20))\n"
+        "    print(arr.index_of(99))\n"
+        "}\n",
+        "1\n-1"
+    );
+}
+
+static void test_array_any_all(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let arr = [1, 2, 3]\n"
+        "    print(arr.any(|x| { x > 2 }))\n"
+        "    print(arr.all(|x| { x > 0 }))\n"
+        "    print(arr.all(|x| { x > 1 }))\n"
+        "    print(arr.any(|x| { x > 10 }))\n"
+        "}\n",
+        "true\ntrue\nfalse\nfalse"
+    );
+}
+
+static void test_array_zip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    let b = [4, 5]\n"
+        "    print(a.zip(b))\n"
+        "}\n",
+        "[[1, 4], [2, 5]]"
+    );
+}
+
+static void test_array_unique(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 2, 1, 4].unique())\n"
+        "}\n",
+        "[1, 2, 3, 4]"
+    );
+}
+
+static void test_array_insert(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux arr = [1, 2, 3]\n"
+        "    arr.insert(1, 10)\n"
+        "    print(arr)\n"
+        "}\n",
+        "[1, 10, 2, 3]"
+    );
+}
+
+static void test_array_remove_at(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux arr = [1, 2, 3]\n"
+        "    print(arr.remove_at(1))\n"
+        "    print(arr)\n"
+        "}\n",
+        "2\n[1, 3]"
+    );
+}
+
+static void test_array_sort_by(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let arr = [3, 1, 4, 1, 5]\n"
+        "    print(arr.sort_by(|a, b| { a - b }))\n"
+        "    print(arr.sort_by(|a, b| { b - a }))\n"
+        "}\n",
+        "[1, 1, 3, 4, 5]\n[5, 4, 3, 1, 1]"
+    );
+}
+
+/* ── Map method tests ── */
+
+static void test_map_entries(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"a\", 1)\n"
+        "    let e = m.entries()\n"
+        "    print(len(e))\n"
+        "    print(e[0][0])\n"
+        "    print(e[0][1])\n"
+        "}\n",
+        "1\na\n1"
+    );
+}
+
+static void test_map_merge(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m1 = Map::new()\n"
+        "    m1.set(\"a\", 1)\n"
+        "    flux m2 = Map::new()\n"
+        "    m2.set(\"b\", 2)\n"
+        "    m1.merge(m2)\n"
+        "    print(m1.has(\"b\"))\n"
+        "    print(m1.get(\"b\"))\n"
+        "}\n",
+        "true\n2"
+    );
+}
+
+static void test_map_for_each(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"x\", 10)\n"
+        "    m.for_each(|k, v| { print(format(\"{} -> {}\", k, v)) })\n"
+        "}\n",
+        "x -> 10"
+    );
+}
+
+/* ── String method tests ── */
+
+static void test_str_trim_start(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(\"  hi  \".trim_start()) }\n",
+        "hi  "
+    );
+}
+
+static void test_str_trim_end(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(\"  hi  \".trim_end()) }\n",
+        "  hi"
+    );
+}
+
+static void test_str_pad_left(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(\"42\".pad_left(5, \"0\")) }\n",
+        "00042"
+    );
+}
+
+static void test_str_pad_right(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(\"hi\".pad_right(5, \".\")) }\n",
+        "hi..."
+    );
+}
+
+/* ── Math function tests ── */
+
+static void test_math_log(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(log(math_e())) }\n",
+        "1"
+    );
+}
+
+static void test_math_log2(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(log2(8)) }\n",
+        "3"
+    );
+}
+
+static void test_math_log10(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(log10(1000)) }\n",
+        "3"
+    );
+}
+
+static void test_math_trig(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(sin(0.0))\n"
+        "    print(cos(0.0))\n"
+        "    print(tan(0.0))\n"
+        "}\n",
+        "0\n1\n0"
+    );
+}
+
+static void test_math_atan2(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(atan2(0.0, 1.0)) }\n",
+        "0"
+    );
+}
+
+static void test_math_clamp(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(clamp(5, 1, 10))\n"
+        "    print(clamp(-3, 0, 100))\n"
+        "    print(clamp(200, 0, 100))\n"
+        "}\n",
+        "5\n0\n100"
+    );
+}
+
+static void test_math_pi_e(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(math_pi() > 3.14)\n"
+        "    print(math_e() > 2.71)\n"
+        "}\n",
+        "true\ntrue"
+    );
+}
+
+/* ── System/FS tests ── */
+
+static void test_cwd_builtin(void) {
+    char *out = run_capture("fn main() { print(cwd()) }\n");
+    ASSERT(strlen(out) > 0);
+    ASSERT(out[0] == '/');
+    free(out);
+}
+
+static void test_is_dir_file(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(is_dir(\".\"))\n"
+        "    print(is_file(\"Makefile\"))\n"
+        "    print(is_dir(\"Makefile\"))\n"
+        "    print(is_file(\"nonexistent\"))\n"
+        "}\n",
+        "true\ntrue\nfalse\nfalse"
+    );
+}
+
+static void test_mkdir_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let dir = \"/tmp/lattice_test_mkdir_\" + to_string(time())\n"
+        "    print(mkdir(dir))\n"
+        "    print(is_dir(dir))\n"
+        "}\n",
+        "true\ntrue"
+    );
+}
+
+static void test_rename_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let f1 = \"/tmp/lattice_rename_src_\" + to_string(time())\n"
+        "    let f2 = \"/tmp/lattice_rename_dst_\" + to_string(time())\n"
+        "    write_file(f1, \"hello\")\n"
+        "    print(rename(f1, f2))\n"
+        "    print(file_exists(f1))\n"
+        "    print(file_exists(f2))\n"
+        "    delete_file(f2)\n"
+        "}\n",
+        "true\nfalse\ntrue"
+    );
+}
+
+static void test_assert_pass(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    assert(true)\n"
+        "    assert(1 + 1 == 2, \"math works\")\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_assert_fail(void) {
+    char *out = run_capture(
+        "fn main() { assert(false, \"should fail\") }\n"
+    );
+    ASSERT(strstr(out, "EVAL_ERROR") != NULL);
+    ASSERT(strstr(out, "should fail") != NULL);
+    free(out);
+}
+
+static void test_args_builtin(void) {
+    char *out = run_capture(
+        "fn main() { print(typeof(args())) }\n"
+    );
+    ASSERT_STR_EQ(out, "Array");
+    free(out);
+}
+
+/* ── Map .filter() and .map() tests ── */
+
+static void test_map_filter(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"a\", 1)\n"
+        "    m.set(\"b\", 2)\n"
+        "    m.set(\"c\", 3)\n"
+        "    let filtered = m.filter(|k, v| { v > 1 })\n"
+        "    print(filtered.len())\n"
+        "}\n",
+        "2"
+    );
+    /* Filter that matches nothing */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"x\", 10)\n"
+        "    let filtered = m.filter(|k, v| { v > 100 })\n"
+        "    print(filtered.len())\n"
+        "}\n",
+        "0"
+    );
+}
+
+static void test_map_map(void) {
+    /* Single-entry map for deterministic output */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"x\", 5)\n"
+        "    let doubled = m.map(|k, v| { v * 2 })\n"
+        "    print(doubled.get(\"x\"))\n"
+        "}\n",
+        "10"
+    );
+    /* Map preserves all keys */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m.set(\"a\", 1)\n"
+        "    m.set(\"b\", 2)\n"
+        "    m.set(\"c\", 3)\n"
+        "    let mapped = m.map(|k, v| { v + 10 })\n"
+        "    print(mapped.len())\n"
+        "}\n",
+        "3"
+    );
+}
+
+/* ── String .count() and .is_empty() tests ── */
+
+static void test_str_count(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(\"hello world hello\".count(\"hello\")) }\n",
+        "2"
+    );
+    /* Zero matches */
+    ASSERT_OUTPUT(
+        "fn main() { print(\"abcdef\".count(\"xyz\")) }\n",
+        "0"
+    );
+    /* Overlapping: non-overlapping count */
+    ASSERT_OUTPUT(
+        "fn main() { print(\"aaa\".count(\"aa\")) }\n",
+        "1"
+    );
+}
+
+static void test_str_is_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(\"\".is_empty()) }\n",
+        "true"
+    );
+    ASSERT_OUTPUT(
+        "fn main() { print(\"hello\".is_empty()) }\n",
+        "false"
+    );
+}
+
+/* ── process exec/shell builtins ── */
+
+static void test_exec_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let result = exec(\"echo hello\")\n"
+        "    print(result.trim())\n"
+        "}\n",
+        "hello"
+    );
+}
+
+static void test_shell_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = shell(\"echo hello\")\n"
+        "    print(r.get(\"stdout\").trim())\n"
+        "    print(r.get(\"exit_code\"))\n"
+        "}\n",
+        "hello\n0"
+    );
+}
+
+static void test_shell_stderr(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = shell(\"echo err >&2\")\n"
+        "    print(r.get(\"stderr\").trim())\n"
+        "    print(r.get(\"exit_code\"))\n"
+        "}\n",
+        "err\n0"
+    );
+}
+
+static void test_exec_failure(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = shell(\"exit 42\")\n"
+        "    print(r.get(\"exit_code\"))\n"
+        "}\n",
+        "42"
+    );
+}
+
+/* ======================================================================
+ * New filesystem builtins: rmdir, glob, stat, copy_file, realpath, tempdir, tempfile
+ * ====================================================================== */
+
+static void test_rmdir_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let dir = \"/tmp/lattice_test_rmdir_\" + to_string(time())\n"
+        "    mkdir(dir)\n"
+        "    print(rmdir(dir))\n"
+        "    print(is_dir(dir))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_rmdir_error(void) {
+    char *out = run_capture(
+        "fn main() { rmdir(\"/tmp/nonexistent_lattice_dir_999\") }\n"
+    );
+    ASSERT(strstr(out, "EVAL_ERROR") != NULL);
+    ASSERT(strstr(out, "rmdir") != NULL);
+    free(out);
+}
+
+static void test_glob_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let dir = \"/tmp/lattice_test_glob_\" + to_string(time())\n"
+        "    mkdir(dir)\n"
+        "    write_file(dir + \"/a.txt\", \"hello\")\n"
+        "    write_file(dir + \"/b.txt\", \"world\")\n"
+        "    write_file(dir + \"/c.log\", \"other\")\n"
+        "    let matches = glob(dir + \"/*.txt\")\n"
+        "    print(len(matches))\n"
+        "    delete_file(dir + \"/a.txt\")\n"
+        "    delete_file(dir + \"/b.txt\")\n"
+        "    delete_file(dir + \"/c.log\")\n"
+        "    rmdir(dir)\n"
+        "}\n",
+        "2"
+    );
+}
+
+static void test_glob_no_match(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let matches = glob(\"/tmp/lattice_nonexistent_glob_*.xyz\")\n"
+        "    print(len(matches))\n"
+        "}\n",
+        "0"
+    );
+}
+
+static void test_stat_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let f = \"/tmp/lattice_test_stat_\" + to_string(time())\n"
+        "    write_file(f, \"hello\")\n"
+        "    let s = stat(f)\n"
+        "    print(s.get(\"size\"))\n"
+        "    print(s.get(\"type\"))\n"
+        "    print(s.get(\"mtime\") > 0)\n"
+        "    print(s.get(\"permissions\") > 0)\n"
+        "    delete_file(f)\n"
+        "}\n",
+        "5\nfile\ntrue\ntrue"
+    );
+}
+
+static void test_stat_dir(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = stat(\".\")\n"
+        "    print(s.get(\"type\"))\n"
+        "}\n",
+        "dir"
+    );
+}
+
+static void test_stat_error(void) {
+    char *out = run_capture(
+        "fn main() { stat(\"/tmp/nonexistent_lattice_stat_999\") }\n"
+    );
+    ASSERT(strstr(out, "EVAL_ERROR") != NULL);
+    ASSERT(strstr(out, "stat") != NULL);
+    free(out);
+}
+
+static void test_copy_file_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let src = \"/tmp/lattice_test_cp_src_\" + to_string(time())\n"
+        "    let dst = \"/tmp/lattice_test_cp_dst_\" + to_string(time())\n"
+        "    write_file(src, \"copy me\")\n"
+        "    print(copy_file(src, dst))\n"
+        "    print(read_file(dst))\n"
+        "    delete_file(src)\n"
+        "    delete_file(dst)\n"
+        "}\n",
+        "true\ncopy me"
+    );
+}
+
+static void test_copy_file_error(void) {
+    char *out = run_capture(
+        "fn main() { copy_file(\"/tmp/nonexistent_lattice_cp_999\", \"/tmp/out\") }\n"
+    );
+    ASSERT(strstr(out, "EVAL_ERROR") != NULL);
+    ASSERT(strstr(out, "copy_file") != NULL);
+    free(out);
+}
+
+static void test_realpath_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let rp = realpath(\".\")\n"
+        "    print(rp.starts_with(\"/\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_realpath_error(void) {
+    char *out = run_capture(
+        "fn main() { realpath(\"/tmp/nonexistent_lattice_rp_999\") }\n"
+    );
+    ASSERT(strstr(out, "EVAL_ERROR") != NULL);
+    ASSERT(strstr(out, "realpath") != NULL);
+    free(out);
+}
+
+static void test_tempdir_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let d = tempdir()\n"
+        "    print(is_dir(d))\n"
+        "    rmdir(d)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_tempfile_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let f = tempfile()\n"
+        "    print(is_file(f))\n"
+        "    delete_file(f)\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* ======================================================================
+ * Array: flat_map, chunk, group_by, sum, min, max, first, last
+ * ====================================================================== */
+
+static void test_array_flat_map(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print([1, 2, 3].flat_map(|x| { [x, x * 10] })) }\n",
+        "[1, 10, 2, 20, 3, 30]"
+    );
+    /* Single values (not arrays) are kept as-is */
+    ASSERT_OUTPUT(
+        "fn main() { print([1, 2, 3].flat_map(|x| { x + 1 })) }\n",
+        "[2, 3, 4]"
+    );
+    /* Empty array */
+    ASSERT_OUTPUT(
+        "fn main() { print([].flat_map(|x| { [x] })) }\n",
+        "[]"
+    );
+}
+
+static void test_array_chunk(void) {
+    /* Even split */
+    ASSERT_OUTPUT(
+        "fn main() { print([1, 2, 3, 4].chunk(2)) }\n",
+        "[[1, 2], [3, 4]]"
+    );
+    /* Uneven split */
+    ASSERT_OUTPUT(
+        "fn main() { print([1, 2, 3, 4, 5].chunk(2)) }\n",
+        "[[1, 2], [3, 4], [5]]"
+    );
+    /* Chunk size larger than array */
+    ASSERT_OUTPUT(
+        "fn main() { print([1, 2].chunk(5)) }\n",
+        "[[1, 2]]"
+    );
+    /* Empty array */
+    ASSERT_OUTPUT(
+        "fn main() { print([].chunk(3)) }\n",
+        "[]"
+    );
+}
+
+static void test_array_group_by(void) {
+    /* Group by even/odd using map access to avoid order issues */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let g = [1, 2, 3, 4, 5].group_by(|x| { x % 2 })\n"
+        "    print(g.get(\"0\"))\n"
+        "    print(g.get(\"1\"))\n"
+        "}\n",
+        "[2, 4]\n[1, 3, 5]"
+    );
+}
+
+static void test_array_sum(void) {
+    /* Integer sum */
+    ASSERT_OUTPUT(
+        "fn main() { print([1, 2, 3, 4, 5].sum()) }\n",
+        "15"
+    );
+    /* Float sum */
+    ASSERT_OUTPUT(
+        "fn main() { print([1.5, 2.5, 3.0].sum()) }\n",
+        "7"
+    );
+    /* Empty array */
+    ASSERT_OUTPUT(
+        "fn main() { print([].sum()) }\n",
+        "0"
+    );
+}
+
+static void test_array_min_max(void) {
+    /* Int min/max */
+    ASSERT_OUTPUT(
+        "fn main() { print([3, 1, 4, 1, 5].min()) }\n",
+        "1"
+    );
+    ASSERT_OUTPUT(
+        "fn main() { print([3, 1, 4, 1, 5].max()) }\n",
+        "5"
+    );
+    /* Float min/max */
+    ASSERT_OUTPUT(
+        "fn main() { print([3.5, 1.2, 4.8].min()) }\n",
+        "1.2"
+    );
+    ASSERT_OUTPUT(
+        "fn main() { print([3.5, 1.2, 4.8].max()) }\n",
+        "4.8"
+    );
+    /* Error on empty array */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() { print([].min()) }\n",
+        "EVAL_ERROR"
+    );
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() { print([].max()) }\n",
+        "EVAL_ERROR"
+    );
+}
+
+static void test_array_first_last(void) {
+    /* Non-empty */
+    ASSERT_OUTPUT(
+        "fn main() { print([10, 20, 30].first()) }\n",
+        "10"
+    );
+    ASSERT_OUTPUT(
+        "fn main() { print([10, 20, 30].last()) }\n",
+        "30"
+    );
+    /* Empty returns unit */
+    ASSERT_OUTPUT(
+        "fn main() { print([].first()) }\n",
+        "()"
+    );
+    ASSERT_OUTPUT(
+        "fn main() { print([].last()) }\n",
+        "()"
+    );
+}
+
+/* ======================================================================
+ * range() builtin
+ * ====================================================================== */
+
+static void test_range_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(range(0, 5)) }\n",
+        "[0, 1, 2, 3, 4]"
+    );
+    /* Negative direction auto-detects step */
+    ASSERT_OUTPUT(
+        "fn main() { print(range(5, 0)) }\n",
+        "[5, 4, 3, 2, 1]"
+    );
+}
+
+static void test_range_with_step(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(range(0, 10, 3)) }\n",
+        "[0, 3, 6, 9]"
+    );
+    /* Negative step */
+    ASSERT_OUTPUT(
+        "fn main() { print(range(10, 0, -2)) }\n",
+        "[10, 8, 6, 4, 2]"
+    );
+}
+
+static void test_range_empty(void) {
+    /* Wrong direction for step produces empty */
+    ASSERT_OUTPUT(
+        "fn main() { print(range(0, 5, -1)) }\n",
+        "[]"
+    );
+    /* Same start and end */
+    ASSERT_OUTPUT(
+        "fn main() { print(range(3, 3)) }\n",
+        "[]"
+    );
+}
+
+static void test_range_step_zero(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() { print(range(0, 5, 0)) }\n",
+        "EVAL_ERROR"
+    );
+}
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -3137,4 +4027,98 @@ void register_stdlib_tests(void) {
     register_test("test_path_base", test_path_base);
     register_test("test_path_ext", test_path_ext);
     register_test("test_path_error_handling", test_path_error_handling);
+
+    /* Channels & Concurrency */
+    register_test("test_channel_basic_send_recv", test_channel_basic_send_recv);
+    register_test("test_scope_two_spawns_channels", test_scope_two_spawns_channels);
+    register_test("test_channel_close_recv_unit", test_channel_close_recv_unit);
+    register_test("test_channel_crystal_only_send", test_channel_crystal_only_send);
+    register_test("test_scope_no_spawns_sequential", test_scope_no_spawns_sequential);
+    register_test("test_spawn_outside_scope", test_spawn_outside_scope);
+    register_test("test_channel_multiple_sends_fifo", test_channel_multiple_sends_fifo);
+    register_test("test_scope_spawn_error_propagates", test_scope_spawn_error_propagates);
+    register_test("test_cannot_freeze_channel", test_cannot_freeze_channel);
+    register_test("test_channel_typeof", test_channel_typeof);
+
+    /* New array methods */
+    register_test("test_array_pop", test_array_pop);
+    register_test("test_array_index_of", test_array_index_of);
+    register_test("test_array_any_all", test_array_any_all);
+    register_test("test_array_zip", test_array_zip);
+    register_test("test_array_unique", test_array_unique);
+    register_test("test_array_insert", test_array_insert);
+    register_test("test_array_remove_at", test_array_remove_at);
+    register_test("test_array_sort_by", test_array_sort_by);
+
+    /* New map methods */
+    register_test("test_map_entries", test_map_entries);
+    register_test("test_map_merge", test_map_merge);
+    register_test("test_map_for_each", test_map_for_each);
+
+    /* New string methods */
+    register_test("test_str_trim_start", test_str_trim_start);
+    register_test("test_str_trim_end", test_str_trim_end);
+    register_test("test_str_pad_left", test_str_pad_left);
+    register_test("test_str_pad_right", test_str_pad_right);
+
+    /* New math functions */
+    register_test("test_math_log", test_math_log);
+    register_test("test_math_log2", test_math_log2);
+    register_test("test_math_log10", test_math_log10);
+    register_test("test_math_trig", test_math_trig);
+    register_test("test_math_atan2", test_math_atan2);
+    register_test("test_math_clamp", test_math_clamp);
+    register_test("test_math_pi_e", test_math_pi_e);
+
+    /* New system/fs builtins */
+    register_test("test_cwd_builtin", test_cwd_builtin);
+    register_test("test_is_dir_file", test_is_dir_file);
+    register_test("test_mkdir_builtin", test_mkdir_builtin);
+    register_test("test_rename_builtin", test_rename_builtin);
+    register_test("test_assert_pass", test_assert_pass);
+    register_test("test_assert_fail", test_assert_fail);
+    register_test("test_args_builtin", test_args_builtin);
+
+    /* Map .filter() and .map() */
+    register_test("test_map_filter", test_map_filter);
+    register_test("test_map_map", test_map_map);
+
+    /* String .count() and .is_empty() */
+    register_test("test_str_count", test_str_count);
+    register_test("test_str_is_empty", test_str_is_empty);
+
+    /* New filesystem builtins */
+    register_test("test_rmdir_builtin", test_rmdir_builtin);
+    register_test("test_rmdir_error", test_rmdir_error);
+    register_test("test_glob_builtin", test_glob_builtin);
+    register_test("test_glob_no_match", test_glob_no_match);
+    register_test("test_stat_builtin", test_stat_builtin);
+    register_test("test_stat_dir", test_stat_dir);
+    register_test("test_stat_error", test_stat_error);
+    register_test("test_copy_file_builtin", test_copy_file_builtin);
+    register_test("test_copy_file_error", test_copy_file_error);
+    register_test("test_realpath_builtin", test_realpath_builtin);
+    register_test("test_realpath_error", test_realpath_error);
+    register_test("test_tempdir_builtin", test_tempdir_builtin);
+    register_test("test_tempfile_builtin", test_tempfile_builtin);
+
+    /* Process exec/shell builtins */
+    register_test("test_exec_builtin", test_exec_builtin);
+    register_test("test_shell_builtin", test_shell_builtin);
+    register_test("test_shell_stderr", test_shell_stderr);
+    register_test("test_exec_failure", test_exec_failure);
+
+    /* Array: flat_map, chunk, group_by, sum, min, max, first, last */
+    register_test("test_array_flat_map", test_array_flat_map);
+    register_test("test_array_chunk", test_array_chunk);
+    register_test("test_array_group_by", test_array_group_by);
+    register_test("test_array_sum", test_array_sum);
+    register_test("test_array_min_max", test_array_min_max);
+    register_test("test_array_first_last", test_array_first_last);
+
+    /* range() builtin */
+    register_test("test_range_basic", test_range_basic);
+    register_test("test_range_with_step", test_range_with_step);
+    register_test("test_range_empty", test_range_empty);
+    register_test("test_range_step_zero", test_range_step_zero);
 }

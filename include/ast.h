@@ -47,6 +47,7 @@ typedef enum {
     EXPR_FORGE, EXPR_IF, EXPR_BLOCK,
     EXPR_CLOSURE, EXPR_RANGE,
     EXPR_PRINT, EXPR_SPAWN,
+    EXPR_SCOPE,
     EXPR_TRY_CATCH,
 } ExprTag;
 
@@ -201,6 +202,7 @@ Expr *expr_closure(char **params, size_t param_count, Expr *body);
 Expr *expr_range(Expr *start, Expr *end);
 Expr *expr_print(Expr **args, size_t arg_count);
 Expr *expr_spawn(Stmt **stmts, size_t count);
+Expr *expr_scope(Stmt **stmts, size_t count);
 Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
                      Stmt **catch_stmts, size_t catch_count);
 

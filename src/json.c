@@ -483,6 +483,7 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
         case VAL_STRUCT:
         case VAL_CLOSURE:
         case VAL_RANGE:
+        case VAL_CHANNEL:
             *err = strdup("json_stringify: unsupported value type");
             return false;
     }

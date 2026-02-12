@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifndef __EMSCRIPTEN__
+
 char *envvar_get(const char *name) {
     const char *val = getenv(name);
     if (!val) return NULL;
@@ -18,3 +20,18 @@ bool envvar_set(const char *name, const char *value, char **err) {
     }
     return true;
 }
+
+#else /* __EMSCRIPTEN__ */
+
+char *envvar_get(const char *name) {
+    (void)name;
+    return NULL;
+}
+
+bool envvar_set(const char *name, const char *value, char **err) {
+    (void)name; (void)value;
+    *err = strdup("env_set: not available in browser");
+    return false;
+}
+
+#endif /* __EMSCRIPTEN__ */

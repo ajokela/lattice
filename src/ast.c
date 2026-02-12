@@ -173,6 +173,13 @@ Expr *expr_spawn(Stmt **stmts, size_t count) {
     return e;
 }
 
+Expr *expr_scope(Stmt **stmts, size_t count) {
+    Expr *e = expr_alloc(EXPR_SCOPE);
+    e->as.block.stmts = stmts;
+    e->as.block.count = count;
+    return e;
+}
+
 Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
                      Stmt **catch_stmts, size_t catch_count) {
     Expr *e = expr_alloc(EXPR_TRY_CATCH);
@@ -342,6 +349,7 @@ void expr_free(Expr *e) {
         case EXPR_FORGE:
         case EXPR_BLOCK:
         case EXPR_SPAWN:
+        case EXPR_SCOPE:
             for (size_t i = 0; i < e->as.block.count; i++)
                 stmt_free(e->as.block.stmts[i]);
             free(e->as.block.stmts);

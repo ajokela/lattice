@@ -11,6 +11,7 @@ typedef enum {
     TOK_WHILE, TOK_LOOP, TOK_RETURN, TOK_BREAK, TOK_CONTINUE,
     TOK_SPAWN, TOK_TRUE, TOK_FALSE, TOK_CLONE, TOK_PRINT,
     TOK_TRY, TOK_CATCH,
+    TOK_SCOPE,
 
     /* Mode directive */
     TOK_MODE_DIRECTIVE,   /* #mode casual / #mode strict */

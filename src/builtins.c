@@ -5,7 +5,24 @@
 #include <stdio.h>
 #include <errno.h>
 #ifndef __EMSCRIPTEN__
-#include <editline/readline.h>
+  #if defined(LATTICE_HAS_EDITLINE)
+    #include <editline/readline.h>
+  #elif defined(LATTICE_HAS_READLINE)
+    #include <readline/readline.h>
+    #include <readline/history.h>
+  #else
+    static char *readline(const char *prompt) {
+        if (prompt) fputs(prompt, stdout);
+        fflush(stdout);
+        char *buf = malloc(4096);
+        if (!buf) return NULL;
+        if (!fgets(buf, 4096, stdin)) { free(buf); return NULL; }
+        size_t len = strlen(buf);
+        if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+        return buf;
+    }
+    static void add_history(const char *line) { (void)line; }
+  #endif
 #endif
 
 /* ── builtin_input ── */
@@ -75,6 +92,7 @@ const char *builtin_typeof_str(const LatValue *v) {
         case VAL_UNIT:    return "Unit";
         case VAL_RANGE:   return "Range";
         case VAL_MAP:     return "Map";
+        case VAL_CHANNEL: return "Channel";
     }
     return "?";
 }

@@ -58,7 +58,7 @@ static const char *simple_names[] = {
     [TOK_RETURN] = "return", [TOK_BREAK] = "break", [TOK_CONTINUE] = "continue",
     [TOK_SPAWN] = "spawn", [TOK_TRUE] = "true", [TOK_FALSE] = "false",
     [TOK_CLONE] = "clone", [TOK_PRINT] = "print",
-    [TOK_TRY] = "try", [TOK_CATCH] = "catch",
+    [TOK_TRY] = "try", [TOK_CATCH] = "catch", [TOK_SCOPE] = "scope",
     [TOK_TILDE] = "~", [TOK_STAR] = "*",
     [TOK_PLUS] = "+", [TOK_MINUS] = "-", [TOK_SLASH] = "/", [TOK_PERCENT] = "%",
     [TOK_EQ] = "=", [TOK_EQEQ] = "==", [TOK_BANGEQ] = "!=",
