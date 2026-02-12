@@ -267,6 +267,27 @@ char *fs_tempfile(char **err) {
     return strdup(tmpl);
 }
 
+bool fs_chmod(const char *path, int mode, char **err) {
+    if (chmod(path, (mode_t)mode) != 0) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "chmod: %s: %s", path, strerror(errno));
+        *err = strdup(buf);
+        return false;
+    }
+    return true;
+}
+
+int64_t fs_file_size(const char *path, char **err) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "file_size: %s: %s", path, strerror(errno));
+        *err = strdup(buf);
+        return -1;
+    }
+    return (int64_t)st.st_size;
+}
+
 #else /* __EMSCRIPTEN__ */
 
 bool fs_file_exists(const char *path) {
@@ -355,6 +376,18 @@ char *fs_tempdir(char **err) {
 char *fs_tempfile(char **err) {
     *err = strdup("tempfile: not available in browser");
     return NULL;
+}
+
+bool fs_chmod(const char *path, int mode, char **err) {
+    (void)path; (void)mode;
+    *err = strdup("chmod: not available in browser");
+    return false;
+}
+
+int64_t fs_file_size(const char *path, char **err) {
+    (void)path;
+    *err = strdup("file_size: not available in browser");
+    return -1;
 }
 
 #endif /* __EMSCRIPTEN__ */

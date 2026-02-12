@@ -509,3 +509,57 @@ LatValue math_is_inf(const LatValue *v, char **err) {
     *err = strdup("is_inf() expects Int or Float");
     return value_unit();
 }
+
+/* ── sinh ── */
+
+LatValue math_sinh(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(sinh((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(sinh(v->as.float_val));
+    }
+    *err = strdup("sinh() expects Int or Float");
+    return value_unit();
+}
+
+/* ── cosh ── */
+
+LatValue math_cosh(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(cosh((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(cosh(v->as.float_val));
+    }
+    *err = strdup("cosh() expects Int or Float");
+    return value_unit();
+}
+
+/* ── tanh ── */
+
+LatValue math_tanh(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(tanh((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(tanh(v->as.float_val));
+    }
+    *err = strdup("tanh() expects Int or Float");
+    return value_unit();
+}
+
+/* ── lerp ── */
+
+LatValue math_lerp(const LatValue *a, const LatValue *b, const LatValue *t, char **err) {
+    if ((a->type != VAL_INT && a->type != VAL_FLOAT) ||
+        (b->type != VAL_INT && b->type != VAL_FLOAT) ||
+        (t->type != VAL_INT && t->type != VAL_FLOAT)) {
+        *err = strdup("lerp() expects (Int|Float, Int|Float, Int|Float)");
+        return value_unit();
+    }
+    double da = to_double(a);
+    double db = to_double(b);
+    double dt = to_double(t);
+    return value_float(da + (db - da) * dt);
+}

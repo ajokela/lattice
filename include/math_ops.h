@@ -35,5 +35,9 @@ LatValue math_gcd(const LatValue *a, const LatValue *b, char **err);
 LatValue math_lcm(const LatValue *a, const LatValue *b, char **err);
 LatValue math_is_nan(const LatValue *v, char **err);
 LatValue math_is_inf(const LatValue *v, char **err);
+LatValue math_sinh(const LatValue *v, char **err);
+LatValue math_cosh(const LatValue *v, char **err);
+LatValue math_tanh(const LatValue *v, char **err);
+LatValue math_lerp(const LatValue *a, const LatValue *b, const LatValue *t, char **err);
 
 #endif

@@ -68,4 +68,12 @@ char *fs_tempdir(char **err);
  * Returns heap-allocated path string; on failure returns NULL and sets *err. */
 char *fs_tempfile(char **err);
 
+/* Change file permissions.
+ * Returns true on success; on failure sets *err. */
+bool fs_chmod(const char *path, int mode, char **err);
+
+/* Get file size in bytes.
+ * Returns file size on success; on failure returns -1 and sets *err. */
+int64_t fs_file_size(const char *path, char **err);
+
 #endif /* FS_OPS_H */

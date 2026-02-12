@@ -1105,6 +1105,26 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(tf_result));
                 }
 
+                if (strcmp(fn_name, "chmod") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("chmod() expects 2 arguments (string path, integer mode)")); }
+                    char *ch_err = NULL;
+                    bool ch_ok = fs_chmod(args[0].as.str_val, (int)args[1].as.int_val, &ch_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!ch_ok) { return eval_err(ch_err); }
+                    return eval_ok(value_bool(true));
+                }
+
+                if (strcmp(fn_name, "file_size") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("file_size() expects 1 string argument")); }
+                    char *fs_err = NULL;
+                    int64_t sz = fs_file_size(args[0].as.str_val, &fs_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (sz < 0) { return eval_err(fs_err); }
+                    return eval_ok(value_int(sz));
+                }
+
                 /* ── Path builtins ── */
 
                 if (strcmp(fn_name, "path_join") == 0) {
@@ -1928,6 +1948,46 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                if (strcmp(fn_name, "sinh") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sinh() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_sinh(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "cosh") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cosh() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_cosh(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "tanh") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tanh() expects (Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_tanh(&args[0], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "lerp") == 0) {
+                    if (argc != 3) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lerp() expects (Int|Float, Int|Float, Int|Float)")); }
+                    char *merr = NULL;
+                    LatValue result = math_lerp(&args[0], &args[1], &args[2], &merr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (merr) return eval_err(merr);
+                    return eval_ok(result);
+                }
+
                 /* ── range() builtin ── */
 
                 if (strcmp(fn_name, "range") == 0) {
@@ -2186,6 +2246,160 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(out));
                 }
 
+                /* ── CSV builtins ── */
+
+                if (strcmp(fn_name, "csv_parse") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("csv_parse() expects (String)")); }
+                    const char *input = args[0].as.str_val;
+                    size_t pos = 0;
+                    size_t input_len = strlen(input);
+
+                    /* Collect rows into a temporary array */
+                    size_t rows_cap = 8;
+                    size_t rows_len = 0;
+                    LatValue *rows = malloc(rows_cap * sizeof(LatValue));
+
+                    while (pos < input_len) {
+                        /* Parse one row: collect fields */
+                        size_t fields_cap = 8;
+                        size_t fields_len = 0;
+                        LatValue *fields = malloc(fields_cap * sizeof(LatValue));
+
+                        for (;;) {
+                            /* Parse one field */
+                            size_t field_cap = 64;
+                            size_t field_len = 0;
+                            char *field = malloc(field_cap);
+
+                            if (pos < input_len && input[pos] == '"') {
+                                /* Quoted field */
+                                pos++; /* skip opening quote */
+                                for (;;) {
+                                    if (pos >= input_len) break;
+                                    if (input[pos] == '"') {
+                                        if (pos + 1 < input_len && input[pos + 1] == '"') {
+                                            /* Escaped quote */
+                                            if (field_len + 1 >= field_cap) { field_cap *= 2; field = realloc(field, field_cap); }
+                                            field[field_len++] = '"';
+                                            pos += 2;
+                                        } else {
+                                            /* End of quoted field */
+                                            pos++; /* skip closing quote */
+                                            break;
+                                        }
+                                    } else {
+                                        if (field_len + 1 >= field_cap) { field_cap *= 2; field = realloc(field, field_cap); }
+                                        field[field_len++] = input[pos++];
+                                    }
+                                }
+                            } else {
+                                /* Unquoted field */
+                                while (pos < input_len && input[pos] != ',' && input[pos] != '\n' && input[pos] != '\r') {
+                                    if (field_len + 1 >= field_cap) { field_cap *= 2; field = realloc(field, field_cap); }
+                                    field[field_len++] = input[pos++];
+                                }
+                            }
+
+                            field[field_len] = '\0';
+
+                            /* Add field to fields array */
+                            if (fields_len >= fields_cap) { fields_cap *= 2; fields = realloc(fields, fields_cap * sizeof(LatValue)); }
+                            fields[fields_len++] = value_string_owned(field);
+
+                            /* Check what follows */
+                            if (pos < input_len && input[pos] == ',') {
+                                pos++; /* skip comma, continue to next field */
+                            } else {
+                                break; /* end of row */
+                            }
+                        }
+
+                        /* Skip line ending */
+                        if (pos < input_len && input[pos] == '\r') pos++;
+                        if (pos < input_len && input[pos] == '\n') pos++;
+
+                        /* Build row array and add to rows (value_array does shallow copy, so don't free elements) */
+                        LatValue row = value_array(fields, fields_len);
+                        free(fields);
+
+                        if (rows_len >= rows_cap) { rows_cap *= 2; rows = realloc(rows, rows_cap * sizeof(LatValue)); }
+                        rows[rows_len++] = row;
+                    }
+
+                    LatValue result = value_array(rows, rows_len);
+                    free(rows);
+
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "csv_stringify") == 0) {
+                    if (argc != 1 || args[0].type != VAL_ARRAY) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("csv_stringify() expects (Array)")); }
+
+                    LatValue *data = &args[0];
+                    size_t out_cap = 256;
+                    size_t out_len = 0;
+                    char *out = malloc(out_cap);
+
+                    for (size_t r = 0; r < data->as.array.len; r++) {
+                        LatValue *row = &data->as.array.elems[r];
+                        if (row->type != VAL_ARRAY) {
+                            free(out);
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                            free(args);
+                            return eval_err(strdup("csv_stringify(): each row must be an Array"));
+                        }
+                        for (size_t c = 0; c < row->as.array.len; c++) {
+                            if (c > 0) {
+                                if (out_len + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                                out[out_len++] = ',';
+                            }
+
+                            char *field_str = value_display(&row->as.array.elems[c]);
+                            size_t flen = strlen(field_str);
+
+                            /* Check if quoting is needed */
+                            bool needs_quote = false;
+                            for (size_t k = 0; k < flen; k++) {
+                                if (field_str[k] == ',' || field_str[k] == '"' || field_str[k] == '\n' || field_str[k] == '\r') {
+                                    needs_quote = true;
+                                    break;
+                                }
+                            }
+
+                            if (needs_quote) {
+                                /* Count quotes for escaped size */
+                                size_t extra = 0;
+                                for (size_t k = 0; k < flen; k++) {
+                                    if (field_str[k] == '"') extra++;
+                                }
+                                size_t needed = flen + extra + 2; /* +2 for surrounding quotes */
+                                while (out_len + needed >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                                out[out_len++] = '"';
+                                for (size_t k = 0; k < flen; k++) {
+                                    if (field_str[k] == '"') out[out_len++] = '"';
+                                    out[out_len++] = field_str[k];
+                                }
+                                out[out_len++] = '"';
+                            } else {
+                                while (out_len + flen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                                memcpy(out + out_len, field_str, flen);
+                                out_len += flen;
+                            }
+                            free(field_str);
+                        }
+                        /* Append newline */
+                        if (out_len + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                        out[out_len++] = '\n';
+                    }
+                    out[out_len] = '\0';
+
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string_owned(out));
+                }
+
                 /* ── Regex builtins ── */
 
                 if (strcmp(fn_name, "regex_match") == 0) {
@@ -2309,6 +2523,80 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_unit());
+                }
+
+                /* ── Functional programming builtins ── */
+
+                if (strcmp(fn_name, "identity") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("identity() expects 1 argument")); }
+                    LatValue result = value_deep_clone(&args[0]);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
+                }
+
+                if (strcmp(fn_name, "pipe") == 0) {
+                    if (argc < 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pipe() expects a value and at least one function")); }
+                    for (size_t i = 1; i < argc; i++) {
+                        if (args[i].type != VAL_CLOSURE) {
+                            char *err = NULL;
+                            (void)asprintf(&err, "pipe() argument %zu is not a function", i + 1);
+                            for (size_t j = 0; j < argc; j++) value_free(&args[j]);
+                            free(args);
+                            return eval_err(err);
+                        }
+                    }
+                    LatValue current = value_deep_clone(&args[0]);
+                    for (size_t i = 1; i < argc; i++) {
+                        LatValue call_arg = current;
+                        EvalResult r = call_closure(ev,
+                            args[i].as.closure.param_names,
+                            args[i].as.closure.param_count,
+                            args[i].as.closure.body,
+                            args[i].as.closure.captured_env,
+                            &call_arg, 1);
+                        if (!IS_OK(r)) {
+                            for (size_t j = 0; j < argc; j++) value_free(&args[j]);
+                            free(args);
+                            return r;
+                        }
+                        current = r.value;
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(current);
+                }
+
+                if (strcmp(fn_name, "compose") == 0) {
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("compose() expects 2 arguments (both closures)")); }
+                    if (args[0].type != VAL_CLOSURE || args[1].type != VAL_CLOSURE) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("compose() arguments must be closures"));
+                    }
+                    /* Build closure |x| { __compose_f(__compose_g(x)) }
+                     * where f = args[0], g = args[1] */
+                    Env *cenv = env_clone(ev->env);
+                    env_push_scope(cenv);
+                    env_define(cenv, "__compose_f", value_deep_clone(&args[0]));
+                    env_define(cenv, "__compose_g", value_deep_clone(&args[1]));
+
+                    /* AST: __compose_f(__compose_g(x))  (intentionally leaked — borrowed by closure) */
+                    Expr *x_var = expr_ident(strdup("x"));
+                    Expr **g_cargs = malloc(sizeof(Expr *));
+                    g_cargs[0] = x_var;
+                    Expr *g_call = expr_call(expr_ident(strdup("__compose_g")), g_cargs, 1);
+                    Expr **f_cargs = malloc(sizeof(Expr *));
+                    f_cargs[0] = g_call;
+                    Expr *body = expr_call(expr_ident(strdup("__compose_f")), f_cargs, 1);
+
+                    char **params = malloc(sizeof(char *));
+                    params[0] = strdup("x");
+                    LatValue closure = value_closure(params, 1, body, cenv);
+
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(closure);
                 }
 
                 /* ── Named function lookup ── */

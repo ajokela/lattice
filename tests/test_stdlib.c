@@ -3295,6 +3295,27 @@ static void test_is_nan_inf(void) {
     );
 }
 
+static void test_math_lerp(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(lerp(0.0, 10.0, 0.5))\n"
+        "    print(lerp(0, 100, 0.25))\n"
+        "}\n",
+        "5\n25"
+    );
+}
+
+static void test_math_hyperbolic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"{}\", sinh(0.0)))\n"
+        "    print(format(\"{}\", cosh(0.0)))\n"
+        "    print(format(\"{}\", tanh(0.0)))\n"
+        "}\n",
+        "0\n1\n0"
+    );
+}
+
 /* ── System/FS tests ── */
 
 static void test_cwd_builtin(void) {
@@ -3649,6 +3670,38 @@ static void test_tempfile_builtin(void) {
     );
 }
 
+static void test_chmod_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let f = tempfile()\n"
+        "    print(chmod(f, 448))\n"
+        "    delete_file(f)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_file_size_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let f = \"/tmp/lattice_size_test_\" + to_string(time())\n"
+        "    write_file(f, \"hello\")\n"
+        "    print(file_size(f))\n"
+        "    delete_file(f)\n"
+        "}\n",
+        "5"
+    );
+}
+
+static void test_file_size_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    file_size(\"/nonexistent_path_xyz\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
 /* ======================================================================
  * Array: flat_map, chunk, group_by, sum, min, max, first, last
  * ====================================================================== */
@@ -3945,6 +3998,91 @@ static void test_url_decode(void) {
         "    print(url_decode(\"foo+bar\"))\n"
         "}\n",
         "hello world\nfoo bar"
+    );
+}
+
+/* ======================================================================
+ * CSV builtins
+ * ====================================================================== */
+
+static void test_csv_parse(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let data = csv_parse(\"a,b,c\\n1,2,3\\n\")\n"
+        "    print(len(data))\n"
+        "    print(data[0])\n"
+        "    print(data[1])\n"
+        "}\n",
+        "2\n[a, b, c]\n[1, 2, 3]"
+    );
+}
+
+static void test_csv_parse_quoted(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let data = csv_parse(\"name,desc\\n\" + \"\\\"Alice\\\",\\\"has, comma\\\"\\n\")\n"
+        "    print(data[1][0])\n"
+        "    print(data[1][1])\n"
+        "}\n",
+        "Alice\nhas, comma"
+    );
+}
+
+static void test_csv_stringify(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let data = [[\"name\", \"age\"], [\"Alice\", \"30\"]]\n"
+        "    print(csv_stringify(data).trim())\n"
+        "}\n",
+        "name,age\nAlice,30"
+    );
+}
+
+static void test_csv_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let csv = \"a,b\\n1,2\\n\"\n"
+        "    let data = csv_parse(csv)\n"
+        "    let result = csv_stringify(data)\n"
+        "    print(result == csv)\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* ── Functional programming builtins ── */
+
+static void test_identity(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(identity(42))\n"
+        "    print(identity(\"hello\"))\n"
+        "}\n",
+        "42\nhello"
+    );
+}
+
+static void test_pipe(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let double = |x| { x * 2 }\n"
+        "    let add1 = |x| { x + 1 }\n"
+        "    print(pipe(5, double, add1))\n"
+        "    print(pipe(3, add1, double, add1))\n"
+        "}\n",
+        "11\n9"
+    );
+}
+
+static void test_compose(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let double = |x| { x * 2 }\n"
+        "    let add1 = |x| { x + 1 }\n"
+        "    let f = compose(double, add1)\n"
+        "    print(f(5))\n"
+        "}\n",
+        "12"
     );
 }
 
@@ -4251,6 +4389,8 @@ void register_stdlib_tests(void) {
     register_test("test_math_sign", test_math_sign);
     register_test("test_math_gcd_lcm", test_math_gcd_lcm);
     register_test("test_is_nan_inf", test_is_nan_inf);
+    register_test("test_math_lerp", test_math_lerp);
+    register_test("test_math_hyperbolic", test_math_hyperbolic);
 
     /* New system/fs builtins */
     register_test("test_cwd_builtin", test_cwd_builtin);
@@ -4283,6 +4423,9 @@ void register_stdlib_tests(void) {
     register_test("test_realpath_error", test_realpath_error);
     register_test("test_tempdir_builtin", test_tempdir_builtin);
     register_test("test_tempfile_builtin", test_tempfile_builtin);
+    register_test("test_chmod_builtin", test_chmod_builtin);
+    register_test("test_file_size_builtin", test_file_size_builtin);
+    register_test("test_file_size_error", test_file_size_error);
 
     /* Process exec/shell builtins */
     register_test("test_exec_builtin", test_exec_builtin);
@@ -4325,4 +4468,15 @@ void register_stdlib_tests(void) {
     /* URL encoding builtins */
     register_test("test_url_encode", test_url_encode);
     register_test("test_url_decode", test_url_decode);
+
+    /* CSV builtins */
+    register_test("test_csv_parse", test_csv_parse);
+    register_test("test_csv_parse_quoted", test_csv_parse_quoted);
+    register_test("test_csv_stringify", test_csv_stringify);
+    register_test("test_csv_roundtrip", test_csv_roundtrip);
+
+    /* Functional programming builtins */
+    register_test("test_identity", test_identity);
+    register_test("test_pipe", test_pipe);
+    register_test("test_compose", test_compose);
 }
