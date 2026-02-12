@@ -234,194 +234,296 @@ fix frozen = freeze(data)
 
 ## Standard Library
 
-### Core Builtins
+Lattice ships with 100+ builtin functions and 55+ type methods covering I/O, math, strings, files, networking, concurrency, and more.
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `print` | `print(args...)` | Print values to stdout with newline |
-| `eprint` | `eprint(args...)` | Print values to stderr with newline |
-| `print_raw` | `print_raw(args...)` | Print values to stdout without newline |
-| `input` | `input(prompt?) -> String\|Unit` | Read a line from stdin (returns Unit on EOF) |
-| `typeof` | `typeof(val) -> String` | Returns the type name of a value |
-| `phase_of` | `phase_of(val) -> String` | Returns `"fluid"`, `"crystal"`, or `"unphased"` |
-| `to_string` | `to_string(val) -> String` | Convert any value to its string representation |
-| `len` | `len(val) -> Int` | Length of a string, array, or map |
-| `exit` | `exit(code?)` | Exit the process with a status code (default 0) |
-| `version` | `version() -> String` | Returns the Lattice version string |
+### Core
+
+| Function | Description |
+|----------|-------------|
+| `print(args...)` | Print values to stdout with newline |
+| `eprint(args...)` | Print to stderr with newline |
+| `print_raw(args...)` | Print to stdout without newline |
+| `input(prompt?)` | Read a line from stdin (Unit on EOF) |
+| `typeof(val)` | Type name of a value (`"Int"`, `"String"`, etc.) |
+| `phase_of(val)` | Phase of a value (`"fluid"`, `"crystal"`, `"unphased"`) |
+| `to_string(val)` | Convert any value to its string representation |
+| `len(val)` | Length of a string, array, or map |
+| `assert(cond, msg?)` | Assert condition is truthy; error with optional message |
+| `exit(code?)` | Exit the process (default code 0) |
+| `version()` | Lattice version string |
 
 ### Phase Transitions
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `freeze` | `freeze(val) -> crystal` | Transition a value to crystal (immutable) phase |
-| `thaw` | `thaw(val) -> fluid` | Create a mutable copy of a crystal value |
-| `clone` | `clone(val) -> Value` | Deep-clone a value |
+| Function | Description |
+|----------|-------------|
+| `freeze(val)` | Transition a value to crystal (immutable) phase |
+| `thaw(val)` | Create a mutable copy of a crystal value |
+| `clone(val)` | Deep-clone a value |
 
-### Type Constructors
+### Type Constructors & Conversion
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `Map::new` | `Map::new() -> Map` | Create an empty map |
-| `Channel::new` | `Channel::new() -> Channel` | Create a new channel for inter-thread communication |
+| Function | Description |
+|----------|-------------|
+| `Map::new()` | Create an empty map |
+| `Channel::new()` | Create a channel for inter-thread communication |
+| `range(start, end, step?)` | Generate array of integers (`start` inclusive, `end` exclusive) |
+| `to_int(val)` | Convert to Int (from Float, Bool, or String) |
+| `to_float(val)` | Convert to Float |
+| `parse_int(s)` | Parse string as integer |
+| `parse_float(s)` | Parse string as float |
+| `ord(ch)` | Unicode code point of first character |
+| `chr(code)` | Character from a code point |
 
-### Type Conversion
+### Error Handling
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `to_int` | `to_int(val) -> Int` | Convert Int, Float, Bool, or String to Int |
-| `to_float` | `to_float(val) -> Float` | Convert Int, Float, Bool, or String to Float |
-| `parse_int` | `parse_int(s) -> Int` | Parse a string as an integer |
-| `parse_float` | `parse_float(s) -> Float` | Parse a string as a float |
-| `ord` | `ord(ch) -> Int` | ASCII code of the first character |
-| `chr` | `chr(code) -> String` | Character from an ASCII code |
+| Function | Description |
+|----------|-------------|
+| `error(msg)` | Create an error value from a message string |
+| `is_error(val)` | Check if a value is an error |
 
 ### Math
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `abs` | `abs(n) -> Int\|Float` | Absolute value (preserves type) |
-| `floor` | `floor(n) -> Int` | Floor to integer |
-| `ceil` | `ceil(n) -> Int` | Ceiling to integer |
-| `round` | `round(n) -> Int` | Round to nearest integer |
-| `sqrt` | `sqrt(n) -> Float` | Square root |
-| `pow` | `pow(base, exp) -> Int\|Float` | Exponentiation |
-| `min` | `min(a, b) -> Int\|Float` | Minimum of two numbers |
-| `max` | `max(a, b) -> Int\|Float` | Maximum of two numbers |
-| `random` | `random() -> Float` | Random float in [0, 1) |
-| `random_int` | `random_int(low, high) -> Int` | Random integer in [low, high] inclusive |
+| Function | Description |
+|----------|-------------|
+| `abs(n)` | Absolute value (preserves Int/Float type) |
+| `floor(n)` | Floor to integer |
+| `ceil(n)` | Ceiling to integer |
+| `round(n)` | Round to nearest integer |
+| `sqrt(n)` | Square root |
+| `pow(base, exp)` | Exponentiation |
+| `exp(x)` | e^x |
+| `log(n)` | Natural logarithm |
+| `log2(n)` | Base-2 logarithm |
+| `log10(n)` | Base-10 logarithm |
+| `min(a, b)` | Minimum of two numbers |
+| `max(a, b)` | Maximum of two numbers |
+| `clamp(x, lo, hi)` | Clamp value to range [lo, hi] |
+| `sign(x)` | Returns -1, 0, or 1 |
+| `lerp(a, b, t)` | Linear interpolation: `a + (b - a) * t` |
+| `gcd(a, b)` | Greatest common divisor |
+| `lcm(a, b)` | Least common multiple |
+| `math_pi()` | Pi constant (3.14159...) |
+| `math_e()` | Euler's number (2.71828...) |
+| `random()` | Random float in [0, 1) |
+| `random_int(lo, hi)` | Random integer in [lo, hi] inclusive |
+
+**Trigonometric:**
+
+| Function | Description |
+|----------|-------------|
+| `sin(x)` `cos(x)` `tan(x)` | Standard trig (radians) |
+| `asin(x)` `acos(x)` `atan(x)` | Inverse trig |
+| `atan2(y, x)` | Two-argument arc tangent |
+| `sinh(x)` `cosh(x)` `tanh(x)` | Hyperbolic trig |
+
+**Float inspection:**
+
+| Function | Description |
+|----------|-------------|
+| `is_nan(x)` | True if value is NaN |
+| `is_inf(x)` | True if value is infinite |
 
 ### String Formatting & Regex
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `format` | `format(fmt, args...) -> String` | Format string with `{}` placeholders |
-| `regex_match` | `regex_match(pattern, str) -> Bool` | Test if pattern matches string (POSIX extended) |
-| `regex_find_all` | `regex_find_all(pattern, str) -> Array` | Find all non-overlapping matches |
-| `regex_replace` | `regex_replace(pattern, str, repl) -> String` | Replace all matches |
+| Function | Description |
+|----------|-------------|
+| `format(fmt, args...)` | Format string with `{}` placeholders |
+| `regex_match(pattern, str)` | Test if POSIX extended regex matches |
+| `regex_find_all(pattern, str)` | Find all non-overlapping matches |
+| `regex_replace(pattern, str, repl)` | Replace all matches |
 
 ### JSON
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `json_parse` | `json_parse(str) -> Value` | Parse JSON string into a Lattice value |
-| `json_stringify` | `json_stringify(val) -> String` | Serialize a Lattice value to JSON |
+| Function | Description |
+|----------|-------------|
+| `json_parse(str)` | Parse JSON string into a Lattice value |
+| `json_stringify(val)` | Serialize a Lattice value to JSON |
+
+### CSV
+
+| Function | Description |
+|----------|-------------|
+| `csv_parse(str)` | Parse CSV into array of arrays (supports quoted fields) |
+| `csv_stringify(data)` | Convert array of arrays to CSV string |
+
+### URL Encoding
+
+| Function | Description |
+|----------|-------------|
+| `url_encode(str)` | Percent-encode a string for URLs |
+| `url_decode(str)` | Decode a percent-encoded string |
 
 ### File System
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `read_file` | `read_file(path) -> String` | Read entire file contents |
-| `write_file` | `write_file(path, content) -> Bool` | Write string to a file |
-| `append_file` | `append_file(path, content) -> Bool` | Append string to a file |
-| `file_exists` | `file_exists(path) -> Bool` | Check if a file exists |
-| `delete_file` | `delete_file(path) -> Bool` | Delete a file |
-| `list_dir` | `list_dir(path) -> Array` | List directory contents |
+| Function | Description |
+|----------|-------------|
+| `read_file(path)` | Read entire file contents as string |
+| `write_file(path, content)` | Write string to file |
+| `append_file(path, content)` | Append string to file |
+| `file_exists(path)` | Check if file exists |
+| `file_size(path)` | File size in bytes |
+| `delete_file(path)` | Delete a file |
+| `list_dir(path)` | List directory contents as array |
+| `mkdir(path)` | Create a directory |
+| `rmdir(path)` | Remove an empty directory |
+| `rename(old, new)` | Rename/move a file or directory |
+| `copy_file(src, dst)` | Copy a file |
+| `chmod(path, mode)` | Change file permissions |
+| `is_dir(path)` | Check if path is a directory |
+| `is_file(path)` | Check if path is a regular file |
+| `stat(path)` | File metadata (returns Map with `size`, `mtime`, `type`, `permissions`) |
+| `glob(pattern)` | Match files by glob pattern (e.g., `"*.lat"`) |
+| `realpath(path)` | Resolve to absolute canonical path |
+| `tempdir()` | Create a temporary directory, returns path |
+| `tempfile()` | Create a temporary file, returns path |
 
 ### Path Utilities
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `path_join` | `path_join(parts...) -> String` | Join path components with `/` |
-| `path_dir` | `path_dir(path) -> String` | Directory portion of a path |
-| `path_base` | `path_base(path) -> String` | Base name of a path |
-| `path_ext` | `path_ext(path) -> String` | File extension (including `.`) |
+| Function | Description |
+|----------|-------------|
+| `path_join(parts...)` | Join path components with `/` |
+| `path_dir(path)` | Directory portion of a path |
+| `path_base(path)` | Base name of a path |
+| `path_ext(path)` | File extension (including `.`) |
 
 ### Environment & Process
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `env` | `env(name) -> String\|Unit` | Get environment variable (Unit if not set) |
-| `env_set` | `env_set(name, value)` | Set environment variable |
-| `time` | `time() -> Int` | Current time in milliseconds since epoch |
-| `sleep` | `sleep(ms)` | Sleep for milliseconds |
+| Function | Description |
+|----------|-------------|
+| `env(name)` | Get environment variable (Unit if not set) |
+| `env_set(name, value)` | Set environment variable |
+| `env_keys()` | Array of all environment variable names |
+| `cwd()` | Current working directory |
+| `args()` | Command-line arguments as array |
+| `exec(cmd)` | Run shell command, return stdout (error on non-zero exit) |
+| `shell(cmd)` | Run shell command, return Map with `stdout`, `stderr`, `exit_code` |
+| `platform()` | OS name (`"macos"`, `"linux"`, `"windows"`, `"wasm"`) |
+| `hostname()` | System hostname |
+| `pid()` | Current process ID |
 
-### Date & Time Formatting
+### Date & Time
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `time_format` | `time_format(epoch_ms, fmt) -> String` | Format timestamp with strftime codes |
-| `time_parse` | `time_parse(str, fmt) -> Int` | Parse datetime string to epoch milliseconds |
+| Function | Description |
+|----------|-------------|
+| `time()` | Current time in milliseconds since epoch |
+| `sleep(ms)` | Sleep for milliseconds |
+| `time_format(epoch_ms, fmt)` | Format timestamp with strftime codes |
+| `time_parse(str, fmt)` | Parse datetime string to epoch milliseconds |
 
 ### Cryptography (requires OpenSSL)
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `sha256` | `sha256(s) -> String` | SHA-256 hash as hex string |
-| `md5` | `md5(s) -> String` | MD5 hash as hex string |
-| `base64_encode` | `base64_encode(s) -> String` | Base64 encode |
-| `base64_decode` | `base64_decode(s) -> String` | Base64 decode |
+| Function | Description |
+|----------|-------------|
+| `sha256(s)` | SHA-256 hash as hex string |
+| `md5(s)` | MD5 hash as hex string |
+| `base64_encode(s)` | Base64 encode |
+| `base64_decode(s)` | Base64 decode |
 
 ### Networking (TCP)
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `tcp_listen` | `tcp_listen(host, port) -> Int` | Create a listening socket, returns fd |
-| `tcp_accept` | `tcp_accept(fd) -> Int` | Accept a client connection, returns fd |
-| `tcp_connect` | `tcp_connect(host, port) -> Int` | Connect to a server, returns fd |
-| `tcp_read` | `tcp_read(fd) -> String` | Read until EOF |
-| `tcp_read_bytes` | `tcp_read_bytes(fd, n) -> String` | Read exactly n bytes |
-| `tcp_write` | `tcp_write(fd, data) -> Bool` | Write data to socket |
-| `tcp_close` | `tcp_close(fd)` | Close a socket |
-| `tcp_peer_addr` | `tcp_peer_addr(fd) -> String` | Get peer address as `"host:port"` |
-| `tcp_set_timeout` | `tcp_set_timeout(fd, secs) -> Bool` | Set read/write timeout |
+| Function | Description |
+|----------|-------------|
+| `tcp_listen(host, port)` | Create listening socket, returns fd |
+| `tcp_accept(fd)` | Accept client connection, returns fd |
+| `tcp_connect(host, port)` | Connect to server, returns fd |
+| `tcp_read(fd)` | Read until EOF |
+| `tcp_read_bytes(fd, n)` | Read exactly n bytes |
+| `tcp_write(fd, data)` | Write data to socket |
+| `tcp_close(fd)` | Close socket |
+| `tcp_peer_addr(fd)` | Peer address as `"host:port"` |
+| `tcp_set_timeout(fd, secs)` | Set read/write timeout |
 
 ### Networking (TLS, requires OpenSSL)
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `tls_connect` | `tls_connect(host, port) -> Int` | Create a TLS connection, returns fd |
-| `tls_read` | `tls_read(fd) -> String` | Read decrypted data until EOF |
-| `tls_read_bytes` | `tls_read_bytes(fd, n) -> String` | Read exactly n decrypted bytes |
-| `tls_write` | `tls_write(fd, data) -> Bool` | Write encrypted data |
-| `tls_close` | `tls_close(fd)` | Close a TLS connection |
-| `tls_available` | `tls_available() -> Bool` | Check if TLS support is compiled in |
+| Function | Description |
+|----------|-------------|
+| `tls_connect(host, port)` | Create TLS connection, returns fd |
+| `tls_read(fd)` | Read decrypted data until EOF |
+| `tls_read_bytes(fd, n)` | Read exactly n decrypted bytes |
+| `tls_write(fd, data)` | Write encrypted data |
+| `tls_close(fd)` | Close TLS connection |
+| `tls_available()` | Check if TLS support is compiled in |
+
+### Functional
+
+| Function | Description |
+|----------|-------------|
+| `identity(x)` | Return x unchanged |
+| `pipe(val, ...fns)` | Thread value through functions: `pipe(x, f, g)` = `g(f(x))` |
+| `compose(f, g)` | Return new function: `compose(f, g)(x)` = `f(g(x))` |
 
 ### Metaprogramming
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `lat_eval` | `lat_eval(src) -> Value` | Run a string as Lattice code |
-| `tokenize` | `tokenize(src) -> Array` | Tokenize source code into token strings |
-| `is_complete` | `is_complete(src) -> Bool` | Check if source code has balanced delimiters |
-| `require` | `require(path) -> Bool` | Load and execute a `.lat` file |
+| Function | Description |
+|----------|-------------|
+| `lat_eval(src)` | Run a string as Lattice code |
+| `tokenize(src)` | Tokenize source code into token strings |
+| `is_complete(src)` | Check if source has balanced delimiters |
+| `require(path)` | Load and execute a `.lat` file |
 
 ### String Methods
 
 | Method | Description |
 |--------|-------------|
 | `.len()` | Length of the string |
-| `.contains(substr)` | Check if string contains a substring |
+| `.contains(substr)` | Check if string contains substring |
 | `.starts_with(prefix)` | Check if string starts with prefix |
 | `.ends_with(suffix)` | Check if string ends with suffix |
+| `.index_of(substr)` | Index of first occurrence (-1 if not found) |
+| `.count(substr)` | Count non-overlapping occurrences |
+| `.is_empty()` | True if string length is 0 |
 | `.trim()` | Remove leading and trailing whitespace |
+| `.trim_start()` | Remove leading whitespace |
+| `.trim_end()` | Remove trailing whitespace |
 | `.to_upper()` | Convert to uppercase |
 | `.to_lower()` | Convert to lowercase |
-| `.replace(old, new)` | Replace all occurrences of `old` with `new` |
-| `.split(delim)` | Split string by delimiter, returns array |
-| `.index_of(substr)` | Index of first occurrence (-1 if not found) |
+| `.replace(old, new)` | Replace all occurrences |
+| `.split(delim)` | Split by delimiter, returns array |
 | `.substring(start, end)` | Extract substring by index range |
-| `.chars()` | Split into array of individual characters |
+| `.chars()` | Split into array of characters |
+| `.bytes()` | Array of byte values (integers) |
 | `.reverse()` | Reverse the string |
-| `.repeat(n)` | Repeat the string `n` times |
+| `.repeat(n)` | Repeat n times |
+| `.pad_left(width, ch)` | Pad on the left to target width |
+| `.pad_right(width, ch)` | Pad on the right to target width |
 
 ### Array Methods
 
 | Method | Description |
 |--------|-------------|
 | `.len()` | Number of elements |
-| `.push(val)` | Append an element (mutates in place) |
-| `.map(fn)` | Transform each element, returns new array |
-| `.filter(fn)` | Keep elements where `fn` returns true |
-| `.reduce(fn, init)` | Fold with `fn(accumulator, element)` |
-| `.for_each(fn)` | Call `fn` on each element |
-| `.find(fn)` | Return first element where `fn` returns true (or Unit) |
-| `.join(sep)` | Join elements into a string with separator |
-| `.contains(val)` | Check if array contains a value |
-| `.reverse()` | Return a reversed copy |
-| `.sort()` | Return a sorted copy (Int, Float, or String arrays) |
+| `.push(val)` | Append element (mutates in place) |
+| `.pop()` | Remove and return last element (mutates in place) |
+| `.insert(i, val)` | Insert element at index (mutates in place) |
+| `.remove_at(i)` | Remove element at index (mutates in place) |
+| `.first()` | First element (Unit if empty) |
+| `.last()` | Last element (Unit if empty) |
+| `.index_of(val)` | Index of first occurrence (-1 if not found) |
+| `.contains(val)` | Check if array contains value |
+| `.map(fn)` | Transform each element |
+| `.flat_map(fn)` | Map then flatten one level |
+| `.filter(fn)` | Keep elements where fn returns true |
+| `.reduce(fn, init)` | Fold with `fn(acc, elem)` |
+| `.for_each(fn)` | Call fn on each element |
+| `.find(fn)` | First element where fn is true (Unit if none) |
+| `.any(fn)` | True if any element satisfies fn |
+| `.all(fn)` | True if all elements satisfy fn |
+| `.join(sep)` | Join into string with separator |
+| `.reverse()` | Return reversed copy |
+| `.sort()` | Return sorted copy |
+| `.sort_by(fn)` | Sort by comparator: `fn(a, b)` returns negative/zero/positive |
 | `.slice(start, end)` | Extract subarray by index range |
-| `.flat()` | Flatten one level of nested arrays |
-| `.enumerate()` | Return array of `[index, value]` pairs |
+| `.take(n)` | First n elements |
+| `.drop(n)` | All elements after first n |
+| `.flat()` | Flatten one level of nesting |
+| `.zip(other)` | Zip with another array into `[[a, b], ...]` pairs |
+| `.unique()` | Remove duplicate values |
+| `.chunk(n)` | Split into sub-arrays of size n |
+| `.group_by(fn)` | Group by fn result into a Map |
+| `.sum()` | Sum of numeric elements |
+| `.min()` | Minimum numeric element |
+| `.max()` | Maximum numeric element |
+| `.enumerate()` | Array of `[index, value]` pairs |
 
 ### Map Methods
 
@@ -429,11 +531,16 @@ fix frozen = freeze(data)
 |--------|-------------|
 | `.len()` | Number of entries |
 | `.get(key)` | Get value by key (Unit if not found) |
-| `.set(key, val)` | Set a key-value pair (mutates in place) |
+| `.set(key, val)` | Set key-value pair (mutates in place) |
 | `.has(key)` | Check if key exists |
 | `.remove(key)` | Remove a key-value pair |
-| `.keys()` | Return array of all keys |
-| `.values()` | Return array of all values |
+| `.keys()` | Array of all keys |
+| `.values()` | Array of all values |
+| `.entries()` | Array of `[key, value]` pairs |
+| `.merge(other)` | Merge another map in (mutates in place) |
+| `.for_each(fn)` | Call `fn(key, value)` for each entry |
+| `.filter(fn)` | New map with entries where `fn(key, value)` is true |
+| `.map(fn)` | New map with values transformed by `fn(key, value)` |
 
 ### Channel Methods
 
