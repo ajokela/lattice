@@ -245,6 +245,14 @@
         {
           "name": "support.function.builtin.csv.lattice",
           "match": "\\b(csv_parse|csv_stringify)\\b"
+        },
+        {
+          "name": "support.function.builtin.toml.lattice",
+          "match": "\\b(toml_parse|toml_stringify)\\b"
+        },
+        {
+          "name": "support.function.builtin.yaml.lattice",
+          "match": "\\b(yaml_parse|yaml_stringify)\\b"
         }
       ]
     },

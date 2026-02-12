@@ -83,7 +83,9 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/crypto_ops.c \
        $(SRC_DIR)/array_ops.c \
        $(SRC_DIR)/channel.c \
-       $(SRC_DIR)/http.c
+       $(SRC_DIR)/http.c \
+       $(SRC_DIR)/toml_ops.c \
+       $(SRC_DIR)/yaml_ops.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))

@@ -18,6 +18,8 @@
 #include "crypto_ops.h"
 #include "process_ops.h"
 #include "http.h"
+#include "toml_ops.h"
+#include "yaml_ops.h"
 #include "lexer.h"
 #include "parser.h"
 #include "channel.h"
@@ -3194,6 +3196,78 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_string_owned(out));
+                }
+
+                /* ── TOML builtins ── */
+
+                /// @builtin toml_parse(s: String) -> Map
+                /// @category Data Formats
+                /// Parse a TOML string into a Lattice Map.
+                /// @example toml_parse("[server]\nhost = \"localhost\"\nport = 8080")
+                if (strcmp(fn_name, "toml_parse") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("toml_parse() expects (String)"));
+                    }
+                    char *terr = NULL;
+                    LatValue result = toml_ops_parse(args[0].as.str_val, &terr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (terr) return eval_err(terr);
+                    return eval_ok(result);
+                }
+
+                /// @builtin toml_stringify(val: Map) -> String
+                /// @category Data Formats
+                /// Serialize a Lattice Map to a TOML string.
+                /// @example toml_stringify({"host": "localhost", "port": 8080})
+                if (strcmp(fn_name, "toml_stringify") == 0) {
+                    if (argc != 1) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("toml_stringify() expects (Map)"));
+                    }
+                    char *terr = NULL;
+                    char *toml = toml_ops_stringify(&args[0], &terr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (terr) { free(toml); return eval_err(terr); }
+                    return eval_ok(value_string_owned(toml));
+                }
+
+                /* ── YAML builtins ── */
+
+                /// @builtin yaml_parse(s: String) -> Map|Array
+                /// @category Data Formats
+                /// Parse a YAML string into a Lattice value.
+                /// @example yaml_parse("name: Alice\nage: 30")
+                if (strcmp(fn_name, "yaml_parse") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("yaml_parse() expects (String)"));
+                    }
+                    char *yerr = NULL;
+                    LatValue result = yaml_ops_parse(args[0].as.str_val, &yerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (yerr) return eval_err(yerr);
+                    return eval_ok(result);
+                }
+
+                /// @builtin yaml_stringify(val: Map|Array) -> String
+                /// @category Data Formats
+                /// Serialize a Lattice value to a YAML string.
+                /// @example yaml_stringify({"name": "Alice", "age": 30})
+                if (strcmp(fn_name, "yaml_stringify") == 0) {
+                    if (argc != 1) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("yaml_stringify() expects (value)"));
+                    }
+                    if (args[0].type != VAL_MAP && args[0].type != VAL_ARRAY) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("yaml_stringify: value must be a Map or Array"));
+                    }
+                    char *yerr = NULL;
+                    char *yaml = yaml_ops_stringify(&args[0], &yerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (yerr) { free(yaml); return eval_err(yerr); }
+                    return eval_ok(value_string_owned(yaml));
                 }
 
                 /* ── Regex builtins ── */

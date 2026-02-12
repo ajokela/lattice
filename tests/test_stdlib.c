@@ -4882,6 +4882,193 @@ static void test_http_request_invalid_url(void) {
     );
 }
 
+/* ── TOML tests ── */
+
+static void test_toml_parse_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = toml_parse(\"title = \\\"Test\\\"\\ncount = 42\")\n"
+        "    print(t.get(\"title\"))\n"
+        "    print(t.get(\"count\"))\n"
+        "}\n",
+        "Test\n42"
+    );
+}
+
+static void test_toml_parse_table(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = toml_parse(\"[server]\\nhost = \\\"localhost\\\"\\nport = 8080\")\n"
+        "    let srv = t.get(\"server\")\n"
+        "    print(srv.get(\"host\"))\n"
+        "    print(srv.get(\"port\"))\n"
+        "}\n",
+        "localhost\n8080"
+    );
+}
+
+static void test_toml_parse_bool(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = toml_parse(\"enabled = true\\ndebug = false\")\n"
+        "    print(t.get(\"enabled\"))\n"
+        "    print(t.get(\"debug\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_toml_parse_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = toml_parse(\"nums = [1, 2, 3]\")\n"
+        "    print(t.get(\"nums\"))\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_toml_stringify_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let m = Map::new()\n"
+        "    m.set(\"name\", \"Alice\")\n"
+        "    m.set(\"age\", 30)\n"
+        "    let s = toml_stringify(m)\n"
+        "    let t2 = toml_parse(s)\n"
+        "    print(t2.get(\"name\"))\n"
+        "    print(t2.get(\"age\"))\n"
+        "}\n",
+        "Alice\n30"
+    );
+}
+
+static void test_toml_parse_wrong_type(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        toml_parse(123)\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "toml_parse() expects (String)"
+    );
+}
+
+static void test_toml_stringify_wrong_type(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        toml_stringify(123)\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "toml_stringify: value must be a Map"
+    );
+}
+
+/* ── YAML tests ── */
+
+static void test_yaml_parse_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let y = yaml_parse(\"name: John\\nage: 30\")\n"
+        "    print(y.get(\"name\"))\n"
+        "    print(y.get(\"age\"))\n"
+        "}\n",
+        "John\n30"
+    );
+}
+
+static void test_yaml_parse_bool(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let y = yaml_parse(\"active: true\\ndone: false\")\n"
+        "    print(y.get(\"active\"))\n"
+        "    print(y.get(\"done\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_yaml_parse_sequence(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let y = yaml_parse(\"- apple\\n- banana\\n- cherry\")\n"
+        "    print(y.len())\n"
+        "    print(y[0])\n"
+        "    print(y[2])\n"
+        "}\n",
+        "3\napple\ncherry"
+    );
+}
+
+static void test_yaml_parse_nested(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let y = yaml_parse(\"server:\\n  host: localhost\\n  port: 8080\")\n"
+        "    let srv = y.get(\"server\")\n"
+        "    print(srv.get(\"host\"))\n"
+        "    print(srv.get(\"port\"))\n"
+        "}\n",
+        "localhost\n8080"
+    );
+}
+
+static void test_yaml_stringify_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let m = Map::new()\n"
+        "    m.set(\"color\", \"blue\")\n"
+        "    m.set(\"size\", 10)\n"
+        "    let s = yaml_stringify(m)\n"
+        "    let y2 = yaml_parse(s)\n"
+        "    print(y2.get(\"color\"))\n"
+        "    print(y2.get(\"size\"))\n"
+        "}\n",
+        "blue\n10"
+    );
+}
+
+static void test_yaml_parse_wrong_type(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        yaml_parse(123)\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "yaml_parse() expects (String)"
+    );
+}
+
+static void test_yaml_stringify_wrong_type(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        yaml_stringify(123)\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "yaml_stringify: value must be a Map or Array"
+    );
+}
+
+static void test_yaml_parse_flow_seq(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let y = yaml_parse(\"[1, 2, 3]\")\n"
+        "    print(y.len())\n"
+        "    print(y[1])\n"
+        "}\n",
+        "3\n2"
+    );
+}
+
 /* ======================================================================
  * Test Registration
  * ====================================================================== */
@@ -5361,4 +5548,23 @@ void register_stdlib_tests(void) {
     register_test("test_http_request_wrong_type", test_http_request_wrong_type);
     register_test("test_http_request_too_few_args", test_http_request_too_few_args);
     register_test("test_http_request_invalid_url", test_http_request_invalid_url);
+
+    /* TOML */
+    register_test("test_toml_parse_basic", test_toml_parse_basic);
+    register_test("test_toml_parse_table", test_toml_parse_table);
+    register_test("test_toml_parse_bool", test_toml_parse_bool);
+    register_test("test_toml_parse_array", test_toml_parse_array);
+    register_test("test_toml_stringify_basic", test_toml_stringify_basic);
+    register_test("test_toml_parse_wrong_type", test_toml_parse_wrong_type);
+    register_test("test_toml_stringify_wrong_type", test_toml_stringify_wrong_type);
+
+    /* YAML */
+    register_test("test_yaml_parse_basic", test_yaml_parse_basic);
+    register_test("test_yaml_parse_bool", test_yaml_parse_bool);
+    register_test("test_yaml_parse_sequence", test_yaml_parse_sequence);
+    register_test("test_yaml_parse_nested", test_yaml_parse_nested);
+    register_test("test_yaml_stringify_basic", test_yaml_stringify_basic);
+    register_test("test_yaml_parse_wrong_type", test_yaml_parse_wrong_type);
+    register_test("test_yaml_stringify_wrong_type", test_yaml_stringify_wrong_type);
+    register_test("test_yaml_parse_flow_seq", test_yaml_parse_flow_seq);
 }
