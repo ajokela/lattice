@@ -231,8 +231,12 @@ def make_anchor(name):
 def generate_html(groups, output_path):
     """Generate the complete docs.html file."""
 
-    # Build sidebar HTML
-    sidebar_html = ""
+    # Build sidebar HTML — start with language syntax guide
+    sidebar_html = """      <div class="sidebar-section">
+        <div class="sidebar-heading">Syntax</div>
+        <a href="#string-interpolation" class="sidebar-link" data-cat="string-interpolation">String Interpolation</a>
+      </div>
+"""
     for section_name, categories in SECTION_GROUPS.items():
         active_cats = [c for c in categories if c in groups]
         if not active_cats:
@@ -248,8 +252,25 @@ def generate_html(groups, output_path):
             )
         sidebar_html += f'      </div>\n'
 
-    # Build content HTML
-    content_html = ""
+    # Build content HTML — start with language syntax guide
+    content_html = """    <div class="doc-category" id="string-interpolation">
+      <div class="section-label">Language Syntax</div>
+      <h2 class="section-title">String Interpolation</h2>
+      <div class="doc-entry" data-name="string interpolation" data-desc="embed expressions inside string literals with ${...}">
+        <div class="doc-sig"><span class="str">"hello ${name}"</span></div>
+        <p class="doc-desc">Embed any expression inside a string with <code>${...}</code>. The expression is evaluated and converted to a string at runtime.</p>
+        <div class="doc-examples">
+          <pre><code><span class="kw">let</span> name = <span class="str">"world"</span>
+<span class="fn">print</span>(<span class="str">"hello ${name}"</span>)              <span class="cmt">// hello world</span>
+<span class="fn">print</span>(<span class="str">"2 + 2 = ${2 + 2}"</span>)            <span class="cmt">// 2 + 2 = 4</span>
+<span class="fn">print</span>(<span class="str">"${name.to_upper()}"</span>)          <span class="cmt">// WORLD</span>
+<span class="fn">print</span>(<span class="str">"len: ${[1,2,3].len()}"</span>)       <span class="cmt">// len: 3</span>
+<span class="fn">print</span>(<span class="str">"escaped: \\${literal}"</span>)        <span class="cmt">// escaped: ${literal}</span></code></pre>
+        </div>
+      </div>
+    </div>
+"""
+
     for section_name, categories in SECTION_GROUPS.items():
         active_cats = [c for c in categories if c in groups]
         if not active_cats:
