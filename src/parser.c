@@ -384,6 +384,50 @@ static Expr *parse_primary(Parser *p, char **err) {
         Token *t = advance(p);
         return expr_string_lit(strdup(t->as.str_val));
     }
+    if (tt == TOK_INTERP_START) {
+        /* Interpolated string: INTERP_START expr (INTERP_MID expr)* INTERP_END */
+        size_t cap = 4;
+        size_t count = 0;
+        char **parts = malloc((cap + 1) * sizeof(char *));
+        Expr **exprs = malloc(cap * sizeof(Expr *));
+
+        Token *t = advance(p); /* consume INTERP_START */
+        parts[0] = strdup(t->as.str_val);
+
+        for (;;) {
+            /* Parse the interpolated expression */
+            Expr *e = parse_expr(p, err);
+            if (!e) goto interp_fail;
+            if (count >= cap) {
+                cap *= 2;
+                parts = realloc(parts, (cap + 1) * sizeof(char *));
+                exprs = realloc(exprs, cap * sizeof(Expr *));
+            }
+            exprs[count] = e;
+            count++;
+
+            if (peek_type(p) == TOK_INTERP_MID) {
+                Token *mid = advance(p);
+                parts[count] = strdup(mid->as.str_val);
+            } else if (peek_type(p) == TOK_INTERP_END) {
+                Token *end = advance(p);
+                parts[count] = strdup(end->as.str_val);
+                break;
+            } else {
+                *err = parser_error_fmt(p, "expected interpolation continuation or end, got '%s'",
+                                        token_type_name(peek_type(p)));
+                goto interp_fail;
+            }
+        }
+        return expr_interp_string(parts, exprs, count);
+
+    interp_fail:
+        for (size_t i = 0; i <= count; i++) free(parts[i]);
+        free(parts);
+        for (size_t i = 0; i < count; i++) expr_free(exprs[i]);
+        free(exprs);
+        return NULL;
+    }
     if (tt == TOK_TRUE) { advance(p); return expr_bool_lit(true); }
     if (tt == TOK_FALSE) { advance(p); return expr_bool_lit(false); }
 

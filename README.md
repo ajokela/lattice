@@ -67,7 +67,7 @@ fn add(a: Int, b: Int) -> Int {
 }
 
 fn greet(name: String) -> String {
-    "Hello, " + name + "!"  // implicit return
+    "Hello, ${name}!"  // string interpolation, implicit return
 }
 ```
 
@@ -461,6 +461,24 @@ Lattice ships with 100+ builtin functions and 55+ type methods covering I/O, mat
 | `is_complete(src)` | Check if source has balanced delimiters |
 | `require(path)` | Load and execute a `.lat` file |
 
+### String Interpolation
+
+Embed expressions directly inside string literals with `${...}`:
+
+```lattice
+let name = "world"
+print("hello ${name}")              // hello world
+print("${name} is ${30} years old") // world is 30 years old
+print("2 + 2 = ${2 + 2}")           // 2 + 2 = 4
+print("upper: ${name.to_upper()}")  // upper: WORLD
+```
+
+Use `\${` to produce a literal `${`:
+
+```lattice
+print("escaped: \${not interpolated}") // escaped: ${not interpolated}
+```
+
 ### String Methods
 
 | Method | Description |
@@ -561,6 +579,7 @@ Lattice ships with 100+ builtin functions and 55+ type methods covering I/O, mat
 | Range | `..` |
 | Indexing | `[]` (with slice support) |
 | String Concat | `+` |
+| String Interpolation | `"hello ${expr}"` |
 
 ## Examples
 

@@ -191,6 +191,14 @@ Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
     return e;
 }
 
+Expr *expr_interp_string(char **parts, Expr **exprs, size_t count) {
+    Expr *e = expr_alloc(EXPR_INTERP_STRING);
+    e->as.interp.parts = parts;
+    e->as.interp.exprs = exprs;
+    e->as.interp.count = count;
+    return e;
+}
+
 /* ── Clone (for lvalue AST expressions in desugaring) ── */
 
 Expr *expr_clone_ast(const Expr *e) {
@@ -386,6 +394,14 @@ void expr_free(Expr *e) {
             for (size_t i = 0; i < e->as.try_catch.catch_count; i++)
                 stmt_free(e->as.try_catch.catch_stmts[i]);
             free(e->as.try_catch.catch_stmts);
+            break;
+        case EXPR_INTERP_STRING:
+            for (size_t i = 0; i <= e->as.interp.count; i++)
+                free(e->as.interp.parts[i]);
+            free(e->as.interp.parts);
+            for (size_t i = 0; i < e->as.interp.count; i++)
+                expr_free(e->as.interp.exprs[i]);
+            free(e->as.interp.exprs);
             break;
     }
     free(e);

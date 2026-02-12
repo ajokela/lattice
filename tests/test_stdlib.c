@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.1.6"
+        "0.1.7"
     );
 }
 
@@ -4087,6 +4087,89 @@ static void test_compose(void) {
 }
 
 /* ======================================================================
+ * String Interpolation
+ * ====================================================================== */
+
+static void test_interp_simple_var(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let name = \"world\"\n"
+        "    print(\"hello ${name}\")\n"
+        "}\n",
+        "hello world"
+    );
+}
+
+static void test_interp_expression(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"2 + 2 = ${2 + 2}\")\n"
+        "}\n",
+        "2 + 2 = 4"
+    );
+}
+
+static void test_interp_multiple(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = \"hello\"\n"
+        "    let b = \"world\"\n"
+        "    print(\"${a} and ${b}\")\n"
+        "}\n",
+        "hello and world"
+    );
+}
+
+static void test_interp_escaped(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"literal \\${not interpolated}\")\n"
+        "}\n",
+        "literal ${not interpolated}"
+    );
+}
+
+static void test_interp_adjacent(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = \"foo\"\n"
+        "    let b = \"bar\"\n"
+        "    print(\"${a}${b}\")\n"
+        "}\n",
+        "foobar"
+    );
+}
+
+static void test_interp_only_expr(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = 42\n"
+        "    print(\"${x}\")\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_interp_method_call(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let name = \"world\"\n"
+        "    print(\"${name.to_upper()}\")\n"
+        "}\n",
+        "WORLD"
+    );
+}
+
+static void test_interp_nested_braces(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"len = ${[1,2,3].len()}\")\n"
+        "}\n",
+        "len = 3"
+    );
+}
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -4479,4 +4562,14 @@ void register_stdlib_tests(void) {
     register_test("test_identity", test_identity);
     register_test("test_pipe", test_pipe);
     register_test("test_compose", test_compose);
+
+    /* String interpolation */
+    register_test("test_interp_simple_var", test_interp_simple_var);
+    register_test("test_interp_expression", test_interp_expression);
+    register_test("test_interp_multiple", test_interp_multiple);
+    register_test("test_interp_escaped", test_interp_escaped);
+    register_test("test_interp_adjacent", test_interp_adjacent);
+    register_test("test_interp_only_expr", test_interp_only_expr);
+    register_test("test_interp_method_call", test_interp_method_call);
+    register_test("test_interp_nested_braces", test_interp_nested_braces);
 }

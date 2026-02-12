@@ -202,6 +202,11 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             pc_pop_scope(pc);
             return PHASE_UNSPECIFIED;
 
+        case EXPR_INTERP_STRING:
+            for (size_t i = 0; i < expr->as.interp.count; i++)
+                pc_check_expr(pc, expr->as.interp.exprs[i]);
+            return PHASE_UNSPECIFIED;
+
         case EXPR_SPAWN:
             if (pc->mode == MODE_STRICT) {
                 pc_push_scope(pc);
@@ -337,6 +342,10 @@ static void pc_check_spawn_expr(PhaseChecker *pc, const Expr *expr) {
         case EXPR_PRINT:
             for (size_t i = 0; i < expr->as.print.arg_count; i++)
                 pc_check_spawn_expr(pc, expr->as.print.args[i]);
+            break;
+        case EXPR_INTERP_STRING:
+            for (size_t i = 0; i < expr->as.interp.count; i++)
+                pc_check_spawn_expr(pc, expr->as.interp.exprs[i]);
             break;
         case EXPR_ARRAY:
             for (size_t i = 0; i < expr->as.array.count; i++)

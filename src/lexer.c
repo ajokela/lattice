@@ -112,6 +112,10 @@ static TokenType keyword_lookup(const char *ident) {
     return TOK_IDENT;
 }
 
+/* Forward declarations for mutual recursion (string interpolation) */
+static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err);
+static bool lex_one(Lexer *lex, LatVec *tokens, char **err);
+
 static bool next_token(Lexer *lex, Token *out, char **err) {
     size_t line = lex->line;
     size_t col = lex->col;
@@ -140,75 +144,7 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         return true;
     }
 
-    /* String literal */
-    if (ch == '"') {
-        lex_advance(lex);
-        size_t buf_cap = 64;
-        size_t buf_len = 0;
-        char *buf = malloc(buf_cap);
-        for (;;) {
-            if (lex->pos >= lex->len) {
-                free(buf);
-                *err = NULL;
-                (void)asprintf(err, "%zu:%zu: unterminated string literal", line, col);
-                return false;
-            }
-            char c = lex_advance(lex);
-            if (c == '"') break;
-            if (c == '\\') {
-                if (lex->pos >= lex->len) {
-                    free(buf);
-                    *err = NULL;
-                    (void)asprintf(err, "%zu:%zu: unterminated string escape", line, col);
-                    return false;
-                }
-                char esc = lex_advance(lex);
-                switch (esc) {
-                    case 'n':  c = '\n'; break;
-                    case 't':  c = '\t'; break;
-                    case 'r':  c = '\r'; break;
-                    case '0':  c = '\0'; break;
-                    case '\\': c = '\\'; break;
-                    case '"':  c = '"';  break;
-                    case 'x': {
-                        /* Hex escape: \xNN */
-                        if (lex->pos + 1 >= lex->len) {
-                            free(buf);
-                            *err = NULL;
-                            (void)asprintf(err, "%zu:%zu: incomplete \\x escape", line, col);
-                            return false;
-                        }
-                        char h1 = lex_advance(lex);
-                        char h2 = lex_advance(lex);
-                        int d1 = -1, d2 = -1;
-                        if (h1 >= '0' && h1 <= '9') d1 = h1 - '0';
-                        else if (h1 >= 'a' && h1 <= 'f') d1 = h1 - 'a' + 10;
-                        else if (h1 >= 'A' && h1 <= 'F') d1 = h1 - 'A' + 10;
-                        if (h2 >= '0' && h2 <= '9') d2 = h2 - '0';
-                        else if (h2 >= 'a' && h2 <= 'f') d2 = h2 - 'a' + 10;
-                        else if (h2 >= 'A' && h2 <= 'F') d2 = h2 - 'A' + 10;
-                        if (d1 < 0 || d2 < 0) {
-                            free(buf);
-                            *err = NULL;
-                            (void)asprintf(err, "%zu:%zu: invalid hex escape '\\x%c%c'", line, col, h1, h2);
-                            return false;
-                        }
-                        c = (char)((d1 << 4) | d2);
-                        break;
-                    }
-                    default:   c = esc;  break;
-                }
-            }
-            if (buf_len + 1 >= buf_cap) {
-                buf_cap *= 2;
-                buf = realloc(buf, buf_cap);
-            }
-            buf[buf_len++] = c;
-        }
-        buf[buf_len] = '\0';
-        *out = token_str(TOK_STRING_LIT, buf, line, col);
-        return true;
-    }
+    /* String literals are handled by lex_string_or_interp() via lex_one() */
 
     /* Number literal */
     if (isdigit((unsigned char)ch)) {
@@ -326,6 +262,170 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
     }
 }
 
+/* Helper: scan escape sequence inside a string, appending to buf.
+ * On entry, the backslash has already been consumed. Returns false on error. */
+static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len,
+                               size_t *buf_cap, size_t line, size_t col, char **err) {
+    if (lex->pos >= lex->len) {
+        *err = NULL;
+        (void)asprintf(err, "%zu:%zu: unterminated string escape", line, col);
+        return false;
+    }
+    char esc = lex_advance(lex);
+    char c;
+    switch (esc) {
+        case 'n':  c = '\n'; break;
+        case 't':  c = '\t'; break;
+        case 'r':  c = '\r'; break;
+        case '0':  c = '\0'; break;
+        case '\\': c = '\\'; break;
+        case '"':  c = '"';  break;
+        case '$':  c = '$';  break;
+        case 'x': {
+            if (lex->pos + 1 >= lex->len) {
+                *err = NULL;
+                (void)asprintf(err, "%zu:%zu: incomplete \\x escape", line, col);
+                return false;
+            }
+            char h1 = lex_advance(lex);
+            char h2 = lex_advance(lex);
+            int d1 = -1, d2 = -1;
+            if (h1 >= '0' && h1 <= '9') d1 = h1 - '0';
+            else if (h1 >= 'a' && h1 <= 'f') d1 = h1 - 'a' + 10;
+            else if (h1 >= 'A' && h1 <= 'F') d1 = h1 - 'A' + 10;
+            if (h2 >= '0' && h2 <= '9') d2 = h2 - '0';
+            else if (h2 >= 'a' && h2 <= 'f') d2 = h2 - 'a' + 10;
+            else if (h2 >= 'A' && h2 <= 'F') d2 = h2 - 'A' + 10;
+            if (d1 < 0 || d2 < 0) {
+                *err = NULL;
+                (void)asprintf(err, "%zu:%zu: invalid hex escape '\\x%c%c'", line, col, h1, h2);
+                return false;
+            }
+            c = (char)((d1 << 4) | d2);
+            break;
+        }
+        default: c = esc; break;
+    }
+    if (*buf_len + 1 >= *buf_cap) {
+        *buf_cap *= 2;
+        *buf = realloc(*buf, *buf_cap);
+    }
+    (*buf)[(*buf_len)++] = c;
+    return true;
+}
+
+/* Scan a string literal, handling interpolation with ${...}.
+ * On entry, lex is positioned at the opening '"'.
+ * Pushes TOK_STRING_LIT (no interpolation) or
+ * TOK_INTERP_START / expression tokens / TOK_INTERP_MID / ... / TOK_INTERP_END. */
+static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err) {
+    size_t line = lex->line;
+    size_t col = lex->col;
+    lex_advance(lex); /* consume opening " */
+
+    bool has_interp = false;
+    size_t buf_cap = 64;
+    size_t buf_len = 0;
+    char *buf = malloc(buf_cap);
+
+    for (;;) {
+        if (lex->pos >= lex->len) {
+            free(buf);
+            *err = NULL;
+            (void)asprintf(err, "%zu:%zu: unterminated string literal", line, col);
+            return false;
+        }
+
+        /* Check for interpolation: ${ */
+        if (lex_peek(lex) == '$' && lex_peek_ahead(lex, 1) == '{') {
+            /* Emit accumulated text as INTERP_START or INTERP_MID */
+            buf[buf_len] = '\0';
+            TokenType seg_type = has_interp ? TOK_INTERP_MID : TOK_INTERP_START;
+            Token seg = token_str(seg_type, buf, line, col);
+            lat_vec_push(tokens, &seg);
+            has_interp = true;
+
+            lex_advance(lex); /* consume $ */
+            lex_advance(lex); /* consume { */
+
+            /* Lex expression tokens until brace depth returns to 0 */
+            int depth = 1;
+            while (depth > 0) {
+                skip_whitespace_and_comments(lex);
+                if (lex->pos >= lex->len) {
+                    *err = NULL;
+                    (void)asprintf(err, "%zu:%zu: unterminated string interpolation", line, col);
+                    return false;
+                }
+                /* End of interpolation */
+                if (lex_peek(lex) == '}' && depth == 1) {
+                    lex_advance(lex); /* consume closing } */
+                    break;
+                }
+                /* Lex one token (handles nested strings with interpolation) */
+                size_t before = tokens->len;
+                if (!lex_one(lex, tokens, err)) return false;
+                /* Track brace depth */
+                if (tokens->len > before) {
+                    Token *last = lat_vec_get(tokens, tokens->len - 1);
+                    if (last->type == TOK_LBRACE) depth++;
+                    else if (last->type == TOK_RBRACE) depth--;
+                }
+            }
+
+            /* Reset buffer for next string segment */
+            buf_cap = 64;
+            buf_len = 0;
+            buf = malloc(buf_cap);
+            continue;
+        }
+
+        /* Check for end of string */
+        if (lex_peek(lex) == '"') {
+            lex_advance(lex); /* consume closing " */
+            buf[buf_len] = '\0';
+            if (has_interp) {
+                Token seg = token_str(TOK_INTERP_END, buf, line, col);
+                lat_vec_push(tokens, &seg);
+            } else {
+                Token seg = token_str(TOK_STRING_LIT, buf, line, col);
+                lat_vec_push(tokens, &seg);
+            }
+            return true;
+        }
+
+        /* Check for escape sequence */
+        if (lex_peek(lex) == '\\') {
+            lex_advance(lex); /* consume backslash */
+            if (!lex_string_escape(lex, &buf, &buf_len, &buf_cap, line, col, err)) {
+                free(buf);
+                return false;
+            }
+            continue;
+        }
+
+        /* Regular character */
+        char c = lex_advance(lex);
+        if (buf_len + 1 >= buf_cap) {
+            buf_cap *= 2;
+            buf = realloc(buf, buf_cap);
+        }
+        buf[buf_len++] = c;
+    }
+}
+
+/* Lex one token (or multiple for interpolated strings) and push to tokens. */
+static bool lex_one(Lexer *lex, LatVec *tokens, char **err) {
+    skip_whitespace_and_comments(lex);
+    if (lex_peek(lex) == '"') {
+        return lex_string_or_interp(lex, tokens, err);
+    }
+    Token tok;
+    if (!next_token(lex, &tok, err)) return false;
+    lat_vec_push(tokens, &tok);
+    return true;
+}
+
 LatVec lexer_tokenize(Lexer *lex, char **err) {
     LatVec tokens = lat_vec_new(sizeof(Token));
     *err = NULL;
@@ -337,8 +437,7 @@ LatVec lexer_tokenize(Lexer *lex, char **err) {
             lat_vec_push(&tokens, &eof);
             break;
         }
-        Token tok;
-        if (!next_token(lex, &tok, err)) {
+        if (!lex_one(lex, &tokens, err)) {
             /* Free tokens on error */
             for (size_t i = 0; i < tokens.len; i++) {
                 token_free(lat_vec_get(&tokens, i));
@@ -346,7 +445,6 @@ LatVec lexer_tokenize(Lexer *lex, char **err) {
             lat_vec_free(&tokens);
             return lat_vec_new(sizeof(Token));
         }
-        lat_vec_push(&tokens, &tok);
     }
 
     return tokens;

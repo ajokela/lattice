@@ -3882,6 +3882,40 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             return eval_ok(value_unit());
 #endif
         }
+
+        case EXPR_INTERP_STRING: {
+            size_t count = expr->as.interp.count;
+            /* Estimate buffer size */
+            size_t buf_cap = 64;
+            size_t buf_len = 0;
+            char *buf = malloc(buf_cap);
+            for (size_t i = 0; i < count; i++) {
+                /* Append string segment */
+                const char *part = expr->as.interp.parts[i];
+                size_t plen = strlen(part);
+                while (buf_len + plen + 1 >= buf_cap) { buf_cap *= 2; buf = realloc(buf, buf_cap); }
+                memcpy(buf + buf_len, part, plen);
+                buf_len += plen;
+                /* Evaluate expression and convert to string */
+                EvalResult er = eval_expr(ev, expr->as.interp.exprs[i]);
+                if (!IS_OK(er)) { free(buf); return er; }
+                char *s = value_display(&er.value);
+                value_free(&er.value);
+                size_t slen = strlen(s);
+                while (buf_len + slen + 1 >= buf_cap) { buf_cap *= 2; buf = realloc(buf, buf_cap); }
+                memcpy(buf + buf_len, s, slen);
+                buf_len += slen;
+                free(s);
+            }
+            /* Append trailing segment */
+            const char *last_part = expr->as.interp.parts[count];
+            size_t lplen = strlen(last_part);
+            while (buf_len + lplen + 1 >= buf_cap) { buf_cap *= 2; buf = realloc(buf, buf_cap); }
+            memcpy(buf + buf_len, last_part, lplen);
+            buf_len += lplen;
+            buf[buf_len] = '\0';
+            return eval_ok(value_string_owned(buf));
+        }
     }
     return eval_err(strdup("unknown expression type"));
 }

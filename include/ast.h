@@ -49,6 +49,7 @@ typedef enum {
     EXPR_PRINT, EXPR_SPAWN,
     EXPR_SCOPE,
     EXPR_TRY_CATCH,
+    EXPR_INTERP_STRING,
 } ExprTag;
 
 /* Statement types */
@@ -99,6 +100,11 @@ struct Expr {
             char *catch_var;
             Stmt **catch_stmts; size_t catch_count;
         } try_catch;
+        struct {
+            char **parts;       /* count + 1 string segments */
+            Expr **exprs;       /* count interpolated expressions */
+            size_t count;       /* number of interpolated expressions */
+        } interp;
     } as;
 };
 
@@ -205,6 +211,7 @@ Expr *expr_spawn(Stmt **stmts, size_t count);
 Expr *expr_scope(Stmt **stmts, size_t count);
 Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
                      Stmt **catch_stmts, size_t catch_count);
+Expr *expr_interp_string(char **parts, Expr **exprs, size_t count);
 
 Stmt *stmt_binding(AstPhase phase, char *name, TypeExpr *ty, Expr *value);
 Stmt *stmt_assign(Expr *target, Expr *value);

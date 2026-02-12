@@ -43,7 +43,9 @@ Token token_float(double val, size_t line, size_t col) {
 
 void token_free(Token *t) {
     if (t->type == TOK_IDENT || t->type == TOK_STRING_LIT ||
-        t->type == TOK_MODE_DIRECTIVE) {
+        t->type == TOK_MODE_DIRECTIVE ||
+        t->type == TOK_INTERP_START || t->type == TOK_INTERP_MID ||
+        t->type == TOK_INTERP_END) {
         free(t->as.str_val);
         t->as.str_val = NULL;
     }
@@ -82,6 +84,9 @@ const char *token_type_name(TokenType type) {
     if (type == TOK_INT_LIT) return "integer";
     if (type == TOK_FLOAT_LIT) return "float";
     if (type == TOK_STRING_LIT) return "string";
+    if (type == TOK_INTERP_START) return "INTERP_START";
+    if (type == TOK_INTERP_MID) return "INTERP_MID";
+    if (type == TOK_INTERP_END) return "INTERP_END";
     if ((size_t)type < sizeof(simple_names)/sizeof(simple_names[0]) && simple_names[type]) {
         return simple_names[type];
     }

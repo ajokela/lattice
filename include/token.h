@@ -60,6 +60,11 @@ typedef enum {
     /* Punctuation */
     TOK_COMMA, TOK_COLON, TOK_COLONCOLON, TOK_SEMICOLON,
 
+    /* String interpolation */
+    TOK_INTERP_START,  /* first segment of interpolated string */
+    TOK_INTERP_MID,    /* middle segment between interpolations */
+    TOK_INTERP_END,    /* final segment of interpolated string */
+
     /* Special */
     TOK_EOF,
 } TokenType;
