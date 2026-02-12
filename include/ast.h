@@ -77,6 +77,7 @@ typedef enum {
     EXPR_TRY_CATCH,
     EXPR_INTERP_STRING,
     EXPR_MATCH,
+    EXPR_ENUM_VARIANT,
 } ExprTag;
 
 /* Statement types */
@@ -145,6 +146,12 @@ struct Expr {
             MatchArm *arms;
             size_t arm_count;
         } match_expr;
+        struct {
+            char *enum_name;
+            char *variant_name;
+            Expr **args;
+            size_t arg_count;
+        } enum_variant;
     } as;
 };
 
@@ -222,8 +229,22 @@ typedef struct {
     size_t  body_count;
 } TestDecl;
 
+/* Enum variant declaration */
+typedef struct {
+    char     *name;
+    TypeExpr *param_types;   /* nullable — for tuple variants */
+    size_t    param_count;
+} VariantDecl;
+
+/* Enum declaration */
+typedef struct {
+    char        *name;
+    VariantDecl *variants;
+    size_t       variant_count;
+} EnumDecl;
+
 /* Top-level item */
-typedef enum { ITEM_FUNCTION, ITEM_STRUCT, ITEM_STMT, ITEM_TEST } ItemTag;
+typedef enum { ITEM_FUNCTION, ITEM_STRUCT, ITEM_STMT, ITEM_TEST, ITEM_ENUM } ItemTag;
 
 typedef struct {
     ItemTag tag;
@@ -232,6 +253,7 @@ typedef struct {
         StructDecl struct_decl;
         Stmt      *stmt;
         TestDecl   test_decl;
+        EnumDecl   enum_decl;
     } as;
 } Item;
 
@@ -272,6 +294,7 @@ Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
                      Stmt **catch_stmts, size_t catch_count);
 Expr *expr_interp_string(char **parts, Expr **exprs, size_t count);
 Expr *expr_match(Expr *scrutinee, MatchArm *arms, size_t arm_count);
+Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t arg_count);
 
 /* Pattern constructors */
 Pattern *pattern_literal(Expr *lit);
@@ -304,6 +327,7 @@ void type_expr_free(TypeExpr *t);
 void fn_decl_free(FnDecl *f);
 void struct_decl_free(StructDecl *s);
 void test_decl_free(TestDecl *t);
+void enum_decl_free(EnumDecl *e);
 void item_free(Item *item);
 void program_free(Program *p);
 

@@ -235,6 +235,11 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
                     pc_check_stmt(pc, arm->body[j]);
             }
             return PHASE_UNSPECIFIED;
+
+        case EXPR_ENUM_VARIANT:
+            for (size_t i = 0; i < expr->as.enum_variant.arg_count; i++)
+                pc_check_expr(pc, expr->as.enum_variant.args[i]);
+            return PHASE_UNSPECIFIED;
     }
     return PHASE_UNSPECIFIED;
 }
@@ -440,6 +445,8 @@ LatVec phase_check(const Program *prog) {
             case ITEM_TEST:
                 for (size_t j = 0; j < prog->items[i].as.test_decl.body_count; j++)
                     pc_check_stmt(&pc, prog->items[i].as.test_decl.body[j]);
+                break;
+            case ITEM_ENUM:
                 break;
         }
     }

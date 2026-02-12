@@ -68,6 +68,7 @@ typedef struct Evaluator {
     Env        *env;
     AstMode     mode;
     LatMap      struct_defs;   /* char* -> StructDecl */
+    LatMap      enum_defs;     /* char* -> EnumDecl */
     LatMap      fn_defs;       /* char* -> FnDecl */
     MemoryStats stats;
     DualHeap   *heap;

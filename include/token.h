@@ -14,6 +14,7 @@ typedef enum {
     TOK_SCOPE,
     TOK_TEST,
     TOK_MATCH,
+    TOK_ENUM,
 
     /* Mode directive */
     TOK_MODE_DIRECTIVE,   /* #mode casual / #mode strict */

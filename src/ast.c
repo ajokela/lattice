@@ -210,6 +210,15 @@ Expr *expr_match(Expr *scrutinee, MatchArm *arms, size_t arm_count) {
     return e;
 }
 
+Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t arg_count) {
+    Expr *e = expr_alloc(EXPR_ENUM_VARIANT);
+    e->as.enum_variant.enum_name = enum_name;
+    e->as.enum_variant.variant_name = variant_name;
+    e->as.enum_variant.args = args;
+    e->as.enum_variant.arg_count = arg_count;
+    return e;
+}
+
 Pattern *pattern_literal(Expr *lit) {
     Pattern *p = calloc(1, sizeof(Pattern));
     p->tag = PAT_LITERAL;
@@ -491,6 +500,13 @@ void expr_free(Expr *e) {
             }
             free(e->as.match_expr.arms);
             break;
+        case EXPR_ENUM_VARIANT:
+            free(e->as.enum_variant.enum_name);
+            free(e->as.enum_variant.variant_name);
+            for (size_t i = 0; i < e->as.enum_variant.arg_count; i++)
+                expr_free(e->as.enum_variant.args[i]);
+            free(e->as.enum_variant.args);
+            break;
     }
     free(e);
 }
@@ -582,6 +598,19 @@ void test_decl_free(TestDecl *t) {
     free(t->body);
 }
 
+void enum_decl_free(EnumDecl *e) {
+    free(e->name);
+    for (size_t i = 0; i < e->variant_count; i++) {
+        free(e->variants[i].name);
+        if (e->variants[i].param_types) {
+            for (size_t j = 0; j < e->variants[i].param_count; j++)
+                type_expr_free(&e->variants[i].param_types[j]);
+            free(e->variants[i].param_types);
+        }
+    }
+    free(e->variants);
+}
+
 void item_free(Item *item) {
     switch (item->tag) {
         case ITEM_FUNCTION:
@@ -595,6 +624,9 @@ void item_free(Item *item) {
             break;
         case ITEM_TEST:
             test_decl_free(&item->as.test_decl);
+            break;
+        case ITEM_ENUM:
+            enum_decl_free(&item->as.enum_decl);
             break;
     }
 }

@@ -963,28 +963,30 @@ static Expr *parse_primary(Parser *p, char **err) {
             }
             return expr_struct_lit(name, fields, n);
         }
-        /* Name::method() static call */
+        /* Name::Variant or Name::method() */
         if (peek_type(p) == TOK_COLONCOLON) {
             advance(p);
-            char *method = expect_ident(p, err);
-            if (!method) { free(name); return NULL; }
-            if (!expect(p, TOK_LPAREN, err)) { free(name); free(method); return NULL; }
-            size_t arg_count;
-            Expr **args = parse_args(p, &arg_count, err);
-            if (!args && *err) { free(name); free(method); return NULL; }
-            if (!expect(p, TOK_RPAREN, err)) {
-                free(name); free(method);
-                for (size_t i = 0; i < arg_count; i++) expr_free(args[i]);
-                free(args);
-                return NULL;
+            char *rhs = expect_ident(p, err);
+            if (!rhs) { free(name); return NULL; }
+
+            if (peek_type(p) == TOK_LPAREN) {
+                /* Could be enum variant with args or static method call.
+                 * We parse as enum variant; the evaluator falls back to
+                 * static call if no enum matches. */
+                advance(p);
+                size_t arg_count;
+                Expr **args = parse_args(p, &arg_count, err);
+                if (!args && *err) { free(name); free(rhs); return NULL; }
+                if (!expect(p, TOK_RPAREN, err)) {
+                    free(name); free(rhs);
+                    for (size_t i = 0; i < arg_count; i++) expr_free(args[i]);
+                    free(args);
+                    return NULL;
+                }
+                return expr_enum_variant(name, rhs, args, arg_count);
             }
-            /* Build "Name::method" string */
-            size_t nlen = strlen(name) + 2 + strlen(method) + 1;
-            char *full = malloc(nlen);
-            snprintf(full, nlen, "%s::%s", name, method);
-            free(name);
-            free(method);
-            return expr_call(expr_ident(full), args, arg_count);
+            /* Unit variant (or identifier) */
+            return expr_enum_variant(name, rhs, NULL, 0);
         }
         return expr_ident(name);
     }
@@ -1271,6 +1273,67 @@ static bool parse_test_decl(Parser *p, TestDecl *out, char **err) {
     return true;
 }
 
+/* ── Enum declaration ── */
+
+static bool parse_enum_decl(Parser *p, EnumDecl *out, char **err) {
+    if (!expect(p, TOK_ENUM, err)) return false;
+    out->name = expect_ident(p, err);
+    if (!out->name) return false;
+    if (!expect(p, TOK_LBRACE, err)) { free(out->name); return false; }
+
+    size_t cap = 4;
+    size_t n = 0;
+    out->variants = malloc(cap * sizeof(VariantDecl));
+
+    while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+        if (n >= cap) { cap *= 2; out->variants = realloc(out->variants, cap * sizeof(VariantDecl)); }
+        out->variants[n].name = expect_ident(p, err);
+        if (!out->variants[n].name) goto fail;
+        out->variants[n].param_types = NULL;
+        out->variants[n].param_count = 0;
+
+        /* Tuple variant: Variant(Type1, Type2) */
+        if (peek_type(p) == TOK_LPAREN) {
+            advance(p);
+            size_t tcap = 4, tn = 0;
+            TypeExpr *types = malloc(tcap * sizeof(TypeExpr));
+            while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
+                if (tn >= tcap) { tcap *= 2; types = realloc(types, tcap * sizeof(TypeExpr)); }
+                TypeExpr *te = parse_type_expr(p, err);
+                if (!te) { free(types); free(out->variants[n].name); goto fail; }
+                types[tn++] = *te;
+                free(te);
+                if (peek_type(p) != TOK_RPAREN) {
+                    if (!expect(p, TOK_COMMA, err)) { free(types); free(out->variants[n].name); goto fail; }
+                }
+            }
+            if (!expect(p, TOK_RPAREN, err)) { free(types); free(out->variants[n].name); goto fail; }
+            out->variants[n].param_types = types;
+            out->variants[n].param_count = tn;
+        }
+        n++;
+        if (peek_type(p) != TOK_RBRACE) {
+            if (peek_type(p) == TOK_COMMA) advance(p);
+        }
+    }
+    out->variant_count = n;
+    if (!expect(p, TOK_RBRACE, err)) goto fail;
+    return true;
+
+fail:
+    free(out->name);
+    for (size_t i = 0; i < n; i++) {
+        free(out->variants[i].name);
+        if (out->variants[i].param_types) {
+            for (size_t j = 0; j < out->variants[i].param_count; j++)
+                type_expr_free(&out->variants[i].param_types[j]);
+            free(out->variants[i].param_types);
+        }
+    }
+    free(out->variants);
+    return false;
+}
+
 /* ── Program ── */
 
 Program parser_parse(Parser *p, char **err) {
@@ -1314,6 +1377,12 @@ Program parser_parse(Parser *p, char **err) {
         } else if (peek_type(p) == TOK_TEST) {
             prog.items[n].tag = ITEM_TEST;
             if (!parse_test_decl(p, &prog.items[n].as.test_decl, err)) {
+                prog.item_count = n;
+                return prog;
+            }
+        } else if (peek_type(p) == TOK_ENUM) {
+            prog.items[n].tag = ITEM_ENUM;
+            if (!parse_enum_decl(p, &prog.items[n].as.enum_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }

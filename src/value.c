@@ -203,6 +203,27 @@ LatValue value_channel(struct LatChannel *ch) {
     return val;
 }
 
+LatValue value_enum(const char *enum_name, const char *variant_name,
+                    LatValue *payload, size_t count) {
+    LatValue val;
+    memset(&val, 0, sizeof(val));
+    val.type = VAL_ENUM;
+    val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
+    val.as.enm.enum_name = lat_strdup(enum_name);
+    val.as.enm.variant_name = lat_strdup(variant_name);
+    if (count > 0 && payload) {
+        val.as.enm.payload = lat_alloc(count * sizeof(LatValue));
+        for (size_t i = 0; i < count; i++)
+            val.as.enm.payload[i] = value_deep_clone(&payload[i]);
+        val.as.enm.payload_count = count;
+    } else {
+        val.as.enm.payload = NULL;
+        val.as.enm.payload_count = 0;
+    }
+    return val;
+}
+
 /* ── Phase helpers ── */
 
 bool value_is_fluid(const LatValue *v) { return v->phase == VTAG_FLUID; }
@@ -267,6 +288,20 @@ LatValue value_deep_clone(const LatValue *v) {
             channel_retain(v->as.channel.ch);
             out.as.channel.ch = v->as.channel.ch;
             break;
+        case VAL_ENUM: {
+            out.as.enm.enum_name = lat_strdup(v->as.enm.enum_name);
+            out.as.enm.variant_name = lat_strdup(v->as.enm.variant_name);
+            if (v->as.enm.payload_count > 0) {
+                out.as.enm.payload = lat_alloc(v->as.enm.payload_count * sizeof(LatValue));
+                for (size_t i = 0; i < v->as.enm.payload_count; i++)
+                    out.as.enm.payload[i] = value_deep_clone(&v->as.enm.payload[i]);
+                out.as.enm.payload_count = v->as.enm.payload_count;
+            } else {
+                out.as.enm.payload = NULL;
+                out.as.enm.payload_count = 0;
+            }
+            break;
+        }
         case VAL_MAP: {
             LatMap *src = v->as.map.map;
             if (g_arena) {
@@ -327,6 +362,9 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
                 set_phase_recursive(mv, phase);
             }
         }
+    } else if (v->type == VAL_ENUM) {
+        for (size_t i = 0; i < v->as.enm.payload_count; i++)
+            set_phase_recursive(&v->as.enm.payload[i], phase);
     }
 }
 
@@ -446,6 +484,33 @@ char *value_display(const LatValue *v) {
         case VAL_CHANNEL:
             buf = strdup("<Channel>");
             break;
+        case VAL_ENUM: {
+            if (v->as.enm.payload_count == 0) {
+                (void)asprintf(&buf, "%s::%s", v->as.enm.enum_name, v->as.enm.variant_name);
+            } else {
+                size_t ecap = 64;
+                buf = malloc(ecap);
+                size_t epos = 0;
+                size_t enlen = strlen(v->as.enm.enum_name);
+                size_t vnlen = strlen(v->as.enm.variant_name);
+                while (epos + enlen + vnlen + 8 > ecap) { ecap *= 2; buf = realloc(buf, ecap); }
+                memcpy(buf + epos, v->as.enm.enum_name, enlen); epos += enlen;
+                buf[epos++] = ':'; buf[epos++] = ':';
+                memcpy(buf + epos, v->as.enm.variant_name, vnlen); epos += vnlen;
+                buf[epos++] = '(';
+                for (size_t i = 0; i < v->as.enm.payload_count; i++) {
+                    if (i > 0) { buf[epos++] = ','; buf[epos++] = ' '; }
+                    char *elem = value_display(&v->as.enm.payload[i]);
+                    size_t elen = strlen(elem);
+                    while (epos + elen + 4 > ecap) { ecap *= 2; buf = realloc(buf, ecap); }
+                    memcpy(buf + epos, elem, elen); epos += elen;
+                    free(elem);
+                }
+                buf[epos++] = ')';
+                buf[epos] = '\0';
+            }
+            break;
+        }
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
@@ -494,6 +559,7 @@ const char *value_type_name(const LatValue *v) {
         case VAL_RANGE:   return "Range";
         case VAL_MAP:     return "Map";
         case VAL_CHANNEL: return "Channel";
+        case VAL_ENUM:    return "Enum";
     }
     return "?";
 }
@@ -530,6 +596,14 @@ bool value_eq(const LatValue *a, const LatValue *b) {
         case VAL_CLOSURE: return false;
         case VAL_CHANNEL:
             return a->as.channel.ch == b->as.channel.ch;
+        case VAL_ENUM:
+            if (strcmp(a->as.enm.enum_name, b->as.enm.enum_name) != 0) return false;
+            if (strcmp(a->as.enm.variant_name, b->as.enm.variant_name) != 0) return false;
+            if (a->as.enm.payload_count != b->as.enm.payload_count) return false;
+            for (size_t i = 0; i < a->as.enm.payload_count; i++) {
+                if (!value_eq(&a->as.enm.payload[i], &b->as.enm.payload[i])) return false;
+            }
+            return true;
         case VAL_MAP: {
             if (lat_map_len(a->as.map.map) != lat_map_len(b->as.map.map)) return false;
             for (size_t i = 0; i < a->as.map.map->cap; i++) {
@@ -599,6 +673,15 @@ void value_free(LatValue *v) {
         case VAL_CHANNEL:
             if (v->as.channel.ch)
                 channel_release(v->as.channel.ch);
+            break;
+        case VAL_ENUM:
+            val_dealloc(v, v->as.enm.enum_name);
+            val_dealloc(v, v->as.enm.variant_name);
+            if (v->as.enm.payload) {
+                for (size_t i = 0; i < v->as.enm.payload_count; i++)
+                    value_free(&v->as.enm.payload[i]);
+                val_dealloc(v, v->as.enm.payload);
+            }
             break;
         default:
             break;

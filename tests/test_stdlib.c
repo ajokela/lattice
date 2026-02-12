@@ -4526,6 +4526,108 @@ static void test_destructure_nested_array(void) {
     );
 }
 
+/* ------ Enum / Sum Types ------ */
+
+static void test_enum_unit_variant(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "fn main() {\n"
+        "    let r = Color::Red\n"
+        "    print(r)\n"
+        "}\n",
+        "Color::Red"
+    );
+}
+
+static void test_enum_tuple_variant(void) {
+    ASSERT_OUTPUT(
+        "enum Shape { Circle(Number), Rect(Number, Number) }\n"
+        "fn main() {\n"
+        "    let c = Shape::Circle(5)\n"
+        "    let r = Shape::Rect(3, 4)\n"
+        "    print(c)\n"
+        "    print(r)\n"
+        "}\n",
+        "Shape::Circle(5)\nShape::Rect(3, 4)"
+    );
+}
+
+static void test_enum_equality(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "fn main() {\n"
+        "    let r1 = Color::Red\n"
+        "    let r2 = Color::Red\n"
+        "    let g = Color::Green\n"
+        "    print(r1 == r2)\n"
+        "    print(r1 == g)\n"
+        "    print(r1 != g)\n"
+        "}\n",
+        "true\nfalse\ntrue"
+    );
+}
+
+static void test_enum_variant_name(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "fn main() {\n"
+        "    let r = Color::Red\n"
+        "    print(r.variant_name())\n"
+        "}\n",
+        "Red"
+    );
+}
+
+static void test_enum_enum_name(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "fn main() {\n"
+        "    let r = Color::Red\n"
+        "    print(r.enum_name())\n"
+        "}\n",
+        "Color"
+    );
+}
+
+static void test_enum_is_variant(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "fn main() {\n"
+        "    let r = Color::Red\n"
+        "    print(r.is_variant(\"Red\"))\n"
+        "    print(r.is_variant(\"Green\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_enum_payload(void) {
+    ASSERT_OUTPUT(
+        "enum Shape { Circle(Number), Rect(Number, Number) }\n"
+        "fn main() {\n"
+        "    let c = Shape::Circle(42)\n"
+        "    let p = c.payload()\n"
+        "    print(p[0])\n"
+        "    let r = Shape::Rect(3, 4)\n"
+        "    let rp = r.payload()\n"
+        "    print(rp[0])\n"
+        "    print(rp[1])\n"
+        "}\n",
+        "42\n3\n4"
+    );
+}
+
+static void test_enum_typeof(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green }\n"
+        "fn main() {\n"
+        "    let r = Color::Red\n"
+        "    print(typeof(r))\n"
+        "}\n",
+        "Enum"
+    );
+}
+
 /* ======================================================================
  * Test Registration
  * ====================================================================== */
@@ -4971,4 +5073,14 @@ void register_stdlib_tests(void) {
     register_test("test_destructure_flux", test_destructure_flux);
     register_test("test_destructure_array_from_fn", test_destructure_array_from_fn);
     register_test("test_destructure_nested_array", test_destructure_nested_array);
+
+    /* Enums / Sum types */
+    register_test("test_enum_unit_variant", test_enum_unit_variant);
+    register_test("test_enum_tuple_variant", test_enum_tuple_variant);
+    register_test("test_enum_equality", test_enum_equality);
+    register_test("test_enum_variant_name", test_enum_variant_name);
+    register_test("test_enum_enum_name", test_enum_enum_name);
+    register_test("test_enum_is_variant", test_enum_is_variant);
+    register_test("test_enum_payload", test_enum_payload);
+    register_test("test_enum_typeof", test_enum_typeof);
 }

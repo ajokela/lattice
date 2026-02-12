@@ -195,6 +195,15 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
                 }
             }
             break;
+        case VAL_ENUM:
+            if (v->as.enm.enum_name) fluid_mark(fh, v->as.enm.enum_name);
+            if (v->as.enm.variant_name) fluid_mark(fh, v->as.enm.variant_name);
+            if (v->as.enm.payload) {
+                fluid_mark(fh, v->as.enm.payload);
+                for (size_t i = 0; i < v->as.enm.payload_count; i++)
+                    gc_mark_value(fh, &v->as.enm.payload[i], reachable_regions);
+            }
+            break;
         default:
             break;
     }
@@ -372,6 +381,10 @@ static void set_region_id_recursive(LatValue *v, RegionId rid) {
                 }
             }
             break;
+        case VAL_ENUM:
+            for (size_t i = 0; i < v->as.enm.payload_count; i++)
+                set_region_id_recursive(&v->as.enm.payload[i], rid);
+            break;
         default:
             break;
     }
@@ -503,6 +516,19 @@ static FnDecl *find_fn(Evaluator *ev, const char *name) {
 static StructDecl *find_struct(Evaluator *ev, const char *name) {
     StructDecl **ptr = lat_map_get(&ev->struct_defs, name);
     return ptr ? *ptr : NULL;
+}
+
+static EnumDecl *find_enum(Evaluator *ev, const char *name) {
+    EnumDecl **ptr = lat_map_get(&ev->enum_defs, name);
+    return ptr ? *ptr : NULL;
+}
+
+static VariantDecl *find_variant(EnumDecl *ed, const char *variant_name) {
+    for (size_t i = 0; i < ed->variant_count; i++) {
+        if (strcmp(ed->variants[i].name, variant_name) == 0)
+            return &ed->variants[i];
+    }
+    return NULL;
 }
 
 /* ── Function calling ── */
@@ -740,6 +766,11 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
         if (op == BINOP_NEQ) return eval_ok(value_bool(lv->as.bool_val != rv->as.bool_val));
         if (op == BINOP_AND) return eval_ok(value_bool(lv->as.bool_val && rv->as.bool_val));
         if (op == BINOP_OR) return eval_ok(value_bool(lv->as.bool_val || rv->as.bool_val));
+    }
+    /* General equality using value_eq (enums, arrays, structs, etc.) */
+    if (lv->type == rv->type && (op == BINOP_EQ || op == BINOP_NEQ)) {
+        bool eq = value_eq(lv, rv);
+        return eval_ok(value_bool(op == BINOP_EQ ? eq : !eq));
     }
 
     char *err = NULL;
@@ -4086,6 +4117,85 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             GC_POP(ev); value_free(&scr.value);
             return eval_err(strdup("no matching pattern in match expression"));
         }
+
+        case EXPR_ENUM_VARIANT: {
+            const char *enum_name = expr->as.enum_variant.enum_name;
+            const char *variant_name = expr->as.enum_variant.variant_name;
+
+            EnumDecl *ed = find_enum(ev, enum_name);
+            if (!ed) {
+                /* Fall back to static call: Name::method(args)
+                 * Build a temporary EXPR_CALL node and evaluate it so that
+                 * builtins like Map::new(), Channel::new() etc. work. */
+                size_t ac = expr->as.enum_variant.arg_count;
+                size_t nlen = strlen(enum_name) + 2 + strlen(variant_name) + 1;
+                char *full = malloc(nlen);
+                snprintf(full, nlen, "%s::%s", enum_name, variant_name);
+
+                /* Borrow the arg expressions for the temp node */
+                Expr **arg_refs = NULL;
+                if (ac > 0) {
+                    arg_refs = malloc(ac * sizeof(Expr *));
+                    for (size_t i = 0; i < ac; i++)
+                        arg_refs[i] = expr->as.enum_variant.args[i];
+                }
+
+                /* Build a temporary EXPR_CALL:  full(args...)
+                 * Use a stack-allocated EXPR_IDENT for the func. */
+                Expr tmp_ident;
+                tmp_ident.tag = EXPR_IDENT;
+                tmp_ident.as.str_val = full;
+
+                Expr tmp_call;
+                tmp_call.tag = EXPR_CALL;
+                tmp_call.as.call.func = &tmp_ident;
+                tmp_call.as.call.args = arg_refs;
+                tmp_call.as.call.arg_count = ac;
+
+                EvalResult cr = eval_expr(ev, &tmp_call);
+
+                /* Don't free arg expressions — they belong to the original node */
+                free(arg_refs);
+                free(full);
+                return cr;
+            }
+
+            VariantDecl *vd = find_variant(ed, variant_name);
+            if (!vd) {
+                char *err2 = NULL;
+                (void)asprintf(&err2, "enum '%s' has no variant '%s'", enum_name, variant_name);
+                return eval_err(err2);
+            }
+
+            size_t provided = expr->as.enum_variant.arg_count;
+            if (provided != vd->param_count) {
+                char *err2 = NULL;
+                (void)asprintf(&err2, "variant '%s::%s' expects %zu argument%s, got %zu",
+                               enum_name, variant_name, vd->param_count,
+                               vd->param_count == 1 ? "" : "s", provided);
+                return eval_err(err2);
+            }
+
+            LatValue *payload = NULL;
+            if (provided > 0) {
+                payload = malloc(provided * sizeof(LatValue));
+                for (size_t i = 0; i < provided; i++) {
+                    EvalResult er = eval_expr(ev, expr->as.enum_variant.args[i]);
+                    if (!IS_OK(er)) {
+                        for (size_t j = 0; j < i; j++) value_free(&payload[j]);
+                        free(payload);
+                        return er;
+                    }
+                    payload[i] = er.value;
+                }
+            }
+            LatValue enm = value_enum(enum_name, variant_name, payload, provided);
+            if (payload) {
+                for (size_t i = 0; i < provided; i++) value_free(&payload[i]);
+                free(payload);
+            }
+            return eval_ok(enm);
+        }
     }
     return eval_err(strdup("unknown expression type"));
 }
@@ -4453,6 +4563,43 @@ static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
 
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method,
                                    LatValue *args, size_t arg_count) {
+    /* ── Enum methods ── */
+    if (obj.type == VAL_ENUM) {
+        if (strcmp(method, "variant_name") == 0) {
+            if (arg_count != 0) return eval_err(strdup("variant_name() takes no arguments"));
+            return eval_ok(value_string(obj.as.enm.variant_name));
+        }
+        if (strcmp(method, "enum_name") == 0) {
+            if (arg_count != 0) return eval_err(strdup("enum_name() takes no arguments"));
+            return eval_ok(value_string(obj.as.enm.enum_name));
+        }
+        if (strcmp(method, "is_variant") == 0) {
+            if (arg_count != 1)
+                return eval_err(strdup("is_variant() expects 1 argument"));
+            if (args[0].type != VAL_STR)
+                return eval_err(strdup("is_variant() expects a String argument"));
+            bool match = (strcmp(obj.as.enm.variant_name, args[0].as.str_val) == 0);
+            return eval_ok(value_bool(match));
+        }
+        if (strcmp(method, "payload") == 0) {
+            if (arg_count != 0) return eval_err(strdup("payload() takes no arguments"));
+            LatValue r;
+            if (obj.as.enm.payload_count > 0) {
+                LatValue *elems = malloc(obj.as.enm.payload_count * sizeof(LatValue));
+                for (size_t i = 0; i < obj.as.enm.payload_count; i++)
+                    elems[i] = value_deep_clone(&obj.as.enm.payload[i]);
+                r = value_array(elems, obj.as.enm.payload_count);
+                free(elems);
+            } else {
+                r = value_array(NULL, 0);
+            }
+            return eval_ok(r);
+        }
+        char *err2 = NULL;
+        (void)asprintf(&err2, "Enum has no method '%s'", method);
+        return eval_err(err2);
+    }
+
     /// @method Array.push(val: Any) -> Unit
     /// @category Array Methods
     /// Append a value to the end of the array (mutates in place).
@@ -5771,6 +5918,7 @@ Evaluator *evaluator_new(void) {
     ev->env = env_new();
     ev->mode = MODE_CASUAL;
     ev->struct_defs = lat_map_new(sizeof(StructDecl *));
+    ev->enum_defs = lat_map_new(sizeof(EnumDecl *));
     ev->fn_defs = lat_map_new(sizeof(FnDecl *));
     stats_init(&ev->stats);
     ev->heap = dual_heap_new();
@@ -5788,6 +5936,7 @@ void evaluator_free(Evaluator *ev) {
     net_tls_cleanup();
     env_free(ev->env);            /* lat_free → fluid_dealloc removes from heap */
     lat_map_free(&ev->struct_defs);
+    lat_map_free(&ev->enum_defs);
     lat_map_free(&ev->fn_defs);
     lat_map_free(&ev->required_files);
     free(ev->script_dir);
@@ -5819,11 +5968,14 @@ void evaluator_set_argv(Evaluator *ev, int argc, char **argv) {
 char *evaluator_run(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
-    /* First pass: register structs and functions */
+    /* First pass: register structs, enums, and functions */
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STRUCT) {
             StructDecl *ptr = &prog->items[i].as.struct_decl;
             lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_ENUM) {
+            EnumDecl *ptr = &prog->items[i].as.enum_decl;
+            lat_map_set(&ev->enum_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
             lat_map_set(&ev->fn_defs, ptr->name, &ptr);
@@ -5854,11 +6006,14 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
 int evaluator_run_tests(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
-    /* First pass: register structs and functions */
+    /* First pass: register structs, enums, and functions */
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STRUCT) {
             StructDecl *ptr = &prog->items[i].as.struct_decl;
             lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_ENUM) {
+            EnumDecl *ptr = &prog->items[i].as.enum_decl;
+            lat_map_set(&ev->enum_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
             lat_map_set(&ev->fn_defs, ptr->name, &ptr);
@@ -5945,11 +6100,14 @@ int evaluator_run_tests(Evaluator *ev, const Program *prog) {
 char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
-    /* First pass: register structs and functions */
+    /* First pass: register structs, enums, and functions */
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STRUCT) {
             StructDecl *ptr = &prog->items[i].as.struct_decl;
             lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_ENUM) {
+            EnumDecl *ptr = &prog->items[i].as.enum_decl;
+            lat_map_set(&ev->enum_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
             lat_map_set(&ev->fn_defs, ptr->name, &ptr);

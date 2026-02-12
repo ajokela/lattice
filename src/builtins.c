@@ -93,6 +93,7 @@ const char *builtin_typeof_str(const LatValue *v) {
         case VAL_RANGE:   return "Range";
         case VAL_MAP:     return "Map";
         case VAL_CHANNEL: return "Channel";
+        case VAL_ENUM:    return "Enum";
     }
     return "?";
 }
