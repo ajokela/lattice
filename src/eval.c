@@ -17,6 +17,7 @@
 #include "regex_ops.h"
 #include "crypto_ops.h"
 #include "process_ops.h"
+#include "http.h"
 #include "lexer.h"
 #include "parser.h"
 #include "channel.h"
@@ -2095,6 +2096,163 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(args);
                     if (!json) return eval_err(jerr);
                     return eval_ok(value_string_owned(json));
+                }
+
+                /* ── HTTP builtins ── */
+
+                /// @builtin http_get(url: String) -> Map
+                /// @category HTTP
+                /// Perform an HTTP GET request. Returns a map with "status", "headers", and "body".
+                /// @example http_get("https://httpbin.org/get")
+                if (strcmp(fn_name, "http_get") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("http_get() expects (url: String)"));
+                    }
+                    HttpRequest hreq = {
+                        .method = "GET", .url = args[0].as.str_val,
+                        .header_keys = NULL, .header_values = NULL, .header_count = 0,
+                        .body = NULL, .body_len = 0, .timeout_ms = 0
+                    };
+                    char *herr = NULL;
+                    HttpResponse *hresp = http_execute(&hreq, &herr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (!hresp) return eval_err(herr ? herr : strdup("http_get failed"));
+                    /* Build result map */
+                    LatValue result = value_map_new();
+                    LatValue st = value_int(hresp->status_code);
+                    lat_map_set(result.as.map.map, "status", &st);
+                    LatValue bd = value_string(hresp->body ? hresp->body : "");
+                    lat_map_set(result.as.map.map, "body", &bd);
+                    LatValue hdrs = value_map_new();
+                    for (size_t i = 0; i < hresp->header_count; i++) {
+                        LatValue hv = value_string(hresp->header_values[i]);
+                        lat_map_set(hdrs.as.map.map, hresp->header_keys[i], &hv);
+                    }
+                    lat_map_set(result.as.map.map, "headers", &hdrs);
+                    http_response_free(hresp);
+                    return eval_ok(result);
+                }
+
+                /// @builtin http_post(url: String, options: Map) -> Map
+                /// @category HTTP
+                /// Perform an HTTP POST request. Options map may contain "headers" (Map), "body" (String), and "timeout" (Int ms).
+                /// @example http_post("https://httpbin.org/post", {"body": "hello"})
+                if (strcmp(fn_name, "http_post") == 0) {
+                    if (argc < 1 || argc > 2 || args[0].type != VAL_STR) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("http_post() expects (url: String, options?: Map)"));
+                    }
+                    /* Extract options */
+                    const char *body_str = NULL;
+                    size_t body_len = 0;
+                    int timeout_ms = 0;
+                    char **hdr_keys = NULL, **hdr_vals = NULL;
+                    size_t hdr_count = 0;
+                    if (argc == 2 && args[1].type == VAL_MAP) {
+                        LatValue *bv = (LatValue *)lat_map_get(args[1].as.map.map, "body");
+                        if (bv && bv->type == VAL_STR) { body_str = bv->as.str_val; body_len = strlen(body_str); }
+                        LatValue *tv = (LatValue *)lat_map_get(args[1].as.map.map, "timeout");
+                        if (tv && tv->type == VAL_INT) timeout_ms = (int)tv->as.int_val;
+                        LatValue *hm = (LatValue *)lat_map_get(args[1].as.map.map, "headers");
+                        if (hm && hm->type == VAL_MAP) {
+                            hdr_count = lat_map_len(hm->as.map.map);
+                            hdr_keys = malloc(hdr_count * sizeof(char *));
+                            hdr_vals = malloc(hdr_count * sizeof(char *));
+                            size_t hi = 0;
+                            for (size_t i = 0; i < hm->as.map.map->cap && hi < hdr_count; i++) {
+                                if (hm->as.map.map->entries[i].state == MAP_OCCUPIED) {
+                                    hdr_keys[hi] = (char *)hm->as.map.map->entries[i].key;
+                                    LatValue *v = (LatValue *)hm->as.map.map->entries[i].value;
+                                    hdr_vals[hi] = v->type == VAL_STR ? v->as.str_val : "";
+                                    hi++;
+                                }
+                            }
+                        }
+                    }
+                    HttpRequest hreq = {
+                        .method = "POST", .url = args[0].as.str_val,
+                        .header_keys = hdr_keys, .header_values = hdr_vals, .header_count = hdr_count,
+                        .body = body_str, .body_len = body_len, .timeout_ms = timeout_ms
+                    };
+                    char *herr = NULL;
+                    HttpResponse *hresp = http_execute(&hreq, &herr);
+                    free(hdr_keys); free(hdr_vals);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (!hresp) return eval_err(herr ? herr : strdup("http_post failed"));
+                    LatValue result = value_map_new();
+                    LatValue st = value_int(hresp->status_code);
+                    lat_map_set(result.as.map.map, "status", &st);
+                    LatValue bd = value_string(hresp->body ? hresp->body : "");
+                    lat_map_set(result.as.map.map, "body", &bd);
+                    LatValue hdrs = value_map_new();
+                    for (size_t i = 0; i < hresp->header_count; i++) {
+                        LatValue hv = value_string(hresp->header_values[i]);
+                        lat_map_set(hdrs.as.map.map, hresp->header_keys[i], &hv);
+                    }
+                    lat_map_set(result.as.map.map, "headers", &hdrs);
+                    http_response_free(hresp);
+                    return eval_ok(result);
+                }
+
+                /// @builtin http_request(method: String, url: String, options?: Map) -> Map
+                /// @category HTTP
+                /// Perform an HTTP request with a custom method. Options may contain "headers", "body", and "timeout".
+                /// @example http_request("PUT", "https://api.example.com/data", {"body": "{}"})
+                if (strcmp(fn_name, "http_request") == 0) {
+                    if (argc < 2 || argc > 3 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(strdup("http_request() expects (method: String, url: String, options?: Map)"));
+                    }
+                    const char *body_str = NULL;
+                    size_t body_len = 0;
+                    int timeout_ms = 0;
+                    char **hdr_keys = NULL, **hdr_vals = NULL;
+                    size_t hdr_count = 0;
+                    if (argc == 3 && args[2].type == VAL_MAP) {
+                        LatValue *bv = (LatValue *)lat_map_get(args[2].as.map.map, "body");
+                        if (bv && bv->type == VAL_STR) { body_str = bv->as.str_val; body_len = strlen(body_str); }
+                        LatValue *tv = (LatValue *)lat_map_get(args[2].as.map.map, "timeout");
+                        if (tv && tv->type == VAL_INT) timeout_ms = (int)tv->as.int_val;
+                        LatValue *hm = (LatValue *)lat_map_get(args[2].as.map.map, "headers");
+                        if (hm && hm->type == VAL_MAP) {
+                            hdr_count = lat_map_len(hm->as.map.map);
+                            hdr_keys = malloc(hdr_count * sizeof(char *));
+                            hdr_vals = malloc(hdr_count * sizeof(char *));
+                            size_t hi = 0;
+                            for (size_t i = 0; i < hm->as.map.map->cap && hi < hdr_count; i++) {
+                                if (hm->as.map.map->entries[i].state == MAP_OCCUPIED) {
+                                    hdr_keys[hi] = (char *)hm->as.map.map->entries[i].key;
+                                    LatValue *v = (LatValue *)hm->as.map.map->entries[i].value;
+                                    hdr_vals[hi] = v->type == VAL_STR ? v->as.str_val : "";
+                                    hi++;
+                                }
+                            }
+                        }
+                    }
+                    HttpRequest hreq = {
+                        .method = args[0].as.str_val, .url = args[1].as.str_val,
+                        .header_keys = hdr_keys, .header_values = hdr_vals, .header_count = hdr_count,
+                        .body = body_str, .body_len = body_len, .timeout_ms = timeout_ms
+                    };
+                    char *herr = NULL;
+                    HttpResponse *hresp = http_execute(&hreq, &herr);
+                    free(hdr_keys); free(hdr_vals);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (!hresp) return eval_err(herr ? herr : strdup("http_request failed"));
+                    LatValue result = value_map_new();
+                    LatValue st = value_int(hresp->status_code);
+                    lat_map_set(result.as.map.map, "status", &st);
+                    LatValue bd = value_string(hresp->body ? hresp->body : "");
+                    lat_map_set(result.as.map.map, "body", &bd);
+                    LatValue hdrs = value_map_new();
+                    for (size_t i = 0; i < hresp->header_count; i++) {
+                        LatValue hv = value_string(hresp->header_values[i]);
+                        lat_map_set(hdrs.as.map.map, hresp->header_keys[i], &hv);
+                    }
+                    lat_map_set(result.as.map.map, "headers", &hdrs);
+                    http_response_free(hresp);
+                    return eval_ok(result);
                 }
 
                 /* ── Math builtins ── */

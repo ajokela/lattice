@@ -4776,6 +4776,112 @@ static void test_set_typeof(void) {
     );
 }
 
+/* ── HTTP client tests ── */
+
+static void test_http_get_wrong_type(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_get(123)\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "http_get() expects (url: String)"
+    );
+}
+
+static void test_http_get_no_args(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_get()\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "http_get() expects (url: String)"
+    );
+}
+
+static void test_http_get_invalid_url(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_get(\"ftp://example.com\")\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "invalid URL: must start with http:// or https://"
+    );
+}
+
+static void test_http_post_wrong_type(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_post(123)\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "http_post() expects (url: String, options?: Map)"
+    );
+}
+
+static void test_http_post_invalid_url(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_post(\"not-a-url\")\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "invalid URL: must start with http:// or https://"
+    );
+}
+
+static void test_http_request_wrong_type(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_request(123, 456)\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "http_request() expects (method: String, url: String, options?: Map)"
+    );
+}
+
+static void test_http_request_too_few_args(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_request(\"GET\")\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "http_request() expects (method: String, url: String, options?: Map)"
+    );
+}
+
+static void test_http_request_invalid_url(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        http_request(\"PUT\", \"bad://url\")\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "invalid URL: must start with http:// or https://"
+    );
+}
+
 /* ======================================================================
  * Test Registration
  * ====================================================================== */
@@ -5245,4 +5351,14 @@ void register_stdlib_tests(void) {
     register_test("test_set_for_in", test_set_for_in);
     register_test("test_set_duplicate_add", test_set_duplicate_add);
     register_test("test_set_typeof", test_set_typeof);
+
+    /* HTTP client */
+    register_test("test_http_get_wrong_type", test_http_get_wrong_type);
+    register_test("test_http_get_no_args", test_http_get_no_args);
+    register_test("test_http_get_invalid_url", test_http_get_invalid_url);
+    register_test("test_http_post_wrong_type", test_http_post_wrong_type);
+    register_test("test_http_post_invalid_url", test_http_post_invalid_url);
+    register_test("test_http_request_wrong_type", test_http_request_wrong_type);
+    register_test("test_http_request_too_few_args", test_http_request_too_few_args);
+    register_test("test_http_request_invalid_url", test_http_request_invalid_url);
 }
