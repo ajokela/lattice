@@ -1,0 +1,42 @@
+{
+  "name": "lattice-language",
+  "displayName": "Lattice Language Support",
+  "description": "Syntax highlighting and language support for Lattice - a crystallization-based programming language",
+  "version": "0.1.0",
+  "publisher": "lattice-lang",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "lattice",
+    "lat",
+    "crystallization",
+    "phase",
+    "immutable"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lattice",
+        "aliases": [
+          "Lattice",
+          "lattice"
+        ],
+        "extensions": [
+          ".lat"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lattice",
+        "scopeName": "source.lattice",
+        "path": "./syntaxes/lattice.tmLanguage.json"
+      }
+    ]
+  }
+}

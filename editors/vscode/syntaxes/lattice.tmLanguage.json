@@ -1,0 +1,352 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lattice",
+  "scopeName": "source.lattice",
+  "patterns": [
+    { "include": "#mode-directive" },
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#function-declaration" },
+    { "include": "#struct-declaration" },
+    { "include": "#enum-declaration" },
+    { "include": "#builtin-functions" },
+    { "include": "#static-method-call" },
+    { "include": "#method-call" },
+    { "include": "#function-call" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "mode-directive": {
+      "patterns": [
+        {
+          "match": "^\\s*(#mode)\\s+(strict|casual)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.directive.lattice" },
+            "2": { "name": "constant.language.mode.lattice" }
+          }
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.lattice",
+          "begin": "///",
+          "end": "$"
+        },
+        {
+          "name": "comment.line.double-slash.lattice",
+          "begin": "//",
+          "end": "$"
+        },
+        {
+          "name": "comment.block.lattice",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            { "include": "#comments" }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.lattice",
+          "match": "\\b(if|else|while|for|in|loop|break|continue|return|try|catch|match)\\b"
+        },
+        {
+          "name": "keyword.other.lattice",
+          "match": "\\b(fn|struct|enum|test|require)\\b"
+        },
+        {
+          "name": "storage.modifier.lattice",
+          "match": "\\b(flux|fix|let)\\b"
+        },
+        {
+          "name": "keyword.other.phase.lattice",
+          "match": "\\b(freeze|thaw|clone|forge)\\b"
+        },
+        {
+          "name": "keyword.control.concurrency.lattice",
+          "match": "\\b(spawn|scope)\\b"
+        },
+        {
+          "name": "keyword.other.print.lattice",
+          "match": "\\b(print)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.lattice",
+          "match": "\\b(Int|Float|Bool|String|Unit)\\b"
+        },
+        {
+          "name": "support.type.collection.lattice",
+          "match": "\\b(Array|Map|Set|Range)\\b"
+        },
+        {
+          "name": "support.type.advanced.lattice",
+          "match": "\\b(Channel|Closure|Struct|Fn|Enum)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.lattice",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.unit.lattice",
+          "match": "\\b(unit)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.lattice",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.lattice",
+              "match": "\\\\(n|t|r|0|\\\\|\"|\\$|x[0-9a-fA-F]{2})"
+            },
+            {
+              "name": "meta.embedded.expression.lattice",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.begin.lattice" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.end.lattice" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.lattice",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.lattice",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "function-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "keyword.other.lattice" },
+            "2": { "name": "entity.name.function.lattice" }
+          }
+        }
+      ]
+    },
+    "struct-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(struct)\\s+([A-Z][a-zA-Z0-9_]*)\\s*\\{",
+          "captures": {
+            "1": { "name": "keyword.other.lattice" },
+            "2": { "name": "entity.name.type.struct.lattice" }
+          }
+        }
+      ]
+    },
+    "enum-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(enum)\\s+([A-Z][a-zA-Z0-9_]*)\\s*\\{",
+          "captures": {
+            "1": { "name": "keyword.other.lattice" },
+            "2": { "name": "entity.name.type.enum.lattice" }
+          }
+        }
+      ]
+    },
+    "builtin-functions": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.core.lattice",
+          "match": "\\b(typeof|phase_of|to_string|len|assert|error|is_error|exit|version|print_raw|eprint|input|is_complete|identity|pipe|compose|format)\\b"
+        },
+        {
+          "name": "support.function.builtin.io.lattice",
+          "match": "\\b(read_file|write_file|append_file|file_exists|delete_file|list_dir|mkdir|rmdir|rename|is_dir|is_file|glob|stat|copy_file|realpath|tempdir|tempfile|chmod|file_size)\\b"
+        },
+        {
+          "name": "support.function.builtin.path.lattice",
+          "match": "\\b(path_join|path_dir|path_base|path_ext)\\b"
+        },
+        {
+          "name": "support.function.builtin.string.lattice",
+          "match": "\\b(ord|chr|parse_int|parse_float|to_int|to_float)\\b"
+        },
+        {
+          "name": "support.function.builtin.math.lattice",
+          "match": "\\b(abs|floor|ceil|round|sqrt|pow|min|max|random|random_int|log|log2|log10|exp|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|clamp|sign|gcd|lcm|is_nan|is_inf|lerp|math_pi|math_e|range)\\b"
+        },
+        {
+          "name": "support.function.builtin.json.lattice",
+          "match": "\\b(json_parse|json_stringify)\\b"
+        },
+        {
+          "name": "support.function.builtin.http.lattice",
+          "match": "\\b(http_get|http_post|http_request)\\b"
+        },
+        {
+          "name": "support.function.builtin.network.lattice",
+          "match": "\\b(tcp_listen|tcp_accept|tcp_connect|tcp_read|tcp_read_bytes|tcp_write|tcp_close|tcp_peer_addr|tcp_set_timeout|tls_connect|tls_read|tls_read_bytes|tls_write|tls_close|tls_available)\\b"
+        },
+        {
+          "name": "support.function.builtin.env.lattice",
+          "match": "\\b(env|env_set|env_keys|cwd|args|platform|hostname|pid)\\b"
+        },
+        {
+          "name": "support.function.builtin.process.lattice",
+          "match": "\\b(exec|shell)\\b"
+        },
+        {
+          "name": "support.function.builtin.meta.lattice",
+          "match": "\\b(lat_eval|tokenize)\\b"
+        },
+        {
+          "name": "support.function.builtin.datetime.lattice",
+          "match": "\\b(time|sleep|time_parse|time_format)\\b"
+        },
+        {
+          "name": "support.function.builtin.regex.lattice",
+          "match": "\\b(regex_match|regex_find_all|regex_replace)\\b"
+        },
+        {
+          "name": "support.function.builtin.crypto.lattice",
+          "match": "\\b(sha256|md5|base64_encode|base64_decode|url_encode|url_decode)\\b"
+        },
+        {
+          "name": "support.function.builtin.csv.lattice",
+          "match": "\\b(csv_parse|csv_stringify)\\b"
+        }
+      ]
+    },
+    "static-method-call": {
+      "patterns": [
+        {
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)(::)([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "support.type.lattice" },
+            "2": { "name": "punctuation.accessor.lattice" },
+            "3": { "name": "entity.name.function.static.lattice" }
+          }
+        },
+        {
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)(::)([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "support.type.lattice" },
+            "2": { "name": "punctuation.accessor.lattice" },
+            "3": { "name": "variable.other.enummember.lattice" }
+          }
+        }
+      ]
+    },
+    "method-call": {
+      "patterns": [
+        {
+          "match": "\\.([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.method.lattice" }
+          }
+        }
+      ]
+    },
+    "function-call": {
+      "patterns": [
+        {
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.lattice" }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.spread.lattice",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.assignment.compound.lattice",
+          "match": "(\\+=|-=|\\*=|/=|%=)"
+        },
+        {
+          "name": "keyword.operator.comparison.lattice",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.lattice",
+          "match": "(&&|\\|\\|)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.lattice",
+          "match": "(\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.assignment.lattice",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.logical.not.lattice",
+          "match": "!"
+        },
+        {
+          "name": "keyword.operator.range.lattice",
+          "match": "\\.\\."
+        },
+        {
+          "name": "keyword.operator.arrow.lattice",
+          "match": "(->|=>)"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.accessor.lattice",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.separator.lattice",
+          "match": ","
+        },
+        {
+          "name": "punctuation.separator.closure.lattice",
+          "match": "\\|"
+        },
+        {
+          "name": "punctuation.separator.type.lattice",
+          "match": ":"
+        }
+      ]
+    }
+  }
+}
