@@ -21,6 +21,38 @@ bool envvar_set(const char *name, const char *value, char **err) {
     return true;
 }
 
+extern char **environ;
+
+void envvar_keys(char ***out_keys, size_t *out_count) {
+    size_t count = 0;
+    if (environ) {
+        for (char **e = environ; *e; e++)
+            count++;
+    }
+
+    char **keys = malloc(count * sizeof(char *));
+    if (!keys) {
+        *out_keys = NULL;
+        *out_count = 0;
+        return;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const char *eq = strchr(environ[i], '=');
+        if (eq) {
+            size_t klen = (size_t)(eq - environ[i]);
+            keys[i] = malloc(klen + 1);
+            memcpy(keys[i], environ[i], klen);
+            keys[i][klen] = '\0';
+        } else {
+            keys[i] = strdup(environ[i]);
+        }
+    }
+
+    *out_keys = keys;
+    *out_count = count;
+}
+
 #else /* __EMSCRIPTEN__ */
 
 char *envvar_get(const char *name) {
@@ -32,6 +64,11 @@ bool envvar_set(const char *name, const char *value, char **err) {
     (void)name; (void)value;
     *err = strdup("env_set: not available in browser");
     return false;
+}
+
+void envvar_keys(char ***out_keys, size_t *out_count) {
+    *out_keys = NULL;
+    *out_count = 0;
 }
 
 #endif /* __EMSCRIPTEN__ */

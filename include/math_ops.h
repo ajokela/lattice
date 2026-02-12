@@ -26,5 +26,14 @@ LatValue math_atan2(const LatValue *y, const LatValue *x, char **err);
 LatValue math_clamp(const LatValue *val, const LatValue *lo, const LatValue *hi, char **err);
 LatValue math_pi(void);
 LatValue math_e(void);
+LatValue math_asin(const LatValue *v, char **err);
+LatValue math_acos(const LatValue *v, char **err);
+LatValue math_atan(const LatValue *v, char **err);
+LatValue math_exp(const LatValue *v, char **err);
+LatValue math_sign(const LatValue *v, char **err);
+LatValue math_gcd(const LatValue *a, const LatValue *b, char **err);
+LatValue math_lcm(const LatValue *a, const LatValue *b, char **err);
+LatValue math_is_nan(const LatValue *v, char **err);
+LatValue math_is_inf(const LatValue *v, char **err);
 
 #endif

@@ -160,6 +160,19 @@ char *process_cwd(char **err) {
     return buf;
 }
 
+char *process_hostname(char **err) {
+    char buf[256];
+    if (gethostname(buf, sizeof(buf)) != 0) {
+        *err = strdup("hostname: failed to get hostname");
+        return NULL;
+    }
+    return strdup(buf);
+}
+
+int process_pid(void) {
+    return (int)getpid();
+}
+
 #else /* __EMSCRIPTEN__ */
 
 LatValue process_exec(const char *cmd, char **err) {
@@ -179,4 +192,28 @@ char *process_cwd(char **err) {
     return NULL;
 }
 
+char *process_hostname(char **err) {
+    *err = strdup("hostname: not available in browser");
+    return NULL;
+}
+
+int process_pid(void) {
+    return 0;
+}
+
 #endif /* __EMSCRIPTEN__ */
+
+/* process_platform works on all targets via preprocessor */
+const char *process_platform(void) {
+#if defined(__EMSCRIPTEN__)
+    return "wasm";
+#elif defined(__APPLE__)
+    return "macos";
+#elif defined(__linux__)
+    return "linux";
+#elif defined(_WIN32)
+    return "windows";
+#else
+    return "unknown";
+#endif
+}

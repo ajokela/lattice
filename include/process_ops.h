@@ -19,4 +19,14 @@ LatValue process_shell(const char *cmd, char **err);
  * On failure, sets *err and returns NULL. */
 char *process_cwd(char **err);
 
+/* Return the OS platform as a static string: "macos", "linux", "windows", "wasm", or "unknown". */
+const char *process_platform(void);
+
+/* Return the system hostname as a heap-allocated string.
+ * On failure, sets *err and returns NULL. */
+char *process_hostname(char **err);
+
+/* Return the current process ID. */
+int process_pid(void);
+
 #endif /* PROCESS_OPS_H */

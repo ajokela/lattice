@@ -370,3 +370,142 @@ LatValue math_pi(void) {
 LatValue math_e(void) {
     return value_float(2.71828182845904523536);
 }
+
+/* ── asin ── */
+
+LatValue math_asin(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(asin((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(asin(v->as.float_val));
+    }
+    *err = strdup("asin() expects Int or Float");
+    return value_unit();
+}
+
+/* ── acos ── */
+
+LatValue math_acos(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(acos((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(acos(v->as.float_val));
+    }
+    *err = strdup("acos() expects Int or Float");
+    return value_unit();
+}
+
+/* ── atan ── */
+
+LatValue math_atan(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(atan((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(atan(v->as.float_val));
+    }
+    *err = strdup("atan() expects Int or Float");
+    return value_unit();
+}
+
+/* ── exp ── */
+
+LatValue math_exp(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_float(exp((double)v->as.int_val));
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_float(exp(v->as.float_val));
+    }
+    *err = strdup("exp() expects Int or Float");
+    return value_unit();
+}
+
+/* ── sign ── */
+
+LatValue math_sign(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        int64_t x = v->as.int_val;
+        if (x < 0) return value_int(-1);
+        if (x > 0) return value_int(1);
+        return value_int(0);
+    }
+    if (v->type == VAL_FLOAT) {
+        double x = v->as.float_val;
+        if (x < 0.0) return value_float(-1.0);
+        if (x > 0.0) return value_float(1.0);
+        return value_float(0.0);
+    }
+    *err = strdup("sign() expects Int or Float");
+    return value_unit();
+}
+
+/* ── gcd ── */
+
+LatValue math_gcd(const LatValue *a, const LatValue *b, char **err) {
+    if (a->type != VAL_INT || b->type != VAL_INT) {
+        *err = strdup("gcd() expects (Int, Int)");
+        return value_unit();
+    }
+    int64_t x = a->as.int_val;
+    int64_t y = b->as.int_val;
+    if (x < 0) x = -x;
+    if (y < 0) y = -y;
+    while (y != 0) {
+        int64_t t = y;
+        y = x % y;
+        x = t;
+    }
+    return value_int(x);
+}
+
+/* ── lcm ── */
+
+LatValue math_lcm(const LatValue *a, const LatValue *b, char **err) {
+    if (a->type != VAL_INT || b->type != VAL_INT) {
+        *err = strdup("lcm() expects (Int, Int)");
+        return value_unit();
+    }
+    int64_t x = a->as.int_val;
+    int64_t y = b->as.int_val;
+    if (x == 0 || y == 0) return value_int(0);
+    /* compute gcd first */
+    int64_t ax = x < 0 ? -x : x;
+    int64_t ay = y < 0 ? -y : y;
+    int64_t gx = ax, gy = ay;
+    while (gy != 0) {
+        int64_t t = gy;
+        gy = gx % gy;
+        gx = t;
+    }
+    /* lcm = abs(a*b) / gcd(a,b) — divide first to reduce overflow risk */
+    return value_int((ax / gx) * ay);
+}
+
+/* ── is_nan ── */
+
+LatValue math_is_nan(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_bool(false);
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_bool(isnan(v->as.float_val));
+    }
+    *err = strdup("is_nan() expects Int or Float");
+    return value_unit();
+}
+
+/* ── is_inf ── */
+
+LatValue math_is_inf(const LatValue *v, char **err) {
+    if (v->type == VAL_INT) {
+        return value_bool(false);
+    }
+    if (v->type == VAL_FLOAT) {
+        return value_bool(isinf(v->as.float_val));
+    }
+    *err = strdup("is_inf() expects Int or Float");
+    return value_unit();
+}

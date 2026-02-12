@@ -3244,6 +3244,57 @@ static void test_math_pi_e(void) {
     );
 }
 
+static void test_math_inverse_trig(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(format(\"{}\", asin(0.0)))\n"
+        "    print(format(\"{}\", acos(1.0)))\n"
+        "    print(format(\"{}\", atan(0.0)))\n"
+        "}\n",
+        "0\n0\n0"
+    );
+}
+
+static void test_math_exp(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(format(\"{}\", exp(0.0))) }\n",
+        "1"
+    );
+}
+
+static void test_math_sign(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(sign(-5))\n"
+        "    print(sign(0))\n"
+        "    print(sign(42))\n"
+        "}\n",
+        "-1\n0\n1"
+    );
+}
+
+static void test_math_gcd_lcm(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(gcd(12, 8))\n"
+        "    print(lcm(4, 6))\n"
+        "}\n",
+        "4\n12"
+    );
+}
+
+static void test_is_nan_inf(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(is_nan(0.0 / 0.0))\n"
+        "    print(is_nan(1.0))\n"
+        "    print(is_inf(1.0 / 0.0))\n"
+        "    print(is_inf(1.0))\n"
+        "}\n",
+        "true\nfalse\ntrue\nfalse"
+    );
+}
+
 /* ── System/FS tests ── */
 
 static void test_cwd_builtin(void) {
@@ -3772,6 +3823,132 @@ static void test_range_step_zero(void) {
 }
 
 /* ======================================================================
+ * String .bytes()
+ * ====================================================================== */
+
+static void test_str_bytes(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(\"ABC\".bytes()) }\n",
+        "[65, 66, 67]"
+    );
+}
+
+/* ======================================================================
+ * Array .take() and .drop()
+ * ====================================================================== */
+
+static void test_array_take(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4, 5].take(3))\n"
+        "    print([1, 2].take(5))\n"
+        "    print([1, 2, 3].take(0))\n"
+        "}\n",
+        "[1, 2, 3]\n[1, 2]\n[]"
+    );
+}
+
+static void test_array_drop(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4, 5].drop(2))\n"
+        "    print([1, 2].drop(5))\n"
+        "    print([1, 2, 3].drop(0))\n"
+        "}\n",
+        "[3, 4, 5]\n[]\n[1, 2, 3]"
+    );
+}
+
+/* ======================================================================
+ * error() and is_error() builtins
+ * ====================================================================== */
+
+static void test_error_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let e = error(\"something went wrong\")\n"
+        "    print(is_error(e))\n"
+        "    print(is_error(42))\n"
+        "    print(is_error(\"hello\"))\n"
+        "}\n",
+        "true\nfalse\nfalse"
+    );
+}
+
+/* ======================================================================
+ * System info builtins: platform, hostname, pid
+ * ====================================================================== */
+
+static void test_platform_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let p = platform()\n"
+        "    print(len(p) > 0)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_hostname_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let h = hostname()\n"
+        "    print(len(h) > 0)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_pid_builtin(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let p = pid()\n"
+        "    print(p > 0)\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* ======================================================================
+ * env_keys builtin
+ * ====================================================================== */
+
+static void test_env_keys(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    env_set(\"LATTICE_TEST_KEY\", \"1\")\n"
+        "    let keys = env_keys()\n"
+        "    print(keys.contains(\"LATTICE_TEST_KEY\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* ======================================================================
+ * URL encoding builtins
+ * ====================================================================== */
+
+static void test_url_encode(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(url_encode(\"hello world\"))\n"
+        "    print(url_encode(\"foo=bar&baz=1\"))\n"
+        "}\n",
+        "hello%20world\nfoo%3Dbar%26baz%3D1"
+    );
+}
+
+static void test_url_decode(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(url_decode(\"hello%20world\"))\n"
+        "    print(url_decode(\"foo+bar\"))\n"
+        "}\n",
+        "hello world\nfoo bar"
+    );
+}
+
+/* ======================================================================
  * Test Registration
  * ====================================================================== */
 
@@ -4069,6 +4246,11 @@ void register_stdlib_tests(void) {
     register_test("test_math_atan2", test_math_atan2);
     register_test("test_math_clamp", test_math_clamp);
     register_test("test_math_pi_e", test_math_pi_e);
+    register_test("test_math_inverse_trig", test_math_inverse_trig);
+    register_test("test_math_exp", test_math_exp);
+    register_test("test_math_sign", test_math_sign);
+    register_test("test_math_gcd_lcm", test_math_gcd_lcm);
+    register_test("test_is_nan_inf", test_is_nan_inf);
 
     /* New system/fs builtins */
     register_test("test_cwd_builtin", test_cwd_builtin);
@@ -4121,4 +4303,26 @@ void register_stdlib_tests(void) {
     register_test("test_range_with_step", test_range_with_step);
     register_test("test_range_empty", test_range_empty);
     register_test("test_range_step_zero", test_range_step_zero);
+
+    /* String .bytes() */
+    register_test("test_str_bytes", test_str_bytes);
+
+    /* Array .take() and .drop() */
+    register_test("test_array_take", test_array_take);
+    register_test("test_array_drop", test_array_drop);
+
+    /* error() and is_error() builtins */
+    register_test("test_error_builtin", test_error_builtin);
+
+    /* System info builtins */
+    register_test("test_platform_builtin", test_platform_builtin);
+    register_test("test_hostname_builtin", test_hostname_builtin);
+    register_test("test_pid_builtin", test_pid_builtin);
+
+    /* env_keys builtin */
+    register_test("test_env_keys", test_env_keys);
+
+    /* URL encoding builtins */
+    register_test("test_url_encode", test_url_encode);
+    register_test("test_url_decode", test_url_decode);
 }
