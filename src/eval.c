@@ -825,6 +825,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Built-in functions ── */
 
+                /// @builtin input(prompt?: String) -> String
+                /// @category Core
+                /// Read a line of input from stdin, optionally displaying a prompt.
+                /// @example input("Name: ")  // reads user input
                 if (strcmp(fn_name, "input") == 0) {
                     const char *prompt = NULL;
                     if (argc > 0 && args[0].type == VAL_STR) prompt = args[0].as.str_val;
@@ -835,6 +839,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(line));
                 }
 
+                /// @builtin is_complete(source: String) -> Bool
+                /// @category Metaprogramming
+                /// Check if a source string is a complete expression (balanced brackets).
+                /// @example is_complete("{ 1 + 2 }")  // true
                 if (strcmp(fn_name, "is_complete") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_complete() expects 1 string argument")); }
                     const char *source = args[0].as.str_val;
@@ -870,6 +878,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(depth <= 0));
                 }
 
+                /// @builtin typeof(val: Any) -> String
+                /// @category Core
+                /// Returns the type name of a value as a string.
+                /// @example typeof(42)  // "Int"
                 if (strcmp(fn_name, "typeof") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("typeof() expects 1 argument")); }
                     const char *tn = builtin_typeof_str(&args[0]);
@@ -878,6 +890,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string(tn));
                 }
 
+                /// @builtin phase_of(val: Any) -> String
+                /// @category Core
+                /// Returns the phase of a value ("flux", "fix", or "crystal").
+                /// @example phase_of(freeze([1, 2]))  // "crystal"
                 if (strcmp(fn_name, "phase_of") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("phase_of() expects 1 argument")); }
                     const char *pn = builtin_phase_of_str(&args[0]);
@@ -886,6 +902,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string(pn));
                 }
 
+                /// @builtin to_string(val: Any) -> String
+                /// @category Core
+                /// Convert any value to its string representation.
+                /// @example to_string(42)  // "42"
                 if (strcmp(fn_name, "to_string") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_string() expects 1 argument")); }
                     char *s = builtin_to_string(&args[0]);
@@ -894,6 +914,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(s));
                 }
 
+                /// @builtin ord(ch: String) -> Int
+                /// @category Type Conversion
+                /// Return the Unicode code point of the first character.
+                /// @example ord("A")  // 65
                 if (strcmp(fn_name, "ord") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("ord() expects 1 string argument")); }
                     int64_t code = builtin_ord(args[0].as.str_val);
@@ -902,6 +926,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int(code));
                 }
 
+                /// @builtin chr(code: Int) -> String
+                /// @category Type Conversion
+                /// Return the character for a Unicode code point.
+                /// @example chr(65)  // "A"
                 if (strcmp(fn_name, "chr") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("chr() expects 1 integer argument")); }
                     char *s = builtin_chr(args[0].as.int_val);
@@ -910,6 +938,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(s));
                 }
 
+                /// @builtin read_file(path: String) -> String
+                /// @category File System
+                /// Read the entire contents of a file as a string.
+                /// @example read_file("data.txt")  // "file contents..."
                 if (strcmp(fn_name, "read_file") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("read_file() expects 1 string argument")); }
                     char *contents = builtin_read_file(args[0].as.str_val);
@@ -919,6 +951,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(contents));
                 }
 
+                /// @builtin write_file(path: String, content: String) -> Bool
+                /// @category File System
+                /// Write a string to a file, creating or overwriting it.
+                /// @example write_file("out.txt", "hello")  // true
                 if (strcmp(fn_name, "write_file") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("write_file() expects 2 string arguments")); }
                     bool wf_ok = builtin_write_file(args[0].as.str_val, args[1].as.str_val);
@@ -928,6 +964,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin file_exists(path: String) -> Bool
+                /// @category File System
+                /// Check if a file or directory exists at the given path.
+                /// @example file_exists("data.txt")  // true
                 if (strcmp(fn_name, "file_exists") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("file_exists() expects 1 string argument")); }
                     bool exists = fs_file_exists(args[0].as.str_val);
@@ -936,6 +976,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(exists));
                 }
 
+                /// @builtin delete_file(path: String) -> Bool
+                /// @category File System
+                /// Delete a file at the given path.
+                /// @example delete_file("temp.txt")  // true
                 if (strcmp(fn_name, "delete_file") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("delete_file() expects 1 string argument")); }
                     char *df_err = NULL;
@@ -946,6 +990,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin list_dir(path: String) -> Array
+                /// @category File System
+                /// List entries in a directory, returning an array of filenames.
+                /// @example list_dir(".")  // ["file1.txt", "dir1", ...]
                 if (strcmp(fn_name, "list_dir") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("list_dir() expects 1 string argument")); }
                     char *ld_err = NULL;
@@ -965,6 +1013,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(arr);
                 }
 
+                /// @builtin append_file(path: String, content: String) -> Bool
+                /// @category File System
+                /// Append a string to the end of a file.
+                /// @example append_file("log.txt", "new line\n")  // true
                 if (strcmp(fn_name, "append_file") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("append_file() expects 2 string arguments")); }
                     char *af_err = NULL;
@@ -975,6 +1027,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin mkdir(path: String) -> Bool
+                /// @category File System
+                /// Create a directory at the given path.
+                /// @example mkdir("new_dir")  // true
                 if (strcmp(fn_name, "mkdir") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("mkdir() expects 1 string argument")); }
                     char *mk_err = NULL;
@@ -985,6 +1041,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin rename(old_path: String, new_path: String) -> Bool
+                /// @category File System
+                /// Rename or move a file or directory.
+                /// @example rename("old.txt", "new.txt")  // true
                 if (strcmp(fn_name, "rename") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rename() expects 2 string arguments")); }
                     char *rn_err = NULL;
@@ -995,6 +1055,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin is_dir(path: String) -> Bool
+                /// @category File System
+                /// Check if the path points to a directory.
+                /// @example is_dir("/tmp")  // true
                 if (strcmp(fn_name, "is_dir") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_dir() expects 1 string argument")); }
                     bool result = fs_is_dir(args[0].as.str_val);
@@ -1003,6 +1067,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(result));
                 }
 
+                /// @builtin is_file(path: String) -> Bool
+                /// @category File System
+                /// Check if the path points to a regular file.
+                /// @example is_file("data.txt")  // true
                 if (strcmp(fn_name, "is_file") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_file() expects 1 string argument")); }
                     bool result = fs_is_file(args[0].as.str_val);
@@ -1011,6 +1079,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(result));
                 }
 
+                /// @builtin rmdir(path: String) -> Bool
+                /// @category File System
+                /// Remove a directory (must be empty).
+                /// @example rmdir("old_dir")  // true
                 if (strcmp(fn_name, "rmdir") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rmdir() expects 1 string argument")); }
                     char *rm_err = NULL;
@@ -1021,6 +1093,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin glob(pattern: String) -> Array
+                /// @category File System
+                /// Find files matching a glob pattern, returning an array of paths.
+                /// @example glob("*.txt")  // ["a.txt", "b.txt"]
                 if (strcmp(fn_name, "glob") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("glob() expects 1 string argument")); }
                     char *gl_err = NULL;
@@ -1043,6 +1119,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(arr);
                 }
 
+                /// @builtin stat(path: String) -> Map
+                /// @category File System
+                /// Get file metadata (size, mtime, type, permissions) as a map.
+                /// @example stat("file.txt")  // {size: 1024, mtime: ..., type: "file", permissions: 644}
                 if (strcmp(fn_name, "stat") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("stat() expects 1 string argument")); }
                     int64_t st_size = 0, st_mtime = 0, st_mode = 0;
@@ -1067,6 +1147,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(map);
                 }
 
+                /// @builtin copy_file(src: String, dest: String) -> Bool
+                /// @category File System
+                /// Copy a file from source path to destination path.
+                /// @example copy_file("a.txt", "b.txt")  // true
                 if (strcmp(fn_name, "copy_file") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("copy_file() expects 2 string arguments")); }
                     char *cp_err = NULL;
@@ -1077,6 +1161,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin realpath(path: String) -> String
+                /// @category File System
+                /// Resolve a path to its absolute canonical form.
+                /// @example realpath("./src/../src")  // "/home/user/src"
                 if (strcmp(fn_name, "realpath") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("realpath() expects 1 string argument")); }
                     char *rp_err = NULL;
@@ -1087,6 +1175,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(rp_result));
                 }
 
+                /// @builtin tempdir() -> String
+                /// @category File System
+                /// Create a temporary directory and return its path.
+                /// @example tempdir()  // "/tmp/lat_XXXXXX"
                 if (strcmp(fn_name, "tempdir") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tempdir() expects no arguments")); }
                     free(args);
@@ -1096,6 +1188,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(td_result));
                 }
 
+                /// @builtin tempfile() -> String
+                /// @category File System
+                /// Create a temporary file and return its path.
+                /// @example tempfile()  // "/tmp/lat_XXXXXX"
                 if (strcmp(fn_name, "tempfile") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tempfile() expects no arguments")); }
                     free(args);
@@ -1105,6 +1201,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(tf_result));
                 }
 
+                /// @builtin chmod(path: String, mode: Int) -> Bool
+                /// @category File System
+                /// Change file permissions using a numeric mode.
+                /// @example chmod("script.sh", 755)  // true
                 if (strcmp(fn_name, "chmod") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("chmod() expects 2 arguments (string path, integer mode)")); }
                     char *ch_err = NULL;
@@ -1115,6 +1215,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin file_size(path: String) -> Int
+                /// @category File System
+                /// Return the size of a file in bytes.
+                /// @example file_size("data.bin")  // 4096
                 if (strcmp(fn_name, "file_size") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("file_size() expects 1 string argument")); }
                     char *fs_err = NULL;
@@ -1127,6 +1231,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Path builtins ── */
 
+                /// @builtin path_join(parts: String...) -> String
+                /// @category Path
+                /// Join path components into a single path string.
+                /// @example path_join("/home", "user", "file.txt")  // "/home/user/file.txt"
                 if (strcmp(fn_name, "path_join") == 0) {
                     if (argc < 1) { free(args); return eval_err(strdup("path_join() expects at least 1 argument")); }
                     for (size_t i = 0; i < argc; i++) {
@@ -1141,6 +1249,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin path_dir(path: String) -> String
+                /// @category Path
+                /// Return the directory component of a path.
+                /// @example path_dir("/home/user/file.txt")  // "/home/user"
                 if (strcmp(fn_name, "path_dir") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_dir() expects 1 String argument")); }
                     char *result = path_dir(args[0].as.str_val);
@@ -1149,6 +1261,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin path_base(path: String) -> String
+                /// @category Path
+                /// Return the filename component of a path.
+                /// @example path_base("/home/user/file.txt")  // "file.txt"
                 if (strcmp(fn_name, "path_base") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_base() expects 1 String argument")); }
                     char *result = path_base(args[0].as.str_val);
@@ -1157,6 +1273,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin path_ext(path: String) -> String
+                /// @category Path
+                /// Return the file extension of a path (including the dot).
+                /// @example path_ext("file.txt")  // ".txt"
                 if (strcmp(fn_name, "path_ext") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_ext() expects 1 String argument")); }
                     char *result = path_ext(args[0].as.str_val);
@@ -1165,6 +1285,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin require(path: String) -> Bool
+                /// @category Metaprogramming
+                /// Load and execute a Lattice source file, importing its definitions.
+                /// @example require("stdlib.lat")  // true
                 if (strcmp(fn_name, "require") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("require() expects 1 string argument")); }
                     const char *raw_path = args[0].as.str_val;
@@ -1292,6 +1416,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin lat_eval(source: String) -> Any
+                /// @category Metaprogramming
+                /// Parse and execute a string as Lattice source code, returning the result.
+                /// @example lat_eval("1 + 2")  // 3
                 if (strcmp(fn_name, "lat_eval") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lat_eval() expects 1 string argument")); }
                     const char *source = args[0].as.str_val;
@@ -1355,6 +1483,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_r;
                 }
 
+                /// @builtin tokenize(source: String) -> Array
+                /// @category Metaprogramming
+                /// Tokenize a source string, returning an array of Token structs.
+                /// @example tokenize("1 + 2")  // [{type: "INT_LIT", text: "1"}, ...]
                 if (strcmp(fn_name, "tokenize") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tokenize() expects 1 string argument")); }
                     const char *source = args[0].as.str_val;
@@ -1396,12 +1528,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(arr);
                 }
 
+                /// @builtin Map::new() -> Map
+                /// @category Type Constructors
+                /// Create a new empty map.
+                /// @example Map::new()  // {}
                 if (strcmp(fn_name, "Map::new") == 0) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_map_new());
                 }
 
+                /// @builtin Channel::new() -> Channel
+                /// @category Type Constructors
+                /// Create a new channel for concurrent communication.
+                /// @example Channel::new()  // <Channel>
                 if (strcmp(fn_name, "Channel::new") == 0) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -1411,6 +1551,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(val);
                 }
 
+                /// @builtin parse_int(s: String) -> Int
+                /// @category Type Conversion
+                /// Parse a string as an integer.
+                /// @example parse_int("42")  // 42
                 if (strcmp(fn_name, "parse_int") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("parse_int() expects 1 string argument")); }
                     bool ok;
@@ -1421,6 +1565,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int(val));
                 }
 
+                /// @builtin parse_float(s: String) -> Float
+                /// @category Type Conversion
+                /// Parse a string as a floating-point number.
+                /// @example parse_float("3.14")  // 3.14
                 if (strcmp(fn_name, "parse_float") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("parse_float() expects 1 string argument")); }
                     bool ok;
@@ -1431,6 +1579,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_float(val));
                 }
 
+                /// @builtin error(msg: String) -> String
+                /// @category Error Handling
+                /// Create an error value with the given message.
+                /// @example error("something went wrong")  // "EVAL_ERROR:something went wrong"
                 if (strcmp(fn_name, "error") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("error() expects 1 string argument")); }
                     char *msg = NULL;
@@ -1440,6 +1592,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(msg));
                 }
 
+                /// @builtin is_error(val: Any) -> Bool
+                /// @category Error Handling
+                /// Check if a value is an error value.
+                /// @example is_error(error("oops"))  // true
                 if (strcmp(fn_name, "is_error") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_error() expects 1 argument")); }
                     bool is_err = args[0].type == VAL_STR && strncmp(args[0].as.str_val, "EVAL_ERROR:", 11) == 0;
@@ -1448,6 +1604,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(is_err));
                 }
 
+                /// @builtin len(val: String|Array|Map) -> Int
+                /// @category Core
+                /// Returns the length of a string, array, or map.
+                /// @example len("hello")  // 5
+                /// @example len([1, 2, 3])  // 3
                 if (strcmp(fn_name, "len") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("len() expects 1 argument")); }
                     int64_t l = -1;
@@ -1460,6 +1621,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int(l));
                 }
 
+                /// @builtin exit(code?: Int) -> Unit
+                /// @category Core
+                /// Exit the program with an optional exit code (default 0).
+                /// @example exit(1)  // exits with code 1
                 if (strcmp(fn_name, "exit") == 0) {
                     int code = 0;
                     if (argc > 0 && args[0].type == VAL_INT) code = (int)args[0].as.int_val;
@@ -1468,12 +1633,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     exit(code);
                 }
 
+                /// @builtin version() -> String
+                /// @category Core
+                /// Return the Lattice interpreter version string.
+                /// @example version()  // "0.1.0"
                 if (strcmp(fn_name, "version") == 0) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_string(LATTICE_VERSION));
                 }
 
+                /// @builtin print_raw(args: Any...) -> Unit
+                /// @category Core
+                /// Print values separated by spaces without a trailing newline.
+                /// @example print_raw("hello", "world")  // prints: hello world
                 if (strcmp(fn_name, "print_raw") == 0) {
                     for (size_t i = 0; i < argc; i++) {
                         if (i > 0) printf(" ");
@@ -1487,6 +1660,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_unit());
                 }
 
+                /// @builtin eprint(args: Any...) -> Unit
+                /// @category Core
+                /// Print values to stderr with a trailing newline.
+                /// @example eprint("warning:", msg)  // prints to stderr
                 if (strcmp(fn_name, "eprint") == 0) {
                     for (size_t i = 0; i < argc; i++) {
                         if (i > 0) fprintf(stderr, " ");
@@ -1502,6 +1679,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── TCP networking builtins ── */
 
+                /// @builtin tcp_listen(host: String, port: Int) -> Int
+                /// @category Networking
+                /// Create a TCP server socket listening on host:port, returning a file descriptor.
+                /// @example tcp_listen("0.0.0.0", 8080)  // 3
                 if (strcmp(fn_name, "tcp_listen") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_listen() expects (String host, Int port)")); }
                     char *net_err = NULL;
@@ -1512,6 +1693,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int(fd));
                 }
 
+                /// @builtin tcp_accept(server_fd: Int) -> Int
+                /// @category Networking
+                /// Accept an incoming TCP connection, returning a new client file descriptor.
+                /// @example tcp_accept(server_fd)  // 4
                 if (strcmp(fn_name, "tcp_accept") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_accept() expects (Int server_fd)")); }
                     char *net_err = NULL;
@@ -1522,6 +1707,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int(fd));
                 }
 
+                /// @builtin tcp_connect(host: String, port: Int) -> Int
+                /// @category Networking
+                /// Connect to a TCP server, returning a file descriptor.
+                /// @example tcp_connect("localhost", 8080)  // 3
                 if (strcmp(fn_name, "tcp_connect") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_connect() expects (String host, Int port)")); }
                     char *net_err = NULL;
@@ -1532,6 +1721,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int(fd));
                 }
 
+                /// @builtin tcp_read(fd: Int) -> String
+                /// @category Networking
+                /// Read data from a TCP socket as a string.
+                /// @example tcp_read(client_fd)  // "HTTP/1.1 200 OK..."
                 if (strcmp(fn_name, "tcp_read") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_read() expects (Int fd)")); }
                     char *net_err = NULL;
@@ -1542,6 +1735,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(data));
                 }
 
+                /// @builtin tcp_read_bytes(fd: Int, n: Int) -> String
+                /// @category Networking
+                /// Read exactly n bytes from a TCP socket.
+                /// @example tcp_read_bytes(fd, 1024)  // "..."
                 if (strcmp(fn_name, "tcp_read_bytes") == 0) {
                     if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_read_bytes() expects (Int fd, Int n)")); }
                     char *net_err = NULL;
@@ -1552,6 +1749,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(data));
                 }
 
+                /// @builtin tcp_write(fd: Int, data: String) -> Bool
+                /// @category Networking
+                /// Write a string to a TCP socket.
+                /// @example tcp_write(fd, "GET / HTTP/1.1\r\n\r\n")  // true
                 if (strcmp(fn_name, "tcp_write") == 0) {
                     if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_write() expects (Int fd, String data)")); }
                     char *net_err = NULL;
@@ -1562,6 +1763,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin tcp_close(fd: Int) -> Unit
+                /// @category Networking
+                /// Close a TCP socket.
+                /// @example tcp_close(fd)
                 if (strcmp(fn_name, "tcp_close") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_close() expects (Int fd)")); }
                     net_tcp_close((int)args[0].as.int_val);
@@ -1570,6 +1775,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_unit());
                 }
 
+                /// @builtin tcp_peer_addr(fd: Int) -> String
+                /// @category Networking
+                /// Get the remote address of a connected TCP socket.
+                /// @example tcp_peer_addr(client_fd)  // "192.168.1.1:54321"
                 if (strcmp(fn_name, "tcp_peer_addr") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_peer_addr() expects (Int fd)")); }
                     char *net_err = NULL;
@@ -1580,6 +1789,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(addr));
                 }
 
+                /// @builtin tcp_set_timeout(fd: Int, secs: Int) -> Bool
+                /// @category Networking
+                /// Set read/write timeout on a TCP socket in seconds.
+                /// @example tcp_set_timeout(fd, 30)  // true
                 if (strcmp(fn_name, "tcp_set_timeout") == 0) {
                     if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_set_timeout() expects (Int fd, Int secs)")); }
                     char *net_err = NULL;
@@ -1592,6 +1805,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── TLS networking builtins ── */
 
+                /// @builtin tls_connect(host: String, port: Int) -> Int
+                /// @category Networking
+                /// Establish a TLS connection to a server, returning a handle.
+                /// @example tls_connect("example.com", 443)  // 1
                 if (strcmp(fn_name, "tls_connect") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_connect() expects (String host, Int port)")); }
                     char *net_err = NULL;
@@ -1602,6 +1819,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int(fd));
                 }
 
+                /// @builtin tls_read(handle: Int) -> String
+                /// @category Networking
+                /// Read data from a TLS connection as a string.
+                /// @example tls_read(handle)  // "HTTP/1.1 200 OK..."
                 if (strcmp(fn_name, "tls_read") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_read() expects (Int fd)")); }
                     char *net_err = NULL;
@@ -1612,6 +1833,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(data));
                 }
 
+                /// @builtin tls_read_bytes(handle: Int, n: Int) -> String
+                /// @category Networking
+                /// Read exactly n bytes from a TLS connection.
+                /// @example tls_read_bytes(handle, 512)  // "..."
                 if (strcmp(fn_name, "tls_read_bytes") == 0) {
                     if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_read_bytes() expects (Int fd, Int n)")); }
                     char *net_err = NULL;
@@ -1622,6 +1847,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(data));
                 }
 
+                /// @builtin tls_write(handle: Int, data: String) -> Bool
+                /// @category Networking
+                /// Write a string to a TLS connection.
+                /// @example tls_write(handle, "GET / HTTP/1.1\r\n\r\n")  // true
                 if (strcmp(fn_name, "tls_write") == 0) {
                     if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_write() expects (Int fd, String data)")); }
                     char *net_err = NULL;
@@ -1632,6 +1861,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_bool(true));
                 }
 
+                /// @builtin tls_close(handle: Int) -> Unit
+                /// @category Networking
+                /// Close a TLS connection.
+                /// @example tls_close(handle)
                 if (strcmp(fn_name, "tls_close") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_close() expects (Int fd)")); }
                     net_tls_close((int)args[0].as.int_val);
@@ -1640,6 +1873,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_unit());
                 }
 
+                /// @builtin tls_available() -> Bool
+                /// @category Networking
+                /// Check if TLS support is available (OpenSSL linked).
+                /// @example tls_available()  // true
                 if (strcmp(fn_name, "tls_available") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_available() expects no arguments")); }
                     free(args);
@@ -1648,6 +1885,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── JSON builtins ── */
 
+                /// @builtin json_parse(s: String) -> Any
+                /// @category JSON
+                /// Parse a JSON string into a Lattice value.
+                /// @example json_parse("{\"a\": 1}")  // {a: 1}
                 if (strcmp(fn_name, "json_parse") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("json_parse() expects (String)")); }
                     char *jerr = NULL;
@@ -1658,6 +1899,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin json_stringify(val: Any) -> String
+                /// @category JSON
+                /// Serialize a Lattice value to a JSON string.
+                /// @example json_stringify([1, 2, 3])  // "[1,2,3]"
                 if (strcmp(fn_name, "json_stringify") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("json_stringify() expects (value)")); }
                     char *jerr = NULL;
@@ -1670,6 +1915,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Math builtins ── */
 
+                /// @builtin abs(x: Int|Float) -> Int|Float
+                /// @category Math
+                /// Return the absolute value of a number.
+                /// @example abs(-5)  // 5
                 if (strcmp(fn_name, "abs") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("abs() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1680,6 +1929,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin floor(x: Int|Float) -> Int
+                /// @category Math
+                /// Round down to the nearest integer.
+                /// @example floor(3.7)  // 3
                 if (strcmp(fn_name, "floor") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("floor() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1690,6 +1943,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin ceil(x: Int|Float) -> Int
+                /// @category Math
+                /// Round up to the nearest integer.
+                /// @example ceil(3.2)  // 4
                 if (strcmp(fn_name, "ceil") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("ceil() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1700,6 +1957,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin round(x: Int|Float) -> Int
+                /// @category Math
+                /// Round to the nearest integer.
+                /// @example round(3.5)  // 4
                 if (strcmp(fn_name, "round") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("round() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1710,6 +1971,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin sqrt(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the square root of a number.
+                /// @example sqrt(16)  // 4.0
                 if (strcmp(fn_name, "sqrt") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sqrt() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1720,6 +1985,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin pow(base: Int|Float, exp: Int|Float) -> Float
+                /// @category Math
+                /// Raise base to the power of exp.
+                /// @example pow(2, 10)  // 1024.0
                 if (strcmp(fn_name, "pow") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pow() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
@@ -1730,6 +1999,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin min(a: Int|Float, b: Int|Float) -> Int|Float
+                /// @category Math
+                /// Return the smaller of two numbers.
+                /// @example min(3, 7)  // 3
                 if (strcmp(fn_name, "min") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("min() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
@@ -1740,6 +2013,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin max(a: Int|Float, b: Int|Float) -> Int|Float
+                /// @category Math
+                /// Return the larger of two numbers.
+                /// @example max(3, 7)  // 7
                 if (strcmp(fn_name, "max") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("max() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
@@ -1750,12 +2027,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin random() -> Float
+                /// @category Math
+                /// Return a random float between 0.0 (inclusive) and 1.0 (exclusive).
+                /// @example random()  // 0.7231...
                 if (strcmp(fn_name, "random") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("random() expects no arguments")); }
                     free(args);
                     return eval_ok(math_random());
                 }
 
+                /// @builtin random_int(min: Int, max: Int) -> Int
+                /// @category Math
+                /// Return a random integer in the range [min, max).
+                /// @example random_int(1, 100)  // 42
                 if (strcmp(fn_name, "random_int") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("random_int() expects (Int, Int)")); }
                     char *merr = NULL;
@@ -1766,6 +2051,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin log(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the natural logarithm (base e) of a number.
+                /// @example log(math_e())  // 1.0
                 if (strcmp(fn_name, "log") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1776,6 +2065,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin log2(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the base-2 logarithm of a number.
+                /// @example log2(8)  // 3.0
                 if (strcmp(fn_name, "log2") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log2() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1786,6 +2079,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin log10(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the base-10 logarithm of a number.
+                /// @example log10(1000)  // 3.0
                 if (strcmp(fn_name, "log10") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log10() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1796,6 +2093,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin sin(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the sine of an angle in radians.
+                /// @example sin(0)  // 0.0
                 if (strcmp(fn_name, "sin") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sin() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1806,6 +2107,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin cos(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the cosine of an angle in radians.
+                /// @example cos(0)  // 1.0
                 if (strcmp(fn_name, "cos") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cos() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1816,6 +2121,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin tan(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the tangent of an angle in radians.
+                /// @example tan(0)  // 0.0
                 if (strcmp(fn_name, "tan") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tan() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1826,6 +2135,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin atan2(y: Int|Float, x: Int|Float) -> Float
+                /// @category Math
+                /// Return the two-argument arctangent in radians.
+                /// @example atan2(1, 1)  // 0.7853...
                 if (strcmp(fn_name, "atan2") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("atan2() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
@@ -1836,6 +2149,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin clamp(x: Int|Float, lo: Int|Float, hi: Int|Float) -> Int|Float
+                /// @category Math
+                /// Clamp a value between a minimum and maximum.
+                /// @example clamp(15, 0, 10)  // 10
                 if (strcmp(fn_name, "clamp") == 0) {
                     if (argc != 3) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("clamp() expects (Int|Float, Int|Float, Int|Float)")); }
                     char *merr = NULL;
@@ -1846,18 +2163,30 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin math_pi() -> Float
+                /// @category Math
+                /// Return the mathematical constant pi.
+                /// @example math_pi()  // 3.14159265358979...
                 if (strcmp(fn_name, "math_pi") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("math_pi() expects no arguments")); }
                     free(args);
                     return eval_ok(math_pi());
                 }
 
+                /// @builtin math_e() -> Float
+                /// @category Math
+                /// Return Euler's number (e).
+                /// @example math_e()  // 2.71828182845904...
                 if (strcmp(fn_name, "math_e") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("math_e() expects no arguments")); }
                     free(args);
                     return eval_ok(math_e());
                 }
 
+                /// @builtin asin(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the arcsine in radians.
+                /// @example asin(1)  // 1.5707...
                 if (strcmp(fn_name, "asin") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("asin() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1868,6 +2197,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin acos(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the arccosine in radians.
+                /// @example acos(1)  // 0.0
                 if (strcmp(fn_name, "acos") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("acos() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1878,6 +2211,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin atan(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the arctangent in radians.
+                /// @example atan(1)  // 0.7853...
                 if (strcmp(fn_name, "atan") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("atan() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1888,6 +2225,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin exp(x: Int|Float) -> Float
+                /// @category Math
+                /// Return e raised to the power of x.
+                /// @example exp(1)  // 2.71828...
                 if (strcmp(fn_name, "exp") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exp() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1898,6 +2239,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin sign(x: Int|Float) -> Int
+                /// @category Math
+                /// Return -1, 0, or 1 indicating the sign of a number.
+                /// @example sign(-42)  // -1
                 if (strcmp(fn_name, "sign") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sign() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1908,6 +2253,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin gcd(a: Int, b: Int) -> Int
+                /// @category Math
+                /// Return the greatest common divisor of two integers.
+                /// @example gcd(12, 8)  // 4
                 if (strcmp(fn_name, "gcd") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("gcd() expects (Int, Int)")); }
                     char *merr = NULL;
@@ -1918,6 +2267,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin lcm(a: Int, b: Int) -> Int
+                /// @category Math
+                /// Return the least common multiple of two integers.
+                /// @example lcm(4, 6)  // 12
                 if (strcmp(fn_name, "lcm") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lcm() expects (Int, Int)")); }
                     char *merr = NULL;
@@ -1928,6 +2281,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin is_nan(x: Int|Float) -> Bool
+                /// @category Math
+                /// Check if a value is NaN (not a number).
+                /// @example is_nan(0.0 / 0.0)  // true
                 if (strcmp(fn_name, "is_nan") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_nan() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1938,6 +2295,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin is_inf(x: Int|Float) -> Bool
+                /// @category Math
+                /// Check if a value is positive or negative infinity.
+                /// @example is_inf(1.0 / 0.0)  // true
                 if (strcmp(fn_name, "is_inf") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_inf() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1948,6 +2309,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin sinh(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the hyperbolic sine.
+                /// @example sinh(1)  // 1.1752...
                 if (strcmp(fn_name, "sinh") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sinh() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1958,6 +2323,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin cosh(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the hyperbolic cosine.
+                /// @example cosh(0)  // 1.0
                 if (strcmp(fn_name, "cosh") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cosh() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1968,6 +2337,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin tanh(x: Int|Float) -> Float
+                /// @category Math
+                /// Return the hyperbolic tangent.
+                /// @example tanh(0)  // 0.0
                 if (strcmp(fn_name, "tanh") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tanh() expects (Int|Float)")); }
                     char *merr = NULL;
@@ -1978,6 +2351,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin lerp(a: Int|Float, b: Int|Float, t: Int|Float) -> Float
+                /// @category Math
+                /// Linear interpolation between a and b by factor t.
+                /// @example lerp(0, 10, 0.5)  // 5.0
                 if (strcmp(fn_name, "lerp") == 0) {
                     if (argc != 3) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lerp() expects (Int|Float, Int|Float, Int|Float)")); }
                     char *merr = NULL;
@@ -1990,6 +2367,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── range() builtin ── */
 
+                /// @builtin range(start: Int, end: Int, step?: Int) -> Array
+                /// @category Type Constructors
+                /// Generate an array of integers from start (inclusive) to end (exclusive).
+                /// @example range(0, 5)  // [0, 1, 2, 3, 4]
+                /// @example range(0, 10, 2)  // [0, 2, 4, 6, 8]
                 if (strcmp(fn_name, "range") == 0) {
                     if (argc < 2 || argc > 3) {
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2037,6 +2419,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Type coercion builtins ── */
 
+                /// @builtin to_int(val: Any) -> Int
+                /// @category Type Conversion
+                /// Convert a value to an integer (truncates floats, parses strings).
+                /// @example to_int(3.9)  // 3
                 if (strcmp(fn_name, "to_int") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_int() expects (value)")); }
                     char *terr = NULL;
@@ -2047,6 +2433,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin to_float(val: Any) -> Float
+                /// @category Type Conversion
+                /// Convert a value to a floating-point number.
+                /// @example to_float(42)  // 42.0
                 if (strcmp(fn_name, "to_float") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_float() expects (value)")); }
                     char *terr = NULL;
@@ -2059,6 +2449,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Environment variable builtins ── */
 
+                /// @builtin env(name: String) -> String|Unit
+                /// @category Environment
+                /// Get an environment variable's value, or unit if not set.
+                /// @example env("HOME")  // "/home/user"
                 if (strcmp(fn_name, "env") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env() expects (String)")); }
                     char *val = envvar_get(args[0].as.str_val);
@@ -2068,6 +2462,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(val));
                 }
 
+                /// @builtin env_set(name: String, value: String) -> Unit
+                /// @category Environment
+                /// Set an environment variable.
+                /// @example env_set("MY_VAR", "hello")
                 if (strcmp(fn_name, "env_set") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env_set() expects (String, String)")); }
                     char *eerr = NULL;
@@ -2078,6 +2476,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_unit());
                 }
 
+                /// @builtin env_keys() -> Array
+                /// @category Environment
+                /// Return an array of all environment variable names.
+                /// @example env_keys()  // ["HOME", "PATH", ...]
                 if (strcmp(fn_name, "env_keys") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env_keys() expects no arguments")); }
                     free(args);
@@ -2099,12 +2501,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Time builtins ── */
 
+                /// @builtin time() -> Int
+                /// @category Date & Time
+                /// Return the current Unix timestamp in milliseconds.
+                /// @example time()  // 1700000000000
                 if (strcmp(fn_name, "time") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time() expects no arguments")); }
                     free(args);
                     return eval_ok(value_int(time_now_ms()));
                 }
 
+                /// @builtin sleep(ms: Int) -> Unit
+                /// @category Date & Time
+                /// Pause execution for the given number of milliseconds.
+                /// @example sleep(1000)  // sleeps for 1 second
                 if (strcmp(fn_name, "sleep") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sleep() expects (Int milliseconds)")); }
                     char *terr = NULL;
@@ -2117,6 +2527,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Process/system builtins ── */
 
+                /// @builtin cwd() -> String
+                /// @category Process
+                /// Return the current working directory.
+                /// @example cwd()  // "/home/user/project"
                 if (strcmp(fn_name, "cwd") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cwd() expects no arguments")); }
                     free(args);
@@ -2126,6 +2540,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(dir));
                 }
 
+                /// @builtin exec(cmd: String) -> Map
+                /// @category Process
+                /// Execute a command directly (no shell), returning {stdout, stderr, status}.
+                /// @example exec("ls -la")  // {stdout: "...", stderr: "", status: 0}
                 if (strcmp(fn_name, "exec") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exec() expects 1 argument")); }
                     if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exec() expects a string command")); }
@@ -2137,6 +2555,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin shell(cmd: String) -> Map
+                /// @category Process
+                /// Execute a command via the system shell, returning {stdout, stderr, status}.
+                /// @example shell("echo hello")  // {stdout: "hello\n", stderr: "", status: 0}
                 if (strcmp(fn_name, "shell") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("shell() expects 1 argument")); }
                     if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("shell() expects a string command")); }
@@ -2148,6 +2570,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin args() -> Array
+                /// @category Process
+                /// Return command-line arguments as an array of strings.
+                /// @example args()  // ["script.lat", "--flag"]
                 if (strcmp(fn_name, "args") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("args() expects no arguments")); }
                     free(args);
@@ -2169,12 +2595,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 #endif
                 }
 
+                /// @builtin platform() -> String
+                /// @category Process
+                /// Return the operating system name ("darwin", "linux", etc.).
+                /// @example platform()  // "darwin"
                 if (strcmp(fn_name, "platform") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("platform() expects no arguments")); }
                     free(args);
                     return eval_ok(value_string(process_platform()));
                 }
 
+                /// @builtin hostname() -> String
+                /// @category Process
+                /// Return the system hostname.
+                /// @example hostname()  // "my-machine"
                 if (strcmp(fn_name, "hostname") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("hostname() expects no arguments")); }
                     free(args);
@@ -2185,6 +2619,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(v);
                 }
 
+                /// @builtin pid() -> Int
+                /// @category Process
+                /// Return the current process ID.
+                /// @example pid()  // 12345
                 if (strcmp(fn_name, "pid") == 0) {
                     if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pid() expects no arguments")); }
                     free(args);
@@ -2193,6 +2631,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── URL encoding builtins ── */
 
+                /// @builtin url_encode(s: String) -> String
+                /// @category URL
+                /// Percent-encode a string for use in URLs.
+                /// @example url_encode("hello world")  // "hello%20world"
                 if (strcmp(fn_name, "url_encode") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("url_encode() expects (String)")); }
                     const char *src = args[0].as.str_val;
@@ -2217,6 +2659,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(out));
                 }
 
+                /// @builtin url_decode(s: String) -> String
+                /// @category URL
+                /// Decode a percent-encoded URL string.
+                /// @example url_decode("hello%20world")  // "hello world"
                 if (strcmp(fn_name, "url_decode") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("url_decode() expects (String)")); }
                     const char *src = args[0].as.str_val;
@@ -2248,6 +2694,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── CSV builtins ── */
 
+                /// @builtin csv_parse(s: String) -> Array
+                /// @category CSV
+                /// Parse a CSV string into an array of arrays (rows of fields).
+                /// @example csv_parse("a,b\n1,2")  // [["a", "b"], ["1", "2"]]
                 if (strcmp(fn_name, "csv_parse") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("csv_parse() expects (String)")); }
                     const char *input = args[0].as.str_val;
@@ -2334,6 +2784,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin csv_stringify(rows: Array) -> String
+                /// @category CSV
+                /// Convert an array of arrays into a CSV string.
+                /// @example csv_stringify([["a", "b"], ["1", "2"]])  // "a,b\n1,2\n"
                 if (strcmp(fn_name, "csv_stringify") == 0) {
                     if (argc != 1 || args[0].type != VAL_ARRAY) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("csv_stringify() expects (Array)")); }
 
@@ -2402,6 +2856,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Regex builtins ── */
 
+                /// @builtin regex_match(pattern: String, str: String) -> Bool
+                /// @category Regex
+                /// Test if a string matches a regular expression pattern.
+                /// @example regex_match("^[0-9]+$", "123")  // true
                 if (strcmp(fn_name, "regex_match") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_match() expects (String pattern, String str)")); }
                     char *rerr = NULL;
@@ -2412,6 +2870,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin regex_find_all(pattern: String, str: String) -> Array
+                /// @category Regex
+                /// Find all matches of a pattern in a string, returning an array.
+                /// @example regex_find_all("[0-9]+", "a1b2c3")  // ["1", "2", "3"]
                 if (strcmp(fn_name, "regex_find_all") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_find_all() expects (String pattern, String str)")); }
                     char *rerr = NULL;
@@ -2422,6 +2884,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin regex_replace(pattern: String, str: String, replacement: String) -> String
+                /// @category Regex
+                /// Replace all matches of a pattern in a string.
+                /// @example regex_replace("[0-9]", "a1b2", "X")  // "aXbX"
                 if (strcmp(fn_name, "regex_replace") == 0) {
                     if (argc != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_replace() expects (String pattern, String str, String replacement)")); }
                     char *rerr = NULL;
@@ -2432,6 +2898,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin format(fmt: String, args: Any...) -> String
+                /// @category String Formatting
+                /// Format a string with placeholders replaced by arguments.
+                /// @example format("{} is {}", "sky", "blue")  // "sky is blue"
                 if (strcmp(fn_name, "format") == 0) {
                     if (argc < 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("format() expects (String fmt, ...)")); }
                     char *ferr = NULL;
@@ -2444,6 +2914,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Crypto builtins ── */
 
+                /// @builtin sha256(s: String) -> String
+                /// @category Crypto
+                /// Compute the SHA-256 hash of a string, returned as hex.
+                /// @example sha256("hello")  // "2cf24dba..."
                 if (strcmp(fn_name, "sha256") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sha256() expects (String)")); }
                     char *cerr = NULL;
@@ -2454,6 +2928,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin md5(s: String) -> String
+                /// @category Crypto
+                /// Compute the MD5 hash of a string, returned as hex.
+                /// @example md5("hello")  // "5d41402a..."
                 if (strcmp(fn_name, "md5") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("md5() expects (String)")); }
                     char *cerr = NULL;
@@ -2464,6 +2942,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin base64_encode(s: String) -> String
+                /// @category Crypto
+                /// Encode a string to Base64.
+                /// @example base64_encode("hello")  // "aGVsbG8="
                 if (strcmp(fn_name, "base64_encode") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("base64_encode() expects (String)")); }
                     char *result = crypto_base64_encode(args[0].as.str_val, strlen(args[0].as.str_val));
@@ -2472,6 +2954,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin base64_decode(s: String) -> String
+                /// @category Crypto
+                /// Decode a Base64 string.
+                /// @example base64_decode("aGVsbG8=")  // "hello"
                 if (strcmp(fn_name, "base64_decode") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("base64_decode() expects (String)")); }
                     char *cerr = NULL;
@@ -2485,6 +2971,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Date/time formatting builtins ── */
 
+                /// @builtin time_format(epoch_ms: Int, fmt: String) -> String
+                /// @category Date & Time
+                /// Format a Unix timestamp (ms) using a strftime format string.
+                /// @example time_format(0, "%Y-%m-%d")  // "1970-01-01"
                 if (strcmp(fn_name, "time_format") == 0) {
                     if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_format() expects (Int epoch_ms, String fmt)")); }
                     char *terr = NULL;
@@ -2495,6 +2985,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin time_parse(datetime: String, fmt: String) -> Int
+                /// @category Date & Time
+                /// Parse a datetime string into a Unix timestamp (ms).
+                /// @example time_parse("2024-01-01", "%Y-%m-%d")  // 1704067200000
                 if (strcmp(fn_name, "time_parse") == 0) {
                     if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_parse() expects (String datetime, String fmt)")); }
                     char *terr = NULL;
@@ -2507,6 +3001,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Assertion builtin ── */
 
+                /// @builtin assert(cond: Any, msg?: String) -> Unit
+                /// @category Core
+                /// Assert that a condition is truthy, or raise an error with an optional message.
+                /// @example assert(1 == 1, "math works")
                 if (strcmp(fn_name, "assert") == 0) {
                     if (argc < 1 || argc > 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("assert() expects 1 or 2 arguments")); }
                     bool truthy = value_is_truthy(&args[0]);
@@ -2527,6 +3025,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Functional programming builtins ── */
 
+                /// @builtin identity(val: Any) -> Any
+                /// @category Functional
+                /// Return the argument unchanged.
+                /// @example identity(42)  // 42
                 if (strcmp(fn_name, "identity") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("identity() expects 1 argument")); }
                     LatValue result = value_deep_clone(&args[0]);
@@ -2535,6 +3037,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin pipe(val: Any, fns: Closure...) -> Any
+                /// @category Functional
+                /// Thread a value through a series of functions left to right.
+                /// @example pipe(5, |x| { x * 2 }, |x| { x + 1 })  // 11
                 if (strcmp(fn_name, "pipe") == 0) {
                     if (argc < 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pipe() expects a value and at least one function")); }
                     for (size_t i = 1; i < argc; i++) {
@@ -2567,6 +3073,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(current);
                 }
 
+                /// @builtin compose(f: Closure, g: Closure) -> Closure
+                /// @category Functional
+                /// Compose two functions: compose(f, g)(x) calls f(g(x)).
+                /// @example compose(|x| { x + 1 }, |x| { x * 2 })(3)  // 7
                 if (strcmp(fn_name, "compose") == 0) {
                     if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("compose() expects 2 arguments (both closures)")); }
                     if (args[0].type != VAL_CLOSURE || args[1].type != VAL_CLOSURE) {
@@ -2701,6 +3211,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 env_set(ev->env, var_name, existing);
                 return eval_ok(value_unit());
             }
+            /// @method Map.set(key: String, value: Any) -> Unit
+            /// @category Map Methods
+            /// Set a key-value pair in the map (mutates in place).
+            /// @example m.set("name", "Alice")
             /* Handle .set() on maps - needs mutation like .push() */
             if (strcmp(expr->as.method_call.method, "set") == 0 &&
                 expr->as.method_call.arg_count == 2) {
@@ -2836,6 +3350,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
                 if (lv_err) free(lv_err);
             }
+            /// @method Map.remove(key: String) -> Unit
+            /// @category Map Methods
+            /// Remove a key from the map (mutates in place).
+            /// @example m.remove("name")
             /* Handle .remove() on maps - needs mutation */
             if (strcmp(expr->as.method_call.method, "remove") == 0 &&
                 expr->as.method_call.arg_count == 1) {
@@ -3030,6 +3548,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             return eval_ok(st);
         }
 
+        /// @builtin freeze(val: Any) -> Any
+        /// @category Phase Transitions
+        /// Transition a value to the crystal (immutable) phase.
+        /// @example freeze([1, 2, 3])  // crystal [1, 2, 3]
         case EXPR_FREEZE: {
             stats_freeze(&ev->stats);
             if (expr->as.freeze_expr->tag == EXPR_IDENT) {
@@ -3084,6 +3606,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             return eval_ok(er.value);
         }
 
+        /// @builtin thaw(val: Any) -> Any
+        /// @category Phase Transitions
+        /// Transition a crystal value back to the flux (mutable) phase.
+        /// @example thaw(freeze([1, 2]))  // flux [1, 2]
         case EXPR_THAW: {
             stats_thaw(&ev->stats);
             if (expr->as.freeze_expr->tag == EXPR_IDENT) {
@@ -3112,6 +3638,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             return eval_ok(thawed); }
         }
 
+        /// @builtin clone(val: Any) -> Any
+        /// @category Phase Transitions
+        /// Create a deep copy of a value.
+        /// @example clone(my_array)  // independent copy
         case EXPR_CLONE: {
             stats_deep_clone(&ev->stats);
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
@@ -3206,6 +3736,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             return eval_ok(value_range(s, e));
         }
 
+        /// @builtin print(args: Any...) -> Unit
+        /// @category Core
+        /// Print values separated by spaces with a trailing newline.
+        /// @example print("hello", "world")  // prints: hello world
         case EXPR_PRINT: {
             for (size_t i = 0; i < expr->as.print.arg_count; i++) {
                 if (i > 0) printf(" ");
@@ -3595,6 +4129,10 @@ static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
 
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method,
                                    LatValue *args, size_t arg_count) {
+    /// @method Array.push(val: Any) -> Unit
+    /// @category Array Methods
+    /// Append a value to the end of the array (mutates in place).
+    /// @example arr.push(42)
     if (strcmp(method, "push") == 0) {
         if (obj.type != VAL_ARRAY)
             return eval_err(strdup(".push() is not defined on non-array"));
@@ -3609,12 +4147,22 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /* This is a simplification - we handle push on the env directly */
         return eval_ok(value_unit());
     }
+    /// @method Array.len() -> Int
+    /// @method String.len() -> Int
+    /// @method Map.len() -> Int
+    /// @category Array Methods
+    /// Return the number of elements or characters.
+    /// @example [1, 2, 3].len()  // 3
     if (strcmp(method, "len") == 0) {
         if (obj.type == VAL_ARRAY) return eval_ok(value_int((int64_t)obj.as.array.len));
         if (obj.type == VAL_STR) return eval_ok(value_int((int64_t)strlen(obj.as.str_val)));
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
         return eval_err(strdup(".len() is not defined on this type"));
     }
+    /// @method Array.map(fn: Closure) -> Array
+    /// @category Array Methods
+    /// Apply a function to each element, returning a new array of results.
+    /// @example [1, 2, 3].map(|x| { x * 2 })  // [2, 4, 6]
     if (strcmp(method, "map") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1) return eval_err(strdup(".map() expects exactly 1 argument (a closure)"));
         if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".map() argument must be a closure"));
@@ -3643,6 +4191,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(results);
         return eval_ok(arr);
     }
+    /// @method Array.join(sep?: String) -> String
+    /// @category Array Methods
+    /// Join array elements into a string with an optional separator.
+    /// @example ["a", "b", "c"].join(", ")  // "a, b, c"
     if (strcmp(method, "join") == 0) {
         if (obj.type != VAL_ARRAY) return eval_err(strdup(".join() is not defined on non-array"));
         const char *sep = "";
@@ -3671,6 +4223,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(parts);
         return eval_ok(value_string_owned(result));
     }
+    /// @method Array.filter(fn: Closure) -> Array
+    /// @category Array Methods
+    /// Return a new array containing only elements for which fn returns true.
+    /// @example [1, 2, 3, 4].filter(|x| { x > 2 })  // [3, 4]
     /* ── Array: filter ── */
     if (strcmp(method, "filter") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE) return eval_err(strdup(".filter() expects 1 closure argument"));
@@ -3702,6 +4258,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(results);
         return eval_ok(arr);
     }
+    /// @method Array.for_each(fn: Closure) -> Unit
+    /// @category Array Methods
+    /// Call a function for each element (for side effects).
+    /// @example [1, 2, 3].for_each(|x| { print(x) })
     /* ── Array: for_each ── */
     if (strcmp(method, "for_each") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE) return eval_err(strdup(".for_each() expects 1 closure argument"));
@@ -3718,6 +4278,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_unit());
     }
+    /// @method Array.find(fn: Closure) -> Any|Unit
+    /// @category Array Methods
+    /// Return the first element for which fn returns true, or unit if not found.
+    /// @example [1, 2, 3].find(|x| { x > 1 })  // 2
     /* ── Array: find ── */
     if (strcmp(method, "find") == 0) {
         if (obj.type != VAL_ARRAY) return eval_err(strdup(".find() is not defined on non-array"));
@@ -3739,6 +4303,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_unit());
     }
+    /// @method Array.contains(val: Any) -> Bool
+    /// @category Array Methods
+    /// Check if the array contains a value.
+    /// @example [1, 2, 3].contains(2)  // true
     /* ── Array: contains ── */
     if (strcmp(method, "contains") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1) return eval_err(strdup(".contains() expects 1 argument"));
@@ -3749,6 +4317,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_bool(false));
     }
+    /// @method Array.reverse() -> Array
+    /// @category Array Methods
+    /// Return a new array with elements in reverse order.
+    /// @example [1, 2, 3].reverse()  // [3, 2, 1]
     /* ── Array: reverse ── */
     if (strcmp(method, "reverse") == 0 && obj.type == VAL_ARRAY) {
         size_t n = obj.as.array.len;
@@ -3760,6 +4332,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(reversed);
         return eval_ok(arr);
     }
+    /// @method Array.enumerate() -> Array
+    /// @category Array Methods
+    /// Return an array of [index, value] pairs.
+    /// @example ["a", "b"].enumerate()  // [[0, "a"], [1, "b"]]
     /* ── Array: enumerate ── */
     if (strcmp(method, "enumerate") == 0) {
         if (obj.type != VAL_ARRAY) return eval_err(strdup(".enumerate() is not defined on non-array"));
@@ -3775,6 +4351,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(pairs);
         return eval_ok(arr);
     }
+    /// @method Array.sort() -> Array
+    /// @category Array Methods
+    /// Return a new sorted array (elements must be comparable).
+    /// @example [3, 1, 2].sort()  // [1, 2, 3]
     /* ── Array: sort ── */
     if (strcmp(method, "sort") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".sort() takes no arguments"));
@@ -3783,11 +4363,19 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (sort_err) return eval_err(sort_err);
         return eval_ok(sorted);
     }
+    /// @method Array.flat() -> Array
+    /// @category Array Methods
+    /// Flatten one level of nested arrays.
+    /// @example [[1, 2], [3, 4]].flat()  // [1, 2, 3, 4]
     /* ── Array: flat ── */
     if (strcmp(method, "flat") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".flat() takes no arguments"));
         return eval_ok(array_flat(&obj));
     }
+    /// @method Array.reduce(fn: Closure, init: Any) -> Any
+    /// @category Array Methods
+    /// Reduce an array to a single value by applying fn(acc, elem) for each element.
+    /// @example [1, 2, 3].reduce(|a, b| { a + b }, 0)  // 6
     /* ── Array: reduce ── */
     if (strcmp(method, "reduce") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 2) return eval_err(strdup(".reduce() expects 2 arguments (closure, initial_value)"));
@@ -3810,6 +4398,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         GC_POP(ev);
         return eval_ok(acc);
     }
+    /// @method Array.slice(start: Int, end: Int) -> Array
+    /// @category Array Methods
+    /// Return a sub-array from start (inclusive) to end (exclusive).
+    /// @example [1, 2, 3, 4, 5].slice(1, 4)  // [2, 3, 4]
     /* ── Array: slice ── */
     if (strcmp(method, "slice") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 2) return eval_err(strdup(".slice() expects 2 arguments (start, end)"));
@@ -3820,6 +4412,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (slice_err) return eval_err(slice_err);
         return eval_ok(sliced);
     }
+    /// @method Array.take(n: Int) -> Array
+    /// @category Array Methods
+    /// Return the first n elements of the array.
+    /// @example [1, 2, 3, 4].take(2)  // [1, 2]
     /* ── Array: take ── */
     if (strcmp(method, "take") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_INT)
@@ -3838,6 +4434,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(elems);
         return eval_ok(arr);
     }
+    /// @method Array.drop(n: Int) -> Array
+    /// @category Array Methods
+    /// Return the array with the first n elements removed.
+    /// @example [1, 2, 3, 4].drop(2)  // [3, 4]
     /* ── Array: drop ── */
     if (strcmp(method, "drop") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_INT)
@@ -3865,6 +4465,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(elems);
         return eval_ok(arr);
     }
+    /// @method Array.pop() -> Any
+    /// @category Array Methods
+    /// Remove and return the last element of the array.
+    /// @example [1, 2, 3].pop()  // 3
     /* ── Array: pop ── */
     if (strcmp(method, "pop") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".pop() takes no arguments"));
@@ -3872,6 +4476,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         LatValue removed = value_deep_clone(&obj.as.array.elems[obj.as.array.len - 1]);
         return eval_ok(removed);
     }
+    /// @method Array.index_of(val: Any) -> Int
+    /// @category Array Methods
+    /// Return the index of the first occurrence of val, or -1 if not found.
+    /// @example [10, 20, 30].index_of(20)  // 1
     /* ── Array: index_of ── */
     if (strcmp(method, "index_of") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1) return eval_err(strdup(".index_of() expects 1 argument"));
@@ -3882,6 +4490,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_int(-1));
     }
+    /// @method Array.any(fn: Closure) -> Bool
+    /// @category Array Methods
+    /// Return true if fn returns true for any element.
+    /// @example [1, 2, 3].any(|x| { x > 2 })  // true
     /* ── Array: any ── */
     if (strcmp(method, "any") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE)
@@ -3903,6 +4515,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_bool(false));
     }
+    /// @method Array.all(fn: Closure) -> Bool
+    /// @category Array Methods
+    /// Return true if fn returns true for all elements.
+    /// @example [2, 4, 6].all(|x| { x % 2 == 0 })  // true
     /* ── Array: all ── */
     if (strcmp(method, "all") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE)
@@ -3924,6 +4540,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_bool(true));
     }
+    /// @method Array.zip(other: Array) -> Array
+    /// @category Array Methods
+    /// Combine two arrays into an array of [a, b] pairs.
+    /// @example [1, 2].zip(["a", "b"])  // [[1, "a"], [2, "b"]]
     /* ── Array: zip ── */
     if (strcmp(method, "zip") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1) return eval_err(strdup(".zip() expects 1 argument"));
@@ -3941,6 +4561,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(pairs);
         return eval_ok(arr);
     }
+    /// @method Array.unique() -> Array
+    /// @category Array Methods
+    /// Return a new array with duplicate elements removed.
+    /// @example [1, 2, 2, 3, 1].unique()  // [1, 2, 3]
     /* ── Array: unique ── */
     if (strcmp(method, "unique") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".unique() takes no arguments"));
@@ -3963,6 +4587,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(results);
         return eval_ok(arr);
     }
+    /// @method Array.insert(index: Int, val: Any) -> Unit
+    /// @category Array Methods
+    /// Insert a value at the given index (mutates in place).
+    /// @example arr.insert(1, "x")
     /* ── Array: insert ── */
     if (strcmp(method, "insert") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 2) return eval_err(strdup(".insert() expects 2 arguments (index, value)"));
@@ -3977,6 +4605,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_unit());
     }
+    /// @method Array.remove_at(index: Int) -> Any
+    /// @category Array Methods
+    /// Remove and return the element at the given index.
+    /// @example [1, 2, 3].remove_at(1)  // 2
     /* ── Array: remove_at ── */
     if (strcmp(method, "remove_at") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1) return eval_err(strdup(".remove_at() expects 1 argument (index)"));
@@ -3992,6 +4624,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         LatValue removed = value_deep_clone(&obj.as.array.elems[(size_t)idx]);
         return eval_ok(removed);
     }
+    /// @method Array.sort_by(cmp: Closure) -> Array
+    /// @category Array Methods
+    /// Sort using a custom comparator that returns a negative, zero, or positive Int.
+    /// @example ["bb", "a", "ccc"].sort_by(|a, b| { len(a) - len(b) })  // ["a", "bb", "ccc"]
     /* ── Array: sort_by ── */
     if (strcmp(method, "sort_by") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE)
@@ -4043,6 +4679,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(buf);
         return eval_ok(arr);
     }
+    /// @method Array.flat_map(fn: Closure) -> Array
+    /// @category Array Methods
+    /// Map each element to an array, then flatten one level.
+    /// @example [1, 2].flat_map(|x| { [x, x * 10] })  // [1, 10, 2, 20]
     /* ── Array: flat_map ── */
     if (strcmp(method, "flat_map") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE)
@@ -4088,6 +4728,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(fm_buf);
         return eval_ok(fm_arr);
     }
+    /// @method Array.chunk(size: Int) -> Array
+    /// @category Array Methods
+    /// Split the array into sub-arrays of the given size.
+    /// @example [1, 2, 3, 4, 5].chunk(2)  // [[1, 2], [3, 4], [5]]
     /* ── Array: chunk ── */
     if (strcmp(method, "chunk") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_INT)
@@ -4114,6 +4758,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         free(chunks);
         return eval_ok(chunk_arr);
     }
+    /// @method Array.group_by(fn: Closure) -> Map
+    /// @category Array Methods
+    /// Group elements by the result of fn, returning a map of key to arrays.
+    /// @example [1, 2, 3, 4].group_by(|x| { x % 2 })  // {0: [2, 4], 1: [1, 3]}
     /* ── Array: group_by ── */
     if (strcmp(method, "group_by") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 1 || args[0].type != VAL_CLOSURE)
@@ -4153,6 +4801,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(grp_map);
     }
+    /// @method Array.sum() -> Int|Float
+    /// @category Array Methods
+    /// Return the sum of all numeric elements.
+    /// @example [1, 2, 3].sum()  // 6
     /* ── Array: sum ── */
     if (strcmp(method, "sum") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".sum() takes no arguments"));
@@ -4173,6 +4825,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (sum_has_float) return eval_ok(value_float(fsum));
         return eval_ok(value_int(isum));
     }
+    /// @method Array.min() -> Int|Float
+    /// @category Array Methods
+    /// Return the minimum element (all elements must be numeric).
+    /// @example [3, 1, 2].min()  // 1
     /* ── Array: min ── */
     if (strcmp(method, "min") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".min() takes no arguments"));
@@ -4202,6 +4858,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_int(imin));
     }
+    /// @method Array.max() -> Int|Float
+    /// @category Array Methods
+    /// Return the maximum element (all elements must be numeric).
+    /// @example [3, 1, 2].max()  // 3
     /* ── Array: max ── */
     if (strcmp(method, "max") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".max() takes no arguments"));
@@ -4231,12 +4891,20 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(value_int(imax));
     }
+    /// @method Array.first() -> Any|Unit
+    /// @category Array Methods
+    /// Return the first element, or unit if the array is empty.
+    /// @example [1, 2, 3].first()  // 1
     /* ── Array: first ── */
     if (strcmp(method, "first") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".first() takes no arguments"));
         if (obj.as.array.len == 0) return eval_ok(value_unit());
         return eval_ok(value_deep_clone(&obj.as.array.elems[0]));
     }
+    /// @method Array.last() -> Any|Unit
+    /// @category Array Methods
+    /// Return the last element, or unit if the array is empty.
+    /// @example [1, 2, 3].last()  // 3
     /* ── Array: last ── */
     if (strcmp(method, "last") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".last() takes no arguments"));
@@ -4245,17 +4913,29 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     }
     /* ── Map methods ── */
     if (obj.type == VAL_MAP) {
+        /// @method Map.get(key: String) -> Any|Unit
+        /// @category Map Methods
+        /// Get the value for a key, or unit if not found.
+        /// @example m.get("name")  // "Alice"
         if (strcmp(method, "get") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".get() expects 1 string argument"));
             LatValue *found = (LatValue *)lat_map_get(obj.as.map.map, args[0].as.str_val);
             return eval_ok(found ? value_deep_clone(found) : value_unit());
         }
+        /// @method Map.has(key: String) -> Bool
+        /// @category Map Methods
+        /// Check if the map contains the given key.
+        /// @example m.has("name")  // true
         if (strcmp(method, "has") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".has() expects 1 string argument"));
             return eval_ok(value_bool(lat_map_contains(obj.as.map.map, args[0].as.str_val)));
         }
+        /// @method Map.keys() -> Array
+        /// @category Map Methods
+        /// Return an array of all keys in the map.
+        /// @example m.keys()  // ["name", "age"]
         if (strcmp(method, "keys") == 0) {
             size_t n = lat_map_len(obj.as.map.map);
             LatValue *keys = malloc((n > 0 ? n : 1) * sizeof(LatValue));
@@ -4269,6 +4949,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             free(keys);
             return eval_ok(arr);
         }
+        /// @method Map.values() -> Array
+        /// @category Map Methods
+        /// Return an array of all values in the map.
+        /// @example m.values()  // ["Alice", 30]
         if (strcmp(method, "values") == 0) {
             size_t n = lat_map_len(obj.as.map.map);
             LatValue *vals = malloc((n > 0 ? n : 1) * sizeof(LatValue));
@@ -4282,9 +4966,17 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             free(vals);
             return eval_ok(arr);
         }
+        /// @method Map.len() -> Int
+        /// @category Map Methods
+        /// Return the number of key-value pairs in the map.
+        /// @example m.len()  // 2
         if (strcmp(method, "len") == 0) {
             return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
         }
+        /// @method Map.entries() -> Array
+        /// @category Map Methods
+        /// Return an array of [key, value] pairs.
+        /// @example m.entries()  // [["name", "Alice"], ["age", 30]]
         if (strcmp(method, "entries") == 0) {
             if (arg_count != 0) return eval_err(strdup(".entries() takes no arguments"));
             size_t n = lat_map_len(obj.as.map.map);
@@ -4302,6 +4994,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             free(entries);
             return eval_ok(arr);
         }
+        /// @method Map.merge(other: Map) -> Unit
+        /// @category Map Methods
+        /// Merge another map into this one (mutates in place).
+        /// @example m.merge(other_map)
         if (strcmp(method, "merge") == 0) {
             if (arg_count != 1) return eval_err(strdup(".merge() expects exactly 1 argument"));
             if (args[0].type != VAL_MAP) return eval_err(strdup(".merge() argument must be a Map"));
@@ -4314,6 +5010,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(value_unit());
         }
+        /// @method Map.for_each(fn: Closure) -> Unit
+        /// @category Map Methods
+        /// Call fn(key, value) for each entry in the map.
+        /// @example m.for_each(|k, v| { print(k, v) })
         if (strcmp(method, "for_each") == 0) {
             if (arg_count != 1 || args[0].type != VAL_CLOSURE)
                 return eval_err(strdup(".for_each() expects 1 closure argument"));
@@ -4334,6 +5034,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(value_unit());
         }
+        /// @method Map.filter(fn: Closure) -> Map
+        /// @category Map Methods
+        /// Return a new map with only entries where fn(key, value) returns true.
+        /// @example m.filter(|k, v| { v > 0 })
         if (strcmp(method, "filter") == 0) {
             if (arg_count != 1 || args[0].type != VAL_CLOSURE)
                 return eval_err(strdup(".filter() expects 1 closure argument"));
@@ -4359,6 +5063,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(result);
         }
+        /// @method Map.map(fn: Closure) -> Map
+        /// @category Map Methods
+        /// Return a new map with values transformed by fn(key, value).
+        /// @example m.map(|k, v| { v * 2 })
         if (strcmp(method, "map") == 0) {
             if (arg_count != 1 || args[0].type != VAL_CLOSURE)
                 return eval_err(strdup(".map() expects 1 closure argument"));
@@ -4383,35 +5091,67 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     }
     /* ── String methods ── */
     if (obj.type == VAL_STR) {
+        /// @method String.contains(substr: String) -> Bool
+        /// @category String Methods
+        /// Check if the string contains a substring.
+        /// @example "hello world".contains("world")  // true
         if (strcmp(method, "contains") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".contains() expects 1 string argument"));
             return eval_ok(value_bool(lat_str_contains(obj.as.str_val, args[0].as.str_val)));
         }
+        /// @method String.starts_with(prefix: String) -> Bool
+        /// @category String Methods
+        /// Check if the string starts with the given prefix.
+        /// @example "hello".starts_with("he")  // true
         if (strcmp(method, "starts_with") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".starts_with() expects 1 string argument"));
             return eval_ok(value_bool(lat_str_starts_with(obj.as.str_val, args[0].as.str_val)));
         }
+        /// @method String.ends_with(suffix: String) -> Bool
+        /// @category String Methods
+        /// Check if the string ends with the given suffix.
+        /// @example "hello".ends_with("lo")  // true
         if (strcmp(method, "ends_with") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".ends_with() expects 1 string argument"));
             return eval_ok(value_bool(lat_str_ends_with(obj.as.str_val, args[0].as.str_val)));
         }
+        /// @method String.trim() -> String
+        /// @category String Methods
+        /// Remove leading and trailing whitespace.
+        /// @example "  hello  ".trim()  // "hello"
         if (strcmp(method, "trim") == 0) {
             return eval_ok(value_string_owned(lat_str_trim(obj.as.str_val)));
         }
+        /// @method String.to_upper() -> String
+        /// @category String Methods
+        /// Convert the string to uppercase.
+        /// @example "hello".to_upper()  // "HELLO"
         if (strcmp(method, "to_upper") == 0) {
             return eval_ok(value_string_owned(lat_str_to_upper(obj.as.str_val)));
         }
+        /// @method String.to_lower() -> String
+        /// @category String Methods
+        /// Convert the string to lowercase.
+        /// @example "HELLO".to_lower()  // "hello"
         if (strcmp(method, "to_lower") == 0) {
             return eval_ok(value_string_owned(lat_str_to_lower(obj.as.str_val)));
         }
+        /// @method String.replace(old: String, new: String) -> String
+        /// @category String Methods
+        /// Replace all occurrences of a substring.
+        /// @example "hello world".replace("world", "there")  // "hello there"
         if (strcmp(method, "replace") == 0) {
             if (arg_count != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR)
                 return eval_err(strdup(".replace() expects 2 string arguments"));
             return eval_ok(value_string_owned(lat_str_replace(obj.as.str_val, args[0].as.str_val, args[1].as.str_val)));
         }
+        /// @method String.split(sep: String) -> Array
+        /// @category String Methods
+        /// Split the string by a separator, returning an array of parts.
+        /// @example "a,b,c".split(",")  // ["a", "b", "c"]
         if (strcmp(method, "split") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".split() expects 1 string argument"));
@@ -4426,16 +5166,28 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             free(elems);
             return eval_ok(arr);
         }
+        /// @method String.index_of(substr: String) -> Int
+        /// @category String Methods
+        /// Return the index of the first occurrence of substr, or -1 if not found.
+        /// @example "hello".index_of("ll")  // 2
         if (strcmp(method, "index_of") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".index_of() expects 1 string argument"));
             return eval_ok(value_int(lat_str_index_of(obj.as.str_val, args[0].as.str_val)));
         }
+        /// @method String.substring(start: Int, end: Int) -> String
+        /// @category String Methods
+        /// Extract a substring from start (inclusive) to end (exclusive).
+        /// @example "hello".substring(1, 4)  // "ell"
         if (strcmp(method, "substring") == 0) {
             if (arg_count != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT)
                 return eval_err(strdup(".substring() expects 2 integer arguments"));
             return eval_ok(value_string_owned(lat_str_substring(obj.as.str_val, args[0].as.int_val, args[1].as.int_val)));
         }
+        /// @method String.chars() -> Array
+        /// @category String Methods
+        /// Split the string into an array of single-character strings.
+        /// @example "abc".chars()  // ["a", "b", "c"]
         if (strcmp(method, "chars") == 0) {
             size_t slen = strlen(obj.as.str_val);
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
@@ -4447,6 +5199,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             free(elems);
             return eval_ok(arr);
         }
+        /// @method String.bytes() -> Array
+        /// @category String Methods
+        /// Return an array of byte values (integers) for the string.
+        /// @example "AB".bytes()  // [65, 66]
         if (strcmp(method, "bytes") == 0) {
             size_t slen = strlen(obj.as.str_val);
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
@@ -4457,14 +5213,26 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             free(elems);
             return eval_ok(arr);
         }
+        /// @method String.reverse() -> String
+        /// @category String Methods
+        /// Return the string with characters in reverse order.
+        /// @example "hello".reverse()  // "olleh"
         if (strcmp(method, "reverse") == 0) {
             return eval_ok(value_string_owned(lat_str_reverse(obj.as.str_val)));
         }
+        /// @method String.repeat(n: Int) -> String
+        /// @category String Methods
+        /// Repeat the string n times.
+        /// @example "ab".repeat(3)  // "ababab"
         if (strcmp(method, "repeat") == 0) {
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup(".repeat() expects 1 integer argument"));
             return eval_ok(value_string_owned(lat_str_repeat(obj.as.str_val, (size_t)args[0].as.int_val)));
         }
+        /// @method String.trim_start() -> String
+        /// @category String Methods
+        /// Remove leading whitespace.
+        /// @example "  hello".trim_start()  // "hello"
         if (strcmp(method, "trim_start") == 0) {
             if (arg_count != 0) return eval_err(strdup(".trim_start() takes no arguments"));
             const char *s = obj.as.str_val;
@@ -4476,6 +5244,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             result[len - start] = '\0';
             return eval_ok(value_string_owned(result));
         }
+        /// @method String.trim_end() -> String
+        /// @category String Methods
+        /// Remove trailing whitespace.
+        /// @example "hello  ".trim_end()  // "hello"
         if (strcmp(method, "trim_end") == 0) {
             if (arg_count != 0) return eval_err(strdup(".trim_end() takes no arguments"));
             const char *s = obj.as.str_val;
@@ -4487,6 +5259,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             result[end] = '\0';
             return eval_ok(value_string_owned(result));
         }
+        /// @method String.pad_left(n: Int, ch: String) -> String
+        /// @category String Methods
+        /// Pad the string on the left to reach length n using character ch.
+        /// @example "42".pad_left(5, "0")  // "00042"
         if (strcmp(method, "pad_left") == 0) {
             if (arg_count != 2) return eval_err(strdup(".pad_left() expects 2 arguments (n, ch)"));
             if (args[0].type != VAL_INT) return eval_err(strdup(".pad_left() first argument must be an integer"));
@@ -4504,6 +5280,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             result[target] = '\0';
             return eval_ok(value_string_owned(result));
         }
+        /// @method String.pad_right(n: Int, ch: String) -> String
+        /// @category String Methods
+        /// Pad the string on the right to reach length n using character ch.
+        /// @example "42".pad_right(5, "0")  // "42000"
         if (strcmp(method, "pad_right") == 0) {
             if (arg_count != 2) return eval_err(strdup(".pad_right() expects 2 arguments (n, ch)"));
             if (args[0].type != VAL_INT) return eval_err(strdup(".pad_right() first argument must be an integer"));
@@ -4521,6 +5301,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             result[target] = '\0';
             return eval_ok(value_string_owned(result));
         }
+        /// @method String.count(substr: String) -> Int
+        /// @category String Methods
+        /// Count non-overlapping occurrences of a substring.
+        /// @example "ababa".count("ab")  // 2
         if (strcmp(method, "count") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".count() expects 1 string argument"));
@@ -4538,6 +5322,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(value_int(count));
         }
+        /// @method String.is_empty() -> Bool
+        /// @category String Methods
+        /// Check if the string is empty.
+        /// @example "".is_empty()  // true
         if (strcmp(method, "is_empty") == 0) {
             if (arg_count != 0)
                 return eval_err(strdup(".is_empty() takes no arguments"));
@@ -4587,6 +5375,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     /* ── Channel methods ── */
     if (obj.type == VAL_CHANNEL) {
         LatChannel *ch = obj.as.channel.ch;
+        /// @method Channel.send(val: Any) -> Unit
+        /// @category Channel Methods
+        /// Send a crystal (frozen) value on the channel.
+        /// @example ch.send(freeze(42))
         if (strcmp(method, "send") == 0) {
             if (arg_count != 1)
                 return eval_err(strdup(".send() expects exactly 1 argument"));
@@ -4605,6 +5397,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (!ok) return eval_err(strdup("cannot send on a closed channel"));
             return eval_ok(value_unit());
         }
+        /// @method Channel.recv() -> Any|Unit
+        /// @category Channel Methods
+        /// Receive a value from the channel, blocking until available. Returns unit if closed.
+        /// @example ch.recv()  // 42
         if (strcmp(method, "recv") == 0) {
             if (arg_count != 0)
                 return eval_err(strdup(".recv() takes no arguments"));
@@ -4613,6 +5409,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (!ok) return eval_ok(value_unit());
             return eval_ok(val);
         }
+        /// @method Channel.close() -> Unit
+        /// @category Channel Methods
+        /// Close the channel, preventing further sends.
+        /// @example ch.close()
         if (strcmp(method, "close") == 0) {
             if (arg_count != 0)
                 return eval_err(strdup(".close() takes no arguments"));
