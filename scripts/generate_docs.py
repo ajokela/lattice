@@ -18,6 +18,7 @@ SECTION_GROUPS = OrderedDict([
         "Type Constructors",
         "Type Conversion",
         "Error Handling",
+        "Reflection",
     ]),
     ("Standard Library", [
         "Math",
@@ -26,6 +27,8 @@ SECTION_GROUPS = OrderedDict([
         "JSON",
         "CSV",
         "URL",
+        "HTTP",
+        "Data Formats",
         "Functional",
         "Metaprogramming",
     ]),
@@ -42,6 +45,7 @@ SECTION_GROUPS = OrderedDict([
         "String Methods",
         "Array Methods",
         "Map Methods",
+        "Set Methods",
         "Channel Methods",
     ]),
 ])
@@ -835,6 +839,7 @@ if (strcmp(fn_name, "print") == 0) {</code></pre>
   </div>
   <div class="doc-header-right">
     <a href="playground.html" class="doc-btn">Playground</a>
+    <a href="libraries.html" class="doc-btn">Libraries</a>
     <a href="/" class="doc-btn">Home</a>
     <a href="https://github.com/ajokela/lattice" class="doc-btn">GitHub</a>
   </div>
