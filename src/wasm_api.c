@@ -80,14 +80,24 @@ const char *lat_run_line(const char *source) {
         return NULL;
     }
 
-    /* Evaluate (REPL mode — no auto-main) */
-    char *eval_err = evaluator_run_repl(g_ev, &prog);
-    if (eval_err) {
-        fprintf(stderr, "error: %s\n", eval_err);
-        free(eval_err);
+    /* Evaluate (REPL mode — no auto-main) and capture result */
+    EvalResult r = evaluator_run_repl_result(g_ev, &prog);
+    if (!r.ok) {
+        fprintf(stderr, "error: %s\n", r.error);
+        free(r.error);
         /* Still store so any partial defs stay valid */
         store_program(prog, tokens);
         return NULL;
+    }
+
+    /* Display non-trivial results */
+    if (r.value.type != VAL_UNIT && r.value.type != VAL_NIL) {
+        char *repr = eval_repr(g_ev, &r.value);
+        printf("=> %s\n", repr);
+        free(repr);
+        value_free(&r.value);
+    } else {
+        value_free(&r.value);
     }
 
     /* Keep program alive (struct/fn decls are referenced by pointer) */
