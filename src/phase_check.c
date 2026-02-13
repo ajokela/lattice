@@ -94,11 +94,38 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             pc_check_expr(pc, expr->as.unaryop.operand);
             return PHASE_UNSPECIFIED;
 
-        case EXPR_CALL:
+        case EXPR_CALL: {
             pc_check_expr(pc, expr->as.call.func);
+            AstPhase arg_phases[expr->as.call.arg_count];
             for (size_t i = 0; i < expr->as.call.arg_count; i++)
-                pc_check_expr(pc, expr->as.call.args[i]);
+                arg_phases[i] = pc_check_expr(pc, expr->as.call.args[i]);
+            /* In strict mode, check argument phases against function parameter constraints */
+            if (pc->mode == MODE_STRICT && expr->as.call.func->tag == EXPR_IDENT) {
+                const char *fn_name = expr->as.call.func->as.str_val;
+                FnDecl **fdp = lat_map_get(&pc->fn_defs, fn_name);
+                if (fdp) {
+                    FnDecl *fd = *fdp;
+                    /* Check all overloads — error only if no overload matches */
+                    bool any_match = false;
+                    for (FnDecl *cand = fd; cand; cand = cand->next_overload) {
+                        bool match = true;
+                        size_t check = expr->as.call.arg_count < cand->param_count
+                                       ? expr->as.call.arg_count : cand->param_count;
+                        for (size_t i = 0; i < check; i++) {
+                            if (cand->params[i].is_variadic) break;
+                            AstPhase pp = cand->params[i].ty.phase;
+                            AstPhase ap = arg_phases[i];
+                            if (pp == PHASE_FLUID && ap == PHASE_CRYSTAL) { match = false; break; }
+                            if (pp == PHASE_CRYSTAL && ap == PHASE_FLUID) { match = false; break; }
+                        }
+                        if (match) { any_match = true; break; }
+                    }
+                    if (!any_match)
+                        pc_error(pc, "strict mode: no matching overload for '%s' with given argument phases", fn_name);
+                }
+            }
             return PHASE_UNSPECIFIED;
+        }
 
         case EXPR_METHOD_CALL:
             pc_check_expr(pc, expr->as.method_call.object);
@@ -440,6 +467,39 @@ static void pc_check_spawn_stmt(PhaseChecker *pc, const Stmt *stmt) {
     }
 }
 
+/* ── Phase-dispatch registration for phase checker ── */
+
+static bool pc_phase_signatures_match(const FnDecl *a, const FnDecl *b) {
+    if (a->param_count != b->param_count) return false;
+    for (size_t i = 0; i < a->param_count; i++) {
+        if (a->params[i].ty.phase != b->params[i].ty.phase) return false;
+    }
+    return true;
+}
+
+static void pc_register_fn(LatMap *fn_defs, FnDecl *new_fn) {
+    FnDecl **existing = lat_map_get(fn_defs, new_fn->name);
+    if (!existing) {
+        lat_map_set(fn_defs, new_fn->name, &new_fn);
+        return;
+    }
+    FnDecl *head = *existing;
+    if (pc_phase_signatures_match(head, new_fn)) {
+        new_fn->next_overload = head->next_overload;
+        lat_map_set(fn_defs, new_fn->name, &new_fn);
+        return;
+    }
+    for (FnDecl *prev = head; prev->next_overload; prev = prev->next_overload) {
+        if (pc_phase_signatures_match(prev->next_overload, new_fn)) {
+            new_fn->next_overload = prev->next_overload->next_overload;
+            prev->next_overload = new_fn;
+            return;
+        }
+    }
+    new_fn->next_overload = head;
+    lat_map_set(fn_defs, new_fn->name, &new_fn);
+}
+
 /* ── Public API ── */
 
 LatVec phase_check(const Program *prog) {
@@ -453,7 +513,7 @@ LatVec phase_check(const Program *prog) {
             lat_map_set(&pc.struct_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
-            lat_map_set(&pc.fn_defs, ptr->name, &ptr);
+            pc_register_fn(&pc.fn_defs, ptr);
         }
     }
 

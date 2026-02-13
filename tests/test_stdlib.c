@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.2.2"
+        "0.2.3"
     );
 }
 
@@ -5306,7 +5306,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.2.2"
+        "Hello, Lattice!\nVersion 0.2.3"
     );
 }
 
@@ -6154,6 +6154,151 @@ static void test_sqlite_last_insert_rowid(void) {
     );
 }
 
+/* ======================================================================
+ * Phase Constraints
+ * ====================================================================== */
+
+static void test_phase_constraint_flux_accepts_fluid(void) {
+    ASSERT_OUTPUT(
+        "fn mutate(data: ~Map) { print(\"ok\") }\n"
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    mutate(m)\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_phase_constraint_flux_rejects_crystal(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn mutate(data: ~Map) { print(\"ok\") }\n"
+        "fn main() {\n"
+        "    fix m = freeze(Map::new())\n"
+        "    mutate(m)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_phase_constraint_fix_accepts_crystal(void) {
+    ASSERT_OUTPUT(
+        "fn inspect(data: *Map) { print(\"ok\") }\n"
+        "fn main() {\n"
+        "    fix m = freeze(Map::new())\n"
+        "    inspect(m)\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_phase_constraint_fix_rejects_fluid(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn inspect(data: *Map) { print(\"ok\") }\n"
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    inspect(m)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_phase_constraint_unphased_accepts_any(void) {
+    ASSERT_OUTPUT(
+        "fn process(data: Map) { print(\"ok\") }\n"
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    process(m)\n"
+        "    fix m2 = freeze(Map::new())\n"
+        "    process(m2)\n"
+        "}\n",
+        "ok\nok"
+    );
+}
+
+static void test_phase_constraint_flux_keyword_syntax(void) {
+    ASSERT_OUTPUT(
+        "fn mutate(data: flux Map) { print(\"flux keyword\") }\n"
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    mutate(m)\n"
+        "}\n",
+        "flux keyword"
+    );
+}
+
+static void test_phase_constraint_fix_keyword_syntax(void) {
+    ASSERT_OUTPUT(
+        "fn inspect(data: fix Map) { print(\"fix keyword\") }\n"
+        "fn main() {\n"
+        "    fix m = freeze(Map::new())\n"
+        "    inspect(m)\n"
+        "}\n",
+        "fix keyword"
+    );
+}
+
+/* ======================================================================
+ * Phase-Dependent Dispatch
+ * ====================================================================== */
+
+static void test_phase_dispatch_fluid_to_flux(void) {
+    ASSERT_OUTPUT(
+        "fn process(data: ~Map) { print(\"flux path\") }\n"
+        "fn process(data: *Map) { print(\"fix path\") }\n"
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    process(m)\n"
+        "}\n",
+        "flux path"
+    );
+}
+
+static void test_phase_dispatch_crystal_to_fix(void) {
+    ASSERT_OUTPUT(
+        "fn process(data: ~Map) { print(\"flux path\") }\n"
+        "fn process(data: *Map) { print(\"fix path\") }\n"
+        "fn main() {\n"
+        "    fix m = freeze(Map::new())\n"
+        "    process(m)\n"
+        "}\n",
+        "fix path"
+    );
+}
+
+static void test_phase_dispatch_no_match_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn process(data: ~Map) { print(\"flux path\") }\n"
+        "fn main() {\n"
+        "    fix m = freeze(Map::new())\n"
+        "    process(m)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_phase_dispatch_same_sig_replaces(void) {
+    ASSERT_OUTPUT(
+        "fn greet() { print(\"first\") }\n"
+        "fn greet() { print(\"second\") }\n"
+        "fn main() {\n"
+        "    greet()\n"
+        "}\n",
+        "second"
+    );
+}
+
+static void test_phase_dispatch_unphased_fallback(void) {
+    ASSERT_OUTPUT(
+        "fn process(data: ~Map) { print(\"flux path\") }\n"
+        "fn process(data: Map) { print(\"fallback\") }\n"
+        "fn main() {\n"
+        "    let m = Map::new()\n"
+        "    process(m)\n"
+        "}\n",
+        "fallback"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -6764,4 +6909,20 @@ void register_stdlib_tests(void) {
     register_test("test_struct_from_map", test_struct_from_map);
     register_test("test_struct_from_map_missing", test_struct_from_map_missing);
     register_test("test_struct_from_map_error", test_struct_from_map_error);
+
+    /* Phase constraints */
+    register_test("test_phase_constraint_flux_accepts_fluid", test_phase_constraint_flux_accepts_fluid);
+    register_test("test_phase_constraint_flux_rejects_crystal", test_phase_constraint_flux_rejects_crystal);
+    register_test("test_phase_constraint_fix_accepts_crystal", test_phase_constraint_fix_accepts_crystal);
+    register_test("test_phase_constraint_fix_rejects_fluid", test_phase_constraint_fix_rejects_fluid);
+    register_test("test_phase_constraint_unphased_accepts_any", test_phase_constraint_unphased_accepts_any);
+    register_test("test_phase_constraint_flux_keyword_syntax", test_phase_constraint_flux_keyword_syntax);
+    register_test("test_phase_constraint_fix_keyword_syntax", test_phase_constraint_fix_keyword_syntax);
+
+    /* Phase-dependent dispatch */
+    register_test("test_phase_dispatch_fluid_to_flux", test_phase_dispatch_fluid_to_flux);
+    register_test("test_phase_dispatch_crystal_to_fix", test_phase_dispatch_crystal_to_fix);
+    register_test("test_phase_dispatch_no_match_error", test_phase_dispatch_no_match_error);
+    register_test("test_phase_dispatch_same_sig_replaces", test_phase_dispatch_same_sig_replaces);
+    register_test("test_phase_dispatch_unphased_fallback", test_phase_dispatch_unphased_fallback);
 }

@@ -239,6 +239,8 @@ def generate_html(groups, output_path):
     sidebar_html = """      <div class="sidebar-section">
         <div class="sidebar-heading">Syntax</div>
         <a href="#string-interpolation" class="sidebar-link" data-cat="string-interpolation">String Interpolation</a>
+        <a href="#phase-constraints" class="sidebar-link" data-cat="phase-constraints">Phase Constraints</a>
+        <a href="#phase-dispatch" class="sidebar-link" data-cat="phase-dispatch">Phase Dispatch</a>
       </div>
 """
     for section_name, categories in SECTION_GROUPS.items():
@@ -270,6 +272,61 @@ def generate_html(groups, output_path):
 <span class="fn">print</span>(<span class="str">"${name.to_upper()}"</span>)          <span class="cmt">// WORLD</span>
 <span class="fn">print</span>(<span class="str">"len: ${[1,2,3].len()}"</span>)       <span class="cmt">// len: 3</span>
 <span class="fn">print</span>(<span class="str">"escaped: \\${literal}"</span>)        <span class="cmt">// escaped: ${literal}</span></code></pre>
+        </div>
+      </div>
+    </div>
+    <div class="doc-category" id="phase-constraints">
+      <div class="section-label">Language Syntax</div>
+      <h2 class="section-title">Phase Constraints</h2>
+      <div class="doc-entry" data-name="phase constraints" data-desc="require function parameters to have a specific phase using flux or fix annotations">
+        <div class="doc-sig"><span class="kw">fn</span> <span class="fn">name</span>(<span class="text">param</span><span class="op">:</span> <span class="kw">flux</span> <span class="typ">Type</span>)</div>
+        <p class="doc-desc">Annotate function parameters with <code>flux</code> (or <code>~</code>) to require a fluid argument, or <code>fix</code> (or <code>*</code>) to require a crystal argument. Passing an argument with an incompatible phase produces a runtime error. Parameters without a phase annotation accept any phase.</p>
+        <div class="doc-examples">
+          <pre><code><span class="kw">fn</span> <span class="fn">mutate</span>(data<span class="op">:</span> <span class="kw">flux</span> <span class="typ">Map</span>) { data.<span class="fn">set</span>(<span class="str">"k"</span>, <span class="str">"v"</span>) }
+<span class="kw">fn</span> <span class="fn">inspect</span>(data<span class="op">:</span> <span class="kw">fix</span> <span class="typ">Map</span>) { <span class="fn">print</span>(data.<span class="fn">get</span>(<span class="str">"k"</span>)) }
+
+<span class="kw">flux</span> m = <span class="typ">Map</span>::<span class="fn">new</span>()
+<span class="fn">mutate</span>(m)                            <span class="cmt">// ok &mdash; fluid matches flux</span>
+
+<span class="kw">fix</span> frozen = <span class="fn">freeze</span>(m)
+<span class="fn">inspect</span>(frozen)                       <span class="cmt">// ok &mdash; crystal matches fix</span>
+<span class="fn">mutate</span>(frozen)                        <span class="cmt">// error &mdash; crystal rejected by flux</span></code></pre>
+        </div>
+      </div>
+      <div class="doc-entry" data-name="phase constraint sigils" data-desc="use tilde ~ for flux and star * for fix as shorthand phase sigils">
+        <div class="doc-sig"><span class="kw">fn</span> <span class="fn">name</span>(<span class="text">param</span><span class="op">:</span> <span class="op">~</span><span class="typ">Type</span>)&ensp;&ensp;<span class="kw">fn</span> <span class="fn">name</span>(<span class="text">param</span><span class="op">:</span> <span class="op">*</span><span class="typ">Type</span>)</div>
+        <p class="doc-desc">The sigils <code>~</code> and <code>*</code> are shorthand for <code>flux</code> and <code>fix</code> in type annotations.</p>
+        <div class="doc-examples">
+          <pre><code><span class="kw">fn</span> <span class="fn">update</span>(data<span class="op">:</span> ~<span class="typ">Map</span>) { data.<span class="fn">set</span>(<span class="str">"x"</span>, <span class="num">1</span>) }   <span class="cmt">// same as flux Map</span>
+<span class="kw">fn</span> <span class="fn">read</span>(data<span class="op">:</span> *<span class="typ">Map</span>) { <span class="fn">print</span>(data) }            <span class="cmt">// same as fix Map</span></code></pre>
+        </div>
+      </div>
+    </div>
+    <div class="doc-category" id="phase-dispatch">
+      <div class="section-label">Language Syntax</div>
+      <h2 class="section-title">Phase-Dependent Dispatch</h2>
+      <div class="doc-entry" data-name="phase dispatch" data-desc="define multiple functions with the same name but different phase annotations for automatic dispatch">
+        <div class="doc-sig"><span class="kw">fn</span> <span class="fn">name</span>(<span class="text">p</span><span class="op">:</span> <span class="kw">flux</span> <span class="typ">T</span>) &ensp;+&ensp; <span class="kw">fn</span> <span class="fn">name</span>(<span class="text">p</span><span class="op">:</span> <span class="kw">fix</span> <span class="typ">T</span>)</div>
+        <p class="doc-desc">Define multiple functions with the same name but different phase annotations. The runtime dispatches to the best-matching overload based on the phases of the arguments at call time.</p>
+        <div class="doc-examples">
+          <pre><code><span class="kw">fn</span> <span class="fn">process</span>(data<span class="op">:</span> ~<span class="typ">Map</span>) { <span class="fn">print</span>(<span class="str">"mutable path"</span>) }
+<span class="kw">fn</span> <span class="fn">process</span>(data<span class="op">:</span> *<span class="typ">Map</span>) { <span class="fn">print</span>(<span class="str">"immutable path"</span>) }
+
+<span class="kw">flux</span> m = <span class="typ">Map</span>::<span class="fn">new</span>()
+<span class="fn">process</span>(m)                           <span class="cmt">// "mutable path"</span>
+<span class="fn">freeze</span>(m)
+<span class="fn">process</span>(m)                           <span class="cmt">// "immutable path"</span></code></pre>
+        </div>
+      </div>
+      <div class="doc-entry" data-name="phase dispatch fallback" data-desc="unphased overloads act as fallbacks when no specific phase overload matches">
+        <div class="doc-sig"><span class="kw">fn</span> <span class="fn">name</span>(<span class="text">p</span><span class="op">:</span> <span class="typ">T</span>) <span class="cmt">&mdash; fallback overload</span></div>
+        <p class="doc-desc">An overload with no phase annotation acts as a fallback. It is selected when the argument has no specific phase or when no phase-annotated overload matches.</p>
+        <div class="doc-examples">
+          <pre><code><span class="kw">fn</span> <span class="fn">handle</span>(data<span class="op">:</span> ~<span class="typ">Map</span>) { <span class="fn">print</span>(<span class="str">"flux"</span>) }
+<span class="kw">fn</span> <span class="fn">handle</span>(data<span class="op">:</span> <span class="typ">Map</span>)  { <span class="fn">print</span>(<span class="str">"fallback"</span>) }
+
+<span class="kw">let</span> m = <span class="typ">Map</span>::<span class="fn">new</span>()
+<span class="fn">handle</span>(m)                            <span class="cmt">// "fallback" (unphased arg)</span></code></pre>
         </div>
       </div>
     </div>

@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -73,6 +73,36 @@ fn add(a: Int, b: Int) -> Int {
 fn greet(name: String) -> String {
     "Hello, ${name}!"  // string interpolation, implicit return
 }
+```
+
+### Phase Constraints
+
+Function parameters can declare a required phase using `flux`/`fix` (or `~`/`*`) in the type annotation. The runtime rejects arguments with an incompatible phase:
+
+```lattice
+fn mutate(data: flux Map) { data.set("key", "value") }
+fn inspect(data: fix Map) { print(data.get("key")) }
+
+flux m = Map::new()
+mutate(m)       // ok — fluid argument matches flux constraint
+inspect(m)      // error — fluid argument rejected by fix constraint
+
+fix frozen = freeze(m)
+inspect(frozen) // ok — crystal argument matches fix constraint
+```
+
+### Phase-Dependent Dispatch
+
+Define multiple functions with the same name but different phase annotations. The runtime dispatches to the best-matching overload based on argument phases:
+
+```lattice
+fn process(data: ~Map) { print("mutable path") }
+fn process(data: *Map) { print("immutable path") }
+
+flux m = Map::new()
+process(m)              // "mutable path"
+freeze(m)
+process(m)              // "immutable path"
 ```
 
 ### Control Flow

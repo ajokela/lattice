@@ -624,6 +624,7 @@ void fn_decl_free(FnDecl *f) {
     for (size_t i = 0; i < f->body_count; i++)
         stmt_free(f->body[i]);
     free(f->body);
+    f->next_overload = NULL;
 }
 
 void struct_decl_free(StructDecl *s) {

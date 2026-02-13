@@ -106,9 +106,9 @@ static Stmt **parse_block_stmts(Parser *p, size_t *count, char **err) {
 
 static TypeExpr *parse_type_expr(Parser *p, char **err) {
     TypeExpr *te = calloc(1, sizeof(TypeExpr));
-    if (peek_type(p) == TOK_TILDE) {
+    if (peek_type(p) == TOK_TILDE || peek_type(p) == TOK_FLUX) {
         advance(p); te->phase = PHASE_FLUID;
-    } else if (peek_type(p) == TOK_STAR) {
+    } else if (peek_type(p) == TOK_STAR || peek_type(p) == TOK_FIX) {
         advance(p); te->phase = PHASE_CRYSTAL;
     } else {
         te->phase = PHASE_UNSPECIFIED;
@@ -1391,6 +1391,7 @@ static Stmt *parse_stmt(Parser *p, char **err) {
 /* ── Items ── */
 
 static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
+    out->next_overload = NULL;
     if (!expect(p, TOK_FN, err)) return false;
     out->name = expect_ident(p, err);
     if (!out->name) return false;

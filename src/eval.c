@@ -550,6 +550,116 @@ static FnDecl *find_fn(Evaluator *ev, const char *name) {
     return ptr ? *ptr : NULL;
 }
 
+/* ── Phase helpers for constraints & dispatch ── */
+
+static const char *phase_tag_name(PhaseTag p) {
+    switch (p) {
+        case VTAG_FLUID:   return "fluid (flux)";
+        case VTAG_CRYSTAL: return "crystal (fix)";
+        case VTAG_UNPHASED: return "unphased";
+    }
+    return "unknown";
+}
+
+static const char *ast_phase_name(AstPhase p) {
+    switch (p) {
+        case PHASE_FLUID:       return "flux";
+        case PHASE_CRYSTAL:     return "fix";
+        case PHASE_UNSPECIFIED: return "unspecified";
+    }
+    return "unknown";
+}
+
+static bool phase_compatible(PhaseTag value_phase, AstPhase param_phase) {
+    switch (param_phase) {
+        case PHASE_FLUID:       return value_phase != VTAG_CRYSTAL;
+        case PHASE_CRYSTAL:     return value_phase != VTAG_FLUID;
+        case PHASE_UNSPECIFIED: return true;
+    }
+    return true;
+}
+
+static bool phase_signatures_match(const FnDecl *a, const FnDecl *b) {
+    if (a->param_count != b->param_count) return false;
+    for (size_t i = 0; i < a->param_count; i++) {
+        if (a->params[i].ty.phase != b->params[i].ty.phase) return false;
+    }
+    return true;
+}
+
+static FnDecl *resolve_overload(FnDecl *head, LatValue *args, size_t argc) {
+    FnDecl *best = NULL;
+    int best_score = -1;
+
+    for (FnDecl *cand = head; cand; cand = cand->next_overload) {
+        /* Check arity */
+        size_t required = 0;
+        bool has_variadic = false;
+        for (size_t i = 0; i < cand->param_count; i++) {
+            if (cand->params[i].is_variadic) has_variadic = true;
+            else if (!cand->params[i].default_value) required++;
+        }
+        size_t max_pos = has_variadic ? cand->param_count - 1 : cand->param_count;
+        if (argc < required || (!has_variadic && argc > max_pos)) continue;
+
+        /* Check phase compatibility and compute score */
+        bool compatible = true;
+        int score = 0;
+        size_t check_count = argc < cand->param_count ? argc : cand->param_count;
+        for (size_t i = 0; i < check_count; i++) {
+            if (cand->params[i].is_variadic) break;
+            AstPhase pp = cand->params[i].ty.phase;
+            PhaseTag vp = args[i].phase;
+            if (!phase_compatible(vp, pp)) { compatible = false; break; }
+            if (pp == PHASE_FLUID && vp == VTAG_FLUID)
+                score += 3;  /* exact: fluid→flux */
+            else if (pp == PHASE_CRYSTAL && vp == VTAG_CRYSTAL)
+                score += 3;  /* exact: crystal→fix */
+            else if (pp == PHASE_UNSPECIFIED && vp == VTAG_UNPHASED)
+                score += 2;  /* exact: unphased→unspecified */
+            else if (pp == PHASE_UNSPECIFIED)
+                score += 1;  /* compatible: specific→unspecified */
+            /* else: unphased→specific = 0 (compatible but weakest) */
+        }
+        if (!compatible) continue;
+
+        if (score >= best_score) {
+            best_score = score;
+            best = cand;
+        }
+    }
+    return best;
+}
+
+static void register_fn_overload(LatMap *fn_defs, FnDecl *new_fn) {
+    FnDecl **existing = lat_map_get(fn_defs, new_fn->name);
+    if (!existing) {
+        /* No existing fn with this name — simple insert */
+        lat_map_set(fn_defs, new_fn->name, &new_fn);
+        return;
+    }
+    /* Check if same phase signature — replace */
+    FnDecl *head = *existing;
+    if (phase_signatures_match(head, new_fn)) {
+        /* Replace head: keep the chain */
+        new_fn->next_overload = head->next_overload;
+        lat_map_set(fn_defs, new_fn->name, &new_fn);
+        return;
+    }
+    /* Check rest of chain */
+    for (FnDecl *prev = head; prev->next_overload; prev = prev->next_overload) {
+        if (phase_signatures_match(prev->next_overload, new_fn)) {
+            /* Replace this link */
+            new_fn->next_overload = prev->next_overload->next_overload;
+            prev->next_overload = new_fn;
+            return;
+        }
+    }
+    /* Different phase signature — chain it */
+    new_fn->next_overload = head;
+    lat_map_set(fn_defs, new_fn->name, &new_fn);
+}
+
 static StructDecl *find_struct(Evaluator *ev, const char *name) {
     StructDecl **ptr = lat_map_get(&ev->struct_defs, name);
     return ptr ? *ptr : NULL;
@@ -592,6 +702,19 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             (void)asprintf(&err, "function '%s' expects %zu arguments, got %zu",
                            decl->name, required, arg_count);
         return eval_err(err);
+    }
+    /* Phase constraint enforcement */
+    for (size_t i = 0; i < decl->param_count && i < arg_count; i++) {
+        if (decl->params[i].is_variadic) break;
+        if (decl->params[i].ty.phase != PHASE_UNSPECIFIED &&
+            !phase_compatible(args[i].phase, decl->params[i].ty.phase)) {
+            char *err = NULL;
+            (void)asprintf(&err, "function '%s' parameter '%s' requires %s argument, got %s",
+                           decl->name, decl->params[i].name,
+                           ast_phase_name(decl->params[i].ty.phase),
+                           phase_tag_name(args[i].phase));
+            return eval_err(err);
+        }
     }
     stats_fn_call(&ev->stats);
     stats_scope_push(&ev->stats);
@@ -1667,7 +1790,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             lat_map_set(&ev->struct_defs, ptr->name, &ptr);
                         } else if (req_prog.items[j].tag == ITEM_FUNCTION) {
                             FnDecl *ptr = &req_prog.items[j].as.fn_decl;
-                            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+                            register_fn_overload(&ev->fn_defs, ptr);
                         }
                     }
                     /* Set script_dir to the required file's directory for nested requires */
@@ -1771,7 +1894,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             lat_map_set(&ev->struct_defs, ptr->name, &ptr);
                         } else if (prog.items[j].tag == ITEM_FUNCTION) {
                             FnDecl *ptr = &prog.items[j].as.fn_decl;
-                            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+                            register_fn_overload(&ev->fn_defs, ptr);
                         }
                     }
                     /* Execute statements — set lat_eval_scope so top-level
@@ -3696,8 +3819,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
 
                 /* ── Named function lookup ── */
-                FnDecl *fd = find_fn(ev, fn_name);
-                if (fd) {
+                FnDecl *fd_head = find_fn(ev, fn_name);
+                if (fd_head) {
+                    FnDecl *fd = fd_head;
+                    if (fd_head->next_overload) {
+                        fd = resolve_overload(fd_head, args, argc);
+                        if (!fd) {
+                            char *err = NULL;
+                            (void)asprintf(&err, "no matching overload for '%s' with given argument phases", fn_name);
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                            free(args);
+                            return eval_err(err);
+                        }
+                    }
                     /* Allocate write-back slots for fluid parameters */
                     LatValue **writeback = calloc(argc, sizeof(LatValue *));
                     EvalResult res = call_fn(ev, fd, args, argc, writeback);
@@ -4903,7 +5037,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
             lat_map_set(&ev->struct_defs, ptr->name, &ptr);
         } else if (mod_prog.items[j].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &mod_prog.items[j].as.fn_decl;
-            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+            register_fn_overload(&ev->fn_defs, ptr);
         } else if (mod_prog.items[j].tag == ITEM_ENUM) {
             EnumDecl *ptr = &mod_prog.items[j].as.enum_decl;
             lat_map_set(&ev->enum_defs, ptr->name, &ptr);
@@ -7052,7 +7186,7 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
             lat_map_set(&ev->enum_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
-            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+            register_fn_overload(&ev->fn_defs, ptr);
         }
     }
 
@@ -7090,7 +7224,7 @@ int evaluator_run_tests(Evaluator *ev, const Program *prog) {
             lat_map_set(&ev->enum_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
-            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+            register_fn_overload(&ev->fn_defs, ptr);
         }
     }
 
@@ -7184,7 +7318,7 @@ char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
             lat_map_set(&ev->enum_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
-            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+            register_fn_overload(&ev->fn_defs, ptr);
         }
     }
 
@@ -7214,7 +7348,7 @@ EvalResult evaluator_run_repl_result(Evaluator *ev, const Program *prog) {
             lat_map_set(&ev->enum_defs, ptr->name, &ptr);
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
-            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+            register_fn_overload(&ev->fn_defs, ptr);
         }
     }
 

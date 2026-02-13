@@ -39,6 +39,7 @@ struct TypeExpr {
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
 typedef struct Pattern Pattern;
+typedef struct FnDecl FnDecl;
 
 /* Pattern types for match expressions */
 typedef enum {
@@ -214,14 +215,15 @@ typedef struct {
 } Param;
 
 /* Function declaration */
-typedef struct {
+struct FnDecl {
     char    *name;
     Param   *params;
     size_t   param_count;
     TypeExpr *return_type;  /* nullable */
     Stmt   **body;
     size_t   body_count;
-} FnDecl;
+    FnDecl  *next_overload; /* phase-dispatch chain, NULL if none */
+};
 
 /* Struct field declaration */
 typedef struct {
