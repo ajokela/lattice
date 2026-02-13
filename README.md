@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern-style `for..in` iteration, try/catch error handling, structured concurrency with channels, and a self-hosted REPL written in Lattice itself.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, default parameters, variadic functions, string interpolation, try/catch error handling, structured concurrency with channels, and a self-hosted REPL written in Lattice itself.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -57,6 +57,8 @@ flux copy = clone(data)     // independent deep copy
 | `Struct` | Named record type with typed fields |
 | `Closure` | First-class function value (`\|x\| x + 1`) |
 | `Range` | Integer range (`0..10`) |
+| `Enum` | Sum type with variants (`Color::Red`) |
+| `Set` | Unordered collection of unique values (`Set::from([1, 2, 3])`) |
 | `Unit` | Absence of a value (like void/nil) |
 
 ### Functions
@@ -132,6 +134,84 @@ let result = {
     a + b
 }
 // result = 30
+```
+
+### Default Parameters & Variadic Functions
+
+Functions and closures support default parameter values and variadic arguments:
+
+```lattice
+fn greet(name: String, greeting = "Hello") {
+    print("${greeting}, ${name}!")
+}
+greet("Alice")            // Hello, Alice!
+greet("Bob", "Hey")       // Hey, Bob!
+
+fn sum(...nums) {
+    nums.reduce(|a, b| a + b, 0)
+}
+print(sum(1, 2, 3))      // 6
+```
+
+### Pattern Matching
+
+`match` expressions compare a value against patterns:
+
+```lattice
+let result = match value {
+    0 => "zero",
+    1..10 => "small",
+    x if x > 100 => "big: ${x}",
+    _ => "other"
+}
+```
+
+Patterns support: integer/string/bool literals, ranges (`1..10`), variable bindings, guards (`if condition`), wildcards (`_`), and negative literals.
+
+### Destructuring
+
+Destructure arrays and structs/maps in `let` and `flux` bindings:
+
+```lattice
+let [a, b, c] = [1, 2, 3]
+let [head, ...rest] = [10, 20, 30, 40]    // head = 10, rest = [20, 30, 40]
+let {name, age} = person                   // extract fields by name
+```
+
+### Enums
+
+Enums define sum types with unit or tuple variants:
+
+```lattice
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Custom(Int, Int, Int)
+}
+
+let c = Color::Red
+let rgb = Color::Custom(255, 128, 0)
+print(rgb.payload())     // [255, 128, 0]
+print(c.variant_name())  // Red
+print(c.is_variant("Red")) // true
+```
+
+### Sets
+
+Sets are unordered collections of unique values:
+
+```lattice
+let s = Set::from([1, 2, 3, 2, 1])  // {1, 2, 3}
+s.add(4)
+print(s.has(2))    // true
+print(s.len())     // 4
+
+let a = Set::from([1, 2, 3])
+let b = Set::from([2, 3, 4])
+print(a.union(b))        // {1, 2, 3, 4}
+print(a.intersection(b)) // {2, 3}
+print(a.difference(b))   // {1}
 ```
 
 ### Structs
@@ -234,7 +314,7 @@ fix frozen = freeze(data)
 
 ## Standard Library
 
-Lattice ships with 100+ builtin functions and 55+ type methods covering I/O, math, strings, files, networking, concurrency, and more.
+Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, math, strings, files, networking, data formats, concurrency, and more.
 
 ### Core
 
@@ -265,6 +345,8 @@ Lattice ships with 100+ builtin functions and 55+ type methods covering I/O, mat
 | Function | Description |
 |----------|-------------|
 | `Map::new()` | Create an empty map |
+| `Set::new()` | Create an empty set |
+| `Set::from(array)` | Create a set from an array |
 | `Channel::new()` | Create a channel for inter-thread communication |
 | `range(start, end, step?)` | Generate array of integers (`start` inclusive, `end` exclusive) |
 | `to_int(val)` | Convert to Int (from Float, Bool, or String) |
@@ -345,6 +427,28 @@ Lattice ships with 100+ builtin functions and 55+ type methods covering I/O, mat
 |----------|-------------|
 | `csv_parse(str)` | Parse CSV into array of arrays (supports quoted fields) |
 | `csv_stringify(data)` | Convert array of arrays to CSV string |
+
+### TOML
+
+| Function | Description |
+|----------|-------------|
+| `toml_parse(str)` | Parse TOML string into a Lattice Map |
+| `toml_stringify(val)` | Serialize a Map to TOML string |
+
+### YAML
+
+| Function | Description |
+|----------|-------------|
+| `yaml_parse(str)` | Parse YAML string into a Lattice value |
+| `yaml_stringify(val)` | Serialize a Map or Array to YAML string |
+
+### HTTP Client
+
+| Function | Description |
+|----------|-------------|
+| `http_get(url)` | HTTP GET request, returns Map with `status`, `headers`, `body` |
+| `http_post(url, body)` | HTTP POST request with string body |
+| `http_request(method, url, headers, body)` | Full HTTP request with custom method, headers map, and body |
 
 ### URL Encoding
 
@@ -567,6 +671,30 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 | `.send(val)` | Send a crystal value on the channel |
 | `.recv()` | Receive a value (blocks until available, Unit if closed) |
 | `.close()` | Close the channel |
+
+### Enum Methods
+
+| Method | Description |
+|--------|-------------|
+| `.variant_name()` | Name of the variant as a string |
+| `.enum_name()` | Name of the enum type |
+| `.is_variant(name)` | Check if enum is a specific variant |
+| `.payload()` | Extract tuple variant data as array (Unit for unit variants) |
+
+### Set Methods
+
+| Method | Description |
+|--------|-------------|
+| `.len()` | Number of elements |
+| `.add(val)` | Add an element |
+| `.has(val)` | Check if element exists |
+| `.remove(val)` | Remove an element |
+| `.to_array()` | Convert to array |
+| `.union(other)` | Set union |
+| `.intersection(other)` | Set intersection |
+| `.difference(other)` | Set difference |
+| `.is_subset(other)` | Check if subset |
+| `.is_superset(other)` | Check if superset |
 
 ### Operators
 
