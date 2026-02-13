@@ -23,6 +23,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "channel.h"
+#include "ext.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -642,6 +643,19 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
         return eval_ok(result.cf.value);
     }
     return result;
+}
+
+static EvalResult call_native_closure(Evaluator *ev, void *native_fn,
+                                      LatValue *args, size_t arg_count) {
+    (void)ev;
+    LatValue result = ext_call_native(native_fn, args, arg_count);
+    /* Check if the result is an error string */
+    if (result.type == VAL_STR && strncmp(result.as.str_val, "EVAL_ERROR:", 11) == 0) {
+        char *msg = strdup(result.as.str_val + 11);
+        value_free(&result);
+        return eval_err(msg);
+    }
+    return eval_ok(result);
 }
 
 static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
@@ -1607,6 +1621,36 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (!IS_OK(req_r)) return req_r;
                     value_free(&req_r.value);
                     return eval_ok(value_bool(true));
+                }
+
+                /// @builtin require_ext(name: String) -> Map
+                /// @category Metaprogramming
+                /// Load a native extension (.dylib/.so) and return a Map of its functions.
+                /// @example let pg = require_ext("pg")
+                if (strcmp(fn_name, "require_ext") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("require_ext() expects 1 string argument")); }
+                    const char *ext_name = args[0].as.str_val;
+                    /* Check cache */
+                    LatValue *cached = (LatValue *)lat_map_get(&ev->loaded_extensions, ext_name);
+                    if (cached) {
+                        LatValue result = value_deep_clone(cached);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_ok(result);
+                    }
+                    char *ext_err = NULL;
+                    LatValue ext_map = ext_load(ev, ext_name, &ext_err);
+                    if (ext_err) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(ext_err);
+                    }
+                    /* Cache the extension */
+                    LatValue cached_copy = value_deep_clone(&ext_map);
+                    lat_map_set(&ev->loaded_extensions, ext_name, &cached_copy);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(ext_map);
                 }
 
                 /// @builtin lat_eval(source: String) -> Any
@@ -3610,6 +3654,15 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                 free(args);
                 return eval_err(err);
+            }
+            /* Native extension closure dispatch */
+            if (callee_r.value.as.closure.native_fn && !callee_r.value.as.closure.body) {
+                EvalResult res = call_native_closure(ev,
+                    callee_r.value.as.closure.native_fn, args, argc);
+                for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                value_free(&callee_r.value);
+                free(args);
+                return res;
             }
             /* Root callee and args so GC inside block-body closures won't sweep them */
             GC_PUSH(ev, &callee_r.value);
@@ -6838,6 +6891,7 @@ Evaluator *evaluator_new(void) {
     ev->no_regions = false;
     ev->required_files = lat_map_new(sizeof(bool));
     ev->module_cache = lat_map_new(sizeof(LatValue));
+    ev->loaded_extensions = lat_map_new(sizeof(LatValue));
     ev->module_exprs = lat_vec_new(sizeof(Expr *));
     value_set_heap(ev->heap);
     return ev;
@@ -6859,6 +6913,14 @@ void evaluator_free(Evaluator *ev) {
         }
     }
     lat_map_free(&ev->module_cache);
+    /* Free cached extension maps */
+    for (size_t i = 0; i < ev->loaded_extensions.cap; i++) {
+        if (ev->loaded_extensions.entries[i].state == MAP_OCCUPIED) {
+            LatValue *mv = (LatValue *)ev->loaded_extensions.entries[i].value;
+            value_free(mv);
+        }
+    }
+    lat_map_free(&ev->loaded_extensions);
     /* Free body Expr wrappers kept alive for module closures */
     for (size_t i = 0; i < ev->module_exprs.len; i++) {
         Expr **ep = lat_vec_get(&ev->module_exprs, i);

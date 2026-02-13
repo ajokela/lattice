@@ -308,9 +308,10 @@ LatValue value_deep_clone(const LatValue *v) {
             }
             out.as.closure.param_count = pc;
             out.as.closure.body = v->as.closure.body;  /* borrowed */
-            out.as.closure.captured_env = env_clone(v->as.closure.captured_env);
+            out.as.closure.captured_env = v->as.closure.captured_env ? env_clone(v->as.closure.captured_env) : NULL;
             out.as.closure.default_values = v->as.closure.default_values;  /* borrowed */
             out.as.closure.has_variadic = v->as.closure.has_variadic;
+            out.as.closure.native_fn = v->as.closure.native_fn;  /* shared, not owned */
             break;
         }
         case VAL_UNIT: break;

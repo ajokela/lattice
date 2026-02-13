@@ -55,6 +55,7 @@ struct LatValue {
             Env   *captured_env;   /* owned, deep-cloned */
             struct Expr **default_values;  /* borrowed, param_count entries, NULL for required */
             bool   has_variadic;
+            void  *native_fn;     /* when non-NULL and body==NULL, native extension function */
         } closure;
         struct {
             int64_t start;

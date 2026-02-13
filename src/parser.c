@@ -1094,7 +1094,14 @@ static Expr *parse_primary(Parser *p, char **err) {
         /* Name::Variant or Name::method() */
         if (peek_type(p) == TOK_COLONCOLON) {
             advance(p);
-            char *rhs = expect_ident(p, err);
+            /* Accept contextual keywords (e.g. 'from' in Set::from) as identifiers */
+            char *rhs = NULL;
+            if (peek_type(p) == TOK_FROM) {
+                advance(p);
+                rhs = strdup("from");
+            } else {
+                rhs = expect_ident(p, err);
+            }
             if (!rhs) { free(name); return NULL; }
 
             if (peek_type(p) == TOK_LPAREN) {

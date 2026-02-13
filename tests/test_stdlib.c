@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.1.9"
+        "0.2.0"
     );
 }
 
@@ -5306,7 +5306,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.1.9"
+        "Hello, Lattice!\nVersion 0.2.0"
     );
 }
 
@@ -5792,6 +5792,37 @@ static void test_repr_bool(void) {
     ASSERT_OUTPUT(
         "fn main() { print(repr(true)) }",
         "true"
+    );
+}
+
+/* ======================================================================
+ * Native Extension System (require_ext)
+ * ====================================================================== */
+
+static void test_require_ext_missing(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(\"nonexistent_extension_xyz\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_wrong_type(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(42)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_no_args(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext()\n"
+        "}\n",
+        "EVAL_ERROR:"
     );
 }
 
@@ -6373,4 +6404,9 @@ void register_stdlib_tests(void) {
     register_test("test_repr_struct_custom_non_string", test_repr_struct_custom_non_string);
     register_test("test_repr_nil", test_repr_nil);
     register_test("test_repr_bool", test_repr_bool);
+
+    /* Native extensions (require_ext) */
+    register_test("test_require_ext_missing", test_require_ext_missing);
+    register_test("test_require_ext_wrong_type", test_require_ext_wrong_type);
+    register_test("test_require_ext_no_args", test_require_ext_no_args);
 }

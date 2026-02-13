@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, try/catch error handling, structured concurrency with channels, and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -441,6 +441,42 @@ exports.set("sub", sub)
 exports  // return the exports map
 ```
 
+### Native Extensions
+
+Lattice supports native extensions — shared libraries (`.dylib` on macOS, `.so` on Linux) loaded at runtime via `require_ext()`. Extensions register functions through a C API and appear as a Map of callable closures in Lattice code.
+
+```lattice
+let pg = require_ext("pg")
+
+let conn = pg.get("connect")("host=localhost dbname=mydb")
+let rows = pg.get("query")(conn, "SELECT id, name FROM users")
+
+for row in rows {
+    print("${row.get("id")}: ${row.get("name")}")
+}
+
+pg.get("close")(conn)
+```
+
+**Extension search paths** (checked in order):
+1. `./extensions/<name>.dylib` (or `.so`)
+2. `~/.lattice/ext/<name>.dylib`
+3. `$LATTICE_EXT_PATH/<name>.dylib`
+
+**PostgreSQL extension** — the first bundled extension, providing:
+
+| Function | Description |
+|----------|-------------|
+| `pg.connect(connstr)` | Connect to PostgreSQL, returns a connection handle |
+| `pg.query(conn, sql)` | Execute a query, returns array of Maps (one per row) |
+| `pg.exec(conn, sql)` | Execute a statement (INSERT/UPDATE/DELETE), returns affected row count |
+| `pg.status(conn)` | Connection status string (`"ok"` or `"bad"`) |
+| `pg.close(conn)` | Close the connection |
+
+Build the PostgreSQL extension with `make ext-pg` (requires libpq).
+
+**Writing custom extensions:** compile a shared library against `lattice_ext.h` that exports a `lat_ext_init(LatExtContext *ctx)` function. Use `lat_ext_register()` to add functions, and the `lat_ext_*` helpers to construct and inspect values.
+
 ### Strict Mode
 
 Enable `#mode strict` at the top of a file for stricter phase enforcement. In strict mode, `freeze()` on an identifier **consumes** the binding — the original variable is no longer accessible after freezing:
@@ -706,6 +742,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `tokenize(src)` | Tokenize source code into token strings |
 | `is_complete(src)` | Check if source has balanced delimiters |
 | `require(path)` | Load and execute a `.lat` file |
+| `require_ext(name)` | Load a native extension, returns Map of functions |
 
 ### String Interpolation
 
@@ -925,6 +962,7 @@ clat [--stats] [--gc-stress] [file.lat]
 make          # build the clat binary
 make test     # run the test suite
 make asan     # build and test with AddressSanitizer + UBSan
+make ext-pg   # build the PostgreSQL extension (requires libpq)
 make clean    # remove build artifacts
 ```
 

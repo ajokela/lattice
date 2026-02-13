@@ -45,10 +45,10 @@ endif
 CFLAGS  += $(TLS_CFLAGS)
 LDFLAGS += $(TLS_LDFLAGS)
 
-# ── pthreads (Linux needs -lpthread, macOS includes it) ──
+# ── pthreads and dlopen (Linux needs explicit linking) ──
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-    LDFLAGS += -lpthread -lm
+    LDFLAGS += -lpthread -lm -ldl
 endif
 
 # Source files
@@ -85,7 +85,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/channel.c \
        $(SRC_DIR)/http.c \
        $(SRC_DIR)/toml_ops.c \
-       $(SRC_DIR)/yaml_ops.c
+       $(SRC_DIR)/yaml_ops.c \
+       $(SRC_DIR)/ext.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
@@ -114,7 +115,7 @@ WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinc
               -sMODULARIZE=1 -sEXPORT_NAME=createLattice \
               -sALLOW_MEMORY_GROWTH=1
 
-.PHONY: all clean test asan wasm bench bench-stress
+.PHONY: all clean test asan wasm bench bench-stress ext-pg
 
 all: $(TARGET)
 
@@ -148,6 +149,9 @@ bench: $(TARGET)
 
 bench-stress: $(TARGET)
 	@for f in benchmarks/*.lat; do echo "--- $$f ---"; ./clat --gc-stress --stats "$$f"; done
+
+ext-pg:
+	$(MAKE) -C extensions/pg
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

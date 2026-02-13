@@ -79,6 +79,7 @@ typedef struct Evaluator {
     size_t      lat_eval_scope; /* when > 0, top-level lat_eval bindings go here */
     LatMap      required_files; /* set of resolved paths already require()'d */
     LatMap      module_cache;  /* char* -> LatValue (cached module Maps) */
+    LatMap      loaded_extensions; /* char* -> LatValue (cached extension Maps) */
     LatVec      module_exprs;  /* Expr* body wrappers kept alive for module closures */
     char       *script_dir;    /* directory of the main script (for require) */
     int         prog_argc;     /* argc from main() for args() builtin */
