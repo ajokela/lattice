@@ -216,21 +216,25 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
 #endif
 
     /* Build search paths */
-    char paths[4][1024];
+    char paths[5][1024];
     int path_count = 0;
 
     /* 1. ./extensions/<name><suffix> */
     snprintf(paths[path_count++], sizeof(paths[0]),
              "./extensions/%s%s", name, suffix);
 
-    /* 2. ~/.lattice/ext/<name><suffix> */
+    /* 2. ./extensions/<name>/<name><suffix> */
+    snprintf(paths[path_count++], sizeof(paths[0]),
+             "./extensions/%s/%s%s", name, name, suffix);
+
+    /* 3. ~/.lattice/ext/<name><suffix> */
     const char *home = getenv("HOME");
     if (home) {
         snprintf(paths[path_count++], sizeof(paths[0]),
                  "%s/.lattice/ext/%s%s", home, name, suffix);
     }
 
-    /* 3. $LATTICE_EXT_PATH/<name><suffix> */
+    /* 4. $LATTICE_EXT_PATH/<name><suffix> */
     const char *ext_path = getenv("LATTICE_EXT_PATH");
     if (ext_path) {
         snprintf(paths[path_count++], sizeof(paths[0]),
@@ -246,8 +250,8 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
 
     if (!handle) {
         (void)asprintf(err, "require_ext: cannot find extension '%s' "
-                       "(searched ./extensions/, ~/.lattice/ext/, $LATTICE_EXT_PATH)",
-                       name);
+                       "(searched ./extensions/, ./extensions/%s/, ~/.lattice/ext/, $LATTICE_EXT_PATH)",
+                       name, name);
         return value_nil();
     }
 

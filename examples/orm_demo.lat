@@ -1,0 +1,98 @@
+// ORM Demo - Demonstrates the Lattice ORM library
+// Run: ./clat examples/orm_demo.lat
+
+import "lib/orm" as orm
+
+fn main() {
+    // Connect to an in-memory SQLite database
+    let db = orm.connect(":memory:")
+    print("Connected to database")
+
+    // Define the users table schema
+    let schema = Map::new()
+    schema.set("id", "INTEGER PRIMARY KEY AUTOINCREMENT")
+    schema.set("name", "TEXT NOT NULL")
+    schema.set("email", "TEXT")
+    schema.set("age", "INTEGER")
+
+    // Create a model for the users table
+    let User = orm.model(db, "users", schema)
+
+    // Create the table
+    let create_table = User.get("create_table")
+    create_table(0)
+    print("Created users table")
+
+    // Insert some records
+    let create = User.get("create")
+
+    let d1 = Map::new()
+    d1.set("name", "Alice")
+    d1.set("email", "alice@example.com")
+    d1.set("age", 30)
+    let id1 = create(d1)
+    print("Created Alice with id: " + to_string(id1))
+
+    let d2 = Map::new()
+    d2.set("name", "Bob")
+    d2.set("email", "bob@example.com")
+    d2.set("age", 25)
+    let id2 = create(d2)
+    print("Created Bob with id: " + to_string(id2))
+
+    let d3 = Map::new()
+    d3.set("name", "Charlie")
+    d3.set("email", "charlie@example.com")
+    d3.set("age", 35)
+    let id3 = create(d3)
+    print("Created Charlie with id: " + to_string(id3))
+
+    // Find a record by id
+    let find = User.get("find")
+    let alice = find(id1)
+    print("\nFound user: " + alice.get("name") + " (age " + to_string(alice.get("age")) + ")")
+
+    // Get all records
+    let all = User.get("all")
+    let everyone = all(0)
+    print("\nAll users (" + to_string(len(everyone)) + "):")
+    for row in everyone {
+        print("  " + to_string(row.get("id")) + ". " + row.get("name") + " - " + row.get("email"))
+    }
+
+    // Query with WHERE clause
+    let where_fn = User.get("where")
+    let older = where_fn("age >= ?", [30])
+    print("\nUsers age >= 30:")
+    for row in older {
+        print("  " + row.get("name") + " (age " + to_string(row.get("age")) + ")")
+    }
+
+    // Update a record
+    let update = User.get("update")
+    let upd = Map::new()
+    upd.set("age", 31)
+    upd.set("email", "alice.new@example.com")
+    update(id1, upd)
+    let updated_alice = find(id1)
+    print("\nUpdated Alice: age=" + to_string(updated_alice.get("age")) + " email=" + updated_alice.get("email"))
+
+    // Count records
+    let count = User.get("count")
+    print("\nTotal users: " + to_string(count(0)))
+
+    // Delete a record
+    let delete_fn = User.get("delete")
+    delete_fn(id2)
+    print("Deleted Bob")
+    print("Total users after delete: " + to_string(count(0)))
+
+    // Drop table
+    let drop_table = User.get("drop_table")
+    drop_table(0)
+    print("\nDropped users table")
+
+    // Close the database
+    orm.close(db)
+    print("Database closed")
+}

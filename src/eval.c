@@ -1083,6 +1083,91 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string(tn));
                 }
 
+                /// @builtin struct_name(val: Struct) -> String
+                /// @category Reflection
+                /// Returns the type name of a struct instance.
+                /// @example struct_name(user)  // "User"
+                if (strcmp(fn_name, "struct_name") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_name() expects 1 Struct argument")); }
+                    const char *sn = args[0].as.strct.name;
+                    LatValue result = value_string(sn);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
+                }
+
+                /// @builtin struct_fields(val: Struct) -> Array
+                /// @category Reflection
+                /// Returns an array of field name strings from a struct instance.
+                /// @example struct_fields(user)  // ["name", "age"]
+                if (strcmp(fn_name, "struct_fields") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_fields() expects 1 Struct argument")); }
+                    size_t fc = args[0].as.strct.field_count;
+                    LatValue *elems = malloc((fc > 0 ? fc : 1) * sizeof(LatValue));
+                    for (size_t j = 0; j < fc; j++) {
+                        elems[j] = value_string(args[0].as.strct.field_names[j]);
+                    }
+                    LatValue result = value_array(elems, fc);
+                    free(elems);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
+                }
+
+                /// @builtin struct_to_map(val: Struct) -> Map
+                /// @category Reflection
+                /// Converts a struct instance to a Map of {field_name: value}.
+                /// @example struct_to_map(user).get("name")  // "Alice"
+                if (strcmp(fn_name, "struct_to_map") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_to_map() expects 1 Struct argument")); }
+                    LatValue map = value_map_new();
+                    size_t fc = args[0].as.strct.field_count;
+                    for (size_t j = 0; j < fc; j++) {
+                        LatValue v = value_deep_clone(&args[0].as.strct.field_values[j]);
+                        lat_map_set(map.as.map.map, args[0].as.strct.field_names[j], &v);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(map);
+                }
+
+                /// @builtin struct_from_map(name: String, map: Map) -> Struct
+                /// @category Reflection
+                /// Creates a struct instance from a type name and a Map of field values.
+                /// Missing fields default to nil.
+                /// @example struct_from_map("User", m)
+                if (strcmp(fn_name, "struct_from_map") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_from_map() expects (name: String, map: Map)")); }
+                    const char *sname = args[0].as.str_val;
+                    StructDecl *sd = find_struct(ev, sname);
+                    if (!sd) {
+                        char *err = NULL;
+                        (void)asprintf(&err, "struct_from_map: undefined struct '%s'", sname);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(err);
+                    }
+                    size_t fc = sd->field_count;
+                    char **names = malloc(fc * sizeof(char *));
+                    LatValue *vals = malloc(fc * sizeof(LatValue));
+                    for (size_t j = 0; j < fc; j++) {
+                        names[j] = sd->fields[j].name;
+                        LatValue *found = (LatValue *)lat_map_get(args[1].as.map.map, sd->fields[j].name);
+                        if (found) {
+                            vals[j] = value_deep_clone(found);
+                        } else {
+                            vals[j] = value_nil();
+                        }
+                    }
+                    stats_struct(&ev->stats);
+                    LatValue st = value_struct(sname, names, vals, fc);
+                    free(names);
+                    free(vals);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(st);
+                }
+
                 /// @builtin phase_of(val: Any) -> String
                 /// @category Core
                 /// Returns the phase of a value ("flux", "fix", or "crystal").

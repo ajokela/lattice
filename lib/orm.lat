@@ -1,0 +1,134 @@
+// Lattice ORM Library
+// Provides a simple ORM layer over the SQLite extension.
+// Usage:
+//   import "lib/orm" as orm
+//   let db = orm.connect(":memory:")
+//   let User = orm.model(db, "users", schema)
+//   ...
+//   orm.close(db)
+
+let _sqlite = require_ext("sqlite")
+let _open = _sqlite.get("open")
+let _close = _sqlite.get("close")
+let _query = _sqlite.get("query")
+let _run = _sqlite.get("exec")
+let _rowid = _sqlite.get("last_insert_rowid")
+
+fn connect(path: String) -> Map {
+    let handle = _open(path)
+    let db = Map::new()
+    db.set("handle", handle)
+    return db
+}
+
+fn close(db: Map) {
+    let handle = db.get("handle")
+    _close(handle)
+}
+
+fn model(db: Map, table_name: String, schema: Map) -> Map {
+    let handle = db.get("handle")
+    let m = Map::new()
+
+    // create_table() - CREATE TABLE IF NOT EXISTS from schema
+    m.set("create_table", |_x| {
+        let cols = ""
+        let keys = schema.keys()
+        flux i = 0
+        for col_name in keys {
+            let col_type = schema.get(col_name)
+            if i > 0 {
+                cols = cols + ", "
+            }
+            cols = cols + col_name + " " + col_type
+            i = i + 1
+        }
+        let sql = "CREATE TABLE IF NOT EXISTS " + table_name + " (" + cols + ")"
+        _run(handle, sql)
+    })
+
+    // drop_table() - DROP TABLE IF EXISTS
+    m.set("drop_table", |_x| {
+        let sql = "DROP TABLE IF EXISTS " + table_name
+        _run(handle, sql)
+    })
+
+    // create(data) - INSERT, returns last_insert_rowid
+    m.set("create", |data| {
+        let keys = data.keys()
+        let col_names = ""
+        let placeholders = ""
+        let values = []
+        flux i = 0
+        for k in keys {
+            if i > 0 {
+                col_names = col_names + ", "
+                placeholders = placeholders + ", "
+            }
+            col_names = col_names + k
+            placeholders = placeholders + "?"
+            values.push(data.get(k))
+            i = i + 1
+        }
+        let sql = "INSERT INTO " + table_name + " (" + col_names + ") VALUES (" + placeholders + ")"
+        _run(handle, sql, values)
+        return _rowid(handle)
+    })
+
+    // find(id) - SELECT WHERE id=?, returns Map or nil
+    m.set("find", |id| {
+        let sql = "SELECT * FROM " + table_name + " WHERE id = ?"
+        let rows = _query(handle, sql, [id])
+        if len(rows) == 0 {
+            return nil
+        }
+        return rows.first()
+    })
+
+    // all() - SELECT *, returns Array of Maps
+    m.set("all", |_x| {
+        let sql = "SELECT * FROM " + table_name
+        return _query(handle, sql)
+    })
+
+    // where(condition, params) - Custom WHERE clause
+    m.set("where", |condition, params| {
+        let sql = "SELECT * FROM " + table_name + " WHERE " + condition
+        return _query(handle, sql, params)
+    })
+
+    // update(id, data) - UPDATE SET ... WHERE id=?
+    m.set("update", |id, data| {
+        let keys = data.keys()
+        let set_clause = ""
+        let values = []
+        flux i = 0
+        for k in keys {
+            if i > 0 {
+                set_clause = set_clause + ", "
+            }
+            set_clause = set_clause + k + " = ?"
+            values.push(data.get(k))
+            i = i + 1
+        }
+        values.push(id)
+        let sql = "UPDATE " + table_name + " SET " + set_clause + " WHERE id = ?"
+        return _run(handle, sql, values)
+    })
+
+    // delete(id) - DELETE WHERE id=?
+    m.set("delete", |id| {
+        let sql = "DELETE FROM " + table_name + " WHERE id = ?"
+        return _run(handle, sql, [id])
+    })
+
+    // count() - SELECT COUNT(*)
+    m.set("count", |_x| {
+        let sql = "SELECT COUNT(*) as cnt FROM " + table_name
+        let rows = _query(handle, sql)
+        let row = rows.first()
+        return row.get("cnt")
+    })
+
+    return m
+}

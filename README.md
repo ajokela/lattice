@@ -460,10 +460,11 @@ pg.get("close")(conn)
 
 **Extension search paths** (checked in order):
 1. `./extensions/<name>.dylib` (or `.so`)
-2. `~/.lattice/ext/<name>.dylib`
-3. `$LATTICE_EXT_PATH/<name>.dylib`
+2. `./extensions/<name>/<name>.dylib`
+3. `~/.lattice/ext/<name>.dylib`
+4. `$LATTICE_EXT_PATH/<name>.dylib`
 
-**PostgreSQL extension** — the first bundled extension, providing:
+**PostgreSQL extension** — requires libpq:
 
 | Function | Description |
 |----------|-------------|
@@ -475,7 +476,111 @@ pg.get("close")(conn)
 
 Build the PostgreSQL extension with `make ext-pg` (requires libpq).
 
+**SQLite extension** — requires libsqlite3 (ships with macOS; `libsqlite3-dev` on Debian/Ubuntu):
+
+```lattice
+let db = require_ext("sqlite")
+
+let conn = db.get("open")("mydata.db")
+db.get("exec")(conn, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
+db.get("exec")(conn, "INSERT INTO users (name, age) VALUES ('Alice', 30)")
+
+let rows = db.get("query")(conn, "SELECT * FROM users")
+for row in rows {
+    print(row)
+}
+
+db.get("close")(conn)
+```
+
+| Function | Description |
+|----------|-------------|
+| `sqlite.open(path)` | Open/create an SQLite database file, returns connection handle |
+| `sqlite.query(conn, sql [, params])` | Execute a SELECT query, returns array of Maps. Optional `params` array for `?` placeholders. |
+| `sqlite.exec(conn, sql [, params])` | Execute a statement, returns affected row count. Optional `params` array for `?` placeholders. |
+| `sqlite.last_insert_rowid(conn)` | Returns the rowid of the most recent INSERT |
+| `sqlite.status(conn)` | Connection status (`"ok"` or `"closed"`) |
+| `sqlite.close(conn)` | Close the database connection |
+
+**Parameterized queries** use `?` placeholders with an array of values to prevent SQL injection:
+
+```lattice
+let db = require_ext("sqlite")
+let open_fn = db.get("open")
+let run = db.get("exec")
+let query = db.get("query")
+
+let conn = open_fn(":memory:")
+run(conn, "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)")
+run(conn, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30])
+
+let rows = query(conn, "SELECT * FROM users WHERE age > ?", [25])
+```
+
+Build the SQLite extension with `make ext-sqlite`.
+
 **Writing custom extensions:** compile a shared library against `lattice_ext.h` that exports a `lat_ext_init(LatExtContext *ctx)` function. Use `lat_ext_register()` to add functions, and the `lat_ext_*` helpers to construct and inspect values.
+
+### ORM Library
+
+Lattice includes a built-in ORM library (`lib/orm.lat`) that provides a simple object-relational mapping layer over SQLite with parameterized queries for safe database operations.
+
+```lattice
+import "lib/orm" as orm
+
+let db = orm.connect(":memory:")
+
+// Define a table schema
+let schema = Map::new()
+schema.set("id", "INTEGER PRIMARY KEY AUTOINCREMENT")
+schema.set("name", "TEXT NOT NULL")
+schema.set("age", "INTEGER")
+
+let User = orm.model(db, "users", schema)
+
+// Create the table
+let create_table = User.get("create_table")
+create_table(0)
+
+// Insert records
+let create = User.get("create")
+let data = Map::new()
+data.set("name", "Alice")
+data.set("age", 30)
+let id = create(data)
+
+// Query records
+let find = User.get("find")
+let user = find(id)
+print(user.get("name"))  // Alice
+
+let where_fn = User.get("where")
+let results = where_fn("age > ?", [25])
+
+orm.close(db)
+```
+
+| Function | Description |
+|----------|-------------|
+| `orm.connect(path)` | Open an SQLite database, returns a db object |
+| `orm.model(db, table, schema)` | Create a model for a table with the given schema |
+| `orm.close(db)` | Close the database connection |
+
+**Model methods** (accessed via `model.get("method_name")`):
+
+| Method | Description |
+|--------|-------------|
+| `create_table(0)` | Create the table if it doesn't exist |
+| `create(data)` | Insert a record (Map), returns the new row ID |
+| `find(id)` | Find a record by ID, returns Map or nil |
+| `all(0)` | Return all records as an Array of Maps |
+| `where(condition, params)` | Query with a WHERE clause and `?` placeholders |
+| `update(id, data)` | Update a record by ID with the given Map of fields |
+| `delete(id)` | Delete a record by ID |
+| `count(0)` | Return the number of records |
+| `drop_table(0)` | Drop the table |
+
+Requires the SQLite extension: `make ext-sqlite`.
 
 ### Strict Mode
 
@@ -743,6 +848,10 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `is_complete(src)` | Check if source has balanced delimiters |
 | `require(path)` | Load and execute a `.lat` file |
 | `require_ext(name)` | Load a native extension, returns Map of functions |
+| `struct_name(val)` | Returns the struct's type name as a String (e.g. `"User"`) |
+| `struct_fields(val)` | Returns an array of field name strings |
+| `struct_to_map(val)` | Converts a struct to a `{field_name: value}` Map |
+| `struct_from_map(name, map)` | Creates a struct instance from a type name and Map of field values |
 
 ### String Interpolation
 
@@ -962,8 +1071,9 @@ clat [--stats] [--gc-stress] [file.lat]
 make          # build the clat binary
 make test     # run the test suite
 make asan     # build and test with AddressSanitizer + UBSan
-make ext-pg   # build the PostgreSQL extension (requires libpq)
-make clean    # remove build artifacts
+make ext-pg     # build the PostgreSQL extension (requires libpq)
+make ext-sqlite # build the SQLite extension (requires libsqlite3)
+make clean      # remove build artifacts
 ```
 
 **Required:** libedit — ships with macOS. On Linux, install `libedit-dev` (Debian/Ubuntu) or `libedit-devel` (Fedora/RHEL).

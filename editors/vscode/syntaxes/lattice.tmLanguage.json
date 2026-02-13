@@ -268,7 +268,7 @@
         },
         {
           "name": "support.function.builtin.meta.lattice",
-          "match": "\\b(lat_eval|tokenize|require_ext)\\b"
+          "match": "\\b(lat_eval|tokenize|require_ext|struct_name|struct_fields|struct_to_map|struct_from_map)\\b"
         },
         {
           "name": "support.function.builtin.datetime.lattice",

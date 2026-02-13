@@ -115,7 +115,7 @@ WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinc
               -sMODULARIZE=1 -sEXPORT_NAME=createLattice \
               -sALLOW_MEMORY_GROWTH=1
 
-.PHONY: all clean test asan wasm bench bench-stress ext-pg
+.PHONY: all clean test asan wasm bench bench-stress ext-pg ext-sqlite
 
 all: $(TARGET)
 
@@ -152,6 +152,9 @@ bench-stress: $(TARGET)
 
 ext-pg:
 	$(MAKE) -C extensions/pg
+
+ext-sqlite:
+	$(MAKE) -C extensions/sqlite
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

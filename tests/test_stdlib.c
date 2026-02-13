@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.2.0"
+        "0.2.1"
     );
 }
 
@@ -5306,7 +5306,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.2.0"
+        "Hello, Lattice!\nVersion 0.2.1"
     );
 }
 
@@ -5823,6 +5823,334 @@ static void test_require_ext_no_args(void) {
         "    let ext = require_ext()\n"
         "}\n",
         "EVAL_ERROR:"
+    );
+}
+
+/* ======================================================================
+ * SQLite Extension
+ * ====================================================================== */
+
+/* Helper: common preamble that loads the sqlite extension and extracts fns */
+#define SQLITE_PREAMBLE \
+    "let db = require_ext(\"sqlite\")\n" \
+    "let open_fn = db.get(\"open\")\n" \
+    "let close_fn = db.get(\"close\")\n" \
+    "let query_fn = db.get(\"query\")\n" \
+    "let exec_fn = db.get(\"exec\")\n" \
+    "let status_fn = db.get(\"status\")\n" \
+    "let rowid_fn = db.get(\"last_insert_rowid\")\n"
+
+static void test_sqlite_open_close(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    print(typeof(conn))\n"
+        "    close_fn(conn)\n"
+        "    print(\"done\")\n"
+        "}\n",
+        "Int\ndone"
+    );
+}
+
+static void test_sqlite_status(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    let s1 = status_fn(conn)\n"
+        "    print(s1)\n"
+        "    close_fn(conn)\n"
+        "    let s2 = status_fn(conn)\n"
+        "    print(s2)\n"
+        "}\n",
+        "ok\nclosed"
+    );
+}
+
+static void test_sqlite_exec_create(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    let r = exec_fn(conn, \"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)\")\n"
+        "    print(r)\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "0"
+    );
+}
+
+static void test_sqlite_exec_insert(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)\")\n"
+        "    let r1 = exec_fn(conn, \"INSERT INTO t (name) VALUES ('Alice')\")\n"
+        "    print(r1)\n"
+        "    let r2 = exec_fn(conn, \"INSERT INTO t (name) VALUES ('Bob')\")\n"
+        "    print(r2)\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "1\n1"
+    );
+}
+
+static void test_sqlite_query_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)\")\n"
+        "    exec_fn(conn, \"INSERT INTO t (name) VALUES ('Alice')\")\n"
+        "    exec_fn(conn, \"INSERT INTO t (name) VALUES ('Bob')\")\n"
+        "    let rows = query_fn(conn, \"SELECT * FROM t ORDER BY id\")\n"
+        "    print(len(rows))\n"
+        "    print(rows.first().get(\"name\"))\n"
+        "    print(rows.last().get(\"name\"))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "2\nAlice\nBob"
+    );
+}
+
+static void test_sqlite_query_types(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (i INTEGER, f REAL, s TEXT, n BLOB)\")\n"
+        "    exec_fn(conn, \"INSERT INTO t VALUES (42, 3.14, 'hello', NULL)\")\n"
+        "    let rows = query_fn(conn, \"SELECT * FROM t\")\n"
+        "    let row = rows.first()\n"
+        "    print(typeof(row.get(\"i\")))\n"
+        "    print(row.get(\"i\"))\n"
+        "    print(typeof(row.get(\"f\")))\n"
+        "    print(row.get(\"f\"))\n"
+        "    print(typeof(row.get(\"s\")))\n"
+        "    print(row.get(\"s\"))\n"
+        "    print(typeof(row.get(\"n\")))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "Int\n42\nFloat\n3.14\nString\nhello\nNil"
+    );
+}
+
+static void test_sqlite_query_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (id INTEGER)\")\n"
+        "    let rows = query_fn(conn, \"SELECT * FROM t\")\n"
+        "    print(len(rows))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "0"
+    );
+}
+
+static void test_sqlite_exec_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"INSERT INTO nonexistent VALUES (1)\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_sqlite_query_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    query_fn(conn, \"SELECT * FROM nonexistent\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_sqlite_close_invalid(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    close_fn(9999)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_sqlite_multiple_tables(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)\")\n"
+        "    exec_fn(conn, \"CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER, amount REAL)\")\n"
+        "    exec_fn(conn, \"INSERT INTO users (name) VALUES ('Alice')\")\n"
+        "    exec_fn(conn, \"INSERT INTO orders (user_id, amount) VALUES (1, 99.95)\")\n"
+        "    let rows = query_fn(conn, \"SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id\")\n"
+        "    print(len(rows))\n"
+        "    let row = rows.first()\n"
+        "    print(row.get(\"name\"))\n"
+        "    print(row.get(\"amount\"))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "1\nAlice\n99.95"
+    );
+}
+
+/* ======================================================================
+ * Struct Reflection Builtins
+ * ====================================================================== */
+
+static void test_struct_name(void) {
+    ASSERT_OUTPUT(
+        "struct User { name: String, age: Int }\n"
+        "fn main() {\n"
+        "    let u = User { name: \"Alice\", age: 30 }\n"
+        "    print(struct_name(u))\n"
+        "}\n",
+        "User"
+    );
+}
+
+static void test_struct_fields(void) {
+    ASSERT_OUTPUT(
+        "struct Point { x: Int, y: Int }\n"
+        "fn main() {\n"
+        "    let p = Point { x: 1, y: 2 }\n"
+        "    print(struct_fields(p))\n"
+        "}\n",
+        "[x, y]"
+    );
+}
+
+static void test_struct_to_map(void) {
+    ASSERT_OUTPUT(
+        "struct User { name: String, age: Int }\n"
+        "fn main() {\n"
+        "    let u = User { name: \"Alice\", age: 30 }\n"
+        "    let m = struct_to_map(u)\n"
+        "    print(m.get(\"name\"))\n"
+        "    print(m.get(\"age\"))\n"
+        "}\n",
+        "Alice\n30"
+    );
+}
+
+static void test_struct_from_map(void) {
+    ASSERT_OUTPUT(
+        "struct User { name: String, age: Int }\n"
+        "fn main() {\n"
+        "    let u = User { name: \"Alice\", age: 30 }\n"
+        "    let m = struct_to_map(u)\n"
+        "    let u2 = struct_from_map(\"User\", m)\n"
+        "    print(u2.name)\n"
+        "    print(u2.age)\n"
+        "}\n",
+        "Alice\n30"
+    );
+}
+
+static void test_struct_from_map_missing(void) {
+    ASSERT_OUTPUT(
+        "struct User { name: String, age: Int }\n"
+        "fn main() {\n"
+        "    let m = Map::new()\n"
+        "    m.set(\"name\", \"Bob\")\n"
+        "    let u = struct_from_map(\"User\", m)\n"
+        "    print(u.name)\n"
+        "    print(u.age)\n"
+        "}\n",
+        "Bob\nnil"
+    );
+}
+
+static void test_struct_from_map_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let m = Map::new()\n"
+        "    struct_from_map(\"NonExistent\", m)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* ======================================================================
+ * SQLite Parameterized Queries
+ * ====================================================================== */
+
+static void test_sqlite_param_query(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)\")\n"
+        "    exec_fn(conn, \"INSERT INTO t VALUES (1, 'Alice')\")\n"
+        "    exec_fn(conn, \"INSERT INTO t VALUES (2, 'Bob')\")\n"
+        "    let rows = query_fn(conn, \"SELECT * FROM t WHERE name = ?\", [\"Alice\"])\n"
+        "    print(len(rows))\n"
+        "    print(rows.first().get(\"name\"))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "1\nAlice"
+    );
+}
+
+static void test_sqlite_param_exec(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (name TEXT, age INTEGER)\")\n"
+        "    exec_fn(conn, \"INSERT INTO t (name, age) VALUES (?, ?)\", [\"Alice\", 30])\n"
+        "    let rows = query_fn(conn, \"SELECT * FROM t\")\n"
+        "    print(rows.first().get(\"name\"))\n"
+        "    print(rows.first().get(\"age\"))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "Alice\n30"
+    );
+}
+
+static void test_sqlite_param_types(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (i INTEGER, f REAL, s TEXT, n TEXT)\")\n"
+        "    exec_fn(conn, \"INSERT INTO t VALUES (?, ?, ?, ?)\", [42, 3.14, \"hello\", nil])\n"
+        "    let rows = query_fn(conn, \"SELECT * FROM t\")\n"
+        "    let row = rows.first()\n"
+        "    print(typeof(row.get(\"i\")))\n"
+        "    print(row.get(\"i\"))\n"
+        "    print(typeof(row.get(\"f\")))\n"
+        "    print(row.get(\"f\"))\n"
+        "    print(row.get(\"s\"))\n"
+        "    print(typeof(row.get(\"n\")))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "Int\n42\nFloat\n3.14\nhello\nNil"
+    );
+}
+
+static void test_sqlite_last_insert_rowid(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        SQLITE_PREAMBLE
+        "    let conn = open_fn(\":memory:\")\n"
+        "    exec_fn(conn, \"CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)\")\n"
+        "    exec_fn(conn, \"INSERT INTO t (name) VALUES (?)\", [\"Alice\"])\n"
+        "    print(rowid_fn(conn))\n"
+        "    exec_fn(conn, \"INSERT INTO t (name) VALUES (?)\", [\"Bob\"])\n"
+        "    print(rowid_fn(conn))\n"
+        "    close_fn(conn)\n"
+        "}\n",
+        "1\n2"
     );
 }
 
@@ -6409,4 +6737,31 @@ void register_stdlib_tests(void) {
     register_test("test_require_ext_missing", test_require_ext_missing);
     register_test("test_require_ext_wrong_type", test_require_ext_wrong_type);
     register_test("test_require_ext_no_args", test_require_ext_no_args);
+
+    /* SQLite extension */
+    register_test("test_sqlite_open_close", test_sqlite_open_close);
+    register_test("test_sqlite_status", test_sqlite_status);
+    register_test("test_sqlite_exec_create", test_sqlite_exec_create);
+    register_test("test_sqlite_exec_insert", test_sqlite_exec_insert);
+    register_test("test_sqlite_query_basic", test_sqlite_query_basic);
+    register_test("test_sqlite_query_types", test_sqlite_query_types);
+    register_test("test_sqlite_query_empty", test_sqlite_query_empty);
+    register_test("test_sqlite_exec_error", test_sqlite_exec_error);
+    register_test("test_sqlite_query_error", test_sqlite_query_error);
+    register_test("test_sqlite_close_invalid", test_sqlite_close_invalid);
+    register_test("test_sqlite_multiple_tables", test_sqlite_multiple_tables);
+
+    /* SQLite parameterized queries */
+    register_test("test_sqlite_param_query", test_sqlite_param_query);
+    register_test("test_sqlite_param_exec", test_sqlite_param_exec);
+    register_test("test_sqlite_param_types", test_sqlite_param_types);
+    register_test("test_sqlite_last_insert_rowid", test_sqlite_last_insert_rowid);
+
+    /* Struct reflection builtins */
+    register_test("test_struct_name", test_struct_name);
+    register_test("test_struct_fields", test_struct_fields);
+    register_test("test_struct_to_map", test_struct_to_map);
+    register_test("test_struct_from_map", test_struct_from_map);
+    register_test("test_struct_from_map_missing", test_struct_from_map_missing);
+    register_test("test_struct_from_map_error", test_struct_from_map_error);
 }
