@@ -170,6 +170,15 @@ LatValue value_unit(void) {
     return val;
 }
 
+LatValue value_nil(void) {
+    LatValue val;
+    memset(&val, 0, sizeof(val));
+    val.type = VAL_NIL;
+    val.phase = VTAG_UNPHASED;
+    val.region_id = (size_t)-1;
+    return val;
+}
+
 LatValue value_range(int64_t start, int64_t end) {
     LatValue val;
     memset(&val, 0, sizeof(val));
@@ -235,6 +244,20 @@ LatValue value_set_new(void) {
     return val;
 }
 
+LatValue value_tuple(LatValue *elems, size_t len) {
+    LatValue val;
+    memset(&val, 0, sizeof(val));
+    val.type = VAL_TUPLE;
+    val.phase = VTAG_CRYSTAL;
+    val.region_id = (size_t)-1;
+    val.as.tuple.elems = lat_alloc(len * sizeof(LatValue));
+    for (size_t i = 0; i < len; i++) {
+        val.as.tuple.elems[i] = value_deep_clone(&elems[i]);
+    }
+    val.as.tuple.len = len;
+    return val;
+}
+
 /* ── Phase helpers ── */
 
 bool value_is_fluid(const LatValue *v) { return v->phase == VTAG_FLUID; }
@@ -291,6 +314,7 @@ LatValue value_deep_clone(const LatValue *v) {
             break;
         }
         case VAL_UNIT: break;
+        case VAL_NIL: break;
         case VAL_RANGE:
             out.as.range.start = v->as.range.start;
             out.as.range.end = v->as.range.end;
@@ -384,6 +408,14 @@ LatValue value_deep_clone(const LatValue *v) {
             }
             break;
         }
+        case VAL_TUPLE: {
+            out.as.tuple.elems = lat_alloc(v->as.tuple.len * sizeof(LatValue));
+            for (size_t i = 0; i < v->as.tuple.len; i++) {
+                out.as.tuple.elems[i] = value_deep_clone(&v->as.tuple.elems[i]);
+            }
+            out.as.tuple.len = v->as.tuple.len;
+            break;
+        }
     }
     return out;
 }
@@ -416,6 +448,10 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
                 LatValue *sv = (LatValue *)v->as.set.map->entries[i].value;
                 set_phase_recursive(sv, phase);
             }
+        }
+    } else if (v->type == VAL_TUPLE) {
+        for (size_t i = 0; i < v->as.tuple.len; i++) {
+            set_phase_recursive(&v->as.tuple.elems[i], phase);
         }
     }
 }
@@ -530,6 +566,9 @@ char *value_display(const LatValue *v) {
         case VAL_UNIT:
             buf = strdup("()");
             break;
+        case VAL_NIL:
+            buf = strdup("nil");
+            break;
         case VAL_RANGE:
             (void)asprintf(&buf, "%lld..%lld", (long long)v->as.range.start, (long long)v->as.range.end);
             break;
@@ -585,6 +624,31 @@ char *value_display(const LatValue *v) {
             buf[pos2] = '\0';
             break;
         }
+        case VAL_TUPLE: {
+            size_t tcap = 64;
+            buf = malloc(tcap);
+            size_t tpos = 0;
+            buf[tpos++] = '(';
+            for (size_t i = 0; i < v->as.tuple.len; i++) {
+                if (i > 0) {
+                    while (tpos + 3 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
+                    buf[tpos++] = ','; buf[tpos++] = ' ';
+                }
+                char *elem = value_display(&v->as.tuple.elems[i]);
+                size_t elen = strlen(elem);
+                while (tpos + elen + 4 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
+                memcpy(buf + tpos, elem, elen); tpos += elen;
+                free(elem);
+            }
+            if (v->as.tuple.len == 1) {
+                while (tpos + 3 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
+                buf[tpos++] = ',';
+            }
+            while (tpos + 2 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
+            buf[tpos++] = ')';
+            buf[tpos] = '\0';
+            break;
+        }
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
@@ -618,6 +682,21 @@ char *value_display(const LatValue *v) {
     return buf;
 }
 
+char *value_repr(const LatValue *v) {
+    if (v->type == VAL_STR) {
+        /* Wrap strings in double quotes */
+        size_t slen = strlen(v->as.str_val);
+        char *buf = malloc(slen + 3);
+        buf[0] = '"';
+        memcpy(buf + 1, v->as.str_val, slen);
+        buf[slen + 1] = '"';
+        buf[slen + 2] = '\0';
+        return buf;
+    }
+    /* Everything else uses standard display */
+    return value_display(v);
+}
+
 /* ── Type name ── */
 
 const char *value_type_name(const LatValue *v) {
@@ -630,11 +709,13 @@ const char *value_type_name(const LatValue *v) {
         case VAL_STRUCT:  return "Struct";
         case VAL_CLOSURE: return "Closure";
         case VAL_UNIT:    return "Unit";
+        case VAL_NIL:     return "Nil";
         case VAL_RANGE:   return "Range";
         case VAL_MAP:     return "Map";
         case VAL_CHANNEL: return "Channel";
         case VAL_ENUM:    return "Enum";
         case VAL_SET:     return "Set";
+        case VAL_TUPLE:   return "Tuple";
     }
     return "?";
 }
@@ -649,6 +730,7 @@ bool value_eq(const LatValue *a, const LatValue *b) {
         case VAL_BOOL:  return a->as.bool_val == b->as.bool_val;
         case VAL_STR:   return strcmp(a->as.str_val, b->as.str_val) == 0;
         case VAL_UNIT:  return true;
+        case VAL_NIL:   return true;
         case VAL_RANGE: return a->as.range.start == b->as.range.start &&
                                a->as.range.end == b->as.range.end;
         case VAL_ARRAY:
@@ -699,6 +781,13 @@ bool value_eq(const LatValue *a, const LatValue *b) {
             }
             return true;
         }
+        case VAL_TUPLE:
+            if (a->as.tuple.len != b->as.tuple.len) return false;
+            for (size_t i = 0; i < a->as.tuple.len; i++) {
+                if (!value_eq(&a->as.tuple.elems[i], &b->as.tuple.elems[i]))
+                    return false;
+            }
+            return true;
     }
     return false;
 }
@@ -779,6 +868,11 @@ void value_free(LatValue *v) {
                 val_dealloc(v, v->as.set.map);
             }
             break;
+        case VAL_TUPLE:
+            for (size_t i = 0; i < v->as.tuple.len; i++)
+                value_free(&v->as.tuple.elems[i]);
+            val_dealloc(v, v->as.tuple.elems);
+            break;
         default:
             break;
     }
@@ -794,8 +888,10 @@ bool value_is_truthy(const LatValue *v) {
         case VAL_FLOAT: return v->as.float_val != 0.0;
         case VAL_STR:   return v->as.str_val[0] != '\0';
         case VAL_UNIT:  return false;
+        case VAL_NIL:   return false;
         case VAL_MAP:     return lat_map_len(v->as.map.map) > 0;
         case VAL_SET:     return lat_map_len(v->as.set.map) > 0;
+        case VAL_TUPLE:   return v->as.tuple.len > 0;
         case VAL_CHANNEL: return true;
         default:          return true;
     }

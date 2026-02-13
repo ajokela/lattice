@@ -90,11 +90,13 @@ const char *builtin_typeof_str(const LatValue *v) {
         case VAL_STRUCT:  return "Struct";
         case VAL_CLOSURE: return "Closure";
         case VAL_UNIT:    return "Unit";
+        case VAL_NIL:     return "Nil";
         case VAL_RANGE:   return "Range";
         case VAL_MAP:     return "Map";
         case VAL_CHANNEL: return "Channel";
         case VAL_ENUM:    return "Enum";
         case VAL_SET:     return "Set";
+        case VAL_TUPLE:   return "Tuple";
     }
     return "?";
 }

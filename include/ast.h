@@ -16,10 +16,13 @@ typedef enum {
     BINOP_ADD, BINOP_SUB, BINOP_MUL, BINOP_DIV, BINOP_MOD,
     BINOP_EQ, BINOP_NEQ, BINOP_LT, BINOP_GT, BINOP_LTEQ, BINOP_GTEQ,
     BINOP_AND, BINOP_OR,
+    BINOP_BIT_AND, BINOP_BIT_OR, BINOP_BIT_XOR,
+    BINOP_LSHIFT, BINOP_RSHIFT,
+    BINOP_NIL_COALESCE,
 } BinOpKind;
 
 /* Unary operators */
-typedef enum { UNOP_NEG, UNOP_NOT } UnaryOpKind;
+typedef enum { UNOP_NEG, UNOP_NOT, UNOP_BIT_NOT } UnaryOpKind;
 
 /* Type expression kind */
 typedef enum { TYPE_NAMED, TYPE_ARRAY } TypeKindTag;
@@ -64,7 +67,7 @@ typedef struct {
 
 /* Expression types */
 typedef enum {
-    EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT,
+    EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT,
     EXPR_IDENT,
     EXPR_BINOP, EXPR_UNARYOP,
     EXPR_CALL, EXPR_METHOD_CALL, EXPR_FIELD_ACCESS, EXPR_INDEX,
@@ -78,6 +81,8 @@ typedef enum {
     EXPR_INTERP_STRING,
     EXPR_MATCH,
     EXPR_ENUM_VARIANT,
+    EXPR_SPREAD,
+    EXPR_TUPLE,
 } ExprTag;
 
 /* Statement types */
@@ -89,6 +94,7 @@ typedef enum {
     STMT_RETURN, STMT_FOR, STMT_WHILE, STMT_LOOP,
     STMT_BREAK, STMT_CONTINUE,
     STMT_DESTRUCTURE,
+    STMT_IMPORT,
 } StmtTag;
 
 /* Struct field in a struct literal */
@@ -118,6 +124,8 @@ struct Expr {
         struct { char *name; FieldInit *fields; size_t field_count; } struct_lit;
 
         Expr *freeze_expr;   /* FREEZE, THAW, CLONE: inner expr */
+        Expr *spread_expr;   /* SPREAD: inner expr to expand */
+        struct { Expr **elems; size_t count; } tuple;  /* TUPLE */
         struct { Stmt **stmts; size_t count; } block;  /* FORGE, BLOCK, SPAWN */
         struct {
             Expr *cond;
@@ -188,6 +196,12 @@ struct Stmt {
             char *rest_name;    /* nullable, for ...rest in arrays */
             Expr *value;
         } destructure;
+        struct {
+            char *module_path;
+            char *alias;               /* nullable — "as alias" name */
+            char **selective_names;     /* nullable — { name1, name2 } */
+            size_t selective_count;
+        } import;
     } as;
 };
 
@@ -269,6 +283,7 @@ Expr *expr_int_lit(int64_t val);
 Expr *expr_float_lit(double val);
 Expr *expr_string_lit(char *val);
 Expr *expr_bool_lit(bool val);
+Expr *expr_nil_lit(void);
 Expr *expr_ident(char *name);
 Expr *expr_binop(BinOpKind op, Expr *left, Expr *right);
 Expr *expr_unaryop(UnaryOpKind op, Expr *operand);
@@ -295,6 +310,8 @@ Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
 Expr *expr_interp_string(char **parts, Expr **exprs, size_t count);
 Expr *expr_match(Expr *scrutinee, MatchArm *arms, size_t arm_count);
 Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t arg_count);
+Expr *expr_spread(Expr *inner);
+Expr *expr_tuple(Expr **elems, size_t count);
 
 /* Pattern constructors */
 Pattern *pattern_literal(Expr *lit);
@@ -316,6 +333,7 @@ Stmt *stmt_break(void);
 Stmt *stmt_continue(void);
 Stmt *stmt_destructure(AstPhase phase, DestructKind kind, char **names, size_t name_count,
                        char *rest_name, Expr *value);
+Stmt *stmt_import(char *path, char *alias, char **selective, size_t count);
 
 /* ── Clone (for lvalue AST expressions in desugaring) ── */
 Expr *expr_clone_ast(const Expr *e);

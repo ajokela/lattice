@@ -79,6 +79,7 @@ static void pc_check_spawn_expr(PhaseChecker *pc, const Expr *expr);
 static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
     switch (expr->tag) {
         case EXPR_INT_LIT: case EXPR_FLOAT_LIT: case EXPR_STRING_LIT: case EXPR_BOOL_LIT:
+        case EXPR_NIL_LIT:
             return PHASE_UNSPECIFIED;
 
         case EXPR_IDENT:
@@ -119,6 +120,15 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             for (size_t i = 0; i < expr->as.array.count; i++)
                 pc_check_expr(pc, expr->as.array.elems[i]);
             return PHASE_UNSPECIFIED;
+
+        case EXPR_SPREAD:
+            pc_check_expr(pc, expr->as.spread_expr);
+            return PHASE_UNSPECIFIED;
+
+        case EXPR_TUPLE:
+            for (size_t i = 0; i < expr->as.tuple.count; i++)
+                pc_check_expr(pc, expr->as.tuple.elems[i]);
+            return PHASE_CRYSTAL;
 
         case EXPR_STRUCT_LIT:
             for (size_t i = 0; i < expr->as.struct_lit.field_count; i++)
@@ -322,6 +332,15 @@ static void pc_check_stmt(PhaseChecker *pc, const Stmt *stmt) {
                 pc_define(pc, stmt->as.destructure.rest_name, eff);
             break;
         }
+        case STMT_IMPORT:
+            /* Import bindings are unphased */
+            if (stmt->as.import.alias)
+                pc_define(pc, stmt->as.import.alias, PHASE_UNSPECIFIED);
+            if (stmt->as.import.selective_names) {
+                for (size_t i = 0; i < stmt->as.import.selective_count; i++)
+                    pc_define(pc, stmt->as.import.selective_names[i], PHASE_UNSPECIFIED);
+            }
+            break;
     }
 }
 
@@ -381,6 +400,13 @@ static void pc_check_spawn_expr(PhaseChecker *pc, const Expr *expr) {
         case EXPR_ARRAY:
             for (size_t i = 0; i < expr->as.array.count; i++)
                 pc_check_spawn_expr(pc, expr->as.array.elems[i]);
+            break;
+        case EXPR_SPREAD:
+            pc_check_spawn_expr(pc, expr->as.spread_expr);
+            break;
+        case EXPR_TUPLE:
+            for (size_t i = 0; i < expr->as.tuple.count; i++)
+                pc_check_spawn_expr(pc, expr->as.tuple.elems[i]);
             break;
         case EXPR_STRUCT_LIT:
             for (size_t i = 0; i < expr->as.struct_lit.field_count; i++)

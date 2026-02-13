@@ -104,6 +104,7 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "spawn") == 0)    return TOK_SPAWN;
     if (strcmp(ident, "true") == 0)     return TOK_TRUE;
     if (strcmp(ident, "false") == 0)    return TOK_FALSE;
+    if (strcmp(ident, "nil") == 0)      return TOK_NIL;
     if (strcmp(ident, "clone") == 0)    return TOK_CLONE;
     if (strcmp(ident, "print") == 0)    return TOK_PRINT;
     if (strcmp(ident, "try") == 0)      return TOK_TRY;
@@ -112,11 +113,15 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "test") == 0)     return TOK_TEST;
     if (strcmp(ident, "match") == 0)    return TOK_MATCH;
     if (strcmp(ident, "enum") == 0)     return TOK_ENUM;
+    if (strcmp(ident, "import") == 0)   return TOK_IMPORT;
+    if (strcmp(ident, "from") == 0)     return TOK_FROM;
+    if (strcmp(ident, "as") == 0)       return TOK_AS;
     return TOK_IDENT;
 }
 
 /* Forward declarations for mutual recursion (string interpolation) */
 static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err);
+static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err);
 static bool lex_one(Lexer *lex, LatVec *tokens, char **err);
 
 static bool next_token(Lexer *lex, Token *out, char **err) {
@@ -222,11 +227,17 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
             return true;
         case '&':
             if (lex_peek(lex) == '&') { lex_advance(lex); *out = token_simple(TOK_AND, line, col); }
+            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_AMP_EQ, line, col); }
             else { *out = token_simple(TOK_AMPERSAND, line, col); }
             return true;
         case '|':
             if (lex_peek(lex) == '|') { lex_advance(lex); *out = token_simple(TOK_OR, line, col); }
+            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_PIPE_EQ, line, col); }
             else { *out = token_simple(TOK_PIPE, line, col); }
+            return true;
+        case '^':
+            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_CARET_EQ, line, col); }
+            else { *out = token_simple(TOK_CARET, line, col); }
             return true;
         case '=':
             if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_EQEQ, line, col); }
@@ -238,11 +249,21 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
             else { *out = token_simple(TOK_BANG, line, col); }
             return true;
         case '<':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_LTEQ, line, col); }
+            if (lex_peek(lex) == '<') {
+                lex_advance(lex);
+                if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_LSHIFT_EQ, line, col); }
+                else { *out = token_simple(TOK_LSHIFT, line, col); }
+            }
+            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_LTEQ, line, col); }
             else { *out = token_simple(TOK_LT, line, col); }
             return true;
         case '>':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_GTEQ, line, col); }
+            if (lex_peek(lex) == '>') {
+                lex_advance(lex);
+                if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_RSHIFT_EQ, line, col); }
+                else { *out = token_simple(TOK_RSHIFT, line, col); }
+            }
+            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_GTEQ, line, col); }
             else { *out = token_simple(TOK_GT, line, col); }
             return true;
         case '-':
@@ -261,6 +282,14 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         case ':':
             if (lex_peek(lex) == ':') { lex_advance(lex); *out = token_simple(TOK_COLONCOLON, line, col); }
             else { *out = token_simple(TOK_COLON, line, col); }
+            return true;
+        case '?':
+            if (lex_peek(lex) == '?') { lex_advance(lex); *out = token_simple(TOK_QUESTION_QUESTION, line, col); }
+            else {
+                *err = NULL;
+                (void)asprintf(err, "%zu:%zu: unexpected character '?'", line, col);
+                return false;
+            }
             return true;
         default:
             *err = NULL;
@@ -287,6 +316,7 @@ static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len,
         case '0':  c = '\0'; break;
         case '\\': c = '\\'; break;
         case '"':  c = '"';  break;
+        case '\'': c = '\''; break;
         case '$':  c = '$';  break;
         case 'x': {
             if (lex->pos + 1 >= lex->len) {
@@ -421,11 +451,334 @@ static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err) {
     }
 }
 
+/* Scan a single-quoted string literal (no interpolation).
+ * On entry, lex is positioned at the opening '\''.
+ * Pushes a TOK_STRING_LIT token. */
+static bool lex_single_quote_string(Lexer *lex, LatVec *tokens, char **err) {
+    size_t line = lex->line;
+    size_t col = lex->col;
+    lex_advance(lex); /* consume opening ' */
+
+    size_t buf_cap = 64;
+    size_t buf_len = 0;
+    char *buf = malloc(buf_cap);
+
+    for (;;) {
+        if (lex->pos >= lex->len) {
+            free(buf);
+            *err = NULL;
+            (void)asprintf(err, "%zu:%zu: unterminated string literal", line, col);
+            return false;
+        }
+
+        /* End of string */
+        if (lex_peek(lex) == '\'') {
+            lex_advance(lex); /* consume closing ' */
+            buf[buf_len] = '\0';
+            Token seg = token_str(TOK_STRING_LIT, buf, line, col);
+            lat_vec_push(tokens, &seg);
+            return true;
+        }
+
+        /* Escape sequence */
+        if (lex_peek(lex) == '\\') {
+            lex_advance(lex); /* consume backslash */
+            if (!lex_string_escape(lex, &buf, &buf_len, &buf_cap, line, col, err)) {
+                free(buf);
+                return false;
+            }
+            continue;
+        }
+
+        /* Regular character */
+        char c = lex_advance(lex);
+        if (buf_len + 1 >= buf_cap) {
+            buf_cap *= 2;
+            buf = realloc(buf, buf_cap);
+        }
+        buf[buf_len++] = c;
+    }
+}
+
+/* Dedent a raw triple-quoted string based on closing indentation.
+ * If the closing """ is on its own line with only whitespace before it,
+ * that whitespace count is used as the dedent level. Returns a new
+ * heap-allocated string. Caller must free. */
+static char *dedent_triple_string(const char *raw, size_t raw_len, size_t *out_len) {
+    /* Find last newline in raw content */
+    size_t last_nl = raw_len; /* sentinel: no newline found */
+    for (size_t i = raw_len; i > 0; i--) {
+        if (raw[i - 1] == '\n') {
+            last_nl = i - 1;
+            break;
+        }
+    }
+
+    size_t closing_indent = 0;
+    size_t content_end = raw_len;
+
+    if (last_nl < raw_len) {
+        /* Check if everything after last newline is whitespace */
+        bool all_ws = true;
+        size_t ws_count = 0;
+        for (size_t i = last_nl + 1; i < raw_len; i++) {
+            if (raw[i] == ' ') ws_count++;
+            else if (raw[i] == '\t') ws_count += 4;
+            else { all_ws = false; break; }
+        }
+        if (all_ws) {
+            closing_indent = ws_count;
+            content_end = last_nl; /* exclude trailing \n + whitespace */
+        }
+    }
+
+    if (closing_indent == 0) {
+        /* No dedenting needed */
+        char *result = malloc(content_end + 1);
+        memcpy(result, raw, content_end);
+        result[content_end] = '\0';
+        *out_len = content_end;
+        return result;
+    }
+
+    /* Dedent: strip up to closing_indent whitespace from start of each line */
+    size_t result_cap = content_end + 1;
+    char *result = malloc(result_cap);
+    size_t result_len = 0;
+    size_t i = 0;
+    bool at_line_start = true;
+
+    while (i < content_end) {
+        if (at_line_start) {
+            size_t skipped = 0;
+            while (i < content_end && skipped < closing_indent) {
+                if (raw[i] == ' ') { skipped++; i++; }
+                else if (raw[i] == '\t') { skipped += 4; i++; }
+                else break;
+            }
+            at_line_start = false;
+        }
+        if (i >= content_end) break;
+        char c = raw[i++];
+        if (c == '\n') at_line_start = true;
+        if (result_len + 1 >= result_cap) {
+            result_cap *= 2;
+            result = realloc(result, result_cap);
+        }
+        result[result_len++] = c;
+    }
+
+    result[result_len] = '\0';
+    *out_len = result_len;
+    return result;
+}
+
+/* Scan a triple-quoted string literal with optional interpolation and dedenting.
+ * On entry, lex is positioned at the first '"' of opening """.
+ * Supports ${...} interpolation like double-quoted strings.
+ * Dedents based on closing """ indentation. */
+static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
+    size_t line = lex->line;
+    size_t col = lex->col;
+
+    /* Consume opening """ */
+    lex_advance(lex); lex_advance(lex); lex_advance(lex);
+
+    /* Skip optional newline immediately after """ */
+    if (lex_peek(lex) == '\n') {
+        lex_advance(lex);
+    } else if (lex_peek(lex) == '\r' && lex_peek_ahead(lex, 1) == '\n') {
+        lex_advance(lex); lex_advance(lex);
+    }
+
+    /* Collect raw content until closing """ */
+    size_t raw_cap = 256;
+    size_t raw_len = 0;
+    char *raw = malloc(raw_cap);
+
+    for (;;) {
+        if (lex->pos >= lex->len) {
+            free(raw);
+            *err = NULL;
+            (void)asprintf(err, "%zu:%zu: unterminated triple-quoted string", line, col);
+            return false;
+        }
+        if (lex_peek(lex) == '"' && lex_peek_ahead(lex, 1) == '"' &&
+            lex_peek_ahead(lex, 2) == '"') {
+            lex_advance(lex); lex_advance(lex); lex_advance(lex);
+            break;
+        }
+        char c = lex_advance(lex);
+        if (raw_len + 1 >= raw_cap) {
+            raw_cap *= 2;
+            raw = realloc(raw, raw_cap);
+        }
+        raw[raw_len++] = c;
+    }
+    raw[raw_len] = '\0';
+
+    /* Dedent */
+    size_t dedented_len = 0;
+    char *dedented = dedent_triple_string(raw, raw_len, &dedented_len);
+    free(raw);
+
+    /* Process dedented content for escapes and interpolation */
+    bool has_interp = false;
+    size_t buf_cap = 64;
+    size_t buf_len = 0;
+    char *buf = malloc(buf_cap);
+    size_t pos = 0;
+
+    while (pos < dedented_len) {
+        /* Check for interpolation ${ */
+        if (dedented[pos] == '$' && pos + 1 < dedented_len && dedented[pos + 1] == '{') {
+            buf[buf_len] = '\0';
+            TokenType seg_type = has_interp ? TOK_INTERP_MID : TOK_INTERP_START;
+            Token seg = token_str(seg_type, buf, line, col);
+            lat_vec_push(tokens, &seg);
+            has_interp = true;
+            pos += 2; /* skip ${ */
+
+            /* Extract expression text by finding matching } */
+            int depth = 1;
+            size_t expr_start = pos;
+            while (pos < dedented_len && depth > 0) {
+                char ec = dedented[pos];
+                if (ec == '{') { depth++; }
+                else if (ec == '}') { depth--; if (depth == 0) break; }
+                else if (ec == '"') {
+                    pos++;
+                    while (pos < dedented_len && dedented[pos] != '"') {
+                        if (dedented[pos] == '\\') pos++;
+                        pos++;
+                    }
+                } else if (ec == '\'') {
+                    pos++;
+                    while (pos < dedented_len && dedented[pos] != '\'') {
+                        if (dedented[pos] == '\\') pos++;
+                        pos++;
+                    }
+                }
+                pos++;
+            }
+
+            if (depth != 0) {
+                free(buf); free(dedented);
+                *err = NULL;
+                (void)asprintf(err, "%zu:%zu: unterminated interpolation in triple-quoted string",
+                               line, col);
+                return false;
+            }
+
+            /* Lex expression tokens via a sub-lexer */
+            size_t expr_len = pos - expr_start;
+            char *expr_src = malloc(expr_len + 1);
+            memcpy(expr_src, dedented + expr_start, expr_len);
+            expr_src[expr_len] = '\0';
+
+            Lexer expr_lex = lexer_new(expr_src);
+            for (;;) {
+                skip_whitespace_and_comments(&expr_lex);
+                if (expr_lex.pos >= expr_lex.len) break;
+                if (!lex_one(&expr_lex, tokens, err)) {
+                    free(expr_src); free(buf); free(dedented);
+                    return false;
+                }
+            }
+            free(expr_src);
+            pos++; /* skip closing } */
+
+            /* Reset buffer for next segment */
+            buf_cap = 64;
+            buf_len = 0;
+            buf = malloc(buf_cap);
+            continue;
+        }
+
+        /* Check for escape sequence */
+        if (dedented[pos] == '\\' && pos + 1 < dedented_len) {
+            pos++; /* skip backslash */
+            char esc = dedented[pos++];
+            char c;
+            switch (esc) {
+                case 'n':  c = '\n'; break;
+                case 't':  c = '\t'; break;
+                case 'r':  c = '\r'; break;
+                case '0':  c = '\0'; break;
+                case '\\': c = '\\'; break;
+                case '"':  c = '"';  break;
+                case '\'': c = '\''; break;
+                case '$':  c = '$';  break;
+                case 'x': {
+                    if (pos + 1 >= dedented_len) {
+                        free(buf); free(dedented);
+                        *err = NULL;
+                        (void)asprintf(err, "%zu:%zu: incomplete \\x escape in triple-quoted string",
+                                       line, col);
+                        return false;
+                    }
+                    char h1 = dedented[pos++];
+                    char h2 = dedented[pos++];
+                    int d1 = -1, d2 = -1;
+                    if (h1 >= '0' && h1 <= '9') d1 = h1 - '0';
+                    else if (h1 >= 'a' && h1 <= 'f') d1 = h1 - 'a' + 10;
+                    else if (h1 >= 'A' && h1 <= 'F') d1 = h1 - 'A' + 10;
+                    if (h2 >= '0' && h2 <= '9') d2 = h2 - '0';
+                    else if (h2 >= 'a' && h2 <= 'f') d2 = h2 - 'a' + 10;
+                    else if (h2 >= 'A' && h2 <= 'F') d2 = h2 - 'A' + 10;
+                    if (d1 < 0 || d2 < 0) {
+                        free(buf); free(dedented);
+                        *err = NULL;
+                        (void)asprintf(err, "%zu:%zu: invalid hex escape in triple-quoted string",
+                                       line, col);
+                        return false;
+                    }
+                    c = (char)((d1 << 4) | d2);
+                    break;
+                }
+                default: c = esc; break;
+            }
+            if (buf_len + 1 >= buf_cap) {
+                buf_cap *= 2;
+                buf = realloc(buf, buf_cap);
+            }
+            buf[buf_len++] = c;
+            continue;
+        }
+
+        /* Regular character */
+        char c = dedented[pos++];
+        if (buf_len + 1 >= buf_cap) {
+            buf_cap *= 2;
+            buf = realloc(buf, buf_cap);
+        }
+        buf[buf_len++] = c;
+    }
+
+    /* Emit final token */
+    buf[buf_len] = '\0';
+    if (has_interp) {
+        Token seg = token_str(TOK_INTERP_END, buf, line, col);
+        lat_vec_push(tokens, &seg);
+    } else {
+        Token seg = token_str(TOK_STRING_LIT, buf, line, col);
+        lat_vec_push(tokens, &seg);
+    }
+    free(dedented);
+    return true;
+}
+
 /* Lex one token (or multiple for interpolated strings) and push to tokens. */
 static bool lex_one(Lexer *lex, LatVec *tokens, char **err) {
     skip_whitespace_and_comments(lex);
     if (lex_peek(lex) == '"') {
+        if (lex_peek_ahead(lex, 1) == '"' && lex_peek_ahead(lex, 2) == '"') {
+            return lex_triple_quote_string(lex, tokens, err);
+        }
         return lex_string_or_interp(lex, tokens, err);
+    }
+    if (lex_peek(lex) == '\'') {
+        return lex_single_quote_string(lex, tokens, err);
     }
     Token tok;
     if (!next_token(lex, &tok, err)) return false;

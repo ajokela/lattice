@@ -1,0 +1,9 @@
+fn add(x: Int, y: Int) -> Int {
+    return x + y
+}
+
+fn sub(x: Int, y: Int) -> Int {
+    return x - y
+}
+
+let PI = 3.14159

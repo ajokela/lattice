@@ -27,7 +27,7 @@ static LatValue yaml_detect_scalar(const char *s) {
         return value_bool(false);
     if (strcmp(s, "null") == 0 || strcmp(s, "Null") == 0 || strcmp(s, "NULL") == 0 ||
         strcmp(s, "~") == 0)
-        return value_unit();
+        return value_nil();
 
     /* Integer */
     const char *p = s;
@@ -542,6 +542,7 @@ static void yaml_stringify_value(YamlBuf *b, const LatValue *val, int indent) {
             yb_append(b, val->as.bool_val ? "true" : "false");
             break;
         case VAL_UNIT:
+        case VAL_NIL:
             yb_append(b, "null");
             break;
         case VAL_ARRAY: {
@@ -574,6 +575,22 @@ static void yaml_stringify_value(YamlBuf *b, const LatValue *val, int indent) {
                     LatValue *v = (LatValue *)val->as.map.map->entries[i].value;
                     yaml_stringify_value(b, v, indent + 1);
                     if (v->type != VAL_MAP && v->type != VAL_ARRAY)
+                        yb_append(b, "\n");
+                }
+            }
+            break;
+        }
+        case VAL_TUPLE: {
+            if (val->as.tuple.len == 0) {
+                yb_append(b, "[]");
+            } else {
+                yb_append(b, "\n");
+                for (size_t i = 0; i < val->as.tuple.len; i++) {
+                    yb_indent(b, indent);
+                    yb_append(b, "- ");
+                    yaml_stringify_value(b, &val->as.tuple.elems[i], indent + 1);
+                    if (val->as.tuple.elems[i].type != VAL_MAP &&
+                        val->as.tuple.elems[i].type != VAL_ARRAY)
                         yb_append(b, "\n");
                 }
             }

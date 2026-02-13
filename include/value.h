@@ -13,11 +13,12 @@ typedef enum { VTAG_FLUID, VTAG_CRYSTAL, VTAG_UNPHASED } PhaseTag;
 /* Runtime value types */
 typedef enum {
     VAL_INT, VAL_FLOAT, VAL_BOOL, VAL_STR, VAL_ARRAY,
-    VAL_STRUCT, VAL_CLOSURE, VAL_UNIT, VAL_RANGE,
+    VAL_STRUCT, VAL_CLOSURE, VAL_UNIT, VAL_NIL, VAL_RANGE,
     VAL_MAP,
     VAL_CHANNEL,
     VAL_ENUM,
     VAL_SET,
+    VAL_TUPLE,
 } ValueType;
 
 /* Forward declarations */
@@ -74,6 +75,10 @@ struct LatValue {
         struct {
             LatMap *map;     /* heap-allocated, keys=display strings, values=LatValue */
         } set;
+        struct {
+            LatValue *elems;
+            size_t    len;
+        } tuple;
     } as;
 };
 
@@ -88,11 +93,13 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
 LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured,
                        struct Expr **default_values, bool has_variadic);
 LatValue value_unit(void);
+LatValue value_nil(void);
 LatValue value_range(int64_t start, int64_t end);
 LatValue value_map_new(void);
 LatValue value_channel(struct LatChannel *ch);
 LatValue value_enum(const char *enum_name, const char *variant_name, LatValue *payload, size_t count);
 LatValue value_set_new(void);
+LatValue value_tuple(LatValue *elems, size_t len);
 
 /* ── Phase helpers ── */
 bool value_is_fluid(const LatValue *v);
@@ -108,6 +115,8 @@ LatValue value_thaw(const LatValue *v);
 void value_print(const LatValue *v, FILE *out);
 /* Returns heap-allocated display string */
 char *value_display(const LatValue *v);
+/* Returns heap-allocated repr string (strings quoted, otherwise like display) */
+char *value_repr(const LatValue *v);
 
 /* ── Type name ── */
 const char *value_type_name(const LatValue *v);

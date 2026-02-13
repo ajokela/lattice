@@ -324,7 +324,7 @@ static LatValue jp_parse_value(JsonParser *p) {
     if (strncmp(p->src + p->pos, "null", 4) == 0 &&
         !isalnum((unsigned char)p->src[p->pos + 4])) {
         p->pos += 4;
-        return value_unit();
+        return value_nil();
     }
 
     jp_error(p, "unexpected character");
@@ -453,6 +453,7 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
             jb_append_escaped_string(b, val->as.str_val);
             return true;
         case VAL_UNIT:
+        case VAL_NIL:
             jb_append_str(b, "null");
             return true;
         case VAL_ARRAY: {
@@ -478,6 +479,15 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
                 if (!jb_serialize(b, mv, err)) return false;
             }
             jb_append_char(b, '}');
+            return true;
+        }
+        case VAL_TUPLE: {
+            jb_append_char(b, '[');
+            for (size_t i = 0; i < val->as.tuple.len; i++) {
+                if (i > 0) jb_append_char(b, ',');
+                if (!jb_serialize(b, &val->as.tuple.elems[i], err)) return false;
+            }
+            jb_append_char(b, ']');
             return true;
         }
         case VAL_STRUCT:

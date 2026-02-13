@@ -986,13 +986,13 @@ static void test_map_set_get(void) {
         "}\n",
         "42"
     );
-    /* Get nonexistent key returns unit */
+    /* Get nonexistent key returns nil */
     ASSERT_OUTPUT(
         "fn main() {\n"
         "    flux m = Map::new()\n"
         "    print(m.get(\"nope\"))\n"
         "}\n",
-        "()"
+        "nil"
     );
 }
 
@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.1.7"
+        "0.1.9"
     );
 }
 
@@ -1749,7 +1749,7 @@ static void test_json_parse_primitives(void) {
         "    print(to_string(json_parse(\"false\")))\n"
         "    print(to_string(json_parse(\"null\")))\n"
         "}\n",
-        "42\n3.14\ntrue\nfalse\n()"
+        "42\n3.14\ntrue\nfalse\nnil"
     );
 }
 
@@ -5073,6 +5073,728 @@ static void test_yaml_parse_flow_seq(void) {
  * Test Registration
  * ====================================================================== */
 
+/* ── Single-quoted strings ── */
+
+static void test_single_quote_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print('hello world') }",
+        "hello world"
+    );
+}
+
+static void test_single_quote_double_quotes_inside(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print('say \"hi\"') }",
+        "say \"hi\""
+    );
+}
+
+static void test_single_quote_escaped(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print('it\\'s fine') }",
+        "it's fine"
+    );
+}
+
+static void test_single_quote_no_interpolation(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print('${not interpolated}') }",
+        "${not interpolated}"
+    );
+}
+
+static void test_single_quote_newline_escape(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print('line1\\nline2') }",
+        "line1\nline2"
+    );
+}
+
+static void test_single_quote_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(len('')) }",
+        "0"
+    );
+}
+
+static void test_single_quote_concat(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print('hello' + \" world\") }",
+        "hello world"
+    );
+}
+
+static void test_single_quote_json(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let obj = json_parse('{\"key\": \"value\"}')\n"
+        "    print(obj.get(\"key\"))\n"
+        "}\n",
+        "value"
+    );
+}
+
+/* ── Nil value and ?? operator ── */
+
+static void test_nil_literal(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    print(x)\n"
+        "}\n",
+        "nil"
+    );
+}
+
+static void test_nil_typeof(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(typeof(nil))\n"
+        "}\n",
+        "Nil"
+    );
+}
+
+static void test_nil_equality(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(nil == nil)\n"
+        "    print(nil != nil)\n"
+        "    print(nil == 0)\n"
+        "    print(nil == false)\n"
+        "}\n",
+        "true\nfalse\nfalse\nfalse"
+    );
+}
+
+static void test_nil_truthiness(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    if nil { print(\"yes\") } else { print(\"no\") }\n"
+        "}\n",
+        "no"
+    );
+}
+
+static void test_nil_coalesce(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    print(x ?? \"default\")\n"
+        "}\n",
+        "default"
+    );
+}
+
+static void test_nil_coalesce_non_nil(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = 42\n"
+        "    print(x ?? 0)\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_nil_map_get(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let m = json_parse('{\"a\": 1}')\n"
+        "    print(m.get(\"a\"))\n"
+        "    print(m.get(\"b\"))\n"
+        "    print(m.get(\"b\") ?? \"missing\")\n"
+        "}\n",
+        "1\nnil\nmissing"
+    );
+}
+
+static void test_nil_match(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    let result = match x {\n"
+        "        nil => \"nothing\",\n"
+        "        _ => \"something\"\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "nothing"
+    );
+}
+
+static void test_nil_json_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = json_stringify(nil)\n"
+        "    print(s)\n"
+        "    let v = json_parse(s)\n"
+        "    print(v == nil)\n"
+        "}\n",
+        "null\ntrue"
+    );
+}
+
+static void test_nil_coalesce_chain(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = nil\n"
+        "    let b = nil\n"
+        "    let c = 3\n"
+        "    print(a ?? b ?? c)\n"
+        "}\n",
+        "3"
+    );
+}
+
+/* ── Triple-quoted strings ── */
+
+static void test_triple_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"\"\"hello world\"\"\"\n"
+        "    print(s)\n"
+        "}\n",
+        "hello world"
+    );
+}
+
+static void test_triple_multiline(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"\"\"\n"
+        "    line 1\n"
+        "    line 2\n"
+        "    line 3\n"
+        "    \"\"\"\n"
+        "    print(s)\n"
+        "}\n",
+        "line 1\nline 2\nline 3"
+    );
+}
+
+static void test_triple_dedent(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"\"\"\n"
+        "        deeper\n"
+        "        lines\n"
+        "    \"\"\"\n"
+        "    print(s)\n"
+        "}\n",
+        "    deeper\n    lines"
+    );
+}
+
+static void test_triple_interpolation(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = 42\n"
+        "    let s = \"\"\"value: ${x}\"\"\"\n"
+        "    print(s)\n"
+        "}\n",
+        "value: 42"
+    );
+}
+
+static void test_triple_multiline_interpolation(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let name = \"Lattice\"\n"
+        "    let s = \"\"\"\n"
+        "    Hello, ${name}!\n"
+        "    Version ${version()}\n"
+        "    \"\"\"\n"
+        "    print(s)\n"
+        "}\n",
+        "Hello, Lattice!\nVersion 0.1.9"
+    );
+}
+
+static void test_triple_embedded_quotes(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"\"\"\n"
+        "    She said \"hello\" and I said 'hi'\n"
+        "    \"\"\"\n"
+        "    print(s)\n"
+        "}\n",
+        "She said \"hello\" and I said 'hi'"
+    );
+}
+
+static void test_triple_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"\"\"\"\"\"\n"
+        "    print(s.len())\n"
+        "}\n",
+        "0"
+    );
+}
+
+static void test_triple_escape(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"\"\"hello\\tworld\"\"\"\n"
+        "    print(s)\n"
+        "}\n",
+        "hello\tworld"
+    );
+}
+
+static void test_triple_json(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"\"\"\n"
+        "    {\"name\": \"Lattice\", \"version\": 1}\n"
+        "    \"\"\"\n"
+        "    let obj = json_parse(s)\n"
+        "    print(obj.get(\"name\"))\n"
+        "}\n",
+        "Lattice"
+    );
+}
+
+/* ── Spread operator ── */
+
+static void test_spread_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    let b = [0, ...a, 4]\n"
+        "    print(b)\n"
+        "}\n",
+        "[0, 1, 2, 3, 4]"
+    );
+}
+
+static void test_spread_multiple(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2]\n"
+        "    let b = [3, 4]\n"
+        "    let c = [...a, ...b]\n"
+        "    print(c)\n"
+        "}\n",
+        "[1, 2, 3, 4]"
+    );
+}
+
+static void test_spread_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let empty = []\n"
+        "    let b = [1, ...empty, 2]\n"
+        "    print(b)\n"
+        "}\n",
+        "[1, 2]"
+    );
+}
+
+static void test_spread_only(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    let b = [...a]\n"
+        "    print(b)\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_spread_with_expr(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let result = [...[1, 2].map(|x| x * 10)]\n"
+        "    print(result)\n"
+        "}\n",
+        "[10, 20]"
+    );
+}
+
+static void test_spread_nested(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2]\n"
+        "    let b = [3, 4]\n"
+        "    let c = [5, 6]\n"
+        "    let all = [...a, ...b, ...c]\n"
+        "    print(all.len())\n"
+        "}\n",
+        "6"
+    );
+}
+
+/* ── Tuples ── */
+
+static void test_tuple_creation(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (1, \"hello\", true)\n"
+        "    print(t)\n"
+        "}\n",
+        "(1, hello, true)"
+    );
+}
+
+static void test_tuple_single(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (42,)\n"
+        "    print(t)\n"
+        "}\n",
+        "(42,)"
+    );
+}
+
+static void test_tuple_field_access(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (10, 20, 30)\n"
+        "    print(t.0)\n"
+        "    print(t.1)\n"
+        "    print(t.2)\n"
+        "}\n",
+        "10\n20\n30"
+    );
+}
+
+static void test_tuple_len(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (1, 2, 3, 4, 5)\n"
+        "    print(t.len())\n"
+        "}\n",
+        "5"
+    );
+}
+
+static void test_tuple_typeof(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (1, 2)\n"
+        "    print(typeof(t))\n"
+        "}\n",
+        "Tuple"
+    );
+}
+
+static void test_tuple_equality(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = (1, 2, 3)\n"
+        "    let b = (1, 2, 3)\n"
+        "    let c = (1, 2, 4)\n"
+        "    print(a == b)\n"
+        "    print(a == c)\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_tuple_nested(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (1, (2, 3), 4)\n"
+        "    let inner = t.1\n"
+        "    print(inner.0)\n"
+        "    print(inner.1)\n"
+        "}\n",
+        "2\n3"
+    );
+}
+
+static void test_tuple_phase(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (1, 2, 3)\n"
+        "    print(phase_of(t))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+/* ── Bitwise operators ── */
+
+static void test_bitwise_and(void) {
+    /* 255 & 15 = 15 */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(255 & 15)\n"
+        "}\n",
+        "15"
+    );
+}
+
+static void test_bitwise_or(void) {
+    /* 15 | 240 = 255 */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(15 | 240)\n"
+        "}\n",
+        "255"
+    );
+}
+
+static void test_bitwise_xor(void) {
+    /* 255 ^ 15 = 240 */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(255 ^ 15)\n"
+        "}\n",
+        "240"
+    );
+}
+
+static void test_bitwise_not(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(~0)\n"
+        "}\n",
+        "-1"
+    );
+}
+
+static void test_bitwise_lshift(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(1 << 8)\n"
+        "}\n",
+        "256"
+    );
+}
+
+static void test_bitwise_rshift(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(256 >> 4)\n"
+        "}\n",
+        "16"
+    );
+}
+
+static void test_bitwise_compound_assign(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 255\n"
+        "    x &= 15\n"
+        "    print(x)\n"
+        "    x |= 240\n"
+        "    print(x)\n"
+        "    x ^= 255\n"
+        "    print(x)\n"
+        "    x = 1\n"
+        "    x <<= 4\n"
+        "    print(x)\n"
+        "    x >>= 2\n"
+        "    print(x)\n"
+        "}\n",
+        "15\n255\n0\n16\n4"
+    );
+}
+
+static void test_bitwise_precedence(void) {
+    /* & binds tighter than ^, ^ binds tighter than | */
+    /* 15 | (16 & 31) = 15 | 16 = 31 */
+    /* 1 | (2 ^ 3) = 1 | 1 = 1 */
+    /* (6 & 3) ^ 5 = 2 ^ 5 = 7 */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(15 | 16 & 31)\n"
+        "    print(1 | 2 ^ 3)\n"
+        "    print(6 & 3 ^ 5)\n"
+        "}\n",
+        "31\n1\n7"
+    );
+}
+
+static void test_bitwise_shift_range(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let result = try { 1 << 64 } catch e { e }\n"
+        "    print(result)\n"
+        "}\n",
+        "shift amount out of range (0..63)"
+    );
+}
+
+static void test_bitwise_not_double(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(~~42)\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_bitwise_with_negative(void) {
+    /* -1 & 255 = 255 */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(-1 & 255)\n"
+        "}\n",
+        "255"
+    );
+}
+
+/* ── Import / module system ── */
+
+static void test_import_full(void) {
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as math\n"
+        "fn main() {\n"
+        "    print(math.add(10, 5))\n"
+        "    print(math.sub(10, 5))\n"
+        "}\n",
+        "15\n5"
+    );
+}
+
+static void test_import_variable(void) {
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as math\n"
+        "fn main() {\n"
+        "    print(math.PI)\n"
+        "}\n",
+        "3.14159"
+    );
+}
+
+static void test_import_selective(void) {
+    ASSERT_OUTPUT(
+        "import { add, sub } from \"tests/modules/math_utils\"\n"
+        "fn main() {\n"
+        "    print(add(3, 4))\n"
+        "    print(sub(10, 3))\n"
+        "}\n",
+        "7\n7"
+    );
+}
+
+static void test_import_selective_variable(void) {
+    ASSERT_OUTPUT(
+        "import { PI } from \"tests/modules/math_utils\"\n"
+        "fn main() {\n"
+        "    print(PI)\n"
+        "}\n",
+        "3.14159"
+    );
+}
+
+static void test_import_closure_capture(void) {
+    ASSERT_OUTPUT(
+        "import \"tests/modules/greeter\" as g\n"
+        "fn main() {\n"
+        "    print(g.greet(\"World\"))\n"
+        "}\n",
+        "Hello, World!"
+    );
+}
+
+static void test_import_cached(void) {
+    /* Importing the same module twice should use cache */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as m1\n"
+        "import \"tests/modules/math_utils\" as m2\n"
+        "fn main() {\n"
+        "    print(m1.add(1, 2))\n"
+        "    print(m2.sub(5, 3))\n"
+        "}\n",
+        "3\n2"
+    );
+}
+
+static void test_import_not_found(void) {
+    ASSERT_OUTPUT(
+        "import \"nonexistent_module\" as m\n"
+        "fn main() {\n"
+        "    print(m.x)\n"
+        "}\n",
+        "EVAL_ERROR:import: cannot find 'nonexistent_module.lat'"
+    );
+}
+
+static void test_import_missing_export(void) {
+    ASSERT_OUTPUT(
+        "import { nonexistent } from \"tests/modules/math_utils\"\n"
+        "fn main() {\n"
+        "    print(nonexistent)\n"
+        "}\n",
+        "EVAL_ERROR:module 'tests/modules/math_utils' does not export 'nonexistent'"
+    );
+}
+
+/* ── repr() builtin ── */
+
+static void test_repr_int(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(repr(42)) }",
+        "42"
+    );
+}
+
+static void test_repr_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(repr(\"hello\")) }",
+        "\"hello\""
+    );
+}
+
+static void test_repr_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(repr([1, 2, 3])) }",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_repr_struct_default(void) {
+    ASSERT_OUTPUT(
+        "struct Point { x: Int, y: Int }\n"
+        "fn main() {\n"
+        "    let p = Point { x: 10, y: 20 }\n"
+        "    print(repr(p))\n"
+        "}",
+        "Point { x: 10, y: 20 }"
+    );
+}
+
+static void test_repr_struct_custom(void) {
+    ASSERT_OUTPUT(
+        "struct Point { x: Int, y: Int, repr: Closure }\n"
+        "fn main() {\n"
+        "    let p = Point { x: 10, y: 20, repr: |self| { \"(\" + to_string(self.x) + \", \" + to_string(self.y) + \")\" } }\n"
+        "    print(repr(p))\n"
+        "}",
+        "(10, 20)"
+    );
+}
+
+static void test_repr_struct_custom_non_string(void) {
+    /* If repr closure returns non-string, fall back to default */
+    ASSERT_OUTPUT(
+        "struct Foo { val: Int, repr: Closure }\n"
+        "fn main() {\n"
+        "    let f = Foo { val: 99, repr: |self| { 42 } }\n"
+        "    print(repr(f))\n"
+        "}",
+        "Foo { val: 99, repr: <closure|self|> }"
+    );
+}
+
+static void test_repr_nil(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(repr(nil)) }",
+        "nil"
+    );
+}
+
+static void test_repr_bool(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(repr(true)) }",
+        "true"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -5567,4 +6289,88 @@ void register_stdlib_tests(void) {
     register_test("test_yaml_parse_wrong_type", test_yaml_parse_wrong_type);
     register_test("test_yaml_stringify_wrong_type", test_yaml_stringify_wrong_type);
     register_test("test_yaml_parse_flow_seq", test_yaml_parse_flow_seq);
+
+    /* Single-quoted strings */
+    register_test("test_single_quote_basic", test_single_quote_basic);
+    register_test("test_single_quote_double_quotes_inside", test_single_quote_double_quotes_inside);
+    register_test("test_single_quote_escaped", test_single_quote_escaped);
+    register_test("test_single_quote_no_interpolation", test_single_quote_no_interpolation);
+    register_test("test_single_quote_newline_escape", test_single_quote_newline_escape);
+    register_test("test_single_quote_empty", test_single_quote_empty);
+    register_test("test_single_quote_concat", test_single_quote_concat);
+    register_test("test_single_quote_json", test_single_quote_json);
+
+    /* Nil and ?? operator */
+    register_test("test_nil_literal", test_nil_literal);
+    register_test("test_nil_typeof", test_nil_typeof);
+    register_test("test_nil_equality", test_nil_equality);
+    register_test("test_nil_truthiness", test_nil_truthiness);
+    register_test("test_nil_coalesce", test_nil_coalesce);
+    register_test("test_nil_coalesce_non_nil", test_nil_coalesce_non_nil);
+    register_test("test_nil_map_get", test_nil_map_get);
+    register_test("test_nil_match", test_nil_match);
+    register_test("test_nil_json_roundtrip", test_nil_json_roundtrip);
+    register_test("test_nil_coalesce_chain", test_nil_coalesce_chain);
+
+    /* Triple-quoted strings */
+    register_test("test_triple_basic", test_triple_basic);
+    register_test("test_triple_multiline", test_triple_multiline);
+    register_test("test_triple_dedent", test_triple_dedent);
+    register_test("test_triple_interpolation", test_triple_interpolation);
+    register_test("test_triple_multiline_interpolation", test_triple_multiline_interpolation);
+    register_test("test_triple_embedded_quotes", test_triple_embedded_quotes);
+    register_test("test_triple_empty", test_triple_empty);
+    register_test("test_triple_escape", test_triple_escape);
+    register_test("test_triple_json", test_triple_json);
+
+    /* Spread operator */
+    register_test("test_spread_basic", test_spread_basic);
+    register_test("test_spread_multiple", test_spread_multiple);
+    register_test("test_spread_empty", test_spread_empty);
+    register_test("test_spread_only", test_spread_only);
+    register_test("test_spread_with_expr", test_spread_with_expr);
+    register_test("test_spread_nested", test_spread_nested);
+
+    /* Tuples */
+    register_test("test_tuple_creation", test_tuple_creation);
+    register_test("test_tuple_single", test_tuple_single);
+    register_test("test_tuple_field_access", test_tuple_field_access);
+    register_test("test_tuple_len", test_tuple_len);
+    register_test("test_tuple_typeof", test_tuple_typeof);
+    register_test("test_tuple_equality", test_tuple_equality);
+    register_test("test_tuple_nested", test_tuple_nested);
+    register_test("test_tuple_phase", test_tuple_phase);
+
+    /* Bitwise operators */
+    register_test("test_bitwise_and", test_bitwise_and);
+    register_test("test_bitwise_or", test_bitwise_or);
+    register_test("test_bitwise_xor", test_bitwise_xor);
+    register_test("test_bitwise_not", test_bitwise_not);
+    register_test("test_bitwise_lshift", test_bitwise_lshift);
+    register_test("test_bitwise_rshift", test_bitwise_rshift);
+    register_test("test_bitwise_compound_assign", test_bitwise_compound_assign);
+    register_test("test_bitwise_precedence", test_bitwise_precedence);
+    register_test("test_bitwise_shift_range", test_bitwise_shift_range);
+    register_test("test_bitwise_not_double", test_bitwise_not_double);
+    register_test("test_bitwise_with_negative", test_bitwise_with_negative);
+
+    /* Import / module system */
+    register_test("test_import_full", test_import_full);
+    register_test("test_import_variable", test_import_variable);
+    register_test("test_import_selective", test_import_selective);
+    register_test("test_import_selective_variable", test_import_selective_variable);
+    register_test("test_import_closure_capture", test_import_closure_capture);
+    register_test("test_import_cached", test_import_cached);
+    register_test("test_import_not_found", test_import_not_found);
+    register_test("test_import_missing_export", test_import_missing_export);
+
+    /* repr() builtin */
+    register_test("test_repr_int", test_repr_int);
+    register_test("test_repr_string", test_repr_string);
+    register_test("test_repr_array", test_repr_array);
+    register_test("test_repr_struct_default", test_repr_struct_default);
+    register_test("test_repr_struct_custom", test_repr_struct_custom);
+    register_test("test_repr_struct_custom_non_string", test_repr_struct_custom_non_string);
+    register_test("test_repr_nil", test_repr_nil);
+    register_test("test_repr_bool", test_repr_bool);
 }

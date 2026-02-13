@@ -240,14 +240,32 @@ static Expr *parse_postfix(Parser *p, char **err);
 static Expr *parse_unary(Parser *p, char **err);
 static Expr *parse_multiplication(Parser *p, char **err);
 static Expr *parse_addition(Parser *p, char **err);
+static Expr *parse_shift(Parser *p, char **err);
 static Expr *parse_range_expr(Parser *p, char **err);
 static Expr *parse_comparison(Parser *p, char **err);
 static Expr *parse_equality(Parser *p, char **err);
+static Expr *parse_bitwise_and(Parser *p, char **err);
+static Expr *parse_bitwise_xor(Parser *p, char **err);
+static Expr *parse_bitwise_or(Parser *p, char **err);
 static Expr *parse_and_expr(Parser *p, char **err);
 static Expr *parse_or(Parser *p, char **err);
 
+static Expr *parse_nil_coalesce(Parser *p, char **err);
+
 static Expr *parse_expr(Parser *p, char **err) {
-    return parse_or(p, err);
+    return parse_nil_coalesce(p, err);
+}
+
+static Expr *parse_nil_coalesce(Parser *p, char **err) {
+    Expr *left = parse_or(p, err);
+    if (!left) return NULL;
+    while (peek_type(p) == TOK_QUESTION_QUESTION) {
+        advance(p);
+        Expr *right = parse_or(p, err);
+        if (!right) { expr_free(left); return NULL; }
+        left = expr_binop(BINOP_NIL_COALESCE, left, right);
+    }
+    return left;
 }
 
 static Expr *parse_or(Parser *p, char **err) {
@@ -263,13 +281,49 @@ static Expr *parse_or(Parser *p, char **err) {
 }
 
 static Expr *parse_and_expr(Parser *p, char **err) {
-    Expr *left = parse_equality(p, err);
+    Expr *left = parse_bitwise_or(p, err);
     if (!left) return NULL;
     while (peek_type(p) == TOK_AND) {
         advance(p);
-        Expr *right = parse_equality(p, err);
+        Expr *right = parse_bitwise_or(p, err);
         if (!right) { expr_free(left); return NULL; }
         left = expr_binop(BINOP_AND, left, right);
+    }
+    return left;
+}
+
+static Expr *parse_bitwise_or(Parser *p, char **err) {
+    Expr *left = parse_bitwise_xor(p, err);
+    if (!left) return NULL;
+    while (peek_type(p) == TOK_PIPE) {
+        advance(p);
+        Expr *right = parse_bitwise_xor(p, err);
+        if (!right) { expr_free(left); return NULL; }
+        left = expr_binop(BINOP_BIT_OR, left, right);
+    }
+    return left;
+}
+
+static Expr *parse_bitwise_xor(Parser *p, char **err) {
+    Expr *left = parse_bitwise_and(p, err);
+    if (!left) return NULL;
+    while (peek_type(p) == TOK_CARET) {
+        advance(p);
+        Expr *right = parse_bitwise_and(p, err);
+        if (!right) { expr_free(left); return NULL; }
+        left = expr_binop(BINOP_BIT_XOR, left, right);
+    }
+    return left;
+}
+
+static Expr *parse_bitwise_and(Parser *p, char **err) {
+    Expr *left = parse_equality(p, err);
+    if (!left) return NULL;
+    while (peek_type(p) == TOK_AMPERSAND) {
+        advance(p);
+        Expr *right = parse_equality(p, err);
+        if (!right) { expr_free(left); return NULL; }
+        left = expr_binop(BINOP_BIT_AND, left, right);
     }
     return left;
 }
@@ -291,7 +345,7 @@ static Expr *parse_equality(Parser *p, char **err) {
 }
 
 static Expr *parse_comparison(Parser *p, char **err) {
-    Expr *left = parse_range_expr(p, err);
+    Expr *left = parse_shift(p, err);
     if (!left) return NULL;
     for (;;) {
         BinOpKind op;
@@ -299,6 +353,22 @@ static Expr *parse_comparison(Parser *p, char **err) {
         else if (peek_type(p) == TOK_GT) op = BINOP_GT;
         else if (peek_type(p) == TOK_LTEQ) op = BINOP_LTEQ;
         else if (peek_type(p) == TOK_GTEQ) op = BINOP_GTEQ;
+        else break;
+        advance(p);
+        Expr *right = parse_shift(p, err);
+        if (!right) { expr_free(left); return NULL; }
+        left = expr_binop(op, left, right);
+    }
+    return left;
+}
+
+static Expr *parse_shift(Parser *p, char **err) {
+    Expr *left = parse_range_expr(p, err);
+    if (!left) return NULL;
+    for (;;) {
+        BinOpKind op;
+        if (peek_type(p) == TOK_LSHIFT) op = BINOP_LSHIFT;
+        else if (peek_type(p) == TOK_RSHIFT) op = BINOP_RSHIFT;
         else break;
         advance(p);
         Expr *right = parse_range_expr(p, err);
@@ -366,6 +436,12 @@ static Expr *parse_unary(Parser *p, char **err) {
         if (!e) return NULL;
         return expr_unaryop(UNOP_NOT, e);
     }
+    if (peek_type(p) == TOK_TILDE) {
+        advance(p);
+        Expr *e = parse_unary(p, err);
+        if (!e) return NULL;
+        return expr_unaryop(UNOP_BIT_NOT, e);
+    }
     return parse_postfix(p, err);
 }
 
@@ -381,7 +457,16 @@ static Expr *parse_postfix(Parser *p, char **err) {
     for (;;) {
         if (peek_type(p) == TOK_DOT) {
             advance(p);
-            char *field = expect_ident(p, err);
+            /* Accept identifier or integer literal for tuple field access (e.g. t.0) */
+            char *field = NULL;
+            if (peek_type(p) == TOK_INT_LIT) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%lld", (long long)peek(p)->as.int_val);
+                field = strdup(buf);
+                advance(p);
+            } else {
+                field = expect_ident(p, err);
+            }
             if (!field) { expr_free(e); return NULL; }
             if (peek_type(p) == TOK_LPAREN) {
                 advance(p);
@@ -484,6 +569,7 @@ static Expr *parse_primary(Parser *p, char **err) {
     }
     if (tt == TOK_TRUE) { advance(p); return expr_bool_lit(true); }
     if (tt == TOK_FALSE) { advance(p); return expr_bool_lit(false); }
+    if (tt == TOK_NIL) { advance(p); return expr_nil_lit(); }
 
     if (tt == TOK_FREEZE) {
         advance(p);
@@ -643,6 +729,9 @@ static Expr *parse_primary(Parser *p, char **err) {
             } else if (pt == TOK_FALSE) {
                 advance(p);
                 pat = pattern_literal(expr_bool_lit(false));
+            } else if (pt == TOK_NIL) {
+                advance(p);
+                pat = pattern_literal(expr_nil_lit());
             } else if (pt == TOK_IDENT) {
                 Token *t = advance(p);
                 if (strcmp(t->as.str_val, "_") == 0) {
@@ -794,12 +883,18 @@ static Expr *parse_primary(Parser *p, char **err) {
         size_t n = 0;
         Expr **elems = malloc(cap * sizeof(Expr *));
         while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
+            bool is_spread = false;
+            if (peek_type(p) == TOK_DOTDOTDOT) {
+                advance(p);
+                is_spread = true;
+            }
             Expr *e = parse_expr(p, err);
             if (!e) {
                 for (size_t i = 0; i < n; i++) expr_free(elems[i]);
                 free(elems);
                 return NULL;
             }
+            if (is_spread) e = expr_spread(e);
             if (n >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(Expr *)); }
             elems[n++] = e;
             if (peek_type(p) != TOK_RBRACKET) {
@@ -819,10 +914,41 @@ static Expr *parse_primary(Parser *p, char **err) {
     }
     if (tt == TOK_LPAREN) {
         advance(p);
-        Expr *e = parse_expr(p, err);
-        if (!e) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
-        return e;
+        Expr *first = parse_expr(p, err);
+        if (!first) return NULL;
+        /* Check for comma: (expr, ...) is a tuple, (expr) is grouping */
+        if (peek_type(p) == TOK_COMMA) {
+            advance(p);
+            size_t cap = 4, n = 1;
+            Expr **elems = malloc(cap * sizeof(Expr *));
+            elems[0] = first;
+            /* (expr,) is a single-element tuple */
+            while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
+                Expr *e = parse_expr(p, err);
+                if (!e) {
+                    for (size_t i = 0; i < n; i++) expr_free(elems[i]);
+                    free(elems);
+                    return NULL;
+                }
+                if (n >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(Expr *)); }
+                elems[n++] = e;
+                if (peek_type(p) != TOK_RPAREN) {
+                    if (!expect(p, TOK_COMMA, err)) {
+                        for (size_t i = 0; i < n; i++) expr_free(elems[i]);
+                        free(elems);
+                        return NULL;
+                    }
+                }
+            }
+            if (!expect(p, TOK_RPAREN, err)) {
+                for (size_t i = 0; i < n; i++) expr_free(elems[i]);
+                free(elems);
+                return NULL;
+            }
+            return expr_tuple(elems, n);
+        }
+        if (!expect(p, TOK_RPAREN, err)) { expr_free(first); return NULL; }
+        return first;
     }
     if (tt == TOK_LBRACE) {
         advance(p);
@@ -873,11 +999,13 @@ static Expr *parse_primary(Parser *p, char **err) {
             }
             params[n] = name;
             defaults[n] = NULL;
-            /* Check for default value: = expr (not for variadic params) */
+            /* Check for default value: = expr (not for variadic params)
+             * Use parse_bitwise_xor to avoid consuming | as bitwise OR,
+             * since | delimits closure parameters. */
             if (!is_variadic && peek_type(p) == TOK_EQ) {
                 advance(p);
                 seen_default = true;
-                Expr *def = parse_expr(p, err);
+                Expr *def = parse_bitwise_xor(p, err);
                 if (!def) {
                     for (size_t i = 0; i <= n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
                     free(params); free(defaults);
@@ -1121,12 +1249,77 @@ static Stmt *parse_loop_stmt(Parser *p, char **err) {
     return stmt_loop(body, count);
 }
 
+/* Parse: import "path" as name
+ * Parse: import { x, y } from "path" */
+static Stmt *parse_import_stmt(Parser *p, char **err) {
+    advance(p); /* consume 'import' */
+
+    /* Selective import: import { name1, name2 } from "path" */
+    if (peek_type(p) == TOK_LBRACE) {
+        advance(p);
+        size_t cap = 4, count = 0;
+        char **names = malloc(cap * sizeof(char *));
+
+        while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+            if (count >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
+            names[count] = expect_ident(p, err);
+            if (!names[count]) {
+                for (size_t i = 0; i < count; i++) free(names[i]);
+                free(names);
+                return NULL;
+            }
+            count++;
+            if (peek_type(p) == TOK_COMMA) advance(p);
+        }
+
+        if (!expect(p, TOK_RBRACE, err)) {
+            for (size_t i = 0; i < count; i++) free(names[i]);
+            free(names);
+            return NULL;
+        }
+        if (!expect(p, TOK_FROM, err)) {
+            for (size_t i = 0; i < count; i++) free(names[i]);
+            free(names);
+            return NULL;
+        }
+
+        if (peek_type(p) != TOK_STRING_LIT) {
+            *err = parser_error_fmt(p, "expected string literal after 'from'");
+            for (size_t i = 0; i < count; i++) free(names[i]);
+            free(names);
+            return NULL;
+        }
+        char *path = strdup(advance(p)->as.str_val);
+        eat_semicolon(p);
+        return stmt_import(path, NULL, names, count);
+    }
+
+    /* Full import: import "path" as name */
+    if (peek_type(p) != TOK_STRING_LIT) {
+        *err = parser_error_fmt(p, "expected string literal or '{' after 'import'");
+        return NULL;
+    }
+    char *path = strdup(advance(p)->as.str_val);
+
+    char *alias = NULL;
+    if (peek_type(p) == TOK_AS) {
+        advance(p);
+        alias = expect_ident(p, err);
+        if (!alias) { free(path); return NULL; }
+    }
+
+    eat_semicolon(p);
+    return stmt_import(path, alias, NULL, 0);
+}
+
 static Stmt *parse_stmt(Parser *p, char **err) {
     TokenType tt = peek_type(p);
 
     if (tt == TOK_FLUX)  return parse_binding(p, PHASE_FLUID, err);
     if (tt == TOK_FIX)   return parse_binding(p, PHASE_CRYSTAL, err);
     if (tt == TOK_LET)   return parse_binding(p, PHASE_UNSPECIFIED, err);
+
+    if (tt == TOK_IMPORT) return parse_import_stmt(p, err);
 
     if (tt == TOK_RETURN) {
         advance(p);
@@ -1156,7 +1349,7 @@ static Stmt *parse_stmt(Parser *p, char **err) {
         eat_semicolon(p);
         return stmt_assign(e, value);
     }
-    /* Compound assignment: +=, -=, *=, /=, %= */
+    /* Compound assignment: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>= */
     {
         BinOpKind cop;
         bool is_compound = true;
@@ -1166,6 +1359,11 @@ static Stmt *parse_stmt(Parser *p, char **err) {
             case TOK_STAR_EQ:    cop = BINOP_MUL; break;
             case TOK_SLASH_EQ:   cop = BINOP_DIV; break;
             case TOK_PERCENT_EQ: cop = BINOP_MOD; break;
+            case TOK_AMP_EQ:     cop = BINOP_BIT_AND; break;
+            case TOK_PIPE_EQ:    cop = BINOP_BIT_OR; break;
+            case TOK_CARET_EQ:   cop = BINOP_BIT_XOR; break;
+            case TOK_LSHIFT_EQ:  cop = BINOP_LSHIFT; break;
+            case TOK_RSHIFT_EQ:  cop = BINOP_RSHIFT; break;
             default: is_compound = false; break;
         }
         if (is_compound) {

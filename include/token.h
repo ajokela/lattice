@@ -9,12 +9,15 @@ typedef enum {
     TOK_FLUX, TOK_FIX, TOK_LET, TOK_FREEZE, TOK_THAW, TOK_FORGE,
     TOK_FN, TOK_STRUCT, TOK_IF, TOK_ELSE, TOK_FOR, TOK_IN,
     TOK_WHILE, TOK_LOOP, TOK_RETURN, TOK_BREAK, TOK_CONTINUE,
-    TOK_SPAWN, TOK_TRUE, TOK_FALSE, TOK_CLONE, TOK_PRINT,
+    TOK_SPAWN, TOK_TRUE, TOK_FALSE, TOK_NIL, TOK_CLONE, TOK_PRINT,
     TOK_TRY, TOK_CATCH,
     TOK_SCOPE,
     TOK_TEST,
     TOK_MATCH,
     TOK_ENUM,
+    TOK_IMPORT,
+    TOK_FROM,
+    TOK_AS,
 
     /* Mode directive */
     TOK_MODE_DIRECTIVE,   /* #mode casual / #mode strict */
@@ -46,8 +49,12 @@ typedef enum {
     TOK_DOTDOTDOT, /* ... */
     TOK_ARROW,     /* -> */
     TOK_FATARROW,  /* => */
+    TOK_QUESTION_QUESTION, /* ?? */
     TOK_PIPE,      /* | */
     TOK_AMPERSAND, /* & */
+    TOK_CARET,     /* ^ */
+    TOK_LSHIFT,    /* << */
+    TOK_RSHIFT,    /* >> */
 
     /* Compound assignment */
     TOK_PLUS_EQ,    /* += */
@@ -55,6 +62,11 @@ typedef enum {
     TOK_STAR_EQ,    /* *= */
     TOK_SLASH_EQ,   /* /= */
     TOK_PERCENT_EQ, /* %= */
+    TOK_AMP_EQ,     /* &= */
+    TOK_PIPE_EQ,    /* |= */
+    TOK_CARET_EQ,   /* ^= */
+    TOK_LSHIFT_EQ,  /* <<= */
+    TOK_RSHIFT_EQ,  /* >>= */
 
     /* Delimiters */
     TOK_LPAREN, TOK_RPAREN,

@@ -1,0 +1,5 @@
+let greeting = "Hello"
+
+fn greet(name: String) -> String {
+    return greeting + ", " + name + "!"
+}

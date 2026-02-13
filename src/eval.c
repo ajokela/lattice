@@ -719,6 +719,7 @@ static bool value_equal(const LatValue *a, const LatValue *b) {
         case VAL_BOOL:  return a->as.bool_val == b->as.bool_val;
         case VAL_STR:   return strcmp(a->as.str_val, b->as.str_val) == 0;
         case VAL_UNIT:  return true;
+        case VAL_NIL:   return true;
         default:        return false;
     }
 }
@@ -745,6 +746,15 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
             case BINOP_GT:   return eval_ok(value_bool(a > b));
             case BINOP_LTEQ: return eval_ok(value_bool(a <= b));
             case BINOP_GTEQ: return eval_ok(value_bool(a >= b));
+            case BINOP_BIT_AND: return eval_ok(value_int(a & b));
+            case BINOP_BIT_OR:  return eval_ok(value_int(a | b));
+            case BINOP_BIT_XOR: return eval_ok(value_int(a ^ b));
+            case BINOP_LSHIFT:
+                if (b < 0 || b > 63) return eval_err(strdup("shift amount out of range (0..63)"));
+                return eval_ok(value_int(a << b));
+            case BINOP_RSHIFT:
+                if (b < 0 || b > 63) return eval_err(strdup("shift amount out of range (0..63)"));
+                return eval_ok(value_int(a >> b));
             default: break;
         }
     }
@@ -803,6 +813,12 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
         if (op == BINOP_AND) return eval_ok(value_bool(lv->as.bool_val && rv->as.bool_val));
         if (op == BINOP_OR) return eval_ok(value_bool(lv->as.bool_val || rv->as.bool_val));
     }
+    /* Nil equality: nil == nil is true, nil == anything_else is false */
+    if ((op == BINOP_EQ || op == BINOP_NEQ) &&
+        (lv->type == VAL_NIL || rv->type == VAL_NIL)) {
+        bool eq = (lv->type == VAL_NIL && rv->type == VAL_NIL);
+        return eval_ok(value_bool(op == BINOP_EQ ? eq : !eq));
+    }
     /* General equality using value_eq (enums, arrays, structs, etc.) */
     if (lv->type == rv->type && (op == BINOP_EQ || op == BINOP_NEQ)) {
         bool eq = value_eq(lv, rv);
@@ -819,6 +835,7 @@ static EvalResult eval_unaryop(UnaryOpKind op, LatValue *val) {
     if (op == UNOP_NEG && val->type == VAL_INT) return eval_ok(value_int(-val->as.int_val));
     if (op == UNOP_NEG && val->type == VAL_FLOAT) return eval_ok(value_float(-val->as.float_val));
     if (op == UNOP_NOT && val->type == VAL_BOOL) return eval_ok(value_bool(!val->as.bool_val));
+    if (op == UNOP_BIT_NOT && val->type == VAL_INT) return eval_ok(value_int(~val->as.int_val));
     char *err = NULL;
     (void)asprintf(&err, "unsupported unary operation on %s", value_type_name(val));
     return eval_err(err);
@@ -924,6 +941,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         case EXPR_FLOAT_LIT:  return eval_ok(value_float(expr->as.float_val));
         case EXPR_STRING_LIT: return eval_ok(value_string(expr->as.str_val));
         case EXPR_BOOL_LIT:   return eval_ok(value_bool(expr->as.bool_val));
+        case EXPR_NIL_LIT:    return eval_ok(value_nil());
 
         case EXPR_IDENT: {
             LatValue val;
@@ -936,6 +954,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         }
 
         case EXPR_BINOP: {
+            /* Short-circuit: ?? (nil coalescing) */
+            if (expr->as.binop.op == BINOP_NIL_COALESCE) {
+                EvalResult lr = eval_expr(ev, expr->as.binop.left);
+                if (!IS_OK(lr)) return lr;
+                if (lr.value.type != VAL_NIL) return lr;
+                value_free(&lr.value);
+                return eval_expr(ev, expr->as.binop.right);
+            }
             EvalResult lr = eval_expr(ev, expr->as.binop.left);
             if (!IS_OK(lr)) return lr;
             GC_PUSH(ev, &lr.value);
@@ -1062,6 +1088,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (strcmp(fn_name, "to_string") == 0) {
                     if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_string() expects 1 argument")); }
                     char *s = builtin_to_string(&args[0]);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_string_owned(s));
+                }
+
+                /// @builtin repr(val: Any) -> String
+                /// @category Core
+                /// Return the repr string of a value.  Strings are quoted,
+                /// structs with a `repr` closure field use the custom representation.
+                /// @example repr(42)        // "42"
+                /// @example repr("hello")   // "\"hello\""
+                if (strcmp(fn_name, "repr") == 0) {
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("repr() expects 1 argument")); }
+                    char *s = eval_repr(ev, &args[0]);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_string_owned(s));
@@ -3868,6 +3908,41 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         case EXPR_FIELD_ACCESS: {
             EvalResult objr = eval_expr(ev, expr->as.field_access.object);
             if (!IS_OK(objr)) return objr;
+            /* Tuple numeric field access: tuple.0, tuple.1, etc. */
+            if (objr.value.type == VAL_TUPLE) {
+                const char *field = expr->as.field_access.field;
+                char *endptr;
+                long idx = strtol(field, &endptr, 10);
+                if (*endptr != '\0' || idx < 0) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "tuple field must be a non-negative integer, got '%s'", field);
+                    value_free(&objr.value);
+                    return eval_err(err);
+                }
+                if ((size_t)idx >= objr.value.as.tuple.len) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "tuple index %ld out of bounds (len=%zu)",
+                                   idx, objr.value.as.tuple.len);
+                    value_free(&objr.value);
+                    return eval_err(err);
+                }
+                LatValue result = value_deep_clone(&objr.value.as.tuple.elems[idx]);
+                value_free(&objr.value);
+                return eval_ok(result);
+            }
+            if (objr.value.type == VAL_MAP) {
+                const char *field = expr->as.field_access.field;
+                LatValue *val = (LatValue *)lat_map_get(objr.value.as.map.map, field);
+                if (val) {
+                    LatValue result = value_deep_clone(val);
+                    value_free(&objr.value);
+                    return eval_ok(result);
+                }
+                char *err = NULL;
+                (void)asprintf(&err, "map has no key '%s'", field);
+                value_free(&objr.value);
+                return eval_err(err);
+            }
             if (objr.value.type != VAL_STRUCT) {
                 char *err = NULL;
                 (void)asprintf(&err, "cannot access field '%s' on %s",
@@ -3950,9 +4025,65 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
         case EXPR_ARRAY: {
             size_t n = expr->as.array.count;
+            size_t cap = n > 0 ? n : 4;
+            size_t out = 0;
+            LatValue *elems = malloc(cap * sizeof(LatValue));
+            size_t gc_count = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (expr->as.array.elems[i]->tag == EXPR_SPREAD) {
+                    EvalResult er = eval_expr(ev, expr->as.array.elems[i]->as.spread_expr);
+                    if (!IS_OK(er)) {
+                        GC_POP_N(ev, gc_count);
+                        for (size_t j = 0; j < out; j++) value_free(&elems[j]);
+                        free(elems);
+                        return er;
+                    }
+                    if (er.value.type != VAL_ARRAY) {
+                        char *msg = NULL;
+                        (void)asprintf(&msg, "cannot spread non-array value of type %s",
+                                       value_type_name(&er.value));
+                        GC_POP_N(ev, gc_count);
+                        for (size_t j = 0; j < out; j++) value_free(&elems[j]);
+                        free(elems);
+                        value_free(&er.value);
+                        return eval_err(msg);
+                    }
+                    size_t slen = er.value.as.array.len;
+                    while (out + slen > cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
+                    for (size_t j = 0; j < slen; j++) {
+                        elems[out] = value_deep_clone(&er.value.as.array.elems[j]);
+                        GC_PUSH(ev, &elems[out]);
+                        gc_count++;
+                        out++;
+                    }
+                    value_free(&er.value);
+                } else {
+                    EvalResult er = eval_expr(ev, expr->as.array.elems[i]);
+                    if (!IS_OK(er)) {
+                        GC_POP_N(ev, gc_count);
+                        for (size_t j = 0; j < out; j++) value_free(&elems[j]);
+                        free(elems);
+                        return er;
+                    }
+                    if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
+                    elems[out] = er.value;
+                    GC_PUSH(ev, &elems[out]);
+                    gc_count++;
+                    out++;
+                }
+            }
+            GC_POP_N(ev, gc_count);
+            stats_array(&ev->stats);
+            LatValue arr = value_array(elems, out);
+            free(elems);
+            return eval_ok(arr);
+        }
+
+        case EXPR_TUPLE: {
+            size_t n = expr->as.tuple.count;
             LatValue *elems = malloc(n * sizeof(LatValue));
             for (size_t i = 0; i < n; i++) {
-                EvalResult er = eval_expr(ev, expr->as.array.elems[i]);
+                EvalResult er = eval_expr(ev, expr->as.tuple.elems[i]);
                 if (!IS_OK(er)) {
                     GC_POP_N(ev, i);
                     for (size_t j = 0; j < i; j++) value_free(&elems[j]);
@@ -3963,10 +4094,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 GC_PUSH(ev, &elems[i]);
             }
             GC_POP_N(ev, n);
-            stats_array(&ev->stats);
-            LatValue arr = value_array(elems, n);
+            LatValue tup = value_tuple(elems, n);
             free(elems);
-            return eval_ok(arr);
+            return eval_ok(tup);
         }
 
         case EXPR_STRUCT_LIT: {
@@ -4540,8 +4670,205 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             }
             return eval_ok(enm);
         }
+
+        case EXPR_SPREAD:
+            return eval_err(strdup("spread operator ... can only be used inside array literals"));
     }
     return eval_err(strdup("unknown expression type"));
+}
+
+/* ── Module loading ── */
+
+static EvalResult load_module(Evaluator *ev, const char *raw_path) {
+    /* Resolve file path: append .lat if not present */
+    size_t plen = strlen(raw_path);
+    char *file_path;
+    if (plen >= 4 && strcmp(raw_path + plen - 4, ".lat") == 0) {
+        file_path = strdup(raw_path);
+    } else {
+        file_path = malloc(plen + 5);
+        memcpy(file_path, raw_path, plen);
+        memcpy(file_path + plen, ".lat", 5);
+    }
+
+    /* Resolve to an absolute path */
+    char resolved[PATH_MAX];
+    bool found = (realpath(file_path, resolved) != NULL);
+    if (!found && ev->script_dir && file_path[0] != '/') {
+        char script_rel[PATH_MAX];
+        snprintf(script_rel, sizeof(script_rel), "%s/%s", ev->script_dir, file_path);
+        found = (realpath(script_rel, resolved) != NULL);
+    }
+    if (!found) {
+        char errbuf[512];
+        snprintf(errbuf, sizeof(errbuf), "import: cannot find '%s'", file_path);
+        free(file_path);
+        return eval_err(strdup(errbuf));
+    }
+    free(file_path);
+
+    /* Check module cache */
+    LatValue *cached = (LatValue *)lat_map_get(&ev->module_cache, resolved);
+    if (cached) {
+        return eval_ok(value_deep_clone(cached));
+    }
+
+    /* Check for circular imports */
+    if (lat_map_get(&ev->required_files, resolved)) {
+        char errbuf[512];
+        snprintf(errbuf, sizeof(errbuf), "import: circular dependency on '%s'", resolved);
+        return eval_err(strdup(errbuf));
+    }
+
+    /* Mark as loading */
+    bool marker = true;
+    lat_map_set(&ev->required_files, resolved, &marker);
+
+    /* Read the file */
+    char *source = builtin_read_file(resolved);
+    if (!source) {
+        char errbuf[512];
+        snprintf(errbuf, sizeof(errbuf), "import: cannot read '%s'", resolved);
+        return eval_err(strdup(errbuf));
+    }
+
+    /* Lex */
+    Lexer mod_lex = lexer_new(source);
+    char *mod_lex_err = NULL;
+    LatVec mod_toks = lexer_tokenize(&mod_lex, &mod_lex_err);
+    free(source);
+    if (mod_lex_err) {
+        char errbuf[1024];
+        snprintf(errbuf, sizeof(errbuf), "import '%s': %s", resolved, mod_lex_err);
+        free(mod_lex_err);
+        return eval_err(strdup(errbuf));
+    }
+
+    /* Parse */
+    Parser mod_parser = parser_new(&mod_toks);
+    char *mod_parse_err = NULL;
+    Program mod_prog = parser_parse(&mod_parser, &mod_parse_err);
+    if (mod_parse_err) {
+        char errbuf[1024];
+        snprintf(errbuf, sizeof(errbuf), "import '%s': %s", resolved, mod_parse_err);
+        free(mod_parse_err);
+        program_free(&mod_prog);
+        for (size_t j = 0; j < mod_toks.len; j++) token_free(lat_vec_get(&mod_toks, j));
+        lat_vec_free(&mod_toks);
+        return eval_err(strdup(errbuf));
+    }
+
+    /* Register functions, structs, enums globally */
+    for (size_t j = 0; j < mod_prog.item_count; j++) {
+        if (mod_prog.items[j].tag == ITEM_STRUCT) {
+            StructDecl *ptr = &mod_prog.items[j].as.struct_decl;
+            lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+        } else if (mod_prog.items[j].tag == ITEM_FUNCTION) {
+            FnDecl *ptr = &mod_prog.items[j].as.fn_decl;
+            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+        } else if (mod_prog.items[j].tag == ITEM_ENUM) {
+            EnumDecl *ptr = &mod_prog.items[j].as.enum_decl;
+            lat_map_set(&ev->enum_defs, ptr->name, &ptr);
+        }
+    }
+
+    /* Push a module scope and execute statements */
+    env_push_scope(ev->env);
+
+    char *prev_script_dir = ev->script_dir;
+    char *resolved_copy = strdup(resolved);
+    ev->script_dir = strdup(dirname(resolved_copy));
+    free(resolved_copy);
+
+    EvalResult exec_r = eval_ok(value_unit());
+    for (size_t j = 0; j < mod_prog.item_count; j++) {
+        if (mod_prog.items[j].tag == ITEM_STMT) {
+            value_free(&exec_r.value);
+            exec_r = eval_stmt(ev, mod_prog.items[j].as.stmt);
+            if (!IS_OK(exec_r)) break;
+        }
+    }
+
+    free(ev->script_dir);
+    ev->script_dir = prev_script_dir;
+
+    if (!IS_OK(exec_r)) {
+        env_pop_scope(ev->env);
+        for (size_t j = 0; j < mod_toks.len; j++) token_free(lat_vec_get(&mod_toks, j));
+        lat_vec_free(&mod_toks);
+        /* Don't free prog items since decls may be registered */
+        return exec_r;
+    }
+    value_free(&exec_r.value);
+
+    /* Build module Map from scope bindings and functions */
+    LatValue module_map = value_map_new();
+
+    /* Export top-level variable bindings from module scope */
+    Scope *mod_scope = &ev->env->scopes[ev->env->count - 1];
+    for (size_t i = 0; i < mod_scope->cap; i++) {
+        if (mod_scope->entries[i].state == MAP_OCCUPIED) {
+            const char *name = mod_scope->entries[i].key;
+            LatValue *val_ptr = (LatValue *)mod_scope->entries[i].value;
+            LatValue exported = value_deep_clone(val_ptr);
+            lat_map_set(module_map.as.map.map, name, &exported);
+        }
+    }
+
+    /* Export functions as closures */
+    for (size_t j = 0; j < mod_prog.item_count; j++) {
+        if (mod_prog.items[j].tag == ITEM_FUNCTION) {
+            FnDecl *fn = &mod_prog.items[j].as.fn_decl;
+            /* Create an expr_block wrapping the function body.
+             * This borrows fn->body (kept alive via program items). */
+            Expr *body = calloc(1, sizeof(Expr));
+            body->tag = EXPR_BLOCK;
+            body->as.block.stmts = fn->body;
+            body->as.block.count = fn->body_count;
+            /* Track this Expr so it stays alive */
+            lat_vec_push(&ev->module_exprs, &body);
+
+            Env *captured = env_clone(ev->env);
+            Expr **defaults = NULL;
+            bool has_variadic = false;
+            if (fn->param_count > 0) {
+                defaults = malloc(fn->param_count * sizeof(Expr *));
+                for (size_t k = 0; k < fn->param_count; k++) {
+                    defaults[k] = fn->params[k].default_value;
+                    if (fn->params[k].is_variadic) has_variadic = true;
+                }
+            }
+
+            char **param_names = malloc(fn->param_count * sizeof(char *));
+            for (size_t k = 0; k < fn->param_count; k++) {
+                param_names[k] = fn->params[k].name;
+            }
+            LatValue closure = value_closure(param_names, fn->param_count, body,
+                                             captured, defaults, has_variadic);
+            free(param_names);
+            /* Don't free defaults — value_closure borrows it. Track for cleanup. */
+            if (defaults) lat_vec_push(&ev->module_exprs, &defaults);
+            lat_map_set(module_map.as.map.map, fn->name, &closure);
+        }
+    }
+
+    env_pop_scope(ev->env);
+
+    /* Cache the module */
+    LatValue cached_copy = value_deep_clone(&module_map);
+    lat_map_set(&ev->module_cache, resolved, &cached_copy);
+
+    /* Cleanup: free statements, keep decl items alive */
+    for (size_t j = 0; j < mod_prog.item_count; j++) {
+        if (mod_prog.items[j].tag == ITEM_STMT)
+            stmt_free(mod_prog.items[j].as.stmt);
+    }
+    /* Don't free prog.items since fn/struct/enum decls are still referenced */
+
+    for (size_t j = 0; j < mod_toks.len; j++) token_free(lat_vec_get(&mod_toks, j));
+    lat_vec_free(&mod_toks);
+
+    return eval_ok(module_map);
 }
 
 /* ── Statement evaluation ── */
@@ -4905,6 +5232,44 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             }
             return eval_ok(value_unit());
         }
+
+        case STMT_IMPORT: {
+            const char *path = stmt->as.import.module_path;
+            const char *alias = stmt->as.import.alias;
+            char **selective = stmt->as.import.selective_names;
+            size_t sel_count = stmt->as.import.selective_count;
+
+            EvalResult mod_r = load_module(ev, path);
+            if (!IS_OK(mod_r)) return mod_r;
+
+            LatValue module_map = mod_r.value;
+
+            /* Selective import: import { x, y } from "path" */
+            if (selective) {
+                for (size_t i = 0; i < sel_count; i++) {
+                    const char *name = selective[i];
+                    LatValue *exported = (LatValue *)lat_map_get(module_map.as.map.map, name);
+                    if (!exported) {
+                        char *err = NULL;
+                        (void)asprintf(&err, "module '%s' does not export '%s'", path, name);
+                        value_free(&module_map);
+                        return eval_err(err);
+                    }
+                    env_define(ev->env, name, value_deep_clone(exported));
+                }
+                value_free(&module_map);
+                return eval_ok(value_unit());
+            }
+
+            /* Full import: import "path" as name */
+            if (!alias) {
+                value_free(&module_map);
+                return eval_err(strdup("import requires 'as <name>' or selective '{ ... } from'"));
+            }
+
+            env_define(ev->env, alias, module_map);
+            return eval_ok(value_unit());
+        }
     }
     return eval_err(strdup("unknown statement type"));
 }
@@ -5132,6 +5497,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (obj.type == VAL_ARRAY) return eval_ok(value_int((int64_t)obj.as.array.len));
         if (obj.type == VAL_STR) return eval_ok(value_int((int64_t)strlen(obj.as.str_val)));
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
+        if (obj.type == VAL_TUPLE) return eval_ok(value_int((int64_t)obj.as.tuple.len));
         return eval_err(strdup(".len() is not defined on this type"));
     }
     /// @method Array.map(fn: Closure) -> Array
@@ -5906,7 +6272,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".get() expects 1 string argument"));
             LatValue *found = (LatValue *)lat_map_get(obj.as.map.map, args[0].as.str_val);
-            return eval_ok(found ? value_deep_clone(found) : value_unit());
+            return eval_ok(found ? value_deep_clone(found) : value_nil());
         }
         /// @method Map.has(key: String) -> Bool
         /// @category Map Methods
@@ -6410,6 +6776,46 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
     }
 
+    /* Fallback: check for callable field (e.g. module map with closure values).
+     * call_closure consumes args, but the caller also frees them, so we
+     * deep-clone args before passing. */
+    if (obj.type == VAL_MAP) {
+        LatValue *field = (LatValue *)lat_map_get(obj.as.map.map, method);
+        if (field && field->type == VAL_CLOSURE) {
+            LatValue *cloned_args = malloc(arg_count * sizeof(LatValue));
+            for (size_t i = 0; i < arg_count; i++)
+                cloned_args[i] = value_deep_clone(&args[i]);
+            EvalResult res = call_closure(ev,
+                field->as.closure.param_names,
+                field->as.closure.param_count,
+                field->as.closure.body,
+                field->as.closure.captured_env,
+                cloned_args, arg_count,
+                field->as.closure.default_values, field->as.closure.has_variadic);
+            free(cloned_args);
+            return res;
+        }
+    } else if (obj.type == VAL_STRUCT) {
+        for (size_t i = 0; i < obj.as.strct.field_count; i++) {
+            if (strcmp(obj.as.strct.field_names[i], method) == 0 &&
+                obj.as.strct.field_values[i].type == VAL_CLOSURE) {
+                LatValue *field = &obj.as.strct.field_values[i];
+                LatValue *cloned_args = malloc(arg_count * sizeof(LatValue));
+                for (size_t j = 0; j < arg_count; j++)
+                    cloned_args[j] = value_deep_clone(&args[j]);
+                EvalResult res = call_closure(ev,
+                    field->as.closure.param_names,
+                    field->as.closure.param_count,
+                    field->as.closure.body,
+                    field->as.closure.captured_env,
+                    cloned_args, arg_count,
+                    field->as.closure.default_values, field->as.closure.has_variadic);
+                free(cloned_args);
+                return res;
+            }
+        }
+    }
+
     char *err = NULL;
     (void)asprintf(&err, "unknown method '.%s()' on %s", method, value_type_name(&obj));
     return eval_err(err);
@@ -6431,6 +6837,8 @@ Evaluator *evaluator_new(void) {
     ev->gc_stress = false;
     ev->no_regions = false;
     ev->required_files = lat_map_new(sizeof(bool));
+    ev->module_cache = lat_map_new(sizeof(LatValue));
+    ev->module_exprs = lat_vec_new(sizeof(Expr *));
     value_set_heap(ev->heap);
     return ev;
 }
@@ -6443,6 +6851,21 @@ void evaluator_free(Evaluator *ev) {
     lat_map_free(&ev->enum_defs);
     lat_map_free(&ev->fn_defs);
     lat_map_free(&ev->required_files);
+    /* Free cached module maps */
+    for (size_t i = 0; i < ev->module_cache.cap; i++) {
+        if (ev->module_cache.entries[i].state == MAP_OCCUPIED) {
+            LatValue *mv = (LatValue *)ev->module_cache.entries[i].value;
+            value_free(mv);
+        }
+    }
+    lat_map_free(&ev->module_cache);
+    /* Free body Expr wrappers kept alive for module closures */
+    for (size_t i = 0; i < ev->module_exprs.len; i++) {
+        Expr **ep = lat_vec_get(&ev->module_exprs, i);
+        /* Only free the wrapper node, not the stmts it borrows */
+        free(*ep);
+    }
+    lat_vec_free(&ev->module_exprs);
     free(ev->script_dir);
     value_set_heap(NULL);         /* disconnect before freeing the heap itself */
     dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
@@ -6629,6 +7052,71 @@ char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
     }
 
     return NULL; /* success */
+}
+
+EvalResult evaluator_run_repl_result(Evaluator *ev, const Program *prog) {
+    ev->mode = prog->mode;
+
+    /* First pass: register structs, enums, and functions */
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag == ITEM_STRUCT) {
+            StructDecl *ptr = &prog->items[i].as.struct_decl;
+            lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_ENUM) {
+            EnumDecl *ptr = &prog->items[i].as.enum_decl;
+            lat_map_set(&ev->enum_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_FUNCTION) {
+            FnDecl *ptr = &prog->items[i].as.fn_decl;
+            lat_map_set(&ev->fn_defs, ptr->name, &ptr);
+        }
+    }
+
+    /* Second pass: execute top-level statements, keep last result */
+    LatValue last = value_unit();
+    for (size_t i = 0; i < prog->item_count; i++) {
+        if (prog->items[i].tag == ITEM_STMT) {
+            EvalResult r = eval_stmt(ev, prog->items[i].as.stmt);
+            if (IS_ERR(r)) return r;
+            if (IS_SIGNAL(r)) {
+                value_free(&last);
+                return eval_err(strdup("unexpected control flow at top level"));
+            }
+            value_free(&last);
+            last = r.value;
+        }
+    }
+
+    return eval_ok(last);
+}
+
+char *eval_repr(Evaluator *ev, const LatValue *v) {
+    if (v->type == VAL_STRUCT) {
+        /* Look for a "repr" closure field */
+        for (size_t i = 0; i < v->as.strct.field_count; i++) {
+            if (strcmp(v->as.strct.field_names[i], "repr") == 0 &&
+                v->as.strct.field_values[i].type == VAL_CLOSURE) {
+                const LatValue *cl = &v->as.strct.field_values[i];
+                LatValue self_arg = value_deep_clone(v);
+                EvalResult r = call_closure(ev,
+                    cl->as.closure.param_names,
+                    cl->as.closure.param_count,
+                    cl->as.closure.body,
+                    cl->as.closure.captured_env,
+                    &self_arg, 1,
+                    cl->as.closure.default_values,
+                    cl->as.closure.has_variadic);
+                if (IS_OK(r) && r.value.type == VAL_STR) {
+                    char *result = strdup(r.value.as.str_val);
+                    value_free(&r.value);
+                    return result;
+                }
+                if (IS_OK(r)) value_free(&r.value);
+                /* Fall through to default */
+                break;
+            }
+        }
+    }
+    return value_repr(v);
 }
 
 const MemoryStats *evaluator_stats(const Evaluator *ev) {

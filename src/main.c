@@ -178,6 +178,19 @@ static void repl(void) {
     printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
 
+    Evaluator *ev = evaluator_new();
+    if (gc_stress_mode)
+        evaluator_set_gc_stress(ev, true);
+    if (no_regions_mode)
+        evaluator_set_no_regions(ev, true);
+    evaluator_set_argv(ev, saved_argc, saved_argv);
+
+    /* Keep programs alive so struct/fn/enum decl pointers stay valid */
+    size_t prog_cap = 16, prog_count = 0;
+    Program *kept_progs = malloc(prog_cap * sizeof(Program));
+    size_t tok_cap = 16, tok_count = 0;
+    LatVec *kept_tokens = malloc(tok_cap * sizeof(LatVec));
+
     char accumulated[65536];
     accumulated[0] = '\0';
 
@@ -200,10 +213,71 @@ static void repl(void) {
         if (!input_is_complete(accumulated))
             continue;
 
-        int result = run_source(accumulated, false, NULL);
-        (void)result;
+        /* Lex */
+        Lexer lex = lexer_new(accumulated);
+        char *lex_err = NULL;
+        LatVec tokens = lexer_tokenize(&lex, &lex_err);
+        if (lex_err) {
+            fprintf(stderr, "error: %s\n", lex_err);
+            free(lex_err);
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Parse */
+        Parser parser = parser_new(&tokens);
+        char *parse_err = NULL;
+        Program prog = parser_parse(&parser, &parse_err);
+        if (parse_err) {
+            fprintf(stderr, "error: %s\n", parse_err);
+            free(parse_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Evaluate and capture result */
+        EvalResult r = evaluator_run_repl_result(ev, &prog);
+        if (!r.ok) {
+            fprintf(stderr, "error: %s\n", r.error);
+            free(r.error);
+        } else if (r.value.type != VAL_UNIT && r.value.type != VAL_NIL) {
+            char *repr = eval_repr(ev, &r.value);
+            printf("=> %s\n", repr);
+            free(repr);
+            value_free(&r.value);
+        } else {
+            value_free(&r.value);
+        }
+
+        /* Keep program and tokens alive for struct/fn/enum declarations */
+        if (prog_count >= prog_cap) {
+            prog_cap *= 2;
+            kept_progs = realloc(kept_progs, prog_cap * sizeof(Program));
+        }
+        kept_progs[prog_count++] = prog;
+        if (tok_count >= tok_cap) {
+            tok_cap *= 2;
+            kept_tokens = realloc(kept_tokens, tok_cap * sizeof(LatVec));
+        }
+        kept_tokens[tok_count++] = tokens;
+
         accumulated[0] = '\0';
     }
+
+    evaluator_free(ev);
+    for (size_t i = 0; i < prog_count; i++)
+        program_free(&kept_progs[i]);
+    free(kept_progs);
+    for (size_t i = 0; i < tok_count; i++) {
+        for (size_t j = 0; j < kept_tokens[i].len; j++)
+            token_free(lat_vec_get(&kept_tokens[i], j));
+        lat_vec_free(&kept_tokens[i]);
+    }
+    free(kept_tokens);
 }
 
 static int run_test_file(const char *path) {

@@ -35,6 +35,10 @@ Expr *expr_bool_lit(bool val) {
     return e;
 }
 
+Expr *expr_nil_lit(void) {
+    return expr_alloc(EXPR_NIL_LIT);
+}
+
 Expr *expr_ident(char *name) {
     Expr *e = expr_alloc(EXPR_IDENT);
     e->as.str_val = name;
@@ -117,6 +121,19 @@ Expr *expr_thaw(Expr *inner) {
 Expr *expr_clone(Expr *inner) {
     Expr *e = expr_alloc(EXPR_CLONE);
     e->as.freeze_expr = inner;
+    return e;
+}
+
+Expr *expr_spread(Expr *inner) {
+    Expr *e = expr_alloc(EXPR_SPREAD);
+    e->as.spread_expr = inner;
+    return e;
+}
+
+Expr *expr_tuple(Expr **elems, size_t count) {
+    Expr *e = expr_alloc(EXPR_TUPLE);
+    e->as.tuple.elems = elems;
+    e->as.tuple.count = count;
     return e;
 }
 
@@ -365,6 +382,15 @@ Stmt *stmt_destructure(AstPhase phase, DestructKind kind, char **names, size_t n
     return s;
 }
 
+Stmt *stmt_import(char *path, char *alias, char **selective, size_t count) {
+    Stmt *s = stmt_alloc(STMT_IMPORT);
+    s->as.import.module_path = path;
+    s->as.import.alias = alias;
+    s->as.import.selective_names = selective;
+    s->as.import.selective_count = count;
+    return s;
+}
+
 /* ── Destructors ── */
 
 void type_expr_free(TypeExpr *t) {
@@ -382,6 +408,7 @@ void expr_free(Expr *e) {
         case EXPR_INT_LIT:
         case EXPR_FLOAT_LIT:
         case EXPR_BOOL_LIT:
+        case EXPR_NIL_LIT:
             break;
         case EXPR_STRING_LIT:
         case EXPR_IDENT:
@@ -507,6 +534,14 @@ void expr_free(Expr *e) {
                 expr_free(e->as.enum_variant.args[i]);
             free(e->as.enum_variant.args);
             break;
+        case EXPR_SPREAD:
+            expr_free(e->as.spread_expr);
+            break;
+        case EXPR_TUPLE:
+            for (size_t i = 0; i < e->as.tuple.count; i++)
+                expr_free(e->as.tuple.elems[i]);
+            free(e->as.tuple.elems);
+            break;
     }
     free(e);
 }
@@ -559,6 +594,15 @@ void stmt_free(Stmt *s) {
             free(s->as.destructure.names);
             free(s->as.destructure.rest_name);
             expr_free(s->as.destructure.value);
+            break;
+        case STMT_IMPORT:
+            free(s->as.import.module_path);
+            free(s->as.import.alias);
+            if (s->as.import.selective_names) {
+                for (size_t i = 0; i < s->as.import.selective_count; i++)
+                    free(s->as.import.selective_names[i]);
+                free(s->as.import.selective_names);
+            }
             break;
     }
     free(s);

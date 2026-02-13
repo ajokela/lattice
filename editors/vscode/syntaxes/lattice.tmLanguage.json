@@ -62,7 +62,7 @@
         },
         {
           "name": "keyword.other.lattice",
-          "match": "\\b(fn|struct|enum|test|require)\\b"
+          "match": "\\b(fn|struct|enum|test|require|import|from|as)\\b"
         },
         {
           "name": "storage.modifier.lattice",
@@ -94,7 +94,7 @@
         },
         {
           "name": "support.type.advanced.lattice",
-          "match": "\\b(Channel|Closure|Struct|Fn|Enum)\\b"
+          "match": "\\b(Channel|Closure|Struct|Fn|Enum|Tuple)\\b"
         }
       ]
     },
@@ -107,11 +107,40 @@
         {
           "name": "constant.language.unit.lattice",
           "match": "\\b(unit)\\b"
+        },
+        {
+          "name": "constant.language.nil.lattice",
+          "match": "\\b(nil)\\b"
         }
       ]
     },
     "strings": {
       "patterns": [
+        {
+          "name": "string.quoted.triple.lattice",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.lattice",
+              "match": "\\\\(n|t|r|0|\\\\|\"|\\$|x[0-9a-fA-F]{2})"
+            },
+            {
+              "name": "meta.embedded.expression.lattice",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.begin.lattice" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.end.lattice" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        },
         {
           "name": "string.quoted.double.lattice",
           "begin": "\"",
@@ -134,6 +163,17 @@
               "patterns": [
                 { "include": "$self" }
               ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.lattice",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.lattice",
+              "match": "\\\\(n|t|r|0|\\\\|'|x[0-9a-fA-F]{2})"
             }
           ]
         }
@@ -188,7 +228,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.core.lattice",
-          "match": "\\b(typeof|phase_of|to_string|len|assert|error|is_error|exit|version|print_raw|eprint|input|is_complete|identity|pipe|compose|format)\\b"
+          "match": "\\b(typeof|phase_of|to_string|repr|len|assert|error|is_error|exit|version|print_raw|eprint|input|is_complete|identity|pipe|compose|format)\\b"
         },
         {
           "name": "support.function.builtin.io.lattice",
@@ -304,7 +344,11 @@
         },
         {
           "name": "keyword.operator.assignment.compound.lattice",
-          "match": "(\\+=|-=|\\*=|/=|%=)"
+          "match": "(<<=|>>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=)"
+        },
+        {
+          "name": "keyword.operator.bitwise.shift.lattice",
+          "match": "(<<|>>)"
         },
         {
           "name": "keyword.operator.comparison.lattice",
@@ -313,6 +357,10 @@
         {
           "name": "keyword.operator.logical.lattice",
           "match": "(&&|\\|\\|)"
+        },
+        {
+          "name": "keyword.operator.bitwise.lattice",
+          "match": "([&|\\^~])"
         },
         {
           "name": "keyword.operator.arithmetic.lattice",
@@ -333,6 +381,10 @@
         {
           "name": "keyword.operator.arrow.lattice",
           "match": "(->|=>)"
+        },
+        {
+          "name": "keyword.operator.nil-coalesce.lattice",
+          "match": "\\?\\?"
         }
       ]
     },

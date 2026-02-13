@@ -78,6 +78,8 @@ typedef struct Evaluator {
     bool        no_regions;    /* baseline mode: skip region registration */
     size_t      lat_eval_scope; /* when > 0, top-level lat_eval bindings go here */
     LatMap      required_files; /* set of resolved paths already require()'d */
+    LatMap      module_cache;  /* char* -> LatValue (cached module Maps) */
+    LatVec      module_exprs;  /* Expr* body wrappers kept alive for module closures */
     char       *script_dir;    /* directory of the main script (for require) */
     int         prog_argc;     /* argc from main() for args() builtin */
     char      **prog_argv;     /* argv from main() for args() builtin */
@@ -108,6 +110,16 @@ char *evaluator_run(Evaluator *ev, const Program *prog);
  * executes statements, but does NOT auto-call main(). The evaluator persists
  * state between calls so bindings/functions/structs accumulate. */
 char *evaluator_run_repl(Evaluator *ev, const Program *prog);
+
+/* Like evaluator_run_repl, but returns the last statement's result value
+ * instead of freeing it.  Caller must value_free the returned result.
+ * On error, result.ok == false and result.error is set. */
+EvalResult evaluator_run_repl_result(Evaluator *ev, const Program *prog);
+
+/* Return the repr string for a value.  For structs with a "repr" closure
+ * field, calls the closure.  Otherwise falls back to value_repr().
+ * Caller must free() the returned string. */
+char *eval_repr(Evaluator *ev, const LatValue *v);
 
 /* Run tests from a parsed program. Returns exit code (0 = all pass). */
 int evaluator_run_tests(Evaluator *ev, const Program *prog);

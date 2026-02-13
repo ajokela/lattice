@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, default parameters, variadic functions, string interpolation, try/catch error handling, structured concurrency with channels, and a self-hosted REPL written in Lattice itself.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, try/catch error handling, structured concurrency with channels, and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -59,7 +59,9 @@ flux copy = clone(data)     // independent deep copy
 | `Range` | Integer range (`0..10`) |
 | `Enum` | Sum type with variants (`Color::Red`) |
 | `Set` | Unordered collection of unique values (`Set::from([1, 2, 3])`) |
-| `Unit` | Absence of a value (like void/nil) |
+| `Tuple` | Fixed-size immutable sequence (`(1, "hello", true)`) |
+| `Nil` | Explicit null value (`nil`) |
+| `Unit` | Absence of a meaningful value (result of statements) |
 
 ### Functions
 
@@ -214,6 +216,41 @@ print(a.intersection(b)) // {2, 3}
 print(a.difference(b))   // {1}
 ```
 
+### Tuples
+
+Tuples are fixed-size, immutable sequences of values:
+
+```lattice
+let point = (10, 20)
+let record = ("Alice", 30, true)
+print(point.0)          // 10
+print(record.1)         // 30
+print(record.len())     // 3
+print(typeof(point))    // Tuple
+```
+
+### Nil & Nil Coalescing
+
+`nil` represents an explicit null value, distinct from `unit`:
+
+```lattice
+let x = nil
+print(typeof(x))        // Nil
+
+let name = nil ?? "default"   // "default"
+let val = "hello" ?? "other"  // "hello"
+
+// nil coalescing chains
+let result = nil ?? nil ?? "found"  // "found"
+```
+
+Map `.get()` returns `nil` for missing keys, making `??` useful for defaults:
+
+```lattice
+let m = Map::new()
+let port = m.get("port") ?? 8080
+```
+
 ### Structs
 
 ```lattice
@@ -239,6 +276,22 @@ let c = Counter {
     increment: |self| self.count + 1
 }
 print(c.increment())  // 1
+```
+
+Structs with a `repr` closure field use it for custom display:
+
+```lattice
+struct Point {
+    x: Int,
+    y: Int,
+    repr: Fn
+}
+
+let p = Point {
+    x: 10, y: 20,
+    repr: |self| "(${self.x}, ${self.y})"
+}
+print(repr(p))  // (10, 20)
 ```
 
 ### Error Handling
@@ -300,6 +353,94 @@ Key rules:
 - Channels cannot be frozen
 - Errors in spawned tasks propagate to the parent scope
 
+### Single-Quote Strings
+
+Single-quoted strings have no interpolation — useful for patterns, regex, and templates:
+
+```lattice
+let pattern = 'hello ${world}'   // literal ${world}, no interpolation
+let path = 'C:\Users\name'       // backslash-friendly
+```
+
+### Multi-Line Strings
+
+Triple-quoted strings (`"""..."""`) preserve newlines and auto-dedent based on closing indent:
+
+```lattice
+let html = """
+    <div>
+        <p>Hello</p>
+    </div>
+    """
+// Leading whitespace is stripped based on closing """ indent
+```
+
+Triple-quoted strings support interpolation:
+
+```lattice
+let name = "Lattice"
+let msg = """
+    Hello, ${name}!
+    Version ${version()}
+    """
+```
+
+### Spread Operator
+
+The `...` spread operator expands arrays inline within array literals:
+
+```lattice
+let a = [1, 2, 3]
+let b = [0, ...a, 4]     // [0, 1, 2, 3, 4]
+
+let x = [10, 20]
+let y = [30, 40]
+let z = [...x, ...y]     // [10, 20, 30, 40]
+```
+
+### Bitwise Operators
+
+Full set of bitwise operations on integers:
+
+```lattice
+print(0xFF & 0x0F)   // 15 (AND)
+print(0xF0 | 0x0F)   // 255 (OR)
+print(0xFF ^ 0x0F)    // 240 (XOR)
+print(~0)             // -1 (NOT)
+print(1 << 8)         // 256 (left shift)
+print(256 >> 4)       // 16 (right shift)
+
+// Compound assignment
+flux x = 0xFF
+x &= 0x0F             // x = 15
+x |= 0xF0             // x = 255
+x ^= 0x0F             // x = 240
+x <<= 4               // x = 3840
+x >>= 8               // x = 15
+```
+
+### Import
+
+Import functions and values from other `.lat` files:
+
+```lattice
+import "math_utils.lat"              // import all exports
+import "utils.lat" as utils          // namespaced import
+import { add, subtract } from "math.lat"  // selective import
+```
+
+Imported modules export values by returning a Map:
+
+```lattice
+// math_utils.lat
+fn add(a, b) { a + b }
+fn sub(a, b) { a - b }
+let exports = Map::new()
+exports.set("add", add)
+exports.set("sub", sub)
+exports  // return the exports map
+```
+
 ### Strict Mode
 
 Enable `#mode strict` at the top of a file for stricter phase enforcement. In strict mode, `freeze()` on an identifier **consumes** the binding — the original variable is no longer accessible after freezing:
@@ -327,6 +468,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `typeof(val)` | Type name of a value (`"Int"`, `"String"`, etc.) |
 | `phase_of(val)` | Phase of a value (`"fluid"`, `"crystal"`, `"unphased"`) |
 | `to_string(val)` | Convert any value to its string representation |
+| `repr(val)` | Display representation (strings quoted, structs use custom `repr` if defined) |
 | `len(val)` | Length of a string, array, or map |
 | `assert(cond, msg?)` | Assert condition is truthy; error with optional message |
 | `exit(code?)` | Exit the process (default code 0) |
@@ -652,7 +794,7 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 | Method | Description |
 |--------|-------------|
 | `.len()` | Number of entries |
-| `.get(key)` | Get value by key (Unit if not found) |
+| `.get(key)` | Get value by key (nil if not found) |
 | `.set(key, val)` | Set key-value pair (mutates in place) |
 | `.has(key)` | Check if key exists |
 | `.remove(key)` | Remove a key-value pair |
@@ -696,6 +838,13 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 | `.is_subset(other)` | Check if subset |
 | `.is_superset(other)` | Check if superset |
 
+### Tuple Access
+
+| Method | Description |
+|--------|-------------|
+| `.0`, `.1`, `.2`, ... | Access element by index |
+| `.len()` | Number of elements |
+
 ### Operators
 
 | Category | Operators |
@@ -703,7 +852,10 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 | Arithmetic | `+` `-` `*` `/` `%` |
 | Comparison | `==` `!=` `<` `>` `<=` `>=` |
 | Logical | `&&` `\|\|` `!` |
-| Compound Assignment | `+=` `-=` `*=` `/=` `%=` |
+| Bitwise | `&` `\|` `^` `~` `<<` `>>` |
+| Compound Assignment | `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` |
+| Nil Coalescing | `??` |
+| Spread | `...expr` (in array literals) |
 | Range | `..` |
 | Indexing | `[]` (with slice support) |
 | String Concat | `+` |
@@ -731,15 +883,28 @@ Run any example:
 ./clat examples/fibonacci.lat
 ```
 
-## Self-Hosted REPL
+## Interactive REPL
 
-Lattice includes a REPL written in Lattice itself (`repl.lat`), built on `is_complete`, `lat_eval`, and `input`:
+The built-in REPL automatically displays expression results with a `=> ` prefix:
+
+```
+lattice> 42
+=> 42
+lattice> "hello"
+=> "hello"
+lattice> [1, 2, 3].map(|x| x * 2)
+=> [2, 4, 6]
+lattice> let x = 5
+lattice>
+```
+
+Assignments and statements that return Unit are silently suppressed. The REPL supports multi-line input (auto-detects incomplete expressions) and readline history.
+
+Lattice also includes a self-hosted REPL written in Lattice itself (`repl.lat`), built on `is_complete`, `lat_eval`, and `input`:
 
 ```sh
 ./clat repl.lat
 ```
-
-Supports multi-line input (auto-detects incomplete expressions), error handling via try/catch, and readline history.
 
 ## CLI Reference
 
