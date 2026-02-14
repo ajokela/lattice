@@ -1,0 +1,394 @@
+// Lattice CLI Argument Parser Library
+// Provides a declarative API for parsing command-line arguments.
+//
+// Usage:
+//   import "lib/cli" as cli
+//
+//   let app = cli.new("myapp", "A sample application")
+//   app.flag("verbose", "v", "Enable verbose output")
+//   app.option("output", "o", "Output file path", "out.txt")
+//   app.arg("input", "Input file to process", true)
+//
+//   let parsed = app.parse()
+//   // parsed is a Map with all flag/option/arg values plus "_args" for extras
+
+// new(name, description) -> Map
+// Creates a CLI parser configuration with closures for building and parsing args.
+fn new(name: String, description: String) -> Map {
+    let app = Map::new()
+    app.set("_name", name)
+    app.set("_description", description)
+
+    // Internal storage: arrays of Maps describing each flag/option/positional arg.
+    // Each flag:   {"name": ..., "short": ..., "description": ...}
+    // Each option: {"name": ..., "short": ..., "description": ..., "default": ...}
+    // Each arg:    {"name": ..., "description": ..., "required": ...}
+    app.set("_flags", [])
+    app.set("_options", [])
+    app.set("_positionals", [])
+
+    // flag(name, short, description) - Register a boolean flag.
+    app.set("flag", |flag_name, short, desc| {
+        let entry = Map::new()
+        entry.set("name", flag_name)
+        entry.set("short", short)
+        entry.set("description", desc)
+        let flags = app.get("_flags")
+        flags.push(entry)
+        app.set("_flags", flags)
+    })
+
+    // option(name, short, description, default_value) - Register a named option.
+    app.set("option", |opt_name, short, desc, default_val| {
+        let entry = Map::new()
+        entry.set("name", opt_name)
+        entry.set("short", short)
+        entry.set("description", desc)
+        entry.set("default", default_val)
+        let options = app.get("_options")
+        options.push(entry)
+        app.set("_options", options)
+    })
+
+    // arg(name, description, required) - Register a positional argument.
+    app.set("arg", |arg_name, desc, required| {
+        let entry = Map::new()
+        entry.set("name", arg_name)
+        entry.set("description", desc)
+        entry.set("required", required)
+        let positionals = app.get("_positionals")
+        positionals.push(entry)
+        app.set("_positionals", positionals)
+    })
+
+    // help() -> String - Generate formatted help text.
+    app.set("help", || {
+        let app_name = app.get("_name")
+        let app_desc = app.get("_description")
+        let flags = app.get("_flags")
+        let options = app.get("_options")
+        let positionals = app.get("_positionals")
+
+        // Build usage line: "Usage: name [OPTIONS] <required> [optional]"
+        flux usage = "Usage: " + app_name + " [OPTIONS]"
+        for pos in positionals {
+            let pos_name = pos.get("name")
+            if pos.get("required") {
+                usage = usage + " <" + pos_name + ">"
+            } else {
+                usage = usage + " [" + pos_name + "]"
+            }
+        }
+
+        flux text = app_name + " - " + app_desc + "\n\n" + usage + "\n"
+
+        // Arguments section
+        if len(positionals) > 0 {
+            text = text + "\nArguments:\n"
+
+            // Calculate column width for alignment
+            flux max_arg_width = 0
+            for pos in positionals {
+                let pos_name = pos.get("name")
+                // "<name>" = name.len() + 2, plus possible " (required)" tag
+                let width = pos_name.len() + 2
+                if width > max_arg_width {
+                    max_arg_width = width
+                }
+            }
+            // Minimum column width with padding
+            if max_arg_width < 12 {
+                max_arg_width = 12
+            }
+
+            for pos in positionals {
+                let pos_name = pos.get("name")
+                let label = "<" + pos_name + ">"
+                let padded = label.pad_right(max_arg_width, " ")
+                flux line = "  " + padded + pos.get("description")
+                if pos.get("required") {
+                    line = line + " (required)"
+                }
+                text = text + line + "\n"
+            }
+        }
+
+        // Options section (flags + options + built-in help)
+        text = text + "\nOptions:\n"
+
+        // Calculate column width for alignment across all options
+        flux max_opt_width = 0
+        for f in flags {
+            // "-s, --name" length
+            let width = f.get("short").len() + f.get("name").len() + 6
+            if width > max_opt_width {
+                max_opt_width = width
+            }
+        }
+        for o in options {
+            let width = o.get("short").len() + o.get("name").len() + 6
+            if width > max_opt_width {
+                max_opt_width = width
+            }
+        }
+        // Account for "-h, --help"
+        let help_width = 10
+        if help_width > max_opt_width {
+            max_opt_width = help_width
+        }
+        // Minimum column width with padding
+        if max_opt_width < 14 {
+            max_opt_width = 14
+        }
+
+        // Print flags
+        for f in flags {
+            let label = "-" + f.get("short") + ", --" + f.get("name")
+            let padded = label.pad_right(max_opt_width, " ")
+            text = text + "  " + padded + f.get("description") + "\n"
+        }
+
+        // Print options
+        for o in options {
+            let label = "-" + o.get("short") + ", --" + o.get("name")
+            let padded = label.pad_right(max_opt_width, " ")
+            text = text + "  " + padded + o.get("description") + " [default: " + o.get("default") + "]\n"
+        }
+
+        // Built-in help flag
+        let help_label = "-h, --help"
+        let help_padded = help_label.pad_right(max_opt_width, " ")
+        text = text + "  " + help_padded + "Show this help message\n"
+
+        return text
+    })
+
+    // parse() -> Map - Parse command-line arguments and return results.
+    app.set("parse", || {
+        let app_name = app.get("_name")
+        let flags = app.get("_flags")
+        let options = app.get("_options")
+        let positionals = app.get("_positionals")
+
+        // Build lookup maps for fast resolution:
+        // long_to_flag: "--name" -> flag entry
+        // short_to_flag: "-x" -> flag entry
+        // long_to_option: "--name" -> option entry
+        // short_to_option: "-x" -> option entry
+        let long_to_type = Map::new()
+        let short_to_type = Map::new()
+        let long_to_name = Map::new()
+        let short_to_name = Map::new()
+
+        for f in flags {
+            long_to_type.set(f.get("name"), "flag")
+            short_to_type.set(f.get("short"), "flag")
+            long_to_name.set(f.get("name"), f.get("name"))
+            short_to_name.set(f.get("short"), f.get("name"))
+        }
+        for o in options {
+            long_to_type.set(o.get("name"), "option")
+            short_to_type.set(o.get("short"), "option")
+            long_to_name.set(o.get("name"), o.get("name"))
+            short_to_name.set(o.get("short"), o.get("name"))
+        }
+
+        // Initialize result map with defaults
+        let result = Map::new()
+        for f in flags {
+            result.set(f.get("name"), false)
+        }
+        for o in options {
+            result.set(o.get("name"), o.get("default"))
+        }
+        result.set("_args", [])
+
+        // Get the help text generator
+        let help_fn = app.get("help")
+
+        // Get raw args from the runtime (skip element 0 which is the script path)
+        let raw_args = args()
+        flux argv = []
+        flux skip_first = true
+        for a in raw_args {
+            if skip_first {
+                skip_first = false
+            } else {
+                argv.push(a)
+            }
+        }
+
+        let argc = len(argv)
+        flux i = 0
+        flux positional_index = 0
+        flux stop_flags = false
+
+        while i < argc {
+            let token = argv[i]
+
+            // "--" stops flag/option parsing; everything after is positional
+            if !stop_flags && token == "--" {
+                stop_flags = true
+                i = i + 1
+            // "--help" or "-h" triggers help output
+            } else if !stop_flags && (token == "--help" || token == "-h") {
+                print(help_fn())
+                exit(0)
+            // Long option: "--name=value" or "--name value" or "--name" (flag)
+            } else if !stop_flags && token.starts_with("--") {
+                let rest = token.substring(2, token.len())
+                let eq_pos = rest.index_of("=")
+
+                if eq_pos >= 0 {
+                    // --name=value form
+                    let opt_name = rest.substring(0, eq_pos)
+                    let opt_val = rest.substring(eq_pos + 1, rest.len())
+
+                    if long_to_type.has(opt_name) {
+                        let kind = long_to_type.get(opt_name)
+                        let canonical = long_to_name.get(opt_name)
+                        if kind == "option" {
+                            result.set(canonical, opt_val)
+                        } else {
+                            // Flag with =value: treat as error
+                            eprint("Error: flag --" + opt_name + " does not accept a value\n")
+                            eprint(help_fn())
+                            exit(1)
+                        }
+                    } else {
+                        eprint("Error: unknown option --" + opt_name + "\n")
+                        eprint(help_fn())
+                        exit(1)
+                    }
+                    i = i + 1
+                } else {
+                    // --name (could be flag or option needing next arg)
+                    let opt_name = rest
+
+                    if long_to_type.has(opt_name) {
+                        let kind = long_to_type.get(opt_name)
+                        let canonical = long_to_name.get(opt_name)
+
+                        if kind == "flag" {
+                            result.set(canonical, true)
+                            i = i + 1
+                        } else {
+                            // Option: consume next argument as value
+                            if i + 1 >= argc {
+                                eprint("Error: option --" + opt_name + " requires a value\n")
+                                eprint(help_fn())
+                                exit(1)
+                            }
+                            i = i + 1
+                            result.set(canonical, argv[i])
+                            i = i + 1
+                        }
+                    } else {
+                        eprint("Error: unknown option --" + opt_name + "\n")
+                        eprint(help_fn())
+                        exit(1)
+                    }
+                }
+            // Short option(s): "-x", "-x value", or "-abc" combined flags
+            } else if !stop_flags && token.starts_with("-") && token.len() > 1 {
+                let chars = token.substring(1, token.len())
+
+                if chars.len() == 1 {
+                    // Single short: -x
+                    let ch = chars
+                    if short_to_type.has(ch) {
+                        let kind = short_to_type.get(ch)
+                        let canonical = short_to_name.get(ch)
+
+                        if kind == "flag" {
+                            result.set(canonical, true)
+                            i = i + 1
+                        } else {
+                            // Option: consume next argument as value
+                            if i + 1 >= argc {
+                                eprint("Error: option -" + ch + " requires a value\n")
+                                eprint(help_fn())
+                                exit(1)
+                            }
+                            i = i + 1
+                            result.set(canonical, argv[i])
+                            i = i + 1
+                        }
+                    } else {
+                        eprint("Error: unknown option -" + ch + "\n")
+                        eprint(help_fn())
+                        exit(1)
+                    }
+                } else {
+                    // Multiple short chars: -abc (combined short flags)
+                    // All must be flags, except the last one may be an option
+                    flux j = 0
+                    let chars_len = chars.len()
+                    while j < chars_len {
+                        let ch = chars.substring(j, j + 1)
+
+                        if !short_to_type.has(ch) {
+                            eprint("Error: unknown option -" + ch + "\n")
+                            eprint(help_fn())
+                            exit(1)
+                        }
+
+                        let kind = short_to_type.get(ch)
+                        let canonical = short_to_name.get(ch)
+
+                        if kind == "flag" {
+                            result.set(canonical, true)
+                            j = j + 1
+                        } else {
+                            // Option: if not the last char, the remainder is the value
+                            if j + 1 < chars_len {
+                                let opt_val = chars.substring(j + 1, chars_len)
+                                result.set(canonical, opt_val)
+                                j = chars_len
+                            } else {
+                                // Last char is an option: consume next argument
+                                if i + 1 >= argc {
+                                    eprint("Error: option -" + ch + " requires a value\n")
+                                    eprint(help_fn())
+                                    exit(1)
+                                }
+                                i = i + 1
+                                result.set(canonical, argv[i])
+                                j = chars_len
+                            }
+                        }
+                    }
+                    i = i + 1
+                }
+            // Positional argument
+            } else {
+                if positional_index < len(positionals) {
+                    let pos = positionals[positional_index]
+                    result.set(pos.get("name"), token)
+                    positional_index = positional_index + 1
+                } else {
+                    // Extra positional: add to _args
+                    let extra = result.get("_args")
+                    extra.push(token)
+                    result.set("_args", extra)
+                }
+                i = i + 1
+            }
+        }
+
+        // Validate required positional arguments
+        flux p_idx = 0
+        for pos in positionals {
+            if pos.get("required") && p_idx >= positional_index {
+                eprint("Error: missing required argument <" + pos.get("name") + ">\n")
+                eprint(help_fn())
+                exit(1)
+            }
+            p_idx = p_idx + 1
+        }
+
+        return result
+    })
+
+    return app
+}

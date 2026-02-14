@@ -1,0 +1,245 @@
+// Lattice Test Runner Library
+// Provides rich assertions and structured test organization.
+//
+// Usage:
+//   import "lib/test" as t
+//
+//   t.run([
+//       t.describe("Math operations", |_| {
+//           return [
+//               t.it("addition", |_| {
+//                   t.assert_eq(2 + 2, 4)
+//                   t.assert_eq(1.5 + 2.5, 4.0)
+//               }),
+//               t.it("division by zero", |_| {
+//                   t.assert_throws(|_| { 1 / 0 })
+//               }),
+//               t.it("comparisons", |_| {
+//                   t.assert_gt(5, 3)
+//                   t.assert_lt(1, 10)
+//                   t.assert_near(3.14159, 3.14, 0.01)
+//               })
+//           ]
+//       }),
+//       t.describe("Types", |_| {
+//           return [
+//               t.it("type checks", |_| {
+//                   t.assert_type(42, "Int")
+//                   t.assert_type("hi", "String")
+//               }),
+//               t.it("nil checks", |_| {
+//                   t.assert_nil(nil)
+//                   t.assert_not_nil(42)
+//               })
+//           ]
+//       })
+//   ])
+
+// ---------------------------------------------------------------------------
+// Assertions
+// ---------------------------------------------------------------------------
+// All assertion functions use the builtin assert(cond, msg) to throw
+// descriptive errors that the runner catches with try/catch.
+
+// Fail if condition is falsy.
+fn check(condition: Any) {
+    if !condition {
+        assert(false, "assertion failed")
+    }
+}
+
+// Fail if actual != expected, showing both values.
+fn assert_eq(actual: Any, expected: Any) {
+    if actual != expected {
+        let msg = format("assert_eq failed: expected {}, got {}", repr(expected), repr(actual))
+        assert(false, msg)
+    }
+}
+
+// Fail if actual == expected.
+fn assert_neq(actual: Any, expected: Any) {
+    if actual == expected {
+        let msg = format("assert_neq failed: values are equal: {}", repr(actual))
+        assert(false, msg)
+    }
+}
+
+// Fail if a <= b.
+fn assert_gt(a: Any, b: Any) {
+    if a <= b {
+        let msg = format("assert_gt failed: {} is not greater than {}", repr(a), repr(b))
+        assert(false, msg)
+    }
+}
+
+// Fail if a >= b.
+fn assert_lt(a: Any, b: Any) {
+    if a >= b {
+        let msg = format("assert_lt failed: {} is not less than {}", repr(a), repr(b))
+        assert(false, msg)
+    }
+}
+
+// Fail if a < b.
+fn assert_gte(a: Any, b: Any) {
+    if a < b {
+        let msg = format("assert_gte failed: {} is not greater than or equal to {}", repr(a), repr(b))
+        assert(false, msg)
+    }
+}
+
+// Fail if a > b.
+fn assert_lte(a: Any, b: Any) {
+    if a > b {
+        let msg = format("assert_lte failed: {} is not less than or equal to {}", repr(a), repr(b))
+        assert(false, msg)
+    }
+}
+
+// Fail if |actual - expected| > epsilon. Useful for floating-point comparison.
+fn assert_near(actual: Any, expected: Any, epsilon: Any) {
+    flux diff = actual - expected
+    if diff < 0.0 { diff = 0.0 - diff }
+    if diff > epsilon {
+        let msg = format("assert_near failed: {} is not within {} of {}", repr(actual), repr(epsilon), repr(expected))
+        assert(false, msg)
+    }
+}
+
+// Fail if haystack does not contain needle.
+// Works for both String (.contains) and Array (.contains).
+fn assert_contains(haystack: Any, needle: Any) {
+    if !haystack.contains(needle) {
+        let msg = format("assert_contains failed: {} does not contain {}", repr(haystack), repr(needle))
+        assert(false, msg)
+    }
+}
+
+// Fail if the closure does NOT throw an error.
+fn assert_throws(closure: Fn) {
+    let threw = try {
+        closure(nil)
+        false
+    } catch _e {
+        true
+    }
+    if !threw {
+        assert(false, "assert_throws failed: expected an error but none was thrown")
+    }
+}
+
+// Fail if typeof(value) != type_name.
+fn assert_type(value: Any, type_name: String) {
+    let actual_type = typeof(value)
+    if actual_type != type_name {
+        let msg = format("assert_type failed: expected type {}, got {}", repr(type_name), repr(actual_type))
+        assert(false, msg)
+    }
+}
+
+// Fail if value is not nil.
+fn assert_nil(value: Any) {
+    if value != nil {
+        let msg = format("assert_nil failed: expected nil, got {}", repr(value))
+        assert(false, msg)
+    }
+}
+
+// Fail if value is nil.
+fn assert_not_nil(value: Any) {
+    if value == nil {
+        assert(false, "assert_not_nil failed: value is nil")
+    }
+}
+
+// Fail if value is not true.
+fn assert_true(value: Any) {
+    if value != true {
+        let msg = format("assert_true failed: expected true, got {}", repr(value))
+        assert(false, msg)
+    }
+}
+
+// Fail if value is not false.
+fn assert_false(value: Any) {
+    if value != false {
+        let msg = format("assert_false failed: expected false, got {}", repr(value))
+        assert(false, msg)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test organization
+// ---------------------------------------------------------------------------
+
+// Create a single test case descriptor.
+// Named "it" because "test" is a reserved keyword in Lattice (used for
+// the built-in test declaration syntax: test "name" { ... }).
+// Returns a Map with "name" and "fn" keys.
+fn it(name: String, closure: Fn) -> Map {
+    let m = Map::new()
+    m.set("name", name)
+    m.set("fn", closure)
+    return m
+}
+
+// Create a test suite. The builder_fn should return an array of test
+// descriptors (created with it()).
+// Returns a Map with "name" and "tests" keys.
+fn describe(name: String, builder_fn: Fn) -> Map {
+    let m = Map::new()
+    m.set("name", name)
+    m.set("tests", builder_fn(nil))
+    return m
+}
+
+// ---------------------------------------------------------------------------
+// Runner
+// ---------------------------------------------------------------------------
+
+// Execute an array of test suites, print results, and report timing.
+//
+// Each suite is a Map with "name" (String) and "tests" (Array of test Maps).
+// Each test Map has "name" (String) and "fn" (Closure).
+fn run(suites: Array) {
+    let start = time()
+
+    flux passed = 0
+    flux failed = 0
+    flux total = 0
+
+    print("Running tests...")
+
+    for suite in suites {
+        let suite_name = suite.get("name")
+        let tests = suite.get("tests")
+
+        print(format("\n  {}", suite_name))
+
+        for tc in tests {
+            let test_name = tc.get("name")
+            let test_fn = tc.get("fn")
+            total = total + 1
+
+            let result = try {
+                test_fn(nil)
+                "pass"
+            } catch e {
+                e
+            }
+
+            if result == "pass" {
+                passed = passed + 1
+                print(format("    \u2713 {}", test_name))
+            } else {
+                failed = failed + 1
+                print(format("    \u2717 {}: {}", test_name, result))
+            }
+        }
+    }
+
+    let elapsed = time() - start
+
+    print(format("\n{} passed, {} failed, {} total", passed, failed, total))
+    print(format("Completed in {}ms", elapsed))
+}

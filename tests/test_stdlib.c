@@ -6299,6 +6299,829 @@ static void test_phase_dispatch_unphased_fallback(void) {
     );
 }
 
+/* ======================================================================
+ * lib/test.lat — Test runner library
+ * ====================================================================== */
+
+static void test_lib_test_assert_eq_pass(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_eq(42, 42)\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_assert_eq_fail(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_eq(1, 2)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_lib_test_assert_neq(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_neq(1, 2)\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_assert_gt(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_gt(5, 3)\n"
+        "    t.assert_lt(1, 10)\n"
+        "    t.assert_gte(5, 5)\n"
+        "    t.assert_lte(3, 3)\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_assert_near(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_near(3.14159, 3.14, 0.01)\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_assert_contains(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_contains(\"hello world\", \"world\")\n"
+        "    t.assert_contains([1, 2, 3], 2)\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_assert_throws(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_throws(|_| { 1 / 0 })\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_assert_type(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_type(42, \"Int\")\n"
+        "    t.assert_type(\"hi\", \"String\")\n"
+        "    t.assert_type(true, \"Bool\")\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_assert_nil(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.assert_nil(nil)\n"
+        "    t.assert_not_nil(42)\n"
+        "    t.assert_true(true)\n"
+        "    t.assert_false(false)\n"
+        "    print(\"ok\")\n"
+        "}\n",
+        "ok"
+    );
+}
+
+static void test_lib_test_describe_it(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    let tc = t.it(\"my test\", |_| { 1 + 1 })\n"
+        "    print(tc.get(\"name\"))\n"
+        "}\n",
+        "my test"
+    );
+}
+
+static void test_lib_test_describe_suite(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    let suite = t.describe(\"Math\", |_| {\n"
+        "        return [t.it(\"add\", |_| { t.assert_eq(1+1, 2) })]\n"
+        "    })\n"
+        "    print(suite.get(\"name\"))\n"
+        "    print(len(suite.get(\"tests\")))\n"
+        "}\n",
+        "Math\n1"
+    );
+}
+
+static void test_lib_test_run_pass(void) {
+    /* Check that run() prints pass results */
+    char *out = run_capture(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.run([\n"
+        "        t.describe(\"Suite\", |_| {\n"
+        "            return [t.it(\"passes\", |_| { t.assert_eq(1, 1) })]\n"
+        "        })\n"
+        "    ])\n"
+        "}\n"
+    );
+    ASSERT(strstr(out, "1 passed") != NULL);
+    ASSERT(strstr(out, "0 failed") != NULL);
+    free(out);
+}
+
+static void test_lib_test_run_fail(void) {
+    /* Check that run() reports failures without crashing */
+    char *out = run_capture(
+        "import \"lib/test\" as t\n"
+        "fn main() {\n"
+        "    t.run([\n"
+        "        t.describe(\"Suite\", |_| {\n"
+        "            return [t.it(\"fails\", |_| { t.assert_eq(1, 2) })]\n"
+        "        })\n"
+        "    ])\n"
+        "}\n"
+    );
+    ASSERT(strstr(out, "1 failed") != NULL);
+    free(out);
+}
+
+/* ======================================================================
+ * lib/dotenv.lat — Dotenv library
+ * ====================================================================== */
+
+static void test_lib_dotenv_parse_basic(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"DB_HOST=localhost\\nDB_PORT=5432\")\n"
+        "    print(vars.get(\"DB_HOST\"))\n"
+        "    print(vars.get(\"DB_PORT\"))\n"
+        "}\n",
+        "localhost\n5432"
+    );
+}
+
+static void test_lib_dotenv_parse_double_quoted(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"KEY=\\\"hello world\\\"\")\n"
+        "    print(vars.get(\"KEY\"))\n"
+        "}\n",
+        "hello world"
+    );
+}
+
+static void test_lib_dotenv_parse_single_quoted(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"KEY='literal $VAR'\")\n"
+        "    print(vars.get(\"KEY\"))\n"
+        "}\n",
+        "literal $VAR"
+    );
+}
+
+static void test_lib_dotenv_parse_comments(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"# comment\\nKEY=value\")\n"
+        "    print(vars.get(\"KEY\"))\n"
+        "}\n",
+        "value"
+    );
+}
+
+static void test_lib_dotenv_parse_inline_comment(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"DEBUG=true #enable\")\n"
+        "    print(vars.get(\"DEBUG\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_lib_dotenv_parse_export(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"export SECRET=abc123\")\n"
+        "    print(vars.get(\"SECRET\"))\n"
+        "}\n",
+        "abc123"
+    );
+}
+
+static void test_lib_dotenv_parse_variable_expansion(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let content = 'HOST=localhost\\nURL=\"http://${HOST}/api\"'\n"
+        "    let vars = dotenv.parse_string(content)\n"
+        "    print(vars.get(\"URL\"))\n"
+        "}\n",
+        "http://localhost/api"
+    );
+}
+
+static void test_lib_dotenv_parse_escape_sequences(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"KEY=\\\"line1\\\\nline2\\\"\")\n"
+        "    print(vars.get(\"KEY\"))\n"
+        "}\n",
+        "line1\nline2"
+    );
+}
+
+static void test_lib_dotenv_parse_whitespace(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"KEY = value\")\n"
+        "    print(vars.get(\"KEY\"))\n"
+        "}\n",
+        "value"
+    );
+}
+
+static void test_lib_dotenv_parse_empty(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/dotenv\" as dotenv\n"
+        "fn main() {\n"
+        "    let vars = dotenv.parse_string(\"\")\n"
+        "    print(len(vars.keys()))\n"
+        "}\n",
+        "0"
+    );
+}
+
+/* ======================================================================
+ * lib/validate.lat — Validation library
+ * ====================================================================== */
+
+static void test_lib_validate_string_valid(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let s = v.string()\n"
+        "    print(v.is_valid(s, \"hello\"))\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_lib_validate_string_invalid(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let s = v.string()\n"
+        "    print(v.is_valid(s, 42))\n"
+        "}\n",
+        "false"
+    );
+}
+
+static void test_lib_validate_number_valid(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let n = v.number()\n"
+        "    print(v.is_valid(n, 42))\n"
+        "    print(v.is_valid(n, 3.14))\n"
+        "}\n",
+        "true\ntrue"
+    );
+}
+
+static void test_lib_validate_number_min_max(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let n = v.max(v.min(v.number(), 0), 100)\n"
+        "    print(v.is_valid(n, 50))\n"
+        "    print(v.is_valid(n, -1))\n"
+        "    print(v.is_valid(n, 101))\n"
+        "}\n",
+        "true\nfalse\nfalse"
+    );
+}
+
+static void test_lib_validate_string_min_max_len(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let s = v.max_len(v.min_len(v.string(), 2), 5)\n"
+        "    print(v.is_valid(s, \"abc\"))\n"
+        "    print(v.is_valid(s, \"a\"))\n"
+        "    print(v.is_valid(s, \"abcdef\"))\n"
+        "}\n",
+        "true\nfalse\nfalse"
+    );
+}
+
+static void test_lib_validate_boolean(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let b = v.boolean()\n"
+        "    print(v.is_valid(b, true))\n"
+        "    print(v.is_valid(b, \"yes\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_lib_validate_optional(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let s = v.opt(v.string())\n"
+        "    print(v.is_valid(s, nil))\n"
+        "    print(v.is_valid(s, \"hello\"))\n"
+        "}\n",
+        "true\ntrue"
+    );
+}
+
+static void test_lib_validate_required_nil(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let s = v.string()\n"
+        "    let r = v.check(s, nil)\n"
+        "    print(r.get(\"valid\"))\n"
+        "    print(r.get(\"errors\")[0])\n"
+        "}\n",
+        "false\nvalue: is required"
+    );
+}
+
+static void test_lib_validate_one_of(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let s = v.one_of(v.string(), [\"admin\", \"user\"])\n"
+        "    print(v.is_valid(s, \"admin\"))\n"
+        "    print(v.is_valid(s, \"root\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_lib_validate_array(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let a = v.array(v.number())\n"
+        "    print(v.is_valid(a, [1, 2, 3]))\n"
+        "    print(v.is_valid(a, \"not array\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_lib_validate_array_item_errors(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let a = v.array(v.number())\n"
+        "    let r = v.check(a, [1, \"bad\", 3])\n"
+        "    print(r.get(\"valid\"))\n"
+        "    print(r.get(\"errors\")[0])\n"
+        "}\n",
+        "false\nvalue[1]: expected number, got String"
+    );
+}
+
+static void test_lib_validate_object(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    flux fields = Map::new()\n"
+        "    fields.set(\"name\", v.string())\n"
+        "    fields.set(\"age\", v.number())\n"
+        "    let schema = v.object(fields)\n"
+        "    flux data = Map::new()\n"
+        "    data.set(\"name\", \"Alice\")\n"
+        "    data.set(\"age\", 30)\n"
+        "    print(v.is_valid(schema, data))\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_lib_validate_object_errors(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    flux fields = Map::new()\n"
+        "    fields.set(\"name\", v.string())\n"
+        "    fields.set(\"age\", v.number())\n"
+        "    let schema = v.object(fields)\n"
+        "    flux data = Map::new()\n"
+        "    data.set(\"name\", 123)\n"
+        "    let r = v.check(schema, data)\n"
+        "    print(r.get(\"valid\"))\n"
+        "}\n",
+        "false"
+    );
+}
+
+static void test_lib_validate_default_val(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    flux fields = Map::new()\n"
+        "    fields.set(\"role\", v.default_val(v.string(), \"user\"))\n"
+        "    let schema = v.object(fields)\n"
+        "    let data = Map::new()\n"
+        "    let filled = v.apply_defaults(schema, data)\n"
+        "    print(filled.get(\"role\"))\n"
+        "}\n",
+        "user"
+    );
+}
+
+static void test_lib_validate_integer(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/validate\" as v\n"
+        "fn main() {\n"
+        "    let n = v.integer(v.number())\n"
+        "    print(v.is_valid(n, 42))\n"
+        "    print(v.is_valid(n, 3.14))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+/* ======================================================================
+ * lib/fn.lat — Functional collections library
+ * ====================================================================== */
+
+static void test_lib_fn_range(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.range(0, 5))\n"
+        "    print(r)\n"
+        "}\n",
+        "[0, 1, 2, 3, 4]"
+    );
+}
+
+static void test_lib_fn_range_step(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.range(0, 10, 3))\n"
+        "    print(r)\n"
+        "}\n",
+        "[0, 3, 6, 9]"
+    );
+}
+
+static void test_lib_fn_from_array(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.from_array([10, 20, 30]))\n"
+        "    print(r)\n"
+        "}\n",
+        "[10, 20, 30]"
+    );
+}
+
+static void test_lib_fn_fmap(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.fmap(F.range(1, 4), |x| { x * x }))\n"
+        "    print(r)\n"
+        "}\n",
+        "[1, 4, 9]"
+    );
+}
+
+static void test_lib_fn_select(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.select(F.range(1, 10), |x| { x % 2 == 0 }))\n"
+        "    print(r)\n"
+        "}\n",
+        "[2, 4, 6, 8]"
+    );
+}
+
+static void test_lib_fn_take(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.take(F.range(0, 100), 3))\n"
+        "    print(r)\n"
+        "}\n",
+        "[0, 1, 2]"
+    );
+}
+
+static void test_lib_fn_drop(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.drop(F.range(0, 5), 3))\n"
+        "    print(r)\n"
+        "}\n",
+        "[3, 4]"
+    );
+}
+
+static void test_lib_fn_take_while(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.take_while(F.range(1, 100), |x| { x < 5 }))\n"
+        "    print(r)\n"
+        "}\n",
+        "[1, 2, 3, 4]"
+    );
+}
+
+static void test_lib_fn_zip(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.zip(F.range(1, 4), F.from_array([\"a\", \"b\", \"c\"])))\n"
+        "    print(r)\n"
+        "}\n",
+        "[[1, a], [2, b], [3, c]]"
+    );
+}
+
+static void test_lib_fn_fold(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let sum = F.fold(F.range(1, 6), 0, |acc, x| { acc + x })\n"
+        "    print(sum)\n"
+        "}\n",
+        "15"
+    );
+}
+
+static void test_lib_fn_count(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    print(F.count(F.range(0, 100)))\n"
+        "}\n",
+        "100"
+    );
+}
+
+static void test_lib_fn_repeat_take(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.take(F.repeat(7), 4))\n"
+        "    print(r)\n"
+        "}\n",
+        "[7, 7, 7, 7]"
+    );
+}
+
+static void test_lib_fn_iterate(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(F.take(F.iterate(1, |x| { x * 2 }), 5))\n"
+        "    print(r)\n"
+        "}\n",
+        "[1, 2, 4, 8, 16]"
+    );
+}
+
+static void test_lib_fn_result_ok(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.ok(42)\n"
+        "    print(F.is_ok(r))\n"
+        "    print(F.unwrap(r))\n"
+        "}\n",
+        "true\n42"
+    );
+}
+
+static void test_lib_fn_result_err(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.err(\"oops\")\n"
+        "    print(F.is_err(r))\n"
+        "    print(F.unwrap_or(r, 0))\n"
+        "}\n",
+        "true\n0"
+    );
+}
+
+static void test_lib_fn_try_fn(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r1 = F.try_fn(|_| { 42 })\n"
+        "    let r2 = F.try_fn(|_| { 1 / 0 })\n"
+        "    print(F.is_ok(r1))\n"
+        "    print(F.is_err(r2))\n"
+        "}\n",
+        "true\ntrue"
+    );
+}
+
+static void test_lib_fn_map_result(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.map_result(F.ok(5), |x| { x * 2 })\n"
+        "    print(F.unwrap(r))\n"
+        "    let e = F.map_result(F.err(\"e\"), |x| { x * 2 })\n"
+        "    print(F.is_err(e))\n"
+        "}\n",
+        "10\ntrue"
+    );
+}
+
+static void test_lib_fn_partial(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let add = |a, b| { a + b }\n"
+        "    let add5 = F.partial(add, 5)\n"
+        "    print(add5(3))\n"
+        "}\n",
+        "8"
+    );
+}
+
+static void test_lib_fn_comp(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let double = |x| { x * 2 }\n"
+        "    let inc = |x| { x + 1 }\n"
+        "    let double_then_inc = F.comp(inc, double)\n"
+        "    print(double_then_inc(3))\n"
+        "}\n",
+        "7"
+    );
+}
+
+static void test_lib_fn_apply_n(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    print(F.apply_n(|x| { x * 2 }, 4, 1))\n"
+        "}\n",
+        "16"
+    );
+}
+
+static void test_lib_fn_flip(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let div = |a, b| { a / b }\n"
+        "    let inv_div = F.flip(div)\n"
+        "    print(inv_div(2, 10))\n"
+        "}\n",
+        "5"
+    );
+}
+
+static void test_lib_fn_constant(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let f = F.constant(42)\n"
+        "    print(f(99))\n"
+        "    print(f(\"anything\"))\n"
+        "}\n",
+        "42\n42"
+    );
+}
+
+static void test_lib_fn_group_by(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let g = F.group_by([1,2,3,4,5,6], |x| { if x % 2 == 0 { \"even\" } else { \"odd\" } })\n"
+        "    print(g.get(\"even\"))\n"
+        "    print(g.get(\"odd\"))\n"
+        "}\n",
+        "[2, 4, 6]\n[1, 3, 5]"
+    );
+}
+
+static void test_lib_fn_partition(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let p = F.partition([1,2,3,4,5], |x| { x > 3 })\n"
+        "    print(p[0])\n"
+        "    print(p[1])\n"
+        "}\n",
+        "[4, 5]\n[1, 2, 3]"
+    );
+}
+
+static void test_lib_fn_frequencies(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let f = F.frequencies([\"a\", \"b\", \"a\", \"c\", \"b\", \"a\"])\n"
+        "    print(f.get(\"a\"))\n"
+        "    print(f.get(\"b\"))\n"
+        "    print(f.get(\"c\"))\n"
+        "}\n",
+        "3\n2\n1"
+    );
+}
+
+static void test_lib_fn_chunk(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    print(F.chunk([1,2,3,4,5], 2))\n"
+        "}\n",
+        "[[1, 2], [3, 4], [5]]"
+    );
+}
+
+static void test_lib_fn_flatten(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    print(F.flatten([[1,2], [3], [4,5]]))\n"
+        "}\n",
+        "[1, 2, 3, 4, 5]"
+    );
+}
+
+static void test_lib_fn_uniq_by(void) {
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    print(F.uniq_by([1,2,3,4,5], |x| { x % 3 }))\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_lib_fn_chain(void) {
+    /* Test chaining: range -> select -> fmap -> collect */
+    ASSERT_OUTPUT(
+        "import \"lib/fn\" as F\n"
+        "fn main() {\n"
+        "    let r = F.collect(\n"
+        "        F.fmap(\n"
+        "            F.select(F.range(1, 20), |x| { x % 3 == 0 }),\n"
+        "            |x| { x * x }\n"
+        "        )\n"
+        "    )\n"
+        "    print(r)\n"
+        "}\n",
+        "[9, 36, 81, 144, 225, 324]"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -6925,4 +7748,79 @@ void register_stdlib_tests(void) {
     register_test("test_phase_dispatch_no_match_error", test_phase_dispatch_no_match_error);
     register_test("test_phase_dispatch_same_sig_replaces", test_phase_dispatch_same_sig_replaces);
     register_test("test_phase_dispatch_unphased_fallback", test_phase_dispatch_unphased_fallback);
+
+    /* lib/test.lat — Test runner library */
+    register_test("test_lib_test_assert_eq_pass", test_lib_test_assert_eq_pass);
+    register_test("test_lib_test_assert_eq_fail", test_lib_test_assert_eq_fail);
+    register_test("test_lib_test_assert_neq", test_lib_test_assert_neq);
+    register_test("test_lib_test_assert_gt", test_lib_test_assert_gt);
+    register_test("test_lib_test_assert_near", test_lib_test_assert_near);
+    register_test("test_lib_test_assert_contains", test_lib_test_assert_contains);
+    register_test("test_lib_test_assert_throws", test_lib_test_assert_throws);
+    register_test("test_lib_test_assert_type", test_lib_test_assert_type);
+    register_test("test_lib_test_assert_nil", test_lib_test_assert_nil);
+    register_test("test_lib_test_describe_it", test_lib_test_describe_it);
+    register_test("test_lib_test_describe_suite", test_lib_test_describe_suite);
+    register_test("test_lib_test_run_pass", test_lib_test_run_pass);
+    register_test("test_lib_test_run_fail", test_lib_test_run_fail);
+
+    /* lib/dotenv.lat — Dotenv library */
+    register_test("test_lib_dotenv_parse_basic", test_lib_dotenv_parse_basic);
+    register_test("test_lib_dotenv_parse_double_quoted", test_lib_dotenv_parse_double_quoted);
+    register_test("test_lib_dotenv_parse_single_quoted", test_lib_dotenv_parse_single_quoted);
+    register_test("test_lib_dotenv_parse_comments", test_lib_dotenv_parse_comments);
+    register_test("test_lib_dotenv_parse_inline_comment", test_lib_dotenv_parse_inline_comment);
+    register_test("test_lib_dotenv_parse_export", test_lib_dotenv_parse_export);
+    register_test("test_lib_dotenv_parse_variable_expansion", test_lib_dotenv_parse_variable_expansion);
+    register_test("test_lib_dotenv_parse_escape_sequences", test_lib_dotenv_parse_escape_sequences);
+    register_test("test_lib_dotenv_parse_whitespace", test_lib_dotenv_parse_whitespace);
+    register_test("test_lib_dotenv_parse_empty", test_lib_dotenv_parse_empty);
+
+    /* lib/validate.lat — Validation library */
+    register_test("test_lib_validate_string_valid", test_lib_validate_string_valid);
+    register_test("test_lib_validate_string_invalid", test_lib_validate_string_invalid);
+    register_test("test_lib_validate_number_valid", test_lib_validate_number_valid);
+    register_test("test_lib_validate_number_min_max", test_lib_validate_number_min_max);
+    register_test("test_lib_validate_string_min_max_len", test_lib_validate_string_min_max_len);
+    register_test("test_lib_validate_boolean", test_lib_validate_boolean);
+    register_test("test_lib_validate_optional", test_lib_validate_optional);
+    register_test("test_lib_validate_required_nil", test_lib_validate_required_nil);
+    register_test("test_lib_validate_one_of", test_lib_validate_one_of);
+    register_test("test_lib_validate_array", test_lib_validate_array);
+    register_test("test_lib_validate_array_item_errors", test_lib_validate_array_item_errors);
+    register_test("test_lib_validate_object", test_lib_validate_object);
+    register_test("test_lib_validate_object_errors", test_lib_validate_object_errors);
+    register_test("test_lib_validate_default_val", test_lib_validate_default_val);
+    register_test("test_lib_validate_integer", test_lib_validate_integer);
+
+    /* lib/fn.lat — Functional collections library */
+    register_test("test_lib_fn_range", test_lib_fn_range);
+    register_test("test_lib_fn_range_step", test_lib_fn_range_step);
+    register_test("test_lib_fn_from_array", test_lib_fn_from_array);
+    register_test("test_lib_fn_fmap", test_lib_fn_fmap);
+    register_test("test_lib_fn_select", test_lib_fn_select);
+    register_test("test_lib_fn_take", test_lib_fn_take);
+    register_test("test_lib_fn_drop", test_lib_fn_drop);
+    register_test("test_lib_fn_take_while", test_lib_fn_take_while);
+    register_test("test_lib_fn_zip", test_lib_fn_zip);
+    register_test("test_lib_fn_fold", test_lib_fn_fold);
+    register_test("test_lib_fn_count", test_lib_fn_count);
+    register_test("test_lib_fn_repeat_take", test_lib_fn_repeat_take);
+    register_test("test_lib_fn_iterate", test_lib_fn_iterate);
+    register_test("test_lib_fn_result_ok", test_lib_fn_result_ok);
+    register_test("test_lib_fn_result_err", test_lib_fn_result_err);
+    register_test("test_lib_fn_try_fn", test_lib_fn_try_fn);
+    register_test("test_lib_fn_map_result", test_lib_fn_map_result);
+    register_test("test_lib_fn_partial", test_lib_fn_partial);
+    register_test("test_lib_fn_comp", test_lib_fn_comp);
+    register_test("test_lib_fn_apply_n", test_lib_fn_apply_n);
+    register_test("test_lib_fn_flip", test_lib_fn_flip);
+    register_test("test_lib_fn_constant", test_lib_fn_constant);
+    register_test("test_lib_fn_group_by", test_lib_fn_group_by);
+    register_test("test_lib_fn_partition", test_lib_fn_partition);
+    register_test("test_lib_fn_frequencies", test_lib_fn_frequencies);
+    register_test("test_lib_fn_chunk", test_lib_fn_chunk);
+    register_test("test_lib_fn_flatten", test_lib_fn_flatten);
+    register_test("test_lib_fn_uniq_by", test_lib_fn_uniq_by);
+    register_test("test_lib_fn_chain", test_lib_fn_chain);
 }

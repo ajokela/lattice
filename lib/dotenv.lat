@@ -1,0 +1,399 @@
+// Lattice dotenv Library
+// Load environment variables from .env files.
+//
+// Usage:
+//   import "lib/dotenv" as dotenv
+//
+//   // Load .env from current directory (silently skips if missing)
+//   dotenv.load()
+//
+//   // Load from a specific path (errors if missing)
+//   dotenv.load_file("config/.env.production")
+//
+//   // Parse without setting env vars (returns a Map)
+//   let vars = dotenv.parse(".env")
+//   print(vars.get("DATABASE_URL"))
+//
+//   // Load with options
+//   let opts = Map::new()
+//   opts.set("path", ".env")
+//   opts.set("override", false)
+//   opts.set("required", ["DATABASE_URL", "SECRET_KEY"])
+//   dotenv.load_opts(opts)
+//
+//   // Access after loading
+//   let db_url = env("DATABASE_URL")
+
+// ---------------------------------------------------------------------------
+// parse_string(content) -> Map
+// ---------------------------------------------------------------------------
+// Parse .env format from a string. Returns a Map of key-value pairs.
+// Does NOT set any environment variables.
+//
+// Parsing rules:
+//   1. KEY=VALUE or KEY = VALUE (whitespace around = is trimmed)
+//   2. Lines starting with # are comments
+//   3. Empty lines are skipped
+//   4. Double-quoted values: KEY="value with spaces"
+//   5. Single-quoted values: KEY='literal value'
+//   6. Double-quoted values support escapes: \n, \\, \"
+//   7. Single-quoted values are literal (no escape processing)
+//   8. Unquoted values trim trailing inline comments: KEY=value # comment
+//   9. export KEY=VALUE syntax is supported
+//  10. Multiline values with double quotes (unclosed quote continues)
+//  11. Variable expansion in double-quoted values: ${OTHER_VAR}
+fn parse_string(content: String) -> Map {
+    let result = Map::new()
+    let lines = content.split("\n")
+    let line_count = len(lines)
+    flux i = 0
+
+    while i < line_count {
+        let raw_line = lines[i]
+        i = i + 1
+
+        // Trim the line
+        flux line = raw_line.trim()
+
+        // Skip empty lines
+        if len(line) == 0 {
+            continue
+        }
+
+        // Skip comment lines
+        if line.starts_with("#") {
+            continue
+        }
+
+        // Strip "export " prefix if present
+        if line.starts_with("export ") {
+            line = line.substring(7, len(line)).trim()
+        }
+
+        // Find the = separator
+        let eq_pos = line.index_of("=")
+        if eq_pos < 0 {
+            // No = found, skip this line
+            continue
+        }
+
+        // Extract key and raw value
+        let key = line.substring(0, eq_pos).trim()
+        let raw_value = line.substring(eq_pos + 1, len(line))
+
+        // Skip if key is empty
+        if len(key) == 0 {
+            continue
+        }
+
+        // Trim leading whitespace from the value
+        flux value_str = raw_value.trim()
+
+        if len(value_str) > 0 && value_str.starts_with("\"") {
+            // ── Double-quoted value ──
+            // Remove the leading quote
+            let inner = value_str.substring(1, len(value_str))
+
+            // Look for closing quote, handling escape sequences and multiline
+            flux parsed = ""
+            flux chars = inner.chars()
+            flux j = 0
+            flux found_close = false
+
+            while !found_close {
+                while j < len(chars) {
+                    let ch = chars[j]
+                    if ch == "\\" && j + 1 < len(chars) {
+                        // Escape sequence
+                        let next = chars[j + 1]
+                        if next == "n" {
+                            parsed = parsed + "\n"
+                        } else {
+                        if next == "t" {
+                            parsed = parsed + "\t"
+                        } else {
+                        if next == "\\" {
+                            parsed = parsed + "\\"
+                        } else {
+                        if next == "\"" {
+                            parsed = parsed + "\""
+                        } else {
+                        if next == "r" {
+                            parsed = parsed + "\r"
+                        } else {
+                            // Unknown escape, keep both characters
+                            parsed = parsed + ch + next
+                        }
+                        }
+                        }
+                        }
+                        }
+                        j = j + 2
+                    } else {
+                    if ch == "\"" {
+                        // Found closing quote
+                        found_close = true
+                        j = j + 1
+                        break
+                    } else {
+                        parsed = parsed + ch
+                        j = j + 1
+                    }
+                    }
+                }
+
+                // If we didn't find a closing quote, this is a multiline value
+                if !found_close {
+                    if i < line_count {
+                        // Add a newline and continue with the next line
+                        parsed = parsed + "\n"
+                        let next_line = lines[i]
+                        i = i + 1
+                        chars = next_line.chars()
+                        j = 0
+                    } else {
+                        // End of file with unclosed quote; accept what we have
+                        found_close = true
+                    }
+                }
+            }
+
+            // Perform variable expansion on double-quoted values
+            value_str = _expand_variables(parsed, result)
+
+        } else {
+        if len(value_str) > 0 && value_str.starts_with("'") {
+            // ── Single-quoted value (literal, no escapes) ──
+            let inner = value_str.substring(1, len(value_str))
+
+            // Find closing single quote
+            let close_pos = inner.index_of("'")
+            if close_pos >= 0 {
+                value_str = inner.substring(0, close_pos)
+            } else {
+                // No closing quote found, take everything after the opening quote
+                value_str = inner
+            }
+
+        } else {
+            // ── Unquoted value ──
+            // Strip inline comments: everything after unquoted # preceded by whitespace
+            let hash_pos = value_str.index_of(" #")
+            if hash_pos >= 0 {
+                value_str = value_str.substring(0, hash_pos).trim()
+            } else {
+                // Also check for tab before #
+                let tab_hash_pos = value_str.index_of("\t#")
+                if tab_hash_pos >= 0 {
+                    value_str = value_str.substring(0, tab_hash_pos).trim()
+                }
+            }
+        }
+        }
+
+        result.set(key, value_str)
+    }
+
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// Internal: Variable expansion
+// ---------------------------------------------------------------------------
+
+// Check if a character is valid in a variable name (A-Z, a-z, 0-9, _).
+fn _is_var_char(ch: String) -> Bool {
+    let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+    return valid.contains(ch)
+}
+
+// Resolve a variable name: check parsed vars first, then env().
+fn _resolve_variable(name: String, parsed_vars: Map) -> String {
+    if parsed_vars.has(name) {
+        return parsed_vars.get(name)
+    }
+    let val = env(name)
+    if typeof(val) == "String" {
+        return val
+    }
+    // Variable not found; return empty string
+    return ""
+}
+
+// Expand ${VAR} and $VAR references in a string value.
+// Looks up variables from already-parsed values first, then falls back to
+// the process environment via env().
+//
+// Note: Lattice does not short-circuit && in while conditions, so we use
+// break-based loops to avoid out-of-bounds array access.
+fn _expand_variables(value: String, parsed_vars: Map) -> String {
+    flux result = ""
+    let chars = value.chars()
+    flux i = 0
+    let length = len(chars)
+
+    while i < length {
+        let ch = chars[i]
+
+        if ch == "$" {
+            if i + 1 < length {
+                if chars[i + 1] == "{" {
+                    // ${VAR_NAME} syntax
+                    i = i + 2
+                    flux var_name = ""
+                    flux reading = true
+                    while reading {
+                        if i >= length {
+                            reading = false
+                        } else {
+                            if chars[i] == "}" {
+                                reading = false
+                            } else {
+                                var_name = var_name + chars[i]
+                                i = i + 1
+                            }
+                        }
+                    }
+                    if i < length {
+                        // Skip the closing }
+                        i = i + 1
+                    }
+                    result = result + _resolve_variable(var_name, parsed_vars)
+                } else {
+                    // $VAR_NAME syntax (read until non-alphanumeric/non-underscore)
+                    i = i + 1
+                    flux var_name = ""
+                    flux reading = true
+                    while reading {
+                        if i >= length {
+                            reading = false
+                        } else {
+                            if _is_var_char(chars[i]) {
+                                var_name = var_name + chars[i]
+                                i = i + 1
+                            } else {
+                                reading = false
+                            }
+                        }
+                    }
+                    if len(var_name) > 0 {
+                        result = result + _resolve_variable(var_name, parsed_vars)
+                    } else {
+                        // Lone $ with no valid var name, keep it
+                        result = result + "$"
+                    }
+                }
+            } else {
+                // $ at end of string, keep it
+                result = result + "$"
+                i = i + 1
+            }
+        } else {
+            result = result + ch
+            i = i + 1
+        }
+    }
+
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// parse(path) -> Map
+// ---------------------------------------------------------------------------
+// Parse a .env file and return a Map of key-value pairs.
+// Does NOT set any environment variables.
+// Errors if the file does not exist.
+fn parse(path: String) -> Map {
+    assert(file_exists(path), format("dotenv: file not found: {}", path))
+    let content = read_file(path)
+    return parse_string(content)
+}
+
+// ---------------------------------------------------------------------------
+// Internal: Apply parsed variables to the environment
+// ---------------------------------------------------------------------------
+fn _apply_vars(vars: Map, do_override: Bool) {
+    let keys = vars.keys()
+    for key in keys {
+        if do_override {
+            env_set(key, vars.get(key))
+        } else {
+            // Only set if not already defined in the environment
+            let existing = env(key)
+            if typeof(existing) != "String" {
+                env_set(key, vars.get(key))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// load() -> Nil
+// ---------------------------------------------------------------------------
+// Load .env from the current directory. Silently skips if the file does
+// not exist. Does not override existing environment variables.
+fn load() {
+    if !file_exists(".env") {
+        return nil
+    }
+    let vars = parse_string(read_file(".env"))
+    _apply_vars(vars, false)
+}
+
+// ---------------------------------------------------------------------------
+// load_file(path) -> Nil
+// ---------------------------------------------------------------------------
+// Load environment variables from a specific .env file path.
+// Errors if the file does not exist. Does not override existing env vars.
+fn load_file(path: String) {
+    assert(file_exists(path), format("dotenv: file not found: {}", path))
+    let vars = parse_string(read_file(path))
+    _apply_vars(vars, false)
+}
+
+// ---------------------------------------------------------------------------
+// load_opts(options) -> Nil
+// ---------------------------------------------------------------------------
+// Load environment variables with options.
+//
+// Options Map keys:
+//   "path"     — file path (default: ".env")
+//   "override" — Bool, override existing env vars (default: false)
+//   "required" — Array of required variable names (error if any missing)
+fn load_opts(options: Map) {
+    // Determine file path
+    flux path = ".env"
+    if options.has("path") {
+        path = options.get("path")
+    }
+
+    // Determine override behavior
+    flux do_override = false
+    if options.has("override") {
+        do_override = options.get("override")
+    }
+
+    // Load and parse the file
+    if !file_exists(path) {
+        // If required keys are specified, we must error
+        if options.has("required") {
+            assert(false, format("dotenv: file not found: {}", path))
+        }
+        // Otherwise silently skip
+        return nil
+    }
+
+    let vars = parse_string(read_file(path))
+    _apply_vars(vars, do_override)
+
+    // Check required variables
+    if options.has("required") {
+        let required = options.get("required")
+        for req_key in required {
+            let val = env(req_key)
+            if typeof(val) != "String" {
+                assert(false, format("dotenv: required variable '{}' is not set", req_key))
+            }
+        }
+    }
+}

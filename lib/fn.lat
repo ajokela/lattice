@@ -1,0 +1,591 @@
+// Lattice Functional Programming & Collections Library
+// Provides lazy sequences, Result type, currying, and collection utilities.
+//
+// Usage:
+//   import "lib/fn" as F
+//
+// -- Lazy Sequences --
+//
+// Lazy sequences are Maps with:
+//   - "state": the current iterator state (any value)
+//   - "next":  a function |state| -> Map with:
+//       {"value": v, "done": false, "state": next_state}  -- yielded element
+//       {"done": true}                                     -- exhausted
+//
+// State is threaded explicitly through each step, making sequences
+// compatible with Lattice's value semantics.
+//
+// -- Result Type --
+//
+// Result is a Map with "tag" = "ok" or "err" and "value".
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+// Build a sequence step that yields a value and advances to the next state.
+fn _yield(value: Any, next_state: Any) -> Map {
+    let s = Map::new()
+    s.set("value", value)
+    s.set("done", false)
+    s.set("state", next_state)
+    return s
+}
+
+// Build a terminal step indicating the sequence is exhausted.
+fn _done() -> Map {
+    let s = Map::new()
+    s.set("done", true)
+    return s
+}
+
+// Build a lazy sequence from an initial state and a step function.
+fn _seq(initial_state: Any, next_fn: Fn) -> Map {
+    let s = Map::new()
+    s.set("state", initial_state)
+    s.set("next", next_fn)
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// Lazy Sequence Constructors
+// ---------------------------------------------------------------------------
+
+/// Create a lazy sequence producing integers from `start` (inclusive) to `end`
+/// (exclusive). An optional `step` controls the increment (default 1).
+///
+///   range(0, 5)        // lazy: 0, 1, 2, 3, 4
+///   range(0, 10, 2)    // lazy: 0, 2, 4, 6, 8
+///   range(5, 0, -1)    // lazy: 5, 4, 3, 2, 1
+fn range(start: Int, end_val: Int, step: Int = 1) -> Map {
+    return _seq(start, |i| {
+        if step > 0 {
+            if i >= end_val { return _done() }
+        } else {
+            if i <= end_val { return _done() }
+        }
+        return _yield(i, i + step)
+    })
+}
+
+/// Create a lazy sequence from an existing array.
+///
+///   from_array([10, 20, 30])  // lazy: 10, 20, 30
+fn from_array(array: Array) -> Map {
+    // State is the current index; the array is captured by the closure.
+    let arr = array
+    return _seq(0, |idx| {
+        if idx >= len(arr) { return _done() }
+        return _yield(arr[idx], idx + 1)
+    })
+}
+
+/// Create an infinite lazy sequence that always yields the same value.
+///
+///   repeat(42)  // lazy: 42, 42, 42, ...
+fn repeat(value: Any) -> Map {
+    let v = value
+    return _seq(nil, |_| {
+        return _yield(v, nil)
+    })
+}
+
+/// Create an infinite lazy sequence: seed, fn(seed), fn(fn(seed)), ...
+///
+///   iterate(1, |x| { x * 2 })  // lazy: 1, 2, 4, 8, 16, ...
+fn iterate(seed: Any, f: Fn) -> Map {
+    return _seq(seed, |current| {
+        return _yield(current, f(current))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Lazy Sequence Transformers
+// ---------------------------------------------------------------------------
+
+/// Lazily filter a sequence, keeping only elements where predicate returns true.
+///
+///   select(range(1, 10), |x| { x % 2 == 0 })  // lazy: 2, 4, 6, 8
+///
+/// Note: Named "select" instead of "filter" to avoid conflict with Map's
+/// built-in .filter() method when accessed via module dot syntax.
+fn select(seq: Map, predicate: Fn) -> Map {
+    let inner_next = seq.get("next")
+    let inner_state = seq.get("state")
+    // State is just the inner state. The next function loops until
+    // it finds a matching element or exhausts the source.
+    return _seq(inner_state, |st| {
+        flux s = st
+        loop {
+            let step = inner_next(s)
+            if step.get("done") { return _done() }
+            if predicate(step.get("value")) {
+                return _yield(step.get("value"), step.get("state"))
+            }
+            s = step.get("state")
+        }
+    })
+}
+
+/// Lazily transform each element of a sequence (or array) with a function.
+/// If the first argument is an array, it is converted to a lazy sequence first.
+///
+///   fmap(range(1, 4), |x| { x * x })  // lazy: 1, 4, 9
+///   fmap([1, 2, 3], |x| { x + 10 })   // lazy: 11, 12, 13
+///
+/// Note: Named "fmap" instead of "map" to avoid conflict with Map's
+/// built-in .map() method when accessed via module dot syntax.
+fn fmap(seq_or_array: Any, transform: Fn) -> Map {
+    flux src = seq_or_array
+    if typeof(seq_or_array) == "Array" {
+        src = from_array(seq_or_array)
+    }
+    let inner_next = src.get("next")
+    let inner_state = src.get("state")
+    return _seq(inner_state, |st| {
+        let step = inner_next(st)
+        if step.get("done") { return _done() }
+        return _yield(transform(step.get("value")), step.get("state"))
+    })
+}
+
+/// Lazily take at most `n` elements from a sequence.
+///
+///   take(range(0, 1000), 3)  // lazy: 0, 1, 2
+fn take(seq: Map, n: Int) -> Map {
+    let inner_next = seq.get("next")
+    let inner_state = seq.get("state")
+    // State is [inner_state, remaining_count]
+    return _seq([inner_state, n], |st| {
+        let remaining = st[1]
+        if remaining <= 0 { return _done() }
+        let step = inner_next(st[0])
+        if step.get("done") { return _done() }
+        return _yield(step.get("value"), [step.get("state"), remaining - 1])
+    })
+}
+
+/// Lazily skip the first `n` elements, then yield the rest.
+///
+///   drop(range(0, 10), 7)  // lazy: 7, 8, 9
+fn drop(seq: Map, n: Int) -> Map {
+    let inner_next = seq.get("next")
+    let inner_state = seq.get("state")
+    // State is [inner_state, to_skip]
+    return _seq([inner_state, n], |st| {
+        flux inner = st[0]
+        flux to_skip = st[1]
+        while to_skip > 0 {
+            let step = inner_next(inner)
+            if step.get("done") { return _done() }
+            inner = step.get("state")
+            to_skip = to_skip - 1
+        }
+        let step = inner_next(inner)
+        if step.get("done") { return _done() }
+        return _yield(step.get("value"), [step.get("state"), 0])
+    })
+}
+
+/// Lazily yield elements while predicate returns true, then stop.
+///
+///   take_while(range(1, 100), |x| { x < 5 })  // lazy: 1, 2, 3, 4
+fn take_while(seq: Map, predicate: Fn) -> Map {
+    let inner_next = seq.get("next")
+    let inner_state = seq.get("state")
+    // State is [inner_state, stopped_flag]
+    return _seq([inner_state, false], |st| {
+        if st[1] { return _done() }
+        let step = inner_next(st[0])
+        if step.get("done") { return _done() }
+        if !predicate(step.get("value")) {
+            return _done()
+        }
+        return _yield(step.get("value"), [step.get("state"), false])
+    })
+}
+
+/// Lazily zip two sequences into pairs [a, b]. Stops when either is exhausted.
+///
+///   zip(range(1, 4), from_array(["a", "b", "c"]))  // lazy: [1,"a"], [2,"b"], [3,"c"]
+fn zip(seq1: Map, seq2: Map) -> Map {
+    let next1 = seq1.get("next")
+    let next2 = seq2.get("next")
+    let state1 = seq1.get("state")
+    let state2 = seq2.get("state")
+    // State is [state1, state2]
+    return _seq([state1, state2], |st| {
+        let s1 = next1(st[0])
+        if s1.get("done") { return _done() }
+        let s2 = next2(st[1])
+        if s2.get("done") { return _done() }
+        return _yield([s1.get("value"), s2.get("value")], [s1.get("state"), s2.get("state")])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Lazy Sequence Consumers
+// ---------------------------------------------------------------------------
+
+/// Consume a lazy sequence and collect all elements into an array.
+///
+///   collect(range(1, 4))  // [1, 2, 3]
+fn collect(seq: Map) -> Array {
+    let next = seq.get("next")
+    flux state = seq.get("state")
+    flux result = []
+    loop {
+        let s = next(state)
+        if s.get("done") { break }
+        result.push(s.get("value"))
+        state = s.get("state")
+    }
+    return result
+}
+
+/// Consume a lazy sequence, folding it with `f(accumulator, element)`.
+///
+///   fold(range(1, 5), 0, |acc, x| { acc + x })  // 10
+fn fold(seq: Map, initial: Any, f: Fn) -> Any {
+    let next = seq.get("next")
+    flux state = seq.get("state")
+    flux acc = initial
+    loop {
+        let s = next(state)
+        if s.get("done") { break }
+        acc = f(acc, s.get("value"))
+        state = s.get("state")
+    }
+    return acc
+}
+
+/// Consume a lazy sequence and return the count of elements.
+///
+///   count(range(0, 100))  // 100
+fn count(seq: Map) -> Int {
+    let next = seq.get("next")
+    flux state = seq.get("state")
+    flux n = 0
+    loop {
+        let s = next(state)
+        if s.get("done") { break }
+        n = n + 1
+        state = s.get("state")
+    }
+    return n
+}
+
+// ---------------------------------------------------------------------------
+// Result Type
+// ---------------------------------------------------------------------------
+
+/// Wrap a value in an Ok result.
+///
+///   ok(42)  // {"tag": "ok", "value": 42}
+fn ok(value: Any) -> Map {
+    let r = Map::new()
+    r.set("tag", "ok")
+    r.set("value", value)
+    return r
+}
+
+/// Wrap a message in an Err result.
+///
+///   err("not found")  // {"tag": "err", "value": "not found"}
+fn err(message: Any) -> Map {
+    let r = Map::new()
+    r.set("tag", "err")
+    r.set("value", message)
+    return r
+}
+
+/// Check whether a Result is Ok.
+///
+///   is_ok(ok(1))   // true
+///   is_ok(err("")) // false
+fn is_ok(result: Map) -> Bool {
+    return result.get("tag") == "ok"
+}
+
+/// Check whether a Result is Err.
+///
+///   is_err(err("x"))  // true
+///   is_err(ok(1))     // false
+fn is_err(result: Map) -> Bool {
+    return result.get("tag") == "err"
+}
+
+/// Unwrap an Ok result, returning the inner value. Raises an error if Err.
+///
+///   unwrap(ok(42))       // 42
+///   unwrap(err("oops"))  // error!
+fn unwrap(result: Map) -> Any {
+    if result.get("tag") == "ok" {
+        return result.get("value")
+    }
+    assert(false, "unwrap() called on Err: " + to_string(result.get("value")))
+}
+
+/// Unwrap an Ok result, or return `default_val` if it is Err.
+///
+///   unwrap_or(ok(42), 0)       // 42
+///   unwrap_or(err("oops"), 0)  // 0
+fn unwrap_or(result: Map, default_val: Any) -> Any {
+    if result.get("tag") == "ok" {
+        return result.get("value")
+    }
+    return default_val
+}
+
+/// Apply `f` to the Ok value, passing Err through unchanged.
+///
+///   map_result(ok(5), |x| { x * 2 })     // ok(10)
+///   map_result(err("e"), |x| { x * 2 })  // err("e")
+fn map_result(result: Map, f: Fn) -> Map {
+    if result.get("tag") == "ok" {
+        return ok(f(result.get("value")))
+    }
+    return result
+}
+
+/// Apply `f` to the Ok value, where `f` itself returns a Result. Flatten.
+///
+///   flat_map_result(ok(5), |x| { if x > 0 { ok(x) } else { err("negative") } })
+fn flat_map_result(result: Map, f: Fn) -> Map {
+    if result.get("tag") == "ok" {
+        return f(result.get("value"))
+    }
+    return result
+}
+
+/// Run a closure inside a try/catch, returning Ok(value) or Err(message).
+/// Catches runtime errors (type errors, assertion failures, undefined vars, etc.).
+/// The closure receives a single ignored argument (use |_| { ... }).
+///
+///   try_fn(|_| { 42 })                       // ok(42)
+///   try_fn(|_| { assert(false, "oops") })    // err("oops")
+///   try_fn(|_| { 1 / 0 })                    // err("division by zero")
+fn try_fn(closure: Fn) -> Map {
+    let result = try {
+        closure(nil)
+    } catch e {
+        return err(e)
+    }
+    return ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Currying & Partial Application
+// ---------------------------------------------------------------------------
+
+/// Curry a 2-argument or 3-argument function.
+/// Returns a function that can be partially applied one argument at a time.
+///
+///   let add = curry(|a, b| { a + b })
+///   let add5 = add(5)
+///   add5(3)  // 8
+///
+///   let add3 = curry(|a, b, c| { a + b + c })
+///   add3(1)(2)(3)  // 6
+fn curry(f: Fn) -> Fn {
+    return |a| {
+        return |b| {
+            // Try calling f(a, b). If f expects 3 args, this will error.
+            let result = try {
+                f(a, b)
+            } catch e {
+                nil
+            }
+            if result != nil {
+                return result
+            }
+            // 3-arg curry: return one more level
+            return |c| {
+                return f(a, b, c)
+            }
+        }
+    }
+}
+
+/// Partially apply a function by binding the first 1, 2, or 3 arguments.
+///
+///   let greet = |greeting, name| { greeting + ", " + name + "!" }
+///   let hello = partial(greet, "Hello")
+///   hello("World")  // "Hello, World!"
+fn partial(f: Fn, ...bound: Any) -> Fn {
+    let bound_args = bound
+    let n = len(bound_args)
+    if n == 1 {
+        let a = bound_args[0]
+        return |...rest| {
+            if len(rest) == 0 { return f(a) }
+            if len(rest) == 1 { return f(a, rest[0]) }
+            if len(rest) == 2 { return f(a, rest[0], rest[1]) }
+            return f(a, rest[0], rest[1], rest[2])
+        }
+    }
+    if n == 2 {
+        let a = bound_args[0]
+        let b = bound_args[1]
+        return |...rest| {
+            if len(rest) == 0 { return f(a, b) }
+            if len(rest) == 1 { return f(a, b, rest[0]) }
+            return f(a, b, rest[0], rest[1])
+        }
+    }
+    if n == 3 {
+        let a = bound_args[0]
+        let b = bound_args[1]
+        let c = bound_args[2]
+        return |...rest| {
+            if len(rest) == 0 { return f(a, b, c) }
+            return f(a, b, c, rest[0])
+        }
+    }
+    // Fallback: just return f if no args bound
+    return f
+}
+
+// ---------------------------------------------------------------------------
+// Function Composition Utilities
+// ---------------------------------------------------------------------------
+
+/// Apply a value to a series of functions left-to-right (pipeline).
+/// Wraps the built-in pipe() for use with module-qualified access.
+///
+///   thread(5, |x| { x * 2 }, |x| { x + 1 })  // 11
+fn thread(value: Any, f1: Fn, f2: Fn) -> Any {
+    return f2(f1(value))
+}
+
+/// Compose two functions right-to-left: comp(f, g)(x) = f(g(x)).
+/// Wraps the built-in compose() for use with module-qualified access.
+///
+///   let inc_double = comp(|x| { x * 2 }, |x| { x + 1 })
+///   inc_double(3)  // 8
+fn comp(f: Fn, g: Fn) -> Fn {
+    return compose(f, g)
+}
+
+/// Apply a function n times to a value: apply_n(f, 3, x) = f(f(f(x))).
+///
+///   apply_n(|x| { x * 2 }, 4, 1)  // 16
+fn apply_n(f: Fn, n: Int, value: Any) -> Any {
+    flux result = value
+    flux i = 0
+    while i < n {
+        result = f(result)
+        i = i + 1
+    }
+    return result
+}
+
+/// Flip the argument order of a 2-argument function.
+///
+///   let div = |a, b| { a / b }
+///   let inv_div = flip(div)
+///   inv_div(2, 10)  // 5
+fn flip(f: Fn) -> Fn {
+    return |a, b| {
+        return f(b, a)
+    }
+}
+
+/// Create a constant function that always returns the same value.
+///
+///   let always5 = constant(5)
+///   always5(99)  // 5
+fn constant(value: Any) -> Fn {
+    let v = value
+    return |_| { v }
+}
+
+// ---------------------------------------------------------------------------
+// Collection Utilities
+// ---------------------------------------------------------------------------
+
+/// Group array elements by a key function. Returns a Map of key -> [elements].
+///
+///   group_by([1,2,3,4,5,6], |x| { if x % 2 == 0 { "even" } else { "odd" } })
+///   // {"even": [2, 4, 6], "odd": [1, 3, 5]}
+fn group_by(array: Array, key_fn: Fn) -> Map {
+    let groups = Map::new()
+    for item in array {
+        let key = key_fn(item)
+        let k = to_string(key)
+        if groups.has(k) {
+            flux group = groups.get(k)
+            group.push(item)
+            groups.set(k, group)
+        } else {
+            groups.set(k, [item])
+        }
+    }
+    return groups
+}
+
+/// Partition an array into two arrays: [matches, non_matches] based on a predicate.
+///
+///   partition([1,2,3,4,5], |x| { x > 3 })  // [[4, 5], [1, 2, 3]]
+fn partition(array: Array, predicate: Fn) -> Array {
+    flux matches = []
+    flux rest = []
+    for item in array {
+        if predicate(item) {
+            matches.push(item)
+        } else {
+            rest.push(item)
+        }
+    }
+    return [matches, rest]
+}
+
+/// Count occurrences of each element. Returns a Map of value -> count.
+///
+///   frequencies(["a", "b", "a", "c", "b", "a"])
+///   // {"a": 3, "b": 2, "c": 1}
+fn frequencies(array: Array) -> Map {
+    let counts = Map::new()
+    for item in array {
+        let key = to_string(item)
+        if counts.has(key) {
+            counts.set(key, counts.get(key) + 1)
+        } else {
+            counts.set(key, 1)
+        }
+    }
+    return counts
+}
+
+/// Split an array into sub-arrays of the given size.
+/// Equivalent to array.chunk(size), provided for completeness.
+///
+///   chunk([1,2,3,4,5], 2)  // [[1, 2], [3, 4], [5]]
+fn chunk(array: Array, size: Int) -> Array {
+    return array.chunk(size)
+}
+
+/// Flatten a nested array by one level.
+/// Equivalent to array.flat(), provided for completeness.
+///
+///   flatten([[1, 2], [3], [4, 5]])  // [1, 2, 3, 4, 5]
+fn flatten(array: Array) -> Array {
+    return array.flat()
+}
+
+/// Deduplicate an array using a key function. The first occurrence of each
+/// unique key is kept.
+///
+///   uniq_by([1, 2, 3, 4, 5], |x| { x % 3 })  // [1, 2, 3]
+fn uniq_by(array: Array, key_fn: Fn) -> Array {
+    let seen = Map::new()
+    flux result = []
+    for item in array {
+        let key = to_string(key_fn(item))
+        if !seen.has(key) {
+            seen.set(key, true)
+            result.push(item)
+        }
+    }
+    return result
+}

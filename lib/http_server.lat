@@ -1,0 +1,317 @@
+// Lattice HTTP Server Library
+// A pure-Lattice HTTP router and server built on top of the built-in TCP networking.
+//
+// Usage:
+//   import "lib/http_server" as http
+//
+//   let app = http.new()
+//
+//   app.get("/", |req| {
+//       return http.response(200, "Hello, World!")
+//   })
+//
+//   app.get("/json", |req| {
+//       return http.json(200, {"message": "OK"})
+//   })
+//
+//   app.post("/items", |req| {
+//       let body = req.get("body")
+//       return http.response(201, "Created")
+//   })
+//
+//   app.listen(8080)
+
+// ---------------------------------------------------------------------------
+// Response Helpers
+// ---------------------------------------------------------------------------
+
+// Build a plain-text HTTP response Map.
+// Returns a Map with keys: "status", "body", "headers".
+fn response(status: Int, body: String) -> Map {
+    let res = Map::new()
+    res.set("status", status)
+    res.set("body", body)
+    let headers = Map::new()
+    headers.set("Content-Type", "text/plain")
+    res.set("headers", headers)
+    return res
+}
+
+// Build a JSON HTTP response Map.
+// The data argument is serialized via json_stringify and the Content-Type is
+// set to application/json.
+fn json(status: Int, data) -> Map {
+    let body = json_stringify(data)
+    let res = Map::new()
+    res.set("status", status)
+    res.set("body", body)
+    let headers = Map::new()
+    headers.set("Content-Type", "application/json")
+    res.set("headers", headers)
+    return res
+}
+
+// Build an HTML HTTP response Map.
+fn html(status: Int, body: String) -> Map {
+    let res = Map::new()
+    res.set("status", status)
+    res.set("body", body)
+    let headers = Map::new()
+    headers.set("Content-Type", "text/html")
+    res.set("headers", headers)
+    return res
+}
+
+// ---------------------------------------------------------------------------
+// Internal Helpers
+// ---------------------------------------------------------------------------
+
+// Map an HTTP status code to its standard reason phrase.
+fn _status_reason(code: Int) -> String {
+    if code == 200 { return "OK" }
+    if code == 201 { return "Created" }
+    if code == 204 { return "No Content" }
+    if code == 301 { return "Moved Permanently" }
+    if code == 302 { return "Found" }
+    if code == 304 { return "Not Modified" }
+    if code == 400 { return "Bad Request" }
+    if code == 401 { return "Unauthorized" }
+    if code == 403 { return "Forbidden" }
+    if code == 404 { return "Not Found" }
+    if code == 405 { return "Method Not Allowed" }
+    if code == 409 { return "Conflict" }
+    if code == 422 { return "Unprocessable Entity" }
+    if code == 500 { return "Internal Server Error" }
+    if code == 502 { return "Bad Gateway" }
+    if code == 503 { return "Service Unavailable" }
+    return "Unknown"
+}
+
+// Parse a query string (everything after the '?') into a Map.
+// Example: "key=val&foo=bar" -> {"key": "val", "foo": "bar"}
+fn _parse_query_string(qs: String) -> Map {
+    let params = Map::new()
+    if len(qs) == 0 {
+        return params
+    }
+    let pairs = qs.split("&")
+    for pair in pairs {
+        let eq = pair.index_of("=")
+        if eq >= 0 {
+            let key = pair.substring(0, eq)
+            let val = pair.substring(eq + 1, len(pair))
+            params.set(key, val)
+        } else {
+            // Key with no value
+            params.set(pair, "")
+        }
+    }
+    return params
+}
+
+// Parse raw HTTP request text into a request Map.
+// Returns a Map with: "method", "path", "query", "headers", "body", "raw_path".
+fn _parse_request(raw: String) -> Map {
+    let req = Map::new()
+    req.set("method", "GET")
+    req.set("path", "/")
+    req.set("raw_path", "/")
+    req.set("query", Map::new())
+    req.set("headers", Map::new())
+    req.set("body", "")
+
+    if len(raw) == 0 {
+        return req
+    }
+
+    // Split headers from body at the \r\n\r\n boundary
+    let body_sep = raw.index_of("\r\n\r\n")
+    flux header_section = raw
+    flux body = ""
+    if body_sep >= 0 {
+        header_section = raw.substring(0, body_sep)
+        body = raw.substring(body_sep + 4, len(raw))
+    }
+
+    let lines = header_section.split("\r\n")
+    if len(lines) == 0 {
+        return req
+    }
+
+    // Parse the request line: "METHOD /path HTTP/1.1"
+    let request_line = lines[0]
+    let parts = request_line.split(" ")
+    if len(parts) >= 1 {
+        req.set("method", parts[0])
+    }
+    if len(parts) >= 2 {
+        let raw_path = parts[1]
+        req.set("raw_path", raw_path)
+
+        // Separate path from query string
+        let qmark = raw_path.index_of("?")
+        if qmark >= 0 {
+            req.set("path", raw_path.substring(0, qmark))
+            let qs = raw_path.substring(qmark + 1, len(raw_path))
+            req.set("query", _parse_query_string(qs))
+        } else {
+            req.set("path", raw_path)
+        }
+    }
+
+    // Parse headers (lines after the request line)
+    let headers = Map::new()
+    flux i = 1
+    while i < len(lines) {
+        let line = lines[i]
+        let colon = line.index_of(":")
+        if colon > 0 {
+            let name = line.substring(0, colon).trim()
+            let value = line.substring(colon + 1, len(line)).trim()
+            headers.set(name, value)
+        }
+        i = i + 1
+    }
+    req.set("headers", headers)
+    req.set("body", body)
+
+    return req
+}
+
+// Format a response Map into a raw HTTP response string ready to send.
+fn _format_response(res: Map) -> String {
+    let status = res.get("status")
+    let body = res.get("body")
+    let headers = res.get("headers")
+    let reason = _status_reason(status)
+
+    // Start building the response string
+    flux result = "HTTP/1.1 " + to_string(status) + " " + reason + "\r\n"
+
+    // Content-Length is always set based on the body
+    result = result + "Content-Length: " + to_string(len(body)) + "\r\n"
+
+    // Connection: close so the client knows we are done
+    result = result + "Connection: close\r\n"
+
+    // Append user-specified headers
+    let header_keys = headers.keys()
+    for key in header_keys {
+        result = result + key + ": " + headers.get(key) + "\r\n"
+    }
+
+    // End of headers, then body
+    result = result + "\r\n" + body
+    return result
+}
+
+// Build a simple 404 response Map.
+fn _not_found_response(path: String) -> Map {
+    let body = "404 Not Found: " + path
+    return response(404, body)
+}
+
+// Build a simple 405 response Map.
+fn _method_not_allowed_response(method: String) -> Map {
+    let body = "405 Method Not Allowed: " + method
+    return response(405, body)
+}
+
+// ---------------------------------------------------------------------------
+// Router / Application
+// ---------------------------------------------------------------------------
+
+// Create a new HTTP application (router).
+// Returns a Map with route registration closures (.get, .post, .put, .delete)
+// and a .listen closure to start the server.
+fn new() -> Map {
+    let app = Map::new()
+
+    // Route tables keyed by HTTP method, each a Map of path -> handler
+    let routes = Map::new()
+    routes.set("GET", Map::new())
+    routes.set("POST", Map::new())
+    routes.set("PUT", Map::new())
+    routes.set("DELETE", Map::new())
+    app.set("_routes", routes)
+
+    // ── Route registration helpers ──
+
+    // Register a GET route handler.
+    app.set("get", |path, handler| {
+        let get_routes = routes.get("GET")
+        get_routes.set(path, handler)
+    })
+
+    // Register a POST route handler.
+    app.set("post", |path, handler| {
+        let post_routes = routes.get("POST")
+        post_routes.set(path, handler)
+    })
+
+    // Register a PUT route handler.
+    app.set("put", |path, handler| {
+        let put_routes = routes.get("PUT")
+        put_routes.set(path, handler)
+    })
+
+    // Register a DELETE route handler.
+    app.set("delete", |path, handler| {
+        let delete_routes = routes.get("DELETE")
+        delete_routes.set(path, handler)
+    })
+
+    // ── Server loop ──
+
+    // Start the HTTP server on the given port. Blocks forever, accepting
+    // and handling one connection at a time.
+    app.set("listen", |port| {
+        let server_fd = tcp_listen("0.0.0.0", port)
+        print("Lattice HTTP server listening on http://localhost:" + to_string(port))
+
+        loop {
+            let client_fd = tcp_accept(server_fd)
+            let raw = tcp_read(client_fd)
+
+            if len(raw) > 0 {
+                // Parse the incoming HTTP request
+                let req = _parse_request(raw)
+
+                // Attach peer address info
+                let peer = tcp_peer_addr(client_fd)
+                req.set("peer", peer)
+
+                let method = req.get("method")
+                let path = req.get("path")
+                print(method + " " + path + " from " + peer)
+
+                // Look up the handler in the route table
+                flux res = nil
+                if routes.has(method) {
+                    let method_routes = routes.get(method)
+                    if method_routes.has(path) {
+                        let handler = method_routes.get(path)
+                        res = handler(req)
+                    } else {
+                        res = _not_found_response(path)
+                    }
+                } else {
+                    res = _method_not_allowed_response(method)
+                }
+
+                // If the handler returned nil or something unexpected, send 500
+                if res == nil {
+                    res = response(500, "Internal Server Error")
+                }
+
+                // Serialize and send the response
+                let raw_response = _format_response(res)
+                tcp_write(client_fd, raw_response)
+            }
+
+            tcp_close(client_fd)
+        }
+    })
+
+    return app
+}

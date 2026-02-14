@@ -1,0 +1,298 @@
+// Lattice Logging Library
+// Provides structured logging with configurable levels, output targets, and formats.
+//
+// Usage:
+//   import "lib/log" as log
+//
+//   // Module-level convenience functions (stderr, info level threshold)
+//   log.info("Server started on port 8080")
+//   log.warn("Connection timeout")
+//   log.error("Failed to connect to database")
+//   log.debug("This won't print at default info level")
+//
+//   // Custom logger with full configuration
+//   let cfg = Map::new()
+//   cfg.set("level", "debug")
+//   cfg.set("file", "app.log")
+//   cfg.set("format", "json")
+//   cfg.set("prefix", "[myapp]")
+//   let logger = log.new(cfg)
+//
+//   logger.info("Custom logger message")
+//   let ctx = Map::new()
+//   ctx.set("code", 500)
+//   ctx.set("path", "/api")
+//   logger.error("Something went wrong", ctx)
+//
+//   // Change level (returns a new logger)
+//   let quiet_logger = log.set_level(logger, "error")
+
+// ---------------------------------------------------------------------------
+// Log Level Constants
+// ---------------------------------------------------------------------------
+
+// Log level numeric values: debug=0, info=1, warn=2, error=3
+
+// ---------------------------------------------------------------------------
+// Log Level Helpers
+// ---------------------------------------------------------------------------
+
+// Convert a level name string to its numeric value.
+// Returns -1 for unknown levels.
+fn _level_to_int(level: String) -> Int {
+    if level == "debug" { return 0 }
+    if level == "info"  { return 1 }
+    if level == "warn"  { return 2 }
+    if level == "error" { return 3 }
+    return -1
+}
+
+// Convert a numeric level to its uppercase display name.
+fn _level_label(level: Int) -> String {
+    if level == 0 { return "DEBUG" }
+    if level == 1 { return "INFO" }
+    if level == 2 { return "WARN" }
+    if level == 3 { return "ERROR" }
+    return "UNKNOWN"
+}
+
+// Convert a numeric level back to its lowercase name.
+fn _level_name(level: Int) -> String {
+    if level == 0 { return "debug" }
+    if level == 1 { return "info" }
+    if level == 2 { return "warn" }
+    if level == 3 { return "error" }
+    return "info"
+}
+
+// ---------------------------------------------------------------------------
+// Formatting
+// ---------------------------------------------------------------------------
+
+// Format a text log line without context.
+// Example: 2024-01-15 10:30:45 [INFO] Server started on port 8080
+fn _fmt_text(label: String, prefix: String, message: String) -> String {
+    let ts = time_format(time(), "%Y-%m-%d %H:%M:%S")
+    flux line = ts + " [" + label + "]"
+    if prefix != "" {
+        line = line + " " + prefix
+    }
+    line = line + " " + message
+    return line
+}
+
+// Format a text log line with a context Map appended as JSON.
+// Example: 2024-01-15 10:30:47 [ERROR] Failed {"code":500}
+fn _fmt_text_ctx(label: String, prefix: String, message: String, context: Map) -> String {
+    let base = _fmt_text(label, prefix, message)
+    return base + " " + json_stringify(context)
+}
+
+// Format a JSON log line without context.
+// Example: {"timestamp":"2024-01-15T10:30:45","level":"INFO","message":"Server started"}
+fn _fmt_json(label: String, prefix: String, message: String) -> String {
+    let ts = time_format(time(), "%Y-%m-%dT%H:%M:%S")
+    let entry = Map::new()
+    entry.set("timestamp", ts)
+    entry.set("level", label)
+    if prefix != "" {
+        entry.set("prefix", prefix)
+    }
+    entry.set("message", message)
+    return json_stringify(entry)
+}
+
+// Format a JSON log line with context keys merged into the entry.
+// Example: {"timestamp":"...","level":"ERROR","message":"Failed","code":500}
+fn _fmt_json_ctx(label: String, prefix: String, message: String, context: Map) -> String {
+    let ts = time_format(time(), "%Y-%m-%dT%H:%M:%S")
+    let entry = Map::new()
+    entry.set("timestamp", ts)
+    entry.set("level", label)
+    if prefix != "" {
+        entry.set("prefix", prefix)
+    }
+    entry.set("message", message)
+    // Merge context keys into the top-level entry
+    let keys = context.keys()
+    for key in keys {
+        entry.set(key, context.get(key))
+    }
+    return json_stringify(entry)
+}
+
+// ---------------------------------------------------------------------------
+// Logger Constructor
+// ---------------------------------------------------------------------------
+
+// Create a new logger instance with the given configuration.
+//
+// Config is a Map with optional keys:
+//   "level"  -- minimum log level: "debug", "info", "warn", "error" (default: "info")
+//   "file"   -- file path to append logs to (default: none, stderr only)
+//   "format" -- output format: "text" or "json" (default: "text")
+//   "prefix" -- string prefix for log messages (default: "")
+//
+// Returns a Map with closures: .debug, .info, .warn, .error
+fn new(config: Map) -> Map {
+    let logger = Map::new()
+
+    // Extract configuration with defaults
+    flux min_level = 1
+    if config.has("level") {
+        min_level = _level_to_int(config.get("level"))
+        if min_level < 0 {
+            min_level = 1
+        }
+    }
+
+    let log_file = if config.has("file") { config.get("file") } else { "" }
+    let log_format = if config.has("format") { config.get("format") } else { "text" }
+    let log_prefix = if config.has("prefix") { config.get("prefix") } else { "" }
+    let use_json = log_format == "json"
+    let use_file = log_file != ""
+
+    // Store config metadata for set_level to read
+    logger.set("_level", min_level)
+    logger.set("_file", log_file)
+    logger.set("_format", log_format)
+    logger.set("_prefix", log_prefix)
+
+    // -- Public API closures --
+    // Each closure captures its config values directly. The level check,
+    // formatting, output to stderr, and optional file append are all inline
+    // to avoid cross-closure mutation issues with Lattice's value semantics.
+
+    logger.set("debug", |message, context = nil| {
+        if 0 < min_level { return nil }
+        let label = "DEBUG"
+        flux line = ""
+        if context == nil {
+            if use_json { line = _fmt_json(label, log_prefix, message) }
+            else { line = _fmt_text(label, log_prefix, message) }
+        } else {
+            if use_json { line = _fmt_json_ctx(label, log_prefix, message, context) }
+            else { line = _fmt_text_ctx(label, log_prefix, message, context) }
+        }
+        eprint(line)
+        if use_file { append_file(log_file, line + "\n") }
+    })
+
+    logger.set("info", |message, context = nil| {
+        if 1 < min_level { return nil }
+        let label = "INFO"
+        flux line = ""
+        if context == nil {
+            if use_json { line = _fmt_json(label, log_prefix, message) }
+            else { line = _fmt_text(label, log_prefix, message) }
+        } else {
+            if use_json { line = _fmt_json_ctx(label, log_prefix, message, context) }
+            else { line = _fmt_text_ctx(label, log_prefix, message, context) }
+        }
+        eprint(line)
+        if use_file { append_file(log_file, line + "\n") }
+    })
+
+    logger.set("warn", |message, context = nil| {
+        if 2 < min_level { return nil }
+        let label = "WARN"
+        flux line = ""
+        if context == nil {
+            if use_json { line = _fmt_json(label, log_prefix, message) }
+            else { line = _fmt_text(label, log_prefix, message) }
+        } else {
+            if use_json { line = _fmt_json_ctx(label, log_prefix, message, context) }
+            else { line = _fmt_text_ctx(label, log_prefix, message, context) }
+        }
+        eprint(line)
+        if use_file { append_file(log_file, line + "\n") }
+    })
+
+    logger.set("error", |message, context = nil| {
+        if 3 < min_level { return nil }
+        let label = "ERROR"
+        flux line = ""
+        if context == nil {
+            if use_json { line = _fmt_json(label, log_prefix, message) }
+            else { line = _fmt_text(label, log_prefix, message) }
+        } else {
+            if use_json { line = _fmt_json_ctx(label, log_prefix, message, context) }
+            else { line = _fmt_text_ctx(label, log_prefix, message, context) }
+        }
+        eprint(line)
+        if use_file { append_file(log_file, line + "\n") }
+    })
+
+    return logger
+}
+
+// ---------------------------------------------------------------------------
+// set_level -- create a new logger with a different minimum level
+// ---------------------------------------------------------------------------
+
+// Returns a new logger with the same configuration but a different minimum level.
+// Lattice closures capture their environment by value, so changing the level
+// requires constructing a fresh logger.
+//
+// Usage:
+//   let logger = log.new(config)
+//   let quiet = log.set_level(logger, "error")
+fn set_level(logger: Map, level_string: String) -> Map {
+    let config = Map::new()
+
+    // Use the new level if valid, otherwise keep the old one
+    let new_level = _level_to_int(level_string)
+    if new_level >= 0 {
+        config.set("level", level_string)
+    } else {
+        config.set("level", _level_name(logger.get("_level")))
+    }
+
+    let file = logger.get("_file")
+    if file != "" {
+        config.set("file", file)
+    }
+
+    config.set("format", logger.get("_format"))
+
+    let prefix = logger.get("_prefix")
+    if prefix != "" {
+        config.set("prefix", prefix)
+    }
+
+    return new(config)
+}
+
+// ---------------------------------------------------------------------------
+// Module-Level Convenience Functions
+// ---------------------------------------------------------------------------
+
+// Default logger: text format, info level, stderr only, no prefix.
+let _default_config = Map::new()
+_default_config.set("level", "info")
+let _default = new(_default_config)
+
+// Log a debug message. Uses the default logger (info level, stderr).
+// At the default info threshold, debug messages are suppressed.
+fn debug(message: String) {
+    let f = _default.get("debug")
+    f(message)
+}
+
+// Log an info message. Uses the default logger (info level, stderr).
+fn info(message: String) {
+    let f = _default.get("info")
+    f(message)
+}
+
+// Log a warning message. Uses the default logger (info level, stderr).
+fn warn(message: String) {
+    let f = _default.get("warn")
+    f(message)
+}
+
+// Log an error message. Uses the default logger (info level, stderr).
+fn error(message: String) {
+    let f = _default.get("error")
+    f(message)
+}

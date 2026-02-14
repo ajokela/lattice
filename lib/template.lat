@@ -1,0 +1,487 @@
+// Lattice Template Engine Library
+// A Mustache/Handlebars-inspired template engine written in pure Lattice.
+//
+// Usage:
+//   import "lib/template" as tmpl
+//
+//   let t = tmpl.compile("Hello, {{name}}!")
+//   let result = tmpl.render(t, {"name": "World"})
+//   // result: "Hello, World!"
+//
+// Features:
+//   - Variable interpolation: {{var}}, {{obj.nested.key}}
+//   - Raw (unescaped) output: {{{var}}}
+//   - Conditionals: {{#if var}}...{{else}}...{{/if}}
+//   - Negated conditionals: {{#unless var}}...{{else}}...{{/unless}}
+//   - Loops: {{#each items}}...{{/each}} with {{@index}} support
+//   - Comments: {{! this is ignored }}
+//   - HTML escaping by default for {{var}}, raw for {{{var}}}
+
+// ---------------------------------------------------------------------------
+// HTML Escaping
+// ---------------------------------------------------------------------------
+
+/// Escape HTML special characters in a string.
+/// Replaces &, <, >, and " with their HTML entity equivalents.
+fn escape_html(str: String) -> String {
+    // Order matters: & must be replaced first to avoid double-escaping
+    flux result = str.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// Truthiness
+// ---------------------------------------------------------------------------
+
+/// Determine if a value is "truthy" for template conditionals.
+/// Falsy values: nil, false, 0, 0.0, and empty string.
+/// Everything else (including non-empty strings, non-zero numbers,
+/// arrays, maps, etc.) is truthy.
+fn _is_truthy(val: String) -> Bool {
+    if val == nil { return false }
+    let t = typeof(val)
+    if t == "Bool" {
+        if val == false { return false }
+    }
+    if t == "Int" {
+        if val == 0 { return false }
+    }
+    if t == "Float" {
+        if val == 0.0 { return false }
+    }
+    if t == "String" {
+        if val == "" { return false }
+    }
+    return true
+}
+
+// ---------------------------------------------------------------------------
+// Variable Resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve a dotted variable path against a data Map.
+/// For example, "user.address.city" will walk data["user"]["address"]["city"].
+/// Returns nil if any key along the path is missing.
+fn _resolve(path: String, data: Map) -> String {
+    let parts = path.split(".")
+    flux current = data
+    flux i = 0
+    let last = parts.len() - 1
+    // Walk through intermediate keys
+    while i < last {
+        let key = parts[i].trim()
+        if current.has(key) {
+            current = current.get(key)
+        } else {
+            return nil
+        }
+        i = i + 1
+    }
+    // Get the final value
+    let final_key = parts[last].trim()
+    if current.has(final_key) {
+        return current.get(final_key)
+    }
+    return nil
+}
+
+/// Resolve a variable, returning the raw value (not stringified).
+/// Handles @index as a special variable for loop contexts.
+fn _resolve_var(path: String, data: Map) -> String {
+    if path == "@index" {
+        if data.has("@index") {
+            return data.get("@index")
+        }
+        return nil
+    }
+    return _resolve(path, data)
+}
+
+// ---------------------------------------------------------------------------
+// Parser Helpers
+// ---------------------------------------------------------------------------
+
+/// Find the index of a substring starting from a given position.
+/// Returns -1 if not found.
+fn _index_from(text: String, needle: String, start: Int) -> Int {
+    let text_len = text.len()
+    let needle_len = needle.len()
+    if start >= text_len { return -1 }
+    // Search in the substring from start onwards
+    let sub = text.substring(start, text_len)
+    let idx = sub.index_of(needle)
+    if idx == -1 { return -1 }
+    return start + idx
+}
+
+// ---------------------------------------------------------------------------
+// Template Parser
+// ---------------------------------------------------------------------------
+
+/// Parse a template string into an array of segment Maps.
+/// Each segment has a "type" key and relevant data fields.
+///
+/// Segment types:
+///   - text:    { type: "text", value: "literal text" }
+///   - var:     { type: "var", path: "name" }
+///   - raw_var: { type: "raw_var", path: "name" }
+///   - if:      { type: "if", path: "var", body: [...], else_body: [...] }
+///   - unless:  { type: "unless", path: "var", body: [...], else_body: [...] }
+///   - each:    { type: "each", path: "var", body: [...] }
+///   - comment: { type: "comment" }
+fn _parse(template: String, start: Int, stop_tags: Array) -> Map {
+    let tpl_len = template.len()
+    flux pos = start
+    flux segments = []
+
+    while pos < tpl_len {
+        // Check for stop tags (closing block tags like {{/if}}, {{/each}}, {{else}})
+        for tag in stop_tags {
+            if _index_from(template, tag, pos) == pos {
+                // We've hit a stop tag; return what we have so far
+                let result = Map::new()
+                result.set("segments", segments)
+                result.set("pos", pos)
+                result.set("stopped_at", tag)
+                return result
+            }
+        }
+
+        // Look for the next tag opening: {{ or {{{
+        let next_open = _index_from(template, "{{", pos)
+
+        if next_open == -1 {
+            // No more tags; rest is literal text
+            if pos < tpl_len {
+                let seg = Map::new()
+                seg.set("type", "text")
+                seg.set("value", template.substring(pos, tpl_len))
+                segments.push(seg)
+            }
+            pos = tpl_len
+        } else {
+            // Before processing the tag, check if any stop tag starts here.
+            // This handles cases where the next {{ is actually a closing block
+            // tag like {{/if}} or {{/each}}.
+            for tag in stop_tags {
+                if _index_from(template, tag, next_open) == next_open {
+                    // Capture any literal text before the stop tag
+                    if next_open > pos {
+                        let seg = Map::new()
+                        seg.set("type", "text")
+                        seg.set("value", template.substring(pos, next_open))
+                        segments.push(seg)
+                    }
+                    let result = Map::new()
+                    result.set("segments", segments)
+                    result.set("pos", next_open)
+                    result.set("stopped_at", tag)
+                    return result
+                }
+            }
+
+            // Capture any literal text before the tag
+            if next_open > pos {
+                let seg = Map::new()
+                seg.set("type", "text")
+                seg.set("value", template.substring(pos, next_open))
+                segments.push(seg)
+            }
+
+            // Check for triple-mustache (raw variable): {{{...}}}
+            flux is_triple = false
+            if next_open + 2 < tpl_len {
+                if template.substring(next_open + 2, next_open + 3) == "{" {
+                    is_triple = true
+                }
+            }
+
+            if is_triple {
+                // Raw variable: {{{path}}}
+                let close = _index_from(template, "}}}", next_open + 3)
+                if close == -1 {
+                    // Malformed tag; treat rest as text
+                    let seg = Map::new()
+                    seg.set("type", "text")
+                    seg.set("value", template.substring(next_open, tpl_len))
+                    segments.push(seg)
+                    pos = tpl_len
+                } else {
+                    let path = template.substring(next_open + 3, close).trim()
+                    let seg = Map::new()
+                    seg.set("type", "raw_var")
+                    seg.set("path", path)
+                    segments.push(seg)
+                    pos = close + 3
+                }
+            } else {
+                // Standard double-mustache: {{...}}
+                let close = _index_from(template, "}}", next_open + 2)
+                if close == -1 {
+                    // Malformed tag; treat rest as text
+                    let seg = Map::new()
+                    seg.set("type", "text")
+                    seg.set("value", template.substring(next_open, tpl_len))
+                    segments.push(seg)
+                    pos = tpl_len
+                } else {
+                    let inner = template.substring(next_open + 2, close).trim()
+                    pos = close + 2
+
+                    if inner.starts_with("!") {
+                        // Comment tag: {{! ... }}
+                        let seg = Map::new()
+                        seg.set("type", "comment")
+                        segments.push(seg)
+
+                    } else {
+                        if inner.starts_with("#if ") {
+                            // Conditional block: {{#if var}}...{{else}}...{{/if}}
+                            let var_path = inner.substring(4, inner.len()).trim()
+                            // Parse the body until {{else}} or {{/if}}
+                            let body_result = _parse(template, pos, ["{{else}}", "{{/if}}"])
+                            let body_segments = body_result.get("segments")
+                            let body_pos = body_result.get("pos")
+                            let body_stopped = body_result.get("stopped_at")
+
+                            flux else_segments = []
+                            flux after_pos = body_pos
+
+                            if body_stopped == "{{else}}" {
+                                // Skip past {{else}} and parse else body until {{/if}}
+                                after_pos = body_pos + 8
+                                let else_result = _parse(template, after_pos, ["{{/if}}"])
+                                else_segments = else_result.get("segments")
+                                after_pos = else_result.get("pos")
+                                // Skip past {{/if}}
+                                after_pos = after_pos + 7
+                            } else {
+                                // Stopped at {{/if}}, skip past it
+                                after_pos = body_pos + 7
+                            }
+
+                            let seg = Map::new()
+                            seg.set("type", "if")
+                            seg.set("path", var_path)
+                            seg.set("body", body_segments)
+                            seg.set("else_body", else_segments)
+                            segments.push(seg)
+                            pos = after_pos
+
+                        } else {
+                            if inner.starts_with("#unless ") {
+                                // Negated conditional: {{#unless var}}...{{else}}...{{/unless}}
+                                let var_path = inner.substring(8, inner.len()).trim()
+                                let body_result = _parse(template, pos, ["{{else}}", "{{/unless}}"])
+                                let body_segments = body_result.get("segments")
+                                let body_pos = body_result.get("pos")
+                                let body_stopped = body_result.get("stopped_at")
+
+                                flux else_segments = []
+                                flux after_pos = body_pos
+
+                                if body_stopped == "{{else}}" {
+                                    after_pos = body_pos + 8
+                                    let else_result = _parse(template, after_pos, ["{{/unless}}"])
+                                    else_segments = else_result.get("segments")
+                                    after_pos = else_result.get("pos")
+                                    after_pos = after_pos + 11
+                                } else {
+                                    // Stopped at {{/unless}}
+                                    after_pos = body_pos + 11
+                                }
+
+                                let seg = Map::new()
+                                seg.set("type", "unless")
+                                seg.set("path", var_path)
+                                seg.set("body", body_segments)
+                                seg.set("else_body", else_segments)
+                                segments.push(seg)
+                                pos = after_pos
+
+                            } else {
+                                if inner.starts_with("#each ") {
+                                    // Loop block: {{#each items}}...{{/each}}
+                                    let var_path = inner.substring(6, inner.len()).trim()
+                                    let body_result = _parse(template, pos, ["{{/each}}"])
+                                    let body_segments = body_result.get("segments")
+                                    let body_pos = body_result.get("pos")
+                                    // Skip past {{/each}}
+                                    let after_pos = body_pos + 9
+
+                                    let seg = Map::new()
+                                    seg.set("type", "each")
+                                    seg.set("path", var_path)
+                                    seg.set("body", body_segments)
+                                    segments.push(seg)
+                                    pos = after_pos
+
+                                } else {
+                                    // Plain variable: {{name}} or {{user.name}}
+                                    let seg = Map::new()
+                                    seg.set("type", "var")
+                                    seg.set("path", inner)
+                                    segments.push(seg)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let result = Map::new()
+    result.set("segments", segments)
+    result.set("pos", pos)
+    result.set("stopped_at", "")
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// Compile
+// ---------------------------------------------------------------------------
+
+/// Compile a template string into a compiled template Map.
+/// The returned Map has a "segments" key containing an array of parsed segments.
+fn compile(template_string: String) -> Map {
+    let parse_result = _parse(template_string, 0, [])
+    let compiled = Map::new()
+    compiled.set("segments", parse_result.get("segments"))
+    return compiled
+}
+
+// ---------------------------------------------------------------------------
+// Renderer
+// ---------------------------------------------------------------------------
+
+/// Render an array of segments against a data Map, producing an output string.
+fn _render_segments(segments: Array, data: Map) -> String {
+    flux output = ""
+
+    for seg in segments {
+        let seg_type = seg.get("type")
+
+        if seg_type == "text" {
+            // Literal text: append directly
+            output = output + seg.get("value")
+
+        } else {
+            if seg_type == "comment" {
+                // Comments produce no output
+
+            } else {
+                if seg_type == "var" {
+                    // Escaped variable interpolation
+                    let val = _resolve_var(seg.get("path"), data)
+                    if val != nil {
+                        output = output + escape_html(to_string(val))
+                    }
+
+                } else {
+                    if seg_type == "raw_var" {
+                        // Raw (unescaped) variable interpolation
+                        let val = _resolve_var(seg.get("path"), data)
+                        if val != nil {
+                            output = output + to_string(val)
+                        }
+
+                    } else {
+                        if seg_type == "if" {
+                            // Conditional block
+                            let val = _resolve_var(seg.get("path"), data)
+                            if _is_truthy(val) {
+                                output = output + _render_segments(seg.get("body"), data)
+                            } else {
+                                let else_body = seg.get("else_body")
+                                if else_body.len() > 0 {
+                                    output = output + _render_segments(else_body, data)
+                                }
+                            }
+
+                        } else {
+                            if seg_type == "unless" {
+                                // Negated conditional block
+                                let val = _resolve_var(seg.get("path"), data)
+                                if !_is_truthy(val) {
+                                    output = output + _render_segments(seg.get("body"), data)
+                                } else {
+                                    let else_body = seg.get("else_body")
+                                    if else_body.len() > 0 {
+                                        output = output + _render_segments(else_body, data)
+                                    }
+                                }
+
+                            } else {
+                                if seg_type == "each" {
+                                    // Loop block: iterate over an array
+                                    let val = _resolve_var(seg.get("path"), data)
+                                    if val != nil {
+                                        let items = val
+                                        flux idx = 0
+                                        for item in items {
+                                            // Build a context Map for each iteration.
+                                            // If the item is a Map, merge its keys into
+                                            // the context so inner variables resolve
+                                            // directly (e.g., {{name}} inside #each).
+                                            flux ctx = Map::new()
+
+                                            // Copy parent data keys for access to outer scope
+                                            let parent_keys = data.keys()
+                                            for pk in parent_keys {
+                                                ctx.set(pk, data.get(pk))
+                                            }
+
+                                            // If item is a Map, overlay its keys
+                                            if typeof(item) == "Map" {
+                                                let item_keys = item.keys()
+                                                for ik in item_keys {
+                                                    ctx.set(ik, item.get(ik))
+                                                }
+                                            } else {
+                                                // For non-Map items, expose as "this"
+                                                ctx.set("this", item)
+                                            }
+
+                                            // Set the special @index variable
+                                            ctx.set("@index", idx)
+
+                                            output = output + _render_segments(seg.get("body"), ctx)
+                                            idx = idx + 1
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return output
+}
+
+/// Render a compiled template with the given data Map, producing a string.
+fn render(compiled: Map, data: Map) -> String {
+    return _render_segments(compiled.get("segments"), data)
+}
+
+// ---------------------------------------------------------------------------
+// Convenience Functions
+// ---------------------------------------------------------------------------
+
+/// Compile and render a template string in one step.
+fn render_string(template_string: String, data: Map) -> String {
+    let compiled = compile(template_string)
+    return render(compiled, data)
+}
+
+/// Read a template from a file and compile it.
+fn from_file(path: String) -> Map {
+    let contents = read_file(path)
+    return compile(contents)
+}

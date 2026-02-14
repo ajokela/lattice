@@ -1,0 +1,389 @@
+// Lattice Validation / Schema Library
+// A pure-Lattice data validation library for validating Maps against schemas.
+//
+// Usage:
+//   import "lib/validate" as v
+//
+//   // Build schemas with chainable constraint helpers
+//   let name_schema = v.max_len(v.min_len(v.string(), 1), 100)
+//   let email_schema = v.pattern(v.string(), "^[^@]+@[^@]+\\.[^@]+$")
+//   let age_schema = v.opt(v.max(v.min(v.number(), 0), 150))
+//   let role_schema = v.one_of(v.string(), ["admin", "user", "guest"])
+//
+//   // Build an object schema
+//   flux fields = Map::new()
+//   fields.set("name", name_schema)
+//   fields.set("email", email_schema)
+//   fields.set("age", age_schema)
+//   fields.set("role", role_schema)
+//   fields.set("tags", v.min_len(v.array(v.string()), 1))
+//   fields.set("active", v.boolean())
+//   let user_schema = v.object(fields)
+//
+//   let result = v.check(user_schema, data)
+//   // result: {"valid": true, "errors": []}
+//   //     or: {"valid": false, "errors": ["field: error message", ...]}
+//
+//   let ok = v.is_valid(user_schema, data)
+//   // ok: true or false
+
+// ---------------------------------------------------------------------------
+// Internal: copy all keys from one Map to another
+// ---------------------------------------------------------------------------
+fn _copy_map(src: Map) -> Map {
+    flux dst = Map::new()
+    let keys = src.keys()
+    for k in keys {
+        dst.set(k, src.get(k))
+    }
+    return dst
+}
+
+// ---------------------------------------------------------------------------
+// Schema Builders — each returns a plain data Map (no closures)
+// ---------------------------------------------------------------------------
+
+// Create a string schema. Validates that the value is a String.
+fn string() -> Map {
+    flux s = Map::new()
+    s.set("_type", "string")
+    s.set("_required", true)
+    return s
+}
+
+// Create a number schema. Validates that the value is an Int or Float.
+fn number() -> Map {
+    flux s = Map::new()
+    s.set("_type", "number")
+    s.set("_required", true)
+    return s
+}
+
+// Create a boolean schema. Validates that the value is a Bool.
+fn boolean() -> Map {
+    flux s = Map::new()
+    s.set("_type", "boolean")
+    s.set("_required", true)
+    return s
+}
+
+// Create an array schema. Validates that the value is an Array and optionally
+// validates each element against the provided item schema.
+fn array(item_schema: Map) -> Map {
+    flux s = Map::new()
+    s.set("_type", "array")
+    s.set("_required", true)
+    s.set("_item_schema", item_schema)
+    return s
+}
+
+// Create an object schema. Validates that the value is a Map and checks
+// each field against the corresponding schema in fields_map.
+fn object(fields_map: Map) -> Map {
+    flux s = Map::new()
+    s.set("_type", "object")
+    s.set("_required", true)
+    s.set("_fields", fields_map)
+    return s
+}
+
+// Create an any schema. Accepts any non-nil value (unless optional).
+fn any() -> Map {
+    flux s = Map::new()
+    s.set("_type", "any")
+    s.set("_required", true)
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// Constraint Helpers — chainable functions that add constraints to schemas
+// ---------------------------------------------------------------------------
+
+// Set minimum length (for strings and arrays).
+fn min_len(schema: Map, n: Int) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_min_len", n)
+    return out
+}
+
+// Set maximum length (for strings and arrays).
+fn max_len(schema: Map, n: Int) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_max_len", n)
+    return out
+}
+
+// Set a regex pattern that the string must match.
+fn pattern(schema: Map, regex: String) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_pattern", regex)
+    return out
+}
+
+// Set allowed values (enumeration constraint).
+fn one_of(schema: Map, options: Array) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_one_of", options)
+    return out
+}
+
+// Set minimum value (for numbers).
+fn min(schema: Map, n: Any) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_min", n)
+    return out
+}
+
+// Set maximum value (for numbers).
+fn max(schema: Map, n: Any) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_max", n)
+    return out
+}
+
+// Require value to be an integer (Int, not Float).
+fn integer(schema: Map) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_integer", true)
+    return out
+}
+
+// Mark the field as optional (nil is accepted).
+fn opt(schema: Map) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_required", false)
+    return out
+}
+
+// Set a default value (also makes the field optional).
+fn default_val(schema: Map, value: Any) -> Map {
+    flux out = _copy_map(schema)
+    out.set("_default", value)
+    out.set("_required", false)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Validation Engine
+// ---------------------------------------------------------------------------
+
+// Internal: validate a single value against a schema.
+// Returns an Array of error strings. An empty array means valid.
+fn _validate(schema: Map, value: Any, path: String) -> Array {
+    flux errors = []
+    let schema_type = schema.get("_type")
+    let required = schema.get("_required")
+
+    // Handle nil / missing values
+    if value == nil {
+        if schema.has("_default") {
+            // Default value is available; treat as valid
+            return errors
+        }
+        if required == true {
+            errors.push(path + ": is required")
+        }
+        return errors
+    }
+
+    // --- String validation ---
+    if schema_type == "string" {
+        if typeof(value) != "String" {
+            errors.push(path + ": expected String, got " + typeof(value))
+            return errors
+        }
+        if schema.has("_min_len") {
+            let min_l = schema.get("_min_len")
+            if len(value) < min_l {
+                errors.push(path + ": length must be >= " + to_string(min_l))
+            }
+        }
+        if schema.has("_max_len") {
+            let max_l = schema.get("_max_len")
+            if len(value) > max_l {
+                errors.push(path + ": length must be <= " + to_string(max_l))
+            }
+        }
+        if schema.has("_pattern") {
+            let pat = schema.get("_pattern")
+            if !regex_match(pat, value) {
+                errors.push(path + ": does not match pattern")
+            }
+        }
+        if schema.has("_one_of") {
+            let options = schema.get("_one_of")
+            if !options.contains(value) {
+                errors.push(path + ": must be one of " + to_string(options))
+            }
+        }
+    }
+
+    // --- Number validation ---
+    if schema_type == "number" {
+        let vtype = typeof(value)
+        if vtype != "Int" {
+            if vtype != "Float" {
+                errors.push(path + ": expected number, got " + vtype)
+                return errors
+            }
+        }
+        if schema.has("_integer") {
+            if typeof(value) != "Int" {
+                errors.push(path + ": must be an integer")
+            }
+        }
+        if schema.has("_min") {
+            let min_v = schema.get("_min")
+            if value < min_v {
+                errors.push(path + ": must be >= " + to_string(min_v))
+            }
+        }
+        if schema.has("_max") {
+            let max_v = schema.get("_max")
+            if value > max_v {
+                errors.push(path + ": must be <= " + to_string(max_v))
+            }
+        }
+    }
+
+    // --- Boolean validation ---
+    if schema_type == "boolean" {
+        if typeof(value) != "Bool" {
+            errors.push(path + ": expected Bool, got " + typeof(value))
+        }
+    }
+
+    // --- Array validation ---
+    if schema_type == "array" {
+        if typeof(value) != "Array" {
+            errors.push(path + ": expected Array, got " + typeof(value))
+            return errors
+        }
+        if schema.has("_min_len") {
+            let min_l = schema.get("_min_len")
+            if len(value) < min_l {
+                errors.push(path + ": array length must be >= " + to_string(min_l))
+            }
+        }
+        if schema.has("_max_len") {
+            let max_l = schema.get("_max_len")
+            if len(value) > max_l {
+                errors.push(path + ": array length must be <= " + to_string(max_l))
+            }
+        }
+        if schema.has("_item_schema") {
+            let item_schema = schema.get("_item_schema")
+            flux idx = 0
+            for item in value {
+                let item_path = path + "[" + to_string(idx) + "]"
+                let item_errors = _validate(item_schema, item, item_path)
+                for e in item_errors {
+                    errors.push(e)
+                }
+                idx = idx + 1
+            }
+        }
+    }
+
+    // --- Object validation ---
+    if schema_type == "object" {
+        if typeof(value) != "Map" {
+            errors.push(path + ": expected Map, got " + typeof(value))
+            return errors
+        }
+        let fields = schema.get("_fields")
+        let field_names = fields.keys()
+        for field_name in field_names {
+            let field_schema = fields.get(field_name)
+            let field_path = if len(path) > 0 {
+                path + "." + field_name
+            } else {
+                field_name
+            }
+            let field_value = if value.has(field_name) {
+                value.get(field_name)
+            } else {
+                nil
+            }
+            let field_errors = _validate(field_schema, field_value, field_path)
+            for e in field_errors {
+                errors.push(e)
+            }
+        }
+    }
+
+    // "any" type accepts any non-nil value (nil handled above)
+    return errors
+}
+
+// Validate data against a schema.
+// Returns a Map with "valid" (Bool) and "errors" (Array of Strings).
+fn check(schema: Map, data: Any) -> Map {
+    let schema_type = schema.get("_type")
+    let path = if schema_type == "object" { "" } else { "value" }
+    let errors = _validate(schema, data, path)
+    let result = Map::new()
+    result.set("valid", len(errors) == 0)
+    result.set("errors", errors)
+    return result
+}
+
+// Shorthand: returns true if data passes validation.
+fn is_valid(schema: Map, data: Any) -> Bool {
+    let result = check(schema, data)
+    return result.get("valid")
+}
+
+// ---------------------------------------------------------------------------
+// Utility: Apply defaults
+// ---------------------------------------------------------------------------
+
+// Apply default values from an object schema to data.
+// Returns a new Map with missing fields filled in with their defaults.
+fn apply_defaults(schema: Map, data: Any) -> Map {
+    let schema_type = schema.get("_type")
+
+    if schema_type != "object" {
+        if data == nil {
+            if schema.has("_default") {
+                return schema.get("_default")
+            }
+        }
+        return data
+    }
+
+    flux result = Map::new()
+    let fields = schema.get("_fields")
+    let field_names = fields.keys()
+
+    // Copy existing data
+    if data != nil {
+        if typeof(data) == "Map" {
+            let data_keys = data.keys()
+            for k in data_keys {
+                result.set(k, data.get(k))
+            }
+        }
+    }
+
+    // Fill in defaults for missing fields
+    for field_name in field_names {
+        let field_schema = fields.get(field_name)
+        let has_field = if data != nil {
+            if typeof(data) == "Map" {
+                data.has(field_name)
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+        if !has_field {
+            if field_schema.has("_default") {
+                result.set(field_name, field_schema.get("_default"))
+            }
+        }
+    }
+
+    return result
+}
