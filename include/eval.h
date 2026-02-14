@@ -90,6 +90,14 @@ typedef struct {
     VariableHistory  history;
 } TrackedVar;
 
+/* Phase reaction entry: callbacks that fire on phase transitions */
+typedef struct {
+    char     *var_name;
+    LatValue *callbacks;   /* array of closure values */
+    size_t    cb_count;
+    size_t    cb_cap;
+} ReactionEntry;
+
 /* Evaluator state */
 typedef struct Evaluator {
     Env        *env;
@@ -119,6 +127,10 @@ typedef struct Evaluator {
     TrackedVar *tracked_vars;
     size_t      tracked_count;
     size_t      tracked_cap;
+    /* Phase reactions */
+    ReactionEntry *reactions;
+    size_t         reaction_count;
+    size_t         reaction_cap;
 } Evaluator;
 
 /* Create a new evaluator */

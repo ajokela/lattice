@@ -106,6 +106,7 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "false") == 0)    return TOK_FALSE;
     if (strcmp(ident, "nil") == 0)      return TOK_NIL;
     if (strcmp(ident, "clone") == 0)    return TOK_CLONE;
+    if (strcmp(ident, "anneal") == 0)   return TOK_ANNEAL;
     if (strcmp(ident, "print") == 0)    return TOK_PRINT;
     if (strcmp(ident, "try") == 0)      return TOK_TRY;
     if (strcmp(ident, "catch") == 0)    return TOK_CATCH;

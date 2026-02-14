@@ -181,6 +181,11 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
         case EXPR_CLONE:
             return pc_check_expr(pc, expr->as.freeze_expr);
 
+        case EXPR_ANNEAL:
+            pc_check_expr(pc, expr->as.anneal.expr);
+            pc_check_expr(pc, expr->as.anneal.closure);
+            return PHASE_CRYSTAL;
+
         case EXPR_FORGE:
             pc_push_scope(pc);
             for (size_t i = 0; i < expr->as.block.count; i++)
@@ -422,6 +427,10 @@ static void pc_check_spawn_expr(PhaseChecker *pc, const Expr *expr) {
             break;
         case EXPR_THAW: case EXPR_CLONE:
             pc_check_spawn_expr(pc, expr->as.freeze_expr);
+            break;
+        case EXPR_ANNEAL:
+            pc_check_spawn_expr(pc, expr->as.anneal.expr);
+            pc_check_spawn_expr(pc, expr->as.anneal.closure);
             break;
         case EXPR_PRINT:
             for (size_t i = 0; i < expr->as.print.arg_count; i++)

@@ -46,6 +46,7 @@ struct LatValue {
             char     *name;
             char    **field_names;
             LatValue *field_values;
+            PhaseTag *field_phases;   /* per-field phase (NULL = all inherit struct phase) */
             size_t    field_count;
         } strct;
         struct {
@@ -62,7 +63,8 @@ struct LatValue {
             int64_t end;
         } range;
         struct {
-            LatMap *map;     /* heap-allocated */
+            LatMap *map;         /* heap-allocated */
+            LatMap *key_phases;  /* per-key phase tracking (NULL = all inherit map phase) */
         } map;
         struct {
             struct LatChannel *ch;

@@ -480,6 +480,50 @@ static void record_history(Evaluator *ev, const char *name) {
     }
 }
 
+/* Forward declaration for fire_reactions */
+static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
+                               const Expr *body, Env *closure_env, LatValue *args, size_t arg_count,
+                               Expr **default_values, bool has_variadic);
+
+/// @builtin react(var: Ident, callback: Closure) -> Unit
+/// @category Phase Reactions
+/// Register a callback that fires when a variable's phase changes.
+/// @example react(data, |phase, val| { print(phase) })
+
+/// @builtin unreact(var: Ident) -> Unit
+/// @category Phase Reactions
+/// Remove all phase reaction callbacks from a variable.
+/// @example unreact(data)
+
+static EvalResult fire_reactions(Evaluator *ev, const char *var_name, const char *phase_name) {
+    for (size_t i = 0; i < ev->reaction_count; i++) {
+        if (strcmp(ev->reactions[i].var_name, var_name) != 0) continue;
+        LatValue cur;
+        if (!env_get(ev->env, var_name, &cur)) return eval_ok(value_unit());
+        for (size_t j = 0; j < ev->reactions[i].cb_count; j++) {
+            LatValue *cb = &ev->reactions[i].callbacks[j];
+            LatValue args[2];
+            args[0] = value_string(phase_name);
+            args[1] = value_deep_clone(&cur);
+            EvalResult r = call_closure(ev, cb->as.closure.param_names,
+                cb->as.closure.param_count, cb->as.closure.body,
+                cb->as.closure.captured_env, args, 2,
+                cb->as.closure.default_values, cb->as.closure.has_variadic);
+            if (!IS_OK(r)) {
+                value_free(&cur);
+                char *err = NULL;
+                (void)asprintf(&err, "reaction error: %s", r.error);
+                free(r.error);
+                return eval_err(err);
+            }
+            value_free(&r.value);
+        }
+        value_free(&cur);
+        return eval_ok(value_unit());
+    }
+    return eval_ok(value_unit());
+}
+
 /* Cascade freeze through bonded variables */
 static void freeze_cascade(Evaluator *ev, const char *target_name) {
     for (size_t bi = 0; bi < ev->bond_count; bi++) {
@@ -494,6 +538,9 @@ static void freeze_cascade(Evaluator *ev, const char *target_name) {
             dval = value_freeze(dval);
             freeze_to_region(ev, &dval);
             env_set(ev->env, dep, dval);
+            /* Fire reactions for cascaded dep (swallow errors) */
+            EvalResult fr = fire_reactions(ev, dep, "crystal");
+            if (!IS_OK(fr)) free(fr.error);
             /* Recurse for transitive bonds */
             freeze_cascade(ev, dep);
         }
@@ -1167,6 +1214,83 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         }
 
         case EXPR_CALL: {
+            /* ── react() / unreact(): special handling before arg evaluation ── */
+            if (expr->as.call.func->tag == EXPR_IDENT &&
+                strcmp(expr->as.call.func->as.str_val, "react") == 0) {
+                size_t argc = expr->as.call.arg_count;
+                if (argc != 2) {
+                    return eval_err(strdup("react() requires exactly 2 arguments (variable, callback)"));
+                }
+                if (expr->as.call.args[0]->tag != EXPR_IDENT) {
+                    return eval_err(strdup("react() first argument must be a variable name"));
+                }
+                const char *var_name = expr->as.call.args[0]->as.str_val;
+                /* Verify variable exists */
+                LatValue tmp;
+                if (!env_get(ev->env, var_name, &tmp)) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "cannot react to undefined variable '%s'", var_name);
+                    return eval_err(err);
+                }
+                value_free(&tmp);
+                /* Evaluate the callback */
+                EvalResult cbr = eval_expr(ev, expr->as.call.args[1]);
+                if (!IS_OK(cbr)) return cbr;
+                if (cbr.value.type != VAL_CLOSURE) {
+                    value_free(&cbr.value);
+                    return eval_err(strdup("react() second argument must be a closure"));
+                }
+                /* Find or create ReactionEntry for var_name */
+                ReactionEntry *re = NULL;
+                for (size_t i = 0; i < ev->reaction_count; i++) {
+                    if (strcmp(ev->reactions[i].var_name, var_name) == 0) {
+                        re = &ev->reactions[i];
+                        break;
+                    }
+                }
+                if (!re) {
+                    if (ev->reaction_count >= ev->reaction_cap) {
+                        ev->reaction_cap = ev->reaction_cap ? ev->reaction_cap * 2 : 4;
+                        ev->reactions = realloc(ev->reactions, ev->reaction_cap * sizeof(ReactionEntry));
+                    }
+                    re = &ev->reactions[ev->reaction_count++];
+                    re->var_name = strdup(var_name);
+                    re->callbacks = NULL;
+                    re->cb_count = 0;
+                    re->cb_cap = 0;
+                }
+                /* Add the callback */
+                if (re->cb_count >= re->cb_cap) {
+                    re->cb_cap = re->cb_cap ? re->cb_cap * 2 : 4;
+                    re->callbacks = realloc(re->callbacks, re->cb_cap * sizeof(LatValue));
+                }
+                re->callbacks[re->cb_count++] = value_deep_clone(&cbr.value);
+                value_free(&cbr.value);
+                return eval_ok(value_unit());
+            }
+            if (expr->as.call.func->tag == EXPR_IDENT &&
+                strcmp(expr->as.call.func->as.str_val, "unreact") == 0) {
+                size_t argc = expr->as.call.arg_count;
+                if (argc != 1) {
+                    return eval_err(strdup("unreact() requires exactly 1 argument (variable)"));
+                }
+                if (expr->as.call.args[0]->tag != EXPR_IDENT) {
+                    return eval_err(strdup("unreact() argument must be a variable name"));
+                }
+                const char *var_name = expr->as.call.args[0]->as.str_val;
+                /* Find and remove ReactionEntry */
+                for (size_t i = 0; i < ev->reaction_count; i++) {
+                    if (strcmp(ev->reactions[i].var_name, var_name) == 0) {
+                        free(ev->reactions[i].var_name);
+                        for (size_t j = 0; j < ev->reactions[i].cb_count; j++)
+                            value_free(&ev->reactions[i].callbacks[j]);
+                        free(ev->reactions[i].callbacks);
+                        ev->reactions[i] = ev->reactions[--ev->reaction_count];
+                        break;
+                    }
+                }
+                return eval_ok(value_unit());
+            }
             /* ── bond() / unbond(): special handling before arg evaluation ── */
             if (expr->as.call.func->tag == EXPR_IDENT &&
                 (strcmp(expr->as.call.func->as.str_val, "bond") == 0 ||
@@ -4644,6 +4768,119 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         /// @example freeze([1, 2, 3])  // crystal [1, 2, 3]
         case EXPR_FREEZE: {
             stats_freeze(&ev->stats);
+
+            /* Partial crystallization: freeze(s.field) or freeze(m["key"]) */
+            if (expr->as.freeze.expr->tag == EXPR_FIELD_ACCESS) {
+                char *lv_err = NULL;
+                /* Resolve parent struct */
+                LatValue *parent = resolve_lvalue(ev, expr->as.freeze.expr->as.field_access.object, &lv_err);
+                if (!parent) return eval_err(lv_err);
+                if (parent->type != VAL_STRUCT) {
+                    return eval_err(strdup("partial freeze requires a struct"));
+                }
+                if (parent->phase == VTAG_CRYSTAL) {
+                    return eval_ok(value_deep_clone(parent));  /* already fully frozen */
+                }
+                const char *fname = expr->as.freeze.expr->as.field_access.field;
+                size_t fi = (size_t)-1;
+                for (size_t i = 0; i < parent->as.strct.field_count; i++) {
+                    if (strcmp(parent->as.strct.field_names[i], fname) == 0) { fi = i; break; }
+                }
+                if (fi == (size_t)-1) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "struct has no field '%s'", fname);
+                    return eval_err(err);
+                }
+                /* Run contract if present */
+                if (expr->as.freeze.contract) {
+                    EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
+                    if (!IS_OK(cr)) return cr;
+                    LatValue check_val = value_deep_clone(&parent->as.strct.field_values[fi]);
+                    EvalResult vr = call_closure(ev, cr.value.as.closure.param_names,
+                        cr.value.as.closure.param_count, cr.value.as.closure.body,
+                        cr.value.as.closure.captured_env, &check_val, 1,
+                        cr.value.as.closure.default_values, cr.value.as.closure.has_variadic);
+                    value_free(&cr.value);
+                    if (!IS_OK(vr)) {
+                        char *msg = NULL;
+                        (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                        free(vr.error);
+                        return eval_err(msg);
+                    }
+                    value_free(&vr.value);
+                }
+                /* Freeze the field value */
+                parent->as.strct.field_values[fi] = value_freeze(parent->as.strct.field_values[fi]);
+                /* Lazy-allocate field_phases */
+                if (!parent->as.strct.field_phases) {
+                    parent->as.strct.field_phases = calloc(parent->as.strct.field_count, sizeof(PhaseTag));
+                }
+                parent->as.strct.field_phases[fi] = VTAG_CRYSTAL;
+                return eval_ok(value_deep_clone(&parent->as.strct.field_values[fi]));
+            }
+            if (expr->as.freeze.expr->tag == EXPR_INDEX) {
+                const Expr *idx_expr = expr->as.freeze.expr;
+                /* Evaluate key first */
+                EvalResult kr = eval_expr(ev, idx_expr->as.index.index);
+                if (!IS_OK(kr)) return kr;
+                if (kr.value.type != VAL_STR) {
+                    value_free(&kr.value);
+                    return eval_err(strdup("partial freeze: map key must be a string"));
+                }
+                char *key = strdup(kr.value.as.str_val);
+                value_free(&kr.value);
+                /* Resolve parent map */
+                char *lv_err = NULL;
+                LatValue *parent = resolve_lvalue(ev, idx_expr->as.index.object, &lv_err);
+                if (!parent) { free(key); return eval_err(lv_err); }
+                if (parent->type != VAL_MAP) {
+                    free(key);
+                    return eval_err(strdup("partial freeze requires a map"));
+                }
+                if (parent->phase == VTAG_CRYSTAL) {
+                    free(key);
+                    return eval_ok(value_deep_clone(parent));
+                }
+                LatValue *val_ptr = (LatValue *)lat_map_get(parent->as.map.map, key);
+                if (!val_ptr) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "map has no key '%s'", key);
+                    free(key);
+                    return eval_err(err);
+                }
+                /* Run contract if present */
+                if (expr->as.freeze.contract) {
+                    EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
+                    if (!IS_OK(cr)) { free(key); return cr; }
+                    LatValue check_val = value_deep_clone(val_ptr);
+                    EvalResult vr = call_closure(ev, cr.value.as.closure.param_names,
+                        cr.value.as.closure.param_count, cr.value.as.closure.body,
+                        cr.value.as.closure.captured_env, &check_val, 1,
+                        cr.value.as.closure.default_values, cr.value.as.closure.has_variadic);
+                    value_free(&cr.value);
+                    if (!IS_OK(vr)) {
+                        char *msg = NULL;
+                        (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                        free(vr.error);
+                        free(key);
+                        return eval_err(msg);
+                    }
+                    value_free(&vr.value);
+                }
+                /* Freeze the value at this key */
+                *val_ptr = value_freeze(*val_ptr);
+                /* Lazy-allocate key_phases */
+                if (!parent->as.map.key_phases) {
+                    parent->as.map.key_phases = calloc(1, sizeof(LatMap));
+                    *parent->as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+                }
+                PhaseTag crystal = VTAG_CRYSTAL;
+                lat_map_set(parent->as.map.key_phases, key, &crystal);
+                LatValue ret = value_deep_clone(val_ptr);
+                free(key);
+                return eval_ok(ret);
+            }
+
             if (expr->as.freeze.expr->tag == EXPR_IDENT) {
                 const char *name = expr->as.freeze.expr->as.str_val;
                 if (ev->mode == MODE_STRICT) {
@@ -4683,6 +4920,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     ev->stats.freeze_total_ns += now_ns() - ft0;
                     record_history(ev, name);
                     freeze_cascade(ev, name);
+                    EvalResult fr = fire_reactions(ev, name, "crystal");
+                    if (!IS_OK(fr)) { value_free(&val); return fr; }
                     return eval_ok(val);
                 }
                 /* Casual mode: freeze the binding in-place */
@@ -4723,6 +4962,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 env_set(ev->env, name, val);
                 record_history(ev, name);
                 freeze_cascade(ev, name);
+                EvalResult fr = fire_reactions(ev, name, "crystal");
+                if (!IS_OK(fr)) { value_free(&ret); return fr; }
                 return eval_ok(ret);
             }
             EvalResult er = eval_expr(ev, expr->as.freeze.expr);
@@ -4779,6 +5020,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue ret = value_deep_clone(&thawed);
                 env_set(ev->env, name, thawed);
                 record_history(ev, name);
+                EvalResult fr = fire_reactions(ev, name, "fluid");
+                if (!IS_OK(fr)) { value_free(&ret); return fr; }
                 return eval_ok(ret);
             }
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
@@ -4801,6 +5044,115 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             LatValue cloned = value_deep_clone(&er.value);
             value_free(&er.value);
             return eval_ok(cloned);
+        }
+
+        /// @builtin anneal(val) |transform| { ... } -> Any
+        /// @category Phase Transitions
+        /// Atomically thaw a crystal value, apply a transformation, and refreeze.
+        /// @example anneal(frozen_map) |m| { m["key"] = "value"; m }
+        case EXPR_ANNEAL: {
+            stats_thaw(&ev->stats);
+            stats_freeze(&ev->stats);
+
+            /* Evaluate the closure expression */
+            EvalResult clr = eval_expr(ev, expr->as.anneal.closure);
+            if (!IS_OK(clr)) return clr;
+
+            /* Special handling for identifier targets (in-place update) */
+            if (expr->as.anneal.expr->tag == EXPR_IDENT) {
+                const char *name = expr->as.anneal.expr->as.str_val;
+                LatValue val;
+                if (!env_get(ev->env, name, &val)) {
+                    value_free(&clr.value);
+                    char *err = NULL;
+                    (void)asprintf(&err, "undefined variable '%s'", name);
+                    return eval_err(err);
+                }
+                if (val.phase != VTAG_CRYSTAL) {
+                    value_free(&val);
+                    value_free(&clr.value);
+                    return eval_err(strdup("anneal requires a crystal value"));
+                }
+                /* Thaw */
+                uint64_t tt0 = now_ns();
+                LatValue thawed = value_thaw(&val);
+                ev->stats.thaw_total_ns += now_ns() - tt0;
+                value_free(&val);
+
+                /* Call the transformation closure */
+                EvalResult tr = call_closure(ev,
+                    clr.value.as.closure.param_names,
+                    clr.value.as.closure.param_count,
+                    clr.value.as.closure.body,
+                    clr.value.as.closure.captured_env,
+                    &thawed, 1,
+                    clr.value.as.closure.default_values,
+                    clr.value.as.closure.has_variadic);
+                value_free(&clr.value);
+
+                if (!IS_OK(tr)) {
+                    char *msg = NULL;
+                    (void)asprintf(&msg, "anneal failed: %s", tr.error);
+                    free(tr.error);
+                    return eval_err(msg);
+                }
+
+                /* Refreeze */
+                uint64_t ft0 = now_ns();
+                tr.value = value_freeze(tr.value);
+                freeze_to_region(ev, &tr.value);
+                ev->stats.freeze_total_ns += now_ns() - ft0;
+
+                /* Update binding in-place */
+                LatValue ret = value_deep_clone(&tr.value);
+                env_set(ev->env, name, tr.value);
+                record_history(ev, name);
+                freeze_cascade(ev, name);
+                EvalResult fr = fire_reactions(ev, name, "crystal");
+                if (!IS_OK(fr)) { value_free(&ret); return fr; }
+                return eval_ok(ret);
+            }
+
+            /* General expression path */
+            EvalResult er = eval_expr(ev, expr->as.anneal.expr);
+            if (!IS_OK(er)) { value_free(&clr.value); return er; }
+
+            if (er.value.phase != VTAG_CRYSTAL) {
+                value_free(&er.value);
+                value_free(&clr.value);
+                return eval_err(strdup("anneal requires a crystal value"));
+            }
+
+            /* Thaw */
+            uint64_t tt0 = now_ns();
+            LatValue thawed = value_thaw(&er.value);
+            ev->stats.thaw_total_ns += now_ns() - tt0;
+            value_free(&er.value);
+
+            /* Call transformation */
+            EvalResult tr = call_closure(ev,
+                clr.value.as.closure.param_names,
+                clr.value.as.closure.param_count,
+                clr.value.as.closure.body,
+                clr.value.as.closure.captured_env,
+                &thawed, 1,
+                clr.value.as.closure.default_values,
+                clr.value.as.closure.has_variadic);
+            value_free(&clr.value);
+
+            if (!IS_OK(tr)) {
+                char *msg = NULL;
+                (void)asprintf(&msg, "anneal failed: %s", tr.error);
+                free(tr.error);
+                return eval_err(msg);
+            }
+
+            /* Refreeze */
+            uint64_t ft0 = now_ns();
+            tr.value = value_freeze(tr.value);
+            freeze_to_region(ev, &tr.value);
+            ev->stats.freeze_total_ns += now_ns() - ft0;
+            return eval_ok(tr.value);
         }
 
         case EXPR_FORGE: {
@@ -5109,6 +5461,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         value_free(&sr.value);
                         value_free(&er.value);
                         break;
+                    }
+                }
+
+                /* Check phase qualifier */
+                if (matched && arm->pattern->phase_qualifier != PHASE_UNSPECIFIED) {
+                    bool phase_ok = false;
+                    if (arm->pattern->phase_qualifier == PHASE_FLUID)
+                        phase_ok = (scr.value.phase == VTAG_FLUID || scr.value.phase == VTAG_UNPHASED);
+                    else if (arm->pattern->phase_qualifier == PHASE_CRYSTAL)
+                        phase_ok = (scr.value.phase == VTAG_CRYSTAL);
+                    if (!phase_ok) {
+                        matched = false;
+                        if (bind_name) { value_free(&bind_val); bind_name = NULL; }
+                        continue;
                     }
                 }
 
@@ -5527,6 +5893,53 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             if (ev->mode == MODE_STRICT && value_is_crystal(target)) {
                 value_free(&valr.value);
                 return eval_err(strdup("strict mode: cannot assign to crystal value"));
+            }
+            /* Check per-field phase for struct field assignments */
+            if (stmt->as.assign.target->tag == EXPR_FIELD_ACCESS) {
+                LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.field_access.object, &lv_err);
+                if (parent && parent->type == VAL_STRUCT && parent->phase == VTAG_CRYSTAL) {
+                    const char *fname = stmt->as.assign.target->as.field_access.field;
+                    char *err = NULL;
+                    (void)asprintf(&err, "cannot assign to field '%s' of frozen struct", fname);
+                    value_free(&valr.value);
+                    return eval_err(err);
+                }
+                if (parent && parent->type == VAL_STRUCT && parent->as.strct.field_phases) {
+                    const char *fname = stmt->as.assign.target->as.field_access.field;
+                    for (size_t fi = 0; fi < parent->as.strct.field_count; fi++) {
+                        if (strcmp(parent->as.strct.field_names[fi], fname) == 0) {
+                            if (parent->as.strct.field_phases[fi] == VTAG_CRYSTAL) {
+                                char *err = NULL;
+                                (void)asprintf(&err, "cannot assign to frozen field '%s'", fname);
+                                value_free(&valr.value);
+                                return eval_err(err);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            /* Check per-key phase for map key assignments */
+            if (stmt->as.assign.target->tag == EXPR_INDEX) {
+                LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &lv_err);
+                if (parent && parent->type == VAL_MAP && parent->phase == VTAG_CRYSTAL) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("cannot assign to key of frozen map"));
+                }
+                if (parent && parent->type == VAL_MAP && parent->as.map.key_phases) {
+                    EvalResult kidxr = eval_expr(ev, stmt->as.assign.target->as.index.index);
+                    if (IS_OK(kidxr) && kidxr.value.type == VAL_STR) {
+                        PhaseTag *kp = (PhaseTag *)lat_map_get(parent->as.map.key_phases, kidxr.value.as.str_val);
+                        if (kp && *kp == VTAG_CRYSTAL) {
+                            char *err = NULL;
+                            (void)asprintf(&err, "cannot assign to frozen key '%s'", kidxr.value.as.str_val);
+                            value_free(&kidxr.value);
+                            value_free(&valr.value);
+                            return eval_err(err);
+                        }
+                    }
+                    value_free(&kidxr.value);
+                }
             }
             value_free(target);
             *target = valr.value;
@@ -7414,6 +7827,9 @@ Evaluator *evaluator_new(void) {
     ev->tracked_vars = NULL;
     ev->tracked_count = 0;
     ev->tracked_cap = 0;
+    ev->reactions = NULL;
+    ev->reaction_count = 0;
+    ev->reaction_cap = 0;
     value_set_heap(ev->heap);
     return ev;
 }
@@ -7468,6 +7884,14 @@ void evaluator_free(Evaluator *ev) {
         free(ev->tracked_vars[i].history.snapshots);
     }
     free(ev->tracked_vars);
+    /* Free phase reactions */
+    for (size_t i = 0; i < ev->reaction_count; i++) {
+        free(ev->reactions[i].var_name);
+        for (size_t j = 0; j < ev->reactions[i].cb_count; j++)
+            value_free(&ev->reactions[i].callbacks[j]);
+        free(ev->reactions[i].callbacks);
+    }
+    free(ev->reactions);
     value_set_heap(NULL);         /* disconnect before freeing the heap itself */
     dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
     lat_vec_free(&ev->gc_roots);

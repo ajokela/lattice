@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, phase reactions, standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -139,6 +139,20 @@ print(phase_of(footer))     // "crystal"
 ```
 
 Use `unbond(target, dep)` to remove a bond before freezing.
+
+### Phase Reactions
+
+Register callbacks that fire automatically when a variable's phase changes:
+
+```lattice
+flux data = [1, 2, 3]
+react(data, |phase, val| {
+    print("data is now " + phase + ": " + to_string(val))
+})
+freeze(data)   // prints: "data is now crystal: [1, 2, 3]"
+thaw(data)     // prints: "data is now fluid: [1, 2, 3]"
+unreact(data)  // removes all reactions
+```
 
 ### Phase History (Temporal Values)
 
@@ -746,6 +760,8 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `track(name)` | Enable phase history tracking for a variable |
 | `phases(name)` | Get phase history as array of `{phase, value}` maps |
 | `rewind(name, n)` | Get value from n steps back in history |
+| `react(var, callback)` | Register a callback for phase transitions |
+| `unreact(var)` | Remove all phase reaction callbacks |
 
 ### Type Constructors & Conversion
 

@@ -134,6 +134,7 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
     val.as.strct.name = lat_strdup(name);
     val.as.strct.field_names = lat_alloc(count * sizeof(char *));
     val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
+    val.as.strct.field_phases = NULL;  /* lazy-allocated on first field freeze */
     for (size_t i = 0; i < count; i++) {
         val.as.strct.field_names[i] = lat_strdup(field_names[i]);
         val.as.strct.field_values[i] = field_values[i];
@@ -198,6 +199,7 @@ LatValue value_map_new(void) {
     val.region_id = (size_t)-1;
     val.as.map.map = lat_alloc(sizeof(LatMap));
     *val.as.map.map = lat_map_new(sizeof(LatValue));
+    val.as.map.key_phases = NULL;  /* lazy-allocated on first key freeze */
     return val;
 }
 
@@ -298,6 +300,12 @@ LatValue value_deep_clone(const LatValue *v) {
                 out.as.strct.field_values[i] = value_deep_clone(&v->as.strct.field_values[i]);
             }
             out.as.strct.field_count = fc;
+            if (v->as.strct.field_phases) {
+                out.as.strct.field_phases = lat_alloc(fc * sizeof(PhaseTag));
+                memcpy(out.as.strct.field_phases, v->as.strct.field_phases, fc * sizeof(PhaseTag));
+            } else {
+                out.as.strct.field_phases = NULL;
+            }
             break;
         }
         case VAL_CLOSURE: {
@@ -373,6 +381,20 @@ LatValue value_deep_clone(const LatValue *v) {
                     }
                 }
             }
+            /* Clone per-key phases if present */
+            if (v->as.map.key_phases) {
+                LatMap *ksrc = v->as.map.key_phases;
+                out.as.map.key_phases = lat_alloc(sizeof(LatMap));
+                *out.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+                for (size_t i = 0; i < ksrc->cap; i++) {
+                    if (ksrc->entries[i].state == MAP_OCCUPIED) {
+                        lat_map_set(out.as.map.key_phases, ksrc->entries[i].key,
+                                    ksrc->entries[i].value);
+                    }
+                }
+            } else {
+                out.as.map.key_phases = NULL;
+            }
             break;
         }
         case VAL_SET: {
@@ -432,6 +454,17 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
     } else if (v->type == VAL_STRUCT) {
         for (size_t i = 0; i < v->as.strct.field_count; i++) {
             set_phase_recursive(&v->as.strct.field_values[i], phase);
+        }
+        /* Update field-level phases */
+        if (v->as.strct.field_phases) {
+            if (phase == VTAG_CRYSTAL) {
+                for (size_t i = 0; i < v->as.strct.field_count; i++)
+                    v->as.strct.field_phases[i] = VTAG_CRYSTAL;
+            } else {
+                /* Thawing: clear per-field phases */
+                lat_free(v->as.strct.field_phases);
+                v->as.strct.field_phases = NULL;
+            }
         }
     } else if (v->type == VAL_MAP) {
         for (size_t i = 0; i < v->as.map.map->cap; i++) {
@@ -823,6 +856,7 @@ void value_free(LatValue *v) {
             }
             val_dealloc(v, v->as.strct.field_names);
             val_dealloc(v, v->as.strct.field_values);
+            val_dealloc(v, v->as.strct.field_phases);
             break;
         case VAL_CLOSURE:
             for (size_t i = 0; i < v->as.closure.param_count; i++)
@@ -842,6 +876,10 @@ void value_free(LatValue *v) {
                 }
                 lat_map_free(v->as.map.map);
                 val_dealloc(v, v->as.map.map);
+            }
+            if (v->as.map.key_phases) {
+                lat_map_free(v->as.map.key_phases);
+                val_dealloc(v, v->as.map.key_phases);
             }
             break;
         case VAL_CHANNEL:

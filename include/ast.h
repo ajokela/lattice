@@ -51,6 +51,7 @@ typedef enum {
 
 struct Pattern {
     PatternTag tag;
+    AstPhase   phase_qualifier; /* PHASE_UNSPECIFIED = any, PHASE_FLUID/PHASE_CRYSTAL */
     union {
         Expr *literal;          /* PAT_LITERAL */
         char *binding_name;     /* PAT_BINDING */
@@ -73,7 +74,7 @@ typedef enum {
     EXPR_BINOP, EXPR_UNARYOP,
     EXPR_CALL, EXPR_METHOD_CALL, EXPR_FIELD_ACCESS, EXPR_INDEX,
     EXPR_ARRAY, EXPR_STRUCT_LIT,
-    EXPR_FREEZE, EXPR_THAW, EXPR_CLONE,
+    EXPR_FREEZE, EXPR_THAW, EXPR_CLONE, EXPR_ANNEAL,
     EXPR_FORGE, EXPR_IF, EXPR_BLOCK,
     EXPR_CLOSURE, EXPR_RANGE,
     EXPR_PRINT, EXPR_SPAWN,
@@ -126,6 +127,7 @@ struct Expr {
 
         Expr *freeze_expr;   /* THAW, CLONE: inner expr */
         struct { Expr *expr; Expr *contract; } freeze;  /* FREEZE: inner expr + optional where contract */
+        struct { Expr *expr; Expr *closure; } anneal;   /* ANNEAL: target + transform closure */
         Expr *spread_expr;   /* SPREAD: inner expr to expand */
         struct { Expr **elems; size_t count; } tuple;  /* TUPLE */
         struct { Stmt **stmts; size_t count; } block;  /* FORGE, BLOCK, SPAWN */
@@ -299,6 +301,7 @@ Expr *expr_struct_lit(char *name, FieldInit *fields, size_t field_count);
 Expr *expr_freeze(Expr *inner, Expr *contract);
 Expr *expr_thaw(Expr *inner);
 Expr *expr_clone(Expr *inner);
+Expr *expr_anneal(Expr *target, Expr *closure);
 Expr *expr_forge(Stmt **stmts, size_t count);
 Expr *expr_if(Expr *cond, Stmt **then_s, size_t then_n, Stmt **else_s, size_t else_n);
 Expr *expr_block(Stmt **stmts, size_t count);

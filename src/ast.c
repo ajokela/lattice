@@ -125,6 +125,13 @@ Expr *expr_clone(Expr *inner) {
     return e;
 }
 
+Expr *expr_anneal(Expr *target, Expr *closure) {
+    Expr *e = expr_alloc(EXPR_ANNEAL);
+    e->as.anneal.expr = target;
+    e->as.anneal.closure = closure;
+    return e;
+}
+
 Expr *expr_spread(Expr *inner) {
     Expr *e = expr_alloc(EXPR_SPREAD);
     e->as.spread_expr = inner;
@@ -240,6 +247,7 @@ Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t
 Pattern *pattern_literal(Expr *lit) {
     Pattern *p = calloc(1, sizeof(Pattern));
     p->tag = PAT_LITERAL;
+    p->phase_qualifier = PHASE_UNSPECIFIED;
     p->as.literal = lit;
     return p;
 }
@@ -247,12 +255,14 @@ Pattern *pattern_literal(Expr *lit) {
 Pattern *pattern_wildcard(void) {
     Pattern *p = calloc(1, sizeof(Pattern));
     p->tag = PAT_WILDCARD;
+    p->phase_qualifier = PHASE_UNSPECIFIED;
     return p;
 }
 
 Pattern *pattern_binding(char *name) {
     Pattern *p = calloc(1, sizeof(Pattern));
     p->tag = PAT_BINDING;
+    p->phase_qualifier = PHASE_UNSPECIFIED;
     p->as.binding_name = name;
     return p;
 }
@@ -260,6 +270,7 @@ Pattern *pattern_binding(char *name) {
 Pattern *pattern_range(Expr *start, Expr *end) {
     Pattern *p = calloc(1, sizeof(Pattern));
     p->tag = PAT_RANGE;
+    p->phase_qualifier = PHASE_UNSPECIFIED;
     p->as.range.start = start;
     p->as.range.end = end;
     return p;
@@ -463,6 +474,10 @@ void expr_free(Expr *e) {
         case EXPR_THAW:
         case EXPR_CLONE:
             expr_free(e->as.freeze_expr);
+            break;
+        case EXPR_ANNEAL:
+            expr_free(e->as.anneal.expr);
+            expr_free(e->as.anneal.closure);
             break;
         case EXPR_FORGE:
         case EXPR_BLOCK:

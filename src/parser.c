@@ -605,6 +605,22 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
         return expr_clone(e);
     }
+    if (tt == TOK_ANNEAL) {
+        advance(p);
+        if (!expect(p, TOK_LPAREN, err)) return NULL;
+        Expr *target = parse_expr(p, err);
+        if (!target) return NULL;
+        if (!expect(p, TOK_RPAREN, err)) { expr_free(target); return NULL; }
+        /* Expect closure: |params| { body } */
+        if (peek_type(p) != TOK_PIPE) {
+            *err = strdup("anneal requires a closure: anneal(val) |v| { ... }");
+            expr_free(target);
+            return NULL;
+        }
+        Expr *closure = parse_expr(p, err);
+        if (!closure) { expr_free(target); return NULL; }
+        return expr_anneal(target, closure);
+    }
     if (tt == TOK_PRINT) {
         advance(p);
         if (!expect(p, TOK_LPAREN, err)) return NULL;
@@ -712,6 +728,24 @@ static Expr *parse_primary(Parser *p, char **err) {
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
             if (n >= cap) { cap *= 2; arms = realloc(arms, cap * sizeof(MatchArm)); }
 
+            /* Parse optional phase qualifier: fluid/crystal */
+            AstPhase phase_qual = PHASE_UNSPECIFIED;
+            if (peek_type(p) == TOK_IDENT) {
+                Token *maybe_phase = peek(p);
+                if (maybe_phase->as.str_val &&
+                    (strcmp(maybe_phase->as.str_val, "fluid") == 0 ||
+                     strcmp(maybe_phase->as.str_val, "crystal") == 0)) {
+                    TokenType next = peek_ahead_type(p, 1);
+                    if (next == TOK_IDENT || next == TOK_INT_LIT || next == TOK_FLOAT_LIT ||
+                        next == TOK_STRING_LIT || next == TOK_TRUE || next == TOK_FALSE ||
+                        next == TOK_NIL || next == TOK_MINUS) {
+                        phase_qual = strcmp(maybe_phase->as.str_val, "fluid") == 0
+                            ? PHASE_FLUID : PHASE_CRYSTAL;
+                        advance(p);
+                    }
+                }
+            }
+
             /* Parse pattern */
             Pattern *pat = NULL;
             TokenType pt = peek_type(p);
@@ -775,6 +809,9 @@ static Expr *parse_primary(Parser *p, char **err) {
                 *err = strdup("expected pattern in match arm");
                 goto match_fail;
             }
+
+            /* Apply phase qualifier to pattern */
+            if (pat) pat->phase_qualifier = phase_qual;
 
             /* Optional guard: if expr */
             Expr *guard = NULL;

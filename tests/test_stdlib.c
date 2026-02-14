@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.2.5"
+        "0.2.6"
     );
 }
 
@@ -5306,7 +5306,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.2.5"
+        "Hello, Lattice!\nVersion 0.2.6"
     );
 }
 
@@ -6512,6 +6512,104 @@ static void test_bond_undefined_error(void) {
 }
 
 /* ======================================================================
+ * Phase Reactions
+ * ====================================================================== */
+
+static void test_react_freeze_fires(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    react(x, |phase, val| { print(phase) })\n"
+        "    freeze(x)\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_react_thaw_fires(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    react(x, |phase, val| { print(phase) })\n"
+        "    freeze(x)\n"
+        "    thaw(x)\n"
+        "}\n",
+        "crystal\nfluid"
+    );
+}
+
+static void test_react_value_passed(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = [1, 2, 3]\n"
+        "    react(x, |phase, val| { print(to_string(val)) })\n"
+        "    freeze(x)\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_react_multiple_callbacks(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    react(x, |phase, val| { print(\"first\") })\n"
+        "    react(x, |phase, val| { print(\"second\") })\n"
+        "    freeze(x)\n"
+        "}\n",
+        "first\nsecond"
+    );
+}
+
+static void test_react_anneal_fires(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    freeze(x)\n"
+        "    react(x, |phase, val| { print(phase + \":\" + to_string(val)) })\n"
+        "    anneal(x) |v| { v + 5 }\n"
+        "}\n",
+        "crystal:15"
+    );
+}
+
+static void test_react_cascade_fires(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b)\n"
+        "    react(b, |phase, val| { print(\"b:\" + phase) })\n"
+        "    freeze(a)\n"
+        "}\n",
+        "b:crystal"
+    );
+}
+
+static void test_unreact_removes(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    react(x, |phase, val| { print(\"fired\") })\n"
+        "    unreact(x)\n"
+        "    freeze(x)\n"
+        "}\n",
+        ""
+    );
+}
+
+static void test_react_error_propagates(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 1\n"
+        "    react(x, |phase, val| { panic(\"boom\") })\n"
+        "    freeze(x)\n"
+        "}\n",
+        "EVAL_ERROR:reaction error:"
+    );
+}
+
+/* ======================================================================
  * Phase History / Temporal Values
  * ====================================================================== */
 
@@ -6620,6 +6718,254 @@ static void test_phases_output_format(void) {
         "    print(h[0][\"value\"])\n"
         "}\n",
         "fluid\n42"
+    );
+}
+
+/* ======================================================================
+ * Annealing
+ * ====================================================================== */
+
+static void test_anneal_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    freeze(x)\n"
+        "    anneal(x) |v| { v + 8 }\n"
+        "    print(x)\n"
+        "}\n",
+        "50"
+    );
+}
+
+static void test_anneal_stays_crystal(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    freeze(x)\n"
+        "    anneal(x) |v| { v * 2 }\n"
+        "    print(phase_of(x))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_anneal_map(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"a\"] = 1\n"
+        "    freeze(m)\n"
+        "    anneal(m) |c| {\n"
+        "        c[\"b\"] = 2\n"
+        "        c\n"
+        "    }\n"
+        "    print(m[\"b\"])\n"
+        "}\n",
+        "2"
+    );
+}
+
+static void test_anneal_non_crystal_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 5\n"
+        "    anneal(x) |v| { v }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_anneal_expr_target(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = anneal(freeze(100)) |v| { v + 1 }\n"
+        "    print(r)\n"
+        "}\n",
+        "101"
+    );
+}
+
+static void test_anneal_closure_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 1\n"
+        "    freeze(x)\n"
+        "    anneal(x) |v| { 1 / 0 }\n"
+        "}\n",
+        "EVAL_ERROR:anneal failed:"
+    );
+}
+
+/* ======================================================================
+ * Partial Crystallization
+ * ====================================================================== */
+
+static void test_partial_freeze_struct_field(void) {
+    ASSERT_OUTPUT(
+        "struct Cfg { host: String, port: Int }\n"
+        "fn main() {\n"
+        "    flux s = Cfg { host: \"localhost\", port: 8080 }\n"
+        "    freeze(s.host)\n"
+        "    s.port = 9090\n"
+        "    print(s.host)\n"
+        "    print(s.port)\n"
+        "}\n",
+        "localhost\n9090"
+    );
+}
+
+static void test_partial_freeze_struct_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "struct Cfg { host: String, port: Int }\n"
+        "fn main() {\n"
+        "    flux s = Cfg { host: \"localhost\", port: 8080 }\n"
+        "    freeze(s.host)\n"
+        "    s.host = \"other\"\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_partial_freeze_map_key(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"name\"] = \"Alice\"\n"
+        "    m[\"age\"] = 30\n"
+        "    freeze(m[\"name\"])\n"
+        "    m[\"age\"] = 31\n"
+        "    print(m[\"age\"])\n"
+        "}\n",
+        "31"
+    );
+}
+
+static void test_partial_freeze_map_key_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"name\"] = \"Alice\"\n"
+        "    freeze(m[\"name\"])\n"
+        "    m[\"name\"] = \"Bob\"\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_partial_freeze_full_overrides(void) {
+    /* Freezing entire struct overrides field phases */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "struct Cfg { host: String, port: Int }\n"
+        "fn main() {\n"
+        "    flux s = Cfg { host: \"localhost\", port: 8080 }\n"
+        "    freeze(s)\n"
+        "    s.port = 9090\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_partial_freeze_contract(void) {
+    ASSERT_OUTPUT(
+        "struct Cfg { host: String, port: Int }\n"
+        "fn main() {\n"
+        "    flux s = Cfg { host: \"localhost\", port: 8080 }\n"
+        "    freeze(s.host) where |v| {\n"
+        "        if v.len() == 0 { 1 / 0 }\n"
+        "    }\n"
+        "    print(s.host)\n"
+        "}\n",
+        "localhost"
+    );
+}
+
+/* ======================================================================
+ * Phase Patterns in Match
+ * ====================================================================== */
+
+static void test_phase_match_crystal_wildcard(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = freeze(42)\n"
+        "    let r = match x {\n"
+        "        fluid _ => \"fluid\"\n"
+        "        crystal _ => \"crystal\"\n"
+        "        _ => \"other\"\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_phase_match_fluid_wildcard(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    let r = match x {\n"
+        "        crystal _ => \"crystal\"\n"
+        "        fluid _ => \"fluid\"\n"
+        "        _ => \"other\"\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "fluid"
+    );
+}
+
+static void test_phase_match_literal(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = freeze(42)\n"
+        "    let r = match x {\n"
+        "        crystal 42 => \"frozen 42\"\n"
+        "        fluid 42 => \"fluid 42\"\n"
+        "        _ => \"other\"\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "frozen 42"
+    );
+}
+
+static void test_phase_match_binding(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = freeze(99)\n"
+        "    let r = match x {\n"
+        "        crystal n => n + 1\n"
+        "        _ => 0\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "100"
+    );
+}
+
+static void test_phase_match_no_match(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = freeze(5)\n"
+        "    let r = match x {\n"
+        "        fluid _ => \"fluid\"\n"
+        "        _ => \"fallback\"\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "fallback"
+    );
+}
+
+static void test_phase_match_unqualified_any(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let x = freeze(10)\n"
+        "    let r = match x {\n"
+        "        v => v\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "10"
     );
 }
 
@@ -8093,6 +8439,16 @@ void register_stdlib_tests(void) {
     register_test("test_bond_non_ident_error", test_bond_non_ident_error);
     register_test("test_bond_undefined_error", test_bond_undefined_error);
 
+    /* Phase reactions */
+    register_test("test_react_freeze_fires", test_react_freeze_fires);
+    register_test("test_react_thaw_fires", test_react_thaw_fires);
+    register_test("test_react_value_passed", test_react_value_passed);
+    register_test("test_react_multiple_callbacks", test_react_multiple_callbacks);
+    register_test("test_react_anneal_fires", test_react_anneal_fires);
+    register_test("test_react_cascade_fires", test_react_cascade_fires);
+    register_test("test_unreact_removes", test_unreact_removes);
+    register_test("test_react_error_propagates", test_react_error_propagates);
+
     /* Phase history / temporal values */
     register_test("test_track_phases_basic", test_track_phases_basic);
     register_test("test_rewind_basic", test_rewind_basic);
@@ -8102,6 +8458,30 @@ void register_stdlib_tests(void) {
     register_test("test_track_different_types", test_track_different_types);
     register_test("test_track_undefined_error", test_track_undefined_error);
     register_test("test_phases_output_format", test_phases_output_format);
+
+    /* Annealing */
+    register_test("test_anneal_basic", test_anneal_basic);
+    register_test("test_anneal_stays_crystal", test_anneal_stays_crystal);
+    register_test("test_anneal_map", test_anneal_map);
+    register_test("test_anneal_non_crystal_error", test_anneal_non_crystal_error);
+    register_test("test_anneal_expr_target", test_anneal_expr_target);
+    register_test("test_anneal_closure_error", test_anneal_closure_error);
+
+    /* Partial Crystallization */
+    register_test("test_partial_freeze_struct_field", test_partial_freeze_struct_field);
+    register_test("test_partial_freeze_struct_error", test_partial_freeze_struct_error);
+    register_test("test_partial_freeze_map_key", test_partial_freeze_map_key);
+    register_test("test_partial_freeze_map_key_error", test_partial_freeze_map_key_error);
+    register_test("test_partial_freeze_full_overrides", test_partial_freeze_full_overrides);
+    register_test("test_partial_freeze_contract", test_partial_freeze_contract);
+
+    /* Phase Patterns in Match */
+    register_test("test_phase_match_crystal_wildcard", test_phase_match_crystal_wildcard);
+    register_test("test_phase_match_fluid_wildcard", test_phase_match_fluid_wildcard);
+    register_test("test_phase_match_literal", test_phase_match_literal);
+    register_test("test_phase_match_binding", test_phase_match_binding);
+    register_test("test_phase_match_no_match", test_phase_match_no_match);
+    register_test("test_phase_match_unqualified_any", test_phase_match_unqualified_any);
 
     /* lib/test.lat — Test runner library */
     register_test("test_lib_test_assert_eq_pass", test_lib_test_assert_eq_pass);
