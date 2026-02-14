@@ -70,7 +70,7 @@
         },
         {
           "name": "keyword.other.phase.lattice",
-          "match": "\\b(freeze|thaw|clone|forge)\\b"
+          "match": "\\b(freeze|thaw|clone|forge|bond|unbond)\\b"
         },
         {
           "name": "keyword.control.concurrency.lattice",
@@ -293,6 +293,10 @@
         {
           "name": "support.function.builtin.yaml.lattice",
           "match": "\\b(yaml_parse|yaml_stringify)\\b"
+        },
+        {
+          "name": "support.function.builtin.temporal.lattice",
+          "match": "\\b(track|phases|rewind)\\b"
         }
       ]
     },

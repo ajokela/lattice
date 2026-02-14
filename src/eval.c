@@ -460,6 +460,53 @@ static void freeze_to_region(Evaluator *ev, LatValue *v) {
     *v = clone;
 }
 
+/* Record a history snapshot for a tracked variable */
+static void record_history(Evaluator *ev, const char *name) {
+    for (size_t i = 0; i < ev->tracked_count; i++) {
+        if (strcmp(ev->tracked_vars[i].name, name) != 0) continue;
+        VariableHistory *vh = &ev->tracked_vars[i].history;
+        LatValue cur;
+        if (!env_get(ev->env, name, &cur)) return;
+        if (vh->count >= vh->cap) {
+            vh->cap = vh->cap ? vh->cap * 2 : 8;
+            vh->snapshots = realloc(vh->snapshots, vh->cap * sizeof(HistorySnapshot));
+        }
+        const char *phase = builtin_phase_of_str(&cur);
+        vh->snapshots[vh->count].phase_name = strdup(phase);
+        vh->snapshots[vh->count].value = value_deep_clone(&cur);
+        vh->count++;
+        value_free(&cur);
+        return;
+    }
+}
+
+/* Cascade freeze through bonded variables */
+static void freeze_cascade(Evaluator *ev, const char *target_name) {
+    for (size_t bi = 0; bi < ev->bond_count; bi++) {
+        if (strcmp(ev->bonds[bi].target, target_name) != 0) continue;
+        /* Found bond entry for target — freeze all deps */
+        for (size_t di = 0; di < ev->bonds[bi].dep_count; di++) {
+            const char *dep = ev->bonds[bi].deps[di];
+            LatValue dval;
+            if (!env_get(ev->env, dep, &dval)) continue;  /* variable gone */
+            if (dval.phase == VTAG_CRYSTAL) { value_free(&dval); continue; }
+            if (dval.type == VAL_CHANNEL) { value_free(&dval); continue; }
+            dval = value_freeze(dval);
+            freeze_to_region(ev, &dval);
+            env_set(ev->env, dep, dval);
+            /* Recurse for transitive bonds */
+            freeze_cascade(ev, dep);
+        }
+        /* Consume the bond entry */
+        for (size_t di = 0; di < ev->bonds[bi].dep_count; di++)
+            free(ev->bonds[bi].deps[di]);
+        free(ev->bonds[bi].deps);
+        free(ev->bonds[bi].target);
+        ev->bonds[bi] = ev->bonds[--ev->bond_count];
+        break;
+    }
+}
+
 /*
  * Resolve a mutable pointer to a LatValue from an lvalue expression.
  * Walks chains of field_access and index expressions to find the
@@ -1120,6 +1167,95 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         }
 
         case EXPR_CALL: {
+            /* ── bond() / unbond(): special handling before arg evaluation ── */
+            if (expr->as.call.func->tag == EXPR_IDENT &&
+                (strcmp(expr->as.call.func->as.str_val, "bond") == 0 ||
+                 strcmp(expr->as.call.func->as.str_val, "unbond") == 0)) {
+                bool is_bond = strcmp(expr->as.call.func->as.str_val, "bond") == 0;
+                size_t argc = expr->as.call.arg_count;
+                if (argc < 2) {
+                    return eval_err(strdup(is_bond
+                        ? "bond() requires at least 2 arguments (target, ...deps)"
+                        : "unbond() requires at least 2 arguments (target, ...deps)"));
+                }
+                /* All arguments must be identifiers */
+                for (size_t i = 0; i < argc; i++) {
+                    if (expr->as.call.args[i]->tag != EXPR_IDENT) {
+                        return eval_err(strdup(is_bond
+                            ? "bond() requires variable names, not expressions"
+                            : "unbond() requires variable names, not expressions"));
+                    }
+                }
+                const char *target = expr->as.call.args[0]->as.str_val;
+                if (is_bond) {
+                    /* Verify all variables exist and are not frozen */
+                    for (size_t i = 0; i < argc; i++) {
+                        const char *vname = expr->as.call.args[i]->as.str_val;
+                        LatValue tmp;
+                        if (!env_get(ev->env, vname, &tmp)) {
+                            char *err = NULL;
+                            (void)asprintf(&err, "cannot bond undefined variable '%s'", vname);
+                            return eval_err(err);
+                        }
+                        if (tmp.phase == VTAG_CRYSTAL) {
+                            value_free(&tmp);
+                            char *err = NULL;
+                            (void)asprintf(&err, "cannot bond already-frozen variable '%s'", vname);
+                            return eval_err(err);
+                        }
+                        value_free(&tmp);
+                    }
+                    /* Register bonds */
+                    BondEntry *be = NULL;
+                    for (size_t i = 0; i < ev->bond_count; i++) {
+                        if (strcmp(ev->bonds[i].target, target) == 0) { be = &ev->bonds[i]; break; }
+                    }
+                    if (!be) {
+                        if (ev->bond_count >= ev->bond_cap) {
+                            ev->bond_cap = ev->bond_cap ? ev->bond_cap * 2 : 4;
+                            ev->bonds = realloc(ev->bonds, ev->bond_cap * sizeof(BondEntry));
+                        }
+                        be = &ev->bonds[ev->bond_count++];
+                        be->target = strdup(target);
+                        be->deps = NULL;
+                        be->dep_count = 0;
+                        be->dep_cap = 0;
+                    }
+                    for (size_t i = 1; i < argc; i++) {
+                        const char *dep = expr->as.call.args[i]->as.str_val;
+                        if (be->dep_count >= be->dep_cap) {
+                            be->dep_cap = be->dep_cap ? be->dep_cap * 2 : 4;
+                            be->deps = realloc(be->deps, be->dep_cap * sizeof(char *));
+                        }
+                        be->deps[be->dep_count++] = strdup(dep);
+                    }
+                } else {
+                    /* unbond: remove deps from target's bond set */
+                    for (size_t i = 0; i < ev->bond_count; i++) {
+                        if (strcmp(ev->bonds[i].target, target) == 0) {
+                            for (size_t j = 1; j < argc; j++) {
+                                const char *dep = expr->as.call.args[j]->as.str_val;
+                                for (size_t k = 0; k < ev->bonds[i].dep_count; k++) {
+                                    if (strcmp(ev->bonds[i].deps[k], dep) == 0) {
+                                        free(ev->bonds[i].deps[k]);
+                                        ev->bonds[i].deps[k] = ev->bonds[i].deps[--ev->bonds[i].dep_count];
+                                        break;
+                                    }
+                                }
+                            }
+                            /* Remove entry if empty */
+                            if (ev->bonds[i].dep_count == 0) {
+                                free(ev->bonds[i].target);
+                                free(ev->bonds[i].deps);
+                                ev->bonds[i] = ev->bonds[--ev->bond_count];
+                            }
+                            break;
+                        }
+                    }
+                }
+                return eval_ok(value_unit());
+            }
+
             /* Evaluate arguments */
             size_t argc = expr->as.call.arg_count;
             LatValue *args = malloc(argc * sizeof(LatValue));
@@ -1327,6 +1463,95 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_string_owned(s));
+                }
+
+                /// @builtin track(name: String) -> Unit
+                /// @category Temporal
+                /// Enable phase history tracking for a variable.
+                /// @example track("counter")
+                if (strcmp(fn_name, "track") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("track() expects 1 String argument")); }
+                    const char *vname = args[0].as.str_val;
+                    LatValue cur;
+                    if (!env_get(ev->env, vname, &cur)) {
+                        char *err = NULL; (void)asprintf(&err, "track(): undefined variable '%s'", vname);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(err);
+                    }
+                    /* Check if already tracked */
+                    bool already = false;
+                    for (size_t i = 0; i < ev->tracked_count; i++) {
+                        if (strcmp(ev->tracked_vars[i].name, vname) == 0) { already = true; break; }
+                    }
+                    if (!already) {
+                        if (ev->tracked_count >= ev->tracked_cap) {
+                            ev->tracked_cap = ev->tracked_cap ? ev->tracked_cap * 2 : 4;
+                            ev->tracked_vars = realloc(ev->tracked_vars, ev->tracked_cap * sizeof(TrackedVar));
+                        }
+                        TrackedVar *tv = &ev->tracked_vars[ev->tracked_count++];
+                        tv->name = strdup(vname);
+                        tv->history.snapshots = NULL;
+                        tv->history.count = 0;
+                        tv->history.cap = 0;
+                        /* Record initial snapshot */
+                        const char *phase = builtin_phase_of_str(&cur);
+                        if (tv->history.count >= tv->history.cap) {
+                            tv->history.cap = tv->history.cap ? tv->history.cap * 2 : 8;
+                            tv->history.snapshots = realloc(tv->history.snapshots, tv->history.cap * sizeof(HistorySnapshot));
+                        }
+                        tv->history.snapshots[tv->history.count].phase_name = strdup(phase);
+                        tv->history.snapshots[tv->history.count].value = value_deep_clone(&cur);
+                        tv->history.count++;
+                    }
+                    value_free(&cur);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin phases(name: String) -> Array
+                /// @category Temporal
+                /// Returns the phase history of a tracked variable as an array of Maps.
+                /// @example phases("counter")  // [{phase: "fluid", value: 0}, ...]
+                if (strcmp(fn_name, "phases") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("phases() expects 1 String argument")); }
+                    const char *vname = args[0].as.str_val;
+                    VariableHistory *vh = NULL;
+                    for (size_t i = 0; i < ev->tracked_count; i++) {
+                        if (strcmp(ev->tracked_vars[i].name, vname) == 0) { vh = &ev->tracked_vars[i].history; break; }
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (!vh || vh->count == 0) return eval_ok(value_array(NULL, 0));
+                    LatValue *elems = malloc(vh->count * sizeof(LatValue));
+                    for (size_t i = 0; i < vh->count; i++) {
+                        LatValue m = value_map_new();
+                        LatValue pv = value_string(vh->snapshots[i].phase_name);
+                        lat_map_set(m.as.map.map, "phase", &pv);
+                        LatValue vv = value_deep_clone(&vh->snapshots[i].value);
+                        lat_map_set(m.as.map.map, "value", &vv);
+                        elems[i] = m;
+                    }
+                    LatValue result = value_array(elems, vh->count);
+                    free(elems);
+                    return eval_ok(result);
+                }
+
+                /// @builtin rewind(name: String, n: Int) -> Any
+                /// @category Temporal
+                /// Returns a deep copy of a tracked variable from n steps ago.
+                /// @example rewind("counter", 2)  // value from 2 steps back
+                if (strcmp(fn_name, "rewind") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rewind() expects (String, Int)")); }
+                    const char *vname = args[0].as.str_val;
+                    int64_t steps = args[1].as.int_val;
+                    VariableHistory *vh = NULL;
+                    for (size_t i = 0; i < ev->tracked_count; i++) {
+                        if (strcmp(ev->tracked_vars[i].name, vname) == 0) { vh = &ev->tracked_vars[i].history; break; }
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (!vh || steps < 0 || (size_t)steps >= vh->count)
+                        return eval_ok(value_nil());
+                    size_t idx = vh->count - 1 - (size_t)steps;
+                    return eval_ok(value_deep_clone(&vh->snapshots[idx].value));
                 }
 
                 /// @builtin ord(ch: String) -> Int
@@ -4419,8 +4644,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         /// @example freeze([1, 2, 3])  // crystal [1, 2, 3]
         case EXPR_FREEZE: {
             stats_freeze(&ev->stats);
-            if (expr->as.freeze_expr->tag == EXPR_IDENT) {
-                const char *name = expr->as.freeze_expr->as.str_val;
+            if (expr->as.freeze.expr->tag == EXPR_IDENT) {
+                const char *name = expr->as.freeze.expr->as.str_val;
                 if (ev->mode == MODE_STRICT) {
                     /* Strict mode: consuming freeze removes the binding */
                     LatValue val;
@@ -4433,10 +4658,31 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         value_free(&val);
                         return eval_err(strdup("cannot freeze a Channel"));
                     }
+                    /* Run crystallization contract if present */
+                    if (expr->as.freeze.contract) {
+                        EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
+                        if (!IS_OK(cr)) { value_free(&val); return cr; }
+                        LatValue check_val = value_deep_clone(&val);
+                        EvalResult vr = call_closure(ev, cr.value.as.closure.param_names,
+                            cr.value.as.closure.param_count, cr.value.as.closure.body,
+                            cr.value.as.closure.captured_env, &check_val, 1,
+                            cr.value.as.closure.default_values, cr.value.as.closure.has_variadic);
+                        value_free(&cr.value);
+                        if (!IS_OK(vr)) {
+                            char *msg = NULL;
+                            (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                            free(vr.error);
+                            value_free(&val);
+                            return eval_err(msg);
+                        }
+                        value_free(&vr.value);
+                    }
                     uint64_t ft0 = now_ns();
                     val = value_freeze(val);
                     freeze_to_region(ev, &val);
                     ev->stats.freeze_total_ns += now_ns() - ft0;
+                    record_history(ev, name);
+                    freeze_cascade(ev, name);
                     return eval_ok(val);
                 }
                 /* Casual mode: freeze the binding in-place */
@@ -4450,19 +4696,59 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     value_free(&val);
                     return eval_err(strdup("cannot freeze a Channel"));
                 }
+                /* Run crystallization contract if present */
+                if (expr->as.freeze.contract) {
+                    EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
+                    if (!IS_OK(cr)) { value_free(&val); return cr; }
+                    LatValue check_val = value_deep_clone(&val);
+                    EvalResult vr = call_closure(ev, cr.value.as.closure.param_names,
+                        cr.value.as.closure.param_count, cr.value.as.closure.body,
+                        cr.value.as.closure.captured_env, &check_val, 1,
+                        cr.value.as.closure.default_values, cr.value.as.closure.has_variadic);
+                    value_free(&cr.value);
+                    if (!IS_OK(vr)) {
+                        char *msg = NULL;
+                        (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                        free(vr.error);
+                        value_free(&val);
+                        return eval_err(msg);
+                    }
+                    value_free(&vr.value);
+                }
                 uint64_t ft0 = now_ns();
                 val = value_freeze(val);
                 freeze_to_region(ev, &val);
                 ev->stats.freeze_total_ns += now_ns() - ft0;
                 LatValue ret = value_deep_clone(&val);
                 env_set(ev->env, name, val);
+                record_history(ev, name);
+                freeze_cascade(ev, name);
                 return eval_ok(ret);
             }
-            EvalResult er = eval_expr(ev, expr->as.freeze_expr);
+            EvalResult er = eval_expr(ev, expr->as.freeze.expr);
             if (!IS_OK(er)) return er;
             if (er.value.type == VAL_CHANNEL) {
                 value_free(&er.value);
                 return eval_err(strdup("cannot freeze a Channel"));
+            }
+            /* Run crystallization contract if present */
+            if (expr->as.freeze.contract) {
+                EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
+                if (!IS_OK(cr)) { value_free(&er.value); return cr; }
+                LatValue check_val = value_deep_clone(&er.value);
+                EvalResult vr = call_closure(ev, cr.value.as.closure.param_names,
+                    cr.value.as.closure.param_count, cr.value.as.closure.body,
+                    cr.value.as.closure.captured_env, &check_val, 1,
+                    cr.value.as.closure.default_values, cr.value.as.closure.has_variadic);
+                value_free(&cr.value);
+                if (!IS_OK(vr)) {
+                    char *msg = NULL;
+                    (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                    free(vr.error);
+                    value_free(&er.value);
+                    return eval_err(msg);
+                }
+                value_free(&vr.value);
             }
             { uint64_t ft0 = now_ns();
             er.value = value_freeze(er.value);
@@ -4492,6 +4778,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 value_free(&val);
                 LatValue ret = value_deep_clone(&thawed);
                 env_set(ev->env, name, thawed);
+                record_history(ev, name);
                 return eval_ok(ret);
             }
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
@@ -5226,6 +5513,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     (void)asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
                 }
+                record_history(ev, name);
                 return eval_ok(value_unit());
             }
 
@@ -5242,6 +5530,14 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             }
             value_free(target);
             *target = valr.value;
+            /* Record history for root variable of field/index chain */
+            if (ev->tracked_count > 0) {
+                const Expr *root = stmt->as.assign.target;
+                while (root->tag == EXPR_FIELD_ACCESS) root = root->as.field_access.object;
+                while (root->tag == EXPR_INDEX) root = root->as.index.object;
+                if (root->tag == EXPR_IDENT)
+                    record_history(ev, root->as.str_val);
+            }
             return eval_ok(value_unit());
         }
 
@@ -7112,6 +7408,12 @@ Evaluator *evaluator_new(void) {
     ev->module_cache = lat_map_new(sizeof(LatValue));
     ev->loaded_extensions = lat_map_new(sizeof(LatValue));
     ev->module_exprs = lat_vec_new(sizeof(Expr *));
+    ev->bonds = NULL;
+    ev->bond_count = 0;
+    ev->bond_cap = 0;
+    ev->tracked_vars = NULL;
+    ev->tracked_count = 0;
+    ev->tracked_cap = 0;
     value_set_heap(ev->heap);
     return ev;
 }
@@ -7148,6 +7450,24 @@ void evaluator_free(Evaluator *ev) {
     }
     lat_vec_free(&ev->module_exprs);
     free(ev->script_dir);
+    /* Free bonds */
+    for (size_t i = 0; i < ev->bond_count; i++) {
+        free(ev->bonds[i].target);
+        for (size_t j = 0; j < ev->bonds[i].dep_count; j++)
+            free(ev->bonds[i].deps[j]);
+        free(ev->bonds[i].deps);
+    }
+    free(ev->bonds);
+    /* Free tracked variable histories */
+    for (size_t i = 0; i < ev->tracked_count; i++) {
+        free(ev->tracked_vars[i].name);
+        for (size_t j = 0; j < ev->tracked_vars[i].history.count; j++) {
+            free(ev->tracked_vars[i].history.snapshots[j].phase_name);
+            value_free(&ev->tracked_vars[i].history.snapshots[j].value);
+        }
+        free(ev->tracked_vars[i].history.snapshots);
+    }
+    free(ev->tracked_vars);
     value_set_heap(NULL);         /* disconnect before freeing the heap itself */
     dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
     lat_vec_free(&ev->gc_roots);

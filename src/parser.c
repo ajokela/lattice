@@ -577,7 +577,17 @@ static Expr *parse_primary(Parser *p, char **err) {
         Expr *e = parse_expr(p, err);
         if (!e) return NULL;
         if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
-        return expr_freeze(e);
+        /* Optional 'where' clause: freeze(x) where |v| { ... } */
+        Expr *contract = NULL;
+        if (peek_type(p) == TOK_IDENT) {
+            Token *maybe_where = peek(p);
+            if (maybe_where->as.str_val && strcmp(maybe_where->as.str_val, "where") == 0) {
+                advance(p);  /* consume 'where' */
+                contract = parse_expr(p, err);
+                if (!contract) { expr_free(e); return NULL; }
+            }
+        }
+        return expr_freeze(e, contract);
     }
     if (tt == TOK_THAW) {
         advance(p);

@@ -124,7 +124,8 @@ struct Expr {
         struct { Expr **elems; size_t count; } array;
         struct { char *name; FieldInit *fields; size_t field_count; } struct_lit;
 
-        Expr *freeze_expr;   /* FREEZE, THAW, CLONE: inner expr */
+        Expr *freeze_expr;   /* THAW, CLONE: inner expr */
+        struct { Expr *expr; Expr *contract; } freeze;  /* FREEZE: inner expr + optional where contract */
         Expr *spread_expr;   /* SPREAD: inner expr to expand */
         struct { Expr **elems; size_t count; } tuple;  /* TUPLE */
         struct { Stmt **stmts; size_t count; } block;  /* FORGE, BLOCK, SPAWN */
@@ -295,7 +296,7 @@ Expr *expr_field_access(Expr *object, char *field);
 Expr *expr_index(Expr *object, Expr *index);
 Expr *expr_array(Expr **elems, size_t count);
 Expr *expr_struct_lit(char *name, FieldInit *fields, size_t field_count);
-Expr *expr_freeze(Expr *inner);
+Expr *expr_freeze(Expr *inner, Expr *contract);
 Expr *expr_thaw(Expr *inner);
 Expr *expr_clone(Expr *inner);
 Expr *expr_forge(Stmt **stmts, size_t count);

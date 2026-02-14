@@ -163,7 +163,9 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             return PHASE_UNSPECIFIED;
 
         case EXPR_FREEZE: {
-            AstPhase inner = pc_check_expr(pc, expr->as.freeze_expr);
+            AstPhase inner = pc_check_expr(pc, expr->as.freeze.expr);
+            if (expr->as.freeze.contract)
+                pc_check_expr(pc, expr->as.freeze.contract);
             if (pc->mode == MODE_STRICT && inner == PHASE_CRYSTAL)
                 pc_error(pc, "strict mode: cannot freeze an already crystal value");
             return PHASE_CRYSTAL;
@@ -413,7 +415,12 @@ static void pc_check_spawn_expr(PhaseChecker *pc, const Expr *expr) {
             pc_check_spawn_expr(pc, expr->as.index.object);
             pc_check_spawn_expr(pc, expr->as.index.index);
             break;
-        case EXPR_FREEZE: case EXPR_THAW: case EXPR_CLONE:
+        case EXPR_FREEZE:
+            pc_check_spawn_expr(pc, expr->as.freeze.expr);
+            if (expr->as.freeze.contract)
+                pc_check_spawn_expr(pc, expr->as.freeze.contract);
+            break;
+        case EXPR_THAW: case EXPR_CLONE:
             pc_check_spawn_expr(pc, expr->as.freeze_expr);
             break;
         case EXPR_PRINT:

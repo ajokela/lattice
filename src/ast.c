@@ -106,9 +106,10 @@ Expr *expr_struct_lit(char *name, FieldInit *fields, size_t field_count) {
     return e;
 }
 
-Expr *expr_freeze(Expr *inner) {
+Expr *expr_freeze(Expr *inner, Expr *contract) {
     Expr *e = expr_alloc(EXPR_FREEZE);
-    e->as.freeze_expr = inner;
+    e->as.freeze.expr = inner;
+    e->as.freeze.contract = contract;
     return e;
 }
 
@@ -456,6 +457,9 @@ void expr_free(Expr *e) {
             free(e->as.struct_lit.fields);
             break;
         case EXPR_FREEZE:
+            expr_free(e->as.freeze.expr);
+            if (e->as.freeze.contract) expr_free(e->as.freeze.contract);
+            break;
         case EXPR_THAW:
         case EXPR_CLONE:
             expr_free(e->as.freeze_expr);

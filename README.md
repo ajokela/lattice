@@ -105,6 +105,60 @@ freeze(m)
 process(m)              // "immutable path"
 ```
 
+### Crystallization Contracts
+
+Attach a validation closure to `freeze()` with `where`. The contract runs before the value is frozen and rejects invalid state:
+
+```lattice
+flux config = Map::new()
+config["host"] = "localhost"
+config["port"] = 8080
+
+// Contract validates the value before freezing
+freeze(config) where |v| {
+    if !v.has("host") { throw("missing host") }
+    if !v.has("port") { throw("missing port") }
+}
+// config is now crystal — validated and immutable
+```
+
+### Phase Propagation (Bonds)
+
+Link variables so that freezing one cascades to its dependencies:
+
+```lattice
+flux header = Map::new()
+flux body = Map::new()
+flux footer = Map::new()
+
+bond(header, body, footer)  // body and footer are bonded to header
+
+freeze(header)              // freezes header, body, AND footer
+print(phase_of(body))       // "crystal"
+print(phase_of(footer))     // "crystal"
+```
+
+Use `unbond(target, dep)` to remove a bond before freezing.
+
+### Phase History (Temporal Values)
+
+Track a variable's phase transitions and value changes over time:
+
+```lattice
+flux counter = 0
+track("counter")
+
+counter = 10
+counter = 20
+freeze(counter)
+
+let history = phases("counter")
+// [{phase: "fluid", value: 0}, {phase: "fluid", value: 10},
+//  {phase: "fluid", value: 20}, {phase: "crystal", value: 20}]
+
+let old_val = rewind("counter", 2)  // 10 (two steps back)
+```
+
 ### Control Flow
 
 **if/else** — expression-based, returns a value:
@@ -684,8 +738,14 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | Function | Description |
 |----------|-------------|
 | `freeze(val)` | Transition a value to crystal (immutable) phase |
+| `freeze(val) where \|v\| { ... }` | Freeze with validation contract |
 | `thaw(val)` | Create a mutable copy of a crystal value |
 | `clone(val)` | Deep-clone a value |
+| `bond(target, ...deps)` | Link variables for cascading freeze |
+| `unbond(target, ...deps)` | Remove a bond |
+| `track(name)` | Enable phase history tracking for a variable |
+| `phases(name)` | Get phase history as array of `{phase, value}` maps |
+| `rewind(name, n)` | Get value from n steps back in history |
 
 ### Type Constructors & Conversion
 

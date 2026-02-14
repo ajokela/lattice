@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.2.4"
+        "0.2.5"
     );
 }
 
@@ -5306,7 +5306,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.2.4"
+        "Hello, Lattice!\nVersion 0.2.5"
     );
 }
 
@@ -6296,6 +6296,330 @@ static void test_phase_dispatch_unphased_fallback(void) {
         "    process(m)\n"
         "}\n",
         "fallback"
+    );
+}
+
+/* ======================================================================
+ * Crystallization Contracts
+ * ====================================================================== */
+
+static void test_contract_basic_pass(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    freeze(x) where |v| { if v < 0 { throw(\"must be non-negative\") } }\n"
+        "    print(x)\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_contract_basic_fail(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = -5\n"
+        "    freeze(x) where |v| { if v < 0 { throw(\"must be non-negative\") } }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_contract_map_validation(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"name\"] = \"Alice\"\n"
+        "    m[\"age\"] = 30\n"
+        "    freeze(m) where |v| {\n"
+        "        if !v.has(\"name\") { throw(\"missing name\") }\n"
+        "        if !v.has(\"age\") { throw(\"missing age\") }\n"
+        "    }\n"
+        "    print(m[\"name\"])\n"
+        "}\n",
+        "Alice"
+    );
+}
+
+static void test_contract_map_fail(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"name\"] = \"Alice\"\n"
+        "    freeze(m) where |v| {\n"
+        "        if !v.has(\"age\") { throw(\"missing age field\") }\n"
+        "    }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_contract_no_contract_compat(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    freeze(x)\n"
+        "    print(x)\n"
+        "}\n",
+        "10"
+    );
+}
+
+static void test_contract_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux arr = [1, 2, 3]\n"
+        "    freeze(arr) where |v| {\n"
+        "        if len(v) == 0 { throw(\"array cannot be empty\") }\n"
+        "    }\n"
+        "    print(len(arr))\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_contract_nonident_expr(void) {
+    /* freeze(expr) where contract — non-identifier expression */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"x\"] = 5\n"
+        "    fix result = freeze(clone(m)) where |v| {\n"
+        "        if !v.has(\"x\") { throw(\"no x\") }\n"
+        "    }\n"
+        "    print(result[\"x\"])\n"
+        "}\n",
+        "5"
+    );
+}
+
+static void test_contract_error_message(void) {
+    /* Verify the error message includes "freeze contract failed:" prefix */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 0\n"
+        "    freeze(x) where |v| { if true { 1 / 0 } }\n"
+        "}\n",
+        "EVAL_ERROR:freeze contract failed:"
+    );
+}
+
+/* ======================================================================
+ * Phase Propagation (Bonds)
+ * ====================================================================== */
+
+static void test_bond_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(b))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_bond_multiple_deps(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    flux y = 20\n"
+        "    flux z = 30\n"
+        "    bond(x, y, z)\n"
+        "    freeze(x)\n"
+        "    print(phase_of(y))\n"
+        "    print(phase_of(z))\n"
+        "}\n",
+        "crystal\ncrystal"
+    );
+}
+
+static void test_unbond(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b)\n"
+        "    unbond(a, b)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(b))\n"
+        "}\n",
+        "fluid"
+    );
+}
+
+static void test_bond_already_frozen_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    fix a = freeze(1)\n"
+        "    flux b = 2\n"
+        "    bond(a, b)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_bond_phase_of_after_cascade(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux config = Map::new()\n"
+        "    config[\"host\"] = \"localhost\"\n"
+        "    flux port = 8080\n"
+        "    bond(config, port)\n"
+        "    freeze(config)\n"
+        "    print(phase_of(config))\n"
+        "    print(phase_of(port))\n"
+        "}\n",
+        "crystal\ncrystal"
+    );
+}
+
+static void test_bond_transitive(void) {
+    /* a -> b -> c: freezing a should freeze b, which freezes c */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    flux c = 3\n"
+        "    bond(a, b)\n"
+        "    bond(b, c)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(c))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_bond_non_ident_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    bond(a, 42)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_bond_undefined_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    bond(a, nonexistent)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* ======================================================================
+ * Phase History / Temporal Values
+ * ====================================================================== */
+
+static void test_track_phases_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    track(\"x\")\n"
+        "    x = 20\n"
+        "    x = 30\n"
+        "    let h = phases(\"x\")\n"
+        "    print(len(h))\n"
+        "    print(h[0][\"value\"])\n"
+        "    print(h[2][\"value\"])\n"
+        "}\n",
+        "3\n10\n30"
+    );
+}
+
+static void test_rewind_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 100\n"
+        "    track(\"x\")\n"
+        "    x = 200\n"
+        "    x = 300\n"
+        "    print(rewind(\"x\", 0))\n"
+        "    print(rewind(\"x\", 1))\n"
+        "    print(rewind(\"x\", 2))\n"
+        "}\n",
+        "300\n200\n100"
+    );
+}
+
+static void test_track_untracked_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let h = phases(\"nonexistent\")\n"
+        "    print(len(h))\n"
+        "}\n",
+        "0"
+    );
+}
+
+static void test_track_freeze_thaw(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 1\n"
+        "    track(\"x\")\n"
+        "    freeze(x)\n"
+        "    thaw(x)\n"
+        "    let h = phases(\"x\")\n"
+        "    print(len(h))\n"
+        "    print(h[0][\"phase\"])\n"
+        "    print(h[1][\"phase\"])\n"
+        "    print(h[2][\"phase\"])\n"
+        "}\n",
+        "3\nfluid\ncrystal\nfluid"
+    );
+}
+
+static void test_rewind_out_of_bounds(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 5\n"
+        "    track(\"x\")\n"
+        "    print(rewind(\"x\", 99))\n"
+        "}\n",
+        "nil"
+    );
+}
+
+static void test_track_different_types(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 1\n"
+        "    track(\"x\")\n"
+        "    x = \"hello\"\n"
+        "    x = true\n"
+        "    let h = phases(\"x\")\n"
+        "    print(len(h))\n"
+        "    print(h[0][\"value\"])\n"
+        "    print(h[1][\"value\"])\n"
+        "    print(h[2][\"value\"])\n"
+        "}\n",
+        "3\n1\nhello\ntrue"
+    );
+}
+
+static void test_track_undefined_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    track(\"nonexistent\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_phases_output_format(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    track(\"x\")\n"
+        "    let h = phases(\"x\")\n"
+        "    print(h[0][\"phase\"])\n"
+        "    print(h[0][\"value\"])\n"
+        "}\n",
+        "fluid\n42"
     );
 }
 
@@ -7748,6 +8072,36 @@ void register_stdlib_tests(void) {
     register_test("test_phase_dispatch_no_match_error", test_phase_dispatch_no_match_error);
     register_test("test_phase_dispatch_same_sig_replaces", test_phase_dispatch_same_sig_replaces);
     register_test("test_phase_dispatch_unphased_fallback", test_phase_dispatch_unphased_fallback);
+
+    /* Crystallization contracts */
+    register_test("test_contract_basic_pass", test_contract_basic_pass);
+    register_test("test_contract_basic_fail", test_contract_basic_fail);
+    register_test("test_contract_map_validation", test_contract_map_validation);
+    register_test("test_contract_map_fail", test_contract_map_fail);
+    register_test("test_contract_no_contract_compat", test_contract_no_contract_compat);
+    register_test("test_contract_array", test_contract_array);
+    register_test("test_contract_nonident_expr", test_contract_nonident_expr);
+    register_test("test_contract_error_message", test_contract_error_message);
+
+    /* Phase propagation (bonds) */
+    register_test("test_bond_basic", test_bond_basic);
+    register_test("test_bond_multiple_deps", test_bond_multiple_deps);
+    register_test("test_unbond", test_unbond);
+    register_test("test_bond_already_frozen_error", test_bond_already_frozen_error);
+    register_test("test_bond_phase_of_after_cascade", test_bond_phase_of_after_cascade);
+    register_test("test_bond_transitive", test_bond_transitive);
+    register_test("test_bond_non_ident_error", test_bond_non_ident_error);
+    register_test("test_bond_undefined_error", test_bond_undefined_error);
+
+    /* Phase history / temporal values */
+    register_test("test_track_phases_basic", test_track_phases_basic);
+    register_test("test_rewind_basic", test_rewind_basic);
+    register_test("test_track_untracked_empty", test_track_untracked_empty);
+    register_test("test_track_freeze_thaw", test_track_freeze_thaw);
+    register_test("test_rewind_out_of_bounds", test_rewind_out_of_bounds);
+    register_test("test_track_different_types", test_track_different_types);
+    register_test("test_track_undefined_error", test_track_undefined_error);
+    register_test("test_phases_output_format", test_phases_output_format);
 
     /* lib/test.lat — Test runner library */
     register_test("test_lib_test_assert_eq_pass", test_lib_test_assert_eq_pass);

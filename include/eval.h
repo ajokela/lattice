@@ -63,6 +63,33 @@ typedef struct {
     ControlFlow cf;    /* control flow signal */
 } EvalResult;
 
+/* Bond entry: tracks variables bonded to a target for phase propagation */
+typedef struct {
+    char  *target;       /* target variable name */
+    char **deps;         /* bonded dependency variable names */
+    size_t dep_count;
+    size_t dep_cap;
+} BondEntry;
+
+/* History snapshot for temporal values */
+typedef struct {
+    char     *phase_name;  /* "fluid", "crystal", "unphased" */
+    LatValue  value;       /* deep clone of value at this point */
+} HistorySnapshot;
+
+/* History tracking for a single variable */
+typedef struct {
+    HistorySnapshot *snapshots;
+    size_t           count;
+    size_t           cap;
+} VariableHistory;
+
+/* Tracked variable entry */
+typedef struct {
+    char            *name;
+    VariableHistory  history;
+} TrackedVar;
+
 /* Evaluator state */
 typedef struct Evaluator {
     Env        *env;
@@ -84,6 +111,14 @@ typedef struct Evaluator {
     char       *script_dir;    /* directory of the main script (for require) */
     int         prog_argc;     /* argc from main() for args() builtin */
     char      **prog_argv;     /* argv from main() for args() builtin */
+    /* Phase propagation bonds */
+    BondEntry  *bonds;
+    size_t      bond_count;
+    size_t      bond_cap;
+    /* Phase history / temporal values */
+    TrackedVar *tracked_vars;
+    size_t      tracked_count;
+    size_t      tracked_cap;
 } Evaluator;
 
 /* Create a new evaluator */
