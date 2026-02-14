@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -611,6 +611,40 @@ orm.close(db)
 | `drop_table(0)` | Drop the table |
 
 Requires the SQLite extension: `make ext-sqlite`.
+
+### Standard Libraries
+
+Lattice ships with importable libraries in the `lib/` directory:
+
+| Library | Import | Description |
+|---------|--------|-------------|
+| Test Runner | `import "lib/test" as t` | Structured test suites with rich assertions |
+| Validation | `import "lib/validate" as v` | Declarative schema validation for Maps |
+| Functional | `import "lib/fn" as f` | Lazy sequences, Result type, currying, collection utilities |
+| Dotenv | `import "lib/dotenv" as dotenv` | Load `.env` files into environment variables |
+| CLI Parser | `import "lib/cli" as cli` | Command-line argument parsing with flags and subcommands |
+| HTTP Server | `import "lib/http_server" as http` | HTTP request routing and response helpers |
+| Logging | `import "lib/log" as log` | Leveled logging (debug/info/warn/error) |
+| Template | `import "lib/template" as tmpl` | String template engine with `{{variable}}` interpolation |
+
+Example using the test runner:
+
+```lattice
+import "lib/test" as t
+
+t.run([
+    t.describe("Math", |_| {
+        return [
+            t.it("addition", |_| {
+                t.assert_eq(2 + 2, 4)
+            }),
+            t.it("division by zero", |_| {
+                t.assert_throws(|_| { 1 / 0 })
+            })
+        ]
+    })
+])
+```
 
 ### Strict Mode
 
