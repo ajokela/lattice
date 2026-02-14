@@ -477,6 +477,15 @@ if (strcmp(fn_name, "print") == 0) {</code></pre>
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+
+    .doc-logo-img {{
+      width: 24px;
+      height: 24px;
+      filter: drop-shadow(0 0 4px rgba(79, 195, 247, 0.3));
     }}
 
     .doc-sep {{
@@ -890,7 +899,7 @@ if (strcmp(fn_name, "print") == 0) {</code></pre>
 <!-- Header -->
 <div class="doc-header">
   <div class="doc-header-left">
-    <a href="/" class="doc-logo">Lattice</a>
+    <a href="/" class="doc-logo"><img src="lattice-fractal-freeze.png" alt="" class="doc-logo-img">Lattice</a>
     <span class="doc-sep">/</span>
     <span class="doc-title">Documentation</span>
   </div>
