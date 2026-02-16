@@ -48,6 +48,7 @@ LDFLAGS += $(TLS_LDFLAGS)
 # ── pthreads and dlopen (Linux needs explicit linking) ──
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
+    CFLAGS  += -D_DEFAULT_SOURCE
     LDFLAGS += -lpthread -lm -ldl
 endif
 
