@@ -1633,7 +1633,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if a source string is a complete expression (balanced brackets).
                 /// @example is_complete("{ 1 + 2 }")  // true
                 if (strcmp(fn_name, "is_complete") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_complete() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("is_complete() expects 1 string argument")); }
                     const char *source = args[0].as.str_val;
                     Lexer lex = lexer_new(source);
                     char *lex_err = NULL;
@@ -1672,7 +1672,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Returns the type name of a value as a string.
                 /// @example typeof(42)  // "Int"
                 if (strcmp(fn_name, "typeof") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("typeof() expects 1 argument")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("typeof() expects 1 argument")); }
                     const char *tn = builtin_typeof_str(&args[0]);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -1684,7 +1684,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Returns the type name of a struct instance.
                 /// @example struct_name(user)  // "User"
                 if (strcmp(fn_name, "struct_name") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_name() expects 1 Struct argument")); }
+                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("struct_name() expects 1 Struct argument")); }
                     const char *sn = args[0].as.strct.name;
                     LatValue result = value_string(sn);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -1697,7 +1697,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Returns an array of field name strings from a struct instance.
                 /// @example struct_fields(user)  // ["name", "age"]
                 if (strcmp(fn_name, "struct_fields") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_fields() expects 1 Struct argument")); }
+                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("struct_fields() expects 1 Struct argument")); }
                     size_t fc = args[0].as.strct.field_count;
                     LatValue *elems = malloc((fc > 0 ? fc : 1) * sizeof(LatValue));
                     for (size_t j = 0; j < fc; j++) {
@@ -1715,7 +1715,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Converts a struct instance to a Map of {field_name: value}.
                 /// @example struct_to_map(user).get("name")  // "Alice"
                 if (strcmp(fn_name, "struct_to_map") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_to_map() expects 1 Struct argument")); }
+                    if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("struct_to_map() expects 1 Struct argument")); }
                     LatValue map = value_map_new();
                     size_t fc = args[0].as.strct.field_count;
                     for (size_t j = 0; j < fc; j++) {
@@ -1733,7 +1733,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Missing fields default to nil.
                 /// @example struct_from_map("User", m)
                 if (strcmp(fn_name, "struct_from_map") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("struct_from_map() expects (name: String, map: Map)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("struct_from_map() expects (name: String, map: Map)")); }
                     const char *sname = args[0].as.str_val;
                     StructDecl *sd = find_struct(ev, sname);
                     if (!sd) {
@@ -1769,7 +1769,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Returns the phase of a value ("flux", "fix", or "crystal").
                 /// @example phase_of(freeze([1, 2]))  // "crystal"
                 if (strcmp(fn_name, "phase_of") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("phase_of() expects 1 argument")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("phase_of() expects 1 argument")); }
                     const char *pn = builtin_phase_of_str(&args[0]);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -1781,7 +1781,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Convert any value to its string representation.
                 /// @example to_string(42)  // "42"
                 if (strcmp(fn_name, "to_string") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_string() expects 1 argument")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("to_string() expects 1 argument")); }
                     char *s = builtin_to_string(&args[0]);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -1795,7 +1795,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example repr(42)        // "42"
                 /// @example repr("hello")   // "\"hello\""
                 if (strcmp(fn_name, "repr") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("repr() expects 1 argument")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("repr() expects 1 argument")); }
                     char *s = eval_repr(ev, &args[0]);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -1807,12 +1807,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Enable phase history tracking for a variable.
                 /// @example track("counter")
                 if (strcmp(fn_name, "track") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("track() expects 1 String argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("track() expects 1 String argument")); }
                     const char *vname = args[0].as.str_val;
                     LatValue cur;
                     if (!env_get(ev->env, vname, &cur)) {
                         char *err = NULL; (void)asprintf(&err, "track(): undefined variable '%s'", vname);
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(err);
                     }
                     /* Check if already tracked */
@@ -1841,7 +1841,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         tv->history.count++;
                     }
                     value_free(&cur);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_unit());
                 }
 
@@ -1850,13 +1850,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Returns the phase history of a tracked variable as an array of Maps.
                 /// @example phases("counter")  // [{phase: "fluid", value: 0}, ...]
                 if (strcmp(fn_name, "phases") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("phases() expects 1 String argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("phases() expects 1 String argument")); }
                     const char *vname = args[0].as.str_val;
                     VariableHistory *vh = NULL;
                     for (size_t i = 0; i < ev->tracked_count; i++) {
                         if (strcmp(ev->tracked_vars[i].name, vname) == 0) { vh = &ev->tracked_vars[i].history; break; }
                     }
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!vh || vh->count == 0) return eval_ok(value_array(NULL, 0));
                     LatValue *elems = malloc(vh->count * sizeof(LatValue));
                     for (size_t i = 0; i < vh->count; i++) {
@@ -1877,14 +1877,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Returns a deep copy of a tracked variable from n steps ago.
                 /// @example rewind("counter", 2)  // value from 2 steps back
                 if (strcmp(fn_name, "rewind") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rewind() expects (String, Int)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("rewind() expects (String, Int)")); }
                     const char *vname = args[0].as.str_val;
                     int64_t steps = args[1].as.int_val;
                     VariableHistory *vh = NULL;
                     for (size_t i = 0; i < ev->tracked_count; i++) {
                         if (strcmp(ev->tracked_vars[i].name, vname) == 0) { vh = &ev->tracked_vars[i].history; break; }
                     }
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!vh || steps < 0 || (size_t)steps >= vh->count)
                         return eval_ok(value_nil());
                     size_t idx = vh->count - 1 - (size_t)steps;
@@ -1896,12 +1896,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Freeze a variable and validate any pending seed contracts.
                 /// @example grow(config)  // freeze + validate seeds
                 if (strcmp(fn_name, "grow") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("grow() expects 1 String argument (variable name)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("grow() expects 1 String argument (variable name)")); }
                     const char *vname = args[0].as.str_val;
                     LatValue val;
                     if (!env_get(ev->env, vname, &val)) {
                         char *err = NULL; (void)asprintf(&err, "grow(): undefined variable '%s'", vname);
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(err);
                     }
                     /* Check and validate all seeds for this variable */
@@ -1917,12 +1917,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             char *msg = NULL;
                             (void)asprintf(&msg, "grow() seed contract failed: %s", vr.error);
                             free(vr.error); value_free(&val);
-                            for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                            for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                             return eval_err(msg);
                         }
                         if (!value_is_truthy(&vr.value)) {
                             value_free(&vr.value); value_free(&val);
-                            for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                            for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                             return eval_err(strdup("grow() seed contract returned false"));
                         }
                         value_free(&vr.value);
@@ -1941,13 +1941,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     {
                         char *cascade_err = freeze_cascade(ev, vname);
                         if (cascade_err) {
-                            for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                            for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                             value_free(&ret);
                             return eval_err(cascade_err);
                         }
                     }
                     EvalResult fr = fire_reactions(ev, vname, "crystal");
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!IS_OK(fr)) { value_free(&ret); return fr; }
                     return eval_ok(ret);
                 }
@@ -1957,16 +1957,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Returns the current pressure mode of a variable, or nil if none.
                 /// @example pressure_of("data")  // "no_grow"
                 if (strcmp(fn_name, "pressure_of") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pressure_of() expects 1 String argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("pressure_of() expects 1 String argument")); }
                     const char *vname = args[0].as.str_val;
                     for (size_t i = 0; i < ev->pressure_count; i++) {
                         if (strcmp(ev->pressures[i].var_name, vname) == 0) {
                             LatValue result = value_string(ev->pressures[i].mode);
-                            for (size_t j = 0; j < argc; j++) value_free(&args[j]); free(args);
+                            for (size_t j = 0; j < argc; j++) { value_free(&args[j]); } free(args);
                             return eval_ok(result);
                         }
                     }
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_nil());
                 }
 
@@ -1975,7 +1975,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the Unicode code point of the first character.
                 /// @example ord("A")  // 65
                 if (strcmp(fn_name, "ord") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("ord() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("ord() expects 1 string argument")); }
                     int64_t code = builtin_ord(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -1987,7 +1987,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the character for a Unicode code point.
                 /// @example chr(65)  // "A"
                 if (strcmp(fn_name, "chr") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("chr() expects 1 integer argument")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("chr() expects 1 integer argument")); }
                     char *s = builtin_chr(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -1999,7 +1999,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Read the entire contents of a file as a string.
                 /// @example read_file("data.txt")  // "file contents..."
                 if (strcmp(fn_name, "read_file") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("read_file() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("read_file() expects 1 string argument")); }
                     char *contents = builtin_read_file(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2012,7 +2012,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Write a string to a file, creating or overwriting it.
                 /// @example write_file("out.txt", "hello")  // true
                 if (strcmp(fn_name, "write_file") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("write_file() expects 2 string arguments")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("write_file() expects 2 string arguments")); }
                     bool wf_ok = builtin_write_file(args[0].as.str_val, args[1].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2025,7 +2025,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if a file or directory exists at the given path.
                 /// @example file_exists("data.txt")  // true
                 if (strcmp(fn_name, "file_exists") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("file_exists() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("file_exists() expects 1 string argument")); }
                     bool exists = fs_file_exists(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2037,7 +2037,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Delete a file at the given path.
                 /// @example delete_file("temp.txt")  // true
                 if (strcmp(fn_name, "delete_file") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("delete_file() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("delete_file() expects 1 string argument")); }
                     char *df_err = NULL;
                     bool df_ok = fs_delete_file(args[0].as.str_val, &df_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2051,7 +2051,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// List entries in a directory, returning an array of filenames.
                 /// @example list_dir(".")  // ["file1.txt", "dir1", ...]
                 if (strcmp(fn_name, "list_dir") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("list_dir() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("list_dir() expects 1 string argument")); }
                     char *ld_err = NULL;
                     size_t ld_count = 0;
                     char **ld_entries = fs_list_dir(args[0].as.str_val, &ld_count, &ld_err);
@@ -2074,7 +2074,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Append a string to the end of a file.
                 /// @example append_file("log.txt", "new line\n")  // true
                 if (strcmp(fn_name, "append_file") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("append_file() expects 2 string arguments")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("append_file() expects 2 string arguments")); }
                     char *af_err = NULL;
                     bool af_ok = fs_append_file(args[0].as.str_val, args[1].as.str_val, &af_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2088,7 +2088,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Create a directory at the given path.
                 /// @example mkdir("new_dir")  // true
                 if (strcmp(fn_name, "mkdir") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("mkdir() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("mkdir() expects 1 string argument")); }
                     char *mk_err = NULL;
                     bool mk_ok = fs_mkdir(args[0].as.str_val, &mk_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2102,7 +2102,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Rename or move a file or directory.
                 /// @example rename("old.txt", "new.txt")  // true
                 if (strcmp(fn_name, "rename") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rename() expects 2 string arguments")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("rename() expects 2 string arguments")); }
                     char *rn_err = NULL;
                     bool rn_ok = fs_rename(args[0].as.str_val, args[1].as.str_val, &rn_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2116,7 +2116,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if the path points to a directory.
                 /// @example is_dir("/tmp")  // true
                 if (strcmp(fn_name, "is_dir") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_dir() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("is_dir() expects 1 string argument")); }
                     bool result = fs_is_dir(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2128,7 +2128,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if the path points to a regular file.
                 /// @example is_file("data.txt")  // true
                 if (strcmp(fn_name, "is_file") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_file() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("is_file() expects 1 string argument")); }
                     bool result = fs_is_file(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2140,7 +2140,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Remove a directory (must be empty).
                 /// @example rmdir("old_dir")  // true
                 if (strcmp(fn_name, "rmdir") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("rmdir() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("rmdir() expects 1 string argument")); }
                     char *rm_err = NULL;
                     bool rm_ok = fs_rmdir(args[0].as.str_val, &rm_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2154,7 +2154,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Find files matching a glob pattern, returning an array of paths.
                 /// @example glob("*.txt")  // ["a.txt", "b.txt"]
                 if (strcmp(fn_name, "glob") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("glob() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("glob() expects 1 string argument")); }
                     char *gl_err = NULL;
                     size_t gl_count = 0;
                     char **gl_entries = fs_glob(args[0].as.str_val, &gl_count, &gl_err);
@@ -2180,7 +2180,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Get file metadata (size, mtime, type, permissions) as a map.
                 /// @example stat("file.txt")  // {size: 1024, mtime: ..., type: "file", permissions: 644}
                 if (strcmp(fn_name, "stat") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("stat() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("stat() expects 1 string argument")); }
                     int64_t st_size = 0, st_mtime = 0, st_mode = 0;
                     const char *st_type = NULL;
                     char *st_err = NULL;
@@ -2208,7 +2208,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Copy a file from source path to destination path.
                 /// @example copy_file("a.txt", "b.txt")  // true
                 if (strcmp(fn_name, "copy_file") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("copy_file() expects 2 string arguments")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("copy_file() expects 2 string arguments")); }
                     char *cp_err = NULL;
                     bool cp_ok = fs_copy_file(args[0].as.str_val, args[1].as.str_val, &cp_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2222,7 +2222,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Resolve a path to its absolute canonical form.
                 /// @example realpath("./src/../src")  // "/home/user/src"
                 if (strcmp(fn_name, "realpath") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("realpath() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("realpath() expects 1 string argument")); }
                     char *rp_err = NULL;
                     char *rp_result = fs_realpath(args[0].as.str_val, &rp_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2236,7 +2236,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Create a temporary directory and return its path.
                 /// @example tempdir()  // "/tmp/lat_XXXXXX"
                 if (strcmp(fn_name, "tempdir") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tempdir() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tempdir() expects no arguments")); }
                     free(args);
                     char *td_err = NULL;
                     char *td_result = fs_tempdir(&td_err);
@@ -2249,7 +2249,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Create a temporary file and return its path.
                 /// @example tempfile()  // "/tmp/lat_XXXXXX"
                 if (strcmp(fn_name, "tempfile") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tempfile() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tempfile() expects no arguments")); }
                     free(args);
                     char *tf_err = NULL;
                     char *tf_result = fs_tempfile(&tf_err);
@@ -2262,7 +2262,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Change file permissions using a numeric mode.
                 /// @example chmod("script.sh", 755)  // true
                 if (strcmp(fn_name, "chmod") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("chmod() expects 2 arguments (string path, integer mode)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("chmod() expects 2 arguments (string path, integer mode)")); }
                     char *ch_err = NULL;
                     bool ch_ok = fs_chmod(args[0].as.str_val, (int)args[1].as.int_val, &ch_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2276,7 +2276,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the size of a file in bytes.
                 /// @example file_size("data.bin")  // 4096
                 if (strcmp(fn_name, "file_size") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("file_size() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("file_size() expects 1 string argument")); }
                     char *fs_err = NULL;
                     int64_t sz = fs_file_size(args[0].as.str_val, &fs_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2294,7 +2294,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (strcmp(fn_name, "path_join") == 0) {
                     if (argc < 1) { free(args); return eval_err(strdup("path_join() expects at least 1 argument")); }
                     for (size_t i = 0; i < argc; i++) {
-                        if (args[i].type != VAL_STR) { for (size_t j = 0; j < argc; j++) value_free(&args[j]); free(args); return eval_err(strdup("path_join() expects String arguments")); }
+                        if (args[i].type != VAL_STR) { for (size_t j = 0; j < argc; j++) { value_free(&args[j]); } free(args); return eval_err(strdup("path_join() expects String arguments")); }
                     }
                     const char **parts = malloc(argc * sizeof(char*));
                     for (size_t i = 0; i < argc; i++) parts[i] = args[i].as.str_val;
@@ -2310,7 +2310,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the directory component of a path.
                 /// @example path_dir("/home/user/file.txt")  // "/home/user"
                 if (strcmp(fn_name, "path_dir") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_dir() expects 1 String argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("path_dir() expects 1 String argument")); }
                     char *result = path_dir(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2322,7 +2322,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the filename component of a path.
                 /// @example path_base("/home/user/file.txt")  // "file.txt"
                 if (strcmp(fn_name, "path_base") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_base() expects 1 String argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("path_base() expects 1 String argument")); }
                     char *result = path_base(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2334,7 +2334,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the file extension of a path (including the dot).
                 /// @example path_ext("file.txt")  // ".txt"
                 if (strcmp(fn_name, "path_ext") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("path_ext() expects 1 String argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("path_ext() expects 1 String argument")); }
                     char *result = path_ext(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2346,7 +2346,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Load and execute a Lattice source file, importing its definitions.
                 /// @example require("stdlib.lat")  // true
                 if (strcmp(fn_name, "require") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("require() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("require() expects 1 string argument")); }
                     const char *raw_path = args[0].as.str_val;
                     /* Build the file path: append .lat if not already present */
                     size_t plen = strlen(raw_path);
@@ -2477,7 +2477,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Load a native extension (.dylib/.so) and return a Map of its functions.
                 /// @example let pg = require_ext("pg")
                 if (strcmp(fn_name, "require_ext") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("require_ext() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("require_ext() expects 1 string argument")); }
                     const char *ext_name = args[0].as.str_val;
                     /* Check cache */
                     LatValue *cached = (LatValue *)lat_map_get(&ev->loaded_extensions, ext_name);
@@ -2507,7 +2507,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Parse and execute a string as Lattice source code, returning the result.
                 /// @example lat_eval("1 + 2")  // 3
                 if (strcmp(fn_name, "lat_eval") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lat_eval() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("lat_eval() expects 1 string argument")); }
                     const char *source = args[0].as.str_val;
                     Lexer lex = lexer_new(source);
                     char *lex_err = NULL;
@@ -2574,7 +2574,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Tokenize a source string, returning an array of Token structs.
                 /// @example tokenize("1 + 2")  // [{type: "INT_LIT", text: "1"}, ...]
                 if (strcmp(fn_name, "tokenize") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tokenize() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tokenize() expects 1 string argument")); }
                     const char *source = args[0].as.str_val;
                     Lexer lex = lexer_new(source);
                     char *lex_err = NULL;
@@ -2675,7 +2675,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Parse a string as an integer.
                 /// @example parse_int("42")  // 42
                 if (strcmp(fn_name, "parse_int") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("parse_int() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("parse_int() expects 1 string argument")); }
                     bool ok;
                     int64_t val = builtin_parse_int(args[0].as.str_val, &ok);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2689,7 +2689,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Parse a string as a floating-point number.
                 /// @example parse_float("3.14")  // 3.14
                 if (strcmp(fn_name, "parse_float") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("parse_float() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("parse_float() expects 1 string argument")); }
                     bool ok;
                     double val = builtin_parse_float(args[0].as.str_val, &ok);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2703,7 +2703,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Create an error value with the given message.
                 /// @example error("something went wrong")  // "EVAL_ERROR:something went wrong"
                 if (strcmp(fn_name, "error") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("error() expects 1 string argument")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("error() expects 1 string argument")); }
                     char *msg = NULL;
                     (void)asprintf(&msg, "EVAL_ERROR:%s", args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2716,7 +2716,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if a value is an error value.
                 /// @example is_error(error("oops"))  // true
                 if (strcmp(fn_name, "is_error") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_error() expects 1 argument")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("is_error() expects 1 argument")); }
                     bool is_err = args[0].type == VAL_STR && strncmp(args[0].as.str_val, "EVAL_ERROR:", 11) == 0;
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2729,7 +2729,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example len("hello")  // 5
                 /// @example len([1, 2, 3])  // 3
                 if (strcmp(fn_name, "len") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("len() expects 1 argument")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("len() expects 1 argument")); }
                     int64_t l = -1;
                     if (args[0].type == VAL_STR) l = (int64_t)strlen(args[0].as.str_val);
                     else if (args[0].type == VAL_ARRAY) l = (int64_t)args[0].as.array.len;
@@ -2804,7 +2804,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Create a TCP server socket listening on host:port, returning a file descriptor.
                 /// @example tcp_listen("0.0.0.0", 8080)  // 3
                 if (strcmp(fn_name, "tcp_listen") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_listen() expects (String host, Int port)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_listen() expects (String host, Int port)")); }
                     char *net_err = NULL;
                     int fd = net_tcp_listen(args[0].as.str_val, (int)args[1].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2818,7 +2818,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Accept an incoming TCP connection, returning a new client file descriptor.
                 /// @example tcp_accept(server_fd)  // 4
                 if (strcmp(fn_name, "tcp_accept") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_accept() expects (Int server_fd)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_accept() expects (Int server_fd)")); }
                     char *net_err = NULL;
                     int fd = net_tcp_accept((int)args[0].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2832,7 +2832,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Connect to a TCP server, returning a file descriptor.
                 /// @example tcp_connect("localhost", 8080)  // 3
                 if (strcmp(fn_name, "tcp_connect") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_connect() expects (String host, Int port)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_connect() expects (String host, Int port)")); }
                     char *net_err = NULL;
                     int fd = net_tcp_connect(args[0].as.str_val, (int)args[1].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2846,7 +2846,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Read data from a TCP socket as a string.
                 /// @example tcp_read(client_fd)  // "HTTP/1.1 200 OK..."
                 if (strcmp(fn_name, "tcp_read") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_read() expects (Int fd)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_read() expects (Int fd)")); }
                     char *net_err = NULL;
                     char *data = net_tcp_read((int)args[0].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2860,7 +2860,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Read exactly n bytes from a TCP socket.
                 /// @example tcp_read_bytes(fd, 1024)  // "..."
                 if (strcmp(fn_name, "tcp_read_bytes") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_read_bytes() expects (Int fd, Int n)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_read_bytes() expects (Int fd, Int n)")); }
                     char *net_err = NULL;
                     char *data = net_tcp_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2874,7 +2874,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Write a string to a TCP socket.
                 /// @example tcp_write(fd, "GET / HTTP/1.1\r\n\r\n")  // true
                 if (strcmp(fn_name, "tcp_write") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_write() expects (Int fd, String data)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_write() expects (Int fd, String data)")); }
                     char *net_err = NULL;
                     bool ok = net_tcp_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2888,7 +2888,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Close a TCP socket.
                 /// @example tcp_close(fd)
                 if (strcmp(fn_name, "tcp_close") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_close() expects (Int fd)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_close() expects (Int fd)")); }
                     net_tcp_close((int)args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2900,7 +2900,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Get the remote address of a connected TCP socket.
                 /// @example tcp_peer_addr(client_fd)  // "192.168.1.1:54321"
                 if (strcmp(fn_name, "tcp_peer_addr") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_peer_addr() expects (Int fd)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_peer_addr() expects (Int fd)")); }
                     char *net_err = NULL;
                     char *addr = net_tcp_peer_addr((int)args[0].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2914,7 +2914,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Set read/write timeout on a TCP socket in seconds.
                 /// @example tcp_set_timeout(fd, 30)  // true
                 if (strcmp(fn_name, "tcp_set_timeout") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tcp_set_timeout() expects (Int fd, Int secs)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tcp_set_timeout() expects (Int fd, Int secs)")); }
                     char *net_err = NULL;
                     bool ok = net_tcp_set_timeout((int)args[0].as.int_val, (int)args[1].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2930,7 +2930,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Establish a TLS connection to a server, returning a handle.
                 /// @example tls_connect("example.com", 443)  // 1
                 if (strcmp(fn_name, "tls_connect") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_connect() expects (String host, Int port)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tls_connect() expects (String host, Int port)")); }
                     char *net_err = NULL;
                     int fd = net_tls_connect(args[0].as.str_val, (int)args[1].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2944,7 +2944,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Read data from a TLS connection as a string.
                 /// @example tls_read(handle)  // "HTTP/1.1 200 OK..."
                 if (strcmp(fn_name, "tls_read") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_read() expects (Int fd)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tls_read() expects (Int fd)")); }
                     char *net_err = NULL;
                     char *data = net_tls_read((int)args[0].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2958,7 +2958,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Read exactly n bytes from a TLS connection.
                 /// @example tls_read_bytes(handle, 512)  // "..."
                 if (strcmp(fn_name, "tls_read_bytes") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_read_bytes() expects (Int fd, Int n)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tls_read_bytes() expects (Int fd, Int n)")); }
                     char *net_err = NULL;
                     char *data = net_tls_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2972,7 +2972,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Write a string to a TLS connection.
                 /// @example tls_write(handle, "GET / HTTP/1.1\r\n\r\n")  // true
                 if (strcmp(fn_name, "tls_write") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_write() expects (Int fd, String data)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tls_write() expects (Int fd, String data)")); }
                     char *net_err = NULL;
                     bool ok = net_tls_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -2986,7 +2986,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Close a TLS connection.
                 /// @example tls_close(handle)
                 if (strcmp(fn_name, "tls_close") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_close() expects (Int fd)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tls_close() expects (Int fd)")); }
                     net_tls_close((int)args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -2998,7 +2998,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if TLS support is available (OpenSSL linked).
                 /// @example tls_available()  // true
                 if (strcmp(fn_name, "tls_available") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tls_available() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tls_available() expects no arguments")); }
                     free(args);
                     return eval_ok(value_bool(net_tls_available()));
                 }
@@ -3010,7 +3010,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Parse a JSON string into a Lattice value.
                 /// @example json_parse("{\"a\": 1}")  // {a: 1}
                 if (strcmp(fn_name, "json_parse") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("json_parse() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("json_parse() expects (String)")); }
                     char *jerr = NULL;
                     LatValue result = json_parse(args[0].as.str_val, &jerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3024,7 +3024,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Serialize a Lattice value to a JSON string.
                 /// @example json_stringify([1, 2, 3])  // "[1,2,3]"
                 if (strcmp(fn_name, "json_stringify") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("json_stringify() expects (value)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("json_stringify() expects (value)")); }
                     char *jerr = NULL;
                     char *json = json_stringify(&args[0], &jerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3041,7 +3041,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example http_get("https://httpbin.org/get")
                 if (strcmp(fn_name, "http_get") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("http_get() expects (url: String)"));
                     }
                     HttpRequest hreq = {
@@ -3051,7 +3051,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     };
                     char *herr = NULL;
                     HttpResponse *hresp = http_execute(&hreq, &herr);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!hresp) return eval_err(herr ? herr : strdup("http_get failed"));
                     /* Build result map */
                     LatValue result = value_map_new();
@@ -3075,7 +3075,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example http_post("https://httpbin.org/post", {"body": "hello"})
                 if (strcmp(fn_name, "http_post") == 0) {
                     if (argc < 1 || argc > 2 || args[0].type != VAL_STR) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("http_post() expects (url: String, options?: Map)"));
                     }
                     /* Extract options */
@@ -3113,7 +3113,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     char *herr = NULL;
                     HttpResponse *hresp = http_execute(&hreq, &herr);
                     free(hdr_keys); free(hdr_vals);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!hresp) return eval_err(herr ? herr : strdup("http_post failed"));
                     LatValue result = value_map_new();
                     LatValue st = value_int(hresp->status_code);
@@ -3136,7 +3136,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example http_request("PUT", "https://api.example.com/data", {"body": "{}"})
                 if (strcmp(fn_name, "http_request") == 0) {
                     if (argc < 2 || argc > 3 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("http_request() expects (method: String, url: String, options?: Map)"));
                     }
                     const char *body_str = NULL;
@@ -3173,7 +3173,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     char *herr = NULL;
                     HttpResponse *hresp = http_execute(&hreq, &herr);
                     free(hdr_keys); free(hdr_vals);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!hresp) return eval_err(herr ? herr : strdup("http_request failed"));
                     LatValue result = value_map_new();
                     LatValue st = value_int(hresp->status_code);
@@ -3197,7 +3197,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the absolute value of a number.
                 /// @example abs(-5)  // 5
                 if (strcmp(fn_name, "abs") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("abs() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("abs() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_abs(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3211,7 +3211,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Round down to the nearest integer.
                 /// @example floor(3.7)  // 3
                 if (strcmp(fn_name, "floor") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("floor() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("floor() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_floor(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3225,7 +3225,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Round up to the nearest integer.
                 /// @example ceil(3.2)  // 4
                 if (strcmp(fn_name, "ceil") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("ceil() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("ceil() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_ceil(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3239,7 +3239,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Round to the nearest integer.
                 /// @example round(3.5)  // 4
                 if (strcmp(fn_name, "round") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("round() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("round() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_round(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3253,7 +3253,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the square root of a number.
                 /// @example sqrt(16)  // 4.0
                 if (strcmp(fn_name, "sqrt") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sqrt() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("sqrt() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_sqrt(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3267,7 +3267,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Raise base to the power of exp.
                 /// @example pow(2, 10)  // 1024.0
                 if (strcmp(fn_name, "pow") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pow() expects (Int|Float, Int|Float)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("pow() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_pow(&args[0], &args[1], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3281,7 +3281,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the smaller of two numbers.
                 /// @example min(3, 7)  // 3
                 if (strcmp(fn_name, "min") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("min() expects (Int|Float, Int|Float)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("min() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_min(&args[0], &args[1], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3295,7 +3295,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the larger of two numbers.
                 /// @example max(3, 7)  // 7
                 if (strcmp(fn_name, "max") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("max() expects (Int|Float, Int|Float)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("max() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_max(&args[0], &args[1], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3309,7 +3309,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return a random float between 0.0 (inclusive) and 1.0 (exclusive).
                 /// @example random()  // 0.7231...
                 if (strcmp(fn_name, "random") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("random() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("random() expects no arguments")); }
                     free(args);
                     return eval_ok(math_random());
                 }
@@ -3319,7 +3319,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return a random integer in the range [min, max).
                 /// @example random_int(1, 100)  // 42
                 if (strcmp(fn_name, "random_int") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("random_int() expects (Int, Int)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("random_int() expects (Int, Int)")); }
                     char *merr = NULL;
                     LatValue result = math_random_int(&args[0], &args[1], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3333,7 +3333,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the natural logarithm (base e) of a number.
                 /// @example log(math_e())  // 1.0
                 if (strcmp(fn_name, "log") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("log() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_log(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3347,7 +3347,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the base-2 logarithm of a number.
                 /// @example log2(8)  // 3.0
                 if (strcmp(fn_name, "log2") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log2() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("log2() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_log2(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3361,7 +3361,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the base-10 logarithm of a number.
                 /// @example log10(1000)  // 3.0
                 if (strcmp(fn_name, "log10") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("log10() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("log10() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_log10(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3375,7 +3375,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the sine of an angle in radians.
                 /// @example sin(0)  // 0.0
                 if (strcmp(fn_name, "sin") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sin() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("sin() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_sin(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3389,7 +3389,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the cosine of an angle in radians.
                 /// @example cos(0)  // 1.0
                 if (strcmp(fn_name, "cos") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cos() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("cos() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_cos(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3403,7 +3403,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the tangent of an angle in radians.
                 /// @example tan(0)  // 0.0
                 if (strcmp(fn_name, "tan") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tan() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tan() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_tan(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3417,7 +3417,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the two-argument arctangent in radians.
                 /// @example atan2(1, 1)  // 0.7853...
                 if (strcmp(fn_name, "atan2") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("atan2() expects (Int|Float, Int|Float)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("atan2() expects (Int|Float, Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_atan2(&args[0], &args[1], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3431,7 +3431,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Clamp a value between a minimum and maximum.
                 /// @example clamp(15, 0, 10)  // 10
                 if (strcmp(fn_name, "clamp") == 0) {
-                    if (argc != 3) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("clamp() expects (Int|Float, Int|Float, Int|Float)")); }
+                    if (argc != 3) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("clamp() expects (Int|Float, Int|Float, Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_clamp(&args[0], &args[1], &args[2], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3445,7 +3445,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the mathematical constant pi.
                 /// @example math_pi()  // 3.14159265358979...
                 if (strcmp(fn_name, "math_pi") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("math_pi() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("math_pi() expects no arguments")); }
                     free(args);
                     return eval_ok(math_pi());
                 }
@@ -3455,7 +3455,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return Euler's number (e).
                 /// @example math_e()  // 2.71828182845904...
                 if (strcmp(fn_name, "math_e") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("math_e() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("math_e() expects no arguments")); }
                     free(args);
                     return eval_ok(math_e());
                 }
@@ -3465,7 +3465,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the arcsine in radians.
                 /// @example asin(1)  // 1.5707...
                 if (strcmp(fn_name, "asin") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("asin() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("asin() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_asin(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3479,7 +3479,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the arccosine in radians.
                 /// @example acos(1)  // 0.0
                 if (strcmp(fn_name, "acos") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("acos() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("acos() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_acos(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3493,7 +3493,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the arctangent in radians.
                 /// @example atan(1)  // 0.7853...
                 if (strcmp(fn_name, "atan") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("atan() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("atan() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_atan(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3507,7 +3507,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return e raised to the power of x.
                 /// @example exp(1)  // 2.71828...
                 if (strcmp(fn_name, "exp") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exp() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("exp() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_exp(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3521,7 +3521,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return -1, 0, or 1 indicating the sign of a number.
                 /// @example sign(-42)  // -1
                 if (strcmp(fn_name, "sign") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sign() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("sign() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_sign(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3535,7 +3535,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the greatest common divisor of two integers.
                 /// @example gcd(12, 8)  // 4
                 if (strcmp(fn_name, "gcd") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("gcd() expects (Int, Int)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("gcd() expects (Int, Int)")); }
                     char *merr = NULL;
                     LatValue result = math_gcd(&args[0], &args[1], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3549,7 +3549,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the least common multiple of two integers.
                 /// @example lcm(4, 6)  // 12
                 if (strcmp(fn_name, "lcm") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lcm() expects (Int, Int)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("lcm() expects (Int, Int)")); }
                     char *merr = NULL;
                     LatValue result = math_lcm(&args[0], &args[1], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3563,7 +3563,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if a value is NaN (not a number).
                 /// @example is_nan(0.0 / 0.0)  // true
                 if (strcmp(fn_name, "is_nan") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_nan() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("is_nan() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_is_nan(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3577,7 +3577,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if a value is positive or negative infinity.
                 /// @example is_inf(1.0 / 0.0)  // true
                 if (strcmp(fn_name, "is_inf") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_inf() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("is_inf() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_is_inf(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3591,7 +3591,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the hyperbolic sine.
                 /// @example sinh(1)  // 1.1752...
                 if (strcmp(fn_name, "sinh") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sinh() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("sinh() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_sinh(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3605,7 +3605,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the hyperbolic cosine.
                 /// @example cosh(0)  // 1.0
                 if (strcmp(fn_name, "cosh") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cosh() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("cosh() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_cosh(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3619,7 +3619,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the hyperbolic tangent.
                 /// @example tanh(0)  // 0.0
                 if (strcmp(fn_name, "tanh") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("tanh() expects (Int|Float)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("tanh() expects (Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_tanh(&args[0], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3633,7 +3633,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Linear interpolation between a and b by factor t.
                 /// @example lerp(0, 10, 0.5)  // 5.0
                 if (strcmp(fn_name, "lerp") == 0) {
-                    if (argc != 3) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("lerp() expects (Int|Float, Int|Float, Int|Float)")); }
+                    if (argc != 3) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("lerp() expects (Int|Float, Int|Float, Int|Float)")); }
                     char *merr = NULL;
                     LatValue result = math_lerp(&args[0], &args[1], &args[2], &merr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3701,7 +3701,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Convert a value to an integer (truncates floats, parses strings).
                 /// @example to_int(3.9)  // 3
                 if (strcmp(fn_name, "to_int") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_int() expects (value)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("to_int() expects (value)")); }
                     char *terr = NULL;
                     LatValue result = type_to_int(&args[0], &terr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3715,7 +3715,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Convert a value to a floating-point number.
                 /// @example to_float(42)  // 42.0
                 if (strcmp(fn_name, "to_float") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("to_float() expects (value)")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("to_float() expects (value)")); }
                     char *terr = NULL;
                     LatValue result = type_to_float(&args[0], &terr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3731,7 +3731,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Get an environment variable's value, or unit if not set.
                 /// @example env("HOME")  // "/home/user"
                 if (strcmp(fn_name, "env") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("env() expects (String)")); }
                     char *val = envvar_get(args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -3744,7 +3744,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Set an environment variable.
                 /// @example env_set("MY_VAR", "hello")
                 if (strcmp(fn_name, "env_set") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env_set() expects (String, String)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("env_set() expects (String, String)")); }
                     char *eerr = NULL;
                     bool ok = envvar_set(args[0].as.str_val, args[1].as.str_val, &eerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3758,7 +3758,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return an array of all environment variable names.
                 /// @example env_keys()  // ["HOME", "PATH", ...]
                 if (strcmp(fn_name, "env_keys") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("env_keys() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("env_keys() expects no arguments")); }
                     free(args);
                     char **keys = NULL;
                     size_t key_count = 0;
@@ -3783,7 +3783,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the current Unix timestamp in milliseconds.
                 /// @example time()  // 1700000000000
                 if (strcmp(fn_name, "time") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time() expects no arguments")); }
                     free(args);
                     return eval_ok(value_int(time_now_ms()));
                 }
@@ -3793,7 +3793,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Pause execution for the given number of milliseconds.
                 /// @example sleep(1000)  // sleeps for 1 second
                 if (strcmp(fn_name, "sleep") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sleep() expects (Int milliseconds)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("sleep() expects (Int milliseconds)")); }
                     char *terr = NULL;
                     bool ok = time_sleep_ms(args[0].as.int_val, &terr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3809,7 +3809,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the current working directory.
                 /// @example cwd()  // "/home/user/project"
                 if (strcmp(fn_name, "cwd") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("cwd() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("cwd() expects no arguments")); }
                     free(args);
                     char *cwd_err = NULL;
                     char *dir = process_cwd(&cwd_err);
@@ -3822,8 +3822,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Execute a command directly (no shell), returning {stdout, stderr, status}.
                 /// @example exec("ls -la")  // {stdout: "...", stderr: "", status: 0}
                 if (strcmp(fn_name, "exec") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exec() expects 1 argument")); }
-                    if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("exec() expects a string command")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("exec() expects 1 argument")); }
+                    if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("exec() expects a string command")); }
                     char *exec_err = NULL;
                     LatValue result = process_exec(args[0].as.str_val, &exec_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3837,8 +3837,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Execute a command via the system shell, returning {stdout, stderr, status}.
                 /// @example shell("echo hello")  // {stdout: "hello\n", stderr: "", status: 0}
                 if (strcmp(fn_name, "shell") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("shell() expects 1 argument")); }
-                    if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("shell() expects a string command")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("shell() expects 1 argument")); }
+                    if (args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("shell() expects a string command")); }
                     char *shell_err = NULL;
                     LatValue result = process_shell(args[0].as.str_val, &shell_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -3852,7 +3852,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return command-line arguments as an array of strings.
                 /// @example args()  // ["script.lat", "--flag"]
                 if (strcmp(fn_name, "args") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("args() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("args() expects no arguments")); }
                     free(args);
 #ifdef __EMSCRIPTEN__
                     LatValue arr = value_array(NULL, 0);
@@ -3877,7 +3877,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the operating system name ("darwin", "linux", etc.).
                 /// @example platform()  // "darwin"
                 if (strcmp(fn_name, "platform") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("platform() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("platform() expects no arguments")); }
                     free(args);
                     return eval_ok(value_string(process_platform()));
                 }
@@ -3887,7 +3887,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the system hostname.
                 /// @example hostname()  // "my-machine"
                 if (strcmp(fn_name, "hostname") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("hostname() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("hostname() expects no arguments")); }
                     free(args);
                     char *h_err = NULL;
                     char *name = process_hostname(&h_err);
@@ -3901,7 +3901,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the current process ID.
                 /// @example pid()  // 12345
                 if (strcmp(fn_name, "pid") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pid() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("pid() expects no arguments")); }
                     free(args);
                     return eval_ok(value_int((int64_t)process_pid()));
                 }
@@ -3913,7 +3913,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Percent-encode a string for use in URLs.
                 /// @example url_encode("hello world")  // "hello%20world"
                 if (strcmp(fn_name, "url_encode") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("url_encode() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("url_encode() expects (String)")); }
                     const char *src = args[0].as.str_val;
                     size_t slen = strlen(src);
                     /* Worst case: every byte becomes %XX (3x expansion) */
@@ -3941,7 +3941,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Decode a percent-encoded URL string.
                 /// @example url_decode("hello%20world")  // "hello world"
                 if (strcmp(fn_name, "url_decode") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("url_decode() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("url_decode() expects (String)")); }
                     const char *src = args[0].as.str_val;
                     size_t slen = strlen(src);
                     char *out = malloc(slen + 1);
@@ -3976,7 +3976,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Parse a CSV string into an array of arrays (rows of fields).
                 /// @example csv_parse("a,b\n1,2")  // [["a", "b"], ["1", "2"]]
                 if (strcmp(fn_name, "csv_parse") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("csv_parse() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("csv_parse() expects (String)")); }
                     const char *input = args[0].as.str_val;
                     size_t pos = 0;
                     size_t input_len = strlen(input);
@@ -4066,7 +4066,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Convert an array of arrays into a CSV string.
                 /// @example csv_stringify([["a", "b"], ["1", "2"]])  // "a,b\n1,2\n"
                 if (strcmp(fn_name, "csv_stringify") == 0) {
-                    if (argc != 1 || args[0].type != VAL_ARRAY) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("csv_stringify() expects (Array)")); }
+                    if (argc != 1 || args[0].type != VAL_ARRAY) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("csv_stringify() expects (Array)")); }
 
                     LatValue *data = &args[0];
                     size_t out_cap = 256;
@@ -4139,12 +4139,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example toml_parse("[server]\nhost = \"localhost\"\nport = 8080")
                 if (strcmp(fn_name, "toml_parse") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("toml_parse() expects (String)"));
                     }
                     char *terr = NULL;
                     LatValue result = toml_ops_parse(args[0].as.str_val, &terr);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (terr) return eval_err(terr);
                     return eval_ok(result);
                 }
@@ -4155,12 +4155,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example toml_stringify({"host": "localhost", "port": 8080})
                 if (strcmp(fn_name, "toml_stringify") == 0) {
                     if (argc != 1) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("toml_stringify() expects (Map)"));
                     }
                     char *terr = NULL;
                     char *toml = toml_ops_stringify(&args[0], &terr);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (terr) { free(toml); return eval_err(terr); }
                     return eval_ok(value_string_owned(toml));
                 }
@@ -4173,12 +4173,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example yaml_parse("name: Alice\nage: 30")
                 if (strcmp(fn_name, "yaml_parse") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("yaml_parse() expects (String)"));
                     }
                     char *yerr = NULL;
                     LatValue result = yaml_ops_parse(args[0].as.str_val, &yerr);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (yerr) return eval_err(yerr);
                     return eval_ok(result);
                 }
@@ -4189,16 +4189,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @example yaml_stringify({"name": "Alice", "age": 30})
                 if (strcmp(fn_name, "yaml_stringify") == 0) {
                     if (argc != 1) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("yaml_stringify() expects (value)"));
                     }
                     if (args[0].type != VAL_MAP && args[0].type != VAL_ARRAY) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("yaml_stringify: value must be a Map or Array"));
                     }
                     char *yerr = NULL;
                     char *yaml = yaml_ops_stringify(&args[0], &yerr);
-                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (yerr) { free(yaml); return eval_err(yerr); }
                     return eval_ok(value_string_owned(yaml));
                 }
@@ -4210,7 +4210,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Test if a string matches a regular expression pattern.
                 /// @example regex_match("^[0-9]+$", "123")  // true
                 if (strcmp(fn_name, "regex_match") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_match() expects (String pattern, String str)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("regex_match() expects (String pattern, String str)")); }
                     char *rerr = NULL;
                     LatValue result = regex_match(args[0].as.str_val, args[1].as.str_val, &rerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4224,7 +4224,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Find all matches of a pattern in a string, returning an array.
                 /// @example regex_find_all("[0-9]+", "a1b2c3")  // ["1", "2", "3"]
                 if (strcmp(fn_name, "regex_find_all") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_find_all() expects (String pattern, String str)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("regex_find_all() expects (String pattern, String str)")); }
                     char *rerr = NULL;
                     LatValue result = regex_find_all(args[0].as.str_val, args[1].as.str_val, &rerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4238,7 +4238,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Replace all matches of a pattern in a string.
                 /// @example regex_replace("[0-9]", "a1b2", "X")  // "aXbX"
                 if (strcmp(fn_name, "regex_replace") == 0) {
-                    if (argc != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("regex_replace() expects (String pattern, String str, String replacement)")); }
+                    if (argc != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("regex_replace() expects (String pattern, String str, String replacement)")); }
                     char *rerr = NULL;
                     char *result = regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, &rerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4252,7 +4252,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Format a string with placeholders replaced by arguments.
                 /// @example format("{} is {}", "sky", "blue")  // "sky is blue"
                 if (strcmp(fn_name, "format") == 0) {
-                    if (argc < 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("format() expects (String fmt, ...)")); }
+                    if (argc < 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("format() expects (String fmt, ...)")); }
                     char *ferr = NULL;
                     char *result = format_string(args[0].as.str_val, args + 1, argc - 1, &ferr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4268,7 +4268,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Compute the SHA-256 hash of a string, returned as hex.
                 /// @example sha256("hello")  // "2cf24dba..."
                 if (strcmp(fn_name, "sha256") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("sha256() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("sha256() expects (String)")); }
                     char *cerr = NULL;
                     char *result = crypto_sha256(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4282,7 +4282,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Compute the MD5 hash of a string, returned as hex.
                 /// @example md5("hello")  // "5d41402a..."
                 if (strcmp(fn_name, "md5") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("md5() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("md5() expects (String)")); }
                     char *cerr = NULL;
                     char *result = crypto_md5(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4296,7 +4296,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Encode a string to Base64.
                 /// @example base64_encode("hello")  // "aGVsbG8="
                 if (strcmp(fn_name, "base64_encode") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("base64_encode() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("base64_encode() expects (String)")); }
                     char *result = crypto_base64_encode(args[0].as.str_val, strlen(args[0].as.str_val));
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -4308,7 +4308,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Decode a Base64 string.
                 /// @example base64_decode("aGVsbG8=")  // "hello"
                 if (strcmp(fn_name, "base64_decode") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("base64_decode() expects (String)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("base64_decode() expects (String)")); }
                     char *cerr = NULL;
                     size_t decoded_len = 0;
                     char *result = crypto_base64_decode(args[0].as.str_val, strlen(args[0].as.str_val), &decoded_len, &cerr);
@@ -4325,7 +4325,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Format a Unix timestamp (ms) using a strftime format string.
                 /// @example time_format(0, "%Y-%m-%d")  // "1970-01-01"
                 if (strcmp(fn_name, "time_format") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_format() expects (Int epoch_ms, String fmt)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_format() expects (Int epoch_ms, String fmt)")); }
                     char *terr = NULL;
                     char *result = datetime_format(args[0].as.int_val, args[1].as.str_val, &terr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4339,7 +4339,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Parse a datetime string into a Unix timestamp (ms).
                 /// @example time_parse("2024-01-01", "%Y-%m-%d")  // 1704067200000
                 if (strcmp(fn_name, "time_parse") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_parse() expects (String datetime, String fmt)")); }
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_parse() expects (String datetime, String fmt)")); }
                     char *terr = NULL;
                     int64_t result = datetime_parse(args[0].as.str_val, args[1].as.str_val, &terr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4355,7 +4355,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Assert that a condition is truthy, or raise an error with an optional message.
                 /// @example assert(1 == 1, "math works")
                 if (strcmp(fn_name, "assert") == 0) {
-                    if (argc < 1 || argc > 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("assert() expects 1 or 2 arguments")); }
+                    if (argc < 1 || argc > 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("assert() expects 1 or 2 arguments")); }
                     bool truthy = value_is_truthy(&args[0]);
                     if (!truthy) {
                         char *msg = NULL;
@@ -4379,7 +4379,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Return the argument unchanged.
                 /// @example identity(42)  // 42
                 if (strcmp(fn_name, "identity") == 0) {
-                    if (argc != 1) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("identity() expects 1 argument")); }
+                    if (argc != 1) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("identity() expects 1 argument")); }
                     LatValue result = value_deep_clone(&args[0]);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -4391,7 +4391,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Thread a value through a series of functions left to right.
                 /// @example pipe(5, |x| { x * 2 }, |x| { x + 1 })  // 11
                 if (strcmp(fn_name, "pipe") == 0) {
-                    if (argc < 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pipe() expects a value and at least one function")); }
+                    if (argc < 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("pipe() expects a value and at least one function")); }
                     for (size_t i = 1; i < argc; i++) {
                         if (args[i].type != VAL_CLOSURE) {
                             char *err = NULL;
@@ -4428,7 +4428,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Compose two functions: compose(f, g)(x) calls f(g(x)).
                 /// @example compose(|x| { x + 1 }, |x| { x * 2 })(3)  // 7
                 if (strcmp(fn_name, "compose") == 0) {
-                    if (argc != 2) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("compose() expects 2 arguments (both closures)")); }
+                    if (argc != 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("compose() expects 2 arguments (both closures)")); }
                     if (args[0].type != VAL_CLOSURE || args[1].type != VAL_CLOSURE) {
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
