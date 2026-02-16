@@ -127,7 +127,7 @@ FUZZ_TARGET = $(BUILD_DIR)/fuzz_eval
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -138,7 +138,7 @@ $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(TEST_TARGET): $(LIB_OBJS) $(TEST_OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test: $(TEST_TARGET)
 	./$(BUILD_DIR)/test_runner
@@ -187,7 +187,7 @@ fuzz: CC = $(FUZZ_CC)
 fuzz: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz: clean $(LIB_OBJS) $(FUZZ_OBJ)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ) $(LDFLAGS)
 	@mkdir -p fuzz/corpus
 	@echo "\n==> Fuzzer built: $(FUZZ_TARGET)"
 	@echo "    Run:  $(FUZZ_TARGET) fuzz/corpus/ -max_len=4096"
