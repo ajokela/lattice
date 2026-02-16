@@ -119,7 +119,7 @@ LatValue value_array(LatValue *elems, size_t len) {
     val.region_id = (size_t)-1;
     size_t cap = len < 4 ? 4 : len;
     val.as.array.elems = lat_alloc(cap * sizeof(LatValue));
-    memcpy(val.as.array.elems, elems, len * sizeof(LatValue));
+    if (len > 0) memcpy(val.as.array.elems, elems, len * sizeof(LatValue));
     val.as.array.len = len;
     val.as.array.cap = cap;
     return val;

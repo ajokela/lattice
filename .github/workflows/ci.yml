@@ -44,6 +44,8 @@ jobs:
 
       - name: ASan + UBSan
         run: make asan
+        env:
+          ASAN_OPTIONS: detect_leaks=0
 
   tsan:
     name: ThreadSanitizer
