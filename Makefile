@@ -49,7 +49,7 @@ LDFLAGS += $(TLS_LDFLAGS)
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
     CFLAGS  += -D_DEFAULT_SOURCE -Wno-error=unused-result -Wno-error=format-truncation
-    LDFLAGS += -lpthread -lm -ldl
+    LDFLAGS += -lpthread -lm -ldl -rdynamic
 endif
 
 # Source files

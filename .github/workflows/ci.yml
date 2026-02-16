@@ -39,6 +39,9 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
 
+      - name: Build extensions
+        run: make ext-sqlite
+
       - name: ASan + UBSan
         run: make asan
 
@@ -50,6 +53,9 @@ jobs:
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
+
+      - name: Build extensions
+        run: make ext-sqlite
 
       - name: TSan
         run: make tsan
