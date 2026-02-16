@@ -162,10 +162,16 @@ coverage: clean $(TEST_TARGET)
 		-format=html -output-dir=$(BUILD_DIR)/coverage $(LIB_SRCS)
 	@echo "\n==> Coverage report: $(BUILD_DIR)/coverage/index.html"
 
+ifeq ($(UNAME_S),Darwin)
+    ANALYZE_CC = xcrun clang
+else
+    ANALYZE_CC = clang
+endif
+
 analyze:
 	@for f in $(LIB_SRCS); do \
 		echo "--- $$f ---"; \
-		xcrun clang --analyze -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) $$f 2>&1 || true; \
+		$(ANALYZE_CC) --analyze -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) $$f 2>&1 || true; \
 	done
 	@echo "\n==> Static analysis complete."
 

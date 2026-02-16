@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev
+
+      - name: Build
+        run: make
+
+      - name: Test
+        run: make test
+
+  asan:
+    name: AddressSanitizer + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev
+
+      - name: ASan + UBSan
+        run: make asan
+
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev
+
+      - name: TSan
+        run: make tsan
+
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev clang-tools
+
+      - name: Analyze
+        run: make analyze
+
+  fuzz:
+    name: Fuzz (60s smoke test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev clang llvm
+
+      - name: Build fuzzer
+        run: make fuzz FUZZ_CC=clang
+
+      - name: Seed corpus
+        run: make fuzz-seed
+
+      - name: Run fuzzer (60s)
+        run: |
+          ./build/fuzz_eval fuzz/corpus/ -max_len=4096 -max_total_time=60
+          # Fail if any crash artifacts were produced
+          if ls crash-* leak-* timeout-* 2>/dev/null; then
+            echo "Fuzzer found crashes!"
+            exit 1
+          fi
