@@ -48,7 +48,7 @@ LDFLAGS += $(TLS_LDFLAGS)
 # ── pthreads and dlopen (Linux needs explicit linking) ──
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-    CFLAGS  += -D_DEFAULT_SOURCE
+    CFLAGS  += -D_DEFAULT_SOURCE -Wno-error=unused-result -Wno-error=format-truncation
     LDFLAGS += -lpthread -lm -ldl
 endif
 
@@ -184,7 +184,7 @@ $(BUILD_DIR)/fuzz/%.o: $(FUZZ_DIR)/%.c
 # Override FUZZ_CC to point to your LLVM installation if not at the default path.
 FUZZ_CC ?= $(shell [ -x /opt/homebrew/opt/llvm/bin/clang ] && echo /opt/homebrew/opt/llvm/bin/clang || echo clang)
 fuzz: CC = $(FUZZ_CC)
-fuzz: CFLAGS = -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz: clean $(LIB_OBJS) $(FUZZ_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ)
