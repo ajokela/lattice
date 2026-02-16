@@ -18,6 +18,8 @@ typedef enum {
     TOK_IMPORT,
     TOK_FROM,
     TOK_AS,
+    TOK_CRYSTALLIZE,
+    TOK_SUBLIMATE,
 
     /* Mode directive */
     TOK_MODE_DIRECTIVE,   /* #mode casual / #mode strict */

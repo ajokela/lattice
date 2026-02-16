@@ -67,9 +67,22 @@ typedef struct {
 typedef struct {
     char  *target;       /* target variable name */
     char **deps;         /* bonded dependency variable names */
+    char **dep_strategies; /* per-dep strategy: "mirror", "inverse", "gate" (parallel to deps) */
     size_t dep_count;
     size_t dep_cap;
 } BondEntry;
+
+/* Seed entry: pending contracts to validate on freeze */
+typedef struct {
+    char    *var_name;
+    LatValue contract;    /* closure value */
+} SeedEntry;
+
+/* Pressure entry: soft constraints on fluid variables */
+typedef struct {
+    char *var_name;
+    char *mode;           /* "no_grow", "no_shrink", "no_resize", "read_heavy" */
+} PressureEntry;
 
 /* History snapshot for temporal values */
 typedef struct {
@@ -131,6 +144,14 @@ typedef struct Evaluator {
     ReactionEntry *reactions;
     size_t         reaction_count;
     size_t         reaction_cap;
+    /* Seed crystals (deferred contracts) */
+    SeedEntry     *seeds;
+    size_t         seed_count;
+    size_t         seed_cap;
+    /* Phase pressure constraints */
+    PressureEntry *pressures;
+    size_t         pressure_count;
+    size_t         pressure_cap;
 } Evaluator;
 
 /* Create a new evaluator */

@@ -117,6 +117,8 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "import") == 0)   return TOK_IMPORT;
     if (strcmp(ident, "from") == 0)     return TOK_FROM;
     if (strcmp(ident, "as") == 0)       return TOK_AS;
+    if (strcmp(ident, "crystallize") == 0) return TOK_CRYSTALLIZE;
+    if (strcmp(ident, "sublimate") == 0) return TOK_SUBLIMATE;
     return TOK_IDENT;
 }
 

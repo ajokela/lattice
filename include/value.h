@@ -8,7 +8,7 @@
 #include "ds/hashmap.h"
 
 /* Runtime phase tag */
-typedef enum { VTAG_FLUID, VTAG_CRYSTAL, VTAG_UNPHASED } PhaseTag;
+typedef enum { VTAG_FLUID, VTAG_CRYSTAL, VTAG_UNPHASED, VTAG_SUBLIMATED } PhaseTag;
 
 /* Runtime value types */
 typedef enum {

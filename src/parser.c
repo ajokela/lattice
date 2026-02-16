@@ -587,6 +587,27 @@ static Expr *parse_primary(Parser *p, char **err) {
                 if (!contract) { expr_free(e); return NULL; }
             }
         }
+        /* Optional 'except' clause: freeze(x) except ["field1", "field2"] */
+        if (peek_type(p) == TOK_IDENT) {
+            Token *maybe_except = peek(p);
+            if (maybe_except->as.str_val && strcmp(maybe_except->as.str_val, "except") == 0) {
+                advance(p);  /* consume 'except' */
+                if (!expect(p, TOK_LBRACKET, err)) { expr_free(e); if (contract) expr_free(contract); return NULL; }
+                size_t ecap = 4, en = 0;
+                Expr **except_fields = malloc(ecap * sizeof(Expr *));
+                while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
+                    Expr *ef = parse_expr(p, err);
+                    if (!ef) { for (size_t i = 0; i < en; i++) expr_free(except_fields[i]); free(except_fields); expr_free(e); if (contract) expr_free(contract); return NULL; }
+                    if (en >= ecap) { ecap *= 2; except_fields = realloc(except_fields, ecap * sizeof(Expr *)); }
+                    except_fields[en++] = ef;
+                    if (peek_type(p) != TOK_RBRACKET) {
+                        if (!expect(p, TOK_COMMA, err)) { for (size_t i = 0; i < en; i++) expr_free(except_fields[i]); free(except_fields); expr_free(e); if (contract) expr_free(contract); return NULL; }
+                    }
+                }
+                if (!expect(p, TOK_RBRACKET, err)) { for (size_t i = 0; i < en; i++) expr_free(except_fields[i]); free(except_fields); expr_free(e); if (contract) expr_free(contract); return NULL; }
+                return expr_freeze_except(e, contract, except_fields, en);
+            }
+        }
         return expr_freeze(e, contract);
     }
     if (tt == TOK_THAW) {
@@ -620,6 +641,32 @@ static Expr *parse_primary(Parser *p, char **err) {
         Expr *closure = parse_expr(p, err);
         if (!closure) { expr_free(target); return NULL; }
         return expr_anneal(target, closure);
+    }
+    if (tt == TOK_CRYSTALLIZE) {
+        advance(p);
+        if (!expect(p, TOK_LPAREN, err)) return NULL;
+        Expr *e = parse_expr(p, err);
+        if (!e) return NULL;
+        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_LBRACE, err)) { expr_free(e); return NULL; }
+        size_t count;
+        Stmt **stmts = parse_block_stmts(p, &count, err);
+        if (!stmts && *err) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RBRACE, err)) {
+            expr_free(e);
+            for (size_t i = 0; i < count; i++) stmt_free(stmts[i]);
+            free(stmts);
+            return NULL;
+        }
+        return expr_crystallize(e, stmts, count);
+    }
+    if (tt == TOK_SUBLIMATE) {
+        advance(p);
+        if (!expect(p, TOK_LPAREN, err)) return NULL;
+        Expr *e = parse_expr(p, err);
+        if (!e) return NULL;
+        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
+        return expr_sublimate(e);
     }
     if (tt == TOK_PRINT) {
         advance(p);
@@ -1426,6 +1473,7 @@ static Stmt *parse_stmt(Parser *p, char **err) {
             if (!rhs) { expr_free(e); return NULL; }
             /* Desugar: target op= rhs  =>  target = target op rhs */
             Expr *target_clone = expr_clone_ast(e);
+            if (!target_clone) { expr_free(rhs); expr_free(e); *err = strdup("invalid compound assignment target"); return NULL; }
             Expr *binop = expr_binop(cop, target_clone, rhs);
             eat_semicolon(p);
             return stmt_assign(e, binop);

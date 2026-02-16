@@ -110,6 +110,17 @@ Expr *expr_freeze(Expr *inner, Expr *contract) {
     Expr *e = expr_alloc(EXPR_FREEZE);
     e->as.freeze.expr = inner;
     e->as.freeze.contract = contract;
+    e->as.freeze.except_fields = NULL;
+    e->as.freeze.except_count = 0;
+    return e;
+}
+
+Expr *expr_freeze_except(Expr *inner, Expr *contract, Expr **except_fields, size_t except_count) {
+    Expr *e = expr_alloc(EXPR_FREEZE);
+    e->as.freeze.expr = inner;
+    e->as.freeze.contract = contract;
+    e->as.freeze.except_fields = except_fields;
+    e->as.freeze.except_count = except_count;
     return e;
 }
 
@@ -129,6 +140,20 @@ Expr *expr_anneal(Expr *target, Expr *closure) {
     Expr *e = expr_alloc(EXPR_ANNEAL);
     e->as.anneal.expr = target;
     e->as.anneal.closure = closure;
+    return e;
+}
+
+Expr *expr_crystallize(Expr *expr, Stmt **body, size_t body_count) {
+    Expr *e = expr_alloc(EXPR_CRYSTALLIZE);
+    e->as.crystallize.expr = expr;
+    e->as.crystallize.body = body;
+    e->as.crystallize.body_count = body_count;
+    return e;
+}
+
+Expr *expr_sublimate(Expr *inner) {
+    Expr *e = expr_alloc(EXPR_SUBLIMATE);
+    e->as.freeze_expr = inner;
     return e;
 }
 
@@ -314,8 +339,7 @@ Expr *expr_clone_ast(const Expr *e) {
         case EXPR_INT_LIT:
             return expr_int_lit(e->as.int_val);
         default:
-            fprintf(stderr, "expr_clone_ast: unsupported expression tag %d\n", e->tag);
-            exit(1);
+            return NULL;
     }
 }
 
@@ -470,10 +494,20 @@ void expr_free(Expr *e) {
         case EXPR_FREEZE:
             expr_free(e->as.freeze.expr);
             if (e->as.freeze.contract) expr_free(e->as.freeze.contract);
+            for (size_t i = 0; i < e->as.freeze.except_count; i++)
+                expr_free(e->as.freeze.except_fields[i]);
+            free(e->as.freeze.except_fields);
             break;
         case EXPR_THAW:
         case EXPR_CLONE:
+        case EXPR_SUBLIMATE:
             expr_free(e->as.freeze_expr);
+            break;
+        case EXPR_CRYSTALLIZE:
+            expr_free(e->as.crystallize.expr);
+            for (size_t i = 0; i < e->as.crystallize.body_count; i++)
+                stmt_free(e->as.crystallize.body[i]);
+            free(e->as.crystallize.body);
             break;
         case EXPR_ANNEAL:
             expr_free(e->as.anneal.expr);

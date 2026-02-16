@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, phase reactions, standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -171,6 +171,115 @@ let history = phases("counter")
 //  {phase: "fluid", value: 20}, {phase: "crystal", value: 20}]
 
 let old_val = rewind("counter", 2)  // 10 (two steps back)
+```
+
+### Crystallize Blocks
+
+Temporarily freeze a variable for the duration of a block, then auto-restore its original phase:
+
+```lattice
+flux data = [1, 2, 3]
+crystallize(data) {
+    // data is crystal here — mutations rejected
+    print(phase_of(data))  // "crystal"
+}
+// data is fluid again
+data.push(4)  // works
+```
+
+### Sublimation (Shallow Freeze)
+
+`sublimate()` locks a value's top-level structure while leaving inner values mutable — a "shallow freeze":
+
+```lattice
+flux items = [Map::new(), Map::new()]
+items[0]["name"] = "A"
+items[1]["name"] = "B"
+
+sublimate(items)
+// items.push(...)  — error: sublimated, structural changes not allowed
+// items[0]["name"] = "C"  — allowed: inner values still mutable
+print(phase_of(items))  // "sublimated"
+
+thaw(items)  // restores to fluid
+```
+
+### Freeze Except (Defects)
+
+Freeze a struct or map while exempting specific fields or keys from crystallization:
+
+```lattice
+struct User { name: String, age: Int, score: Int }
+flux user = User { name: "Alice", age: 30, score: 0 }
+freeze(user) except ["score"]
+// user.name and user.age are crystal, user.score stays fluid
+user.score = 100  // allowed
+// user.name = "Bob"  — error: field is crystal
+```
+
+### Seed Crystals
+
+Attach a pending contract to a fluid variable. When it's eventually frozen, the contract must pass. Use `grow()` to trigger freeze + contract validation:
+
+```lattice
+flux val = 50
+seed(val, |v| { v > 0 && v < 100 })
+val = 75
+grow(val)  // freezes + validates the seed contract
+// val is now crystal
+
+unseed(var)  // remove a pending seed contract
+```
+
+### Phase Pressure
+
+Restrict which structural operations are allowed on a fluid variable without fully freezing it:
+
+```lattice
+flux data = [1, 2, 3]
+pressurize(data, "no_grow")   // allow mutation but not push/pop
+data[0] = 10    // allowed
+// data.push(4)  — error: pressurized — structural changes not allowed
+depressurize(data)
+data.push(4)    // works again
+```
+
+Pressure modes: `"no_grow"` (no push/insert), `"no_shrink"` (no pop/remove), `"no_resize"` (neither).
+
+Use `pressure_of(var)` to query the current pressure mode (returns nil if none).
+
+### Bond Strategies (Phase Interference)
+
+Extend `bond()` with a strategy parameter controlling how phase changes propagate:
+
+```lattice
+flux a = [1, 2, 3]
+flux b = [4, 5, 6]
+
+// "mirror" (default) — when a freezes, b freezes too
+bond(a, b, "mirror")
+
+// "inverse" — when a freezes, b thaws (and vice versa)
+bond(a, b, "inverse")
+
+// "gate" — a can only freeze after b is crystal
+bond(a, b, "gate")
+```
+
+### Alloys (Per-Field Phase Declarations)
+
+Declare per-field phase constraints in struct definitions. Fields automatically get their declared phase on instantiation:
+
+```lattice
+struct Config {
+    host: fix String,    // always crystal
+    port: fix Int,       // always crystal
+    retries: flux Int,   // always fluid
+}
+
+let cfg = Config { host: "localhost", port: 8080, retries: 0 }
+cfg.retries = 5    // allowed (flux field)
+// cfg.host = "other"  — error: field is crystal
 ```
 
 ### Control Flow
@@ -739,7 +848,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `print_raw(args...)` | Print to stdout without newline |
 | `input(prompt?)` | Read a line from stdin (Unit on EOF) |
 | `typeof(val)` | Type name of a value (`"Int"`, `"String"`, etc.) |
-| `phase_of(val)` | Phase of a value (`"fluid"`, `"crystal"`, `"unphased"`) |
+| `phase_of(val)` | Phase of a value (`"fluid"`, `"crystal"`, `"sublimated"`, `"unphased"`) |
 | `to_string(val)` | Convert any value to its string representation |
 | `repr(val)` | Display representation (strings quoted, structs use custom `repr` if defined) |
 | `len(val)` | Length of a string, array, or map |
@@ -753,10 +862,20 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 |----------|-------------|
 | `freeze(val)` | Transition a value to crystal (immutable) phase |
 | `freeze(val) where \|v\| { ... }` | Freeze with validation contract |
-| `thaw(val)` | Create a mutable copy of a crystal value |
+| `freeze(val) except [fields]` | Freeze with field/key exemptions (defects) |
+| `thaw(val)` | Create a mutable copy of a crystal or sublimated value |
 | `clone(val)` | Deep-clone a value |
+| `sublimate(val)` | Shallow freeze — locks structure, inner values stay mutable |
+| `crystallize(var) { ... }` | Temporarily freeze for block duration, then auto-restore |
 | `bond(target, ...deps)` | Link variables for cascading freeze |
+| `bond(target, dep, strategy)` | Bond with strategy: `"mirror"`, `"inverse"`, or `"gate"` |
 | `unbond(target, ...deps)` | Remove a bond |
+| `seed(var, contract)` | Attach a deferred freeze contract |
+| `unseed(var)` | Remove a pending seed contract |
+| `grow(var)` | Freeze + validate seed contract |
+| `pressurize(var, mode)` | Restrict structural mutations (`"no_grow"`, `"no_shrink"`, `"no_resize"`) |
+| `depressurize(var)` | Remove pressure constraint |
+| `pressure_of(var)` | Query current pressure mode (nil if none) |
 | `track(name)` | Enable phase history tracking for a variable |
 | `phases(name)` | Get phase history as array of `{phase, value}` maps |
 | `rewind(name, n)` | Get value from n steps back in history |
@@ -1208,9 +1327,14 @@ clat [--stats] [--gc-stress] [file.lat]
 ## Building & Testing
 
 ```sh
-make          # build the clat binary
-make test     # run the test suite
-make asan     # build and test with AddressSanitizer + UBSan
+make            # build the clat binary
+make test       # run the test suite
+make asan       # build and test with AddressSanitizer + UBSan
+make tsan       # build and test with ThreadSanitizer
+make coverage   # generate code coverage report (build/coverage/index.html)
+make analyze    # run clang static analyzer
+make fuzz       # build the libFuzzer harness (requires Homebrew LLVM)
+make fuzz-seed  # seed the fuzz corpus from examples/ and benchmarks/
 make ext-pg     # build the PostgreSQL extension (requires libpq)
 make ext-sqlite # build the SQLite extension (requires libsqlite3)
 make clean      # remove build artifacts

@@ -62,6 +62,7 @@ static const char *simple_names[] = {
     [TOK_CLONE] = "clone", [TOK_PRINT] = "print",
     [TOK_TRY] = "try", [TOK_CATCH] = "catch", [TOK_SCOPE] = "scope", [TOK_TEST] = "test", [TOK_MATCH] = "match", [TOK_ENUM] = "enum",
     [TOK_IMPORT] = "import", [TOK_FROM] = "from", [TOK_AS] = "as",
+    [TOK_CRYSTALLIZE] = "crystallize", [TOK_SUBLIMATE] = "sublimate",
     [TOK_TILDE] = "~", [TOK_STAR] = "*",
     [TOK_PLUS] = "+", [TOK_MINUS] = "-", [TOK_SLASH] = "/", [TOK_PERCENT] = "%",
     [TOK_EQ] = "=", [TOK_EQEQ] = "==", [TOK_BANGEQ] = "!=",

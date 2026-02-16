@@ -193,6 +193,17 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             pc_pop_scope(pc);
             return PHASE_CRYSTAL;
 
+        case EXPR_CRYSTALLIZE:
+            pc_check_expr(pc, expr->as.crystallize.expr);
+            pc_push_scope(pc);
+            for (size_t i = 0; i < expr->as.crystallize.body_count; i++)
+                pc_check_stmt(pc, expr->as.crystallize.body[i]);
+            pc_pop_scope(pc);
+            return PHASE_UNSPECIFIED;
+
+        case EXPR_SUBLIMATE:
+            return pc_check_expr(pc, expr->as.freeze_expr);
+
         case EXPR_IF:
             pc_check_expr(pc, expr->as.if_expr.cond);
             pc_push_scope(pc);

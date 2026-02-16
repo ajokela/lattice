@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.2.6"
+        "0.2.8"
     );
 }
 
@@ -5306,7 +5306,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.2.6"
+        "Hello, Lattice!\nVersion 0.2.8"
     );
 }
 
@@ -7792,6 +7792,408 @@ static void test_lib_fn_chain(void) {
     );
 }
 
+/* ── Feature 1: crystallize block ── */
+
+static void test_crystallize_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    crystallize(data) {\n"
+        "        print(phase_of(data))\n"
+        "    }\n"
+        "    print(phase_of(data))\n"
+        "    data.push(4)\n"
+        "    print(data.len())\n"
+        "}\n",
+        "crystal\nfluid\n4"
+    );
+}
+
+static void test_crystallize_already_crystal(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    fix data = [1, 2, 3]\n"
+        "    crystallize(data) {\n"
+        "        print(phase_of(data))\n"
+        "    }\n"
+        "    print(phase_of(data))\n"
+        "}\n",
+        "crystal\ncrystal"
+    );
+}
+
+static void test_crystallize_nested(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = [1]\n"
+        "    flux b = [2]\n"
+        "    crystallize(a) {\n"
+        "        crystallize(b) {\n"
+        "            print(phase_of(a))\n"
+        "            print(phase_of(b))\n"
+        "        }\n"
+        "        print(phase_of(b))\n"
+        "    }\n"
+        "    print(phase_of(a))\n"
+        "}\n",
+        "crystal\ncrystal\nfluid\nfluid"
+    );
+}
+
+/* ── Feature 2: freeze except (defects) ── */
+
+static void test_freeze_except_struct(void) {
+    ASSERT_OUTPUT(
+        "struct User { name: String, age: Int, score: Int }\n"
+        "fn main() {\n"
+        "    flux u = User { name: \"Alice\", age: 30, score: 0 }\n"
+        "    freeze(u) except [\"score\"]\n"
+        "    u.score = 100\n"
+        "    print(u.score)\n"
+        "}\n",
+        "100"
+    );
+}
+
+static void test_freeze_except_struct_blocks_frozen_field(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "struct User { name: String, age: Int, score: Int }\n"
+        "fn main() {\n"
+        "    flux u = User { name: \"Alice\", age: 30, score: 0 }\n"
+        "    freeze(u) except [\"score\"]\n"
+        "    u.name = \"Bob\"\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_freeze_except_map(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"host\"] = \"localhost\"\n"
+        "    m[\"port\"] = 8080\n"
+        "    m[\"retries\"] = 0\n"
+        "    freeze(m) except [\"retries\"]\n"
+        "    m[\"retries\"] = 5\n"
+        "    print(m[\"retries\"])\n"
+        "}\n",
+        "5"
+    );
+}
+
+/* ── Feature 3: seed / grow ── */
+
+static void test_seed_grow_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux config = Map::new()\n"
+        "    config[\"host\"] = \"localhost\"\n"
+        "    config[\"port\"] = 8080\n"
+        "    seed(config, |v| { v[\"port\"] > 0 })\n"
+        "    config[\"port\"] = 3000\n"
+        "    grow(\"config\")\n"
+        "    print(phase_of(config))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_seed_contract_fail(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux val = 0\n"
+        "    seed(val, |v| { v > 10 })\n"
+        "    grow(\"val\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_unseed(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    seed(x, |v| { v > 100 })\n"
+        "    unseed(x)\n"
+        "    freeze(x)\n"
+        "    print(phase_of(x))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_seed_validates_on_freeze(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 5\n"
+        "    seed(x, |v| { v > 10 })\n"
+        "    freeze(x)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* ── Feature 4: sublimation ── */
+
+static void test_sublimate_array_no_push(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux items = [1, 2, 3]\n"
+        "    sublimate(items)\n"
+        "    items.push(4)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_sublimate_map_no_set(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"a\"] = 1\n"
+        "    m[\"b\"] = 2\n"
+        "    sublimate(m)\n"
+        "    m[\"c\"] = 3\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_sublimate_thaw_restores(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux items = [1, 2, 3]\n"
+        "    sublimate(items)\n"
+        "    thaw(items)\n"
+        "    items.push(4)\n"
+        "    print(items.len())\n"
+        "}\n",
+        "4"
+    );
+}
+
+static void test_sublimate_phase_of(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = [1, 2]\n"
+        "    sublimate(x)\n"
+        "    print(phase_of(x))\n"
+        "}\n",
+        "sublimated"
+    );
+}
+
+static void test_sublimate_array_no_pop(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux items = [1, 2, 3]\n"
+        "    sublimate(items)\n"
+        "    items.pop()\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* ── Feature 5: phase pressure ── */
+
+static void test_pressure_no_grow_blocks_push(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_grow\")\n"
+        "    data.push(4)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_pressure_no_grow_allows_index_assign(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_grow\")\n"
+        "    data[0] = 10\n"
+        "    print(data[0])\n"
+        "}\n",
+        "10"
+    );
+}
+
+static void test_pressure_no_shrink_blocks_pop(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_shrink\")\n"
+        "    data.pop()\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_pressure_no_resize_blocks_both(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_resize\")\n"
+        "    data.push(4)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_depressurize(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_grow\")\n"
+        "    depressurize(data)\n"
+        "    data.push(4)\n"
+        "    print(data.len())\n"
+        "}\n",
+        "4"
+    );
+}
+
+static void test_pressure_of_returns_mode(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_grow\")\n"
+        "    print(pressure_of(\"data\"))\n"
+        "}\n",
+        "no_grow"
+    );
+}
+
+static void test_pressure_of_returns_nil(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    print(pressure_of(\"data\"))\n"
+        "}\n",
+        "nil"
+    );
+}
+
+/* ── Feature 6: phase interference (bond strategies) ── */
+
+static void test_bond_mirror_default(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(b))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_bond_inverse(void) {
+    /* When a freezes with inverse bond, b should thaw */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b, \"inverse\")\n"
+        "    freeze(b)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(b))\n"
+        "}\n",
+        "fluid"
+    );
+}
+
+static void test_bond_gate_fails_when_dep_not_crystal(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b, \"gate\")\n"
+        "    freeze(a)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_bond_gate_succeeds_when_dep_crystal(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b, \"gate\")\n"
+        "    freeze(b)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(a))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_bond_multiple_deps_strategy(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    flux y = 20\n"
+        "    flux z = 30\n"
+        "    bond(x, y, z)\n"
+        "    freeze(x)\n"
+        "    print(phase_of(y))\n"
+        "    print(phase_of(z))\n"
+        "}\n",
+        "crystal\ncrystal"
+    );
+}
+
+/* ── Feature 7: alloys (struct field phase declarations) ── */
+
+static void test_alloy_fix_field_rejects_mutation(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "struct Config {\n"
+        "    host: fix String,\n"
+        "    retries: flux Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let cfg = Config { host: \"localhost\", retries: 0 }\n"
+        "    cfg.host = \"other\"\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_alloy_flux_field_allows_mutation(void) {
+    ASSERT_OUTPUT(
+        "struct Config {\n"
+        "    host: fix String,\n"
+        "    retries: flux Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let cfg = Config { host: \"localhost\", retries: 0 }\n"
+        "    cfg.retries = 5\n"
+        "    print(cfg.retries)\n"
+        "}\n",
+        "5"
+    );
+}
+
+static void test_alloy_mixed_phases(void) {
+    ASSERT_OUTPUT(
+        "struct Settings {\n"
+        "    name: fix String,\n"
+        "    count: flux Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let s = Settings { name: \"test\", count: 0 }\n"
+        "    s.count = 42\n"
+        "    print(s.name)\n"
+        "    print(s.count)\n"
+        "}\n",
+        "test\n42"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -8557,4 +8959,43 @@ void register_stdlib_tests(void) {
     register_test("test_lib_fn_flatten", test_lib_fn_flatten);
     register_test("test_lib_fn_uniq_by", test_lib_fn_uniq_by);
     register_test("test_lib_fn_chain", test_lib_fn_chain);
+
+    /* Phase system v0.2.8 features */
+    /* Feature 1: crystallize */
+    register_test("test_crystallize_basic", test_crystallize_basic);
+    register_test("test_crystallize_already_crystal", test_crystallize_already_crystal);
+    register_test("test_crystallize_nested", test_crystallize_nested);
+    /* Feature 2: freeze except (defects) */
+    register_test("test_freeze_except_struct", test_freeze_except_struct);
+    register_test("test_freeze_except_struct_blocks_frozen_field", test_freeze_except_struct_blocks_frozen_field);
+    register_test("test_freeze_except_map", test_freeze_except_map);
+    /* Feature 3: seed / grow */
+    register_test("test_seed_grow_basic", test_seed_grow_basic);
+    register_test("test_seed_contract_fail", test_seed_contract_fail);
+    register_test("test_unseed", test_unseed);
+    register_test("test_seed_validates_on_freeze", test_seed_validates_on_freeze);
+    /* Feature 4: sublimation */
+    register_test("test_sublimate_array_no_push", test_sublimate_array_no_push);
+    register_test("test_sublimate_map_no_set", test_sublimate_map_no_set);
+    register_test("test_sublimate_thaw_restores", test_sublimate_thaw_restores);
+    register_test("test_sublimate_phase_of", test_sublimate_phase_of);
+    register_test("test_sublimate_array_no_pop", test_sublimate_array_no_pop);
+    /* Feature 5: phase pressure */
+    register_test("test_pressure_no_grow_blocks_push", test_pressure_no_grow_blocks_push);
+    register_test("test_pressure_no_grow_allows_index_assign", test_pressure_no_grow_allows_index_assign);
+    register_test("test_pressure_no_shrink_blocks_pop", test_pressure_no_shrink_blocks_pop);
+    register_test("test_pressure_no_resize_blocks_both", test_pressure_no_resize_blocks_both);
+    register_test("test_depressurize", test_depressurize);
+    register_test("test_pressure_of_returns_mode", test_pressure_of_returns_mode);
+    register_test("test_pressure_of_returns_nil", test_pressure_of_returns_nil);
+    /* Feature 6: bond strategies */
+    register_test("test_bond_mirror_default", test_bond_mirror_default);
+    register_test("test_bond_inverse", test_bond_inverse);
+    register_test("test_bond_gate_fails_when_dep_not_crystal", test_bond_gate_fails_when_dep_not_crystal);
+    register_test("test_bond_gate_succeeds_when_dep_crystal", test_bond_gate_succeeds_when_dep_crystal);
+    register_test("test_bond_multiple_deps_strategy", test_bond_multiple_deps_strategy);
+    /* Feature 7: alloys */
+    register_test("test_alloy_fix_field_rejects_mutation", test_alloy_fix_field_rejects_mutation);
+    register_test("test_alloy_flux_field_allows_mutation", test_alloy_flux_field_allows_mutation);
+    register_test("test_alloy_mixed_phases", test_alloy_mixed_phases);
 }

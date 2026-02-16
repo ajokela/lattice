@@ -105,9 +105,10 @@ const char *builtin_typeof_str(const LatValue *v) {
 
 const char *builtin_phase_of_str(const LatValue *v) {
     switch (v->phase) {
-        case VTAG_FLUID:    return "fluid";
-        case VTAG_CRYSTAL:  return "crystal";
-        case VTAG_UNPHASED: return "unphased";
+        case VTAG_FLUID:      return "fluid";
+        case VTAG_CRYSTAL:    return "crystal";
+        case VTAG_UNPHASED:   return "unphased";
+        case VTAG_SUBLIMATED: return "sublimated";
     }
     return "?";
 }

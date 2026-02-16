@@ -85,6 +85,8 @@ typedef enum {
     EXPR_ENUM_VARIANT,
     EXPR_SPREAD,
     EXPR_TUPLE,
+    EXPR_CRYSTALLIZE,
+    EXPR_SUBLIMATE,
 } ExprTag;
 
 /* Statement types */
@@ -126,10 +128,11 @@ struct Expr {
         struct { char *name; FieldInit *fields; size_t field_count; } struct_lit;
 
         Expr *freeze_expr;   /* THAW, CLONE: inner expr */
-        struct { Expr *expr; Expr *contract; } freeze;  /* FREEZE: inner expr + optional where contract */
+        struct { Expr *expr; Expr *contract; Expr **except_fields; size_t except_count; } freeze;  /* FREEZE: inner expr + optional where contract + optional except */
         struct { Expr *expr; Expr *closure; } anneal;   /* ANNEAL: target + transform closure */
         Expr *spread_expr;   /* SPREAD: inner expr to expand */
         struct { Expr **elems; size_t count; } tuple;  /* TUPLE */
+        struct { Expr *expr; Stmt **body; size_t body_count; } crystallize;  /* CRYSTALLIZE */
         struct { Stmt **stmts; size_t count; } block;  /* FORGE, BLOCK, SPAWN */
         struct {
             Expr *cond;
@@ -299,6 +302,7 @@ Expr *expr_index(Expr *object, Expr *index);
 Expr *expr_array(Expr **elems, size_t count);
 Expr *expr_struct_lit(char *name, FieldInit *fields, size_t field_count);
 Expr *expr_freeze(Expr *inner, Expr *contract);
+Expr *expr_freeze_except(Expr *inner, Expr *contract, Expr **except_fields, size_t except_count);
 Expr *expr_thaw(Expr *inner);
 Expr *expr_clone(Expr *inner);
 Expr *expr_anneal(Expr *target, Expr *closure);
@@ -318,6 +322,8 @@ Expr *expr_match(Expr *scrutinee, MatchArm *arms, size_t arm_count);
 Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t arg_count);
 Expr *expr_spread(Expr *inner);
 Expr *expr_tuple(Expr **elems, size_t count);
+Expr *expr_crystallize(Expr *expr, Stmt **body, size_t body_count);
+Expr *expr_sublimate(Expr *inner);
 
 /* Pattern constructors */
 Pattern *pattern_literal(Expr *lit);

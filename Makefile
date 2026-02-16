@@ -115,7 +115,13 @@ WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinc
               -sMODULARIZE=1 -sEXPORT_NAME=createLattice \
               -sALLOW_MEMORY_GROWTH=1
 
-.PHONY: all clean test asan wasm bench bench-stress ext-pg ext-sqlite
+# Fuzz harness
+FUZZ_DIR    = fuzz
+FUZZ_SRC    = $(FUZZ_DIR)/fuzz_eval.c
+FUZZ_OBJ    = $(BUILD_DIR)/fuzz/fuzz_eval.o
+FUZZ_TARGET = $(BUILD_DIR)/fuzz_eval
+
+.PHONY: all clean test asan tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite
 
 all: $(TARGET)
 
@@ -141,6 +147,53 @@ asan: LDFLAGS += -fsanitize=address,undefined
 asan: clean $(TEST_TARGET)
 	./$(BUILD_DIR)/test_runner
 
+tsan: CFLAGS += -fsanitize=thread -g -O1
+tsan: LDFLAGS += -fsanitize=thread
+tsan: clean $(TEST_TARGET)
+	./$(BUILD_DIR)/test_runner
+
+coverage: CFLAGS += -fprofile-instr-generate -fcoverage-mapping -g -O0
+coverage: LDFLAGS += -fprofile-instr-generate
+coverage: clean $(TEST_TARGET)
+	LLVM_PROFILE_FILE=$(BUILD_DIR)/default.profraw ./$(BUILD_DIR)/test_runner
+	llvm-profdata merge -sparse $(BUILD_DIR)/default.profraw -o $(BUILD_DIR)/default.profdata
+	llvm-cov report ./$(BUILD_DIR)/test_runner -instr-profile=$(BUILD_DIR)/default.profdata $(LIB_SRCS)
+	llvm-cov show ./$(BUILD_DIR)/test_runner -instr-profile=$(BUILD_DIR)/default.profdata \
+		-format=html -output-dir=$(BUILD_DIR)/coverage $(LIB_SRCS)
+	@echo "\n==> Coverage report: $(BUILD_DIR)/coverage/index.html"
+
+analyze:
+	@for f in $(LIB_SRCS); do \
+		echo "--- $$f ---"; \
+		xcrun clang --analyze -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) $$f 2>&1 || true; \
+	done
+	@echo "\n==> Static analysis complete."
+
+$(BUILD_DIR)/fuzz/%.o: $(FUZZ_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# libFuzzer requires full LLVM clang (not Apple clang).
+# Override FUZZ_CC to point to your LLVM installation if not at the default path.
+FUZZ_CC ?= $(shell [ -x /opt/homebrew/opt/llvm/bin/clang ] && echo /opt/homebrew/opt/llvm/bin/clang || echo clang)
+fuzz: CC = $(FUZZ_CC)
+fuzz: CFLAGS = -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz: clean $(LIB_OBJS) $(FUZZ_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ)
+	@mkdir -p fuzz/corpus
+	@echo "\n==> Fuzzer built: $(FUZZ_TARGET)"
+	@echo "    Run:  $(FUZZ_TARGET) fuzz/corpus/ -max_len=4096"
+	@echo "    Seed: cp examples/*.lat benchmarks/*.lat fuzz/corpus/"
+
+FUZZ_EXCLUDE = http_server http_client https_client tls_client orm_demo
+fuzz-seed:
+	@mkdir -p fuzz/corpus
+	@cp -v examples/*.lat fuzz/corpus/ 2>/dev/null || true
+	@cp -v benchmarks/*.lat fuzz/corpus/ 2>/dev/null || true
+	@for f in $(FUZZ_EXCLUDE); do rm -f fuzz/corpus/$$f.lat; done
+	@echo "\n==> Corpus seeded with $$(ls fuzz/corpus/*.lat 2>/dev/null | wc -l | tr -d ' ') files (excluded: $(FUZZ_EXCLUDE))"
+
 wasm:
 	emcc $(WASM_FLAGS) -o $(WASM_OUT) $(WASM_SRCS)
 
@@ -158,3 +211,4 @@ ext-sqlite:
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
+	rm -f *.plist src/*.plist

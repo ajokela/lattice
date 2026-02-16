@@ -525,33 +525,60 @@ static EvalResult fire_reactions(Evaluator *ev, const char *var_name, const char
 }
 
 /* Cascade freeze through bonded variables */
-static void freeze_cascade(Evaluator *ev, const char *target_name) {
+/* Returns NULL on success, heap-allocated error string on failure */
+static char *freeze_cascade(Evaluator *ev, const char *target_name) {
     for (size_t bi = 0; bi < ev->bond_count; bi++) {
         if (strcmp(ev->bonds[bi].target, target_name) != 0) continue;
-        /* Found bond entry for target — freeze all deps */
+        /* Found bond entry for target — process all deps by strategy */
         for (size_t di = 0; di < ev->bonds[bi].dep_count; di++) {
             const char *dep = ev->bonds[bi].deps[di];
+            const char *strategy = ev->bonds[bi].dep_strategies ? ev->bonds[bi].dep_strategies[di] : "mirror";
             LatValue dval;
             if (!env_get(ev->env, dep, &dval)) continue;  /* variable gone */
-            if (dval.phase == VTAG_CRYSTAL) { value_free(&dval); continue; }
             if (dval.type == VAL_CHANNEL) { value_free(&dval); continue; }
-            dval = value_freeze(dval);
-            freeze_to_region(ev, &dval);
-            env_set(ev->env, dep, dval);
-            /* Fire reactions for cascaded dep (swallow errors) */
-            EvalResult fr = fire_reactions(ev, dep, "crystal");
-            if (!IS_OK(fr)) free(fr.error);
-            /* Recurse for transitive bonds */
-            freeze_cascade(ev, dep);
+
+            if (strcmp(strategy, "mirror") == 0) {
+                if (dval.phase == VTAG_CRYSTAL) { value_free(&dval); continue; }
+                dval = value_freeze(dval);
+                freeze_to_region(ev, &dval);
+                env_set(ev->env, dep, dval);
+                EvalResult fr = fire_reactions(ev, dep, "crystal");
+                if (!IS_OK(fr)) free(fr.error);
+                char *err = freeze_cascade(ev, dep);
+                if (err) return err;
+            } else if (strcmp(strategy, "inverse") == 0) {
+                /* Inverse: thaw the dep when target freezes */
+                if (dval.phase != VTAG_CRYSTAL && dval.phase != VTAG_SUBLIMATED) { value_free(&dval); continue; }
+                LatValue thawed = value_thaw(&dval);
+                value_free(&dval);
+                env_set(ev->env, dep, thawed);
+                EvalResult fr = fire_reactions(ev, dep, "fluid");
+                if (!IS_OK(fr)) free(fr.error);
+            } else if (strcmp(strategy, "gate") == 0) {
+                /* Gate: dep must already be crystal for target to freeze */
+                if (dval.phase != VTAG_CRYSTAL) {
+                    value_free(&dval);
+                    char *err = NULL;
+                    (void)asprintf(&err, "gate bond: '%s' must be crystal before '%s' can freeze", dep, target_name);
+                    return err;
+                }
+                value_free(&dval);
+            } else {
+                value_free(&dval);
+            }
         }
         /* Consume the bond entry */
-        for (size_t di = 0; di < ev->bonds[bi].dep_count; di++)
+        for (size_t di = 0; di < ev->bonds[bi].dep_count; di++) {
             free(ev->bonds[bi].deps[di]);
+            if (ev->bonds[bi].dep_strategies) free(ev->bonds[bi].dep_strategies[di]);
+        }
         free(ev->bonds[bi].deps);
+        free(ev->bonds[bi].dep_strategies);
         free(ev->bonds[bi].target);
         ev->bonds[bi] = ev->bonds[--ev->bond_count];
         break;
     }
+    return NULL;
 }
 
 /*
@@ -648,9 +675,10 @@ static FnDecl *find_fn(Evaluator *ev, const char *name) {
 
 static const char *phase_tag_name(PhaseTag p) {
     switch (p) {
-        case VTAG_FLUID:   return "fluid (flux)";
-        case VTAG_CRYSTAL: return "crystal (fix)";
-        case VTAG_UNPHASED: return "unphased";
+        case VTAG_FLUID:      return "fluid (flux)";
+        case VTAG_CRYSTAL:    return "crystal (fix)";
+        case VTAG_UNPHASED:   return "unphased";
+        case VTAG_SUBLIMATED: return "sublimated";
     }
     return "unknown";
 }
@@ -769,6 +797,33 @@ static VariantDecl *find_variant(EnumDecl *ed, const char *variant_name) {
         if (strcmp(ed->variants[i].name, variant_name) == 0)
             return &ed->variants[i];
     }
+    return NULL;
+}
+
+/* Find a pressure constraint for a variable (returns mode string or NULL) */
+static const char *find_pressure(Evaluator *ev, const char *var_name) {
+    for (size_t i = 0; i < ev->pressure_count; i++) {
+        if (strcmp(ev->pressures[i].var_name, var_name) == 0)
+            return ev->pressures[i].mode;
+    }
+    return NULL;
+}
+
+/* Check if a pressure mode blocks a structural growth operation (push, insert, merge) */
+static bool pressure_blocks_grow(const char *mode) {
+    return mode && (strcmp(mode, "no_grow") == 0 || strcmp(mode, "no_resize") == 0);
+}
+
+/* Check if a pressure mode blocks a structural shrink operation (pop, remove, remove_at) */
+static bool pressure_blocks_shrink(const char *mode) {
+    return mode && (strcmp(mode, "no_shrink") == 0 || strcmp(mode, "no_resize") == 0);
+}
+
+/* Get the root variable name from a method call object expression */
+static const char *get_method_obj_varname(const Expr *obj) {
+    if (obj->tag == EXPR_IDENT) return obj->as.str_val;
+    if (obj->tag == EXPR_FIELD_ACCESS) return get_method_obj_varname(obj->as.field_access.object);
+    if (obj->tag == EXPR_INDEX) return get_method_obj_varname(obj->as.index.object);
     return NULL;
 }
 
@@ -1299,37 +1354,69 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 size_t argc = expr->as.call.arg_count;
                 if (argc < 2) {
                     return eval_err(strdup(is_bond
-                        ? "bond() requires at least 2 arguments (target, ...deps)"
+                        ? "bond() requires at least 2 arguments (target, dep[, strategy])"
                         : "unbond() requires at least 2 arguments (target, ...deps)"));
                 }
-                /* All arguments must be identifiers */
-                for (size_t i = 0; i < argc; i++) {
-                    if (expr->as.call.args[i]->tag != EXPR_IDENT) {
-                        return eval_err(strdup(is_bond
-                            ? "bond() requires variable names, not expressions"
-                            : "unbond() requires variable names, not expressions"));
+                /* First 2 arguments must be identifiers; optional 3rd can be string (strategy) */
+                if (expr->as.call.args[0]->tag != EXPR_IDENT ||
+                    expr->as.call.args[1]->tag != EXPR_IDENT) {
+                    return eval_err(strdup(is_bond
+                        ? "bond() requires variable names for first two arguments"
+                        : "unbond() requires variable names, not expressions"));
+                }
+                if (!is_bond) {
+                    for (size_t i = 2; i < argc; i++) {
+                        if (expr->as.call.args[i]->tag != EXPR_IDENT) {
+                            return eval_err(strdup("unbond() requires variable names, not expressions"));
+                        }
                     }
                 }
                 const char *target = expr->as.call.args[0]->as.str_val;
                 if (is_bond) {
+                    /* Determine strategy: if last arg is a string literal, use as strategy.
+                     * Otherwise all args after target are deps with default "mirror" strategy.
+                     * bond(target, dep) — mirror
+                     * bond(target, dep, "inverse") — explicit strategy
+                     * bond(target, dep1, dep2, ...) — multiple deps, all mirror */
+                    char *strategy = NULL;
+                    size_t dep_end = argc;  /* how many args are deps (excluding target at 0) */
+                    if (argc >= 3 && expr->as.call.args[argc - 1]->tag == EXPR_STRING_LIT) {
+                        /* Last arg is a string literal — treat as strategy */
+                        const char *sval = expr->as.call.args[argc - 1]->as.str_val;
+                        if (strcmp(sval, "mirror") == 0 || strcmp(sval, "inverse") == 0 ||
+                            strcmp(sval, "gate") == 0) {
+                            strategy = strdup(sval);
+                            dep_end = argc - 1;
+                        }
+                    }
+                    if (!strategy) strategy = strdup("mirror");
+                    /* All args from 1..dep_end-1 must be idents (dep vars) */
+                    for (size_t i = 1; i < dep_end; i++) {
+                        if (expr->as.call.args[i]->tag != EXPR_IDENT) {
+                            free(strategy);
+                            return eval_err(strdup("bond() dependency arguments must be variable names"));
+                        }
+                    }
                     /* Verify all variables exist and are not frozen */
-                    for (size_t i = 0; i < argc; i++) {
+                    for (size_t i = 0; i < dep_end; i++) {
                         const char *vname = expr->as.call.args[i]->as.str_val;
                         LatValue tmp;
                         if (!env_get(ev->env, vname, &tmp)) {
                             char *err = NULL;
                             (void)asprintf(&err, "cannot bond undefined variable '%s'", vname);
+                            free(strategy);
                             return eval_err(err);
                         }
                         if (tmp.phase == VTAG_CRYSTAL) {
                             value_free(&tmp);
                             char *err = NULL;
                             (void)asprintf(&err, "cannot bond already-frozen variable '%s'", vname);
+                            free(strategy);
                             return eval_err(err);
                         }
                         value_free(&tmp);
                     }
-                    /* Register bonds */
+                    /* Register bonds for each dep */
                     BondEntry *be = NULL;
                     for (size_t i = 0; i < ev->bond_count; i++) {
                         if (strcmp(ev->bonds[i].target, target) == 0) { be = &ev->bonds[i]; break; }
@@ -1342,17 +1429,22 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         be = &ev->bonds[ev->bond_count++];
                         be->target = strdup(target);
                         be->deps = NULL;
+                        be->dep_strategies = NULL;
                         be->dep_count = 0;
                         be->dep_cap = 0;
                     }
-                    for (size_t i = 1; i < argc; i++) {
-                        const char *dep = expr->as.call.args[i]->as.str_val;
+                    for (size_t di = 1; di < dep_end; di++) {
+                        const char *dep = expr->as.call.args[di]->as.str_val;
                         if (be->dep_count >= be->dep_cap) {
                             be->dep_cap = be->dep_cap ? be->dep_cap * 2 : 4;
                             be->deps = realloc(be->deps, be->dep_cap * sizeof(char *));
+                            be->dep_strategies = realloc(be->dep_strategies, be->dep_cap * sizeof(char *));
                         }
-                        be->deps[be->dep_count++] = strdup(dep);
+                        be->deps[be->dep_count] = strdup(dep);
+                        be->dep_strategies[be->dep_count] = strdup(strategy);
+                        be->dep_count++;
                     }
+                    free(strategy);
                 } else {
                     /* unbond: remove deps from target's bond set */
                     for (size_t i = 0; i < ev->bond_count; i++) {
@@ -1362,7 +1454,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                                 for (size_t k = 0; k < ev->bonds[i].dep_count; k++) {
                                     if (strcmp(ev->bonds[i].deps[k], dep) == 0) {
                                         free(ev->bonds[i].deps[k]);
-                                        ev->bonds[i].deps[k] = ev->bonds[i].deps[--ev->bonds[i].dep_count];
+                                        if (ev->bonds[i].dep_strategies) free(ev->bonds[i].dep_strategies[k]);
+                                        ev->bonds[i].deps[k] = ev->bonds[i].deps[ev->bonds[i].dep_count - 1];
+                                        if (ev->bonds[i].dep_strategies)
+                                            ev->bonds[i].dep_strategies[k] = ev->bonds[i].dep_strategies[ev->bonds[i].dep_count - 1];
+                                        ev->bonds[i].dep_count--;
                                         break;
                                     }
                                 }
@@ -1371,10 +1467,127 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             if (ev->bonds[i].dep_count == 0) {
                                 free(ev->bonds[i].target);
                                 free(ev->bonds[i].deps);
+                                free(ev->bonds[i].dep_strategies);
                                 ev->bonds[i] = ev->bonds[--ev->bond_count];
                             }
                             break;
                         }
+                    }
+                }
+                return eval_ok(value_unit());
+            }
+
+            /* ── seed() / unseed(): special handling before arg evaluation ── */
+            if (expr->as.call.func->tag == EXPR_IDENT &&
+                strcmp(expr->as.call.func->as.str_val, "seed") == 0) {
+                size_t argc = expr->as.call.arg_count;
+                if (argc != 2) return eval_err(strdup("seed() requires exactly 2 arguments (variable, contract)"));
+                if (expr->as.call.args[0]->tag != EXPR_IDENT)
+                    return eval_err(strdup("seed() first argument must be a variable name"));
+                const char *var_name = expr->as.call.args[0]->as.str_val;
+                LatValue tmp;
+                if (!env_get(ev->env, var_name, &tmp)) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "seed(): undefined variable '%s'", var_name);
+                    return eval_err(err);
+                }
+                value_free(&tmp);
+                EvalResult cbr = eval_expr(ev, expr->as.call.args[1]);
+                if (!IS_OK(cbr)) return cbr;
+                if (cbr.value.type != VAL_CLOSURE) {
+                    value_free(&cbr.value);
+                    return eval_err(strdup("seed() second argument must be a closure"));
+                }
+                /* Store seed entry */
+                if (ev->seed_count >= ev->seed_cap) {
+                    ev->seed_cap = ev->seed_cap ? ev->seed_cap * 2 : 4;
+                    ev->seeds = realloc(ev->seeds, ev->seed_cap * sizeof(SeedEntry));
+                }
+                ev->seeds[ev->seed_count].var_name = strdup(var_name);
+                ev->seeds[ev->seed_count].contract = value_deep_clone(&cbr.value);
+                ev->seed_count++;
+                value_free(&cbr.value);
+                return eval_ok(value_unit());
+            }
+            if (expr->as.call.func->tag == EXPR_IDENT &&
+                strcmp(expr->as.call.func->as.str_val, "unseed") == 0) {
+                size_t argc = expr->as.call.arg_count;
+                if (argc != 1) return eval_err(strdup("unseed() requires exactly 1 argument (variable)"));
+                if (expr->as.call.args[0]->tag != EXPR_IDENT)
+                    return eval_err(strdup("unseed() argument must be a variable name"));
+                const char *var_name = expr->as.call.args[0]->as.str_val;
+                for (size_t i = 0; i < ev->seed_count; i++) {
+                    if (strcmp(ev->seeds[i].var_name, var_name) == 0) {
+                        free(ev->seeds[i].var_name);
+                        value_free(&ev->seeds[i].contract);
+                        ev->seeds[i] = ev->seeds[--ev->seed_count];
+                        break;
+                    }
+                }
+                return eval_ok(value_unit());
+            }
+            /* ── pressurize() / depressurize(): special handling before arg evaluation ── */
+            if (expr->as.call.func->tag == EXPR_IDENT &&
+                strcmp(expr->as.call.func->as.str_val, "pressurize") == 0) {
+                size_t argc = expr->as.call.arg_count;
+                if (argc != 2) return eval_err(strdup("pressurize() requires 2 arguments (variable, mode)"));
+                if (expr->as.call.args[0]->tag != EXPR_IDENT)
+                    return eval_err(strdup("pressurize() first argument must be a variable name"));
+                const char *var_name = expr->as.call.args[0]->as.str_val;
+                LatValue tmp;
+                if (!env_get(ev->env, var_name, &tmp)) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "pressurize(): undefined variable '%s'", var_name);
+                    return eval_err(err);
+                }
+                value_free(&tmp);
+                EvalResult mr = eval_expr(ev, expr->as.call.args[1]);
+                if (!IS_OK(mr)) return mr;
+                if (mr.value.type != VAL_STR) {
+                    value_free(&mr.value);
+                    return eval_err(strdup("pressurize() mode must be a string"));
+                }
+                const char *mode = mr.value.as.str_val;
+                if (strcmp(mode, "no_grow") != 0 && strcmp(mode, "no_shrink") != 0 &&
+                    strcmp(mode, "no_resize") != 0 && strcmp(mode, "read_heavy") != 0) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "pressurize() unknown mode '%s'", mode);
+                    value_free(&mr.value);
+                    return eval_err(err);
+                }
+                /* Find or create PressureEntry */
+                PressureEntry *pe = NULL;
+                for (size_t i = 0; i < ev->pressure_count; i++) {
+                    if (strcmp(ev->pressures[i].var_name, var_name) == 0) { pe = &ev->pressures[i]; break; }
+                }
+                if (pe) {
+                    free(pe->mode);
+                    pe->mode = strdup(mode);
+                } else {
+                    if (ev->pressure_count >= ev->pressure_cap) {
+                        ev->pressure_cap = ev->pressure_cap ? ev->pressure_cap * 2 : 4;
+                        ev->pressures = realloc(ev->pressures, ev->pressure_cap * sizeof(PressureEntry));
+                    }
+                    pe = &ev->pressures[ev->pressure_count++];
+                    pe->var_name = strdup(var_name);
+                    pe->mode = strdup(mode);
+                }
+                value_free(&mr.value);
+                return eval_ok(value_unit());
+            }
+            if (expr->as.call.func->tag == EXPR_IDENT &&
+                strcmp(expr->as.call.func->as.str_val, "depressurize") == 0) {
+                size_t argc = expr->as.call.arg_count;
+                if (argc != 1) return eval_err(strdup("depressurize() requires 1 argument (variable)"));
+                if (expr->as.call.args[0]->tag != EXPR_IDENT)
+                    return eval_err(strdup("depressurize() argument must be a variable name"));
+                const char *var_name = expr->as.call.args[0]->as.str_val;
+                for (size_t i = 0; i < ev->pressure_count; i++) {
+                    if (strcmp(ev->pressures[i].var_name, var_name) == 0) {
+                        free(ev->pressures[i].var_name);
+                        free(ev->pressures[i].mode);
+                        ev->pressures[i] = ev->pressures[--ev->pressure_count];
+                        break;
                     }
                 }
                 return eval_ok(value_unit());
@@ -1676,6 +1889,85 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_ok(value_nil());
                     size_t idx = vh->count - 1 - (size_t)steps;
                     return eval_ok(value_deep_clone(&vh->snapshots[idx].value));
+                }
+
+                /// @builtin grow(name: String) -> Any
+                /// @category Phase Transitions
+                /// Freeze a variable and validate any pending seed contracts.
+                /// @example grow(config)  // freeze + validate seeds
+                if (strcmp(fn_name, "grow") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("grow() expects 1 String argument (variable name)")); }
+                    const char *vname = args[0].as.str_val;
+                    LatValue val;
+                    if (!env_get(ev->env, vname, &val)) {
+                        char *err = NULL; (void)asprintf(&err, "grow(): undefined variable '%s'", vname);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        return eval_err(err);
+                    }
+                    /* Check and validate all seeds for this variable */
+                    for (size_t si = 0; si < ev->seed_count; si++) {
+                        if (strcmp(ev->seeds[si].var_name, vname) != 0) continue;
+                        LatValue check_val = value_deep_clone(&val);
+                        LatValue *cb = &ev->seeds[si].contract;
+                        EvalResult vr = call_closure(ev, cb->as.closure.param_names,
+                            cb->as.closure.param_count, cb->as.closure.body,
+                            cb->as.closure.captured_env, &check_val, 1,
+                            cb->as.closure.default_values, cb->as.closure.has_variadic);
+                        if (!IS_OK(vr)) {
+                            char *msg = NULL;
+                            (void)asprintf(&msg, "grow() seed contract failed: %s", vr.error);
+                            free(vr.error); value_free(&val);
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                            return eval_err(msg);
+                        }
+                        if (!value_is_truthy(&vr.value)) {
+                            value_free(&vr.value); value_free(&val);
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                            return eval_err(strdup("grow() seed contract returned false"));
+                        }
+                        value_free(&vr.value);
+                        /* Remove this seed */
+                        free(ev->seeds[si].var_name);
+                        value_free(&ev->seeds[si].contract);
+                        ev->seeds[si] = ev->seeds[--ev->seed_count];
+                        si--;  /* re-check this index */
+                    }
+                    /* Freeze the variable */
+                    val = value_freeze(val);
+                    freeze_to_region(ev, &val);
+                    LatValue ret = value_deep_clone(&val);
+                    env_set(ev->env, vname, val);
+                    record_history(ev, vname);
+                    {
+                        char *cascade_err = freeze_cascade(ev, vname);
+                        if (cascade_err) {
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                            value_free(&ret);
+                            return eval_err(cascade_err);
+                        }
+                    }
+                    EvalResult fr = fire_reactions(ev, vname, "crystal");
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    if (!IS_OK(fr)) { value_free(&ret); return fr; }
+                    return eval_ok(ret);
+                }
+
+                /// @builtin pressure_of(name: String) -> String|Nil
+                /// @category Phase Pressure
+                /// Returns the current pressure mode of a variable, or nil if none.
+                /// @example pressure_of("data")  // "no_grow"
+                if (strcmp(fn_name, "pressure_of") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("pressure_of() expects 1 String argument")); }
+                    const char *vname = args[0].as.str_val;
+                    for (size_t i = 0; i < ev->pressure_count; i++) {
+                        if (strcmp(ev->pressures[i].var_name, vname) == 0) {
+                            LatValue result = value_string(ev->pressures[i].mode);
+                            for (size_t j = 0; j < argc; j++) value_free(&args[j]); free(args);
+                            return eval_ok(result);
+                        }
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_nil());
                 }
 
                 /// @builtin ord(ch: String) -> Int
@@ -4271,6 +4563,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     value_free(&existing);
                     return eval_err(strdup("cannot push to a crystal array"));
                 }
+                if (existing.phase == VTAG_SUBLIMATED) {
+                    value_free(&existing);
+                    return eval_err(strdup("cannot push to a sublimated array"));
+                }
+                {
+                    const char *pmode = find_pressure(ev, var_name);
+                    if (pressure_blocks_grow(pmode)) {
+                        value_free(&existing);
+                        char *err = NULL;
+                        (void)asprintf(&err, "pressurized (%s): cannot push to '%s'", pmode, var_name);
+                        return eval_err(err);
+                    }
+                }
                 GC_PUSH(ev, &existing);
                 EvalResult ar = eval_expr(ev, expr->as.method_call.args[0]);
                 GC_POP(ev);
@@ -4300,6 +4605,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
                 if (map_lv && map_lv->type == VAL_MAP) {
+                    if (map_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot set on a sublimated map"));
                     EvalResult kr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(kr)) return kr;
                     if (kr.value.type != VAL_STR) {
@@ -4327,6 +4634,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
                     if (value_is_crystal(arr_lv))
                         return eval_err(strdup("cannot pop from a crystal array"));
+                    if (arr_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot pop from a sublimated array"));
+                    {
+                        const char *vn = get_method_obj_varname(expr->as.method_call.object);
+                        if (vn) {
+                            const char *pmode = find_pressure(ev, vn);
+                            if (pressure_blocks_shrink(pmode)) {
+                                char *err = NULL;
+                                (void)asprintf(&err, "pressurized (%s): cannot pop from '%s'", pmode, vn);
+                                return eval_err(err);
+                            }
+                        }
+                    }
                     if (arr_lv->as.array.len == 0)
                         return eval_err(strdup("pop on empty array"));
                     LatValue popped = arr_lv->as.array.elems[--arr_lv->as.array.len];
@@ -4342,6 +4662,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
                     if (value_is_crystal(arr_lv))
                         return eval_err(strdup("cannot insert into a crystal array"));
+                    if (arr_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot insert into a sublimated array"));
+                    {
+                        const char *vn = get_method_obj_varname(expr->as.method_call.object);
+                        if (vn) {
+                            const char *pmode = find_pressure(ev, vn);
+                            if (pressure_blocks_grow(pmode)) {
+                                char *err = NULL;
+                                (void)asprintf(&err, "pressurized (%s): cannot insert into '%s'", pmode, vn);
+                                return eval_err(err);
+                            }
+                        }
+                    }
                     EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(ir)) return ir;
                     if (ir.value.type != VAL_INT) {
@@ -4383,6 +4716,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
                     if (value_is_crystal(arr_lv))
                         return eval_err(strdup("cannot remove from a crystal array"));
+                    if (arr_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot remove from a sublimated array"));
+                    {
+                        const char *vn = get_method_obj_varname(expr->as.method_call.object);
+                        if (vn) {
+                            const char *pmode = find_pressure(ev, vn);
+                            if (pressure_blocks_shrink(pmode)) {
+                                char *err = NULL;
+                                (void)asprintf(&err, "pressurized (%s): cannot remove from '%s'", pmode, vn);
+                                return eval_err(err);
+                            }
+                        }
+                    }
                     EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(ir)) return ir;
                     if (ir.value.type != VAL_INT) {
@@ -4409,6 +4755,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
                 if (map_lv && map_lv->type == VAL_MAP) {
+                    if (map_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot merge into a sublimated map"));
+                    {
+                        const char *vn = get_method_obj_varname(expr->as.method_call.object);
+                        if (vn) {
+                            const char *pmode = find_pressure(ev, vn);
+                            if (pressure_blocks_grow(pmode)) {
+                                char *err = NULL;
+                                (void)asprintf(&err, "pressurized (%s): cannot merge into '%s'", pmode, vn);
+                                return eval_err(err);
+                            }
+                        }
+                    }
                     EvalResult mr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(mr)) return mr;
                     if (mr.value.type != VAL_MAP) {
@@ -4439,6 +4798,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
                 if (map_lv && map_lv->type == VAL_MAP) {
+                    if (map_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot remove from a sublimated map"));
+                    {
+                        const char *vn = get_method_obj_varname(expr->as.method_call.object);
+                        if (vn) {
+                            const char *pmode = find_pressure(ev, vn);
+                            if (pressure_blocks_shrink(pmode)) {
+                                char *err = NULL;
+                                (void)asprintf(&err, "pressurized (%s): cannot remove from '%s'", pmode, vn);
+                                return eval_err(err);
+                            }
+                        }
+                    }
                     EvalResult kr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(kr)) return kr;
                     if (kr.value.type != VAL_STR) {
@@ -4759,6 +5131,32 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             stats_struct(&ev->stats);
             LatValue st = value_struct(sname, names, vals, fc);
             free(names); free(vals);
+            /* Alloy enforcement: apply per-field phase from struct declaration */
+            if (sd) {
+                bool has_phase_decl = false;
+                for (size_t i = 0; i < sd->field_count; i++) {
+                    if (sd->fields[i].ty.phase != PHASE_UNSPECIFIED) { has_phase_decl = true; break; }
+                }
+                if (has_phase_decl) {
+                    st.as.strct.field_phases = calloc(st.as.strct.field_count, sizeof(PhaseTag));
+                    for (size_t i = 0; i < st.as.strct.field_count; i++) {
+                        /* Find matching decl field */
+                        for (size_t j = 0; j < sd->field_count; j++) {
+                            if (strcmp(st.as.strct.field_names[i], sd->fields[j].name) == 0) {
+                                if (sd->fields[j].ty.phase == PHASE_CRYSTAL) {
+                                    st.as.strct.field_values[i] = value_freeze(st.as.strct.field_values[i]);
+                                    st.as.strct.field_phases[i] = VTAG_CRYSTAL;
+                                } else if (sd->fields[j].ty.phase == PHASE_FLUID) {
+                                    st.as.strct.field_phases[i] = VTAG_FLUID;
+                                } else {
+                                    st.as.strct.field_phases[i] = st.phase;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             return eval_ok(st);
         }
 
@@ -4919,7 +5317,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     freeze_to_region(ev, &val);
                     ev->stats.freeze_total_ns += now_ns() - ft0;
                     record_history(ev, name);
-                    freeze_cascade(ev, name);
+                    {
+                        char *cascade_err = freeze_cascade(ev, name);
+                        if (cascade_err) { value_free(&val); return eval_err(cascade_err); }
+                    }
                     EvalResult fr = fire_reactions(ev, name, "crystal");
                     if (!IS_OK(fr)) { value_free(&val); return fr; }
                     return eval_ok(val);
@@ -4934,6 +5335,114 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (val.type == VAL_CHANNEL) {
                     value_free(&val);
                     return eval_err(strdup("cannot freeze a Channel"));
+                }
+                /* Freeze-except: selectively freeze struct fields/map keys */
+                if (expr->as.freeze.except_count > 0) {
+                    /* Evaluate except field names */
+                    char **except_names = malloc(expr->as.freeze.except_count * sizeof(char *));
+                    for (size_t i = 0; i < expr->as.freeze.except_count; i++) {
+                        EvalResult er = eval_expr(ev, expr->as.freeze.except_fields[i]);
+                        if (!IS_OK(er)) {
+                            for (size_t j = 0; j < i; j++) free(except_names[j]);
+                            free(except_names);
+                            value_free(&val);
+                            return er;
+                        }
+                        if (er.value.type != VAL_STR) {
+                            for (size_t j = 0; j < i; j++) free(except_names[j]);
+                            free(except_names);
+                            value_free(&val);
+                            value_free(&er.value);
+                            return eval_err(strdup("freeze except: field names must be strings"));
+                        }
+                        except_names[i] = strdup(er.value.as.str_val);
+                        value_free(&er.value);
+                    }
+                    if (val.type == VAL_STRUCT) {
+                        /* Lazy-allocate field_phases */
+                        if (!val.as.strct.field_phases) {
+                            val.as.strct.field_phases = calloc(val.as.strct.field_count, sizeof(PhaseTag));
+                            for (size_t i = 0; i < val.as.strct.field_count; i++)
+                                val.as.strct.field_phases[i] = val.phase;
+                        }
+                        for (size_t i = 0; i < val.as.strct.field_count; i++) {
+                            bool exempted = false;
+                            for (size_t j = 0; j < expr->as.freeze.except_count; j++) {
+                                if (strcmp(val.as.strct.field_names[i], except_names[j]) == 0) {
+                                    exempted = true; break;
+                                }
+                            }
+                            if (!exempted) {
+                                val.as.strct.field_values[i] = value_freeze(val.as.strct.field_values[i]);
+                                val.as.strct.field_phases[i] = VTAG_CRYSTAL;
+                            } else {
+                                val.as.strct.field_phases[i] = VTAG_FLUID;
+                            }
+                        }
+                    } else if (val.type == VAL_MAP) {
+                        /* Lazy-allocate key_phases */
+                        if (!val.as.map.key_phases) {
+                            val.as.map.key_phases = calloc(1, sizeof(LatMap));
+                            *val.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+                        }
+                        for (size_t i = 0; i < val.as.map.map->cap; i++) {
+                            if (val.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                            const char *key = val.as.map.map->entries[i].key;
+                            bool exempted = false;
+                            for (size_t j = 0; j < expr->as.freeze.except_count; j++) {
+                                if (strcmp(key, except_names[j]) == 0) {
+                                    exempted = true; break;
+                                }
+                            }
+                            PhaseTag phase;
+                            if (!exempted) {
+                                LatValue *vp = (LatValue *)val.as.map.map->entries[i].value;
+                                *vp = value_freeze(*vp);
+                                phase = VTAG_CRYSTAL;
+                            } else {
+                                phase = VTAG_FLUID;
+                            }
+                            lat_map_set(val.as.map.key_phases, key, &phase);
+                        }
+                    } else {
+                        for (size_t j = 0; j < expr->as.freeze.except_count; j++) free(except_names[j]);
+                        free(except_names);
+                        value_free(&val);
+                        return eval_err(strdup("freeze except requires a struct or map"));
+                    }
+                    for (size_t j = 0; j < expr->as.freeze.except_count; j++) free(except_names[j]);
+                    free(except_names);
+                    LatValue ret = value_deep_clone(&val);
+                    env_set(ev->env, name, val);
+                    record_history(ev, name);
+                    return eval_ok(ret);
+                }
+                /* Validate pending seed contracts */
+                for (size_t si = 0; si < ev->seed_count; si++) {
+                    if (strcmp(ev->seeds[si].var_name, name) == 0) {
+                        LatValue check_val = value_deep_clone(&val);
+                        EvalResult vr = call_closure(ev,
+                            ev->seeds[si].contract.as.closure.param_names,
+                            ev->seeds[si].contract.as.closure.param_count,
+                            ev->seeds[si].contract.as.closure.body,
+                            ev->seeds[si].contract.as.closure.captured_env,
+                            &check_val, 1,
+                            ev->seeds[si].contract.as.closure.default_values,
+                            ev->seeds[si].contract.as.closure.has_variadic);
+                        if (!IS_OK(vr)) {
+                            char *msg = NULL;
+                            (void)asprintf(&msg, "seed contract failed on freeze: %s", vr.error);
+                            free(vr.error);
+                            value_free(&val);
+                            return eval_err(msg);
+                        }
+                        if (!value_is_truthy(&vr.value)) {
+                            value_free(&vr.value);
+                            value_free(&val);
+                            return eval_err(strdup("seed contract failed on freeze: contract returned false"));
+                        }
+                        value_free(&vr.value);
+                    }
                 }
                 /* Run crystallization contract if present */
                 if (expr->as.freeze.contract) {
@@ -4961,7 +5470,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue ret = value_deep_clone(&val);
                 env_set(ev->env, name, val);
                 record_history(ev, name);
-                freeze_cascade(ev, name);
+                {
+                    char *cascade_err = freeze_cascade(ev, name);
+                    if (cascade_err) { value_free(&ret); return eval_err(cascade_err); }
+                }
                 EvalResult fr = fire_reactions(ev, name, "crystal");
                 if (!IS_OK(fr)) { value_free(&ret); return fr; }
                 return eval_ok(ret);
@@ -5107,7 +5619,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue ret = value_deep_clone(&tr.value);
                 env_set(ev->env, name, tr.value);
                 record_history(ev, name);
-                freeze_cascade(ev, name);
+                {
+                    char *cascade_err = freeze_cascade(ev, name);
+                    if (cascade_err) { value_free(&ret); return eval_err(cascade_err); }
+                }
                 EvalResult fr = fire_reactions(ev, name, "crystal");
                 if (!IS_OK(fr)) { value_free(&ret); return fr; }
                 return eval_ok(ret);
@@ -5153,6 +5668,70 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             freeze_to_region(ev, &tr.value);
             ev->stats.freeze_total_ns += now_ns() - ft0;
             return eval_ok(tr.value);
+        }
+
+        case EXPR_CRYSTALLIZE: {
+            /* crystallize(expr) { body } — temporarily freeze, execute body, restore */
+            if (expr->as.crystallize.expr->tag != EXPR_IDENT) {
+                return eval_err(strdup("crystallize() target must be a variable name"));
+            }
+            const char *name = expr->as.crystallize.expr->as.str_val;
+            LatValue val;
+            if (!env_get(ev->env, name, &val)) {
+                char *err = NULL;
+                (void)asprintf(&err, "crystallize(): undefined variable '%s'", name);
+                return eval_err(err);
+            }
+            PhaseTag saved_phase = val.phase;
+            /* If already crystal, just run the body */
+            if (saved_phase != VTAG_CRYSTAL) {
+                val = value_freeze(val);
+                env_set(ev->env, name, val);
+            } else {
+                value_free(&val);
+            }
+            /* Execute body */
+            stats_scope_push(&ev->stats);
+            env_push_scope(ev->env);
+            EvalResult result = eval_block_stmts(ev, expr->as.crystallize.body, expr->as.crystallize.body_count);
+            env_pop_scope(ev->env);
+            stats_scope_pop(&ev->stats);
+            /* Restore original phase */
+            if (saved_phase != VTAG_CRYSTAL) {
+                LatValue cur;
+                if (env_get(ev->env, name, &cur)) {
+                    LatValue thawed = value_thaw(&cur);
+                    value_free(&cur);
+                    thawed.phase = saved_phase;
+                    env_set(ev->env, name, thawed);
+                }
+            }
+            if (!IS_OK(result)) return result;
+            return eval_ok(result.value);
+        }
+
+        case EXPR_SUBLIMATE: {
+            /* sublimate(expr) — shallow freeze: top-level locked, children mutable */
+            if (expr->as.freeze_expr->tag == EXPR_IDENT) {
+                const char *name = expr->as.freeze_expr->as.str_val;
+                LatValue val;
+                if (!env_get(ev->env, name, &val)) {
+                    char *err = NULL;
+                    (void)asprintf(&err, "sublimate(): undefined variable '%s'", name);
+                    return eval_err(err);
+                }
+                val.phase = VTAG_SUBLIMATED;  /* Only set top-level phase, don't recurse */
+                LatValue ret = value_deep_clone(&val);
+                env_set(ev->env, name, val);
+                record_history(ev, name);
+                EvalResult fr = fire_reactions(ev, name, "sublimated");
+                if (!IS_OK(fr)) { value_free(&ret); return fr; }
+                return eval_ok(ret);
+            }
+            EvalResult er = eval_expr(ev, expr->as.freeze_expr);
+            if (!IS_OK(er)) return er;
+            er.value.phase = VTAG_SUBLIMATED;
+            return eval_ok(er.value);
         }
 
         case EXPR_FORGE: {
@@ -5893,6 +6472,24 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             if (ev->mode == MODE_STRICT && value_is_crystal(target)) {
                 value_free(&valr.value);
                 return eval_err(strdup("strict mode: cannot assign to crystal value"));
+            }
+            /* Check sublimated phase for direct parent */
+            if (stmt->as.assign.target->tag == EXPR_FIELD_ACCESS) {
+                LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.field_access.object, &lv_err);
+                if (parent && parent->phase == VTAG_SUBLIMATED) {
+                    const char *fname = stmt->as.assign.target->as.field_access.field;
+                    char *err = NULL;
+                    (void)asprintf(&err, "cannot assign to field '%s' of sublimated value", fname);
+                    value_free(&valr.value);
+                    return eval_err(err);
+                }
+            }
+            if (stmt->as.assign.target->tag == EXPR_INDEX) {
+                LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &lv_err);
+                if (parent && parent->phase == VTAG_SUBLIMATED) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("cannot assign to index of sublimated value"));
+                }
             }
             /* Check per-field phase for struct field assignments */
             if (stmt->as.assign.target->tag == EXPR_FIELD_ACCESS) {
@@ -7869,9 +8466,12 @@ void evaluator_free(Evaluator *ev) {
     /* Free bonds */
     for (size_t i = 0; i < ev->bond_count; i++) {
         free(ev->bonds[i].target);
-        for (size_t j = 0; j < ev->bonds[i].dep_count; j++)
+        for (size_t j = 0; j < ev->bonds[i].dep_count; j++) {
             free(ev->bonds[i].deps[j]);
+            if (ev->bonds[i].dep_strategies) free(ev->bonds[i].dep_strategies[j]);
+        }
         free(ev->bonds[i].deps);
+        free(ev->bonds[i].dep_strategies);
     }
     free(ev->bonds);
     /* Free tracked variable histories */
@@ -7892,6 +8492,18 @@ void evaluator_free(Evaluator *ev) {
         free(ev->reactions[i].callbacks);
     }
     free(ev->reactions);
+    /* Free seed crystals */
+    for (size_t i = 0; i < ev->seed_count; i++) {
+        free(ev->seeds[i].var_name);
+        value_free(&ev->seeds[i].contract);
+    }
+    free(ev->seeds);
+    /* Free pressure entries */
+    for (size_t i = 0; i < ev->pressure_count; i++) {
+        free(ev->pressures[i].var_name);
+        free(ev->pressures[i].mode);
+    }
+    free(ev->pressures);
     value_set_heap(NULL);         /* disconnect before freeing the heap itself */
     dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
     lat_vec_free(&ev->gc_roots);

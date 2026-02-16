@@ -3,3 +3,5 @@ build/
 clat
 lattice-lang.org
 tinycomputers.io
+crash-*
+fuzz/corpus/
