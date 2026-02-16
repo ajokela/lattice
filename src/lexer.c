@@ -119,6 +119,7 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "as") == 0)       return TOK_AS;
     if (strcmp(ident, "crystallize") == 0) return TOK_CRYSTALLIZE;
     if (strcmp(ident, "sublimate") == 0) return TOK_SUBLIMATE;
+    if (strcmp(ident, "defer") == 0) return TOK_DEFER;
     return TOK_IDENT;
 }
 
@@ -288,11 +289,9 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
             return true;
         case '?':
             if (lex_peek(lex) == '?') { lex_advance(lex); *out = token_simple(TOK_QUESTION_QUESTION, line, col); }
-            else {
-                *err = NULL;
-                (void)asprintf(err, "%zu:%zu: unexpected character '?'", line, col);
-                return false;
-            }
+            else if (lex_peek(lex) == '.') { lex_advance(lex); *out = token_simple(TOK_QUESTION_DOT, line, col); }
+            else if (lex_peek(lex) == '[') { lex_advance(lex); *out = token_simple(TOK_QUESTION_LBRACKET, line, col); }
+            else { *out = token_simple(TOK_QUESTION, line, col); }
             return true;
         default:
             *err = NULL;

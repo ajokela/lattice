@@ -11,6 +11,15 @@
 /* Forward declare LatValue to avoid circular includes */
 struct LatValue;
 
+/* Select waiter: shared condvar for channel multiplexing */
+typedef struct LatSelectWaiter {
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_t *mutex;
+    pthread_cond_t  *cond;
+#endif
+    struct LatSelectWaiter *next;
+} LatSelectWaiter;
+
 typedef struct LatChannel {
     LatVec  buffer;       /* ring buffer of LatValue */
     bool    closed;
@@ -19,6 +28,7 @@ typedef struct LatChannel {
     pthread_mutex_t mutex;
     pthread_cond_t  cond_notempty;
 #endif
+    LatSelectWaiter *waiters;  /* linked list of select waiters */
 } LatChannel;
 
 /* Create a new channel (refcount=1) */
@@ -39,5 +49,15 @@ struct LatValue channel_recv(LatChannel *ch, bool *ok);
 
 /* Close the channel (no more sends allowed) */
 void channel_close(LatChannel *ch);
+
+/* Non-blocking receive. Returns true and sets *out if a value was available.
+ * Returns false if channel is empty (sets *closed_out if channel is closed). */
+bool channel_try_recv(LatChannel *ch, struct LatValue *out, bool *closed_out);
+
+/* Add a select waiter to be notified when data arrives or channel closes */
+void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w);
+
+/* Remove a select waiter from the channel */
+void channel_remove_waiter(LatChannel *ch, LatSelectWaiter *w);
 
 #endif /* CHANNEL_H */

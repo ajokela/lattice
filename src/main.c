@@ -44,6 +44,7 @@ static char *read_file(const char *path) {
 
 static bool gc_stress_mode = false;
 static bool no_regions_mode = false;
+static bool no_assertions_mode = false;
 static int  saved_argc = 0;
 static char **saved_argv = NULL;
 
@@ -97,6 +98,8 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         evaluator_set_gc_stress(ev, true);
     if (no_regions_mode)
         evaluator_set_no_regions(ev, true);
+    if (no_assertions_mode)
+        evaluator_set_assertions(ev, false);
     if (script_dir)
         evaluator_set_script_dir(ev, script_dir);
     evaluator_set_argv(ev, saved_argc, saved_argv);
@@ -183,6 +186,8 @@ static void repl(void) {
         evaluator_set_gc_stress(ev, true);
     if (no_regions_mode)
         evaluator_set_no_regions(ev, true);
+    if (no_assertions_mode)
+        evaluator_set_assertions(ev, false);
     evaluator_set_argv(ev, saved_argc, saved_argv);
 
     /* Keep programs alive so struct/fn/enum decl pointers stay valid */
@@ -321,6 +326,8 @@ static int run_test_file(const char *path) {
         evaluator_set_gc_stress(ev, true);
     if (no_regions_mode)
         evaluator_set_no_regions(ev, true);
+    if (no_assertions_mode)
+        evaluator_set_assertions(ev, false);
     evaluator_set_script_dir(ev, dir);
     evaluator_set_argv(ev, saved_argc, saved_argv);
 
@@ -350,6 +357,8 @@ int main(int argc, char **argv) {
                 gc_stress_mode = true;
             else if (strcmp(argv[i], "--no-regions") == 0)
                 no_regions_mode = true;
+            else if (strcmp(argv[i], "--no-assertions") == 0)
+                no_assertions_mode = true;
             else if (!test_path)
                 test_path = argv[i];
             else {
@@ -371,10 +380,12 @@ int main(int argc, char **argv) {
             gc_stress_mode = true;
         else if (strcmp(argv[i], "--no-regions") == 0)
             no_regions_mode = true;
+        else if (strcmp(argv[i], "--no-assertions") == 0)
+            no_assertions_mode = true;
         else if (!file)
             file = argv[i];
         else {
-            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [file.lat]\n");
+            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [--no-assertions] [file.lat]\n");
             return 1;
         }
     }

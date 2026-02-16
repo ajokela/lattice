@@ -701,6 +701,63 @@ static bool phase_compatible(PhaseTag value_phase, AstPhase param_phase) {
     return true;
 }
 
+static bool type_matches_value(const LatValue *val, const TypeExpr *te) {
+    if (!te || !te->name) return true;  /* no annotation = Any */
+    if (strcmp(te->name, "Any") == 0) return true;
+    if (te->kind == TYPE_ARRAY) {
+        if (val->type != VAL_ARRAY) return false;
+        if (!te->inner) return true;  /* [Any] or unspecified inner */
+        for (size_t i = 0; i < val->as.array.len; i++) {
+            if (!type_matches_value(&val->as.array.elems[i], te->inner))
+                return false;
+        }
+        return true;
+    }
+    /* Named types */
+    const char *n = te->name;
+    if (strcmp(n, "Int") == 0)    return val->type == VAL_INT;
+    if (strcmp(n, "Float") == 0)  return val->type == VAL_FLOAT;
+    if (strcmp(n, "String") == 0) return val->type == VAL_STR;
+    if (strcmp(n, "Bool") == 0)   return val->type == VAL_BOOL;
+    if (strcmp(n, "Nil") == 0)    return val->type == VAL_NIL;
+    if (strcmp(n, "Map") == 0)    return val->type == VAL_MAP;
+    if (strcmp(n, "Array") == 0)  return val->type == VAL_ARRAY;
+    if (strcmp(n, "Fn") == 0 || strcmp(n, "Closure") == 0) return val->type == VAL_CLOSURE;
+    if (strcmp(n, "Channel") == 0) return val->type == VAL_CHANNEL;
+    if (strcmp(n, "Range") == 0)  return val->type == VAL_RANGE;
+    if (strcmp(n, "Set") == 0)    return val->type == VAL_SET;
+    if (strcmp(n, "Tuple") == 0)  return val->type == VAL_TUPLE;
+    if (strcmp(n, "Number") == 0) return val->type == VAL_INT || val->type == VAL_FLOAT;
+    /* Struct name check */
+    if (val->type == VAL_STRUCT && val->as.strct.name)
+        return strcmp(val->as.strct.name, n) == 0;
+    /* Enum name check */
+    if (val->type == VAL_ENUM && val->as.enm.enum_name)
+        return strcmp(val->as.enm.enum_name, n) == 0;
+    return false;
+}
+
+static const char *value_type_display(const LatValue *val) {
+    switch (val->type) {
+        case VAL_INT:     return "Int";
+        case VAL_FLOAT:   return "Float";
+        case VAL_BOOL:    return "Bool";
+        case VAL_STR:     return "String";
+        case VAL_ARRAY:   return "Array";
+        case VAL_STRUCT:  return val->as.strct.name ? val->as.strct.name : "Struct";
+        case VAL_CLOSURE: return "Fn";
+        case VAL_UNIT:    return "Unit";
+        case VAL_NIL:     return "Nil";
+        case VAL_RANGE:   return "Range";
+        case VAL_MAP:     return "Map";
+        case VAL_CHANNEL: return "Channel";
+        case VAL_ENUM:    return val->as.enm.enum_name ? val->as.enm.enum_name : "Enum";
+        case VAL_SET:     return "Set";
+        case VAL_TUPLE:   return "Tuple";
+    }
+    return "Unknown";
+}
+
 static bool phase_signatures_match(const FnDecl *a, const FnDecl *b) {
     if (a->param_count != b->param_count) return false;
     for (size_t i = 0; i < a->param_count; i++) {
@@ -865,6 +922,18 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             return eval_err(err);
         }
     }
+    /* Runtime type checking */
+    for (size_t i = 0; i < decl->param_count && i < arg_count; i++) {
+        if (decl->params[i].is_variadic) break;
+        if (decl->params[i].ty.name && !type_matches_value(&args[i], &decl->params[i].ty)) {
+            char *err = NULL;
+            (void)asprintf(&err, "function '%s' parameter '%s' expects type %s, got %s",
+                           decl->name, decl->params[i].name,
+                           decl->params[i].ty.name,
+                           value_type_display(&args[i]));
+            return eval_err(err);
+        }
+    }
     stats_fn_call(&ev->stats);
     stats_scope_push(&ev->stats);
     env_push_scope(ev->env);
@@ -891,7 +960,101 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             env_define(ev->env, decl->params[i].name, def.value);
         }
     }
+    /* Evaluate require contracts */
+    if (ev->assertions_enabled && decl->contracts) {
+        for (size_t i = 0; i < decl->contract_count; i++) {
+            if (decl->contracts[i].is_ensure) continue;
+            EvalResult cr = eval_expr(ev, decl->contracts[i].condition);
+            if (!IS_OK(cr)) { env_pop_scope(ev->env); stats_scope_pop(&ev->stats); return cr; }
+            bool truthy = (cr.value.type == VAL_BOOL && cr.value.as.bool_val);
+            value_free(&cr.value);
+            if (!truthy) {
+                char *err = NULL;
+                if (decl->contracts[i].message)
+                    (void)asprintf(&err, "require failed in '%s': %s", decl->name, decl->contracts[i].message);
+                else
+                    (void)asprintf(&err, "require contract failed in '%s'", decl->name);
+                env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
+                return eval_err(err);
+            }
+        }
+    }
+
     EvalResult result = eval_block_stmts(ev, decl->body, decl->body_count);
+
+    /* Evaluate ensure contracts on the return value */
+    if (ev->assertions_enabled && decl->contracts && (IS_OK(result) || (IS_SIGNAL(result) && result.cf.tag == CF_RETURN))) {
+        LatValue ret_val = IS_OK(result) ? result.value : result.cf.value;
+        for (size_t i = 0; i < decl->contract_count; i++) {
+            if (!decl->contracts[i].is_ensure) continue;
+            /* Ensure condition is a closure — call it with the return value */
+            EvalResult cc = eval_expr(ev, decl->contracts[i].condition);
+            if (!IS_OK(cc)) {
+                if (IS_OK(result)) value_free(&result.value);
+                else value_free(&result.cf.value);
+                env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
+                return cc;
+            }
+            if (cc.value.type == VAL_CLOSURE) {
+                LatValue arg = value_deep_clone(&ret_val);
+                LatValue call_args[1] = { arg };
+                EvalResult er = call_closure(ev, cc.value.as.closure.param_names,
+                    cc.value.as.closure.param_count, cc.value.as.closure.body,
+                    cc.value.as.closure.captured_env, call_args, 1,
+                    cc.value.as.closure.default_values, cc.value.as.closure.has_variadic);
+                value_free(&arg);
+                value_free(&cc.value);
+                if (!IS_OK(er)) {
+                    if (IS_OK(result)) value_free(&result.value);
+                    else value_free(&result.cf.value);
+                    env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
+                    return er;
+                }
+                bool truthy = (er.value.type == VAL_BOOL && er.value.as.bool_val);
+                value_free(&er.value);
+                if (!truthy) {
+                    if (IS_OK(result)) value_free(&result.value);
+                    else value_free(&result.cf.value);
+                    char *err = NULL;
+                    if (decl->contracts[i].message)
+                        (void)asprintf(&err, "ensure failed in '%s': %s", decl->name, decl->contracts[i].message);
+                    else
+                        (void)asprintf(&err, "ensure contract failed in '%s'", decl->name);
+                    env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
+                    return eval_err(err);
+                }
+            } else {
+                /* ensure with a non-closure: evaluate as boolean directly */
+                bool truthy = (cc.value.type == VAL_BOOL && cc.value.as.bool_val);
+                value_free(&cc.value);
+                if (!truthy) {
+                    if (IS_OK(result)) value_free(&result.value);
+                    else value_free(&result.cf.value);
+                    char *err = NULL;
+                    if (decl->contracts[i].message)
+                        (void)asprintf(&err, "ensure failed in '%s': %s", decl->name, decl->contracts[i].message);
+                    else
+                        (void)asprintf(&err, "ensure contract failed in '%s'", decl->name);
+                    env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
+                    return eval_err(err);
+                }
+            }
+        }
+    }
+
+    /* Return type checking */
+    if (decl->return_type && (IS_OK(result) || (IS_SIGNAL(result) && result.cf.tag == CF_RETURN))) {
+        LatValue *ret_val = IS_OK(result) ? &result.value : &result.cf.value;
+        if (!type_matches_value(ret_val, decl->return_type)) {
+            char *err = NULL;
+            (void)asprintf(&err, "function '%s' return type expects %s, got %s",
+                           decl->name, decl->return_type->name, value_type_display(ret_val));
+            if (IS_OK(result)) value_free(&result.value);
+            else value_free(&result.cf.value);
+            env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
+            return eval_err(err);
+        }
+    }
 
     /* Before popping the scope, capture fluid parameter values for write-back */
     if (writeback_out) {
@@ -4372,6 +4535,30 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_unit());
                 }
 
+                /// @builtin debug_assert(cond: Any, msg?: String) -> Unit
+                /// @category Core
+                /// Assert that a condition is truthy (no-op when assertions are disabled via --no-assertions).
+                /// @example debug_assert(x > 0, "x must be positive")
+                if (strcmp(fn_name, "debug_assert") == 0) {
+                    if (argc < 1 || argc > 2) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("debug_assert() expects 1 or 2 arguments")); }
+                    if (ev->assertions_enabled) {
+                        bool truthy = value_is_truthy(&args[0]);
+                        if (!truthy) {
+                            char *msg = NULL;
+                            if (argc == 2 && args[1].type == VAL_STR)
+                                msg = strdup(args[1].as.str_val);
+                            else
+                                msg = strdup("debug assertion failed");
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                            free(args);
+                            return eval_err(msg);
+                        }
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
                 /* ── Functional programming builtins ── */
 
                 /// @builtin identity(val: Any) -> Any
@@ -4873,6 +5060,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
             EvalResult objr = eval_expr(ev, expr->as.method_call.object);
             if (!IS_OK(objr)) return objr;
+            /* Optional chaining: if receiver is nil, return nil */
+            if (expr->as.method_call.optional && objr.value.type == VAL_NIL) {
+                value_free(&objr.value);
+                return eval_ok(value_nil());
+            }
             GC_PUSH(ev, &objr.value);
             size_t argc = expr->as.method_call.arg_count;
             LatValue *args = malloc((argc < 1 ? 1 : argc) * sizeof(LatValue));
@@ -4901,6 +5093,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         case EXPR_FIELD_ACCESS: {
             EvalResult objr = eval_expr(ev, expr->as.field_access.object);
             if (!IS_OK(objr)) return objr;
+            /* Optional chaining: if receiver is nil, return nil */
+            if (expr->as.field_access.optional && objr.value.type == VAL_NIL) {
+                value_free(&objr.value);
+                return eval_ok(value_nil());
+            }
             /* Tuple numeric field access: tuple.0, tuple.1, etc. */
             if (objr.value.type == VAL_TUPLE) {
                 const char *field = expr->as.field_access.field;
@@ -4959,6 +5156,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         case EXPR_INDEX: {
             EvalResult objr = eval_expr(ev, expr->as.index.object);
             if (!IS_OK(objr)) return objr;
+            /* Optional chaining: if receiver is nil, return nil */
+            if (expr->as.index.optional && objr.value.type == VAL_NIL) {
+                value_free(&objr.value);
+                return eval_ok(value_nil());
+            }
             GC_PUSH(ev, &objr.value);
             EvalResult idxr = eval_expr(ev, expr->as.index.index);
             GC_POP(ev);
@@ -6175,6 +6377,205 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             return eval_ok(enm);
         }
 
+        case EXPR_TRY_PROPAGATE: {
+            EvalResult inner = eval_expr(ev, expr->as.try_propagate_expr);
+            if (!inner.ok) return inner;
+            if (inner.value.type != VAL_MAP) {
+                value_free(&inner.value);
+                return eval_err(strdup("? operator requires a Result map (got non-Map value)"));
+            }
+            LatValue *tag = lat_map_get(inner.value.as.map.map, "tag");
+            if (!tag || tag->type != VAL_STR) {
+                value_free(&inner.value);
+                return eval_err(strdup("? operator requires a Map with a string \"tag\" field"));
+            }
+            if (strcmp(tag->as.str_val, "ok") == 0) {
+                LatValue *val = lat_map_get(inner.value.as.map.map, "value");
+                LatValue result = val ? value_deep_clone(val) : value_nil();
+                value_free(&inner.value);
+                return eval_ok(result);
+            }
+            if (strcmp(tag->as.str_val, "err") == 0) {
+                /* Propagate: return from enclosing function with the err Map */
+                return eval_signal(CF_RETURN, inner.value);
+            }
+            value_free(&inner.value);
+            return eval_err(strdup("? operator: tag must be \"ok\" or \"err\""));
+        }
+
+        case EXPR_SELECT: {
+#ifdef __EMSCRIPTEN__
+            return eval_err(strdup("select is not supported in WASM builds"));
+#else
+            size_t arm_count = expr->as.select_expr.arm_count;
+            SelectArm *arms = expr->as.select_expr.arms;
+
+            /* Find default and timeout arms */
+            int default_idx = -1;
+            int timeout_idx = -1;
+            for (size_t i = 0; i < arm_count; i++) {
+                if (arms[i].is_default) default_idx = (int)i;
+                if (arms[i].is_timeout) timeout_idx = (int)i;
+            }
+
+            /* Evaluate all channel expressions upfront */
+            LatChannel **channels = calloc(arm_count, sizeof(LatChannel *));
+            for (size_t i = 0; i < arm_count; i++) {
+                if (arms[i].is_default || arms[i].is_timeout) continue;
+                EvalResult cer = eval_expr(ev, arms[i].channel_expr);
+                if (!IS_OK(cer)) { free(channels); return cer; }
+                if (cer.value.type != VAL_CHANNEL) {
+                    value_free(&cer.value);
+                    free(channels);
+                    return eval_err(strdup("select arm: expression is not a Channel"));
+                }
+                channels[i] = cer.value.as.channel.ch;
+                channel_retain(channels[i]);
+                value_free(&cer.value);
+            }
+
+            /* Evaluate timeout if present */
+            long timeout_ms = -1;
+            if (timeout_idx >= 0) {
+                EvalResult ter = eval_expr(ev, arms[timeout_idx].timeout_expr);
+                if (!IS_OK(ter)) {
+                    for (size_t i = 0; i < arm_count; i++)
+                        if (channels[i]) channel_release(channels[i]);
+                    free(channels);
+                    return ter;
+                }
+                if (ter.value.type != VAL_INT) {
+                    value_free(&ter.value);
+                    for (size_t i = 0; i < arm_count; i++)
+                        if (channels[i]) channel_release(channels[i]);
+                    free(channels);
+                    return eval_err(strdup("select timeout must be an integer (milliseconds)"));
+                }
+                timeout_ms = (long)ter.value.as.int_val;
+                value_free(&ter.value);
+            }
+
+            /* Build shuffled index array for fairness */
+            size_t ch_arm_count = 0;
+            size_t *indices = malloc(arm_count * sizeof(size_t));
+            for (size_t i = 0; i < arm_count; i++) {
+                if (!arms[i].is_default && !arms[i].is_timeout)
+                    indices[ch_arm_count++] = i;
+            }
+            /* Fisher-Yates shuffle */
+            for (size_t i = ch_arm_count; i > 1; i--) {
+                size_t j = (size_t)rand() % i;
+                size_t tmp = indices[i-1];
+                indices[i-1] = indices[j];
+                indices[j] = tmp;
+            }
+
+            /* Set up waiter for blocking */
+            pthread_mutex_t sel_mutex = PTHREAD_MUTEX_INITIALIZER;
+            pthread_cond_t  sel_cond  = PTHREAD_COND_INITIALIZER;
+            LatSelectWaiter waiter = {
+                .mutex = &sel_mutex,
+                .cond  = &sel_cond,
+                .next  = NULL,
+            };
+
+            EvalResult select_result = eval_ok(value_unit());
+            bool found = false;
+
+            /* Compute deadline for timeout */
+            struct timespec deadline;
+            if (timeout_ms >= 0) {
+                clock_gettime(CLOCK_REALTIME, &deadline);
+                deadline.tv_sec  += timeout_ms / 1000;
+                deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+                if (deadline.tv_nsec >= 1000000000L) {
+                    deadline.tv_sec++;
+                    deadline.tv_nsec -= 1000000000L;
+                }
+            }
+
+            for (;;) {
+                /* Try non-blocking recv on each channel arm (shuffled order) */
+                bool all_closed = true;
+                for (size_t k = 0; k < ch_arm_count; k++) {
+                    size_t i = indices[k];
+                    LatChannel *ch = channels[i];
+                    LatValue recv_val;
+                    bool closed = false;
+                    if (channel_try_recv(ch, &recv_val, &closed)) {
+                        /* Got a value — bind and execute body */
+                        env_push_scope(ev->env);
+                        if (arms[i].binding_name)
+                            env_define(ev->env, arms[i].binding_name, recv_val);
+                        else
+                            value_free(&recv_val);
+                        select_result = eval_block_stmts(ev, arms[i].body, arms[i].body_count);
+                        env_pop_scope(ev->env);
+                        found = true;
+                        break;
+                    }
+                    if (!closed) all_closed = false;
+                }
+                if (found) break;
+
+                if (all_closed && ch_arm_count > 0) {
+                    /* All channels closed — execute default if present, otherwise return unit */
+                    if (default_idx >= 0) {
+                        env_push_scope(ev->env);
+                        select_result = eval_block_stmts(ev, arms[default_idx].body, arms[default_idx].body_count);
+                        env_pop_scope(ev->env);
+                    }
+                    break;
+                }
+
+                /* If there's a default arm, execute it immediately (non-blocking select) */
+                if (default_idx >= 0) {
+                    env_push_scope(ev->env);
+                    select_result = eval_block_stmts(ev, arms[default_idx].body, arms[default_idx].body_count);
+                    env_pop_scope(ev->env);
+                    break;
+                }
+
+                /* Block: register waiter on all channels, then wait */
+                for (size_t k = 0; k < ch_arm_count; k++)
+                    channel_add_waiter(channels[indices[k]], &waiter);
+
+                pthread_mutex_lock(&sel_mutex);
+                if (timeout_ms >= 0) {
+                    int rc = pthread_cond_timedwait(&sel_cond, &sel_mutex, &deadline);
+                    if (rc != 0) {
+                        /* Timeout expired */
+                        pthread_mutex_unlock(&sel_mutex);
+                        for (size_t k = 0; k < ch_arm_count; k++)
+                            channel_remove_waiter(channels[indices[k]], &waiter);
+                        if (timeout_idx >= 0) {
+                            env_push_scope(ev->env);
+                            select_result = eval_block_stmts(ev, arms[timeout_idx].body, arms[timeout_idx].body_count);
+                            env_pop_scope(ev->env);
+                        }
+                        found = true;
+                        break;
+                    }
+                } else {
+                    pthread_cond_wait(&sel_cond, &sel_mutex);
+                }
+                pthread_mutex_unlock(&sel_mutex);
+
+                /* Remove waiters and retry */
+                for (size_t k = 0; k < ch_arm_count; k++)
+                    channel_remove_waiter(channels[indices[k]], &waiter);
+            }
+
+            pthread_mutex_destroy(&sel_mutex);
+            pthread_cond_destroy(&sel_cond);
+            free(indices);
+            for (size_t i = 0; i < arm_count; i++)
+                if (channels[i]) channel_release(channels[i]);
+            free(channels);
+            return select_result;
+#endif
+        }
+
         case EXPR_SPREAD:
             return eval_err(strdup("spread operator ... can only be used inside array literals"));
     }
@@ -6691,6 +7092,19 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
         case STMT_BREAK:    return eval_signal(CF_BREAK, value_unit());
         case STMT_CONTINUE: return eval_signal(CF_CONTINUE, value_unit());
 
+        case STMT_DEFER: {
+            /* Push to defer stack — don't execute now */
+            if (ev->defer_count >= ev->defer_cap) {
+                ev->defer_cap = ev->defer_cap < 8 ? 8 : ev->defer_cap * 2;
+                ev->defer_stack = realloc(ev->defer_stack, ev->defer_cap * sizeof(DeferEntry));
+            }
+            ev->defer_stack[ev->defer_count].body = stmt->as.defer.body;
+            ev->defer_stack[ev->defer_count].body_count = stmt->as.defer.body_count;
+            ev->defer_stack[ev->defer_count].scope_depth = ev->stats.current_scope_depth;
+            ev->defer_count++;
+            return eval_ok(value_unit());
+        }
+
         case STMT_DESTRUCTURE: {
             EvalResult vr = eval_expr(ev, stmt->as.destructure.value);
             if (!IS_OK(vr)) return vr;
@@ -6852,17 +7266,47 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
     return eval_err(strdup("unknown statement type"));
 }
 
+/* Run deferred blocks for the current scope depth (LIFO) */
+static EvalResult run_defers_for_scope(Evaluator *ev, size_t scope_depth) {
+    EvalResult first_err = { .ok = true, .error = NULL };
+    first_err.value = value_unit();
+    first_err.cf.tag = CF_NONE;
+    while (ev->defer_count > 0 && ev->defer_stack[ev->defer_count - 1].scope_depth >= scope_depth) {
+        DeferEntry de = ev->defer_stack[--ev->defer_count];
+        EvalResult dr = eval_block_stmts(ev, de.body, de.body_count);
+        if (!IS_OK(dr) && first_err.ok) {
+            first_err = dr;
+        } else if (!IS_OK(dr)) {
+            if (IS_ERR(dr)) free(dr.error);
+        }
+    }
+    return first_err;
+}
+
 static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
+    size_t defer_base = ev->defer_count;
+    size_t scope_depth = ev->stats.current_scope_depth;
     LatValue last = value_unit();
     GC_PUSH(ev, &last);
     for (size_t i = 0; i < count; i++) {
         gc_maybe_collect(ev);
         value_free(&last);
         EvalResult r = eval_stmt(ev, stmts[i]);
-        if (!IS_OK(r)) { GC_POP(ev); return r; }
+        if (!IS_OK(r)) {
+            /* Run defers before propagating error/signal */
+            EvalResult dr = run_defers_for_scope(ev, scope_depth);
+            GC_POP(ev);
+            if (!dr.ok && r.ok) return dr;
+            if (!dr.ok && IS_ERR(dr)) free(dr.error);
+            return r;
+        }
         last = r.value;
     }
+    /* Run defers on normal exit */
+    EvalResult dr = run_defers_for_scope(ev, scope_depth);
+    (void)defer_base;
     GC_POP(ev);
+    if (!dr.ok) { value_free(&last); return dr; }
     return eval_ok(last);
 }
 
@@ -8427,6 +8871,10 @@ Evaluator *evaluator_new(void) {
     ev->reactions = NULL;
     ev->reaction_count = 0;
     ev->reaction_cap = 0;
+    ev->defer_stack = NULL;
+    ev->defer_count = 0;
+    ev->defer_cap = 0;
+    ev->assertions_enabled = true;
     value_set_heap(ev->heap);
     return ev;
 }
@@ -8504,6 +8952,7 @@ void evaluator_free(Evaluator *ev) {
         free(ev->pressures[i].mode);
     }
     free(ev->pressures);
+    free(ev->defer_stack);
     value_set_heap(NULL);         /* disconnect before freeing the heap itself */
     dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
     lat_vec_free(&ev->gc_roots);
@@ -8527,6 +8976,10 @@ void evaluator_set_script_dir(Evaluator *ev, const char *dir) {
 void evaluator_set_argv(Evaluator *ev, int argc, char **argv) {
     ev->prog_argc = argc;
     ev->prog_argv = argv;
+}
+
+void evaluator_set_assertions(Evaluator *ev, bool enabled) {
+    ev->assertions_enabled = enabled;
 }
 
 char *evaluator_run(Evaluator *ev, const Program *prog) {

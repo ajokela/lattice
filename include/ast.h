@@ -87,6 +87,8 @@ typedef enum {
     EXPR_TUPLE,
     EXPR_CRYSTALLIZE,
     EXPR_SUBLIMATE,
+    EXPR_TRY_PROPAGATE,
+    EXPR_SELECT,
 } ExprTag;
 
 /* Statement types */
@@ -99,6 +101,7 @@ typedef enum {
     STMT_BREAK, STMT_CONTINUE,
     STMT_DESTRUCTURE,
     STMT_IMPORT,
+    STMT_DEFER,
 } StmtTag;
 
 /* Struct field in a struct literal */
@@ -120,9 +123,9 @@ struct Expr {
         struct { UnaryOpKind op; Expr *operand; } unaryop;
 
         struct { Expr *func; Expr **args; size_t arg_count; } call;
-        struct { Expr *object; char *method; Expr **args; size_t arg_count; } method_call;
-        struct { Expr *object; char *field; } field_access;
-        struct { Expr *object; Expr *index; } index;
+        struct { Expr *object; char *method; Expr **args; size_t arg_count; bool optional; } method_call;
+        struct { Expr *object; char *field; bool optional; } field_access;
+        struct { Expr *object; Expr *index; bool optional; } index;
 
         struct { Expr **elems; size_t count; } array;
         struct { char *name; FieldInit *fields; size_t field_count; } struct_lit;
@@ -167,8 +170,24 @@ struct Expr {
             Expr **args;
             size_t arg_count;
         } enum_variant;
+        Expr *try_propagate_expr;  /* EXPR_TRY_PROPAGATE: inner expr */
+        struct {
+            struct SelectArm *arms;
+            size_t arm_count;
+        } select_expr;
     } as;
 };
+
+/* Select arm for channel multiplexing */
+typedef struct SelectArm {
+    char *binding_name;   /* variable to bind received value (nullable for default/timeout) */
+    Expr *channel_expr;   /* channel expression (nullable for default/timeout) */
+    Stmt **body;
+    size_t body_count;
+    bool is_default;
+    bool is_timeout;
+    Expr *timeout_expr;   /* timeout duration in ms (only if is_timeout) */
+} SelectArm;
 
 /* Statement node */
 struct Stmt {
@@ -209,6 +228,10 @@ struct Stmt {
             char **selective_names;     /* nullable — { name1, name2 } */
             size_t selective_count;
         } import;
+        struct {
+            Stmt **body;
+            size_t body_count;
+        } defer;
     } as;
 };
 
@@ -220,12 +243,21 @@ typedef struct {
     bool is_variadic;     /* true for ...rest parameters */
 } Param;
 
+/* Contract clause for require/ensure */
+typedef struct {
+    Expr *condition;   /* boolean expr for require, closure for ensure */
+    char *message;     /* error message (nullable) */
+    bool is_ensure;    /* false=require, true=ensure */
+} ContractClause;
+
 /* Function declaration */
 struct FnDecl {
     char    *name;
     Param   *params;
     size_t   param_count;
     TypeExpr *return_type;  /* nullable */
+    ContractClause *contracts;  /* nullable */
+    size_t   contract_count;
     Stmt   **body;
     size_t   body_count;
     FnDecl  *next_overload; /* phase-dispatch chain, NULL if none */
@@ -324,6 +356,8 @@ Expr *expr_spread(Expr *inner);
 Expr *expr_tuple(Expr **elems, size_t count);
 Expr *expr_crystallize(Expr *expr, Stmt **body, size_t body_count);
 Expr *expr_sublimate(Expr *inner);
+Expr *expr_try_propagate(Expr *inner);
+Expr *expr_select(SelectArm *arms, size_t arm_count);
 
 /* Pattern constructors */
 Pattern *pattern_literal(Expr *lit);
@@ -346,6 +380,7 @@ Stmt *stmt_continue(void);
 Stmt *stmt_destructure(AstPhase phase, DestructKind kind, char **names, size_t name_count,
                        char *rest_name, Expr *value);
 Stmt *stmt_import(char *path, char *alias, char **selective, size_t count);
+Stmt *stmt_defer(Stmt **body, size_t count);
 
 /* ── Clone (for lvalue AST expressions in desugaring) ── */
 Expr *expr_clone_ast(const Expr *e);

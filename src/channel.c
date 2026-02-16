@@ -50,6 +50,12 @@ bool channel_send(LatChannel *ch, LatValue val) {
     lat_vec_push(&ch->buffer, &val);
 #ifndef __EMSCRIPTEN__
     pthread_cond_signal(&ch->cond_notempty);
+    /* Wake any select waiters */
+    for (LatSelectWaiter *w = ch->waiters; w; w = w->next) {
+        pthread_mutex_lock(w->mutex);
+        pthread_cond_signal(w->cond);
+        pthread_mutex_unlock(w->mutex);
+    }
     pthread_mutex_unlock(&ch->mutex);
 #endif
     return true;
@@ -94,6 +100,62 @@ void channel_close(LatChannel *ch) {
     ch->closed = true;
 #ifndef __EMSCRIPTEN__
     pthread_cond_broadcast(&ch->cond_notempty);
+    /* Wake any select waiters */
+    for (LatSelectWaiter *w = ch->waiters; w; w = w->next) {
+        pthread_mutex_lock(w->mutex);
+        pthread_cond_signal(w->cond);
+        pthread_mutex_unlock(w->mutex);
+    }
     pthread_mutex_unlock(&ch->mutex);
+#endif
+}
+
+bool channel_try_recv(LatChannel *ch, LatValue *out, bool *closed_out) {
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_lock(&ch->mutex);
+#endif
+    if (ch->buffer.len == 0) {
+        if (closed_out) *closed_out = ch->closed;
+#ifndef __EMSCRIPTEN__
+        pthread_mutex_unlock(&ch->mutex);
+#endif
+        return false;
+    }
+    memcpy(out, lat_vec_get(&ch->buffer, 0), sizeof(LatValue));
+    if (ch->buffer.len > 1) {
+        memmove(ch->buffer.data,
+                (char *)ch->buffer.data + ch->buffer.elem_size,
+                (ch->buffer.len - 1) * ch->buffer.elem_size);
+    }
+    ch->buffer.len--;
+    if (closed_out) *closed_out = false;
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_unlock(&ch->mutex);
+#endif
+    return true;
+}
+
+void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w) {
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_lock(&ch->mutex);
+    w->next = ch->waiters;
+    ch->waiters = w;
+    pthread_mutex_unlock(&ch->mutex);
+#else
+    (void)ch; (void)w;
+#endif
+}
+
+void channel_remove_waiter(LatChannel *ch, LatSelectWaiter *w) {
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_lock(&ch->mutex);
+    LatSelectWaiter **pp = &ch->waiters;
+    while (*pp) {
+        if (*pp == w) { *pp = w->next; break; }
+        pp = &(*pp)->next;
+    }
+    pthread_mutex_unlock(&ch->mutex);
+#else
+    (void)ch; (void)w;
 #endif
 }

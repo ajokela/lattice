@@ -1150,3 +1150,506 @@ TEST(eval_arena_closure_region_collected) {
     free(output);
     cleanup_run(ev, &tokens, &prog);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Feature 1: Runtime Type Checking
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(type_check_correct_types) {
+    ASSERT_RUNS(
+        "fn add(a: Int, b: Int) -> Int { return a + b }\n"
+        "fn main() { print(add(1, 2)) }\n"
+    );
+}
+
+TEST(type_check_wrong_param_type) {
+    ASSERT_FAILS(
+        "fn add(a: Int, b: Int) -> Int { return a + b }\n"
+        "fn main() { add(1, \"hello\") }\n"
+    );
+}
+
+TEST(type_check_no_annotation_accepts_any) {
+    ASSERT_RUNS(
+        "fn greet(x: Any) { print(x) }\n"
+        "fn main() { greet(42)\n greet(\"hi\")\n greet(nil) }\n"
+    );
+}
+
+TEST(type_check_number_union) {
+    ASSERT_RUNS(
+        "fn double(x: Number) -> Number { return x * 2 }\n"
+        "fn main() { print(double(5))\n print(double(2.5)) }\n"
+    );
+}
+
+TEST(type_check_number_rejects_string) {
+    ASSERT_FAILS(
+        "fn double(x: Number) -> Number { return x * 2 }\n"
+        "fn main() { double(\"hi\") }\n"
+    );
+}
+
+TEST(type_check_return_type_mismatch) {
+    ASSERT_FAILS(
+        "fn get_int() -> Int { return \"oops\" }\n"
+        "fn main() { get_int() }\n"
+    );
+}
+
+TEST(type_check_struct_name) {
+    ASSERT_RUNS(
+        "struct Point { x: Int, y: Int }\n"
+        "fn origin() -> Point { return Point { x: 0, y: 0 } }\n"
+        "fn main() { print(origin().x) }\n"
+    );
+}
+
+TEST(type_check_struct_name_mismatch) {
+    ASSERT_FAILS(
+        "struct Point { x: Int, y: Int }\n"
+        "struct Vec { x: Int, y: Int }\n"
+        "fn get_point() -> Point { return Vec { x: 0, y: 0 } }\n"
+        "fn main() { get_point() }\n"
+    );
+}
+
+TEST(type_check_array_inner) {
+    ASSERT_RUNS(
+        "fn sum(nums: [Int]) -> Int {\n"
+        "    flux total = 0\n"
+        "    for n in nums { total += n }\n"
+        "    return total\n"
+        "}\n"
+        "fn main() { print(sum([1, 2, 3])) }\n"
+    );
+}
+
+TEST(type_check_any_accepts_all) {
+    ASSERT_RUNS(
+        "fn id(x: Any) -> Any { return x }\n"
+        "fn main() { print(id(42))\n print(id(\"hi\")) }\n"
+    );
+}
+
+TEST(type_check_enum_name) {
+    ASSERT_RUNS(
+        "enum Color { Red, Green, Blue }\n"
+        "fn is_red(c: Color) -> Bool { return c == Color::Red }\n"
+        "fn main() { print(is_red(Color::Red)) }\n"
+    );
+}
+
+TEST(type_check_closure_type) {
+    ASSERT_RUNS(
+        "fn apply(f: Fn, x: Int) -> Int { return f(x) }\n"
+        "fn main() { print(apply(|x| { x * 2 }, 5)) }\n"
+    );
+}
+
+TEST(type_check_map_type) {
+    ASSERT_RUNS(
+        "fn get_keys(m: Map) -> Array { return m.keys() }\n"
+        "fn main() {\n"
+        "    let m = Map::new()\n"
+        "    m.set(\"a\", 1)\n"
+        "    print(len(get_keys(m)))\n"
+        "}\n"
+    );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Feature 2: defer Statement
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(defer_basic_block_exit) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    flux result = \"\"\n"
+        "    {\n"
+        "        defer { result += \"deferred\" }\n"
+        "        result += \"body\"\n"
+        "    }\n"
+        "    assert(result == \"bodydeferred\", result)\n"
+        "}\n"
+    );
+}
+
+TEST(defer_lifo_order) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    flux order = \"\"\n"
+        "    {\n"
+        "        defer { order += \"1\" }\n"
+        "        defer { order += \"2\" }\n"
+        "        defer { order += \"3\" }\n"
+        "    }\n"
+        "    assert(order == \"321\", \"expected 321, got \" + order)\n"
+        "}\n"
+    );
+}
+
+TEST(defer_on_early_return) {
+    ASSERT_RUNS(
+        "flux g_log = \"\"\n"
+        "fn work() {\n"
+        "    defer { g_log += \"deferred\" }\n"
+        "    g_log += \"before\"\n"
+        "    return\n"
+        "}\n"
+        "fn main() {\n"
+        "    work()\n"
+        "    assert(g_log == \"beforedeferred\", g_log)\n"
+        "}\n"
+    );
+}
+
+TEST(defer_in_loop) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    flux count = 0\n"
+        "    for i in 0..3 {\n"
+        "        defer { count += 1 }\n"
+        "    }\n"
+        "    assert(count == 3, \"expected 3, got \" + to_string(count))\n"
+        "}\n"
+    );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Feature 3: Optional Chaining ?.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(optional_chain_nil_field) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    assert(x?.name == nil)\n"
+        "}\n"
+    );
+}
+
+TEST(optional_chain_non_nil_field) {
+    ASSERT_RUNS(
+        "struct Pt { x: Int, y: Int }\n"
+        "fn main() {\n"
+        "    let p = Pt { x: 1, y: 2 }\n"
+        "    assert(p?.x == 1)\n"
+        "}\n"
+    );
+}
+
+TEST(optional_chain_deep) {
+    ASSERT_RUNS(
+        "struct Inner { val: Int }\n"
+        "struct Outer { inner: Inner }\n"
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    assert(x?.inner?.val == nil)\n"
+        "    let o = Outer { inner: Inner { val: 42 } }\n"
+        "    assert(o?.inner?.val == 42)\n"
+        "}\n"
+    );
+}
+
+TEST(optional_chain_method_on_nil) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    assert(x?.len() == nil)\n"
+        "}\n"
+    );
+}
+
+TEST(optional_chain_index_on_nil) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    assert(x?[0] == nil)\n"
+        "}\n"
+    );
+}
+
+TEST(optional_chain_with_nil_coalesce) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    let result = x?.name ?? \"fallback\"\n"
+        "    assert(result == \"fallback\")\n"
+        "}\n"
+    );
+}
+
+TEST(optional_chain_non_optional_on_nil_errors) {
+    ASSERT_FAILS(
+        "fn main() {\n"
+        "    let x = nil\n"
+        "    let y = x?.name.len()\n"
+        "}\n"
+    );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Feature 4: Result ? Operator
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(try_propagate_ok_unwraps) {
+    ASSERT_RUNS(
+        "fn make_ok() -> Map {\n"
+        "    let r = Map::new()\n"
+        "    r.set(\"tag\", \"ok\")\n"
+        "    r.set(\"value\", 42)\n"
+        "    return r\n"
+        "}\n"
+        "fn process() -> Map {\n"
+        "    let v = make_ok()?\n"
+        "    let r = Map::new()\n"
+        "    r.set(\"tag\", \"ok\")\n"
+        "    r.set(\"value\", v + 1)\n"
+        "    return r\n"
+        "}\n"
+        "fn main() {\n"
+        "    let result = process()\n"
+        "    assert(result.get(\"value\") == 43)\n"
+        "}\n"
+    );
+}
+
+TEST(try_propagate_err_returns) {
+    ASSERT_RUNS(
+        "fn make_err() -> Map {\n"
+        "    let r = Map::new()\n"
+        "    r.set(\"tag\", \"err\")\n"
+        "    r.set(\"value\", \"failed\")\n"
+        "    return r\n"
+        "}\n"
+        "fn process() -> Map {\n"
+        "    let v = make_err()?\n"
+        "    let r = Map::new()\n"
+        "    r.set(\"tag\", \"ok\")\n"
+        "    r.set(\"value\", v + 1)\n"
+        "    return r\n"
+        "}\n"
+        "fn main() {\n"
+        "    let result = process()\n"
+        "    assert(result.get(\"tag\") == \"err\")\n"
+        "    assert(result.get(\"value\") == \"failed\")\n"
+        "}\n"
+    );
+}
+
+TEST(try_propagate_chain) {
+    ASSERT_RUNS(
+        "fn ok_val(v: Any) -> Map {\n"
+        "    let r = Map::new()\n"
+        "    r.set(\"tag\", \"ok\")\n"
+        "    r.set(\"value\", v)\n"
+        "    return r\n"
+        "}\n"
+        "fn step1() -> Map { return ok_val(10) }\n"
+        "fn step2() -> Map { return ok_val(20) }\n"
+        "fn process() -> Map {\n"
+        "    let a = step1()?\n"
+        "    let b = step2()?\n"
+        "    return ok_val(a + b)\n"
+        "}\n"
+        "fn main() {\n"
+        "    let r = process()\n"
+        "    assert(r.get(\"value\") == 30)\n"
+        "}\n"
+    );
+}
+
+TEST(try_propagate_on_non_map_errors) {
+    ASSERT_FAILS(
+        "fn main() {\n"
+        "    let x = 42?\n"
+        "}\n"
+    );
+}
+
+TEST(try_propagate_skips_code_after_err) {
+    ASSERT_RUNS(
+        "flux reached = false\n"
+        "fn make_err() -> Map {\n"
+        "    let r = Map::new()\n"
+        "    r.set(\"tag\", \"err\")\n"
+        "    r.set(\"value\", \"fail\")\n"
+        "    return r\n"
+        "}\n"
+        "fn process() -> Map {\n"
+        "    let v = make_err()?\n"
+        "    reached = true\n"
+        "    let r = Map::new()\n"
+        "    r.set(\"tag\", \"ok\")\n"
+        "    r.set(\"value\", v)\n"
+        "    return r\n"
+        "}\n"
+        "fn main() {\n"
+        "    let result = process()\n"
+        "    assert(reached == false, \"should not have reached code after ?\")\n"
+        "}\n"
+    );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Feature 5: require/ensure Contracts
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(require_passes) {
+    ASSERT_RUNS(
+        "fn positive(x: Int)\n"
+        "    require x > 0, \"x must be positive\"\n"
+        "{\n"
+        "    return x\n"
+        "}\n"
+        "fn main() { assert(positive(5) == 5) }\n"
+    );
+}
+
+TEST(require_fails_with_message) {
+    ASSERT_FAILS(
+        "fn positive(x: Int)\n"
+        "    require x > 0, \"x must be positive\"\n"
+        "{\n"
+        "    return x\n"
+        "}\n"
+        "fn main() { positive(-1) }\n"
+    );
+}
+
+TEST(ensure_passes) {
+    ASSERT_RUNS(
+        "fn abs_val(x: Int) -> Int\n"
+        "    ensure |r| { r >= 0 }, \"result must be non-negative\"\n"
+        "{\n"
+        "    if x < 0 { return -x }\n"
+        "    return x\n"
+        "}\n"
+        "fn main() { assert(abs_val(-5) == 5) }\n"
+    );
+}
+
+TEST(ensure_fails) {
+    ASSERT_FAILS(
+        "fn broken() -> Int\n"
+        "    ensure |r| { r > 0 }, \"must be positive\"\n"
+        "{\n"
+        "    return -1\n"
+        "}\n"
+        "fn main() { broken() }\n"
+    );
+}
+
+TEST(multiple_require_clauses) {
+    ASSERT_RUNS(
+        "fn range_check(lo: Int, hi: Int)\n"
+        "    require lo >= 0, \"lo must be non-negative\"\n"
+        "    require hi > lo, \"hi must be greater than lo\"\n"
+        "{\n"
+        "    return hi - lo\n"
+        "}\n"
+        "fn main() { assert(range_check(1, 5) == 4) }\n"
+    );
+}
+
+TEST(multiple_require_first_fails) {
+    ASSERT_FAILS(
+        "fn range_check(lo: Int, hi: Int)\n"
+        "    require lo >= 0, \"lo must be non-negative\"\n"
+        "    require hi > lo, \"hi must be greater than lo\"\n"
+        "{\n"
+        "    return hi - lo\n"
+        "}\n"
+        "fn main() { range_check(-1, 5) }\n"
+    );
+}
+
+TEST(debug_assert_enabled) {
+    ASSERT_FAILS(
+        "fn main() {\n"
+        "    debug_assert(false, \"should fire\")\n"
+        "}\n"
+    );
+}
+
+TEST(debug_assert_passes) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    debug_assert(true, \"should not fire\")\n"
+        "}\n"
+    );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Feature 6: select for Channels (basic tests, no threading)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(select_from_ready_channel) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.send(freeze(42))\n"
+        "    let result = select {\n"
+        "        v from ch => { v }\n"
+        "    }\n"
+        "    assert(result == 42)\n"
+        "}\n"
+    );
+}
+
+TEST(select_with_default) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    let result = select {\n"
+        "        v from ch => { v }\n"
+        "        default => { \"empty\" }\n"
+        "    }\n"
+        "    assert(result == \"empty\")\n"
+        "}\n"
+    );
+}
+
+TEST(select_closed_channel_uses_default) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.close()\n"
+        "    let result = select {\n"
+        "        v from ch => { v }\n"
+        "        default => { \"closed\" }\n"
+        "    }\n"
+        "    assert(result == \"closed\")\n"
+        "}\n"
+    );
+}
+
+TEST(select_all_closed_returns_unit) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.close()\n"
+        "    let result = select {\n"
+        "        v from ch => { v }\n"
+        "    }\n"
+        "    assert(result == nil || to_string(result) == \"()\")\n"
+        "}\n"
+    );
+}
+
+TEST(select_first_ready) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let ch1 = Channel::new()\n"
+        "    let ch2 = Channel::new()\n"
+        "    ch2.send(freeze(99))\n"
+        "    let result = select {\n"
+        "        v from ch1 => { \"ch1:\" + to_string(v) }\n"
+        "        v from ch2 => { \"ch2:\" + to_string(v) }\n"
+        "        default => { \"none\" }\n"
+        "    }\n"
+        "    assert(result == \"ch2:99\", \"got: \" + to_string(result))\n"
+        "}\n"
+    );
+}

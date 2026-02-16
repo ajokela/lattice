@@ -20,6 +20,8 @@ typedef enum {
     TOK_AS,
     TOK_CRYSTALLIZE,
     TOK_SUBLIMATE,
+    TOK_DEFER,
+    TOK_SELECT,
 
     /* Mode directive */
     TOK_MODE_DIRECTIVE,   /* #mode casual / #mode strict */
@@ -52,6 +54,9 @@ typedef enum {
     TOK_ARROW,     /* -> */
     TOK_FATARROW,  /* => */
     TOK_QUESTION_QUESTION, /* ?? */
+    TOK_QUESTION_DOT,      /* ?. */
+    TOK_QUESTION_LBRACKET, /* ?[ */
+    TOK_QUESTION,          /* ? */
     TOK_PIPE,      /* | */
     TOK_AMPERSAND, /* & */
     TOK_CARET,     /* ^ */

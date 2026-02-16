@@ -455,7 +455,8 @@ static Expr *parse_postfix(Parser *p, char **err) {
     Expr *e = parse_primary(p, err);
     if (!e) return NULL;
     for (;;) {
-        if (peek_type(p) == TOK_DOT) {
+        if (peek_type(p) == TOK_DOT || peek_type(p) == TOK_QUESTION_DOT) {
+            bool optional = (peek_type(p) == TOK_QUESTION_DOT);
             advance(p);
             /* Accept identifier or integer literal for tuple field access (e.g. t.0) */
             char *field = NULL;
@@ -479,16 +480,23 @@ static Expr *parse_postfix(Parser *p, char **err) {
                     free(args);
                     return NULL;
                 }
-                e = expr_method_call(e, field, args, arg_count);
+                Expr *mc = expr_method_call(e, field, args, arg_count);
+                mc->as.method_call.optional = optional;
+                e = mc;
             } else {
-                e = expr_field_access(e, field);
+                Expr *fa = expr_field_access(e, field);
+                fa->as.field_access.optional = optional;
+                e = fa;
             }
-        } else if (peek_type(p) == TOK_LBRACKET) {
+        } else if (peek_type(p) == TOK_LBRACKET || peek_type(p) == TOK_QUESTION_LBRACKET) {
+            bool optional = (peek_type(p) == TOK_QUESTION_LBRACKET);
             advance(p);
             Expr *idx = parse_expr(p, err);
             if (!idx) { expr_free(e); return NULL; }
             if (!expect(p, TOK_RBRACKET, err)) { expr_free(e); expr_free(idx); return NULL; }
-            e = expr_index(e, idx);
+            Expr *ix = expr_index(e, idx);
+            ix->as.index.optional = optional;
+            e = ix;
         } else if (peek_type(p) == TOK_LPAREN && e->tag == EXPR_IDENT) {
             advance(p);
             size_t arg_count;
@@ -501,6 +509,10 @@ static Expr *parse_postfix(Parser *p, char **err) {
                 return NULL;
             }
             e = expr_call(e, args, arg_count);
+        } else if (peek_type(p) == TOK_QUESTION) {
+            /* Result ? operator — postfix try/propagate */
+            advance(p);
+            e = expr_try_propagate(e);
         } else {
             break;
         }
@@ -762,6 +774,77 @@ static Expr *parse_primary(Parser *p, char **err) {
             return NULL;
         }
         return expr_try_catch(try_stmts, try_count, catch_var, catch_stmts, catch_count);
+    }
+    if (tt == TOK_IDENT && peek(p)->as.str_val &&
+        strcmp(peek(p)->as.str_val, "select") == 0 &&
+        p->pos + 1 < p->count &&
+        p->tokens[p->pos + 1].type == TOK_LBRACE) {
+        advance(p);
+        if (!expect(p, TOK_LBRACE, err)) return NULL;
+        size_t cap = 4, n = 0;
+        SelectArm *arms = malloc(cap * sizeof(SelectArm));
+        while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+            if (n >= cap) { cap *= 2; arms = realloc(arms, cap * sizeof(SelectArm)); }
+            memset(&arms[n], 0, sizeof(SelectArm));
+            /* Check for 'default' arm */
+            if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val &&
+                strcmp(peek(p)->as.str_val, "default") == 0) {
+                advance(p);
+                arms[n].is_default = true;
+                if (!expect(p, TOK_FATARROW, err)) goto select_fail;
+                if (!expect(p, TOK_LBRACE, err)) goto select_fail;
+                arms[n].body = parse_block_stmts(p, &arms[n].body_count, err);
+                if (!arms[n].body && *err) goto select_fail;
+                if (!expect(p, TOK_RBRACE, err)) goto select_fail;
+                n++;
+                if (peek_type(p) == TOK_COMMA) advance(p);
+                continue;
+            }
+            /* Check for 'timeout(expr)' arm */
+            if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val &&
+                strcmp(peek(p)->as.str_val, "timeout") == 0) {
+                advance(p);
+                arms[n].is_timeout = true;
+                if (!expect(p, TOK_LPAREN, err)) goto select_fail;
+                arms[n].timeout_expr = parse_expr(p, err);
+                if (!arms[n].timeout_expr) goto select_fail;
+                if (!expect(p, TOK_RPAREN, err)) goto select_fail;
+                if (!expect(p, TOK_FATARROW, err)) goto select_fail;
+                if (!expect(p, TOK_LBRACE, err)) goto select_fail;
+                arms[n].body = parse_block_stmts(p, &arms[n].body_count, err);
+                if (!arms[n].body && *err) goto select_fail;
+                if (!expect(p, TOK_RBRACE, err)) goto select_fail;
+                n++;
+                if (peek_type(p) == TOK_COMMA) advance(p);
+                continue;
+            }
+            /* Normal arm: binding from channel_expr => { body } */
+            arms[n].binding_name = expect_ident(p, err);
+            if (!arms[n].binding_name) goto select_fail;
+            if (!expect(p, TOK_FROM, err)) goto select_fail;
+            arms[n].channel_expr = parse_expr(p, err);
+            if (!arms[n].channel_expr) goto select_fail;
+            if (!expect(p, TOK_FATARROW, err)) goto select_fail;
+            if (!expect(p, TOK_LBRACE, err)) goto select_fail;
+            arms[n].body = parse_block_stmts(p, &arms[n].body_count, err);
+            if (!arms[n].body && *err) goto select_fail;
+            if (!expect(p, TOK_RBRACE, err)) goto select_fail;
+            n++;
+            if (peek_type(p) == TOK_COMMA) advance(p);
+        }
+        if (!expect(p, TOK_RBRACE, err)) {
+            select_fail:
+            for (size_t i = 0; i < n; i++) {
+                free(arms[i].binding_name);
+                if (arms[i].channel_expr) expr_free(arms[i].channel_expr);
+                if (arms[i].timeout_expr) expr_free(arms[i].timeout_expr);
+                for (size_t j = 0; j < arms[i].body_count; j++) stmt_free(arms[i].body[j]);
+                free(arms[i].body);
+            }
+            free(arms);
+            return NULL;
+        }
+        return expr_select(arms, n);
     }
     if (tt == TOK_MATCH) {
         advance(p);
@@ -1422,6 +1505,20 @@ static Stmt *parse_stmt(Parser *p, char **err) {
 
     if (tt == TOK_IMPORT) return parse_import_stmt(p, err);
 
+    if (tt == TOK_DEFER) {
+        advance(p);
+        if (!expect(p, TOK_LBRACE, err)) return NULL;
+        size_t count;
+        Stmt **body = parse_block_stmts(p, &count, err);
+        if (!body && *err) return NULL;
+        if (!expect(p, TOK_RBRACE, err)) {
+            for (size_t i = 0; i < count; i++) stmt_free(body[i]);
+            free(body);
+            return NULL;
+        }
+        return stmt_defer(body, count);
+    }
+
     if (tt == TOK_RETURN) {
         advance(p);
         if (peek_type(p) == TOK_RBRACE || peek_type(p) == TOK_SEMICOLON || at_eof(p)) {
@@ -1487,6 +1584,8 @@ static Stmt *parse_stmt(Parser *p, char **err) {
 
 static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
     out->next_overload = NULL;
+    out->contracts = NULL;
+    out->contract_count = 0;
     if (!expect(p, TOK_FN, err)) return false;
     out->name = expect_ident(p, err);
     if (!out->name) return false;
@@ -1502,15 +1601,58 @@ static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
         if (!out->return_type) { free(out->name); free(out->params); return false; }
     }
 
+    /* Parse require/ensure contracts (contextual identifiers before '{') */
+    {
+        size_t ccap = 4, cn = 0;
+        ContractClause *contracts = NULL;
+        while (peek_type(p) == TOK_IDENT && peek(p)->as.str_val &&
+               (strcmp(peek(p)->as.str_val, "require") == 0 ||
+                strcmp(peek(p)->as.str_val, "ensure") == 0)) {
+            if (!contracts) contracts = malloc(ccap * sizeof(ContractClause));
+            if (cn >= ccap) { ccap *= 2; contracts = realloc(contracts, ccap * sizeof(ContractClause)); }
+            bool is_ensure = (strcmp(peek(p)->as.str_val, "ensure") == 0);
+            advance(p);
+            Expr *cond = parse_expr(p, err);
+            if (!cond) {
+                for (size_t i = 0; i < cn; i++) { expr_free(contracts[i].condition); free(contracts[i].message); }
+                free(contracts);
+                free(out->name); free(out->params);
+                if (out->return_type) { type_expr_free(out->return_type); free(out->return_type); }
+                return false;
+            }
+            char *msg = NULL;
+            if (peek_type(p) == TOK_COMMA) {
+                advance(p);
+                if (peek_type(p) == TOK_STRING_LIT) {
+                    msg = strdup(advance(p)->as.str_val);
+                }
+            }
+            contracts[cn].condition = cond;
+            contracts[cn].message = msg;
+            contracts[cn].is_ensure = is_ensure;
+            cn++;
+        }
+        out->contracts = contracts;
+        out->contract_count = cn;
+    }
+
     if (!expect(p, TOK_LBRACE, err)) {
         free(out->name); free(out->params);
         if (out->return_type) { type_expr_free(out->return_type); free(out->return_type); }
+        if (out->contracts) {
+            for (size_t i = 0; i < out->contract_count; i++) { expr_free(out->contracts[i].condition); free(out->contracts[i].message); }
+            free(out->contracts);
+        }
         return false;
     }
     out->body = parse_block_stmts(p, &out->body_count, err);
     if (!out->body && *err) {
         free(out->name); free(out->params);
         if (out->return_type) { type_expr_free(out->return_type); free(out->return_type); }
+        if (out->contracts) {
+            for (size_t i = 0; i < out->contract_count; i++) { expr_free(out->contracts[i].condition); free(out->contracts[i].message); }
+            free(out->contracts);
+        }
         return false;
     }
     if (!expect(p, TOK_RBRACE, err)) {

@@ -111,6 +111,13 @@ typedef struct {
     size_t    cb_cap;
 } ReactionEntry;
 
+/* Defer entry: deferred block registered at a given scope depth */
+typedef struct {
+    Stmt  **body;
+    size_t  body_count;
+    size_t  scope_depth;
+} DeferEntry;
+
 /* Evaluator state */
 typedef struct Evaluator {
     Env        *env;
@@ -152,6 +159,12 @@ typedef struct Evaluator {
     PressureEntry *pressures;
     size_t         pressure_count;
     size_t         pressure_cap;
+    /* Defer stack */
+    DeferEntry    *defer_stack;
+    size_t         defer_count;
+    size_t         defer_cap;
+    /* Contract/assertion control */
+    bool           assertions_enabled;
 } Evaluator;
 
 /* Create a new evaluator */
@@ -171,6 +184,9 @@ void evaluator_set_script_dir(Evaluator *ev, const char *dir);
 
 /* Store argc/argv for the args() builtin */
 void evaluator_set_argv(Evaluator *ev, int argc, char **argv);
+
+/* Enable/disable debug_assert() and contracts */
+void evaluator_set_assertions(Evaluator *ev, bool enabled);
 
 /* Evaluate a program. Returns heap-allocated error string or NULL on success. */
 char *evaluator_run(Evaluator *ev, const Program *prog);

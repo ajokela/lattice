@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, structured concurrency with channels, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -74,6 +74,39 @@ fn greet(name: String) -> String {
     "Hello, ${name}!"  // string interpolation, implicit return
 }
 ```
+
+Type annotations are enforced at runtime. Passing a value of the wrong type produces a clear error:
+
+```lattice
+fn add(a: Int, b: Int) -> Int { return a + b }
+add(1, "hello")  // error: function 'add' parameter 'b' expects type Int, got String
+```
+
+Supported type names: `Int`, `Float`, `String`, `Bool`, `Nil`, `Map`, `Array`, `Fn`, `Channel`, `Range`, `Set`, `Tuple`, `Number` (Int or Float), `Any` (accepts everything), struct names, and enum names. Array element types are checked with `[T]` syntax:
+
+```lattice
+fn sum(nums: [Int]) -> Int {
+    flux total = 0
+    for n in nums { total += n }
+    return total
+}
+```
+
+### Function Contracts
+
+Functions can declare preconditions (`require`) and postconditions (`ensure`) between the parameter list and the body:
+
+```lattice
+fn withdraw(account: Map, amount: Int) -> Int
+    require amount > 0, "amount must be positive"
+    require account.get("balance") >= amount, "insufficient funds"
+    ensure |result| { result >= 0 }, "balance must stay non-negative"
+{
+    return account.get("balance") - amount
+}
+```
+
+`require` clauses are checked before the body executes. `ensure` clauses receive the return value and are checked after. Both are gated by the `--no-assertions` flag.
 
 ### Phase Constraints
 
@@ -436,7 +469,7 @@ print(record.len())     // 3
 print(typeof(point))    // Tuple
 ```
 
-### Nil & Nil Coalescing
+### Nil, Nil Coalescing & Optional Chaining
 
 `nil` represents an explicit null value, distinct from `unit`:
 
@@ -456,6 +489,21 @@ Map `.get()` returns `nil` for missing keys, making `??` useful for defaults:
 ```lattice
 let m = Map::new()
 let port = m.get("port") ?? 8080
+```
+
+**Optional chaining** (`?.`, `?[`) safely navigates nullable values. If the receiver is nil, the entire chain short-circuits to nil instead of erroring:
+
+```lattice
+let user = nil
+print(user?.name)           // nil (no error)
+print(user?.address?.city)  // nil (chain short-circuits)
+print(user?[0])             // nil (optional index)
+
+// Only the marked access is optional:
+// user?.name.len()  — if user is nil, ?.name returns nil, then .len() on nil errors
+
+// Compose with ?? for defaults:
+let city = user?.address?.city ?? "Unknown"
 ```
 
 ### Structs
@@ -513,6 +561,58 @@ let result = try {
 }
 ```
 
+### Defer
+
+`defer` guarantees cleanup code runs when the enclosing scope exits, whether normally, via early return, or on error. Multiple defers execute in LIFO (last-in, first-out) order:
+
+```lattice
+fn process_file(path: String) {
+    let fd = open(path)
+    defer { close(fd) }           // guaranteed cleanup
+
+    let lock = acquire_lock()
+    defer { release_lock(lock) }  // runs before close(fd)
+
+    // ... work with fd and lock ...
+    // both defers fire on any exit path
+}
+```
+
+Defers fire per block scope, making them useful in loops too:
+
+```lattice
+for file in files {
+    defer { print("done with " + file) }
+    process(file)
+}
+// "done with ..." prints after each iteration
+```
+
+### Result ? Operator
+
+The `?` postfix operator provides ergonomic error propagation for Result maps (Maps with `"tag"` set to `"ok"` or `"err"` and a `"value"` field). If the result is `ok`, `?` unwraps the value. If `err`, it immediately returns the error from the enclosing function:
+
+```lattice
+import "lib/fn" as F
+
+fn load_config(path: String) -> Map {
+    let text = F::try_fn(|_| { read_file(path) })?
+    let parsed = F::try_fn(|_| { json_parse(text) })?
+    return F::ok(parsed)
+}
+
+fn main() {
+    let result = load_config("config.json")
+    if F::is_err(result) {
+        print("Failed: " + F::unwrap_err(result))
+    } else {
+        print("Loaded: " + to_string(F::unwrap(result)))
+    }
+}
+```
+
+Works with the `ok()`/`err()` Result pattern from `lib/fn.lat` — no special type needed, just a Map with `{"tag": "ok", "value": ...}` or `{"tag": "err", "value": ...}`.
+
 ### Forge Blocks
 
 `forge` blocks provide a controlled scope for building immutable values — mutate freely inside, freeze at the end:
@@ -559,6 +659,24 @@ Key rules:
 - `.recv()` blocks until a value is available, or returns Unit if the channel is closed and empty
 - Channels cannot be frozen
 - Errors in spawned tasks propagate to the parent scope
+
+**`select`** waits on multiple channels and executes the arm for whichever receives a value first:
+
+```lattice
+let result = select {
+    msg from ch1 => { handle(msg) }
+    val from ch2 => { process(val) }
+    timeout(1000) => { print("timed out") }
+    default => { fallback() }
+}
+```
+
+Select arms:
+- **`binding from channel => { body }`** — receive from a channel and bind the value
+- **`default => { body }`** — execute immediately if no channels are ready (non-blocking)
+- **`timeout(ms) => { body }`** — execute if no value arrives within the timeout
+
+Channel arms are checked in random order for fairness. If all channels are closed and there's no default arm, `select` returns Unit.
 
 ### Single-Quote Strings
 
@@ -853,6 +971,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `repr(val)` | Display representation (strings quoted, structs use custom `repr` if defined) |
 | `len(val)` | Length of a string, array, or map |
 | `assert(cond, msg?)` | Assert condition is truthy; error with optional message |
+| `debug_assert(cond, msg?)` | Like `assert`, but skipped when `--no-assertions` is set |
 | `exit(code?)` | Exit the process (default code 0) |
 | `version()` | Lattice version string |
 
@@ -1260,6 +1379,8 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 | Bitwise | `&` `\|` `^` `~` `<<` `>>` |
 | Compound Assignment | `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` |
 | Nil Coalescing | `??` |
+| Optional Chaining | `?.` `?[` |
+| Result Propagation | `expr?` (unwrap ok or propagate err) |
 | Spread | `...expr` (in array literals) |
 | Range | `..` |
 | Indexing | `[]` (with slice support) |
@@ -1314,7 +1435,7 @@ Lattice also includes a self-hosted REPL written in Lattice itself (`repl.lat`),
 ## CLI Reference
 
 ```
-clat [--stats] [--gc-stress] [file.lat]
+clat [--stats] [--gc-stress] [--no-assertions] [file.lat]
 ```
 
 | Flag | Description |
@@ -1323,6 +1444,7 @@ clat [--stats] [--gc-stress] [file.lat]
 | *(no file)* | Start the interactive REPL |
 | `--stats` | Print memory/GC statistics to stderr after execution |
 | `--gc-stress` | Force garbage collection on every allocation (for testing) |
+| `--no-assertions` | Disable `debug_assert()` and `require`/`ensure` contracts |
 
 ## Building & Testing
 

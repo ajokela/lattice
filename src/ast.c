@@ -163,6 +163,19 @@ Expr *expr_spread(Expr *inner) {
     return e;
 }
 
+Expr *expr_try_propagate(Expr *inner) {
+    Expr *e = expr_alloc(EXPR_TRY_PROPAGATE);
+    e->as.try_propagate_expr = inner;
+    return e;
+}
+
+Expr *expr_select(SelectArm *arms, size_t arm_count) {
+    Expr *e = expr_alloc(EXPR_SELECT);
+    e->as.select_expr.arms = arms;
+    e->as.select_expr.arm_count = arm_count;
+    return e;
+}
+
 Expr *expr_tuple(Expr **elems, size_t count) {
     Expr *e = expr_alloc(EXPR_TUPLE);
     e->as.tuple.elems = elems;
@@ -427,6 +440,13 @@ Stmt *stmt_import(char *path, char *alias, char **selective, size_t count) {
     return s;
 }
 
+Stmt *stmt_defer(Stmt **body, size_t count) {
+    Stmt *s = stmt_alloc(STMT_DEFER);
+    s->as.defer.body = body;
+    s->as.defer.body_count = count;
+    return s;
+}
+
 /* ── Destructors ── */
 
 void type_expr_free(TypeExpr *t) {
@@ -595,6 +615,21 @@ void expr_free(Expr *e) {
                 expr_free(e->as.tuple.elems[i]);
             free(e->as.tuple.elems);
             break;
+        case EXPR_TRY_PROPAGATE:
+            expr_free(e->as.try_propagate_expr);
+            break;
+        case EXPR_SELECT:
+            for (size_t i = 0; i < e->as.select_expr.arm_count; i++) {
+                SelectArm *arm = &e->as.select_expr.arms[i];
+                free(arm->binding_name);
+                if (arm->channel_expr) expr_free(arm->channel_expr);
+                if (arm->timeout_expr) expr_free(arm->timeout_expr);
+                for (size_t j = 0; j < arm->body_count; j++)
+                    stmt_free(arm->body[j]);
+                free(arm->body);
+            }
+            free(e->as.select_expr.arms);
+            break;
     }
     free(e);
 }
@@ -657,6 +692,11 @@ void stmt_free(Stmt *s) {
                 free(s->as.import.selective_names);
             }
             break;
+        case STMT_DEFER:
+            for (size_t i = 0; i < s->as.defer.body_count; i++)
+                stmt_free(s->as.defer.body[i]);
+            free(s->as.defer.body);
+            break;
     }
     free(s);
 }
@@ -673,6 +713,13 @@ void fn_decl_free(FnDecl *f) {
     if (f->return_type) {
         type_expr_free(f->return_type);
         free(f->return_type);
+    }
+    if (f->contracts) {
+        for (size_t i = 0; i < f->contract_count; i++) {
+            expr_free(f->contracts[i].condition);
+            free(f->contracts[i].message);
+        }
+        free(f->contracts);
     }
     for (size_t i = 0; i < f->body_count; i++)
         stmt_free(f->body[i]);

@@ -295,6 +295,24 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             for (size_t i = 0; i < expr->as.enum_variant.arg_count; i++)
                 pc_check_expr(pc, expr->as.enum_variant.args[i]);
             return PHASE_UNSPECIFIED;
+
+        case EXPR_TRY_PROPAGATE:
+            pc_check_expr(pc, expr->as.try_propagate_expr);
+            return PHASE_UNSPECIFIED;
+
+        case EXPR_SELECT:
+            for (size_t i = 0; i < expr->as.select_expr.arm_count; i++) {
+                SelectArm *arm = &expr->as.select_expr.arms[i];
+                if (arm->channel_expr) pc_check_expr(pc, arm->channel_expr);
+                if (arm->timeout_expr) pc_check_expr(pc, arm->timeout_expr);
+                pc_push_scope(pc);
+                if (arm->binding_name)
+                    pc_define(pc, arm->binding_name, PHASE_UNSPECIFIED);
+                for (size_t j = 0; j < arm->body_count; j++)
+                    pc_check_stmt(pc, arm->body[j]);
+                pc_pop_scope(pc);
+            }
+            return PHASE_UNSPECIFIED;
     }
     return PHASE_UNSPECIFIED;
 }
@@ -385,6 +403,10 @@ static void pc_check_stmt(PhaseChecker *pc, const Stmt *stmt) {
                 for (size_t i = 0; i < stmt->as.import.selective_count; i++)
                     pc_define(pc, stmt->as.import.selective_names[i], PHASE_UNSPECIFIED);
             }
+            break;
+        case STMT_DEFER:
+            for (size_t i = 0; i < stmt->as.defer.body_count; i++)
+                pc_check_stmt(pc, stmt->as.defer.body[i]);
             break;
     }
 }
