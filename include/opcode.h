@@ -80,6 +80,7 @@ typedef enum {
     OP_SET_FIELD,      /* operand = field name constant. Pop value, pop object, set field. */
     OP_INVOKE,         /* operand1 = method name constant, operand2 = arg count */
     OP_INVOKE_LOCAL,   /* operand1 = local slot, operand2 = method name constant, operand3 = arg count. Mutates local directly. */
+    OP_INVOKE_GLOBAL,  /* operand1 = global name constant, operand2 = method name constant, operand3 = arg count. Writes back to env. */
     OP_SET_INDEX_LOCAL,/* operand = local slot. Pop value, index. Mutates local[index] = value. Push value. */
 
     /* Exception handling */

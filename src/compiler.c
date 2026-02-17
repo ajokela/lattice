@@ -578,6 +578,35 @@ static void compile_expr(const Expr *e, int line) {
                     if (opt) patch_jump(end_jump);
                     break;
                 }
+                /* If not a local and not an upvalue, it's a global —
+                 * use OP_INVOKE_GLOBAL for write-back of mutating builtins */
+                int upvalue = resolve_upvalue(current, e->as.method_call.object->as.str_val);
+                if (upvalue < 0) {
+                    size_t end_jump = 0;
+                    if (opt) {
+                        size_t tmp_idx = chunk_add_constant(current_chunk(),
+                            value_string(e->as.method_call.object->as.str_val));
+                        emit_bytes(OP_GET_GLOBAL, (uint8_t)tmp_idx, line);
+                        size_t skip = emit_jump(OP_JUMP_IF_NOT_NIL, line);
+                        emit_byte(OP_POP, line);
+                        emit_byte(OP_NIL, line);
+                        end_jump = emit_jump(OP_JUMP, line);
+                        patch_jump(skip);
+                        emit_byte(OP_POP, line);
+                    }
+                    for (size_t i = 0; i < e->as.method_call.arg_count; i++)
+                        compile_expr(e->as.method_call.args[i], line);
+                    size_t name_idx = chunk_add_constant(current_chunk(),
+                        value_string(e->as.method_call.object->as.str_val));
+                    size_t method_idx = chunk_add_constant(current_chunk(),
+                        value_string(e->as.method_call.method));
+                    emit_byte(OP_INVOKE_GLOBAL, line);
+                    emit_byte((uint8_t)name_idx, line);
+                    emit_byte((uint8_t)method_idx, line);
+                    emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    if (opt) patch_jump(end_jump);
+                    break;
+                }
             }
             compile_expr(e->as.method_call.object, line);
             size_t end_jump = 0;
@@ -1287,10 +1316,21 @@ static void compile_stmt(const Stmt *s) {
                     emit_index_write_back(target->as.index.object, 0);
                     break; /* write-back handles everything, skip OP_POP */
                 }
-                /* Fallback: non-local single-level index */
+                /* Fallback: non-local single-level index (global/upvalue) */
                 compile_expr(target->as.index.object, 0);
                 compile_expr(target->as.index.index, 0);
                 emit_byte(OP_SET_INDEX, 0);
+                /* Write back the modified object to the variable */
+                if (target->as.index.object->tag == EXPR_IDENT) {
+                    const char *name = target->as.index.object->as.str_val;
+                    int upvalue = resolve_upvalue(current, name);
+                    if (upvalue >= 0) {
+                        emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, 0);
+                    } else {
+                        size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
+                        emit_bytes(OP_SET_GLOBAL, (uint8_t)gidx, 0);
+                    }
+                }
             }
             emit_byte(OP_POP, 0);
             break;
@@ -1908,6 +1948,133 @@ Chunk *compile_module(const Program *prog, char **error) {
     current = NULL;
     free_known_enums();
     return result;
+}
+
+Chunk *compile_repl(const Program *prog, char **error) {
+    Compiler top;
+    compiler_init(&top, NULL, FUNC_SCRIPT);
+    *error = NULL;
+
+    for (size_t i = 0; i < prog->item_count; i++) {
+        switch (prog->items[i].tag) {
+            case ITEM_STMT: {
+                bool is_last = (i == prog->item_count - 1);
+                Stmt *s = prog->items[i].as.stmt;
+                /* Last item is a bare expression: keep value on stack */
+                if (is_last && s->tag == STMT_EXPR) {
+                    compile_expr(s->as.expr, 0);
+                    /* Skip OP_POP — value stays as return */
+                } else {
+                    compile_stmt(s);
+                }
+                break;
+            }
+            case ITEM_FUNCTION: {
+                FnDecl *fn = &prog->items[i].as.fn_decl;
+                compile_function_body(FUNC_FUNCTION, fn->name,
+                                      fn->params, fn->param_count,
+                                      fn->body, fn->body_count,
+                                      fn->contracts, fn->contract_count, 0);
+                size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
+                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                break;
+            }
+            case ITEM_STRUCT: {
+                StructDecl *sd = &prog->items[i].as.struct_decl;
+                LatValue *field_names = malloc(sd->field_count * sizeof(LatValue));
+                for (size_t j = 0; j < sd->field_count; j++)
+                    field_names[j] = value_string(sd->fields[j].name);
+                LatValue arr = value_array(field_names, sd->field_count);
+                free(field_names);
+                char meta_name[256];
+                snprintf(meta_name, sizeof(meta_name), "__struct_%s", sd->name);
+                size_t arr_idx = chunk_add_constant(current_chunk(), arr);
+                emit_bytes(OP_CONSTANT, (uint8_t)arr_idx, 0);
+                size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
+                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                {
+                    bool has_phase = false;
+                    for (size_t j = 0; j < sd->field_count; j++) {
+                        if (sd->fields[j].ty.phase != PHASE_UNSPECIFIED) { has_phase = true; break; }
+                    }
+                    if (has_phase) {
+                        LatValue *phases = malloc(sd->field_count * sizeof(LatValue));
+                        for (size_t j = 0; j < sd->field_count; j++)
+                            phases[j] = value_int((int64_t)sd->fields[j].ty.phase);
+                        LatValue phase_arr = value_array(phases, sd->field_count);
+                        free(phases);
+                        char phase_meta[256];
+                        snprintf(phase_meta, sizeof(phase_meta), "__struct_phases_%s", sd->name);
+                        size_t pi = chunk_add_constant(current_chunk(), phase_arr);
+                        emit_bytes(OP_CONSTANT, (uint8_t)pi, 0);
+                        size_t pn = chunk_add_constant(current_chunk(), value_string(phase_meta));
+                        emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)pn, 0);
+                    }
+                }
+                break;
+            }
+            case ITEM_ENUM: {
+                EnumDecl *ed = &prog->items[i].as.enum_decl;
+                register_enum(ed->name);
+                char meta_name[256];
+                snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
+                emit_byte(OP_TRUE, 0);
+                size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
+                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                break;
+            }
+            case ITEM_IMPL: {
+                ImplBlock *ib = &prog->items[i].as.impl_block;
+                for (size_t j = 0; j < ib->method_count; j++) {
+                    FnDecl *method = &ib->methods[j];
+                    compile_function_body(FUNC_FUNCTION, method->name,
+                                          method->params, method->param_count,
+                                          method->body, method->body_count,
+                                          method->contracts, method->contract_count, 0);
+                    char key[256];
+                    snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
+                    size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
+                    emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)key_idx, 0);
+                }
+                break;
+            }
+            case ITEM_TRAIT:
+            case ITEM_TEST:
+                break;
+        }
+
+        if (compile_error) {
+            *error = compile_error;
+            compile_error = NULL;
+            chunk_free(top.chunk);
+            compiler_cleanup(&top);
+            current = NULL;
+            /* Don't free known enums — they persist across REPL iterations */
+            return NULL;
+        }
+    }
+
+    /* Check if last item was a bare expression (value already on stack) */
+    bool last_is_expr = (prog->item_count > 0 &&
+                         prog->items[prog->item_count - 1].tag == ITEM_STMT &&
+                         prog->items[prog->item_count - 1].as.stmt->tag == STMT_EXPR);
+
+    if (last_is_expr) {
+        emit_byte(OP_RETURN, 0);
+    } else {
+        emit_byte(OP_UNIT, 0);
+        emit_byte(OP_RETURN, 0);
+    }
+
+    Chunk *result = top.chunk;
+    compiler_cleanup(&top);
+    current = NULL;
+    /* Don't free known enums — they persist across REPL iterations */
+    return result;
+}
+
+void compiler_free_known_enums(void) {
+    free_known_enums();
 }
 
 Chunk *compile_expr_chunk(const Expr *expr, char **error) {

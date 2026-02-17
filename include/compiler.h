@@ -49,6 +49,14 @@ Chunk *compile(const Program *prog, char **error);
 /* Compile a module (does not auto-call main). */
 Chunk *compile_module(const Program *prog, char **error);
 
+/* Compile for REPL: like compile_module but keeps last expression on stack
+ * as the return value, and does NOT free known enums (they persist across
+ * REPL iterations). Call compiler_free_known_enums() on REPL exit. */
+Chunk *compile_repl(const Program *prog, char **error);
+
+/* Free the compiler's known-enum table. Call once when the bytecode REPL exits. */
+void compiler_free_known_enums(void);
+
 /* Compile a single expression to a standalone chunk (evaluates and returns value).
  * Used by the VM to re-compile AST fragments at runtime (e.g. scope/select bodies). */
 Chunk *compile_expr_chunk(const Expr *expr, char **error);

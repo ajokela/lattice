@@ -4803,6 +4803,187 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+            case OP_INVOKE_GLOBAL: {
+                uint8_t name_idx = READ_BYTE();
+                uint8_t method_idx = READ_BYTE();
+                uint8_t arg_count = READ_BYTE();
+                const char *global_name = frame->chunk->constants[name_idx].as.str_val;
+                const char *method_name = frame->chunk->constants[method_idx].as.str_val;
+
+                /* Get a clone of the global value */
+                LatValue obj_val;
+                if (!env_get(vm->env, global_name, &obj_val)) {
+                    VM_ERROR("undefined variable '%s'", global_name); break;
+                }
+
+                if (vm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name)) {
+                    if (vm->error) {
+                        value_free(&obj_val);
+                        VMResult r = vm_handle_error(vm, &frame, "%s", vm->error);
+                        free(vm->error); vm->error = NULL;
+                        if (r != VM_OK) return r;
+                        break;
+                    }
+                    /* Write back the mutated object to the global env */
+                    env_set(vm->env, global_name, obj_val);
+                    /* Record history for tracked variables */
+                    if (vm->tracked_count > 0) {
+                        LatValue cur;
+                        if (env_get(vm->env, global_name, &cur)) {
+                            vm_record_history(vm, global_name, &cur);
+                            value_free(&cur);
+                        }
+                    }
+                    break;
+                }
+
+                /* Not a builtin — insert object below args on stack and
+                 * dispatch like OP_INVOKE (struct closures, impl methods, etc.) */
+                push(vm, value_nil()); /* make room */
+                LatValue *base = vm->stack_top - arg_count - 1;
+                memmove(base + 1, base, arg_count * sizeof(LatValue));
+                *base = obj_val;
+                LatValue *obj = base;
+
+                /* Check if map/struct has a callable closure field */
+                if (obj->type == VAL_MAP) {
+                    LatValue *field = lat_map_get(obj->as.map.map, method_name);
+                    if (field && field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                        field->as.closure.default_values != VM_NATIVE_MARKER) {
+                        Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        if (vm->frame_count >= VM_FRAMES_MAX) {
+                            VM_ERROR("stack overflow (too many nested calls)"); break;
+                        }
+                        LatValue closure_copy = value_deep_clone(field);
+                        value_free(obj);
+                        *obj = closure_copy;
+                        CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                        new_frame->chunk = fn_chunk;
+                        new_frame->ip = fn_chunk->code;
+                        new_frame->slots = obj;
+                        new_frame->upvalues = upvals;
+                        new_frame->upvalue_count = uv_count;
+                        frame = new_frame;
+                        break;
+                    }
+                    if (field && field->type == VAL_CLOSURE &&
+                        field->as.closure.default_values == VM_NATIVE_MARKER) {
+                        VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                        LatValue *args = NULL;
+                        if (arg_count > 0) {
+                            args = malloc(arg_count * sizeof(LatValue));
+                            for (int i = arg_count - 1; i >= 0; i--)
+                                args[i] = pop(vm);
+                        }
+                        LatValue obj_popped = pop(vm);
+                        LatValue ret = native(args, arg_count);
+                        for (int i = 0; i < arg_count; i++)
+                            value_free(&args[i]);
+                        free(args);
+                        value_free(&obj_popped);
+                        push(vm, ret);
+                        break;
+                    }
+                }
+
+                if (obj->type == VAL_STRUCT) {
+                    bool handled = false;
+                    for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
+                        if (strcmp(obj->as.strct.field_names[fi], method_name) != 0)
+                            continue;
+                        LatValue *field = &obj->as.strct.field_values[fi];
+                        if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                            field->as.closure.default_values != VM_NATIVE_MARKER) {
+                            Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                            ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                            size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                            if (vm->frame_count >= VM_FRAMES_MAX) {
+                                VM_ERROR("stack overflow (too many nested calls)"); break;
+                            }
+                            LatValue self_copy = value_deep_clone(obj);
+                            LatValue closure_copy = value_deep_clone(field);
+                            push(vm, value_nil());
+                            for (int si = arg_count; si >= 1; si--)
+                                obj[si + 1] = obj[si];
+                            obj[1] = self_copy;
+                            value_free(obj);
+                            *obj = closure_copy;
+                            CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                            new_frame->chunk = fn_chunk;
+                            new_frame->ip = fn_chunk->code;
+                            new_frame->slots = obj;
+                            new_frame->upvalues = upvals;
+                            new_frame->upvalue_count = uv_count;
+                            frame = new_frame;
+                            handled = true;
+                            break;
+                        }
+                        if (field->type == VAL_CLOSURE &&
+                            field->as.closure.default_values == VM_NATIVE_MARKER) {
+                            VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                            LatValue self_copy = value_deep_clone(obj);
+                            int total_args = arg_count + 1;
+                            LatValue *args = malloc(total_args * sizeof(LatValue));
+                            args[0] = self_copy;
+                            for (int ai = arg_count - 1; ai >= 0; ai--)
+                                args[ai + 1] = pop(vm);
+                            LatValue obj_popped = pop(vm);
+                            LatValue ret = native(args, total_args);
+                            for (int ai = 0; ai < total_args; ai++)
+                                value_free(&args[ai]);
+                            free(args);
+                            value_free(&obj_popped);
+                            push(vm, ret);
+                            handled = true;
+                            break;
+                        }
+                        break;
+                    }
+                    if (handled) break;
+                }
+
+                /* Try compiled method via "TypeName::method" global */
+                {
+                    const char *type_name = (obj->type == VAL_STRUCT) ? obj->as.strct.name :
+                                            (obj->type == VAL_ENUM)   ? obj->as.enm.enum_name :
+                                            value_type_name(obj);
+                    char key[256];
+                    snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
+                    LatValue method_val;
+                    if (env_get(vm->env, key, &method_val) &&
+                        method_val.type == VAL_CLOSURE && method_val.as.closure.native_fn) {
+                        Chunk *fn_chunk = (Chunk *)method_val.as.closure.native_fn;
+                        if (vm->frame_count >= VM_FRAMES_MAX) {
+                            value_free(&method_val);
+                            VM_ERROR("stack overflow (too many nested calls)"); break;
+                        }
+                        /* Replace obj with self clone, shift args */
+                        LatValue self_copy = value_deep_clone(obj);
+                        value_free(obj);
+                        *obj = self_copy;
+                        CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                        new_frame->chunk = fn_chunk;
+                        new_frame->ip = fn_chunk->code;
+                        new_frame->slots = obj;
+                        new_frame->upvalues = NULL;
+                        new_frame->upvalue_count = 0;
+                        frame = new_frame;
+                        value_free(&method_val);
+                    } else {
+                        for (int i = 0; i < arg_count; i++) {
+                            LatValue v = pop(vm);
+                            value_free(&v);
+                        }
+                        LatValue obj_popped = pop(vm);
+                        value_free(&obj_popped);
+                        push(vm, value_nil());
+                    }
+                }
+                break;
+            }
+
             case OP_SET_INDEX_LOCAL: {
                 uint8_t slot = READ_BYTE();
                 LatValue idx = pop(vm);

@@ -1411,7 +1411,7 @@ Run any example:
 
 ## Interactive REPL
 
-The built-in REPL automatically displays expression results with a `=> ` prefix:
+The built-in REPL runs on the bytecode VM (same as file execution) and automatically displays expression results with a `=> ` prefix:
 
 ```
 lattice> 42
@@ -1424,7 +1424,13 @@ lattice> let x = 5
 lattice>
 ```
 
-Assignments and statements that return Unit are silently suppressed. The REPL supports multi-line input (auto-detects incomplete expressions) and readline history.
+Assignments and statements that return Unit are silently suppressed. The REPL supports multi-line input (auto-detects incomplete expressions) and readline history. Globals, functions, structs, and enums defined in one line persist for subsequent lines.
+
+Use `--tree-walk` to run the REPL on the tree-walking interpreter instead:
+
+```sh
+./clat --tree-walk
+```
 
 Lattice also includes a self-hosted REPL written in Lattice itself (`repl.lat`), built on `is_complete`, `lat_eval`, and `input`:
 
@@ -1434,28 +1440,24 @@ Lattice also includes a self-hosted REPL written in Lattice itself (`repl.lat`),
 
 ## Bytecode VM
 
-Lattice includes an experimental bytecode compiler and stack-based virtual machine. Pass `--bytecode` to compile and run programs on the VM instead of the tree-walking interpreter:
+Lattice compiles source to a compact bytecode format and executes it on a stack-based VM with upvalue-based closures. The bytecode VM is the default execution mode for both file execution and the interactive REPL.
 
-```sh
-./clat --bytecode examples/fibonacci.lat
-```
+The VM supports the full phase system (freeze/thaw, react/bond/seed, sublimate, forge, anneal, pressure, alloy types), structs, enums, pattern matching, closures with captures, try/catch, defer, structured concurrency (`scope`/`spawn`/`select` with channels), and all builtin functions.
 
-The bytecode VM compiles Lattice source to a compact bytecode format and executes it on a stack-based VM with upvalue-based closures. It supports the full phase system (freeze/thaw, react/bond/seed, sublimate, forge, anneal, pressure, alloy types), structs, enums, pattern matching, closures with captures, try/catch, defer, and all builtin functions.
-
-The tree-walker remains the default and supports the complete feature set including concurrency (`scope`/`spawn`/`select`). The bytecode VM is being developed toward full parity.
+The tree-walking interpreter is available as a fallback via `--tree-walk`.
 
 ## CLI Reference
 
 ```
-clat [--stats] [--gc-stress] [--no-assertions] [--bytecode] [file.lat]
+clat [--stats] [--gc-stress] [--no-assertions] [--tree-walk] [file.lat]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `file.lat` | Run a Lattice source file |
 | *(no file)* | Start the interactive REPL |
-| `--bytecode` | Compile and run on the bytecode VM instead of the tree-walker |
-| `--stats` | Print memory/GC statistics to stderr after execution |
+| `--tree-walk` | Use the tree-walking interpreter instead of the bytecode VM |
+| `--stats` | Print memory/GC statistics to stderr after execution (tree-walk mode) |
 | `--gc-stress` | Force garbage collection on every allocation (for testing) |
 | `--no-assertions` | Disable `debug_assert()` and `require`/`ensure` contracts |
 

@@ -3,14 +3,14 @@
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
-#include "eval.h"
-#include "phase_check.h"
+#include "compiler.h"
+#include "vm.h"
 #include <emscripten.h>
 
-static Evaluator *g_ev = NULL;
+static VM *g_vm = NULL;
 
-/* Keep parsed programs alive so struct/fn decls referenced by the evaluator
- * remain valid. We store them in a simple growable array. */
+/* Keep parsed programs alive so struct/fn/enum decl pointers referenced by
+ * compiled chunks remain valid. */
 static Program *g_programs = NULL;
 static LatVec  *g_token_vecs = NULL;
 static size_t   g_prog_count = 0;
@@ -44,16 +44,23 @@ static void free_stored_programs(void) {
 
 EMSCRIPTEN_KEEPALIVE
 void lat_init(void) {
-    if (g_ev) {
-        evaluator_free(g_ev);
+    if (g_vm) {
+        vm_free(g_vm);
+        free(g_vm);
+        compiler_free_known_enums();
         free_stored_programs();
     }
-    g_ev = evaluator_new();
+    /* Disconnect the fluid heap so the compiler and VM use plain malloc/free */
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    g_vm = malloc(sizeof(VM));
+    vm_init(g_vm);
 }
 
 EMSCRIPTEN_KEEPALIVE
 const char *lat_run_line(const char *source) {
-    if (!g_ev) return "error: evaluator not initialized";
+    if (!g_vm) return "error: VM not initialized";
 
     /* Lex */
     Lexer lex = lexer_new(source);
@@ -80,27 +87,48 @@ const char *lat_run_line(const char *source) {
         return NULL;
     }
 
-    /* Evaluate (REPL mode — no auto-main) and capture result */
-    EvalResult r = evaluator_run_repl_result(g_ev, &prog);
-    if (!r.ok) {
-        fprintf(stderr, "error: %s\n", r.error);
-        free(r.error);
-        /* Still store so any partial defs stay valid */
+    /* Compile for REPL (keeps last expression value on stack) */
+    char *comp_err = NULL;
+    Chunk *chunk = compile_repl(&prog, &comp_err);
+    if (!chunk) {
+        fprintf(stderr, "compile error: %s\n", comp_err);
+        free(comp_err);
         store_program(prog, tokens);
         return NULL;
     }
 
-    /* Display non-trivial results */
-    if (r.value.type != VAL_UNIT && r.value.type != VAL_NIL) {
-        char *repr = eval_repr(g_ev, &r.value);
+    /* Run on VM */
+    LatValue result;
+    VMResult vm_res = vm_run(g_vm, chunk, &result);
+    if (vm_res != VM_OK) {
+        fprintf(stderr, "error: %s\n", g_vm->error);
+        free(g_vm->error);
+        g_vm->error = NULL;
+        /* Reset VM state for next iteration */
+        for (LatValue *slot = g_vm->stack; slot < g_vm->stack_top; slot++)
+            value_free(slot);
+        g_vm->stack_top = g_vm->stack;
+        g_vm->frame_count = 0;
+        g_vm->handler_count = 0;
+        g_vm->defer_count = 0;
+        while (g_vm->open_upvalues) {
+            ObjUpvalue *uv = g_vm->open_upvalues;
+            g_vm->open_upvalues = uv->next;
+            uv->closed = *uv->location;
+            uv->location = &uv->closed;
+        }
+    } else if (result.type != VAL_UNIT && result.type != VAL_NIL) {
+        char *repr = value_repr(&result);
         printf("=> %s\n", repr);
         free(repr);
-        value_free(&r.value);
+        value_free(&result);
     } else {
-        value_free(&r.value);
+        value_free(&result);
     }
 
-    /* Keep program alive (struct/fn decls are referenced by pointer) */
+    chunk_free(chunk);
+
+    /* Keep program alive (struct/fn/enum decls are referenced by pointer) */
     store_program(prog, tokens);
     return NULL;
 }
@@ -137,10 +165,12 @@ int lat_is_complete(const char *source) {
 
 EMSCRIPTEN_KEEPALIVE
 void lat_destroy(void) {
-    if (g_ev) {
-        evaluator_free(g_ev);
-        g_ev = NULL;
+    if (g_vm) {
+        vm_free(g_vm);
+        free(g_vm);
+        g_vm = NULL;
     }
+    compiler_free_known_enums();
     free_stored_programs();
 }
 

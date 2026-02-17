@@ -47,7 +47,7 @@ static char *read_file(const char *path) {
 static bool gc_stress_mode = false;
 static bool no_regions_mode = false;
 static bool no_assertions_mode = false;
-static bool bytecode_mode = false;
+static bool tree_walk_mode = false;
 static int  saved_argc = 0;
 static char **saved_argv = NULL;
 
@@ -107,19 +107,12 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         evaluator_set_script_dir(ev, script_dir);
     evaluator_set_argv(ev, saved_argc, saved_argv);
 
-    /* Bytecode VM mode */
-    if (bytecode_mode) {
-        /* Disconnect the fluid heap so the compiler and VM use plain
-         * malloc/free. The DualHeap doesn't support realloc, which
-         * the VM needs for growing arrays. */
-        value_set_heap(NULL);
-        value_set_arena(NULL);
-
-        char *comp_err = NULL;
-        Chunk *chunk = compile(&prog, &comp_err);
-        if (!chunk) {
-            fprintf(stderr, "compile error: %s\n", comp_err);
-            free(comp_err);
+    /* Tree-walk interpreter (legacy path) */
+    if (tree_walk_mode) {
+        char *eval_err = evaluator_run(ev, &prog);
+        if (eval_err) {
+            fprintf(stderr, "error: %s\n", eval_err);
+            free(eval_err);
             evaluator_free(ev);
             program_free(&prog);
             for (size_t i = 0; i < tokens.len; i++)
@@ -127,32 +120,12 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             lat_vec_free(&tokens);
             return 1;
         }
-        chunk_disassemble(chunk, "<script>");
-        fprintf(stderr, "\n== output ==\n");
-        fflush(stderr);
 
-        VM vm;
-        vm_init(&vm);
-        if (script_dir)
-            vm.script_dir = strdup(script_dir);
-        vm.prog_argc = saved_argc;
-        vm.prog_argv = saved_argv;
-        LatValue result;
-        VMResult vm_res = vm_run(&vm, chunk, &result);
-        if (vm_res != VM_OK) {
-            fprintf(stderr, "vm error: %s\n", vm.error);
-            vm_free(&vm);
-            chunk_free(chunk);
-            evaluator_free(ev);
-            program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
-            lat_vec_free(&tokens);
-            return 1;
+        if (show_stats) {
+            fprintf(stderr, "\n");
+            memory_stats_print(evaluator_stats(ev), stderr);
         }
-        value_free(&result);
-        vm_free(&vm);
-        chunk_free(chunk);
+
         evaluator_free(ev);
         program_free(&prog);
         for (size_t i = 0; i < tokens.len; i++)
@@ -161,10 +134,18 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 0;
     }
 
-    char *eval_err = evaluator_run(ev, &prog);
-    if (eval_err) {
-        fprintf(stderr, "error: %s\n", eval_err);
-        free(eval_err);
+    /* Bytecode VM (default) */
+    /* Disconnect the fluid heap so the compiler and VM use plain
+     * malloc/free. The DualHeap doesn't support realloc, which
+     * the VM needs for growing arrays. */
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    Chunk *chunk = compile(&prog, &comp_err);
+    if (!chunk) {
+        fprintf(stderr, "compile error: %s\n", comp_err);
+        free(comp_err);
         evaluator_free(ev);
         program_free(&prog);
         for (size_t i = 0; i < tokens.len; i++)
@@ -173,11 +154,28 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 1;
     }
 
-    if (show_stats) {
-        fprintf(stderr, "\n");
-        memory_stats_print(evaluator_stats(ev), stderr);
+    VM vm;
+    vm_init(&vm);
+    if (script_dir)
+        vm.script_dir = strdup(script_dir);
+    vm.prog_argc = saved_argc;
+    vm.prog_argv = saved_argv;
+    LatValue result;
+    VMResult vm_res = vm_run(&vm, chunk, &result);
+    if (vm_res != VM_OK) {
+        fprintf(stderr, "vm error: %s\n", vm.error);
+        vm_free(&vm);
+        chunk_free(chunk);
+        evaluator_free(ev);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        return 1;
     }
-
+    value_free(&result);
+    vm_free(&vm);
+    chunk_free(chunk);
     evaluator_free(ev);
     program_free(&prog);
     for (size_t i = 0; i < tokens.len; i++)
@@ -235,6 +233,155 @@ static bool input_is_complete(const char *source) {
 }
 
 static void repl(void) {
+    printf("Lattice v%s — crystallization-based programming language\n", LATTICE_VERSION);
+    printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
+    printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
+
+    /* Disconnect the fluid heap so the compiler and VM use plain malloc/free */
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    VM vm;
+    vm_init(&vm);
+    vm.prog_argc = saved_argc;
+    vm.prog_argv = saved_argv;
+
+    /* Keep programs/tokens alive — scope/select store Expr* pointers in chunks */
+    size_t prog_cap = 16, prog_count = 0;
+    Program *kept_progs = malloc(prog_cap * sizeof(Program));
+    size_t tok_cap = 16, tok_count = 0;
+    LatVec *kept_tokens = malloc(tok_cap * sizeof(LatVec));
+
+    char accumulated[65536];
+    accumulated[0] = '\0';
+
+    for (;;) {
+        const char *prompt = (accumulated[0] == '\0') ? "lattice> " : "    ...> ";
+        char *line = readline(prompt);
+        if (!line) {
+            printf("\n");
+            break;
+        }
+
+        if (accumulated[0] != '\0')
+            strcat(accumulated, "\n");
+        strcat(accumulated, line);
+
+        if (line[0] != '\0')
+            add_history(line);
+        free(line);
+
+        if (!input_is_complete(accumulated))
+            continue;
+
+        /* Lex */
+        Lexer lex = lexer_new(accumulated);
+        char *lex_err = NULL;
+        LatVec tokens = lexer_tokenize(&lex, &lex_err);
+        if (lex_err) {
+            fprintf(stderr, "error: %s\n", lex_err);
+            free(lex_err);
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Parse */
+        Parser parser = parser_new(&tokens);
+        char *parse_err = NULL;
+        Program prog = parser_parse(&parser, &parse_err);
+        if (parse_err) {
+            fprintf(stderr, "error: %s\n", parse_err);
+            free(parse_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Compile for REPL (keeps last expression value on stack) */
+        char *comp_err = NULL;
+        Chunk *chunk = compile_repl(&prog, &comp_err);
+        if (!chunk) {
+            fprintf(stderr, "compile error: %s\n", comp_err);
+            free(comp_err);
+            /* Keep program/tokens alive even on compile error */
+            if (prog_count >= prog_cap) {
+                prog_cap *= 2;
+                kept_progs = realloc(kept_progs, prog_cap * sizeof(Program));
+            }
+            kept_progs[prog_count++] = prog;
+            if (tok_count >= tok_cap) {
+                tok_cap *= 2;
+                kept_tokens = realloc(kept_tokens, tok_cap * sizeof(LatVec));
+            }
+            kept_tokens[tok_count++] = tokens;
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Run */
+        LatValue result;
+        VMResult vm_res = vm_run(&vm, chunk, &result);
+        if (vm_res != VM_OK) {
+            fprintf(stderr, "error: %s\n", vm.error);
+            free(vm.error);
+            vm.error = NULL;
+            /* Reset VM state for next iteration */
+            for (LatValue *slot = vm.stack; slot < vm.stack_top; slot++)
+                value_free(slot);
+            vm.stack_top = vm.stack;
+            vm.frame_count = 0;
+            vm.handler_count = 0;
+            vm.defer_count = 0;
+            /* Close any open upvalues */
+            while (vm.open_upvalues) {
+                ObjUpvalue *uv = vm.open_upvalues;
+                vm.open_upvalues = uv->next;
+                uv->closed = *uv->location;
+                uv->location = &uv->closed;
+            }
+        } else if (result.type != VAL_UNIT && result.type != VAL_NIL) {
+            char *repr = value_repr(&result);
+            printf("=> %s\n", repr);
+            free(repr);
+            value_free(&result);
+        } else {
+            value_free(&result);
+        }
+
+        chunk_free(chunk);
+
+        /* Keep program and tokens alive for struct/fn/enum declarations */
+        if (prog_count >= prog_cap) {
+            prog_cap *= 2;
+            kept_progs = realloc(kept_progs, prog_cap * sizeof(Program));
+        }
+        kept_progs[prog_count++] = prog;
+        if (tok_count >= tok_cap) {
+            tok_cap *= 2;
+            kept_tokens = realloc(kept_tokens, tok_cap * sizeof(LatVec));
+        }
+        kept_tokens[tok_count++] = tokens;
+
+        accumulated[0] = '\0';
+    }
+
+    vm_free(&vm);
+    compiler_free_known_enums();
+    for (size_t i = 0; i < prog_count; i++)
+        program_free(&kept_progs[i]);
+    free(kept_progs);
+    for (size_t i = 0; i < tok_count; i++) {
+        for (size_t j = 0; j < kept_tokens[i].len; j++)
+            token_free(lat_vec_get(&kept_tokens[i], j));
+        lat_vec_free(&kept_tokens[i]);
+    }
+    free(kept_tokens);
+}
+
+static void repl_tree_walk(void) {
     printf("Lattice v%s — crystallization-based programming language\n", LATTICE_VERSION);
     printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
@@ -440,18 +587,20 @@ int main(int argc, char **argv) {
             no_regions_mode = true;
         else if (strcmp(argv[i], "--no-assertions") == 0)
             no_assertions_mode = true;
-        else if (strcmp(argv[i], "--bytecode") == 0)
-            bytecode_mode = true;
+        else if (strcmp(argv[i], "--tree-walk") == 0)
+            tree_walk_mode = true;
         else if (!file)
             file = argv[i];
         else {
-            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [--no-assertions] [--bytecode] [file.lat]\n");
+            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [--no-assertions] [--tree-walk] [file.lat]\n");
             return 1;
         }
     }
 
     if (file)
         return run_file(file, show_stats);
+    else if (tree_walk_mode)
+        repl_tree_walk();
     else
         repl();
 
