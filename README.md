@@ -1432,16 +1432,29 @@ Lattice also includes a self-hosted REPL written in Lattice itself (`repl.lat`),
 ./clat repl.lat
 ```
 
+## Bytecode VM
+
+Lattice includes an experimental bytecode compiler and stack-based virtual machine. Pass `--bytecode` to compile and run programs on the VM instead of the tree-walking interpreter:
+
+```sh
+./clat --bytecode examples/fibonacci.lat
+```
+
+The bytecode VM compiles Lattice source to a compact bytecode format and executes it on a stack-based VM with upvalue-based closures. It supports the full phase system (freeze/thaw, react/bond/seed, sublimate, forge, anneal, pressure, alloy types), structs, enums, pattern matching, closures with captures, try/catch, defer, and all builtin functions.
+
+The tree-walker remains the default and supports the complete feature set including concurrency (`scope`/`spawn`/`select`). The bytecode VM is being developed toward full parity.
+
 ## CLI Reference
 
 ```
-clat [--stats] [--gc-stress] [--no-assertions] [file.lat]
+clat [--stats] [--gc-stress] [--no-assertions] [--bytecode] [file.lat]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `file.lat` | Run a Lattice source file |
 | *(no file)* | Start the interactive REPL |
+| `--bytecode` | Compile and run on the bytecode VM instead of the tree-walker |
 | `--stats` | Print memory/GC statistics to stderr after execution |
 | `--gc-stress` | Force garbage collection on every allocation (for testing) |
 | `--no-assertions` | Disable `debug_assert()` and `require`/`ensure` contracts |

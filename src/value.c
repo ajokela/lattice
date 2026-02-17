@@ -310,16 +310,28 @@ LatValue value_deep_clone(const LatValue *v) {
         }
         case VAL_CLOSURE: {
             size_t pc = v->as.closure.param_count;
-            out.as.closure.param_names = lat_alloc(pc * sizeof(char *));
-            for (size_t i = 0; i < pc; i++) {
-                out.as.closure.param_names[i] = lat_strdup(v->as.closure.param_names[i]);
+            if (v->as.closure.param_names) {
+                out.as.closure.param_names = lat_alloc(pc * sizeof(char *));
+                for (size_t i = 0; i < pc; i++) {
+                    out.as.closure.param_names[i] = lat_strdup(v->as.closure.param_names[i]);
+                }
+            } else {
+                out.as.closure.param_names = NULL;
             }
             out.as.closure.param_count = pc;
             out.as.closure.body = v->as.closure.body;  /* borrowed */
-            out.as.closure.captured_env = v->as.closure.captured_env ? env_clone(v->as.closure.captured_env) : NULL;
+            /* Compiled bytecode closures store ObjUpvalue** in captured_env (not Env*).
+             * Shallow-copy the pointer; the VM manages upvalue lifetime. */
+            if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL)
+                out.as.closure.captured_env = v->as.closure.captured_env;
+            else
+                out.as.closure.captured_env = v->as.closure.captured_env ? env_clone(v->as.closure.captured_env) : NULL;
             out.as.closure.default_values = v->as.closure.default_values;  /* borrowed */
             out.as.closure.has_variadic = v->as.closure.has_variadic;
             out.as.closure.native_fn = v->as.closure.native_fn;  /* shared, not owned */
+            /* Compiled bytecode closures store upvalue count in region_id */
+            if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL)
+                out.region_id = v->region_id;
             break;
         }
         case VAL_UNIT: break;
@@ -584,13 +596,15 @@ char *value_display(const LatValue *v) {
             size_t plen = strlen(prefix);
             memcpy(buf, prefix, plen);
             pos = plen;
-            for (size_t i = 0; i < v->as.closure.param_count; i++) {
-                if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
-                const char *pn = v->as.closure.param_names[i];
-                size_t nl = strlen(pn);
-                while (pos + nl + 4 > cap) { cap *= 2; buf = realloc(buf, cap); }
-                memcpy(buf + pos, pn, nl);
-                pos += nl;
+            if (v->as.closure.param_names) {
+                for (size_t i = 0; i < v->as.closure.param_count; i++) {
+                    if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
+                    const char *pn = v->as.closure.param_names[i];
+                    size_t nl = strlen(pn);
+                    while (pos + nl + 4 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                    memcpy(buf + pos, pn, nl);
+                    pos += nl;
+                }
             }
             buf[pos++] = '|';
             buf[pos++] = '>';
@@ -859,10 +873,15 @@ void value_free(LatValue *v) {
             val_dealloc(v, v->as.strct.field_phases);
             break;
         case VAL_CLOSURE:
-            for (size_t i = 0; i < v->as.closure.param_count; i++)
-                val_dealloc(v, v->as.closure.param_names[i]);
-            val_dealloc(v, v->as.closure.param_names);
-            if (v->as.closure.captured_env)
+            if (v->as.closure.param_names) {
+                for (size_t i = 0; i < v->as.closure.param_count; i++)
+                    val_dealloc(v, v->as.closure.param_names[i]);
+                val_dealloc(v, v->as.closure.param_names);
+            }
+            /* Don't env_free compiled bytecode closures — they store ObjUpvalue**,
+             * not Env*. The VM manages upvalue lifetime. */
+            if (v->as.closure.captured_env &&
+                !(v->as.closure.body == NULL && v->as.closure.native_fn != NULL))
                 env_free(v->as.closure.captured_env);
             break;
         case VAL_MAP:

@@ -583,6 +583,12 @@ LatVec phase_check(const Program *prog) {
                 break;
             case ITEM_ENUM:
                 break;
+            case ITEM_TRAIT:
+                break;
+            case ITEM_IMPL:
+                for (size_t j = 0; j < prog->items[i].as.impl_block.method_count; j++)
+                    pc_check_fn(&pc, &prog->items[i].as.impl_block.methods[j]);
+                break;
         }
     }
 

@@ -1777,6 +1777,98 @@ fail:
     return false;
 }
 
+/* ── Trait declaration ── */
+
+static bool parse_trait_decl(Parser *p, TraitDecl *out, char **err) {
+    if (!expect(p, TOK_TRAIT, err)) return false;
+    out->name = expect_ident(p, err);
+    if (!out->name) return false;
+    if (!expect(p, TOK_LBRACE, err)) { free(out->name); return false; }
+
+    size_t cap = 4;
+    size_t n = 0;
+    out->methods = malloc(cap * sizeof(TraitMethod));
+
+    while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+        if (n >= cap) { cap *= 2; out->methods = realloc(out->methods, cap * sizeof(TraitMethod)); }
+
+        /* fn name(params) -> RetType */
+        if (!expect(p, TOK_FN, err)) {
+            for (size_t i = 0; i < n; i++) {
+                free(out->methods[i].name);
+                for (size_t j = 0; j < out->methods[i].param_count; j++) {
+                    free(out->methods[i].params[j].name);
+                    type_expr_free(&out->methods[i].params[j].ty);
+                }
+                free(out->methods[i].params);
+                if (out->methods[i].return_type) { type_expr_free(out->methods[i].return_type); free(out->methods[i].return_type); }
+            }
+            free(out->methods); free(out->name);
+            return false;
+        }
+        out->methods[n].name = expect_ident(p, err);
+        if (!out->methods[n].name) { free(out->methods); free(out->name); return false; }
+        if (!expect(p, TOK_LPAREN, err)) { free(out->methods[n].name); free(out->methods); free(out->name); return false; }
+        out->methods[n].params = parse_params(p, &out->methods[n].param_count, err);
+        if (!out->methods[n].params && *err) { free(out->methods[n].name); free(out->methods); free(out->name); return false; }
+        if (!expect(p, TOK_RPAREN, err)) { free(out->methods[n].name); free(out->methods[n].params); free(out->methods); free(out->name); return false; }
+
+        out->methods[n].return_type = NULL;
+        if (peek_type(p) == TOK_ARROW) {
+            advance(p);
+            out->methods[n].return_type = parse_type_expr(p, err);
+            if (!out->methods[n].return_type) { free(out->methods[n].name); free(out->methods[n].params); free(out->methods); free(out->name); return false; }
+        }
+        n++;
+        /* Allow optional semicolons between methods */
+        eat_semicolon(p);
+    }
+    out->method_count = n;
+    if (!expect(p, TOK_RBRACE, err)) { trait_decl_free(out); return false; }
+    return true;
+}
+
+/* ── Impl block ── */
+
+static bool parse_impl_block(Parser *p, ImplBlock *out, char **err) {
+    if (!expect(p, TOK_IMPL, err)) return false;
+    out->trait_name = expect_ident(p, err);
+    if (!out->trait_name) return false;
+
+    /* "for TypeName" */
+    if (peek_type(p) != TOK_FOR) {
+        *err = parser_error_fmt(p, "expected 'for' after trait name in impl block");
+        free(out->trait_name);
+        return false;
+    }
+    advance(p);
+    out->type_name = expect_ident(p, err);
+    if (!out->type_name) { free(out->trait_name); return false; }
+
+    if (!expect(p, TOK_LBRACE, err)) { free(out->trait_name); free(out->type_name); return false; }
+
+    size_t cap = 4;
+    size_t n = 0;
+    out->methods = malloc(cap * sizeof(FnDecl));
+
+    while (peek_type(p) == TOK_FN && !at_eof(p)) {
+        if (n >= cap) { cap *= 2; out->methods = realloc(out->methods, cap * sizeof(FnDecl)); }
+        if (!parse_fn_decl(p, &out->methods[n], err)) {
+            for (size_t i = 0; i < n; i++) fn_decl_free(&out->methods[i]);
+            free(out->methods); free(out->trait_name); free(out->type_name);
+            return false;
+        }
+        n++;
+    }
+    out->method_count = n;
+    if (!expect(p, TOK_RBRACE, err)) {
+        for (size_t i = 0; i < n; i++) fn_decl_free(&out->methods[i]);
+        free(out->methods); free(out->trait_name); free(out->type_name);
+        return false;
+    }
+    return true;
+}
+
 /* ── Program ── */
 
 Program parser_parse(Parser *p, char **err) {
@@ -1826,6 +1918,18 @@ Program parser_parse(Parser *p, char **err) {
         } else if (peek_type(p) == TOK_ENUM) {
             prog.items[n].tag = ITEM_ENUM;
             if (!parse_enum_decl(p, &prog.items[n].as.enum_decl, err)) {
+                prog.item_count = n;
+                return prog;
+            }
+        } else if (peek_type(p) == TOK_TRAIT) {
+            prog.items[n].tag = ITEM_TRAIT;
+            if (!parse_trait_decl(p, &prog.items[n].as.trait_decl, err)) {
+                prog.item_count = n;
+                return prog;
+            }
+        } else if (peek_type(p) == TOK_IMPL) {
+            prog.items[n].tag = ITEM_IMPL;
+            if (!parse_impl_block(p, &prog.items[n].as.impl_block, err)) {
                 prog.item_count = n;
                 return prog;
             }

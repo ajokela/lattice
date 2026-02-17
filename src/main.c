@@ -3,6 +3,8 @@
 #include "parser.h"
 #include "eval.h"
 #include "phase_check.h"
+#include "compiler.h"
+#include "vm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +47,7 @@ static char *read_file(const char *path) {
 static bool gc_stress_mode = false;
 static bool no_regions_mode = false;
 static bool no_assertions_mode = false;
+static bool bytecode_mode = false;
 static int  saved_argc = 0;
 static char **saved_argv = NULL;
 
@@ -103,6 +106,61 @@ static int run_source(const char *source, bool show_stats, const char *script_di
     if (script_dir)
         evaluator_set_script_dir(ev, script_dir);
     evaluator_set_argv(ev, saved_argc, saved_argv);
+
+    /* Bytecode VM mode */
+    if (bytecode_mode) {
+        /* Disconnect the fluid heap so the compiler and VM use plain
+         * malloc/free. The DualHeap doesn't support realloc, which
+         * the VM needs for growing arrays. */
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+
+        char *comp_err = NULL;
+        Chunk *chunk = compile(&prog, &comp_err);
+        if (!chunk) {
+            fprintf(stderr, "compile error: %s\n", comp_err);
+            free(comp_err);
+            evaluator_free(ev);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            return 1;
+        }
+        chunk_disassemble(chunk, "<script>");
+        fprintf(stderr, "\n== output ==\n");
+        fflush(stderr);
+
+        VM vm;
+        vm_init(&vm);
+        if (script_dir)
+            vm.script_dir = strdup(script_dir);
+        vm.prog_argc = saved_argc;
+        vm.prog_argv = saved_argv;
+        LatValue result;
+        VMResult vm_res = vm_run(&vm, chunk, &result);
+        if (vm_res != VM_OK) {
+            fprintf(stderr, "vm error: %s\n", vm.error);
+            vm_free(&vm);
+            chunk_free(chunk);
+            evaluator_free(ev);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            return 1;
+        }
+        value_free(&result);
+        vm_free(&vm);
+        chunk_free(chunk);
+        evaluator_free(ev);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        return 0;
+    }
+
     char *eval_err = evaluator_run(ev, &prog);
     if (eval_err) {
         fprintf(stderr, "error: %s\n", eval_err);
@@ -382,10 +440,12 @@ int main(int argc, char **argv) {
             no_regions_mode = true;
         else if (strcmp(argv[i], "--no-assertions") == 0)
             no_assertions_mode = true;
+        else if (strcmp(argv[i], "--bytecode") == 0)
+            bytecode_mode = true;
         else if (!file)
             file = argv[i];
         else {
-            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [--no-assertions] [file.lat]\n");
+            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [--no-assertions] [--bytecode] [file.lat]\n");
             return 1;
         }
     }

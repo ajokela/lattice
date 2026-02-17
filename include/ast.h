@@ -297,8 +297,34 @@ typedef struct {
     size_t       variant_count;
 } EnumDecl;
 
+/* Trait method signature (no body) */
+typedef struct {
+    char *name;
+    Param *params;
+    size_t param_count;
+    TypeExpr *return_type;  /* nullable */
+} TraitMethod;
+
+/* Trait declaration */
+typedef struct {
+    char *name;
+    TraitMethod *methods;
+    size_t method_count;
+} TraitDecl;
+
+/* Implementation block */
+typedef struct {
+    char *trait_name;
+    char *type_name;
+    FnDecl *methods;        /* array of method implementations */
+    size_t method_count;
+} ImplBlock;
+
 /* Top-level item */
-typedef enum { ITEM_FUNCTION, ITEM_STRUCT, ITEM_STMT, ITEM_TEST, ITEM_ENUM } ItemTag;
+typedef enum {
+    ITEM_FUNCTION, ITEM_STRUCT, ITEM_STMT, ITEM_TEST, ITEM_ENUM,
+    ITEM_TRAIT, ITEM_IMPL
+} ItemTag;
 
 typedef struct {
     ItemTag tag;
@@ -308,6 +334,8 @@ typedef struct {
         Stmt      *stmt;
         TestDecl   test_decl;
         EnumDecl   enum_decl;
+        TraitDecl  trait_decl;
+        ImplBlock  impl_block;
     } as;
 } Item;
 
@@ -393,6 +421,8 @@ void fn_decl_free(FnDecl *f);
 void struct_decl_free(StructDecl *s);
 void test_decl_free(TestDecl *t);
 void enum_decl_free(EnumDecl *e);
+void trait_decl_free(TraitDecl *t);
+void impl_block_free(ImplBlock *ib);
 void item_free(Item *item);
 void program_free(Program *p);
 

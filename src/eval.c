@@ -2587,7 +2587,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         free(args);
                         return eval_err(strdup(errbuf));
                     }
-                    /* Register functions and structs */
+                    /* Register functions, structs, traits, impls */
                     for (size_t j = 0; j < req_prog.item_count; j++) {
                         if (req_prog.items[j].tag == ITEM_STRUCT) {
                             StructDecl *ptr = &req_prog.items[j].as.struct_decl;
@@ -2595,6 +2595,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         } else if (req_prog.items[j].tag == ITEM_FUNCTION) {
                             FnDecl *ptr = &req_prog.items[j].as.fn_decl;
                             register_fn_overload(&ev->fn_defs, ptr);
+                        } else if (req_prog.items[j].tag == ITEM_TRAIT) {
+                            TraitDecl *ptr = &req_prog.items[j].as.trait_decl;
+                            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+                        } else if (req_prog.items[j].tag == ITEM_IMPL) {
+                            ImplBlock *ptr = &req_prog.items[j].as.impl_block;
+                            char key[512];
+                            snprintf(key, sizeof(key), "%s::%s", ptr->type_name, ptr->trait_name);
+                            lat_map_set(&ev->impl_registry, key, &ptr);
                         }
                     }
                     /* Set script_dir to the required file's directory for nested requires */
@@ -2691,7 +2699,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         free(args);
                         return eval_err(parse_err);
                     }
-                    /* Register functions and structs (same as evaluator_run) */
+                    /* Register functions, structs, traits, impls (same as evaluator_run) */
                     for (size_t j = 0; j < prog.item_count; j++) {
                         if (prog.items[j].tag == ITEM_STRUCT) {
                             StructDecl *ptr = &prog.items[j].as.struct_decl;
@@ -2699,6 +2707,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         } else if (prog.items[j].tag == ITEM_FUNCTION) {
                             FnDecl *ptr = &prog.items[j].as.fn_decl;
                             register_fn_overload(&ev->fn_defs, ptr);
+                        } else if (prog.items[j].tag == ITEM_TRAIT) {
+                            TraitDecl *ptr = &prog.items[j].as.trait_decl;
+                            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+                        } else if (prog.items[j].tag == ITEM_IMPL) {
+                            ImplBlock *ptr = &prog.items[j].as.impl_block;
+                            char key[512];
+                            snprintf(key, sizeof(key), "%s::%s", ptr->type_name, ptr->trait_name);
+                            lat_map_set(&ev->impl_registry, key, &ptr);
                         }
                     }
                     /* Execute statements — set lat_eval_scope so top-level
@@ -6663,7 +6679,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
         return eval_err(strdup(errbuf));
     }
 
-    /* Register functions, structs, enums globally */
+    /* Register functions, structs, enums, traits, impls globally */
     for (size_t j = 0; j < mod_prog.item_count; j++) {
         if (mod_prog.items[j].tag == ITEM_STRUCT) {
             StructDecl *ptr = &mod_prog.items[j].as.struct_decl;
@@ -6674,6 +6690,14 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
         } else if (mod_prog.items[j].tag == ITEM_ENUM) {
             EnumDecl *ptr = &mod_prog.items[j].as.enum_decl;
             lat_map_set(&ev->enum_defs, ptr->name, &ptr);
+        } else if (mod_prog.items[j].tag == ITEM_TRAIT) {
+            TraitDecl *ptr = &mod_prog.items[j].as.trait_decl;
+            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+        } else if (mod_prog.items[j].tag == ITEM_IMPL) {
+            ImplBlock *ptr = &mod_prog.items[j].as.impl_block;
+            char key[512];
+            snprintf(key, sizeof(key), "%s::%s", ptr->type_name, ptr->trait_name);
+            lat_map_set(&ev->impl_registry, key, &ptr);
         }
     }
 
@@ -8838,6 +8862,42 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
     }
 
+    /* ── Trait impl method dispatch ── */
+    {
+        const char *type_name = NULL;
+        if (obj.type == VAL_STRUCT) type_name = obj.as.strct.name;
+        else if (obj.type == VAL_INT) type_name = "Int";
+        else if (obj.type == VAL_FLOAT) type_name = "Float";
+        else if (obj.type == VAL_STR) type_name = "String";
+        else if (obj.type == VAL_BOOL) type_name = "Bool";
+        else if (obj.type == VAL_ARRAY) type_name = "Array";
+        else if (obj.type == VAL_MAP) type_name = "Map";
+
+        if (type_name) {
+            /* Search all impl blocks for this type */
+            for (size_t i = 0; i < ev->impl_registry.cap; i++) {
+                if (ev->impl_registry.entries[i].state != MAP_OCCUPIED) continue;
+                ImplBlock **ib_ptr = (ImplBlock **)ev->impl_registry.entries[i].value;
+                ImplBlock *ib = *ib_ptr;
+                if (strcmp(ib->type_name, type_name) != 0) continue;
+                for (size_t m = 0; m < ib->method_count; m++) {
+                    if (strcmp(ib->methods[m].name, method) != 0) continue;
+                    /* Found a matching impl method — call it with self as first arg.
+                     * call_fn takes ownership of args via env_define, so do NOT free them. */
+                    FnDecl *fn = &ib->methods[m];
+                    size_t total = 1 + arg_count;
+                    LatValue *full_args = malloc(total * sizeof(LatValue));
+                    full_args[0] = value_deep_clone(&obj);
+                    for (size_t j = 0; j < arg_count; j++)
+                        full_args[j + 1] = value_deep_clone(&args[j]);
+                    EvalResult r = call_fn(ev, fn, full_args, total, NULL);
+                    free(full_args);
+                    return r;
+                }
+            }
+        }
+    }
+
     char *err = NULL;
     (void)asprintf(&err, "unknown method '.%s()' on %s", method, value_type_name(&obj));
     return eval_err(err);
@@ -8852,6 +8912,8 @@ Evaluator *evaluator_new(void) {
     ev->struct_defs = lat_map_new(sizeof(StructDecl *));
     ev->enum_defs = lat_map_new(sizeof(EnumDecl *));
     ev->fn_defs = lat_map_new(sizeof(FnDecl *));
+    ev->trait_defs = lat_map_new(sizeof(TraitDecl *));
+    ev->impl_registry = lat_map_new(sizeof(ImplBlock *));
     stats_init(&ev->stats);
     ev->heap = dual_heap_new();
     ev->gc_roots = lat_vec_new(sizeof(LatValue *));
@@ -8886,6 +8948,8 @@ void evaluator_free(Evaluator *ev) {
     lat_map_free(&ev->struct_defs);
     lat_map_free(&ev->enum_defs);
     lat_map_free(&ev->fn_defs);
+    lat_map_free(&ev->trait_defs);
+    lat_map_free(&ev->impl_registry);
     lat_map_free(&ev->required_files);
     /* Free cached module maps */
     for (size_t i = 0; i < ev->module_cache.cap; i++) {
@@ -8985,7 +9049,7 @@ void evaluator_set_assertions(Evaluator *ev, bool enabled) {
 char *evaluator_run(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
-    /* First pass: register structs, enums, and functions */
+    /* First pass: register structs, enums, functions, traits, and impls */
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STRUCT) {
             StructDecl *ptr = &prog->items[i].as.struct_decl;
@@ -8996,6 +9060,14 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
             register_fn_overload(&ev->fn_defs, ptr);
+        } else if (prog->items[i].tag == ITEM_TRAIT) {
+            TraitDecl *ptr = &prog->items[i].as.trait_decl;
+            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_IMPL) {
+            ImplBlock *ptr = &prog->items[i].as.impl_block;
+            char key[512];
+            snprintf(key, sizeof(key), "%s::%s", ptr->type_name, ptr->trait_name);
+            lat_map_set(&ev->impl_registry, key, &ptr);
         }
     }
 
@@ -9023,7 +9095,7 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
 int evaluator_run_tests(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
-    /* First pass: register structs, enums, and functions */
+    /* First pass: register structs, enums, functions, traits, and impls */
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STRUCT) {
             StructDecl *ptr = &prog->items[i].as.struct_decl;
@@ -9034,6 +9106,14 @@ int evaluator_run_tests(Evaluator *ev, const Program *prog) {
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
             register_fn_overload(&ev->fn_defs, ptr);
+        } else if (prog->items[i].tag == ITEM_TRAIT) {
+            TraitDecl *ptr = &prog->items[i].as.trait_decl;
+            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_IMPL) {
+            ImplBlock *ptr = &prog->items[i].as.impl_block;
+            char key[512];
+            snprintf(key, sizeof(key), "%s::%s", ptr->type_name, ptr->trait_name);
+            lat_map_set(&ev->impl_registry, key, &ptr);
         }
     }
 
@@ -9117,7 +9197,7 @@ int evaluator_run_tests(Evaluator *ev, const Program *prog) {
 char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
-    /* First pass: register structs, enums, and functions */
+    /* First pass: register structs, enums, functions, traits, and impls */
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STRUCT) {
             StructDecl *ptr = &prog->items[i].as.struct_decl;
@@ -9128,6 +9208,14 @@ char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
             register_fn_overload(&ev->fn_defs, ptr);
+        } else if (prog->items[i].tag == ITEM_TRAIT) {
+            TraitDecl *ptr = &prog->items[i].as.trait_decl;
+            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_IMPL) {
+            ImplBlock *ptr = &prog->items[i].as.impl_block;
+            char key[512];
+            snprintf(key, sizeof(key), "%s::%s", ptr->type_name, ptr->trait_name);
+            lat_map_set(&ev->impl_registry, key, &ptr);
         }
     }
 
@@ -9147,7 +9235,7 @@ char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
 EvalResult evaluator_run_repl_result(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
-    /* First pass: register structs, enums, and functions */
+    /* First pass: register structs, enums, functions, traits, and impls */
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STRUCT) {
             StructDecl *ptr = &prog->items[i].as.struct_decl;
@@ -9158,6 +9246,14 @@ EvalResult evaluator_run_repl_result(Evaluator *ev, const Program *prog) {
         } else if (prog->items[i].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &prog->items[i].as.fn_decl;
             register_fn_overload(&ev->fn_defs, ptr);
+        } else if (prog->items[i].tag == ITEM_TRAIT) {
+            TraitDecl *ptr = &prog->items[i].as.trait_decl;
+            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+        } else if (prog->items[i].tag == ITEM_IMPL) {
+            ImplBlock *ptr = &prog->items[i].as.impl_block;
+            char key[512];
+            snprintf(key, sizeof(key), "%s::%s", ptr->type_name, ptr->trait_name);
+            lat_map_set(&ev->impl_registry, key, &ptr);
         }
     }
 

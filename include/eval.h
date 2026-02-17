@@ -125,6 +125,8 @@ typedef struct Evaluator {
     LatMap      struct_defs;   /* char* -> StructDecl */
     LatMap      enum_defs;     /* char* -> EnumDecl */
     LatMap      fn_defs;       /* char* -> FnDecl */
+    LatMap      trait_defs;    /* char* -> TraitDecl* */
+    LatMap      impl_registry; /* "Type::Trait" -> ImplBlock* */
     MemoryStats stats;
     DualHeap   *heap;
     LatVec      gc_roots;      /* shadow stack of LatValue* */

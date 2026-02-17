@@ -120,6 +120,8 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "crystallize") == 0) return TOK_CRYSTALLIZE;
     if (strcmp(ident, "sublimate") == 0) return TOK_SUBLIMATE;
     if (strcmp(ident, "defer") == 0) return TOK_DEFER;
+    if (strcmp(ident, "trait") == 0) return TOK_TRAIT;
+    if (strcmp(ident, "impl") == 0) return TOK_IMPL;
     return TOK_IDENT;
 }
 

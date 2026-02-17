@@ -87,7 +87,11 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/http.c \
        $(SRC_DIR)/toml_ops.c \
        $(SRC_DIR)/yaml_ops.c \
-       $(SRC_DIR)/ext.c
+       $(SRC_DIR)/ext.c \
+       $(SRC_DIR)/opcode.c \
+       $(SRC_DIR)/chunk.c \
+       $(SRC_DIR)/compiler.c \
+       $(SRC_DIR)/vm.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
@@ -96,6 +100,19 @@ OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
 TARGET = clat
+
+# LSP server sources
+LSP_SRCS = $(SRC_DIR)/lsp_main.c \
+           $(SRC_DIR)/lsp_server.c \
+           $(SRC_DIR)/lsp_protocol.c \
+           $(SRC_DIR)/lsp_analysis.c \
+           $(SRC_DIR)/lsp_symbols.c \
+           vendor/cJSON.c
+
+LSP_SRC_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter $(SRC_DIR)/%,$(LSP_SRCS)))
+LSP_VND_OBJS = $(patsubst vendor/%.c,$(BUILD_DIR)/vendor/%.o,$(filter vendor/%,$(LSP_SRCS)))
+LSP_OBJS = $(LSP_SRC_OBJS) $(LSP_VND_OBJS)
+LSP_TARGET = clat-lsp
 
 # Test sources
 TEST_SRCS = $(TEST_DIR)/test_main.c \
@@ -122,7 +139,7 @@ FUZZ_SRC    = $(FUZZ_DIR)/fuzz_eval.c
 FUZZ_OBJ    = $(BUILD_DIR)/fuzz/fuzz_eval.o
 FUZZ_TARGET = $(BUILD_DIR)/fuzz_eval
 
-.PHONY: all clean test asan tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite
+.PHONY: all clean test asan tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite lsp
 
 all: $(TARGET)
 
@@ -132,6 +149,16 @@ $(TARGET): $(OBJS)
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# LSP server
+lsp: $(LSP_TARGET)
+
+$(LSP_TARGET): $(LIB_OBJS) $(LSP_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(BUILD_DIR)/vendor/%.o: vendor/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Wno-unused-parameter -c -o $@ $<
 
 $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -217,5 +244,5 @@ ext-sqlite:
 	$(MAKE) -C extensions/sqlite
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET)
+	rm -rf $(BUILD_DIR) $(TARGET) $(LSP_TARGET)
 	rm -f *.plist src/*.plist

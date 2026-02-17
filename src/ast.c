@@ -756,6 +756,34 @@ void enum_decl_free(EnumDecl *e) {
     free(e->variants);
 }
 
+void trait_decl_free(TraitDecl *t) {
+    free(t->name);
+    for (size_t i = 0; i < t->method_count; i++) {
+        free(t->methods[i].name);
+        for (size_t j = 0; j < t->methods[i].param_count; j++) {
+            free(t->methods[i].params[j].name);
+            type_expr_free(&t->methods[i].params[j].ty);
+            if (t->methods[i].params[j].default_value)
+                expr_free(t->methods[i].params[j].default_value);
+        }
+        free(t->methods[i].params);
+        if (t->methods[i].return_type) {
+            type_expr_free(t->methods[i].return_type);
+            free(t->methods[i].return_type);
+        }
+    }
+    free(t->methods);
+}
+
+void impl_block_free(ImplBlock *ib) {
+    free(ib->trait_name);
+    free(ib->type_name);
+    for (size_t i = 0; i < ib->method_count; i++) {
+        fn_decl_free(&ib->methods[i]);
+    }
+    free(ib->methods);
+}
+
 void item_free(Item *item) {
     switch (item->tag) {
         case ITEM_FUNCTION:
@@ -772,6 +800,12 @@ void item_free(Item *item) {
             break;
         case ITEM_ENUM:
             enum_decl_free(&item->as.enum_decl);
+            break;
+        case ITEM_TRAIT:
+            trait_decl_free(&item->as.trait_decl);
+            break;
+        case ITEM_IMPL:
+            impl_block_free(&item->as.impl_block);
             break;
     }
 }

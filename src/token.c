@@ -64,6 +64,7 @@ static const char *simple_names[] = {
     [TOK_IMPORT] = "import", [TOK_FROM] = "from", [TOK_AS] = "as",
     [TOK_CRYSTALLIZE] = "crystallize", [TOK_SUBLIMATE] = "sublimate",
     [TOK_DEFER] = "defer", [TOK_SELECT] = "select",
+    [TOK_TRAIT] = "trait", [TOK_IMPL] = "impl",
     [TOK_TILDE] = "~", [TOK_STAR] = "*",
     [TOK_PLUS] = "+", [TOK_MINUS] = "-", [TOK_SLASH] = "/", [TOK_PERCENT] = "%",
     [TOK_EQ] = "=", [TOK_EQEQ] = "==", [TOK_BANGEQ] = "!=",

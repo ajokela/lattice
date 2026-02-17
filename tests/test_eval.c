@@ -1653,3 +1653,82 @@ TEST(select_first_ready) {
         "}\n"
     );
 }
+
+/* ── Trait/Impl Tests ── */
+
+TEST(trait_basic_impl) {
+    ASSERT_RUNS(
+        "trait Greetable {\n"
+        "    fn greet(self: Any) -> String;\n"
+        "}\n"
+        "struct Person { name: String }\n"
+        "impl Greetable for Person {\n"
+        "    fn greet(self: Any) -> String {\n"
+        "        return \"Hello, \" + self.name\n"
+        "    }\n"
+        "}\n"
+        "fn main() {\n"
+        "    let p = Person { name: \"Alice\" }\n"
+        "    assert(p.greet() == \"Hello, Alice\")\n"
+        "}\n"
+    );
+}
+
+TEST(trait_multiple_methods) {
+    ASSERT_RUNS(
+        "trait Shape {\n"
+        "    fn area(self: Any) -> Int;\n"
+        "    fn name(self: Any) -> String;\n"
+        "}\n"
+        "struct Square { side: Int }\n"
+        "impl Shape for Square {\n"
+        "    fn area(self: Any) -> Int { return self.side * self.side }\n"
+        "    fn name(self: Any) -> String { return \"Square\" }\n"
+        "}\n"
+        "fn main() {\n"
+        "    let s = Square { side: 5 }\n"
+        "    assert(s.area() == 25)\n"
+        "    assert(s.name() == \"Square\")\n"
+        "}\n"
+    );
+}
+
+TEST(trait_impl_with_args) {
+    ASSERT_RUNS(
+        "trait Addable {\n"
+        "    fn add_to(self: Any, n: Int) -> Int;\n"
+        "}\n"
+        "struct Counter { value: Int }\n"
+        "impl Addable for Counter {\n"
+        "    fn add_to(self: Any, n: Int) -> Int {\n"
+        "        return self.value + n\n"
+        "    }\n"
+        "}\n"
+        "fn main() {\n"
+        "    let c = Counter { value: 10 }\n"
+        "    assert(c.add_to(5) == 15)\n"
+        "}\n"
+    );
+}
+
+TEST(trait_multiple_impls) {
+    ASSERT_RUNS(
+        "trait Describable {\n"
+        "    fn describe(self: Any) -> String;\n"
+        "}\n"
+        "struct Dog { name: String }\n"
+        "struct Cat { name: String }\n"
+        "impl Describable for Dog {\n"
+        "    fn describe(self: Any) -> String { return \"Dog: \" + self.name }\n"
+        "}\n"
+        "impl Describable for Cat {\n"
+        "    fn describe(self: Any) -> String { return \"Cat: \" + self.name }\n"
+        "}\n"
+        "fn main() {\n"
+        "    let d = Dog { name: \"Rex\" }\n"
+        "    let c = Cat { name: \"Whiskers\" }\n"
+        "    assert(d.describe() == \"Dog: Rex\")\n"
+        "    assert(c.describe() == \"Cat: Whiskers\")\n"
+        "}\n"
+    );
+}

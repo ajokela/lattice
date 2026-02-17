@@ -22,6 +22,8 @@ typedef enum {
     TOK_SUBLIMATE,
     TOK_DEFER,
     TOK_SELECT,
+    TOK_TRAIT,
+    TOK_IMPL,
 
     /* Mode directive */
     TOK_MODE_DIRECTIVE,   /* #mode casual / #mode strict */
