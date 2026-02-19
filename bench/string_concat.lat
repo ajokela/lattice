@@ -1,0 +1,10 @@
+// Benchmark: string concatenation and manipulation
+fn main() {
+    flux s = ""
+    flux i = 0
+    while i < 2000 {
+        s += "a"
+        i += 1
+    }
+    print(to_string(s.len()))
+}

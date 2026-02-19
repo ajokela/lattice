@@ -1,0 +1,40 @@
+// Benchmark: Sieve of Eratosthenes (array-heavy, index access)
+fn sieve(limit: Int) -> Int {
+    flux flags = []
+    flux i = 0
+    while i <= limit {
+        if i < 2 {
+            flags.push(0)
+        } else {
+            flags.push(1)
+        }
+        i += 1
+    }
+
+    flux p = 2
+    while p * p <= limit {
+        if flags[p] == 1 {
+            flux j = p * p
+            while j <= limit {
+                flags[j] = 0
+                j += p
+            }
+        }
+        p += 1
+    }
+
+    flux count = 0
+    flux k = 0
+    while k <= limit {
+        if flags[k] == 1 {
+            count += 1
+        }
+        k += 1
+    }
+    return count
+}
+
+fn main() {
+    let count = sieve(10000)
+    print(to_string(count))
+}

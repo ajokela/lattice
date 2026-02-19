@@ -1,0 +1,24 @@
+// Benchmark: iterative fibonacci (tight loop, many iterations)
+fn fib(n: Int) -> Int {
+    if n <= 1 { return n }
+    flux a = 0
+    flux b = 1
+    flux i = 2
+    while i <= n {
+        let temp = a + b
+        a = b
+        b = temp
+        i += 1
+    }
+    return b
+}
+
+fn main() {
+    flux sum = 0
+    flux i = 0
+    while i < 10000 {
+        sum += fib(50)
+        i += 1
+    }
+    print(to_string(sum))
+}

@@ -1,0 +1,14 @@
+// Benchmark: nested loop arithmetic (pure computation)
+fn main() {
+    flux total = 0
+    flux i = 0
+    while i < 500 {
+        flux j = 0
+        while j < 500 {
+            total += (i * j) % 97
+            j += 1
+        }
+        i += 1
+    }
+    print(to_string(total))
+}

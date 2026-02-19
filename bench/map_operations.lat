@@ -1,0 +1,18 @@
+// Benchmark: map creation and lookup
+fn main() {
+    flux m = Map::new()
+    flux i = 0
+    while i < 2000 {
+        m[to_string(i)] = i * i
+        i += 1
+    }
+
+    // Sum all values by lookup
+    flux sum = 0
+    flux j = 0
+    while j < 2000 {
+        sum += m[to_string(j)]
+        j += 1
+    }
+    print(to_string(sum))
+}

@@ -1,0 +1,59 @@
+// Benchmark: matrix multiplication (nested arrays, heavy computation)
+fn mat_new(rows: Int, cols: Int) -> [[Int]] {
+    flux m = []
+    flux r = 0
+    while r < rows {
+        flux row = []
+        flux c = 0
+        while c < cols {
+            row.push(0)
+            c += 1
+        }
+        m.push(row)
+        r += 1
+    }
+    return m
+}
+
+fn mat_mul(a: [[Int]], b: [[Int]]) -> [[Int]] {
+    let rows_a = a.len()
+    let cols_a = a[0].len()
+    let cols_b = b[0].len()
+    flux result = mat_new(rows_a, cols_b)
+    flux r = 0
+    while r < rows_a {
+        flux c = 0
+        while c < cols_b {
+            flux sum = 0
+            flux k = 0
+            while k < cols_a {
+                sum += a[r][k] * b[k][c]
+                k += 1
+            }
+            result[r][c] = sum
+            c += 1
+        }
+        r += 1
+    }
+    return result
+}
+
+fn main() {
+    // Build 50x50 matrices
+    let n = 30
+    flux a = mat_new(n, n)
+    flux b = mat_new(n, n)
+    flux i = 0
+    while i < n {
+        flux j = 0
+        while j < n {
+            a[i][j] = i + j
+            b[i][j] = i * j
+            j += 1
+        }
+        i += 1
+    }
+
+    let c = mat_mul(a, b)
+    print(to_string(c[0][0]) + " " + to_string(c[n - 1][n - 1]))
+}
