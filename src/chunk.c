@@ -290,6 +290,14 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
             }
             return pos;
         }
+        case OP_INC_LOCAL:     return byte_instruction("OP_INC_LOCAL", c, offset);
+        case OP_DEC_LOCAL:     return byte_instruction("OP_DEC_LOCAL", c, offset);
+        case OP_ADD_INT:       return simple_instruction("OP_ADD_INT", offset);
+        case OP_SUB_INT:       return simple_instruction("OP_SUB_INT", offset);
+        case OP_MUL_INT:       return simple_instruction("OP_MUL_INT", offset);
+        case OP_LT_INT:        return simple_instruction("OP_LT_INT", offset);
+        case OP_LTEQ_INT:      return simple_instruction("OP_LTEQ_INT", offset);
+        case OP_LOAD_INT8:     return byte_instruction("OP_LOAD_INT8", c, offset);
         case OP_HALT:          return simple_instruction("OP_HALT", offset);
         default:
             fprintf(stderr, "Unknown opcode %d\n", op);

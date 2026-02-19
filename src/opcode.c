@@ -87,6 +87,14 @@ static const char *names[] = {
     [OP_IMPORT]        = "OP_IMPORT",
     [OP_SCOPE]         = "OP_SCOPE",
     [OP_SELECT]        = "OP_SELECT",
+    [OP_INC_LOCAL]     = "OP_INC_LOCAL",
+    [OP_DEC_LOCAL]     = "OP_DEC_LOCAL",
+    [OP_ADD_INT]       = "OP_ADD_INT",
+    [OP_SUB_INT]       = "OP_SUB_INT",
+    [OP_MUL_INT]       = "OP_MUL_INT",
+    [OP_LT_INT]        = "OP_LT_INT",
+    [OP_LTEQ_INT]      = "OP_LTEQ_INT",
+    [OP_LOAD_INT8]     = "OP_LOAD_INT8",
     [OP_HALT]          = "OP_HALT",
 };
 

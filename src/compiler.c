@@ -273,7 +273,11 @@ static void compile_expr(const Expr *e, int line) {
 
     switch (e->tag) {
         case EXPR_INT_LIT:
-            emit_constant(value_int(e->as.int_val), line);
+            if (e->as.int_val >= -128 && e->as.int_val <= 127) {
+                emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)e->as.int_val, line);
+            } else {
+                emit_constant(value_int(e->as.int_val), line);
+            }
             break;
 
         case EXPR_FLOAT_LIT:
@@ -309,6 +313,49 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_BINOP: {
+            /* Constant folding: evaluate at compile time if both operands are literals */
+            if ((e->as.binop.left->tag == EXPR_INT_LIT || e->as.binop.left->tag == EXPR_FLOAT_LIT) &&
+                (e->as.binop.right->tag == EXPR_INT_LIT || e->as.binop.right->tag == EXPR_FLOAT_LIT)) {
+                bool both_int = (e->as.binop.left->tag == EXPR_INT_LIT &&
+                                 e->as.binop.right->tag == EXPR_INT_LIT);
+                int64_t li = e->as.binop.left->tag == EXPR_INT_LIT ? e->as.binop.left->as.int_val : 0;
+                int64_t ri = e->as.binop.right->tag == EXPR_INT_LIT ? e->as.binop.right->as.int_val : 0;
+                double lf = e->as.binop.left->tag == EXPR_FLOAT_LIT ? e->as.binop.left->as.float_val : (double)li;
+                double rf = e->as.binop.right->tag == EXPR_FLOAT_LIT ? e->as.binop.right->as.float_val : (double)ri;
+                bool folded = true;
+                switch (e->as.binop.op) {
+                    case BINOP_ADD:
+                        if (both_int) { int64_t v = li + ri; if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line); else emit_constant(value_int(v), line); }
+                        else emit_constant(value_float(lf + rf), line);
+                        break;
+                    case BINOP_SUB:
+                        if (both_int) { int64_t v = li - ri; if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line); else emit_constant(value_int(v), line); }
+                        else emit_constant(value_float(lf - rf), line);
+                        break;
+                    case BINOP_MUL:
+                        if (both_int) { int64_t v = li * ri; if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line); else emit_constant(value_int(v), line); }
+                        else emit_constant(value_float(lf * rf), line);
+                        break;
+                    case BINOP_DIV:
+                        if (both_int) { if (ri == 0) { folded = false; break; } int64_t v = li / ri; if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line); else emit_constant(value_int(v), line); }
+                        else { if (rf == 0.0) { folded = false; break; } emit_constant(value_float(lf / rf), line); }
+                        break;
+                    case BINOP_MOD:
+                        if (both_int) { if (ri == 0) { folded = false; break; } int64_t v = li % ri; if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line); else emit_constant(value_int(v), line); }
+                        else folded = false;
+                        break;
+                    case BINOP_LT:    emit_constant(value_bool(both_int ? li < ri : lf < rf), line); break;
+                    case BINOP_GT:    emit_constant(value_bool(both_int ? li > ri : lf > rf), line); break;
+                    case BINOP_LTEQ:  emit_constant(value_bool(both_int ? li <= ri : lf <= rf), line); break;
+                    case BINOP_GTEQ:  emit_constant(value_bool(both_int ? li >= ri : lf >= rf), line); break;
+                    case BINOP_EQ:    emit_constant(value_bool(both_int ? li == ri : lf == rf), line); break;
+                    case BINOP_NEQ:   emit_constant(value_bool(both_int ? li != ri : lf != rf), line); break;
+                    default: folded = false; break;
+                }
+                if (folded) break;
+            }
+            /* Unary negation of int literal (constant fold -N) handled by EXPR_UNARYOP below */
+
             /* Short-circuit AND/OR */
             if (e->as.binop.op == BINOP_AND) {
                 compile_expr(e->as.binop.left, line);
@@ -361,6 +408,23 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_UNARYOP:
+            /* Constant fold unary negation of literals */
+            if (e->as.unaryop.op == UNOP_NEG && e->as.unaryop.operand->tag == EXPR_INT_LIT) {
+                int64_t v = -e->as.unaryop.operand->as.int_val;
+                if (v >= -128 && v <= 127)
+                    emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
+                else
+                    emit_constant(value_int(v), line);
+                break;
+            }
+            if (e->as.unaryop.op == UNOP_NEG && e->as.unaryop.operand->tag == EXPR_FLOAT_LIT) {
+                emit_constant(value_float(-e->as.unaryop.operand->as.float_val), line);
+                break;
+            }
+            if (e->as.unaryop.op == UNOP_NOT && e->as.unaryop.operand->tag == EXPR_BOOL_LIT) {
+                emit_constant(value_bool(!e->as.unaryop.operand->as.bool_val), line);
+                break;
+            }
             compile_expr(e->as.unaryop.operand, line);
             switch (e->as.unaryop.op) {
                 case UNOP_NEG:     emit_byte(OP_NEG, line); break;
@@ -1381,6 +1445,31 @@ static void compile_stmt(const Stmt *s) {
         }
 
         case STMT_ASSIGN: {
+            /* Detect i += 1 / i -= 1 → OP_INC_LOCAL / OP_DEC_LOCAL
+             * The parser desugars i += 1 into STMT_ASSIGN(IDENT("i"), BINOP(ADD, IDENT("i"), INT(1)))
+             */
+            if (s->as.assign.target->tag == EXPR_IDENT &&
+                s->as.assign.value->tag == EXPR_BINOP) {
+                const char *name = s->as.assign.target->as.str_val;
+                Expr *val = s->as.assign.value;
+                if (val->as.binop.left->tag == EXPR_IDENT &&
+                    strcmp(val->as.binop.left->as.str_val, name) == 0 &&
+                    val->as.binop.right->tag == EXPR_INT_LIT &&
+                    val->as.binop.right->as.int_val == 1) {
+                    int slot = resolve_local(current, name);
+                    if (slot >= 0) {
+                        if (val->as.binop.op == BINOP_ADD) {
+                            emit_bytes(OP_INC_LOCAL, (uint8_t)slot, 0);
+                            break; /* INC_LOCAL doesn't push; skip OP_POP at end */
+                        }
+                        if (val->as.binop.op == BINOP_SUB) {
+                            emit_bytes(OP_DEC_LOCAL, (uint8_t)slot, 0);
+                            break;
+                        }
+                    }
+                }
+            }
+
             compile_expr(s->as.assign.value, 0);
             if (s->as.assign.target->tag == EXPR_IDENT) {
                 const char *name = s->as.assign.target->as.str_val;

@@ -1,5 +1,6 @@
 #include "vm.h"
 #include "opcode.h"
+#include "intern.h"
 #include "builtins.h"
 #include "lattice.h"
 #include "math_ops.h"
@@ -154,6 +155,23 @@ static void close_upvalues(VM *vm, LatValue *last) {
  * Defined here (before vm_call_closure) and also used by vm_register_native below. */
 #define VM_NATIVE_MARKER ((struct Expr **)(uintptr_t)0x1)
 #define VM_EXT_MARKER    ((struct Expr **)(uintptr_t)0x2)
+
+/* Fast-path clone: flat copy for primitives, strdup for strings,
+ * full deep clone only for compound types. */
+static inline LatValue value_clone_fast(const LatValue *src) {
+    switch (src->type) {
+        case VAL_INT: case VAL_FLOAT: case VAL_BOOL:
+        case VAL_UNIT: case VAL_NIL: case VAL_RANGE:
+            return *src;
+        case VAL_STR: {
+            LatValue v = *src;
+            v.as.str_val = strdup(src->as.str_val);
+            return v;
+        }
+        default:
+            return value_deep_clone(src);
+    }
+}
 
 /* ── Closure invocation helper for builtins ──
  * Calls a compiled closure from within the VM using a temporary wrapper chunk.
@@ -2137,6 +2155,8 @@ void vm_init(VM *vm) {
     /* Functional */
     vm_register_native(vm, "pipe", native_pipe, -1);
     vm_register_native(vm, "compose", native_compose, 2);
+
+    intern_init();
 }
 
 void vm_free(VM *vm) {
@@ -2241,6 +2261,8 @@ void vm_free(VM *vm) {
         value_free(&vm->seeds[i].contract);
     }
     free(vm->seeds);
+
+    intern_free();
 }
 
 /* ── Concurrency infrastructure ── */
@@ -2423,14 +2445,96 @@ static const char *vm_find_pressure(VM *vm, const char *name) {
     return NULL;
 }
 
+/* ── Pre-computed djb2 hashes for builtin method names ── */
+#define MHASH_all              0x0b885ddeu
+#define MHASH_any              0x0b885e2du
+#define MHASH_bytes            0x0f30b64cu
+#define MHASH_chars            0x0f392d36u
+#define MHASH_chunk            0x0f3981beu
+#define MHASH_close            0x0f3b9a5bu
+#define MHASH_contains         0x42aa8264u
+#define MHASH_count            0x0f3d586eu
+#define MHASH_difference       0x52a92470u
+#define MHASH_drop             0x7c95d91au
+#define MHASH_each             0x7c961b96u
+#define MHASH_ends_with        0x9079bb6au
+#define MHASH_entries          0x6b84747fu
+#define MHASH_enum_name        0x9f13be1au
+#define MHASH_enumerate        0x9f82838bu
+#define MHASH_filter           0xfd7675abu
+#define MHASH_find             0x7c96cb66u
+#define MHASH_first            0x0f704b8du
+#define MHASH_flat             0x7c96d68cu
+#define MHASH_flat_map         0x022d3129u
+#define MHASH_for_each         0x0f4aaefcu
+#define MHASH_get              0x0b887685u
+#define MHASH_group_by         0xdd0fdaecu
+#define MHASH_has              0x0b887a41u
+#define MHASH_index_of         0x66e4af51u
+#define MHASH_insert           0x04d4029au
+#define MHASH_intersection     0x40c04d3cu
+#define MHASH_is_empty         0xdc1854cfu
+#define MHASH_is_subset        0x805437d6u
+#define MHASH_is_superset      0x05f3913bu
+#define MHASH_is_variant       0x443eb735u
+#define MHASH_join             0x7c9915d5u
+#define MHASH_keys             0x7c9979c1u
+#define MHASH_last             0x7c99f459u
+#define MHASH_len              0x0b888bc4u
+#define MHASH_map              0x0b888f83u
+#define MHASH_max              0x0b888f8bu
+#define MHASH_merge            0x0fecc3f5u
+#define MHASH_min              0x0b889089u
+#define MHASH_pad_left         0xf3895c84u
+#define MHASH_pad_right        0x6523b4b7u
+#define MHASH_payload          0x9c4949cfu
+#define MHASH_pop              0x0b889e14u
+#define MHASH_push             0x7c9c7ae5u
+#define MHASH_recv             0x7c9d4d95u
+#define MHASH_reduce           0x19279c1du
+#define MHASH_remove_at        0xd988a4a7u
+#define MHASH_repeat           0x192dec66u
+#define MHASH_replace          0x3eef4e01u
+#define MHASH_reverse          0x3f5854c1u
+#define MHASH_send             0x7c9ddb4fu
+#define MHASH_set              0x0b88a991u
+#define MHASH_slice            0x105d06d5u
+#define MHASH_sort             0x7c9e066du
+#define MHASH_sort_by          0xa365ac87u
+#define MHASH_split            0x105f45f1u
+#define MHASH_starts_with      0xf5ef8361u
+#define MHASH_substring        0xcc998606u
+#define MHASH_sum              0x0b88ab9au
+#define MHASH_tag              0x0b88ad41u
+#define MHASH_take             0x7c9e564au
+#define MHASH_to_array         0xcebde966u
+#define MHASH_to_lower         0xcf836790u
+#define MHASH_to_upper         0xd026b2b3u
+#define MHASH_trim             0x7c9e9e61u
+#define MHASH_trim_end         0xcdcebb17u
+#define MHASH_trim_start       0x7d6a808eu
+#define MHASH_union            0x1082522eu
+#define MHASH_unique           0x20cca1bcu
+#define MHASH_values           0x22383ff5u
+#define MHASH_variant_name     0xb2b2b8bau
+#define MHASH_zip              0x0b88c7d8u
+
+static inline uint32_t method_hash(const char *s) {
+    uint32_t h = 5381;
+    while (*s) h = h * 33 + (unsigned char)*s++;
+    return h;
+}
+
 static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg_count, const char *var_name) {
+    uint32_t mhash = method_hash(method);
+
     /* Array methods */
     if (obj->type == VAL_ARRAY) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.array.len));
             return true;
         }
-        if (strcmp(method, "push") == 0 && arg_count == 1) {
+        if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
             /* Check pressure constraint */
             const char *pmode = vm_find_pressure(vm, var_name);
             if (pressure_blocks_grow(pmode)) {
@@ -2453,7 +2557,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_unit());
             return true;
         }
-        if (strcmp(method, "pop") == 0 && arg_count == 0) {
+        if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
             /* Check pressure constraint */
             const char *pmode = vm_find_pressure(vm, var_name);
             if (pressure_blocks_shrink(pmode)) {
@@ -2470,7 +2574,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             }
             return true;
         }
-        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+        if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             LatValue needle = pop(vm);
             bool found = false;
             for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -2483,7 +2587,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_bool(found));
             return true;
         }
-        if (strcmp(method, "enumerate") == 0 && arg_count == 0) {
+        if (mhash == MHASH_enumerate && strcmp(method, "enumerate") == 0 && arg_count == 0) {
             /* Build array of [index, element] pairs */
             LatValue *pairs = malloc(obj->as.array.len * sizeof(LatValue));
             for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -2498,7 +2602,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, result);
             return true;
         }
-        if (strcmp(method, "reverse") == 0 && arg_count == 0) {
+        if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
             LatValue *elems = malloc(obj->as.array.len * sizeof(LatValue));
             for (size_t i = 0; i < obj->as.array.len; i++)
                 elems[i] = value_deep_clone(&obj->as.array.elems[obj->as.array.len - 1 - i]);
@@ -2507,7 +2611,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, result);
             return true;
         }
-        if (strcmp(method, "join") == 0 && arg_count == 1) {
+        if (mhash == MHASH_join && strcmp(method, "join") == 0 && arg_count == 1) {
             LatValue sep = pop(vm);
             const char *sep_str = (sep.type == VAL_STR) ? sep.as.str_val : "";
             size_t total = 0;
@@ -2530,7 +2634,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             free(buf);
             return true;
         }
-        if (strcmp(method, "map") == 0 && arg_count == 1) {
+        if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             size_t len = obj->as.array.len;
             LatValue *elems = malloc(len * sizeof(LatValue));
@@ -2545,7 +2649,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, result);
             return true;
         }
-        if (strcmp(method, "filter") == 0 && arg_count == 1) {
+        if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             size_t len = obj->as.array.len;
             size_t cap = len > 0 ? len : 1;
@@ -2568,7 +2672,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, result);
             return true;
         }
-        if (strcmp(method, "reduce") == 0 && arg_count == 2) {
+        if (mhash == MHASH_reduce && strcmp(method, "reduce") == 0 && arg_count == 2) {
             LatValue acc = pop(vm);       /* second arg: initial value (TOS) */
             LatValue closure = pop(vm);   /* first arg: closure */
             size_t len = obj->as.array.len;
@@ -2583,7 +2687,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, acc);
             return true;
         }
-        if (strcmp(method, "each") == 0 && arg_count == 1) {
+        if (mhash == MHASH_each && strcmp(method, "each") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             size_t len = obj->as.array.len;
             for (size_t i = 0; i < len; i++) {
@@ -2596,7 +2700,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_nil());
             return true;
         }
-        if (strcmp(method, "sort") == 0 && arg_count <= 1) {
+        if (mhash == MHASH_sort && strcmp(method, "sort") == 0 && arg_count <= 1) {
             LatValue closure;
             bool has_cmp = (arg_count == 1);
             if (has_cmp) closure = pop(vm);
@@ -2641,7 +2745,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, result);
             return true;
         }
-        if (strcmp(method, "for_each") == 0 && arg_count == 1) {
+        if (mhash == MHASH_for_each && strcmp(method, "for_each") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             size_t len = obj->as.array.len;
             for (size_t i = 0; i < len; i++) {
@@ -2653,7 +2757,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_unit());
             return true;
         }
-        if (strcmp(method, "find") == 0 && arg_count == 1) {
+        if (mhash == MHASH_find && strcmp(method, "find") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
@@ -2670,7 +2774,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_unit());
             return true;
         }
-        if (strcmp(method, "any") == 0 && arg_count == 1) {
+        if (mhash == MHASH_any && strcmp(method, "any") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
@@ -2681,7 +2785,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             }
             value_free(&closure); push(vm, value_bool(false)); return true;
         }
-        if (strcmp(method, "all") == 0 && arg_count == 1) {
+        if (mhash == MHASH_all && strcmp(method, "all") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
@@ -2692,11 +2796,11 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             }
             value_free(&closure); push(vm, value_bool(true)); return true;
         }
-        if (strcmp(method, "flat") == 0 && arg_count == 0) {
+        if (mhash == MHASH_flat && strcmp(method, "flat") == 0 && arg_count == 0) {
             push(vm, array_flat(obj));
             return true;
         }
-        if (strcmp(method, "slice") == 0 && arg_count == 2) {
+        if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && arg_count == 2) {
             LatValue end_v = pop(vm); LatValue start_v = pop(vm);
             char *err = NULL;
             LatValue r = array_slice(obj, start_v.as.int_val, end_v.as.int_val, &err);
@@ -2705,7 +2809,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             else push(vm, r);
             return true;
         }
-        if (strcmp(method, "take") == 0 && arg_count == 1) {
+        if (mhash == MHASH_take && strcmp(method, "take") == 0 && arg_count == 1) {
             LatValue n_v = pop(vm);
             int64_t n = n_v.as.int_val;
             value_free(&n_v);
@@ -2718,7 +2822,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(elems, take_n); free(elems);
             push(vm, r); return true;
         }
-        if (strcmp(method, "drop") == 0 && arg_count == 1) {
+        if (mhash == MHASH_drop && strcmp(method, "drop") == 0 && arg_count == 1) {
             LatValue n_v = pop(vm);
             int64_t n = n_v.as.int_val;
             value_free(&n_v);
@@ -2731,7 +2835,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(elems, cnt); free(elems);
             push(vm, r); return true;
         }
-        if (strcmp(method, "index_of") == 0 && arg_count == 1) {
+        if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
             LatValue needle = pop(vm);
             int64_t idx = -1;
             for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -2740,7 +2844,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&needle);
             push(vm, value_int(idx)); return true;
         }
-        if (strcmp(method, "zip") == 0 && arg_count == 1) {
+        if (mhash == MHASH_zip && strcmp(method, "zip") == 0 && arg_count == 1) {
             LatValue other = pop(vm);
             if (other.type != VAL_ARRAY) { value_free(&other); push(vm, value_nil()); return true; }
             size_t n = obj->as.array.len < other.as.array.len ? obj->as.array.len : other.as.array.len;
@@ -2755,7 +2859,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(pairs, n); free(pairs);
             push(vm, r); return true;
         }
-        if (strcmp(method, "unique") == 0 && arg_count == 0) {
+        if (mhash == MHASH_unique && strcmp(method, "unique") == 0 && arg_count == 0) {
             size_t n = obj->as.array.len;
             LatValue *res = malloc((n > 0 ? n : 1) * sizeof(LatValue));
             size_t rc = 0;
@@ -2768,7 +2872,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(res, rc); free(res);
             push(vm, r); return true;
         }
-        if (strcmp(method, "remove_at") == 0 && arg_count == 1) {
+        if (mhash == MHASH_remove_at && strcmp(method, "remove_at") == 0 && arg_count == 1) {
             const char *pmode = vm_find_pressure(vm, var_name);
             if (pressure_blocks_shrink(pmode)) {
                 LatValue idx_v = pop(vm); value_free(&idx_v);
@@ -2784,7 +2888,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_deep_clone(&obj->as.array.elems[(size_t)idx]));
             return true;
         }
-        if (strcmp(method, "chunk") == 0 && arg_count == 1) {
+        if (mhash == MHASH_chunk && strcmp(method, "chunk") == 0 && arg_count == 1) {
             LatValue cs_v = pop(vm);
             int64_t cs = cs_v.as.int_val;
             value_free(&cs_v);
@@ -2804,7 +2908,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(chunks, nc); free(chunks);
             push(vm, r); return true;
         }
-        if (strcmp(method, "sum") == 0 && arg_count == 0) {
+        if (mhash == MHASH_sum && strcmp(method, "sum") == 0 && arg_count == 0) {
             bool has_float = false;
             int64_t isum = 0; double fsum = 0.0;
             for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -2819,7 +2923,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, has_float ? value_float(fsum) : value_int(isum));
             return true;
         }
-        if (strcmp(method, "min") == 0 && arg_count == 0) {
+        if (mhash == MHASH_min && strcmp(method, "min") == 0 && arg_count == 0) {
             if (obj->as.array.len == 0) { push(vm, value_nil()); return true; }
             bool hf = false;
             for (size_t i = 0; i < obj->as.array.len; i++)
@@ -2841,7 +2945,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             }
             return true;
         }
-        if (strcmp(method, "max") == 0 && arg_count == 0) {
+        if (mhash == MHASH_max && strcmp(method, "max") == 0 && arg_count == 0) {
             if (obj->as.array.len == 0) { push(vm, value_nil()); return true; }
             bool hf = false;
             for (size_t i = 0; i < obj->as.array.len; i++)
@@ -2863,15 +2967,15 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             }
             return true;
         }
-        if (strcmp(method, "first") == 0 && arg_count == 0) {
+        if (mhash == MHASH_first && strcmp(method, "first") == 0 && arg_count == 0) {
             push(vm, obj->as.array.len > 0 ? value_deep_clone(&obj->as.array.elems[0]) : value_unit());
             return true;
         }
-        if (strcmp(method, "last") == 0 && arg_count == 0) {
+        if (mhash == MHASH_last && strcmp(method, "last") == 0 && arg_count == 0) {
             push(vm, obj->as.array.len > 0 ? value_deep_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit());
             return true;
         }
-        if (strcmp(method, "flat_map") == 0 && arg_count == 1) {
+        if (mhash == MHASH_flat_map && strcmp(method, "flat_map") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             size_t n = obj->as.array.len;
             LatValue *mapped = malloc((n > 0 ? n : 1) * sizeof(LatValue));
@@ -2898,7 +3002,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(buf, pos); free(buf);
             push(vm, r); return true;
         }
-        if (strcmp(method, "sort_by") == 0 && arg_count == 1) {
+        if (mhash == MHASH_sort_by && strcmp(method, "sort_by") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             size_t n = obj->as.array.len;
             LatValue *buf = malloc((n > 0 ? n : 1) * sizeof(LatValue));
@@ -2923,7 +3027,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(buf, n); free(buf);
             push(vm, r); return true;
         }
-        if (strcmp(method, "group_by") == 0 && arg_count == 1) {
+        if (mhash == MHASH_group_by && strcmp(method, "group_by") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             LatValue grp = value_map_new();
             for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -2951,7 +3055,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&closure);
             push(vm, grp); return true;
         }
-        if (strcmp(method, "insert") == 0 && arg_count == 2) {
+        if (mhash == MHASH_insert && strcmp(method, "insert") == 0 && arg_count == 2) {
             const char *pmode = vm_find_pressure(vm, var_name);
             if (pressure_blocks_grow(pmode)) {
                 LatValue val = pop(vm); LatValue idx_v = pop(vm);
@@ -2970,11 +3074,11 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* String methods */
     if (obj->type == VAL_STR) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)strlen(obj->as.str_val)));
             return true;
         }
-        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+        if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             LatValue needle = pop(vm);
             if (needle.type == VAL_STR) {
                 push(vm, value_bool(strstr(obj->as.str_val, needle.as.str_val) != NULL));
@@ -2984,7 +3088,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&needle);
             return true;
         }
-        if (strcmp(method, "split") == 0 && arg_count == 1) {
+        if (mhash == MHASH_split && strcmp(method, "split") == 0 && arg_count == 1) {
             LatValue delim = pop(vm);
             if (delim.type == VAL_STR) {
                 /* Split string */
@@ -3009,7 +3113,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&delim);
             return true;
         }
-        if (strcmp(method, "trim") == 0 && arg_count == 0) {
+        if (mhash == MHASH_trim && strcmp(method, "trim") == 0 && arg_count == 0) {
             const char *s = obj->as.str_val;
             while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
             const char *e = s + strlen(s);
@@ -3022,21 +3126,21 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, result);
             return true;
         }
-        if (strcmp(method, "to_upper") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_upper && strcmp(method, "to_upper") == 0 && arg_count == 0) {
             char *s = strdup(obj->as.str_val);
             for (size_t i = 0; s[i]; i++)
                 if (s[i] >= 'a' && s[i] <= 'z') s[i] -= 32;
             push(vm, value_string_owned(s));
             return true;
         }
-        if (strcmp(method, "to_lower") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_lower && strcmp(method, "to_lower") == 0 && arg_count == 0) {
             char *s = strdup(obj->as.str_val);
             for (size_t i = 0; s[i]; i++)
                 if (s[i] >= 'A' && s[i] <= 'Z') s[i] += 32;
             push(vm, value_string_owned(s));
             return true;
         }
-        if (strcmp(method, "starts_with") == 0 && arg_count == 1) {
+        if (mhash == MHASH_starts_with && strcmp(method, "starts_with") == 0 && arg_count == 1) {
             LatValue prefix = pop(vm);
             if (prefix.type == VAL_STR) {
                 size_t plen = strlen(prefix.as.str_val);
@@ -3047,7 +3151,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&prefix);
             return true;
         }
-        if (strcmp(method, "ends_with") == 0 && arg_count == 1) {
+        if (mhash == MHASH_ends_with && strcmp(method, "ends_with") == 0 && arg_count == 1) {
             LatValue suffix = pop(vm);
             if (suffix.type == VAL_STR) {
                 size_t slen = strlen(obj->as.str_val);
@@ -3062,7 +3166,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&suffix);
             return true;
         }
-        if (strcmp(method, "replace") == 0 && arg_count == 2) {
+        if (mhash == MHASH_replace && strcmp(method, "replace") == 0 && arg_count == 2) {
             LatValue replacement = pop(vm);
             LatValue pattern = pop(vm);
             if (pattern.type == VAL_STR && replacement.type == VAL_STR) {
@@ -3074,7 +3178,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&replacement);
             return true;
         }
-        if (strcmp(method, "index_of") == 0 && arg_count == 1) {
+        if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
             LatValue needle = pop(vm);
             if (needle.type == VAL_STR)
                 push(vm, value_int(lat_str_index_of(obj->as.str_val, needle.as.str_val)));
@@ -3082,14 +3186,14 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 push(vm, value_int(-1));
             value_free(&needle); return true;
         }
-        if (strcmp(method, "substring") == 0 && arg_count == 2) {
+        if (mhash == MHASH_substring && strcmp(method, "substring") == 0 && arg_count == 2) {
             LatValue end_v = pop(vm); LatValue start_v = pop(vm);
             int64_t s = (start_v.type == VAL_INT) ? start_v.as.int_val : 0;
             int64_t e = (end_v.type == VAL_INT) ? end_v.as.int_val : (int64_t)strlen(obj->as.str_val);
             push(vm, value_string_owned(lat_str_substring(obj->as.str_val, s, e)));
             value_free(&start_v); value_free(&end_v); return true;
         }
-        if (strcmp(method, "chars") == 0 && arg_count == 0) {
+        if (mhash == MHASH_chars && strcmp(method, "chars") == 0 && arg_count == 0) {
             size_t slen = strlen(obj->as.str_val);
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
             for (size_t i = 0; i < slen; i++) {
@@ -3099,7 +3203,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(elems, slen); free(elems);
             push(vm, r); return true;
         }
-        if (strcmp(method, "bytes") == 0 && arg_count == 0) {
+        if (mhash == MHASH_bytes && strcmp(method, "bytes") == 0 && arg_count == 0) {
             size_t slen = strlen(obj->as.str_val);
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
             for (size_t i = 0; i < slen; i++)
@@ -3107,23 +3211,23 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(elems, slen); free(elems);
             push(vm, r); return true;
         }
-        if (strcmp(method, "reverse") == 0 && arg_count == 0) {
+        if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
             push(vm, value_string_owned(lat_str_reverse(obj->as.str_val)));
             return true;
         }
-        if (strcmp(method, "repeat") == 0 && arg_count == 1) {
+        if (mhash == MHASH_repeat && strcmp(method, "repeat") == 0 && arg_count == 1) {
             LatValue n_v = pop(vm);
             size_t n = (n_v.type == VAL_INT && n_v.as.int_val > 0) ? (size_t)n_v.as.int_val : 0;
             value_free(&n_v);
             push(vm, value_string_owned(lat_str_repeat(obj->as.str_val, n)));
             return true;
         }
-        if (strcmp(method, "trim_start") == 0 && arg_count == 0) {
+        if (mhash == MHASH_trim_start && strcmp(method, "trim_start") == 0 && arg_count == 0) {
             const char *s = obj->as.str_val;
             while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
             push(vm, value_string(s)); return true;
         }
-        if (strcmp(method, "trim_end") == 0 && arg_count == 0) {
+        if (mhash == MHASH_trim_end && strcmp(method, "trim_end") == 0 && arg_count == 0) {
             const char *s = obj->as.str_val;
             size_t slen = strlen(s);
             while (slen > 0 && (s[slen-1] == ' ' || s[slen-1] == '\t' || s[slen-1] == '\n' || s[slen-1] == '\r')) slen--;
@@ -3131,7 +3235,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             memcpy(r, s, slen); r[slen] = '\0';
             push(vm, value_string_owned(r)); return true;
         }
-        if (strcmp(method, "pad_left") == 0 && arg_count == 2) {
+        if (mhash == MHASH_pad_left && strcmp(method, "pad_left") == 0 && arg_count == 2) {
             LatValue ch_v = pop(vm); LatValue n_v = pop(vm);
             int64_t n = (n_v.type == VAL_INT) ? n_v.as.int_val : 0;
             char pad = (ch_v.type == VAL_STR && ch_v.as.str_val[0]) ? ch_v.as.str_val[0] : ' ';
@@ -3145,7 +3249,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             r[(size_t)n] = '\0';
             push(vm, value_string_owned(r)); return true;
         }
-        if (strcmp(method, "pad_right") == 0 && arg_count == 2) {
+        if (mhash == MHASH_pad_right && strcmp(method, "pad_right") == 0 && arg_count == 2) {
             LatValue ch_v = pop(vm); LatValue n_v = pop(vm);
             int64_t n = (n_v.type == VAL_INT) ? n_v.as.int_val : 0;
             char pad = (ch_v.type == VAL_STR && ch_v.as.str_val[0]) ? ch_v.as.str_val[0] : ' ';
@@ -3159,7 +3263,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             r[(size_t)n] = '\0';
             push(vm, value_string_owned(r)); return true;
         }
-        if (strcmp(method, "count") == 0 && arg_count == 1) {
+        if (mhash == MHASH_count && strcmp(method, "count") == 0 && arg_count == 1) {
             LatValue needle = pop(vm);
             int64_t cnt = 0;
             if (needle.type == VAL_STR && needle.as.str_val[0]) {
@@ -3170,7 +3274,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&needle);
             push(vm, value_int(cnt)); return true;
         }
-        if (strcmp(method, "is_empty") == 0 && arg_count == 0) {
+        if (mhash == MHASH_is_empty && strcmp(method, "is_empty") == 0 && arg_count == 0) {
             push(vm, value_bool(obj->as.str_val[0] == '\0'));
             return true;
         }
@@ -3178,11 +3282,11 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* Map methods */
     if (obj->type == VAL_MAP) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)lat_map_len(obj->as.map.map)));
             return true;
         }
-        if (strcmp(method, "get") == 0 && arg_count == 1) {
+        if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1) {
             LatValue key = pop(vm);
             if (key.type == VAL_STR) {
                 LatValue *found = lat_map_get(obj->as.map.map, key.as.str_val);
@@ -3196,7 +3300,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&key);
             return true;
         }
-        if (strcmp(method, "keys") == 0 && arg_count == 0) {
+        if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
             size_t len = lat_map_len(obj->as.map.map);
             LatValue *keys = malloc((len ? len : 1) * sizeof(LatValue));
             size_t key_idx = 0;
@@ -3210,7 +3314,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, arr);
             return true;
         }
-        if (strcmp(method, "values") == 0 && arg_count == 0) {
+        if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
             size_t len = lat_map_len(obj->as.map.map);
             LatValue *vals = malloc((len ? len : 1) * sizeof(LatValue));
             size_t val_idx = 0;
@@ -3225,7 +3329,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, arr);
             return true;
         }
-        if (strcmp(method, "set") == 0 && arg_count == 2) {
+        if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) {
             LatValue val = pop(vm);
             LatValue key = pop(vm);
             if (key.type == VAL_STR) {
@@ -3237,7 +3341,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_unit());
             return true;
         }
-        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+        if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             LatValue key = pop(vm);
             if (key.type == VAL_STR) {
                 push(vm, value_bool(lat_map_get(obj->as.map.map, key.as.str_val) != NULL));
@@ -3247,7 +3351,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&key);
             return true;
         }
-        if (strcmp(method, "has") == 0 && arg_count == 1) {
+        if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
             LatValue key = pop(vm);
             if (key.type == VAL_STR)
                 push(vm, value_bool(lat_map_get(obj->as.map.map, key.as.str_val) != NULL));
@@ -3255,7 +3359,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 push(vm, value_bool(false));
             value_free(&key); return true;
         }
-        if (strcmp(method, "entries") == 0 && arg_count == 0) {
+        if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
             size_t n = lat_map_len(obj->as.map.map);
             LatValue *entries = malloc((n > 0 ? n : 1) * sizeof(LatValue));
             size_t ei = 0;
@@ -3270,7 +3374,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue r = value_array(entries, ei); free(entries);
             push(vm, r); return true;
         }
-        if (strcmp(method, "merge") == 0 && arg_count == 1) {
+        if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1) {
             LatValue other = pop(vm);
             if (other.type == VAL_MAP) {
                 for (size_t i = 0; i < other.as.map.map->cap; i++) {
@@ -3283,7 +3387,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&other);
             push(vm, value_unit()); return true;
         }
-        if (strcmp(method, "for_each") == 0 && arg_count == 1) {
+        if (mhash == MHASH_for_each && strcmp(method, "for_each") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
                 if (obj->as.map.map->entries[i].state == MAP_OCCUPIED) {
@@ -3297,7 +3401,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&closure);
             push(vm, value_unit()); return true;
         }
-        if (strcmp(method, "filter") == 0 && arg_count == 1) {
+        if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             LatValue result = value_map_new();
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
@@ -3317,7 +3421,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&closure);
             push(vm, result); return true;
         }
-        if (strcmp(method, "map") == 0 && arg_count == 1) {
+        if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
             LatValue result = value_map_new();
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
@@ -3337,7 +3441,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* Struct methods */
     if (obj->type == VAL_STRUCT) {
-        if (strcmp(method, "get") == 0 && arg_count == 1) {
+        if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1) {
             LatValue key = pop(vm);
             if (key.type == VAL_STR) {
                 bool found = false;
@@ -3369,12 +3473,12 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* Range methods */
     if (obj->type == VAL_RANGE) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             int64_t len = obj->as.range.end - obj->as.range.start;
             push(vm, value_int(len > 0 ? len : 0));
             return true;
         }
-        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+        if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             LatValue val = pop(vm);
             if (val.type == VAL_INT) {
                 push(vm, value_bool(val.as.int_val >= obj->as.range.start &&
@@ -3389,7 +3493,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* Tuple methods */
     if (obj->type == VAL_TUPLE) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.tuple.len));
             return true;
         }
@@ -3397,11 +3501,11 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* Enum methods */
     if (obj->type == VAL_ENUM) {
-        if (strcmp(method, "tag") == 0 && arg_count == 0) {
+        if (mhash == MHASH_tag && strcmp(method, "tag") == 0 && arg_count == 0) {
             push(vm, value_string(obj->as.enm.variant_name));
             return true;
         }
-        if (strcmp(method, "payload") == 0 && arg_count == 0) {
+        if (mhash == MHASH_payload && strcmp(method, "payload") == 0 && arg_count == 0) {
             if (obj->as.enm.payload_count == 1) {
                 push(vm, value_deep_clone(&obj->as.enm.payload[0]));
             } else if (obj->as.enm.payload_count > 1) {
@@ -3411,15 +3515,15 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             }
             return true;
         }
-        if (strcmp(method, "variant_name") == 0 && arg_count == 0) {
+        if (mhash == MHASH_variant_name && strcmp(method, "variant_name") == 0 && arg_count == 0) {
             push(vm, value_string(obj->as.enm.variant_name));
             return true;
         }
-        if (strcmp(method, "enum_name") == 0 && arg_count == 0) {
+        if (mhash == MHASH_enum_name && strcmp(method, "enum_name") == 0 && arg_count == 0) {
             push(vm, value_string(obj->as.enm.enum_name));
             return true;
         }
-        if (strcmp(method, "is_variant") == 0 && arg_count == 1) {
+        if (mhash == MHASH_is_variant && strcmp(method, "is_variant") == 0 && arg_count == 1) {
             LatValue name = pop(vm);
             bool match = (name.type == VAL_STR && strcmp(obj->as.enm.variant_name, name.as.str_val) == 0);
             value_free(&name);
@@ -3429,7 +3533,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* ── Set methods ── */
     if (obj->type == VAL_SET) {
-        if (strcmp(method, "has") == 0 && arg_count == 1) {
+        if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
             LatValue val = pop(vm);
             char *key = value_display(&val);
             bool found = lat_map_contains(obj->as.set.map, key);
@@ -3437,10 +3541,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&val);
             push(vm, value_bool(found)); return true;
         }
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)lat_map_len(obj->as.set.map))); return true;
         }
-        if (strcmp(method, "to_array") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
             size_t len = lat_map_len(obj->as.set.map);
             LatValue *elems = malloc(len * sizeof(LatValue));
             size_t idx = 0;
@@ -3454,7 +3558,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             free(elems);
             push(vm, arr); return true;
         }
-        if (strcmp(method, "union") == 0 && arg_count == 1) {
+        if (mhash == MHASH_union && strcmp(method, "union") == 0 && arg_count == 1) {
             LatValue other = pop(vm);
             LatValue result = value_set_new();
             for (size_t i = 0; i < obj->as.set.map->cap; i++) {
@@ -3476,7 +3580,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&other);
             push(vm, result); return true;
         }
-        if (strcmp(method, "intersection") == 0 && arg_count == 1) {
+        if (mhash == MHASH_intersection && strcmp(method, "intersection") == 0 && arg_count == 1) {
             LatValue other = pop(vm);
             LatValue result = value_set_new();
             if (other.type == VAL_SET) {
@@ -3492,7 +3596,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&other);
             push(vm, result); return true;
         }
-        if (strcmp(method, "difference") == 0 && arg_count == 1) {
+        if (mhash == MHASH_difference && strcmp(method, "difference") == 0 && arg_count == 1) {
             LatValue other = pop(vm);
             LatValue result = value_set_new();
             if (other.type == VAL_SET) {
@@ -3508,7 +3612,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&other);
             push(vm, result); return true;
         }
-        if (strcmp(method, "is_subset") == 0 && arg_count == 1) {
+        if (mhash == MHASH_is_subset && strcmp(method, "is_subset") == 0 && arg_count == 1) {
             LatValue other = pop(vm);
             bool result = true;
             if (other.type == VAL_SET) {
@@ -3522,7 +3626,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&other);
             push(vm, value_bool(result)); return true;
         }
-        if (strcmp(method, "is_superset") == 0 && arg_count == 1) {
+        if (mhash == MHASH_is_superset && strcmp(method, "is_superset") == 0 && arg_count == 1) {
             LatValue other = pop(vm);
             bool result = true;
             if (other.type == VAL_SET) {
@@ -3540,18 +3644,18 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
 
     /* ── Channel methods ── */
     if (obj->type == VAL_CHANNEL) {
-        if (strcmp(method, "send") == 0 && arg_count == 1) {
+        if (mhash == MHASH_send && strcmp(method, "send") == 0 && arg_count == 1) {
             LatValue val = pop(vm);
             channel_send(obj->as.channel.ch, val);
             push(vm, value_unit()); return true;
         }
-        if (strcmp(method, "recv") == 0 && arg_count == 0) {
+        if (mhash == MHASH_recv && strcmp(method, "recv") == 0 && arg_count == 0) {
             bool ok;
             LatValue val = channel_recv(obj->as.channel.ch, &ok);
             if (!ok) { push(vm, value_unit()); return true; }
             push(vm, val); return true;
         }
-        if (strcmp(method, "close") == 0 && arg_count == 0) {
+        if (mhash == MHASH_close && strcmp(method, "close") == 0 && arg_count == 0) {
             channel_close(obj->as.channel.ch);
             push(vm, value_unit()); return true;
         }
@@ -3582,32 +3686,116 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
     frame->upvalues = NULL;
     frame->upvalue_count = 0;
 
+#ifdef VM_USE_COMPUTED_GOTO
+    static void *dispatch_table[] = {
+        [OP_CONSTANT] = &&lbl_OP_CONSTANT,
+        [OP_NIL] = &&lbl_OP_NIL, [OP_TRUE] = &&lbl_OP_TRUE,
+        [OP_FALSE] = &&lbl_OP_FALSE, [OP_UNIT] = &&lbl_OP_UNIT,
+        [OP_POP] = &&lbl_OP_POP, [OP_DUP] = &&lbl_OP_DUP, [OP_SWAP] = &&lbl_OP_SWAP,
+        [OP_ADD] = &&lbl_OP_ADD, [OP_SUB] = &&lbl_OP_SUB,
+        [OP_MUL] = &&lbl_OP_MUL, [OP_DIV] = &&lbl_OP_DIV, [OP_MOD] = &&lbl_OP_MOD,
+        [OP_NEG] = &&lbl_OP_NEG, [OP_NOT] = &&lbl_OP_NOT,
+        [OP_BIT_AND] = &&lbl_OP_BIT_AND, [OP_BIT_OR] = &&lbl_OP_BIT_OR,
+        [OP_BIT_XOR] = &&lbl_OP_BIT_XOR, [OP_BIT_NOT] = &&lbl_OP_BIT_NOT,
+        [OP_LSHIFT] = &&lbl_OP_LSHIFT, [OP_RSHIFT] = &&lbl_OP_RSHIFT,
+        [OP_EQ] = &&lbl_OP_EQ, [OP_NEQ] = &&lbl_OP_NEQ,
+        [OP_LT] = &&lbl_OP_LT, [OP_GT] = &&lbl_OP_GT,
+        [OP_LTEQ] = &&lbl_OP_LTEQ, [OP_GTEQ] = &&lbl_OP_GTEQ,
+        [OP_CONCAT] = &&lbl_OP_CONCAT,
+        [OP_GET_LOCAL] = &&lbl_OP_GET_LOCAL, [OP_SET_LOCAL] = &&lbl_OP_SET_LOCAL,
+        [OP_GET_GLOBAL] = &&lbl_OP_GET_GLOBAL, [OP_SET_GLOBAL] = &&lbl_OP_SET_GLOBAL,
+        [OP_DEFINE_GLOBAL] = &&lbl_OP_DEFINE_GLOBAL,
+        [OP_GET_UPVALUE] = &&lbl_OP_GET_UPVALUE, [OP_SET_UPVALUE] = &&lbl_OP_SET_UPVALUE,
+        [OP_CLOSE_UPVALUE] = &&lbl_OP_CLOSE_UPVALUE,
+        [OP_JUMP] = &&lbl_OP_JUMP, [OP_JUMP_IF_FALSE] = &&lbl_OP_JUMP_IF_FALSE,
+        [OP_JUMP_IF_TRUE] = &&lbl_OP_JUMP_IF_TRUE,
+        [OP_JUMP_IF_NOT_NIL] = &&lbl_OP_JUMP_IF_NOT_NIL, [OP_LOOP] = &&lbl_OP_LOOP,
+        [OP_CALL] = &&lbl_OP_CALL, [OP_CLOSURE] = &&lbl_OP_CLOSURE,
+        [OP_RETURN] = &&lbl_OP_RETURN,
+        [OP_ITER_INIT] = &&lbl_OP_ITER_INIT, [OP_ITER_NEXT] = &&lbl_OP_ITER_NEXT,
+        [OP_BUILD_ARRAY] = &&lbl_OP_BUILD_ARRAY, [OP_ARRAY_FLATTEN] = &&lbl_OP_ARRAY_FLATTEN,
+        [OP_BUILD_MAP] = &&lbl_OP_BUILD_MAP, [OP_BUILD_TUPLE] = &&lbl_OP_BUILD_TUPLE,
+        [OP_BUILD_STRUCT] = &&lbl_OP_BUILD_STRUCT, [OP_BUILD_RANGE] = &&lbl_OP_BUILD_RANGE,
+        [OP_BUILD_ENUM] = &&lbl_OP_BUILD_ENUM,
+        [OP_INDEX] = &&lbl_OP_INDEX, [OP_SET_INDEX] = &&lbl_OP_SET_INDEX,
+        [OP_GET_FIELD] = &&lbl_OP_GET_FIELD, [OP_SET_FIELD] = &&lbl_OP_SET_FIELD,
+        [OP_INVOKE] = &&lbl_OP_INVOKE, [OP_INVOKE_LOCAL] = &&lbl_OP_INVOKE_LOCAL,
+        [OP_INVOKE_GLOBAL] = &&lbl_OP_INVOKE_GLOBAL,
+        [OP_SET_INDEX_LOCAL] = &&lbl_OP_SET_INDEX_LOCAL,
+        [OP_PUSH_EXCEPTION_HANDLER] = &&lbl_OP_PUSH_EXCEPTION_HANDLER,
+        [OP_POP_EXCEPTION_HANDLER] = &&lbl_OP_POP_EXCEPTION_HANDLER,
+        [OP_THROW] = &&lbl_OP_THROW, [OP_TRY_UNWRAP] = &&lbl_OP_TRY_UNWRAP,
+        [OP_DEFER_PUSH] = &&lbl_OP_DEFER_PUSH, [OP_DEFER_RUN] = &&lbl_OP_DEFER_RUN,
+        [OP_FREEZE] = &&lbl_OP_FREEZE, [OP_THAW] = &&lbl_OP_THAW,
+        [OP_CLONE] = &&lbl_OP_CLONE, [OP_MARK_FLUID] = &&lbl_OP_MARK_FLUID,
+        [OP_REACT] = &&lbl_OP_REACT, [OP_UNREACT] = &&lbl_OP_UNREACT,
+        [OP_BOND] = &&lbl_OP_BOND, [OP_UNBOND] = &&lbl_OP_UNBOND,
+        [OP_SEED] = &&lbl_OP_SEED, [OP_UNSEED] = &&lbl_OP_UNSEED,
+        [OP_FREEZE_VAR] = &&lbl_OP_FREEZE_VAR, [OP_THAW_VAR] = &&lbl_OP_THAW_VAR,
+        [OP_SUBLIMATE_VAR] = &&lbl_OP_SUBLIMATE_VAR, [OP_SUBLIMATE] = &&lbl_OP_SUBLIMATE,
+        [OP_PRINT] = &&lbl_OP_PRINT, [OP_IMPORT] = &&lbl_OP_IMPORT,
+        [OP_SCOPE] = &&lbl_OP_SCOPE, [OP_SELECT] = &&lbl_OP_SELECT,
+        [OP_INC_LOCAL] = &&lbl_OP_INC_LOCAL, [OP_DEC_LOCAL] = &&lbl_OP_DEC_LOCAL,
+        [OP_ADD_INT] = &&lbl_OP_ADD_INT, [OP_SUB_INT] = &&lbl_OP_SUB_INT,
+        [OP_MUL_INT] = &&lbl_OP_MUL_INT, [OP_LT_INT] = &&lbl_OP_LT_INT,
+        [OP_LTEQ_INT] = &&lbl_OP_LTEQ_INT, [OP_LOAD_INT8] = &&lbl_OP_LOAD_INT8,
+        [OP_HALT] = &&lbl_OP_HALT,
+    };
+#endif
+
     for (;;) {
         uint8_t op = READ_BYTE();
 
+#ifdef VM_USE_COMPUTED_GOTO
+        goto *dispatch_table[op];
+#endif
         switch (op) {
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CONSTANT:
+#endif
             case OP_CONSTANT: {
                 uint8_t idx = READ_BYTE();
-                push(vm, value_deep_clone(&frame->chunk->constants[idx]));
+                push(vm, value_clone_fast(&frame->chunk->constants[idx]));
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_NIL:
+#endif
             case OP_NIL:   push(vm, value_nil()); break;
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_TRUE:
+#endif
             case OP_TRUE:  push(vm, value_bool(true)); break;
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_FALSE:
+#endif
             case OP_FALSE: push(vm, value_bool(false)); break;
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_UNIT:
+#endif
             case OP_UNIT:  push(vm, value_unit()); break;
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_POP:
+#endif
             case OP_POP: {
                 LatValue v = pop(vm);
                 value_free(&v);
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_DUP:
+#endif
             case OP_DUP: {
-                push(vm, value_deep_clone(vm_peek(vm, 0)));
+                push(vm, value_clone_fast(vm_peek(vm, 0)));
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SWAP:
+#endif
             case OP_SWAP: {
                 LatValue a = vm->stack_top[-1];
                 vm->stack_top[-1] = vm->stack_top[-2];
@@ -3615,6 +3803,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_ADD:
+#endif
             case OP_ADD: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3626,18 +3817,20 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 } else if (a.type == VAL_FLOAT && b.type == VAL_INT) {
                     push(vm, value_float(a.as.float_val + (double)b.as.int_val));
                 } else if (a.type == VAL_STR || b.type == VAL_STR) {
-                    char *sa = (a.type == VAL_STR) ? strdup(a.as.str_val) : value_repr(&a);
-                    char *sb = (b.type == VAL_STR) ? strdup(b.as.str_val) : value_repr(&b);
-                    size_t la = strlen(sa), lb = strlen(sb);
+                    const char *pa = (a.type == VAL_STR) ? a.as.str_val : NULL;
+                    const char *pb = (b.type == VAL_STR) ? b.as.str_val : NULL;
+                    char *ra = pa ? NULL : value_repr(&a);
+                    char *rb = pb ? NULL : value_repr(&b);
+                    if (!pa) pa = ra;
+                    if (!pb) pb = rb;
+                    size_t la = strlen(pa), lb = strlen(pb);
                     char *result_str = malloc(la + lb + 1);
-                    memcpy(result_str, sa, la);
-                    memcpy(result_str + la, sb, lb);
+                    memcpy(result_str, pa, la);
+                    memcpy(result_str + la, pb, lb);
                     result_str[la + lb] = '\0';
-                    free(sa); free(sb);
+                    free(ra); free(rb);
                     value_free(&a); value_free(&b);
-                    LatValue sv = value_string(result_str);
-                    free(result_str);
-                    push(vm, sv);
+                    push(vm, value_string_owned(result_str));
                     break;
                 } else {
                     value_free(&a); value_free(&b);
@@ -3646,6 +3839,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SUB:
+#endif
             case OP_SUB: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT)
@@ -3663,6 +3859,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_MUL:
+#endif
             case OP_MUL: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT)
@@ -3680,6 +3879,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_DIV:
+#endif
             case OP_DIV: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3697,6 +3899,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_MOD:
+#endif
             case OP_MOD: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3709,6 +3914,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_NEG:
+#endif
             case OP_NEG: {
                 LatValue a = pop(vm);
                 if (a.type == VAL_INT) push(vm, value_int(-a.as.int_val));
@@ -3720,6 +3928,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_NOT:
+#endif
             case OP_NOT: {
                 LatValue a = pop(vm);
                 bool falsy_val = is_falsy(&a);
@@ -3728,6 +3939,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_EQ:
+#endif
             case OP_EQ: {
                 LatValue b = pop(vm), a = pop(vm);
                 bool eq = value_eq(&a, &b);
@@ -3735,6 +3949,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 push(vm, value_bool(eq));
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_NEQ:
+#endif
             case OP_NEQ: {
                 LatValue b = pop(vm), a = pop(vm);
                 bool eq = value_eq(&a, &b);
@@ -3743,6 +3960,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_LT:
+#endif
             case OP_LT: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT)
@@ -3757,6 +3977,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_GT:
+#endif
             case OP_GT: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT)
@@ -3771,6 +3994,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_LTEQ:
+#endif
             case OP_LTEQ: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT)
@@ -3785,6 +4011,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_GTEQ:
+#endif
             case OP_GTEQ: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT)
@@ -3801,6 +4030,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Bitwise operations ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BIT_AND:
+#endif
             case OP_BIT_AND: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3811,6 +4043,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BIT_OR:
+#endif
             case OP_BIT_OR: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3821,6 +4056,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BIT_XOR:
+#endif
             case OP_BIT_XOR: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3831,6 +4069,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BIT_NOT:
+#endif
             case OP_BIT_NOT: {
                 LatValue a = pop(vm);
                 if (a.type == VAL_INT) {
@@ -3841,6 +4082,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_LSHIFT:
+#endif
             case OP_LSHIFT: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3851,6 +4095,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 }
                 break;
             }
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_RSHIFT:
+#endif
             case OP_RSHIFT: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
@@ -3862,34 +4109,45 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CONCAT:
+#endif
             case OP_CONCAT: {
                 LatValue b = pop(vm), a = pop(vm);
-                char *sa = (a.type == VAL_STR) ? strdup(a.as.str_val) : value_repr(&a);
-                char *sb = (b.type == VAL_STR) ? strdup(b.as.str_val) : value_repr(&b);
-                size_t la = strlen(sa), lb = strlen(sb);
+                const char *pa = (a.type == VAL_STR) ? a.as.str_val : NULL;
+                const char *pb = (b.type == VAL_STR) ? b.as.str_val : NULL;
+                char *ra = pa ? NULL : value_repr(&a);
+                char *rb = pb ? NULL : value_repr(&b);
+                if (!pa) pa = ra;
+                if (!pb) pb = rb;
+                size_t la = strlen(pa), lb = strlen(pb);
                 char *res = malloc(la + lb + 1);
-                memcpy(res, sa, la);
-                memcpy(res + la, sb, lb);
+                memcpy(res, pa, la);
+                memcpy(res + la, pb, lb);
                 res[la + lb] = '\0';
-                free(sa); free(sb);
+                free(ra); free(rb);
                 value_free(&a); value_free(&b);
-                LatValue sv = value_string(res);
-                free(res);
-                push(vm, sv);
+                push(vm, value_string_owned(res));
                 break;
             }
 
             /* ── Variables ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_GET_LOCAL:
+#endif
             case OP_GET_LOCAL: {
                 uint8_t slot = READ_BYTE();
-                push(vm, value_deep_clone(&frame->slots[slot]));
+                push(vm, value_clone_fast(&frame->slots[slot]));
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_LOCAL:
+#endif
             case OP_SET_LOCAL: {
                 uint8_t slot = READ_BYTE();
                 value_free(&frame->slots[slot]);
-                frame->slots[slot] = value_deep_clone(vm_peek(vm, 0));
+                frame->slots[slot] = value_clone_fast(vm_peek(vm, 0));
                 /* Record history for tracked variables */
                 if (vm->tracked_count > 0 && frame->chunk->local_names &&
                     slot < frame->chunk->local_name_cap && frame->chunk->local_names[slot]) {
@@ -3898,17 +4156,29 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_GET_GLOBAL:
+#endif
             case OP_GET_GLOBAL: {
                 uint8_t idx = READ_BYTE();
                 const char *name = frame->chunk->constants[idx].as.str_val;
-                LatValue val;
-                if (!env_get(vm->env, name, &val)) {
+                LatValue *ref = env_get_ref(vm->env, name);
+                if (!ref) {
                     VM_ERROR("undefined variable '%s'", name); break;
                 }
-                push(vm, val);
+                if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
+                    (ref->as.closure.default_values == VM_NATIVE_MARKER ||
+                     ref->as.closure.default_values == VM_EXT_MARKER)) {
+                    push(vm, *ref);
+                } else {
+                    push(vm, value_deep_clone(ref));
+                }
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_GLOBAL:
+#endif
             case OP_SET_GLOBAL: {
                 uint8_t idx = READ_BYTE();
                 const char *name = frame->chunk->constants[idx].as.str_val;
@@ -3921,6 +4191,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_DEFINE_GLOBAL:
+#endif
             case OP_DEFINE_GLOBAL: {
                 uint8_t idx = READ_BYTE();
                 const char *name = frame->chunk->constants[idx].as.str_val;
@@ -3929,6 +4202,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_GET_UPVALUE:
+#endif
             case OP_GET_UPVALUE: {
                 uint8_t slot = READ_BYTE();
                 if (frame->upvalues && slot < frame->upvalue_count && frame->upvalues[slot]) {
@@ -3939,6 +4215,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_UPVALUE:
+#endif
             case OP_SET_UPVALUE: {
                 uint8_t slot = READ_BYTE();
                 if (frame->upvalues && slot < frame->upvalue_count && frame->upvalues[slot]) {
@@ -3948,6 +4227,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CLOSE_UPVALUE:
+#endif
             case OP_CLOSE_UPVALUE: {
                 close_upvalues(vm, vm->stack_top - 1);
                 LatValue v = pop(vm);
@@ -3956,12 +4238,18 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Jumps ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_JUMP:
+#endif
             case OP_JUMP: {
                 uint16_t offset = READ_U16();
                 frame->ip += offset;
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_JUMP_IF_FALSE:
+#endif
             case OP_JUMP_IF_FALSE: {
                 uint16_t offset = READ_U16();
                 if (is_falsy(vm_peek(vm, 0)))
@@ -3969,6 +4257,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_JUMP_IF_TRUE:
+#endif
             case OP_JUMP_IF_TRUE: {
                 uint16_t offset = READ_U16();
                 if (!is_falsy(vm_peek(vm, 0)))
@@ -3976,6 +4267,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_JUMP_IF_NOT_NIL:
+#endif
             case OP_JUMP_IF_NOT_NIL: {
                 uint16_t offset = READ_U16();
                 if (vm_peek(vm, 0)->type != VAL_NIL)
@@ -3983,6 +4277,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_LOOP:
+#endif
             case OP_LOOP: {
                 uint16_t offset = READ_U16();
                 frame->ip -= offset;
@@ -3990,6 +4287,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Functions/closures ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CALL:
+#endif
             case OP_CALL: {
                 uint8_t arg_count = READ_BYTE();
                 LatValue *callee = vm_peek(vm, arg_count);
@@ -3998,17 +4298,15 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     && callee->as.closure.default_values == VM_NATIVE_MARKER) {
                     /* VM native builtin function */
                     VMNativeFn native = (VMNativeFn)callee->as.closure.native_fn;
-                    LatValue *args = NULL;
-                    if (arg_count > 0) {
-                        args = malloc(arg_count * sizeof(LatValue));
-                        for (int i = arg_count - 1; i >= 0; i--)
-                            args[i] = pop(vm);
-                    }
+                    LatValue *args = (arg_count <= 16) ? vm->fast_args
+                                   : malloc(arg_count * sizeof(LatValue));
+                    for (int i = arg_count - 1; i >= 0; i--)
+                        args[i] = pop(vm);
                     LatValue callee_val = pop(vm); /* pop callee */
                     LatValue ret = native(args, arg_count);
                     for (int i = 0; i < arg_count; i++)
                         value_free(&args[i]);
-                    free(args);
+                    if (arg_count > 16) free(args);
                     value_free(&callee_val);
                     /* Check if native set an error (e.g. grow() seed failure) */
                     if (vm->error) {
@@ -4026,18 +4324,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 if (callee->type == VAL_CLOSURE && callee->as.closure.native_fn != NULL
                     && callee->as.closure.default_values == VM_EXT_MARKER) {
                     /* Extension native function — call via ext_call_native() */
-                    LatValue *args = NULL;
-                    if (arg_count > 0) {
-                        args = malloc(arg_count * sizeof(LatValue));
-                        for (int i = arg_count - 1; i >= 0; i--)
-                            args[i] = pop(vm);
-                    }
+                    LatValue *args = (arg_count <= 16) ? vm->fast_args
+                                   : malloc(arg_count * sizeof(LatValue));
+                    for (int i = arg_count - 1; i >= 0; i--)
+                        args[i] = pop(vm);
                     LatValue callee_val = pop(vm);
                     LatValue ret = ext_call_native(callee_val.as.closure.native_fn,
                                                    args, (size_t)arg_count);
                     for (int i = 0; i < arg_count; i++)
                         value_free(&args[i]);
-                    free(args);
+                    if (arg_count > 16) free(args);
                     value_free(&callee_val);
                     push(vm, ret);
                     break;
@@ -4082,6 +4378,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CLOSURE:
+#endif
             case OP_CLOSURE: {
                 uint8_t fn_idx = READ_BYTE();
                 uint8_t upvalue_count = READ_BYTE();
@@ -4120,6 +4419,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_RETURN:
+#endif
             case OP_RETURN: {
                 LatValue ret = pop(vm);
                 close_upvalues(vm, frame->slots);
@@ -4145,6 +4447,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Iterators ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_ITER_INIT:
+#endif
             case OP_ITER_INIT: {
                 /* TOS is a range or array. Push index 0 on top. */
                 LatValue *iter = vm_peek(vm, 0);
@@ -4155,6 +4460,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_ITER_NEXT:
+#endif
             case OP_ITER_NEXT: {
                 uint16_t offset = READ_U16();
                 LatValue *idx_val = vm_peek(vm, 0);  /* index */
@@ -4185,6 +4493,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Data structures ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BUILD_ARRAY:
+#endif
             case OP_BUILD_ARRAY: {
                 uint8_t count = READ_BYTE();
                 LatValue *elems = NULL;
@@ -4199,6 +4510,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_ARRAY_FLATTEN:
+#endif
             case OP_ARRAY_FLATTEN: {
                 /* One-level flatten for spread operator: [1, [2, 3], 4] → [1, 2, 3, 4] */
                 LatValue arr = pop(vm);
@@ -4231,6 +4545,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BUILD_MAP:
+#endif
             case OP_BUILD_MAP: {
                 uint8_t pair_count = READ_BYTE();
                 LatValue map = value_map_new();
@@ -4254,6 +4571,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BUILD_TUPLE:
+#endif
             case OP_BUILD_TUPLE: {
                 uint8_t count = READ_BYTE();
                 LatValue *elems = NULL;
@@ -4268,6 +4588,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BUILD_STRUCT:
+#endif
             case OP_BUILD_STRUCT: {
                 uint8_t name_idx = READ_BYTE();
                 uint8_t field_count = READ_BYTE();
@@ -4319,6 +4642,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BUILD_RANGE:
+#endif
             case OP_BUILD_RANGE: {
                 LatValue end = pop(vm), start = pop(vm);
                 if (start.type == VAL_INT && end.type == VAL_INT) {
@@ -4330,6 +4656,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BUILD_ENUM:
+#endif
             case OP_BUILD_ENUM: {
                 uint8_t enum_idx = READ_BYTE();
                 uint8_t var_idx = READ_BYTE();
@@ -4349,6 +4678,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_INDEX:
+#endif
             case OP_INDEX: {
                 LatValue idx = pop(vm);
                 LatValue obj = pop(vm);
@@ -4398,6 +4730,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_INDEX:
+#endif
             case OP_SET_INDEX: {
                 LatValue idx = pop(vm);
                 LatValue obj = pop(vm);
@@ -4422,6 +4757,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_GET_FIELD:
+#endif
             case OP_GET_FIELD: {
                 uint8_t name_idx = READ_BYTE();
                 const char *field_name = frame->chunk->constants[name_idx].as.str_val;
@@ -4468,6 +4806,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_FIELD:
+#endif
             case OP_SET_FIELD: {
                 uint8_t name_idx = READ_BYTE();
                 const char *field_name = frame->chunk->constants[name_idx].as.str_val;
@@ -4514,6 +4855,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_INVOKE:
+#endif
             case OP_INVOKE: {
                 uint8_t method_idx = READ_BYTE();
                 uint8_t arg_count = READ_BYTE();
@@ -4569,17 +4913,15 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                             field->as.closure.default_values == VM_NATIVE_MARKER) {
                             /* VM native function stored in map */
                             VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
-                            LatValue *args = NULL;
-                            if (arg_count > 0) {
-                                args = malloc(arg_count * sizeof(LatValue));
-                                for (int i = arg_count - 1; i >= 0; i--)
-                                    args[i] = pop(vm);
-                            }
+                            LatValue *args = (arg_count <= 16) ? vm->fast_args
+                                           : malloc(arg_count * sizeof(LatValue));
+                            for (int i = arg_count - 1; i >= 0; i--)
+                                args[i] = pop(vm);
                             LatValue obj_val = pop(vm);
                             LatValue ret = native(args, arg_count);
                             for (int i = 0; i < arg_count; i++)
                                 value_free(&args[i]);
-                            free(args);
+                            if (arg_count > 16) free(args);
                             value_free(&obj_val);
                             push(vm, ret);
                             break;
@@ -4684,6 +5026,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_INVOKE_LOCAL:
+#endif
             case OP_INVOKE_LOCAL: {
                 uint8_t slot = READ_BYTE();
                 uint8_t method_idx = READ_BYTE();
@@ -4803,6 +5148,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_INVOKE_GLOBAL:
+#endif
             case OP_INVOKE_GLOBAL: {
                 uint8_t name_idx = READ_BYTE();
                 uint8_t method_idx = READ_BYTE();
@@ -4871,17 +5219,15 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     if (field && field->type == VAL_CLOSURE &&
                         field->as.closure.default_values == VM_NATIVE_MARKER) {
                         VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
-                        LatValue *args = NULL;
-                        if (arg_count > 0) {
-                            args = malloc(arg_count * sizeof(LatValue));
-                            for (int i = arg_count - 1; i >= 0; i--)
-                                args[i] = pop(vm);
-                        }
+                        LatValue *args = (arg_count <= 16) ? vm->fast_args
+                                       : malloc(arg_count * sizeof(LatValue));
+                        for (int i = arg_count - 1; i >= 0; i--)
+                            args[i] = pop(vm);
                         LatValue obj_popped = pop(vm);
                         LatValue ret = native(args, arg_count);
                         for (int i = 0; i < arg_count; i++)
                             value_free(&args[i]);
-                        free(args);
+                        if (arg_count > 16) free(args);
                         value_free(&obj_popped);
                         push(vm, ret);
                         break;
@@ -4984,6 +5330,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_INDEX_LOCAL:
+#endif
             case OP_SET_INDEX_LOCAL: {
                 uint8_t slot = READ_BYTE();
                 LatValue idx = pop(vm);
@@ -5011,6 +5360,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Exception handling ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_PUSH_EXCEPTION_HANDLER:
+#endif
             case OP_PUSH_EXCEPTION_HANDLER: {
                 uint16_t offset = READ_U16();
                 if (vm->handler_count >= VM_HANDLER_MAX) {
@@ -5024,12 +5376,18 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_POP_EXCEPTION_HANDLER:
+#endif
             case OP_POP_EXCEPTION_HANDLER: {
                 if (vm->handler_count > 0)
                     vm->handler_count--;
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_THROW:
+#endif
             case OP_THROW: {
                 LatValue err = pop(vm);
                 if (vm->handler_count > 0) {
@@ -5052,6 +5410,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_TRY_UNWRAP:
+#endif
             case OP_TRY_UNWRAP: {
                 /* Check if TOS is a map with "tag" = "ok" or "tag" = "err" */
                 LatValue *val = vm_peek(vm, 0);
@@ -5086,6 +5447,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Defer ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_DEFER_PUSH:
+#endif
             case OP_DEFER_PUSH: {
                 uint16_t offset = READ_U16();
                 if (vm->defer_count < VM_DEFER_MAX) {
@@ -5099,6 +5463,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_DEFER_RUN:
+#endif
             case OP_DEFER_RUN: {
                 /* Execute pending defers for the current function in LIFO order.
                  * Only run defers that belong to the current call frame. */
@@ -5132,6 +5499,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Phase system ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_FREEZE:
+#endif
             case OP_FREEZE: {
                 LatValue val = pop(vm);
                 LatValue frozen = value_freeze(val);
@@ -5139,6 +5509,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_THAW:
+#endif
             case OP_THAW: {
                 LatValue val = pop(vm);
                 LatValue thawed = value_thaw(&val);
@@ -5147,6 +5520,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CLONE:
+#endif
             case OP_CLONE: {
                 LatValue val = pop(vm);
                 LatValue cloned = value_deep_clone(&val);
@@ -5155,6 +5531,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_MARK_FLUID:
+#endif
             case OP_MARK_FLUID: {
                 vm_peek(vm, 0)->phase = VTAG_FLUID;
                 break;
@@ -5162,6 +5541,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 
             /* ── Phase system: reactions, bonds, seeds ── */
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_REACT:
+#endif
             case OP_REACT: {
                 uint8_t name_idx = READ_BYTE();
                 const char *var_name = frame->chunk->constants[name_idx].as.str_val;
@@ -5198,6 +5580,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_UNREACT:
+#endif
             case OP_UNREACT: {
                 uint8_t name_idx = READ_BYTE();
                 const char *var_name = frame->chunk->constants[name_idx].as.str_val;
@@ -5214,6 +5599,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_BOND:
+#endif
             case OP_BOND: {
                 uint8_t target_idx = READ_BYTE();
                 const char *target_name = frame->chunk->constants[target_idx].as.str_val;
@@ -5254,6 +5642,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_UNBOND:
+#endif
             case OP_UNBOND: {
                 uint8_t target_idx = READ_BYTE();
                 const char *target_name = frame->chunk->constants[target_idx].as.str_val;
@@ -5286,6 +5677,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SEED:
+#endif
             case OP_SEED: {
                 uint8_t name_idx = READ_BYTE();
                 const char *var_name = frame->chunk->constants[name_idx].as.str_val;
@@ -5307,6 +5701,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_UNSEED:
+#endif
             case OP_UNSEED: {
                 uint8_t name_idx = READ_BYTE();
                 const char *var_name = frame->chunk->constants[name_idx].as.str_val;
@@ -5321,6 +5718,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_FREEZE_VAR:
+#endif
             case OP_FREEZE_VAR: {
                 uint8_t name_idx = READ_BYTE();
                 uint8_t loc_type = READ_BYTE();
@@ -5348,6 +5748,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_THAW_VAR:
+#endif
             case OP_THAW_VAR: {
                 uint8_t name_idx = READ_BYTE();
                 uint8_t loc_type = READ_BYTE();
@@ -5365,6 +5768,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SUBLIMATE_VAR:
+#endif
             case OP_SUBLIMATE_VAR: {
                 uint8_t name_idx = READ_BYTE();
                 uint8_t loc_type = READ_BYTE();
@@ -5381,6 +5787,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SUBLIMATE:
+#endif
             case OP_SUBLIMATE: {
                 LatValue val = pop(vm);
                 val.phase = VTAG_SUBLIMATED;
@@ -5389,6 +5798,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Print ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_PRINT:
+#endif
             case OP_PRINT: {
                 uint8_t argc = READ_BYTE();
                 LatValue *vals = malloc(argc * sizeof(LatValue));
@@ -5412,6 +5824,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             /* ── Import ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_IMPORT:
+#endif
             case OP_IMPORT: {
                 uint8_t path_idx = READ_BYTE();
                 const char *raw_path = frame->chunk->constants[path_idx].as.str_val;
@@ -5548,6 +5963,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 
             /* ── Concurrency ── */
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SCOPE:
+#endif
             case OP_SCOPE: {
                 /* Read all inline data upfront */
                 uint8_t spawn_count = READ_BYTE();
@@ -5658,6 +6076,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SELECT:
+#endif
             case OP_SELECT: {
                 /* Read all inline arm data upfront */
                 uint8_t arm_count = READ_BYTE();
@@ -5925,6 +6346,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_HALT:
+#endif
             case OP_HALT:
                 *result = value_unit();
                 return VM_OK;

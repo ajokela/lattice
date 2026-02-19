@@ -80,6 +80,14 @@ bool env_get(const Env *env, const char *name, LatValue *out) {
     return false;
 }
 
+LatValue *env_get_ref(const Env *env, const char *name) {
+    for (size_t i = env->count; i > 0; i--) {
+        LatValue *v = lat_map_get(&env->scopes[i - 1], name);
+        if (v) return v;
+    }
+    return NULL;
+}
+
 bool env_set(Env *env, const char *name, LatValue value) {
     for (size_t i = env->count; i > 0; i--) {
         LatValue *existing = lat_map_get(&env->scopes[i - 1], name);

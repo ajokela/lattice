@@ -115,6 +115,8 @@ typedef struct {
     } *seeds;
     size_t seed_count;
     size_t seed_cap;
+    /* Pre-allocated buffer for native function call args (avoids malloc per call) */
+    LatValue fast_args[16];
 } VM;
 
 void vm_init(VM *vm);

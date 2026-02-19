@@ -121,6 +121,16 @@ typedef enum {
     OP_SCOPE,          /* spawn_count(1), sync_idx(1), spawn_idx(1) × spawn_count */
     OP_SELECT,         /* arm_count(1), per arm: flags(1), chan_idx(1), body_idx(1), binding_idx(1) */
 
+    /* Specialized integer ops (fast path, no type checking overhead) */
+    OP_INC_LOCAL,      /* operand: slot. Increment int local by 1 in-place */
+    OP_DEC_LOCAL,      /* operand: slot. Decrement int local by 1 in-place */
+    OP_ADD_INT,        /* Pop two ints, push int result */
+    OP_SUB_INT,        /* Pop two ints, push int result */
+    OP_MUL_INT,        /* Pop two ints, push int result */
+    OP_LT_INT,         /* Pop two ints, push bool result */
+    OP_LTEQ_INT,       /* Pop two ints, push bool result */
+    OP_LOAD_INT8,      /* operand: int8. Push small int from instruction stream */
+
     /* Fallback to tree-walker */
     OP_HALT,           /* Stop execution */
 } Opcode;

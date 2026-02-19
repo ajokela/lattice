@@ -62,61 +62,37 @@ char *lat_strdup_routed(const char *s) { return lat_strdup(s); }
 /* ── Constructors ── */
 
 LatValue value_int(int64_t v) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_INT;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_INT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.int_val = v;
     return val;
 }
 
 LatValue value_float(double v) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_FLOAT;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_FLOAT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.float_val = v;
     return val;
 }
 
 LatValue value_bool(bool v) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_BOOL;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_BOOL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.bool_val = v;
     return val;
 }
 
 LatValue value_string(const char *s) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_STR;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.str_val = lat_strdup(s);
     return val;
 }
 
 LatValue value_string_owned(char *s) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_STR;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.str_val = s;
     return val;
 }
 
 LatValue value_array(LatValue *elems, size_t len) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_ARRAY;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     size_t cap = len < 4 ? 4 : len;
     val.as.array.elems = lat_alloc(cap * sizeof(LatValue));
     if (len > 0) memcpy(val.as.array.elems, elems, len * sizeof(LatValue));
@@ -126,11 +102,7 @@ LatValue value_array(LatValue *elems, size_t len) {
 }
 
 LatValue value_struct(const char *name, char **field_names, LatValue *field_values, size_t count) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_STRUCT;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_STRUCT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.strct.name = lat_strdup(name);
     val.as.strct.field_names = lat_alloc(count * sizeof(char *));
     val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
@@ -145,11 +117,7 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
 
 LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured,
                        struct Expr **default_values, bool has_variadic) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_CLOSURE;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_CLOSURE, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.closure.param_names = lat_alloc(param_count * sizeof(char *));
     for (size_t i = 0; i < param_count; i++) {
         val.as.closure.param_names[i] = lat_strdup(param_names[i]);
@@ -163,40 +131,22 @@ LatValue value_closure(char **param_names, size_t param_count, struct Expr *body
 }
 
 LatValue value_unit(void) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_UNIT;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
-    return val;
+    return (LatValue){ .type = VAL_UNIT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
 }
 
 LatValue value_nil(void) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_NIL;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
-    return val;
+    return (LatValue){ .type = VAL_NIL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
 }
 
 LatValue value_range(int64_t start, int64_t end) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_RANGE;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_RANGE, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.range.start = start;
     val.as.range.end = end;
     return val;
 }
 
 LatValue value_map_new(void) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_MAP;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_MAP, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.map.map = lat_alloc(sizeof(LatMap));
     *val.as.map.map = lat_map_new(sizeof(LatValue));
     val.as.map.key_phases = NULL;  /* lazy-allocated on first key freeze */
@@ -204,11 +154,7 @@ LatValue value_map_new(void) {
 }
 
 LatValue value_channel(struct LatChannel *ch) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_CHANNEL;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_CHANNEL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     channel_retain(ch);
     val.as.channel.ch = ch;
     return val;
@@ -216,11 +162,7 @@ LatValue value_channel(struct LatChannel *ch) {
 
 LatValue value_enum(const char *enum_name, const char *variant_name,
                     LatValue *payload, size_t count) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_ENUM;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_ENUM, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.enm.enum_name = lat_strdup(enum_name);
     val.as.enm.variant_name = lat_strdup(variant_name);
     if (count > 0 && payload) {
@@ -236,22 +178,14 @@ LatValue value_enum(const char *enum_name, const char *variant_name,
 }
 
 LatValue value_set_new(void) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_SET;
-    val.phase = VTAG_UNPHASED;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_SET, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     val.as.set.map = lat_alloc(sizeof(LatMap));
     *val.as.set.map = lat_map_new(sizeof(LatValue));
     return val;
 }
 
 LatValue value_tuple(LatValue *elems, size_t len) {
-    LatValue val;
-    memset(&val, 0, sizeof(val));
-    val.type = VAL_TUPLE;
-    val.phase = VTAG_CRYSTAL;
-    val.region_id = (size_t)-1;
+    LatValue val = { .type = VAL_TUPLE, .phase = VTAG_CRYSTAL, .region_id = (size_t)-1 };
     val.as.tuple.elems = lat_alloc(len * sizeof(LatValue));
     for (size_t i = 0; i < len; i++) {
         val.as.tuple.elems[i] = value_deep_clone(&elems[i]);
@@ -268,11 +202,7 @@ bool value_is_crystal(const LatValue *v) { return v->phase == VTAG_CRYSTAL; }
 /* ── Deep clone ── */
 
 LatValue value_deep_clone(const LatValue *v) {
-    LatValue out;
-    memset(&out, 0, sizeof(out));
-    out.type = v->type;
-    out.phase = v->phase;
-    out.region_id = (size_t)-1;  /* clone is a new value, not in any region */
+    LatValue out = { .type = v->type, .phase = v->phase, .region_id = (size_t)-1 };
 
     switch (v->type) {
         case VAL_INT:   out.as.int_val = v->as.int_val; break;
