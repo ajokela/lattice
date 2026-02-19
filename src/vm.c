@@ -5549,121 +5549,56 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             /* ── Concurrency ── */
 
             case OP_SCOPE: {
-                uint8_t expr_idx = READ_BYTE();
+                /* Read all inline data upfront */
+                uint8_t spawn_count = READ_BYTE();
+                uint8_t sync_idx = READ_BYTE();
+                uint8_t spawn_indices[256];
+                for (uint8_t i = 0; i < spawn_count; i++)
+                    spawn_indices[i] = READ_BYTE();
+
 #ifdef __EMSCRIPTEN__
-                (void)expr_idx;
+                (void)sync_idx;
                 push(vm, value_unit());
 #else
-                const Expr *scope_expr = (const Expr *)(uintptr_t)
-                    frame->chunk->constants[expr_idx].as.int_val;
-
-                size_t total = scope_expr->as.block.count;
-                size_t spawn_count = 0;
-                for (size_t i = 0; i < total; i++) {
-                    Stmt *s = scope_expr->as.block.stmts[i];
-                    if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)
-                        spawn_count++;
+                /* Export current locals so sub-chunks can see them via env */
+                env_push_scope(vm->env);
+                for (size_t fi2 = 0; fi2 < vm->frame_count; fi2++) {
+                    CallFrame *f2 = &vm->frames[fi2];
+                    if (!f2->chunk) continue;
+                    size_t lc = (fi2 + 1 < vm->frame_count)
+                        ? (size_t)(vm->frames[fi2 + 1].slots - f2->slots)
+                        : (size_t)(vm->stack_top - f2->slots);
+                    for (size_t sl = 0; sl < lc; sl++) {
+                        if (sl < f2->chunk->local_name_cap && f2->chunk->local_names[sl])
+                            env_define(vm->env, f2->chunk->local_names[sl],
+                                       value_deep_clone(&f2->slots[sl]));
+                    }
                 }
 
                 if (spawn_count == 0) {
-                    /* No spawns — compile and run as synchronous block */
-                    char *cerr = NULL;
-                    Chunk *body = compile_body_chunk(scope_expr->as.block.stmts,
-                                                     total, &cerr);
-                    if (!body) {
-                        VM_ERROR("scope compile: %s", cerr ? cerr : "(unknown)");
-                        free(cerr);
-                        break;
-                    }
-                    vm_track_chunk(vm, body);
-
-                    /* Export current locals so compiled body can see them */
-                    env_push_scope(vm->env);
-                    for (size_t fi2 = 0; fi2 < vm->frame_count; fi2++) {
-                        CallFrame *f2 = &vm->frames[fi2];
-                        if (!f2->chunk) continue;
-                        size_t lc = (fi2 + 1 < vm->frame_count)
-                            ? (size_t)(vm->frames[fi2 + 1].slots - f2->slots)
-                            : (size_t)(vm->stack_top - f2->slots);
-                        for (size_t sl = 0; sl < lc; sl++) {
-                            if (sl < f2->chunk->local_name_cap && f2->chunk->local_names[sl])
-                                env_define(vm->env, f2->chunk->local_names[sl],
-                                           value_deep_clone(&f2->slots[sl]));
+                    /* No spawns — run sync body */
+                    if (sync_idx != 0xFF) {
+                        Chunk *body = (Chunk *)frame->chunk->constants[sync_idx].as.closure.native_fn;
+                        LatValue scope_result;
+                        VMResult sr = vm_run(vm, body, &scope_result);
+                        env_pop_scope(vm->env);
+                        if (sr != VM_OK) {
+                            return runtime_error(vm, "%s", vm->error ? vm->error : "scope error");
                         }
+                        value_free(&scope_result);
+                    } else {
+                        env_pop_scope(vm->env);
                     }
-
-                    LatValue scope_result;
-                    VMResult sr = vm_run(vm, body, &scope_result);
-                    env_pop_scope(vm->env);
-                    if (sr != VM_OK) {
-                        return runtime_error(vm, "%s", vm->error ? vm->error : "scope error");
-                    }
-                    value_free(&scope_result);
                     push(vm, value_unit());
                 } else {
                     /* Has spawns — run concurrently */
-                    VMSpawnTask *tasks = calloc(spawn_count, sizeof(VMSpawnTask));
                     char *first_error = NULL;
 
-                    /* Export parent locals to env for compilation visibility */
-                    env_push_scope(vm->env);
-                    for (size_t fi2 = 0; fi2 < vm->frame_count; fi2++) {
-                        CallFrame *f2 = &vm->frames[fi2];
-                        if (!f2->chunk) continue;
-                        size_t lc = (fi2 + 1 < vm->frame_count)
-                            ? (size_t)(vm->frames[fi2 + 1].slots - f2->slots)
-                            : (size_t)(vm->stack_top - f2->slots);
-                        for (size_t sl = 0; sl < lc; sl++) {
-                            if (sl < f2->chunk->local_name_cap && f2->chunk->local_names[sl])
-                                env_define(vm->env, f2->chunk->local_names[sl],
-                                           value_deep_clone(&f2->slots[sl]));
-                        }
-                    }
-
-                    /* Compile all spawn bodies and non-spawn stmts BEFORE launching threads */
-                    Chunk **spawn_chunks = calloc(spawn_count, sizeof(Chunk *));
-                    Chunk **non_spawn_chunks = NULL;
-                    size_t non_spawn_count = total - spawn_count;
-                    if (non_spawn_count > 0)
-                        non_spawn_chunks = calloc(non_spawn_count, sizeof(Chunk *));
-
-                    size_t si = 0, nsi = 0;
-                    for (size_t i = 0; i < total; i++) {
-                        Stmt *s = scope_expr->as.block.stmts[i];
-                        if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN) {
-                            Expr *spawn_expr = s->as.expr;
-                            char *cerr = NULL;
-                            spawn_chunks[si] = compile_body_chunk(
-                                spawn_expr->as.block.stmts,
-                                spawn_expr->as.block.count, &cerr);
-                            if (!spawn_chunks[si] && !first_error) {
-                                first_error = cerr;
-                            } else {
-                                free(cerr);
-                            }
-                            if (spawn_chunks[si])
-                                vm_track_chunk(vm, spawn_chunks[si]);
-                            si++;
-                        } else {
-                            char *cerr = NULL;
-                            Stmt *stmts_arr[1] = { s };
-                            non_spawn_chunks[nsi] = compile_body_chunk(stmts_arr, 1, &cerr);
-                            if (!non_spawn_chunks[nsi] && !first_error) {
-                                first_error = cerr;
-                            } else {
-                                free(cerr);
-                            }
-                            if (non_spawn_chunks[nsi])
-                                vm_track_chunk(vm, non_spawn_chunks[nsi]);
-                            nsi++;
-                        }
-                    }
-
-                    /* Run non-spawn statements synchronously in parent */
-                    for (size_t i = 0; i < non_spawn_count && !first_error; i++) {
-                        if (!non_spawn_chunks[i]) continue;
+                    /* Run sync body first (non-spawn statements) */
+                    if (sync_idx != 0xFF) {
+                        Chunk *sync_body = (Chunk *)frame->chunk->constants[sync_idx].as.closure.native_fn;
                         LatValue ns_result;
-                        VMResult nsr = vm_run(vm, non_spawn_chunks[i], &ns_result);
+                        VMResult nsr = vm_run(vm, sync_body, &ns_result);
                         if (nsr != VM_OK) {
                             first_error = vm->error ? strdup(vm->error) : strdup("scope stmt error");
                             free(vm->error);
@@ -5674,22 +5609,23 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     }
 
                     /* Create child VMs for each spawn */
-                    for (size_t i = 0; i < spawn_count; i++) {
-                        if (!spawn_chunks[i]) continue;
-                        tasks[i].chunk = spawn_chunks[i];
+                    VMSpawnTask *tasks = calloc(spawn_count, sizeof(VMSpawnTask));
+                    for (uint8_t i = 0; i < spawn_count && !first_error; i++) {
+                        Chunk *sp_chunk = (Chunk *)frame->chunk->constants[spawn_indices[i]].as.closure.native_fn;
+                        tasks[i].chunk = sp_chunk;
                         tasks[i].child_vm = vm_clone_for_thread(vm);
                         vm_export_locals_to_env(vm, tasks[i].child_vm);
                         tasks[i].error = NULL;
                     }
 
                     /* Launch all spawn threads */
-                    for (size_t i = 0; i < spawn_count; i++) {
+                    for (uint8_t i = 0; i < spawn_count; i++) {
                         if (!tasks[i].child_vm) continue;
                         pthread_create(&tasks[i].thread, NULL, vm_spawn_thread_fn, &tasks[i]);
                     }
 
                     /* Join all threads */
-                    for (size_t i = 0; i < spawn_count; i++) {
+                    for (uint8_t i = 0; i < spawn_count; i++) {
                         if (!tasks[i].child_vm) continue;
                         pthread_join(tasks[i].thread, NULL);
                     }
@@ -5698,7 +5634,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     current_vm = vm;
 
                     /* Collect first error from child threads */
-                    for (size_t i = 0; i < spawn_count; i++) {
+                    for (uint8_t i = 0; i < spawn_count; i++) {
                         if (tasks[i].error && !first_error) {
                             first_error = tasks[i].error;
                         } else if (tasks[i].error) {
@@ -5710,8 +5646,6 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 
                     env_pop_scope(vm->env);
                     free(tasks);
-                    free(spawn_chunks);
-                    free(non_spawn_chunks);
 
                     if (first_error) {
                         VMResult err = runtime_error(vm, "%s", first_error);
@@ -5725,26 +5659,30 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
             case OP_SELECT: {
-                uint8_t expr_idx = READ_BYTE();
-#ifdef __EMSCRIPTEN__
-                (void)expr_idx;
-                push(vm, value_nil());
-#else
-                const Expr *sel_expr = (const Expr *)(uintptr_t)
-                    frame->chunk->constants[expr_idx].as.int_val;
-
-                size_t arm_count = sel_expr->as.select_expr.arm_count;
-                SelectArm *arms = sel_expr->as.select_expr.arms;
-
-                /* Find default and timeout arms */
-                int default_idx = -1;
-                int timeout_idx = -1;
-                for (size_t i = 0; i < arm_count; i++) {
-                    if (arms[i].is_default) default_idx = (int)i;
-                    if (arms[i].is_timeout) timeout_idx = (int)i;
+                /* Read all inline arm data upfront */
+                uint8_t arm_count = READ_BYTE();
+                typedef struct { uint8_t flags, chan_idx, body_idx, binding_idx; } SelArmInfo;
+                SelArmInfo *arm_info = malloc(arm_count * sizeof(SelArmInfo));
+                for (uint8_t i = 0; i < arm_count; i++) {
+                    arm_info[i].flags = READ_BYTE();
+                    arm_info[i].chan_idx = READ_BYTE();
+                    arm_info[i].body_idx = READ_BYTE();
+                    arm_info[i].binding_idx = READ_BYTE();
                 }
 
-                /* Export locals to env for sub-compilation */
+#ifdef __EMSCRIPTEN__
+                free(arm_info);
+                push(vm, value_nil());
+#else
+                /* Find default and timeout arms */
+                int default_arm = -1;
+                int timeout_arm = -1;
+                for (uint8_t i = 0; i < arm_count; i++) {
+                    if (arm_info[i].flags & 0x01) default_arm = (int)i;
+                    if (arm_info[i].flags & 0x02) timeout_arm = (int)i;
+                }
+
+                /* Export locals to env for sub-chunk visibility */
                 env_push_scope(vm->env);
                 for (size_t fi2 = 0; fi2 < vm->frame_count; fi2++) {
                     CallFrame *f2 = &vm->frames[fi2];
@@ -5761,76 +5699,54 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 
                 /* Evaluate all channel expressions upfront */
                 LatChannel **channels = calloc(arm_count, sizeof(LatChannel *));
-                bool ch_eval_error = false;
-                for (size_t i = 0; i < arm_count; i++) {
-                    if (arms[i].is_default || arms[i].is_timeout) continue;
-                    char *cerr = NULL;
-                    Chunk *ch_chunk = compile_expr_chunk(arms[i].channel_expr, &cerr);
-                    if (!ch_chunk) {
-                        env_pop_scope(vm->env);
-                        for (size_t j = 0; j < i; j++)
-                            if (channels[j]) channel_release(channels[j]);
-                        free(channels);
-                        VMResult err = runtime_error(vm, "select channel compile: %s",
-                                                      cerr ? cerr : "(unknown)");
-                        free(cerr);
-                        return err;
-                    }
-                    vm_track_chunk(vm, ch_chunk);
+                for (uint8_t i = 0; i < arm_count; i++) {
+                    if (arm_info[i].flags & 0x03) continue; /* skip default/timeout */
+                    Chunk *ch_chunk = (Chunk *)frame->chunk->constants[arm_info[i].chan_idx].as.closure.native_fn;
                     LatValue ch_val;
                     VMResult cr = vm_run(vm, ch_chunk, &ch_val);
                     if (cr != VM_OK) {
                         env_pop_scope(vm->env);
-                        for (size_t j = 0; j < i; j++)
+                        for (uint8_t j = 0; j < i; j++)
                             if (channels[j]) channel_release(channels[j]);
                         free(channels);
+                        free(arm_info);
                         return runtime_error(vm, "%s", vm->error ? vm->error : "select channel error");
                     }
                     if (ch_val.type != VAL_CHANNEL) {
                         value_free(&ch_val);
                         env_pop_scope(vm->env);
-                        for (size_t j = 0; j < i; j++)
+                        for (uint8_t j = 0; j < i; j++)
                             if (channels[j]) channel_release(channels[j]);
                         free(channels);
+                        free(arm_info);
                         return runtime_error(vm, "select arm: expression is not a Channel");
                     }
                     channels[i] = ch_val.as.channel.ch;
                     channel_retain(channels[i]);
                     value_free(&ch_val);
                 }
-                (void)ch_eval_error;
 
                 /* Evaluate timeout if present */
                 long timeout_ms = -1;
-                if (timeout_idx >= 0) {
-                    char *cerr = NULL;
-                    Chunk *to_chunk = compile_expr_chunk(arms[timeout_idx].timeout_expr, &cerr);
-                    if (!to_chunk) {
-                        env_pop_scope(vm->env);
-                        for (size_t i = 0; i < arm_count; i++)
-                            if (channels[i]) channel_release(channels[i]);
-                        free(channels);
-                        VMResult err = runtime_error(vm, "select timeout compile: %s",
-                                                      cerr ? cerr : "(unknown)");
-                        free(cerr);
-                        return err;
-                    }
-                    vm_track_chunk(vm, to_chunk);
+                if (timeout_arm >= 0) {
+                    Chunk *to_chunk = (Chunk *)frame->chunk->constants[arm_info[timeout_arm].chan_idx].as.closure.native_fn;
                     LatValue to_val;
                     VMResult tr = vm_run(vm, to_chunk, &to_val);
                     if (tr != VM_OK) {
                         env_pop_scope(vm->env);
-                        for (size_t i = 0; i < arm_count; i++)
+                        for (uint8_t i = 0; i < arm_count; i++)
                             if (channels[i]) channel_release(channels[i]);
                         free(channels);
+                        free(arm_info);
                         return runtime_error(vm, "%s", vm->error ? vm->error : "select timeout error");
                     }
                     if (to_val.type != VAL_INT) {
                         value_free(&to_val);
                         env_pop_scope(vm->env);
-                        for (size_t i = 0; i < arm_count; i++)
+                        for (uint8_t i = 0; i < arm_count; i++)
                             if (channels[i]) channel_release(channels[i]);
                         free(channels);
+                        free(arm_info);
                         return runtime_error(vm, "select timeout must be an integer (milliseconds)");
                     }
                     timeout_ms = (long)to_val.as.int_val;
@@ -5840,8 +5756,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 /* Build shuffled index array for fairness */
                 size_t ch_arm_count = 0;
                 size_t *indices = malloc(arm_count * sizeof(size_t));
-                for (size_t i = 0; i < arm_count; i++) {
-                    if (!arms[i].is_default && !arms[i].is_timeout)
+                for (uint8_t i = 0; i < arm_count; i++) {
+                    if (!(arm_info[i].flags & 0x03))
                         indices[ch_arm_count++] = i;
                 }
                 /* Fisher-Yates shuffle */
@@ -5886,24 +5802,17 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         LatValue recv_val;
                         bool closed = false;
                         if (channel_try_recv(ch, &recv_val, &closed)) {
-                            /* Got a value — bind in env, compile and run body */
+                            /* Got a value — bind in env, run body */
                             env_push_scope(vm->env);
-                            if (arms[i].binding_name)
-                                env_define(vm->env, arms[i].binding_name, recv_val);
+                            const char *binding = (arm_info[i].flags & 0x04)
+                                ? frame->chunk->constants[arm_info[i].binding_idx].as.str_val
+                                : NULL;
+                            if (binding)
+                                env_define(vm->env, binding, recv_val);
                             else
                                 value_free(&recv_val);
 
-                            char *cerr = NULL;
-                            Chunk *arm_chunk = compile_body_chunk(arms[i].body,
-                                                                   arms[i].body_count, &cerr);
-                            if (!arm_chunk) {
-                                env_pop_scope(vm->env);
-                                select_error = true;
-                                free(vm->error);
-                                vm->error = cerr;
-                                break;
-                            }
-                            vm_track_chunk(vm, arm_chunk);
+                            Chunk *arm_chunk = (Chunk *)frame->chunk->constants[arm_info[i].body_idx].as.closure.native_fn;
                             LatValue arm_result;
                             VMResult ar = vm_run(vm, arm_chunk, &arm_result);
                             env_pop_scope(vm->env);
@@ -5922,39 +5831,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 
                     if (all_closed && ch_arm_count > 0) {
                         /* All channels closed — execute default if present */
-                        if (default_idx >= 0) {
+                        if (default_arm >= 0) {
                             env_push_scope(vm->env);
-                            char *cerr = NULL;
-                            Chunk *def_chunk = compile_body_chunk(arms[default_idx].body,
-                                                                    arms[default_idx].body_count, &cerr);
-                            if (def_chunk) {
-                                vm_track_chunk(vm, def_chunk);
-                                LatValue def_result;
-                                VMResult dr = vm_run(vm, def_chunk, &def_result);
-                                if (dr == VM_OK) {
-                                    value_free(&select_result);
-                                    select_result = def_result;
-                                } else {
-                                    select_error = true;
-                                }
-                            } else {
-                                free(vm->error);
-                                vm->error = cerr;
-                                select_error = true;
-                            }
-                            env_pop_scope(vm->env);
-                        }
-                        break;
-                    }
-
-                    /* If there's a default arm, execute it immediately */
-                    if (default_idx >= 0) {
-                        env_push_scope(vm->env);
-                        char *cerr = NULL;
-                        Chunk *def_chunk = compile_body_chunk(arms[default_idx].body,
-                                                                arms[default_idx].body_count, &cerr);
-                        if (def_chunk) {
-                            vm_track_chunk(vm, def_chunk);
+                            Chunk *def_chunk = (Chunk *)frame->chunk->constants[arm_info[default_arm].body_idx].as.closure.native_fn;
                             LatValue def_result;
                             VMResult dr = vm_run(vm, def_chunk, &def_result);
                             if (dr == VM_OK) {
@@ -5963,9 +5842,21 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                             } else {
                                 select_error = true;
                             }
+                            env_pop_scope(vm->env);
+                        }
+                        break;
+                    }
+
+                    /* If there's a default arm, execute it immediately */
+                    if (default_arm >= 0) {
+                        env_push_scope(vm->env);
+                        Chunk *def_chunk = (Chunk *)frame->chunk->constants[arm_info[default_arm].body_idx].as.closure.native_fn;
+                        LatValue def_result;
+                        VMResult dr = vm_run(vm, def_chunk, &def_result);
+                        if (dr == VM_OK) {
+                            value_free(&select_result);
+                            select_result = def_result;
                         } else {
-                            free(vm->error);
-                            vm->error = cerr;
                             select_error = true;
                         }
                         env_pop_scope(vm->env);
@@ -5984,24 +5875,15 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                             pthread_mutex_unlock(&sel_mutex);
                             for (size_t k = 0; k < ch_arm_count; k++)
                                 channel_remove_waiter(channels[indices[k]], &waiter);
-                            if (timeout_idx >= 0) {
+                            if (timeout_arm >= 0) {
                                 env_push_scope(vm->env);
-                                char *cerr = NULL;
-                                Chunk *to_body = compile_body_chunk(arms[timeout_idx].body,
-                                                                     arms[timeout_idx].body_count, &cerr);
-                                if (to_body) {
-                                    vm_track_chunk(vm, to_body);
-                                    LatValue to_result;
-                                    VMResult tor = vm_run(vm, to_body, &to_result);
-                                    if (tor == VM_OK) {
-                                        value_free(&select_result);
-                                        select_result = to_result;
-                                    } else {
-                                        select_error = true;
-                                    }
+                                Chunk *to_body = (Chunk *)frame->chunk->constants[arm_info[timeout_arm].body_idx].as.closure.native_fn;
+                                LatValue to_result;
+                                VMResult tor = vm_run(vm, to_body, &to_result);
+                                if (tor == VM_OK) {
+                                    value_free(&select_result);
+                                    select_result = to_result;
                                 } else {
-                                    free(vm->error);
-                                    vm->error = cerr;
                                     select_error = true;
                                 }
                                 env_pop_scope(vm->env);
@@ -6022,7 +5904,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 pthread_mutex_destroy(&sel_mutex);
                 pthread_cond_destroy(&sel_cond);
                 free(indices);
-                for (size_t i = 0; i < arm_count; i++)
+                for (uint8_t i = 0; i < arm_count; i++)
                     if (channels[i]) channel_release(channels[i]);
                 free(channels);
                 env_pop_scope(vm->env);
@@ -6032,10 +5914,12 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     char *err_msg = vm->error ? strdup(vm->error) : strdup("select error");
                     free(vm->error);
                     vm->error = NULL;
+                    free(arm_info);
                     VMResult err = runtime_error(vm, "%s", err_msg);
                     free(err_msg);
                     return err;
                 }
+                free(arm_info);
                 push(vm, select_result);
 #endif
                 break;

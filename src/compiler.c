@@ -222,6 +222,52 @@ static void compile_function_body(FunctionType type, const char *name,
                                   ContractClause *contracts, size_t contract_count,
                                   int line);
 
+/* Compile a list of statements into a standalone sub-chunk.
+ * Saves/restores the current compiler so this can be called mid-compilation. */
+static Chunk *compile_sub_body(Stmt **stmts, size_t count, int line) {
+    Compiler *saved = current;
+    Compiler sub;
+    compiler_init(&sub, NULL, FUNC_SCRIPT);
+
+    for (size_t i = 0; i < count; i++)
+        compile_stmt(stmts[i]);
+
+    emit_byte(OP_UNIT, line);
+    emit_byte(OP_RETURN, line);
+
+    Chunk *ch = sub.chunk;
+    compiler_cleanup(&sub);
+    current = saved;
+    return ch;
+}
+
+/* Compile a single expression into a standalone sub-chunk (evaluates and returns value). */
+static Chunk *compile_sub_expr(const Expr *expr, int line) {
+    Compiler *saved = current;
+    Compiler sub;
+    compiler_init(&sub, NULL, FUNC_SCRIPT);
+
+    compile_expr(expr, line);
+    emit_byte(OP_RETURN, line);
+
+    Chunk *ch = sub.chunk;
+    compiler_cleanup(&sub);
+    current = saved;
+    return ch;
+}
+
+/* Store a pre-compiled Chunk* as a VAL_CLOSURE constant in the current chunk. */
+static size_t add_chunk_constant(Chunk *ch) {
+    LatValue fn_val;
+    memset(&fn_val, 0, sizeof(fn_val));
+    fn_val.type = VAL_CLOSURE;
+    fn_val.phase = VTAG_UNPHASED;
+    fn_val.region_id = (size_t)-1;
+    fn_val.as.closure.body = NULL;
+    fn_val.as.closure.native_fn = ch;
+    return chunk_add_constant(current_chunk(), fn_val);
+}
+
 static void compile_expr(const Expr *e, int line) {
     if (compile_error) return;
 
@@ -1138,10 +1184,55 @@ static void compile_expr(const Expr *e, int line) {
                 compile_stmt(e->as.block.stmts[i]);
             emit_byte(OP_UNIT, line);
 #else
-            /* Store Expr* as int64 constant; VM interprets at runtime */
-            size_t idx = chunk_add_constant(current_chunk(),
-                            value_int((int64_t)(uintptr_t)e));
-            emit_bytes(OP_SCOPE, (uint8_t)idx, line);
+            size_t total = e->as.block.count;
+
+            /* Count spawns and collect non-spawn stmts */
+            size_t spawn_count = 0;
+            for (size_t i = 0; i < total; i++) {
+                Stmt *s = e->as.block.stmts[i];
+                if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)
+                    spawn_count++;
+            }
+            size_t sync_count = total - spawn_count;
+
+            /* Compile sync body (all non-spawn stmts together) */
+            uint8_t sync_idx = 0xFF;
+            if (sync_count > 0) {
+                Stmt **sync_stmts = malloc(sync_count * sizeof(Stmt *));
+                size_t si = 0;
+                for (size_t i = 0; i < total; i++) {
+                    Stmt *s = e->as.block.stmts[i];
+                    if (!(s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN))
+                        sync_stmts[si++] = s;
+                }
+                Chunk *sync_chunk = compile_sub_body(sync_stmts, sync_count, line);
+                sync_idx = (uint8_t)add_chunk_constant(sync_chunk);
+                free(sync_stmts);
+            }
+
+            /* Compile each spawn body */
+            uint8_t *spawn_indices = NULL;
+            if (spawn_count > 0)
+                spawn_indices = malloc(spawn_count * sizeof(uint8_t));
+            size_t spi = 0;
+            for (size_t i = 0; i < total; i++) {
+                Stmt *s = e->as.block.stmts[i];
+                if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN) {
+                    Expr *spawn_expr = s->as.expr;
+                    Chunk *spawn_ch = compile_sub_body(
+                        spawn_expr->as.block.stmts,
+                        spawn_expr->as.block.count, line);
+                    spawn_indices[spi++] = (uint8_t)add_chunk_constant(spawn_ch);
+                }
+            }
+
+            /* Emit: OP_SCOPE spawn_count sync_idx [spawn_idx...] */
+            emit_byte(OP_SCOPE, line);
+            emit_byte((uint8_t)spawn_count, line);
+            emit_byte(sync_idx, line);
+            for (size_t i = 0; i < spawn_count; i++)
+                emit_byte(spawn_indices[i], line);
+            free(spawn_indices);
 #endif
             break;
         }
@@ -1150,10 +1241,42 @@ static void compile_expr(const Expr *e, int line) {
 #ifdef __EMSCRIPTEN__
             emit_byte(OP_NIL, line);
 #else
-            /* Store Expr* as int64 constant; VM interprets at runtime */
-            size_t idx = chunk_add_constant(current_chunk(),
-                            value_int((int64_t)(uintptr_t)e));
-            emit_bytes(OP_SELECT, (uint8_t)idx, line);
+            size_t arm_count = e->as.select_expr.arm_count;
+            SelectArm *arms = e->as.select_expr.arms;
+
+            emit_byte(OP_SELECT, line);
+            emit_byte((uint8_t)arm_count, line);
+
+            for (size_t i = 0; i < arm_count; i++) {
+                uint8_t flags = 0;
+                if (arms[i].is_default) flags |= 0x01;
+                if (arms[i].is_timeout) flags |= 0x02;
+                if (arms[i].binding_name) flags |= 0x04;
+                emit_byte(flags, line);
+
+                /* Channel or timeout expression chunk */
+                if (arms[i].is_default) {
+                    emit_byte(0xFF, line);
+                } else if (arms[i].is_timeout) {
+                    Chunk *to_ch = compile_sub_expr(arms[i].timeout_expr, line);
+                    emit_byte((uint8_t)add_chunk_constant(to_ch), line);
+                } else {
+                    Chunk *ch_ch = compile_sub_expr(arms[i].channel_expr, line);
+                    emit_byte((uint8_t)add_chunk_constant(ch_ch), line);
+                }
+
+                /* Body chunk */
+                Chunk *body_ch = compile_sub_body(arms[i].body, arms[i].body_count, line);
+                emit_byte((uint8_t)add_chunk_constant(body_ch), line);
+
+                /* Binding name (string constant or 0xFF) */
+                if (arms[i].binding_name) {
+                    emit_byte((uint8_t)chunk_add_constant(current_chunk(),
+                                   value_string(arms[i].binding_name)), line);
+                } else {
+                    emit_byte(0xFF, line);
+                }
+            }
 #endif
             break;
         }
@@ -2077,53 +2200,3 @@ void compiler_free_known_enums(void) {
     free_known_enums();
 }
 
-Chunk *compile_expr_chunk(const Expr *expr, char **error) {
-    Compiler top;
-    compiler_init(&top, NULL, FUNC_SCRIPT);
-    current = &top;
-    *error = NULL;
-
-    compile_expr(expr, 0);
-    emit_byte(OP_RETURN, 0);
-
-    if (compile_error) {
-        *error = compile_error;
-        compile_error = NULL;
-        chunk_free(top.chunk);
-        compiler_cleanup(&top);
-        current = NULL;
-        return NULL;
-    }
-
-    Chunk *result = top.chunk;
-    compiler_cleanup(&top);
-    current = NULL;
-    return result;
-}
-
-Chunk *compile_body_chunk(Stmt **stmts, size_t count, char **error) {
-    Compiler top;
-    compiler_init(&top, NULL, FUNC_SCRIPT);
-    current = &top;
-    *error = NULL;
-
-    for (size_t i = 0; i < count; i++)
-        compile_stmt(stmts[i]);
-
-    emit_byte(OP_UNIT, 0);
-    emit_byte(OP_RETURN, 0);
-
-    if (compile_error) {
-        *error = compile_error;
-        compile_error = NULL;
-        chunk_free(top.chunk);
-        compiler_cleanup(&top);
-        current = NULL;
-        return NULL;
-    }
-
-    Chunk *result = top.chunk;
-    compiler_cleanup(&top);
-    current = NULL;
-    return result;
-}

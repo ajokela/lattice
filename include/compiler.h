@@ -57,12 +57,4 @@ Chunk *compile_repl(const Program *prog, char **error);
 /* Free the compiler's known-enum table. Call once when the bytecode REPL exits. */
 void compiler_free_known_enums(void);
 
-/* Compile a single expression to a standalone chunk (evaluates and returns value).
- * Used by the VM to re-compile AST fragments at runtime (e.g. scope/select bodies). */
-Chunk *compile_expr_chunk(const Expr *expr, char **error);
-
-/* Compile a list of statements to a standalone chunk (executes and returns unit).
- * Used by the VM to re-compile AST fragments at runtime (e.g. spawn bodies). */
-Chunk *compile_body_chunk(Stmt **stmts, size_t count, char **error);
-
 #endif /* COMPILER_H */

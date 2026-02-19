@@ -39,6 +39,8 @@ BENCHMARKS = [
     ("map_operations",  "Map operations"),
     ("string_concat",   "String operations"),
     ("closures",        "Closures"),
+    ("scope_spawn",     "Scope/spawn"),
+    ("select_channels", "Select channels"),
 ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

@@ -1,0 +1,28 @@
+// Benchmark: scope/spawn concurrency overhead
+fn work(n: Int) -> Int {
+    flux sum = 0
+    flux i = 0
+    while i < n {
+        sum += i
+        i += 1
+    }
+    return sum
+}
+
+fn main() {
+    flux total = 0
+    flux round = 0
+    while round < 200 {
+        let ch1 = Channel::new()
+        let ch2 = Channel::new()
+
+        scope {
+            spawn { ch1.send(freeze(work(100))) }
+            spawn { ch2.send(freeze(work(200))) }
+        }
+
+        total += ch1.recv() + ch2.recv()
+        round += 1
+    }
+    print(to_string(total))
+}

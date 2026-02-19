@@ -1,0 +1,27 @@
+// Benchmark: select channel multiplexing
+fn main() {
+    flux total = 0
+    flux round = 0
+    while round < 500 {
+        let ch1 = Channel::new()
+        let ch2 = Channel::new()
+        let out = Channel::new()
+
+        if round % 2 == 0 {
+            ch1.send(freeze(round + 1))
+        }
+        if round % 2 == 1 {
+            ch2.send(freeze((round + 1) * 2))
+        }
+
+        select {
+            v from ch1 => { out.send(freeze(v)) }
+            v from ch2 => { out.send(freeze(v)) }
+            default => { out.send(freeze(0)) }
+        }
+
+        total += out.recv()
+        round += 1
+    }
+    print(to_string(total))
+}

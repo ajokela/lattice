@@ -117,9 +117,9 @@ typedef enum {
     /* Module */
     OP_IMPORT,         /* operand = path constant */
 
-    /* Concurrency */
-    OP_SCOPE,          /* operand = constant index holding Expr* as int64 */
-    OP_SELECT,         /* operand = constant index holding Expr* as int64 */
+    /* Concurrency (variable-length instructions) */
+    OP_SCOPE,          /* spawn_count(1), sync_idx(1), spawn_idx(1) × spawn_count */
+    OP_SELECT,         /* arm_count(1), per arm: flags(1), chan_idx(1), body_idx(1), binding_idx(1) */
 
     /* Fallback to tree-walker */
     OP_HALT,           /* Stop execution */

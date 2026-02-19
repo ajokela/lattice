@@ -18,8 +18,16 @@ Chunk *chunk_new(void) {
 void chunk_free(Chunk *c) {
     if (!c) return;
     free(c->code);
-    for (size_t i = 0; i < c->const_len; i++)
+    for (size_t i = 0; i < c->const_len; i++) {
+        /* Recursively free compiled sub-chunks stored as VAL_CLOSURE constants */
+        if (c->constants[i].type == VAL_CLOSURE &&
+            c->constants[i].as.closure.body == NULL &&
+            c->constants[i].as.closure.native_fn != NULL) {
+            chunk_free((Chunk *)c->constants[i].as.closure.native_fn);
+            c->constants[i].as.closure.native_fn = NULL;
+        }
         value_free(&c->constants[i]);
+    }
     free(c->constants);
     free(c->lines);
     for (size_t i = 0; i < c->local_name_cap; i++)
@@ -259,6 +267,29 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
         case OP_MARK_FLUID:    return simple_instruction("OP_MARK_FLUID", offset);
         case OP_PRINT:         return byte_instruction("OP_PRINT", c, offset);
         case OP_IMPORT:        return byte_instruction("OP_IMPORT", c, offset);
+        case OP_SCOPE: {
+            uint8_t spawn_count = c->code[offset + 1];
+            uint8_t sync_idx = c->code[offset + 2];
+            fprintf(stderr, "%-20s spawns=%d sync=%d", "OP_SCOPE", spawn_count, sync_idx);
+            for (uint8_t i = 0; i < spawn_count; i++)
+                fprintf(stderr, " spawn[%d]=%d", i, c->code[offset + 3 + i]);
+            fprintf(stderr, "\n");
+            return offset + 3 + spawn_count;
+        }
+        case OP_SELECT: {
+            uint8_t arm_count = c->code[offset + 1];
+            fprintf(stderr, "%-20s arms=%d\n", "OP_SELECT", arm_count);
+            size_t pos = offset + 2;
+            for (uint8_t i = 0; i < arm_count; i++) {
+                uint8_t flags = c->code[pos++];
+                uint8_t chan_idx = c->code[pos++];
+                uint8_t body_idx = c->code[pos++];
+                uint8_t bind_idx = c->code[pos++];
+                fprintf(stderr, "     |                     arm %d: flags=%02x chan=%d body=%d bind=%d\n",
+                        i, flags, chan_idx, body_idx, bind_idx);
+            }
+            return pos;
+        }
         case OP_HALT:          return simple_instruction("OP_HALT", offset);
         default:
             fprintf(stderr, "Unknown opcode %d\n", op);
