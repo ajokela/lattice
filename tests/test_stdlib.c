@@ -18,6 +18,9 @@
 #include "env_ops.h"
 #include "time_ops.h"
 #include "fs_ops.h"
+#include "compiler.h"
+#include "vm.h"
+#include "latc.h"
 
 /* Import test harness from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
@@ -1351,7 +1354,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.5"
+        "0.3.6"
     );
 }
 
@@ -5306,7 +5309,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.5"
+        "Hello, Lattice!\nVersion 0.3.6"
     );
 }
 
@@ -8320,6 +8323,231 @@ static void test_ref_display(void) {
     );
 }
 
+/* ======================================================================
+ * Bytecode Serialization (.latc)
+ * ====================================================================== */
+
+/* Helper: compile source to a Chunk, round-trip through serialize/deserialize,
+ * then run the deserialized chunk and capture stdout. */
+static char *latc_round_trip_capture(const char *source) {
+    /* Compile */
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        free(lex_err);
+        lat_vec_free(&tokens);
+        return strdup("LEX_ERROR");
+    }
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        free(parse_err);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        return strdup("PARSE_ERROR");
+    }
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    Chunk *chunk = compile(&prog, &comp_err);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    if (!chunk) {
+        free(comp_err);
+        return strdup("COMPILE_ERROR");
+    }
+
+    /* Serialize → Deserialize */
+    size_t buf_len;
+    uint8_t *buf = chunk_serialize(chunk, &buf_len);
+    chunk_free(chunk);
+
+    char *deser_err = NULL;
+    Chunk *loaded = chunk_deserialize(buf, buf_len, &deser_err);
+    free(buf);
+    if (!loaded) {
+        size_t msglen = strlen(deser_err) + 20;
+        char *msg = malloc(msglen);
+        snprintf(msg, msglen, "DESER_ERROR:%s", deser_err);
+        free(deser_err);
+        return msg;
+    }
+
+    /* Run the deserialized chunk, capturing stdout */
+    fflush(stdout);
+    FILE *tmp = tmpfile();
+    int old_stdout = dup(fileno(stdout));
+    dup2(fileno(tmp), fileno(stdout));
+
+    VM vm;
+    vm_init(&vm);
+    LatValue result;
+    VMResult vm_res = vm_run(&vm, loaded, &result);
+
+    fflush(stdout);
+    dup2(old_stdout, fileno(stdout));
+    close(old_stdout);
+
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    fseek(tmp, 0, SEEK_SET);
+    char *output = malloc((size_t)len + 1);
+    size_t n = fread(output, 1, (size_t)len, tmp);
+    output[n] = '\0';
+    fclose(tmp);
+    if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
+
+    if (vm_res != VM_OK) {
+        free(output);
+        size_t elen = strlen(vm.error) + 16;
+        output = malloc(elen);
+        snprintf(output, elen, "VM_ERROR:%s", vm.error);
+    } else {
+        value_free(&result);
+    }
+    vm_free(&vm);
+    chunk_free(loaded);
+    return output;
+}
+
+static void test_latc_round_trip_int(void) {
+    char *out = latc_round_trip_capture("fn main() { print(42) }");
+    ASSERT_STR_EQ(out, "42");
+    free(out);
+}
+
+static void test_latc_round_trip_string(void) {
+    char *out = latc_round_trip_capture("fn main() { print(\"hello latc\") }");
+    ASSERT_STR_EQ(out, "hello latc");
+    free(out);
+}
+
+static void test_latc_round_trip_closure(void) {
+    char *out = latc_round_trip_capture(
+        "let add = |a, b| { a + b }\n"
+        "fn main() { print(add(2, 3)) }\n"
+    );
+    ASSERT_STR_EQ(out, "5");
+    free(out);
+}
+
+static void test_latc_round_trip_nested(void) {
+    char *out = latc_round_trip_capture(
+        "fn outer() {\n"
+        "    let inner = |x| { x * 2 }\n"
+        "    return inner(21)\n"
+        "}\n"
+        "fn main() { print(outer()) }\n"
+    );
+    ASSERT_STR_EQ(out, "42");
+    free(out);
+}
+
+static void test_latc_round_trip_program(void) {
+    char *out = latc_round_trip_capture(
+        "let fib = |n| {\n"
+        "    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n"
+        "}\n"
+        "fn main() { print(fib(10)) }\n"
+    );
+    ASSERT_STR_EQ(out, "55");
+    free(out);
+}
+
+static void test_latc_invalid_magic(void) {
+    uint8_t bad_data[] = { 'N', 'O', 'P', 'E', 0, 0, 0, 0 };
+    char *err = NULL;
+    Chunk *c = chunk_deserialize(bad_data, sizeof(bad_data), &err);
+    ASSERT(c == NULL);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "magic") != NULL || strstr(err, "not a .latc") != NULL);
+    free(err);
+}
+
+static void test_latc_truncated(void) {
+    uint8_t trunc[] = { 'L', 'A', 'T', 'C', 1, 0 };
+    char *err = NULL;
+    Chunk *c = chunk_deserialize(trunc, sizeof(trunc), &err);
+    ASSERT(c == NULL);
+    ASSERT(err != NULL);
+    free(err);
+}
+
+static void test_latc_file_save_load(void) {
+    /* Compile a program */
+    const char *source = "fn main() { print(\"file round-trip\") }";
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    ASSERT(lex_err == NULL);
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    ASSERT(parse_err == NULL);
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    Chunk *chunk = compile(&prog, &comp_err);
+    ASSERT(chunk != NULL);
+
+    /* Save to temp file */
+    const char *tmp_path = "/tmp/test_latc_save_load.latc";
+    ASSERT(chunk_save(chunk, tmp_path) == 0);
+    chunk_free(chunk);
+
+    /* Load back */
+    char *load_err = NULL;
+    Chunk *loaded = chunk_load(tmp_path, &load_err);
+    ASSERT(loaded != NULL);
+
+    /* Run it */
+    fflush(stdout);
+    FILE *tmp = tmpfile();
+    int old_stdout = dup(fileno(stdout));
+    dup2(fileno(tmp), fileno(stdout));
+
+    VM vm;
+    vm_init(&vm);
+    LatValue result;
+    VMResult vm_res = vm_run(&vm, loaded, &result);
+
+    fflush(stdout);
+    dup2(old_stdout, fileno(stdout));
+    close(old_stdout);
+
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    fseek(tmp, 0, SEEK_SET);
+    char *output = malloc((size_t)len + 1);
+    size_t n = fread(output, 1, (size_t)len, tmp);
+    output[n] = '\0';
+    fclose(tmp);
+    if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
+
+    ASSERT(vm_res == VM_OK);
+    ASSERT_STR_EQ(output, "file round-trip");
+
+    free(output);
+    value_free(&result);
+    vm_free(&vm);
+    chunk_free(loaded);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    unlink(tmp_path);
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -9138,4 +9366,14 @@ void register_stdlib_tests(void) {
     register_test("test_ref_inner_type", test_ref_inner_type);
     register_test("test_ref_freeze", test_ref_freeze);
     register_test("test_ref_display", test_ref_display);
+
+    /* Bytecode serialization (.latc) */
+    register_test("test_latc_round_trip_int", test_latc_round_trip_int);
+    register_test("test_latc_round_trip_string", test_latc_round_trip_string);
+    register_test("test_latc_round_trip_closure", test_latc_round_trip_closure);
+    register_test("test_latc_round_trip_nested", test_latc_round_trip_nested);
+    register_test("test_latc_round_trip_program", test_latc_round_trip_program);
+    register_test("test_latc_invalid_magic", test_latc_invalid_magic);
+    register_test("test_latc_truncated", test_latc_truncated);
+    register_test("test_latc_file_save_load", test_latc_file_save_load);
 }

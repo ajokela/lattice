@@ -5,6 +5,7 @@
 #include "phase_check.h"
 #include "compiler.h"
 #include "vm.h"
+#include "latc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -184,7 +185,48 @@ static int run_source(const char *source, bool show_stats, const char *script_di
     return 0;
 }
 
+static bool has_suffix(const char *str, const char *suffix) {
+    size_t slen = strlen(str);
+    size_t xlen = strlen(suffix);
+    return slen >= xlen && strcmp(str + slen - xlen, suffix) == 0;
+}
+
+static int run_latc_file(const char *path) {
+    char *err = NULL;
+    Chunk *chunk = chunk_load(path, &err);
+    if (!chunk) {
+        fprintf(stderr, "error: %s\n", err);
+        free(err);
+        return 1;
+    }
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    VM vm;
+    vm_init(&vm);
+    vm.prog_argc = saved_argc;
+    vm.prog_argv = saved_argv;
+
+    LatValue result;
+    VMResult vm_res = vm_run(&vm, chunk, &result);
+    if (vm_res != VM_OK) {
+        fprintf(stderr, "vm error: %s\n", vm.error);
+        vm_free(&vm);
+        chunk_free(chunk);
+        return 1;
+    }
+    value_free(&result);
+    vm_free(&vm);
+    chunk_free(chunk);
+    return 0;
+}
+
 static int run_file(const char *path, bool show_stats) {
+    /* Auto-detect .latc pre-compiled bytecode */
+    if (has_suffix(path, ".latc"))
+        return run_latc_file(path);
+
     char *source = read_file(path);
     if (!source) {
         fprintf(stderr, "error: cannot read '%s'\n", path);
@@ -554,6 +596,120 @@ int main(int argc, char **argv) {
     bool show_stats = false;
     const char *file = NULL;
 
+    /* Check for 'compile' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "compile") == 0) {
+        const char *input_path = NULL;
+        const char *output_path = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "-o") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "error: -o requires an argument\n");
+                    return 1;
+                }
+                output_path = argv[++i];
+            } else if (!input_path) {
+                input_path = argv[i];
+            } else {
+                fprintf(stderr, "usage: clat compile <file.lat> [-o output.latc]\n");
+                return 1;
+            }
+        }
+        if (!input_path) {
+            fprintf(stderr, "usage: clat compile <file.lat> [-o output.latc]\n");
+            return 1;
+        }
+
+        /* Build default output path: replace .lat with .latc (or append .latc) */
+        char *default_output = NULL;
+        if (!output_path) {
+            size_t ilen = strlen(input_path);
+            if (has_suffix(input_path, ".lat")) {
+                default_output = malloc(ilen + 2); /* +1 for 'c', +1 for NUL */
+                memcpy(default_output, input_path, ilen);
+                default_output[ilen] = 'c';
+                default_output[ilen + 1] = '\0';
+            } else {
+                default_output = malloc(ilen + 6);
+                memcpy(default_output, input_path, ilen);
+                memcpy(default_output + ilen, ".latc", 6);
+            }
+            output_path = default_output;
+        }
+
+        /* Lex → Parse → Compile */
+        char *source = read_file(input_path);
+        if (!source) {
+            fprintf(stderr, "error: cannot read '%s'\n", input_path);
+            free(default_output);
+            return 1;
+        }
+
+        Lexer lex = lexer_new(source);
+        char *lex_err = NULL;
+        LatVec tokens = lexer_tokenize(&lex, &lex_err);
+        if (lex_err) {
+            fprintf(stderr, "error: %s\n", lex_err);
+            free(lex_err);
+            free(source);
+            free(default_output);
+            return 1;
+        }
+
+        Parser parser = parser_new(&tokens);
+        char *parse_err = NULL;
+        Program prog = parser_parse(&parser, &parse_err);
+        if (parse_err) {
+            fprintf(stderr, "error: %s\n", parse_err);
+            free(parse_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            free(source);
+            free(default_output);
+            return 1;
+        }
+
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+
+        char *comp_err = NULL;
+        Chunk *chunk = compile(&prog, &comp_err);
+        if (!chunk) {
+            fprintf(stderr, "compile error: %s\n", comp_err);
+            free(comp_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            free(source);
+            free(default_output);
+            return 1;
+        }
+
+        /* Save bytecode */
+        if (chunk_save(chunk, output_path) != 0) {
+            fprintf(stderr, "error: cannot write '%s'\n", output_path);
+            chunk_free(chunk);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            free(source);
+            free(default_output);
+            return 1;
+        }
+
+        chunk_free(chunk);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        free(source);
+        free(default_output);
+        return 0;
+    }
+
     /* Check for 'test' subcommand */
     if (argc >= 2 && strcmp(argv[1], "test") == 0) {
         const char *test_path = NULL;
@@ -592,7 +748,9 @@ int main(int argc, char **argv) {
         else if (!file)
             file = argv[i];
         else {
-            fprintf(stderr, "usage: clat [--stats] [--gc-stress] [--no-regions] [--no-assertions] [--tree-walk] [file.lat]\n");
+            fprintf(stderr, "usage: clat [options] [file.lat | file.latc]\n"
+                            "       clat compile <file.lat> [-o output.latc]\n"
+                            "       clat test <file.lat>\n");
             return 1;
         }
     }

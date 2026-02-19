@@ -27,6 +27,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "compiler.h"
+#include "latc.h"
 #include <stdlib.h>
 #include <limits.h>
 #include <libgen.h>
@@ -1999,6 +2000,103 @@ static LatValue native_compose(LatValue *args, int arg_count) {
     return closure;
 }
 
+/* ── Bytecode compilation/loading builtins ── */
+
+static char *latc_read_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)len + 1);
+    size_t n = fread(buf, 1, (size_t)len, f);
+    buf[n] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static LatValue native_compile_file(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    const char *path = args[0].as.str_val;
+
+    char *source = latc_read_file(path);
+    if (!source) return value_nil();
+
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        free(lex_err);
+        lat_vec_free(&tokens);
+        free(source);
+        return value_nil();
+    }
+
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        free(parse_err);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        free(source);
+        return value_nil();
+    }
+
+    char *comp_err = NULL;
+    Chunk *chunk = compile(&prog, &comp_err);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    free(source);
+
+    if (!chunk) {
+        free(comp_err);
+        return value_nil();
+    }
+
+    size_t buf_len;
+    uint8_t *buf = chunk_serialize(chunk, &buf_len);
+    chunk_free(chunk);
+
+    LatValue result = value_buffer(buf, buf_len);
+    free(buf);
+    return result;
+}
+
+static LatValue native_load_bytecode(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    const char *path = args[0].as.str_val;
+
+    char *err = NULL;
+    Chunk *chunk = chunk_load(path, &err);
+    if (!chunk) {
+        free(err);
+        return value_nil();
+    }
+
+    VM *vm = current_vm;
+    if (!vm) {
+        chunk_free(chunk);
+        return value_nil();
+    }
+
+    LatValue result;
+    VMResult res = vm_run(vm, chunk, &result);
+    chunk_free(chunk);
+
+    if (res != VM_OK) {
+        /* Clear the error so the parent VM can continue */
+        free(vm->error);
+        vm->error = NULL;
+        return value_nil();
+    }
+    return result;
+}
+
 /* Register a native function in the VM env. */
 static void vm_register_native(VM *vm, const char *name, VMNativeFn fn, int arity) {
     (void)arity;
@@ -2130,6 +2228,10 @@ void vm_init(VM *vm) {
     vm_register_native(vm, "tempfile", native_tempfile, 0);
     vm_register_native(vm, "chmod", native_chmod, 2);
     vm_register_native(vm, "file_size", native_file_size, 1);
+
+    /* Bytecode compilation/loading */
+    vm_register_native(vm, "compile_file", native_compile_file, 1);
+    vm_register_native(vm, "load_bytecode", native_load_bytecode, 1);
 
     /* Path */
     vm_register_native(vm, "path_join", native_path_join, -1);

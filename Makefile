@@ -92,7 +92,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/chunk.c \
        $(SRC_DIR)/compiler.c \
        $(SRC_DIR)/vm.c \
-       $(SRC_DIR)/intern.c
+       $(SRC_DIR)/intern.c \
+       $(SRC_DIR)/latc.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
