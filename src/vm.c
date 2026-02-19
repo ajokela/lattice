@@ -174,6 +174,10 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             memcpy(v.as.buffer.data, src->as.buffer.data, src->as.buffer.len);
             return v;
         }
+        case VAL_REF: {
+            ref_retain(src->as.ref.ref);
+            return *src;
+        }
         default:
             return value_deep_clone(src);
     }
@@ -222,10 +226,12 @@ static LatValue native_typeof(LatValue *args, int arg_count) {
 
 static LatValue native_len(LatValue *args, int arg_count) {
     if (arg_count != 1) return value_int(0);
-    if (args[0].type == VAL_ARRAY) return value_int((int64_t)args[0].as.array.len);
-    if (args[0].type == VAL_STR) return value_int((int64_t)strlen(args[0].as.str_val));
-    if (args[0].type == VAL_MAP) return value_int((int64_t)lat_map_len(args[0].as.map.map));
-    if (args[0].type == VAL_BUFFER) return value_int((int64_t)args[0].as.buffer.len);
+    LatValue *v = &args[0];
+    if (v->type == VAL_REF) v = &v->as.ref.ref->value;
+    if (v->type == VAL_ARRAY) return value_int((int64_t)v->as.array.len);
+    if (v->type == VAL_STR) return value_int((int64_t)strlen(v->as.str_val));
+    if (v->type == VAL_MAP) return value_int((int64_t)lat_map_len(v->as.map.map));
+    if (v->type == VAL_BUFFER) return value_int((int64_t)v->as.buffer.len);
     return value_int(0);
 }
 
@@ -366,6 +372,11 @@ static LatValue native_buffer_from_string(LatValue *args, int arg_count) {
     const char *s = args[0].as.str_val;
     size_t len = strlen(s);
     return value_buffer((const uint8_t *)s, len);
+}
+
+static LatValue native_ref_new(LatValue *args, int arg_count) {
+    if (arg_count != 1) return value_nil();
+    return value_ref(args[0]);
 }
 
 static LatValue native_read_file_bytes(LatValue *args, int ac) {
@@ -2050,6 +2061,7 @@ void vm_init(VM *vm) {
     vm_register_native(vm, "Buffer::new", native_buffer_new, 1);
     vm_register_native(vm, "Buffer::from", native_buffer_from, 1);
     vm_register_native(vm, "Buffer::from_string", native_buffer_from_string, 1);
+    vm_register_native(vm, "Ref::new", native_ref_new, 1);
     vm_register_native(vm, "phase_of", native_phase_of, 1);
     vm_register_native(vm, "assert", native_assert, 2);
     vm_register_native(vm, "version", native_version, 0);
@@ -2586,6 +2598,9 @@ static const char *vm_find_pressure(VM *vm, const char *name) {
 #define MHASH_values           0x22383ff5u
 #define MHASH_variant_name     0xb2b2b8bau
 #define MHASH_zip              0x0b88c7d8u
+/* Ref methods */
+#define MHASH_deref            0x0f49e72bu
+#define MHASH_inner_type       0xdf644222u
 /* Buffer methods */
 #define MHASH_push_u16         0x1aaf75a0u
 #define MHASH_push_u32         0x1aaf75deu
@@ -3950,6 +3965,201 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
         }
     }
 
+    /* ── Ref methods ── */
+    if (obj->type == VAL_REF) {
+        LatRef *ref = obj->as.ref.ref;
+        LatValue *inner = &ref->value;
+
+        /* Ref-specific: get() with 0 args */
+        if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 0) {
+            push(vm, value_deep_clone(inner));
+            return true;
+        }
+        /* Ref-specific: deref() alias for get() */
+        if (mhash == MHASH_deref && strcmp(method, "deref") == 0 && arg_count == 0) {
+            push(vm, value_deep_clone(inner));
+            return true;
+        }
+        /* Ref-specific: set(v) with 1 arg */
+        if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 1) {
+            if (obj->phase == VTAG_CRYSTAL) {
+                runtime_error(vm, "cannot set on a frozen Ref");
+                return true;
+            }
+            value_free(inner);
+            *inner = vm_peek(vm, 0)[0];
+            vm->stack_top--;
+            *inner = value_deep_clone(inner);
+            push(vm, value_unit());
+            return true;
+        }
+        /* Ref-specific: inner_type() */
+        if (mhash == MHASH_inner_type && strcmp(method, "inner_type") == 0 && arg_count == 0) {
+            push(vm, value_string(value_type_name(inner)));
+            return true;
+        }
+
+        /* Map proxy (when inner is VAL_MAP) */
+        if (inner->type == VAL_MAP) {
+            /* get(key) with 1 arg -> Map proxy */
+            if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1) {
+                LatValue key = vm_peek(vm, 0)[0];
+                if (key.type != VAL_STR) { push(vm, value_nil()); return true; }
+                LatValue *found = lat_map_get(inner->as.map.map, key.as.str_val);
+                value_free(&key); vm->stack_top--;
+                push(vm, found ? value_deep_clone(found) : value_nil());
+                return true;
+            }
+            /* set(k, v) with 2 args -> Map proxy */
+            if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) {
+                if (obj->phase == VTAG_CRYSTAL) {
+                    runtime_error(vm, "cannot set on a frozen Ref");
+                    return true;
+                }
+                LatValue val2 = vm_peek(vm, 0)[0]; vm->stack_top--;
+                LatValue key = vm_peek(vm, 0)[0]; vm->stack_top--;
+                if (key.type == VAL_STR) {
+                    LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, key.as.str_val);
+                    if (old) value_free(old);
+                    lat_map_set(inner->as.map.map, key.as.str_val, &val2);
+                } else {
+                    value_free(&val2);
+                }
+                value_free(&key);
+                push(vm, value_unit());
+                return true;
+            }
+            if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
+                LatValue key = vm_peek(vm, 0)[0]; vm->stack_top--;
+                bool found = key.type == VAL_STR && lat_map_contains(inner->as.map.map, key.as.str_val);
+                value_free(&key);
+                push(vm, value_bool(found));
+                return true;
+            }
+            if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
+                LatValue needle = vm_peek(vm, 0)[0]; vm->stack_top--;
+                bool found = false;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
+                    if (value_eq(mv, &needle)) { found = true; break; }
+                }
+                value_free(&needle);
+                push(vm, value_bool(found));
+                return true;
+            }
+            if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
+                size_t n = lat_map_len(inner->as.map.map);
+                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                size_t ei = 0;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    elems[ei++] = value_string(inner->as.map.map->entries[i].key);
+                }
+                LatValue arr = value_array(elems, ei); free(elems);
+                push(vm, arr);
+                return true;
+            }
+            if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
+                size_t n = lat_map_len(inner->as.map.map);
+                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                size_t ei = 0;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
+                    elems[ei++] = value_deep_clone(mv);
+                }
+                LatValue arr = value_array(elems, ei); free(elems);
+                push(vm, arr);
+                return true;
+            }
+            if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
+                size_t n = lat_map_len(inner->as.map.map);
+                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                size_t ei = 0;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    LatValue pair[2];
+                    pair[0] = value_string(inner->as.map.map->entries[i].key);
+                    pair[1] = value_deep_clone((LatValue *)inner->as.map.map->entries[i].value);
+                    elems[ei++] = value_array(pair, 2);
+                }
+                LatValue arr = value_array(elems, ei); free(elems);
+                push(vm, arr);
+                return true;
+            }
+            if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+                push(vm, value_int((int64_t)lat_map_len(inner->as.map.map)));
+                return true;
+            }
+            if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1) {
+                if (obj->phase == VTAG_CRYSTAL) {
+                    runtime_error(vm, "cannot merge into a frozen Ref");
+                    return true;
+                }
+                LatValue other = vm_peek(vm, 0)[0]; vm->stack_top--;
+                if (other.type == VAL_MAP) {
+                    for (size_t i = 0; i < other.as.map.map->cap; i++) {
+                        if (other.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                        LatValue cloned = value_deep_clone((LatValue *)other.as.map.map->entries[i].value);
+                        LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, other.as.map.map->entries[i].key);
+                        if (old) value_free(old);
+                        lat_map_set(inner->as.map.map, other.as.map.map->entries[i].key, &cloned);
+                    }
+                }
+                value_free(&other);
+                push(vm, value_unit());
+                return true;
+            }
+        }
+
+        /* Array proxy (when inner is VAL_ARRAY) */
+        if (inner->type == VAL_ARRAY) {
+            if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
+                if (obj->phase == VTAG_CRYSTAL) {
+                    runtime_error(vm, "cannot push to a frozen Ref");
+                    return true;
+                }
+                LatValue val2 = vm_peek(vm, 0)[0]; vm->stack_top--;
+                if (inner->as.array.len >= inner->as.array.cap) {
+                    size_t old_cap = inner->as.array.cap;
+                    inner->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
+                    inner->as.array.elems = realloc(inner->as.array.elems, inner->as.array.cap * sizeof(LatValue));
+                }
+                inner->as.array.elems[inner->as.array.len++] = val2;
+                push(vm, value_unit());
+                return true;
+            }
+            if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
+                if (obj->phase == VTAG_CRYSTAL) {
+                    runtime_error(vm, "cannot pop from a frozen Ref");
+                    return true;
+                }
+                if (inner->as.array.len == 0) {
+                    runtime_error(vm, "pop on empty array");
+                    return true;
+                }
+                LatValue popped = inner->as.array.elems[--inner->as.array.len];
+                push(vm, popped);
+                return true;
+            }
+            if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+                push(vm, value_int((int64_t)inner->as.array.len));
+                return true;
+            }
+            if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
+                LatValue needle = vm_peek(vm, 0)[0]; vm->stack_top--;
+                bool found = false;
+                for (size_t i = 0; i < inner->as.array.len; i++) {
+                    if (value_eq(&inner->as.array.elems[i], &needle)) { found = true; break; }
+                }
+                value_free(&needle);
+                push(vm, value_bool(found));
+                return true;
+            }
+        }
+    }
+
     return false;
 }
 
@@ -4973,6 +5183,36 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_INDEX: {
                 LatValue idx = pop(vm);
                 LatValue obj = pop(vm);
+                /* Ref proxy: delegate indexing to inner value */
+                if (obj.type == VAL_REF) {
+                    LatValue *inner = &obj.as.ref.ref->value;
+                    if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
+                        int64_t i = idx.as.int_val;
+                        if (i < 0 || (size_t)i >= inner->as.array.len) {
+                            value_free(&obj);
+                            VM_ERROR("array index out of bounds: %lld (len %zu)",
+                                     (long long)i, inner->as.array.len); break;
+                        }
+                        LatValue elem = value_deep_clone(&inner->as.array.elems[i]);
+                        value_free(&obj);
+                        push(vm, elem);
+                        break;
+                    }
+                    if (inner->type == VAL_MAP && idx.type == VAL_STR) {
+                        LatValue *found = lat_map_get(inner->as.map.map, idx.as.str_val);
+                        if (found)
+                            push(vm, value_deep_clone(found));
+                        else
+                            push(vm, value_nil());
+                        value_free(&obj);
+                        value_free(&idx);
+                        break;
+                    }
+                    const char *it = value_type_name(&idx);
+                    const char *innert = value_type_name(inner);
+                    value_free(&obj); value_free(&idx);
+                    VM_ERROR("invalid index operation: Ref<%s>[%s]", innert, it); break;
+                }
                 if (obj.type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= obj.as.array.len) {
@@ -5036,6 +5276,35 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 LatValue idx = pop(vm);
                 LatValue obj = pop(vm);
                 LatValue val = pop(vm);
+                /* Ref proxy: delegate set-index to inner value */
+                if (obj.type == VAL_REF) {
+                    if (obj.phase == VTAG_CRYSTAL) {
+                        value_free(&obj); value_free(&idx); value_free(&val);
+                        VM_ERROR("cannot assign index on a frozen Ref"); break;
+                    }
+                    LatValue *inner = &obj.as.ref.ref->value;
+                    if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
+                        int64_t i = idx.as.int_val;
+                        if (i < 0 || (size_t)i >= inner->as.array.len) {
+                            value_free(&obj); value_free(&val);
+                            VM_ERROR("array index out of bounds in assignment"); break;
+                        }
+                        value_free(&inner->as.array.elems[i]);
+                        inner->as.array.elems[i] = val;
+                        push(vm, obj);
+                        break;
+                    }
+                    if (inner->type == VAL_MAP && idx.type == VAL_STR) {
+                        LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, idx.as.str_val);
+                        if (old) value_free(old);
+                        lat_map_set(inner->as.map.map, idx.as.str_val, &val);
+                        value_free(&idx);
+                        push(vm, obj);
+                        break;
+                    }
+                    value_free(&obj); value_free(&idx); value_free(&val);
+                    VM_ERROR("invalid index assignment on Ref"); break;
+                }
                 if (obj.type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= obj.as.array.len) {
@@ -5647,6 +5916,34 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 LatValue val = pop(vm);
                 LatValue *obj = &frame->slots[slot]; /* Direct pointer to local */
 
+                /* Ref proxy: delegate set-index to inner value */
+                if (obj->type == VAL_REF) {
+                    if (obj->phase == VTAG_CRYSTAL) {
+                        value_free(&val);
+                        VM_ERROR("cannot assign index on a frozen Ref"); break;
+                    }
+                    LatValue *inner = &obj->as.ref.ref->value;
+                    if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
+                        int64_t i = idx.as.int_val;
+                        if (i < 0 || (size_t)i >= inner->as.array.len) {
+                            value_free(&val);
+                            VM_ERROR("array index out of bounds: %lld (len %zu)",
+                                (long long)i, inner->as.array.len); break;
+                        }
+                        value_free(&inner->as.array.elems[i]);
+                        inner->as.array.elems[i] = val;
+                        break;
+                    }
+                    if (inner->type == VAL_MAP && idx.type == VAL_STR) {
+                        LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, idx.as.str_val);
+                        if (old) value_free(old);
+                        lat_map_set(inner->as.map.map, idx.as.str_val, &val);
+                        value_free(&idx);
+                        break;
+                    }
+                    value_free(&val); value_free(&idx);
+                    VM_ERROR("invalid index assignment on Ref"); break;
+                }
                 if (obj->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= obj->as.array.len) {

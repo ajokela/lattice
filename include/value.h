@@ -20,10 +20,12 @@ typedef enum {
     VAL_SET,
     VAL_TUPLE,
     VAL_BUFFER,
+    VAL_REF,
 } ValueType;
 
 /* Forward declarations */
 typedef struct LatValue LatValue;
+typedef struct LatRef LatRef;
 typedef struct Env Env;
 struct Expr;
 struct LatChannel;
@@ -88,7 +90,16 @@ struct LatValue {
             size_t   len;
             size_t   cap;
         } buffer;
+        struct {
+            LatRef *ref;
+        } ref;
     } as;
+};
+
+/* Ref: reference-counted shared mutable wrapper */
+struct LatRef {
+    LatValue value;
+    size_t   refcount;
 };
 
 /* ── Constructors ── */
@@ -111,6 +122,9 @@ LatValue value_set_new(void);
 LatValue value_tuple(LatValue *elems, size_t len);
 LatValue value_buffer(const uint8_t *data, size_t len);
 LatValue value_buffer_alloc(size_t cap);
+LatValue value_ref(LatValue inner);
+void ref_retain(LatRef *r);
+void ref_release(LatRef *r);
 
 /* ── Phase helpers ── */
 bool value_is_fluid(const LatValue *v);

@@ -213,6 +213,27 @@ LatValue value_buffer_alloc(size_t size) {
     return val;
 }
 
+LatValue value_ref(LatValue inner) {
+    LatValue val = { .type = VAL_REF, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatRef *r = malloc(sizeof(LatRef));
+    r->value = value_deep_clone(&inner);
+    r->refcount = 1;
+    val.as.ref.ref = r;
+    return val;
+}
+
+void ref_retain(LatRef *r) {
+    if (r) r->refcount++;
+}
+
+void ref_release(LatRef *r) {
+    if (!r) return;
+    if (--r->refcount == 0) {
+        value_free(&r->value);
+        free(r);
+    }
+}
+
 /* ── Phase helpers ── */
 
 bool value_is_fluid(const LatValue *v) { return v->phase == VTAG_FLUID; }
@@ -408,6 +429,10 @@ LatValue value_deep_clone(const LatValue *v) {
             out.as.buffer.cap = cap;
             break;
         }
+        case VAL_REF:
+            ref_retain(v->as.ref.ref);
+            out.as.ref.ref = v->as.ref.ref;
+            break;
     }
     return out;
 }
@@ -458,6 +483,9 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
         }
     }
     /* VAL_BUFFER: just set phase tag (no nested values) */
+    else if (v->type == VAL_REF) {
+        set_phase_recursive(&v->as.ref.ref->value, phase);
+    }
 }
 
 LatValue value_freeze(LatValue v) {
@@ -468,6 +496,15 @@ LatValue value_freeze(LatValue v) {
 /* ── Thaw ── */
 
 LatValue value_thaw(const LatValue *v) {
+    if (v->type == VAL_REF) {
+        /* Thaw breaks sharing: new LatRef with deep-cloned inner */
+        LatValue inner_clone = value_deep_clone(&v->as.ref.ref->value);
+        set_phase_recursive(&inner_clone, VTAG_FLUID);
+        LatValue result = value_ref(inner_clone);
+        value_free(&inner_clone);
+        result.phase = VTAG_FLUID;
+        return result;
+    }
     LatValue cloned = value_deep_clone(v);
     set_phase_recursive(&cloned, VTAG_FLUID);
     return cloned;
@@ -658,6 +695,9 @@ char *value_display(const LatValue *v) {
         case VAL_BUFFER:
             (void)asprintf(&buf, "Buffer<%zu bytes>", v->as.buffer.len);
             break;
+        case VAL_REF:
+            (void)asprintf(&buf, "Ref<%s>", value_type_name(&v->as.ref.ref->value));
+            break;
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
@@ -739,6 +779,7 @@ const char *value_type_name(const LatValue *v) {
         case VAL_SET:     return "Set";
         case VAL_TUPLE:   return "Tuple";
         case VAL_BUFFER:  return "Buffer";
+        case VAL_REF:     return "Ref";
     }
     return "?";
 }
@@ -814,6 +855,8 @@ bool value_eq(const LatValue *a, const LatValue *b) {
         case VAL_BUFFER:
             if (a->as.buffer.len != b->as.buffer.len) return false;
             return memcmp(a->as.buffer.data, b->as.buffer.data, a->as.buffer.len) == 0;
+        case VAL_REF:
+            return a->as.ref.ref == b->as.ref.ref;
     }
     return false;
 }
@@ -912,6 +955,9 @@ void value_free(LatValue *v) {
         case VAL_BUFFER:
             val_dealloc(v, v->as.buffer.data);
             break;
+        case VAL_REF:
+            ref_release(v->as.ref.ref);
+            break;
         default:
             break;
     }
@@ -933,6 +979,7 @@ bool value_is_truthy(const LatValue *v) {
         case VAL_TUPLE:   return v->as.tuple.len > 0;
         case VAL_CHANNEL: return true;
         case VAL_BUFFER:  return v->as.buffer.len > 0;
+        case VAL_REF:     return true;
         default:          return true;
     }
 }

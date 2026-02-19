@@ -501,6 +501,8 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
             jb_append_char(b, ']');
             return true;
         }
+        case VAL_REF:
+            return jb_serialize(b, &val->as.ref.ref->value, err);
         case VAL_STRUCT:
         case VAL_CLOSURE:
         case VAL_RANGE:

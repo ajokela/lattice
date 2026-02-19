@@ -622,6 +622,9 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
         LatValue *parent = resolve_lvalue(ev, expr->as.index.object, err);
         if (!parent) { value_free(&idxr.value); return NULL; }
 
+        /* Ref unwrap: delegate indexing to the inner value */
+        if (parent->type == VAL_REF) parent = &parent->as.ref.ref->value;
+
         if (parent->type == VAL_MAP) {
             if (idxr.value.type != VAL_STR) {
                 value_free(&idxr.value);
@@ -728,6 +731,7 @@ static bool type_matches_value(const LatValue *val, const TypeExpr *te) {
     if (strcmp(n, "Set") == 0)    return val->type == VAL_SET;
     if (strcmp(n, "Tuple") == 0)  return val->type == VAL_TUPLE;
     if (strcmp(n, "Buffer") == 0) return val->type == VAL_BUFFER;
+    if (strcmp(n, "Ref") == 0) return val->type == VAL_REF;
     if (strcmp(n, "Number") == 0) return val->type == VAL_INT || val->type == VAL_FLOAT;
     /* Struct name check */
     if (val->type == VAL_STRUCT && val->as.strct.name)
@@ -756,6 +760,7 @@ static const char *value_type_display(const LatValue *val) {
         case VAL_SET:     return "Set";
         case VAL_TUPLE:   return "Tuple";
         case VAL_BUFFER:  return "Buffer";
+        case VAL_REF:     return "Ref";
     }
     return "Unknown";
 }
@@ -2948,6 +2953,22 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(buf);
                 }
 
+                /// @builtin Ref::new(value: Any) -> Ref
+                /// @category Type Constructors
+                /// Create a new reference-counted shared wrapper around a value.
+                /// @example Ref::new({})
+                if (strcmp(fn_name, "Ref::new") == 0) {
+                    if (argc != 1) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("Ref::new() expects 1 argument"));
+                    }
+                    LatValue ref = value_ref(args[0]);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(ref);
+                }
+
                 /// @builtin parse_int(s: String) -> Int
                 /// @category Type Conversion
                 /// Parse a string as an integer.
@@ -4858,12 +4879,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     (void)asprintf(&err, "undefined variable '%s'", var_name);
                     return eval_err(err);
                 }
-                if (existing.type != VAL_ARRAY && existing.type != VAL_BUFFER) {
+                if (existing.type != VAL_ARRAY && existing.type != VAL_BUFFER && existing.type != VAL_REF) {
                     value_free(&existing);
                     return eval_err(strdup(".push() is not defined on non-array"));
                 }
-                /* Buffer push: handle via resolve_lvalue path below */
-                if (existing.type == VAL_BUFFER) {
+                /* Ref/Buffer push: handle via resolve_lvalue path below */
+                if (existing.type == VAL_BUFFER || existing.type == VAL_REF) {
                     value_free(&existing);
                     goto buffer_mutating_methods;
                 }
@@ -4912,6 +4933,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.method_call.arg_count == 2) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (map_lv && map_lv->type == VAL_REF) map_lv = &map_lv->as.ref.ref->value;
                 if (map_lv && map_lv->type == VAL_MAP) {
                     if (map_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot set on a sublimated map"));
@@ -4939,6 +4961,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.method_call.arg_count == 0) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (arr_lv && arr_lv->type == VAL_REF) arr_lv = &arr_lv->as.ref.ref->value;
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
                     if (value_is_crystal(arr_lv))
                         return eval_err(strdup("cannot pop from a crystal array"));
@@ -4967,6 +4990,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.method_call.arg_count == 2) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (arr_lv && arr_lv->type == VAL_REF) arr_lv = &arr_lv->as.ref.ref->value;
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
                     if (value_is_crystal(arr_lv))
                         return eval_err(strdup("cannot insert into a crystal array"));
@@ -5021,6 +5045,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (arr_lv && arr_lv->type == VAL_REF) arr_lv = &arr_lv->as.ref.ref->value;
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
                     if (value_is_crystal(arr_lv))
                         return eval_err(strdup("cannot remove from a crystal array"));
@@ -5062,6 +5087,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (map_lv && map_lv->type == VAL_REF) map_lv = &map_lv->as.ref.ref->value;
                 if (map_lv && map_lv->type == VAL_MAP) {
                     if (map_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot merge into a sublimated map"));
@@ -5105,6 +5131,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (map_lv && map_lv->type == VAL_REF) map_lv = &map_lv->as.ref.ref->value;
                 if (map_lv && map_lv->type == VAL_MAP) {
                     if (map_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot remove from a sublimated map"));
@@ -5185,6 +5212,21 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_REF) buf_lv = &buf_lv->as.ref.ref->value;
+                if (buf_lv && buf_lv->type == VAL_ARRAY) {
+                    /* Ref-wrapped array push via resolve_lvalue */
+                    if (value_is_crystal(buf_lv))
+                        return eval_err(strdup("cannot push to a crystal array"));
+                    EvalResult ar = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ar)) return ar;
+                    if (buf_lv->as.array.len >= buf_lv->as.array.cap) {
+                        size_t old_cap = buf_lv->as.array.cap;
+                        buf_lv->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
+                        buf_lv->as.array.elems = realloc(buf_lv->as.array.elems, buf_lv->as.array.cap * sizeof(LatValue));
+                    }
+                    buf_lv->as.array.elems[buf_lv->as.array.len++] = ar.value;
+                    return eval_ok(value_unit());
+                }
                 if (buf_lv && buf_lv->type == VAL_BUFFER) {
                     EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(vr)) return vr;
@@ -5519,6 +5561,31 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue result = value_int(objr.value.as.buffer.data[bidx]);
                 value_free(&objr.value);
                 return eval_ok(result);
+            }
+            /* Ref proxy: delegate indexing to inner value */
+            if (objr.value.type == VAL_REF) {
+                LatValue *inner = &objr.value.as.ref.ref->value;
+                if (inner->type == VAL_MAP && idxr.value.type == VAL_STR) {
+                    LatValue *found = (LatValue *)lat_map_get(inner->as.map.map, idxr.value.as.str_val);
+                    LatValue result = found ? value_deep_clone(found) : value_unit();
+                    value_free(&objr.value);
+                    value_free(&idxr.value);
+                    return eval_ok(result);
+                }
+                if (inner->type == VAL_ARRAY && idxr.value.type == VAL_INT) {
+                    size_t idx = (size_t)idxr.value.as.int_val;
+                    value_free(&idxr.value);
+                    if (idx >= inner->as.array.len) {
+                        char *berr = NULL;
+                        (void)asprintf(&berr, "index %zu out of bounds (length %zu)",
+                                       idx, inner->as.array.len);
+                        value_free(&objr.value);
+                        return eval_err(berr);
+                    }
+                    LatValue result = value_deep_clone(&inner->as.array.elems[idx]);
+                    value_free(&objr.value);
+                    return eval_ok(result);
+                }
             }
             char *err = NULL;
             (void)asprintf(&err, "cannot index %s with %s",
@@ -7270,6 +7337,10 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             /* Check per-key phase for map key assignments */
             if (stmt->as.assign.target->tag == EXPR_INDEX) {
                 LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &lv_err);
+                if (parent && parent->type == VAL_REF && parent->phase == VTAG_CRYSTAL) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("cannot assign index on a frozen Ref"));
+                }
                 if (parent && parent->type == VAL_MAP && parent->phase == VTAG_CRYSTAL) {
                     value_free(&valr.value);
                     return eval_err(strdup("cannot assign to key of frozen map"));
@@ -8045,6 +8116,13 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
         if (obj.type == VAL_TUPLE) return eval_ok(value_int((int64_t)obj.as.tuple.len));
         if (obj.type == VAL_BUFFER) return eval_ok(value_int((int64_t)obj.as.buffer.len));
+        if (obj.type == VAL_REF) {
+            LatValue *inner = &obj.as.ref.ref->value;
+            if (inner->type == VAL_ARRAY) return eval_ok(value_int((int64_t)inner->as.array.len));
+            if (inner->type == VAL_STR) return eval_ok(value_int((int64_t)strlen(inner->as.str_val)));
+            if (inner->type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(inner->as.map.map)));
+            if (inner->type == VAL_BUFFER) return eval_ok(value_int((int64_t)inner->as.buffer.len));
+        }
         return eval_err(strdup(".len() is not defined on this type"));
     }
     /// @method Array.map(fn: Closure) -> Array
@@ -9234,7 +9312,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
     }
 
-    if (strcmp(method, "get") == 0) {
+    if (strcmp(method, "get") == 0 && obj.type != VAL_REF) {
         if (obj.type != VAL_STRUCT) return eval_err(strdup(".get() is not defined on non-struct"));
         if (arg_count != 1) return eval_err(strdup(".get() expects exactly 1 argument"));
         if (args[0].type != VAL_STR) return eval_err(strdup(".get() key must be a string"));
@@ -9397,6 +9475,136 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 }
             }
         }
+    }
+
+    /* ── Ref methods ── */
+    if (obj.type == VAL_REF) {
+        LatRef *ref = obj.as.ref.ref;
+        LatValue *inner = &ref->value;
+
+        /* Ref-specific methods */
+        /// @method Ref.get() -> Any
+        /// @category Ref Methods
+        /// Return a deep clone of the wrapped value.
+        /// @example r.get()
+        if (strcmp(method, "get") == 0 && arg_count == 0) {
+            return eval_ok(value_deep_clone(inner));
+        }
+        /// @method Ref.deref() -> Any
+        /// @category Ref Methods
+        /// Alias for get(). Return a deep clone of the wrapped value.
+        /// @example r.deref()
+        if (strcmp(method, "deref") == 0 && arg_count == 0) {
+            return eval_ok(value_deep_clone(inner));
+        }
+        /// @method Ref.set(value: Any) -> Unit
+        /// @category Ref Methods
+        /// Replace the inner value (all holders see the change).
+        /// @example r.set(42)
+        if (strcmp(method, "set") == 0 && arg_count == 1) {
+            if (obj.phase == VTAG_CRYSTAL)
+                return eval_err(strdup("cannot set on a frozen Ref"));
+            value_free(inner);
+            *inner = value_deep_clone(&args[0]);
+            return eval_ok(value_unit());
+        }
+        /// @method Ref.inner_type() -> String
+        /// @category Ref Methods
+        /// Return the type name of the wrapped value.
+        /// @example r.inner_type()
+        if (strcmp(method, "inner_type") == 0 && arg_count == 0) {
+            return eval_ok(value_string(value_type_name(inner)));
+        }
+
+        /* Map proxy (when inner is VAL_MAP) */
+        if (inner->type == VAL_MAP) {
+            if (strcmp(method, "get") == 0 && arg_count == 1) {
+                if (args[0].type != VAL_STR) return eval_ok(value_nil());
+                LatValue *found = lat_map_get(inner->as.map.map, args[0].as.str_val);
+                return eval_ok(found ? value_deep_clone(found) : value_nil());
+            }
+            if (strcmp(method, "set") == 0 && arg_count == 2) {
+                if (obj.phase == VTAG_CRYSTAL)
+                    return eval_err(strdup("cannot set on a frozen Ref"));
+                if (args[0].type != VAL_STR)
+                    return eval_err(strdup(".set() key must be a string"));
+                LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, args[0].as.str_val);
+                if (old) value_free(old);
+                LatValue cloned = value_deep_clone(&args[1]);
+                lat_map_set(inner->as.map.map, args[0].as.str_val, &cloned);
+                return eval_ok(value_unit());
+            }
+            if (strcmp(method, "has") == 0 && arg_count == 1) {
+                bool found = args[0].type == VAL_STR && lat_map_contains(inner->as.map.map, args[0].as.str_val);
+                return eval_ok(value_bool(found));
+            }
+            if (strcmp(method, "contains") == 0 && arg_count == 1) {
+                bool found = false;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
+                    if (value_eq(mv, &args[0])) { found = true; break; }
+                }
+                return eval_ok(value_bool(found));
+            }
+            if (strcmp(method, "keys") == 0 && arg_count == 0) {
+                size_t n = lat_map_len(inner->as.map.map);
+                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                size_t ei = 0;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    elems[ei++] = value_string(inner->as.map.map->entries[i].key);
+                }
+                LatValue arr = value_array(elems, ei); free(elems);
+                return eval_ok(arr);
+            }
+            if (strcmp(method, "values") == 0 && arg_count == 0) {
+                size_t n = lat_map_len(inner->as.map.map);
+                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                size_t ei = 0;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
+                    elems[ei++] = value_deep_clone(mv);
+                }
+                LatValue arr = value_array(elems, ei); free(elems);
+                return eval_ok(arr);
+            }
+            if (strcmp(method, "entries") == 0 && arg_count == 0) {
+                size_t n = lat_map_len(inner->as.map.map);
+                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                size_t ei = 0;
+                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    LatValue pair[2];
+                    pair[0] = value_string(inner->as.map.map->entries[i].key);
+                    pair[1] = value_deep_clone((LatValue *)inner->as.map.map->entries[i].value);
+                    elems[ei++] = value_array(pair, 2);
+                }
+                LatValue arr = value_array(elems, ei); free(elems);
+                return eval_ok(arr);
+            }
+            if (strcmp(method, "len") == 0 && arg_count == 0) {
+                return eval_ok(value_int((int64_t)lat_map_len(inner->as.map.map)));
+            }
+        }
+
+        /* Array proxy */
+        if (inner->type == VAL_ARRAY) {
+            if (strcmp(method, "len") == 0 && arg_count == 0)
+                return eval_ok(value_int((int64_t)inner->as.array.len));
+            if (strcmp(method, "contains") == 0 && arg_count == 1) {
+                for (size_t i = 0; i < inner->as.array.len; i++) {
+                    if (value_eq(&inner->as.array.elems[i], &args[0]))
+                        return eval_ok(value_bool(true));
+                }
+                return eval_ok(value_bool(false));
+            }
+        }
+
+        char *rerr = NULL;
+        (void)asprintf(&rerr, "Ref has no method '%s'", method);
+        return eval_err(rerr);
     }
 
     char *err = NULL;

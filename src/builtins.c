@@ -98,6 +98,7 @@ const char *builtin_typeof_str(const LatValue *v) {
         case VAL_SET:     return "Set";
         case VAL_TUPLE:   return "Tuple";
         case VAL_BUFFER:  return "Buffer";
+        case VAL_REF:     return "Ref";
     }
     return "?";
 }

@@ -1351,7 +1351,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.3"
+        "0.3.5"
     );
 }
 
@@ -5306,7 +5306,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.3"
+        "Hello, Lattice!\nVersion 0.3.5"
     );
 }
 
@@ -8194,6 +8194,132 @@ static void test_alloy_mixed_phases(void) {
     );
 }
 
+/* ======================================================================
+ * Ref Type Tests
+ * ====================================================================== */
+
+static void test_ref_new(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(42)\n"
+        "print(typeof(r))\n",
+        "Ref"
+    );
+}
+
+static void test_ref_get_set(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(10)\n"
+        "print(r.get())\n"
+        "r.set(20)\n"
+        "print(r.get())\n",
+        "10\n20"
+    );
+}
+
+static void test_ref_shared(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(1)\n"
+        "let f = |x| { x.set(99) }\n"
+        "f(r)\n"
+        "print(r.get())\n",
+        "99"
+    );
+}
+
+static void test_ref_shared_map(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(Map::new())\n"
+        "let add = |t, k, v| { t[k] = v }\n"
+        "add(r, \"x\", 42)\n"
+        "print(r[\"x\"])\n",
+        "42"
+    );
+}
+
+static void test_ref_map_proxy_index(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(Map::new())\n"
+        "r[\"a\"] = 1\n"
+        "r[\"b\"] = 2\n"
+        "print(r[\"a\"])\n"
+        "print(r[\"b\"])\n",
+        "1\n2"
+    );
+}
+
+static void test_ref_map_proxy_methods(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(Map::new())\n"
+        "r[\"x\"] = 10\n"
+        "r[\"y\"] = 20\n"
+        "print(r.len())\n"
+        "print(r.has(\"x\"))\n"
+        "print(r.has(\"z\"))\n",
+        "2\ntrue\nfalse"
+    );
+}
+
+static void test_ref_array_proxy(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new([1, 2, 3])\n"
+        "r.push(4)\n"
+        "print(r.len())\n"
+        "print(r[0])\n"
+        "r[0] = 99\n"
+        "print(r[0])\n"
+        "print(r.pop())\n"
+        "print(r.len())\n",
+        "4\n1\n99\n4\n3"
+    );
+}
+
+static void test_ref_equality(void) {
+    ASSERT_OUTPUT(
+        "let a = Ref::new(42)\n"
+        "let b = a\n"
+        "let c = Ref::new(42)\n"
+        "print(a == b)\n"
+        "print(a == c)\n",
+        "true\nfalse"
+    );
+}
+
+static void test_ref_deref(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(\"hello\")\n"
+        "print(r.deref())\n",
+        "hello"
+    );
+}
+
+static void test_ref_inner_type(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(Map::new())\n"
+        "print(r.inner_type())\n"
+        "let r2 = Ref::new(42)\n"
+        "print(r2.inner_type())\n",
+        "Map\nInt"
+    );
+}
+
+static void test_ref_freeze(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "let r = freeze(Ref::new(Map::new()))\n"
+        "r[\"x\"] = 1\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_ref_display(void) {
+    ASSERT_OUTPUT(
+        "let r = Ref::new(Map::new())\n"
+        "print(r)\n"
+        "let r2 = Ref::new(42)\n"
+        "print(r2)\n",
+        "Ref<Map>\nRef<Int>"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -8998,4 +9124,18 @@ void register_stdlib_tests(void) {
     register_test("test_alloy_fix_field_rejects_mutation", test_alloy_fix_field_rejects_mutation);
     register_test("test_alloy_flux_field_allows_mutation", test_alloy_flux_field_allows_mutation);
     register_test("test_alloy_mixed_phases", test_alloy_mixed_phases);
+
+    /* Ref type */
+    register_test("test_ref_new", test_ref_new);
+    register_test("test_ref_get_set", test_ref_get_set);
+    register_test("test_ref_shared", test_ref_shared);
+    register_test("test_ref_shared_map", test_ref_shared_map);
+    register_test("test_ref_map_proxy_index", test_ref_map_proxy_index);
+    register_test("test_ref_map_proxy_methods", test_ref_map_proxy_methods);
+    register_test("test_ref_array_proxy", test_ref_array_proxy);
+    register_test("test_ref_equality", test_ref_equality);
+    register_test("test_ref_deref", test_ref_deref);
+    register_test("test_ref_inner_type", test_ref_inner_type);
+    register_test("test_ref_freeze", test_ref_freeze);
+    register_test("test_ref_display", test_ref_display);
 }
