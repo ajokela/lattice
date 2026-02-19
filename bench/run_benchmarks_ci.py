@@ -33,14 +33,11 @@ DB_USER = "markets"
 DB_PASS = "R3a7dVXTVRFZSz8EgAkWRzsxRpVXzs"
 
 BENCHMARKS = [
-    ("fib_recursive",   "Fibonacci (recursive)"),
-    ("fib_iterative",   "Fibonacci (iterative)"),
-    ("sieve",           "Sieve of Eratosthenes"),
-    ("bubble_sort",     "Bubble sort"),
-    ("nested_loops",    "Nested loops"),
+    ("fib_recursive",   "Function calls"),
+    ("nested_loops",    "Iteration"),
+    ("sieve",           "Array operations"),
     ("map_operations",  "Map operations"),
-    ("string_concat",   "String concat"),
-    ("matrix_mul",      "Matrix multiply"),
+    ("string_concat",   "String operations"),
 ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
