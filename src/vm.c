@@ -1860,6 +1860,20 @@ static LatValue native_is_complete(LatValue *args, int arg_count) {
     return value_bool(depth <= 0);
 }
 
+static LatValue native_float_to_bits(LatValue *args, int arg_count) {
+    if (arg_count != 1 || args[0].type != VAL_FLOAT) return value_nil();
+    double d = args[0].as.float_val;
+    uint64_t bits; memcpy(&bits, &d, 8);
+    return value_int((int64_t)bits);
+}
+
+static LatValue native_bits_to_float(LatValue *args, int arg_count) {
+    if (arg_count != 1 || args[0].type != VAL_INT) return value_nil();
+    uint64_t bits = (uint64_t)args[0].as.int_val;
+    double d; memcpy(&d, &bits, 8);
+    return value_float(d);
+}
+
 static LatValue native_tokenize(LatValue *args, int arg_count) {
     if (arg_count < 1 || args[0].type != VAL_STR) return value_nil();
     const char *source = args[0].as.str_val;
@@ -1873,7 +1887,8 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
         Token *t = lat_vec_get(&toks, j);
         const char *type_str = token_type_name(t->type);
         char *text;
-        if (t->type == TOK_IDENT || t->type == TOK_STRING_LIT || t->type == TOK_MODE_DIRECTIVE) {
+        if (t->type == TOK_IDENT || t->type == TOK_STRING_LIT || t->type == TOK_MODE_DIRECTIVE ||
+            t->type == TOK_INTERP_START || t->type == TOK_INTERP_MID || t->type == TOK_INTERP_END) {
             text = strdup(t->as.str_val);
         } else if (t->type == TOK_INT_LIT) {
             (void)asprintf(&text, "%lld", (long long)t->as.int_val);
@@ -1882,11 +1897,12 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
         } else {
             text = strdup(token_type_name(t->type));
         }
-        char *fnames[2] = { "type", "text" };
-        LatValue fvals[2];
+        char *fnames[3] = { "type", "text", "line" };
+        LatValue fvals[3];
         fvals[0] = value_string(type_str);
         fvals[1] = value_string_owned(text);
-        elems[j] = value_struct("Token", fnames, fvals, 2);
+        fvals[2] = value_int((int64_t)t->line);
+        elems[j] = value_struct("Token", fnames, fvals, 3);
     }
     for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
     lat_vec_free(&toks);
@@ -2325,6 +2341,10 @@ void vm_init(VM *vm) {
     vm_register_native(vm, "is_complete", native_is_complete, 1);
     vm_register_native(vm, "tokenize", native_tokenize, 1);
     vm_register_native(vm, "lat_eval", native_lat_eval, 1);
+
+    /* Bitwise float conversion (for bytecode serialization) */
+    vm_register_native(vm, "float_to_bits", native_float_to_bits, 1);
+    vm_register_native(vm, "bits_to_float", native_bits_to_float, 1);
 
     /* URL encoding */
     vm_register_native(vm, "url_encode", native_url_encode, 1);
@@ -4340,6 +4360,11 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
         [OP_ADD_INT] = &&lbl_OP_ADD_INT, [OP_SUB_INT] = &&lbl_OP_SUB_INT,
         [OP_MUL_INT] = &&lbl_OP_MUL_INT, [OP_LT_INT] = &&lbl_OP_LT_INT,
         [OP_LTEQ_INT] = &&lbl_OP_LTEQ_INT, [OP_LOAD_INT8] = &&lbl_OP_LOAD_INT8,
+        [OP_CONSTANT_16] = &&lbl_OP_CONSTANT_16,
+        [OP_GET_GLOBAL_16] = &&lbl_OP_GET_GLOBAL_16,
+        [OP_SET_GLOBAL_16] = &&lbl_OP_SET_GLOBAL_16,
+        [OP_DEFINE_GLOBAL_16] = &&lbl_OP_DEFINE_GLOBAL_16,
+        [OP_CLOSURE_16] = &&lbl_OP_CLOSURE_16,
         [OP_HALT] = &&lbl_OP_HALT,
     };
 #endif
@@ -4356,6 +4381,15 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 #endif
             case OP_CONSTANT: {
                 uint8_t idx = READ_BYTE();
+                push(vm, value_clone_fast(&frame->chunk->constants[idx]));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CONSTANT_16:
+#endif
+            case OP_CONSTANT_16: {
+                uint16_t idx = READ_U16();
                 push(vm, value_clone_fast(&frame->chunk->constants[idx]));
                 break;
             }
@@ -4778,6 +4812,26 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
 #ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_GET_GLOBAL_16:
+#endif
+            case OP_GET_GLOBAL_16: {
+                uint16_t idx = READ_U16();
+                const char *name = frame->chunk->constants[idx].as.str_val;
+                LatValue *ref = env_get_ref(vm->env, name);
+                if (!ref) {
+                    VM_ERROR("undefined variable '%s'", name); break;
+                }
+                if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
+                    (ref->as.closure.default_values == VM_NATIVE_MARKER ||
+                     ref->as.closure.default_values == VM_EXT_MARKER)) {
+                    push(vm, *ref);
+                } else {
+                    push(vm, value_deep_clone(ref));
+                }
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
             lbl_OP_SET_GLOBAL:
 #endif
             case OP_SET_GLOBAL: {
@@ -4785,7 +4839,20 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue *val = vm_peek(vm, 0);
                 env_set(vm->env, name, value_deep_clone(val));
-                /* Record history for tracked variables */
+                if (vm->tracked_count > 0) {
+                    vm_record_history(vm, name, val);
+                }
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_GLOBAL_16:
+#endif
+            case OP_SET_GLOBAL_16: {
+                uint16_t idx = READ_U16();
+                const char *name = frame->chunk->constants[idx].as.str_val;
+                LatValue *val = vm_peek(vm, 0);
+                env_set(vm->env, name, value_deep_clone(val));
                 if (vm->tracked_count > 0) {
                     vm_record_history(vm, name, val);
                 }
@@ -4797,6 +4864,17 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 #endif
             case OP_DEFINE_GLOBAL: {
                 uint8_t idx = READ_BYTE();
+                const char *name = frame->chunk->constants[idx].as.str_val;
+                LatValue val = pop(vm);
+                env_define(vm->env, name, val);
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_DEFINE_GLOBAL_16:
+#endif
+            case OP_DEFINE_GLOBAL_16: {
+                uint16_t idx = READ_U16();
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue val = pop(vm);
                 env_define(vm->env, name, val);
@@ -5016,6 +5094,38 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     /* Don't double-track - the chunk is in the constant pool already */
                 }
 
+                push(vm, fn_val);
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CLOSURE_16:
+#endif
+            case OP_CLOSURE_16: {
+                uint16_t fn_idx = READ_U16();
+                uint8_t upvalue_count = READ_BYTE();
+                LatValue fn_val = value_deep_clone(&frame->chunk->constants[fn_idx]);
+
+                ObjUpvalue **upvalues = NULL;
+                if (upvalue_count > 0) {
+                    upvalues = calloc(upvalue_count, sizeof(ObjUpvalue *));
+                    for (uint8_t i = 0; i < upvalue_count; i++) {
+                        uint8_t is_local = READ_BYTE();
+                        uint8_t index = READ_BYTE();
+                        if (is_local) {
+                            upvalues[i] = capture_upvalue(vm, &frame->slots[index]);
+                        } else {
+                            if (frame->upvalues && index < frame->upvalue_count)
+                                upvalues[i] = frame->upvalues[index];
+                            else
+                                upvalues[i] = new_upvalue(&frame->slots[0]);
+                        }
+                    }
+                }
+
+                fn_val.as.closure.captured_env = (Env *)upvalues;
+                fn_val.as.closure.has_variadic = (upvalue_count > 0);
+                fn_val.region_id = (size_t)upvalue_count;
                 push(vm, fn_val);
                 break;
             }

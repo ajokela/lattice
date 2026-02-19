@@ -100,6 +100,18 @@ static size_t constant_instruction(const char *name, const Chunk *c, size_t offs
     return offset + 2;
 }
 
+static size_t constant_instruction_16(const char *name, const Chunk *c, size_t offset) {
+    uint16_t idx = (uint16_t)(c->code[offset + 1] << 8) | c->code[offset + 2];
+    fprintf(stderr, "%-20s %4d '", name, idx);
+    if (idx < c->const_len) {
+        char *repr = value_repr(&c->constants[idx]);
+        fprintf(stderr, "%s", repr);
+        free(repr);
+    }
+    fprintf(stderr, "'\n");
+    return offset + 3;
+}
+
 static size_t jump_instruction(const char *name, int sign, const Chunk *c, size_t offset) {
     uint16_t jump = (uint16_t)(c->code[offset + 1] << 8) | c->code[offset + 2];
     fprintf(stderr, "%-20s %4zu -> %zu\n", name, offset, offset + 3 + sign * jump);
@@ -298,6 +310,16 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
         case OP_LT_INT:        return simple_instruction("OP_LT_INT", offset);
         case OP_LTEQ_INT:      return simple_instruction("OP_LTEQ_INT", offset);
         case OP_LOAD_INT8:     return byte_instruction("OP_LOAD_INT8", c, offset);
+        case OP_CONSTANT_16:      return constant_instruction_16("OP_CONSTANT_16", c, offset);
+        case OP_GET_GLOBAL_16:    return constant_instruction_16("OP_GET_GLOBAL_16", c, offset);
+        case OP_SET_GLOBAL_16:    return constant_instruction_16("OP_SET_GLOBAL_16", c, offset);
+        case OP_DEFINE_GLOBAL_16: return constant_instruction_16("OP_DEFINE_GLOBAL_16", c, offset);
+        case OP_CLOSURE_16: {
+            uint16_t idx = (uint16_t)(c->code[offset + 1] << 8) | c->code[offset + 2];
+            uint8_t uvc = c->code[offset + 3];
+            fprintf(stderr, "%-20s %4d (upvalues: %d)\n", "OP_CLOSURE_16", idx, uvc);
+            return offset + 4 + uvc * 2;
+        }
         case OP_HALT:          return simple_instruction("OP_HALT", offset);
         default:
             fprintf(stderr, "Unknown opcode %d\n", op);

@@ -95,6 +95,11 @@ static const char *names[] = {
     [OP_LT_INT]        = "OP_LT_INT",
     [OP_LTEQ_INT]      = "OP_LTEQ_INT",
     [OP_LOAD_INT8]     = "OP_LOAD_INT8",
+    [OP_CONSTANT_16]   = "OP_CONSTANT_16",
+    [OP_GET_GLOBAL_16] = "OP_GET_GLOBAL_16",
+    [OP_SET_GLOBAL_16] = "OP_SET_GLOBAL_16",
+    [OP_DEFINE_GLOBAL_16] = "OP_DEFINE_GLOBAL_16",
+    [OP_CLOSURE_16]    = "OP_CLOSURE_16",
     [OP_HALT]          = "OP_HALT",
 };
 

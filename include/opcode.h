@@ -131,6 +131,13 @@ typedef enum {
     OP_LTEQ_INT,       /* Pop two ints, push bool result */
     OP_LOAD_INT8,      /* operand: int8. Push small int from instruction stream */
 
+    /* Wide constant index variants (2-byte BE index for >256 constants) */
+    OP_CONSTANT_16,    /* Push constant from chunk.constants[BE16 operand] */
+    OP_GET_GLOBAL_16,  /* env_get(constants[BE16 operand]) -> push result */
+    OP_SET_GLOBAL_16,  /* env_set(constants[BE16 operand], TOS) */
+    OP_DEFINE_GLOBAL_16, /* env_define(constants[BE16 operand], TOS), pop TOS */
+    OP_CLOSURE_16,     /* Create closure from function constant (BE16 index) */
+
     /* Fallback to tree-walker */
     OP_HALT,           /* Stop execution */
 } Opcode;

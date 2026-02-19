@@ -90,13 +90,21 @@ static void emit_bytes(uint8_t b1, uint8_t b2, int line) {
     emit_byte(b2, line);
 }
 
+static void emit_constant_idx(uint8_t op, uint8_t op16, size_t idx, int line) {
+    if (idx <= 255) {
+        emit_bytes(op, (uint8_t)idx, line);
+    } else if (idx <= 65535) {
+        emit_byte(op16, line);
+        emit_byte((uint8_t)((idx >> 8) & 0xff), line);
+        emit_byte((uint8_t)(idx & 0xff), line);
+    } else {
+        compile_error = strdup("too many constants in one chunk (>65535)");
+    }
+}
+
 static size_t emit_constant(LatValue val, int line) {
     size_t idx = chunk_add_constant(current_chunk(), val);
-    if (idx > 255) {
-        compile_error = strdup("too many constants in one chunk");
-        return 0;
-    }
-    emit_bytes(OP_CONSTANT, (uint8_t)idx, line);
+    emit_constant_idx(OP_CONSTANT, OP_CONSTANT_16, idx, line);
     return idx;
 }
 
@@ -306,7 +314,7 @@ static void compile_expr(const Expr *e, int line) {
                     emit_bytes(OP_GET_UPVALUE, (uint8_t)upvalue, line);
                 } else {
                     size_t idx = chunk_add_constant(current_chunk(), value_string(e->as.str_val));
-                    emit_bytes(OP_GET_GLOBAL, (uint8_t)idx, line);
+                    emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16, idx, line);
                 }
             }
             break;
@@ -696,7 +704,7 @@ static void compile_expr(const Expr *e, int line) {
                     if (opt) {
                         size_t tmp_idx = chunk_add_constant(current_chunk(),
                             value_string(e->as.method_call.object->as.str_val));
-                        emit_bytes(OP_GET_GLOBAL, (uint8_t)tmp_idx, line);
+                        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16, tmp_idx, line);
                         size_t skip = emit_jump(OP_JUMP_IF_NOT_NIL, line);
                         emit_byte(OP_POP, line);
                         emit_byte(OP_NIL, line);
@@ -805,8 +813,14 @@ static void compile_expr(const Expr *e, int line) {
             fn_val.as.closure.native_fn = fn_chunk;
             size_t fn_idx = chunk_add_constant(current_chunk(), fn_val);
 
-            emit_byte(OP_CLOSURE, line);
-            emit_byte((uint8_t)fn_idx, line);
+            if (fn_idx <= 255) {
+                emit_byte(OP_CLOSURE, line);
+                emit_byte((uint8_t)fn_idx, line);
+            } else {
+                emit_byte(OP_CLOSURE_16, line);
+                emit_byte((uint8_t)((fn_idx >> 8) & 0xff), line);
+                emit_byte((uint8_t)(fn_idx & 0xff), line);
+            }
             emit_byte((uint8_t)upvalue_count, line);
             for (size_t i = 0; i < upvalue_count; i++) {
                 emit_byte(upvalues[i].is_local ? 1 : 0, line);
@@ -1053,7 +1067,7 @@ static void compile_expr(const Expr *e, int line) {
                 snprintf(key, sizeof(key), "%s::%s",
                          e->as.enum_variant.enum_name, e->as.enum_variant.variant_name);
                 size_t fn_idx = chunk_add_constant(current_chunk(), value_string(key));
-                emit_bytes(OP_GET_GLOBAL, (uint8_t)fn_idx, line);
+                emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16, fn_idx, line);
                 for (size_t i = 0; i < e->as.enum_variant.arg_count; i++)
                     compile_expr(e->as.enum_variant.args[i], line);
                 emit_bytes(OP_CALL, (uint8_t)e->as.enum_variant.arg_count, line);
@@ -1399,7 +1413,7 @@ static void emit_index_write_back(Expr *node, int line) {
                 emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
             } else {
                 size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
-                emit_bytes(OP_SET_GLOBAL, (uint8_t)gidx, line);
+                emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
             }
         }
     } else if (node->as.index.object->tag == EXPR_INDEX) {
@@ -1439,7 +1453,7 @@ static void compile_stmt(const Stmt *s) {
             } else {
                 size_t idx = chunk_add_constant(current_chunk(),
                     value_string(s->as.binding.name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, 0);
             }
             break;
         }
@@ -1482,7 +1496,7 @@ static void compile_stmt(const Stmt *s) {
                         emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, 0);
                     } else {
                         size_t idx = chunk_add_constant(current_chunk(), value_string(name));
-                        emit_bytes(OP_SET_GLOBAL, (uint8_t)idx, 0);
+                        emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, idx, 0);
                     }
                 }
             } else if (s->as.assign.target->tag == EXPR_FIELD_ACCESS) {
@@ -1503,7 +1517,7 @@ static void compile_stmt(const Stmt *s) {
                             emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, 0);
                         } else {
                             size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
-                            emit_bytes(OP_SET_GLOBAL, (uint8_t)gidx, 0);
+                            emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, 0);
                         }
                     }
                 }
@@ -1540,7 +1554,7 @@ static void compile_stmt(const Stmt *s) {
                         emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, 0);
                     } else {
                         size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
-                        emit_bytes(OP_SET_GLOBAL, (uint8_t)gidx, 0);
+                        emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, 0);
                     }
                 }
             }
@@ -1758,7 +1772,7 @@ static void compile_stmt(const Stmt *s) {
                         emit_byte(OP_INDEX, 0);
                         size_t idx = chunk_add_constant(current_chunk(),
                             value_string(s->as.destructure.names[i]));
-                        emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)idx, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, 0);
                     }
                 } else {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
@@ -1768,7 +1782,7 @@ static void compile_stmt(const Stmt *s) {
                         emit_bytes(OP_GET_FIELD, (uint8_t)fidx, 0);
                         size_t nidx = chunk_add_constant(current_chunk(),
                             value_string(s->as.destructure.names[i]));
-                        emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)nidx, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, nidx, 0);
                     }
                 }
                 emit_byte(OP_POP, 0); /* pop the original value */
@@ -1797,7 +1811,7 @@ static void compile_stmt(const Stmt *s) {
                 } else {
                     size_t name_idx = chunk_add_constant(current_chunk(),
                         value_string(s->as.import.alias));
-                    emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 }
             } else if (s->as.import.selective_names && s->as.import.selective_count > 0) {
                 /* Selective import: import { x, y } from "path" */
@@ -1811,7 +1825,7 @@ static void compile_stmt(const Stmt *s) {
                     } else {
                         size_t name_idx = chunk_add_constant(current_chunk(),
                             value_string(s->as.import.selective_names[i]));
-                        emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                     }
                 }
                 emit_byte(OP_POP, 0);  /* pop original module map */
@@ -1907,8 +1921,14 @@ static void compile_function_body(FunctionType type, const char *name,
     fn_val.as.closure.native_fn = fn_chunk;
     size_t fn_idx = chunk_add_constant(current_chunk(), fn_val);
 
-    emit_byte(OP_CLOSURE, line);
-    emit_byte((uint8_t)fn_idx, line);
+    if (fn_idx <= 255) {
+        emit_byte(OP_CLOSURE, line);
+        emit_byte((uint8_t)fn_idx, line);
+    } else {
+        emit_byte(OP_CLOSURE_16, line);
+        emit_byte((uint8_t)((fn_idx >> 8) & 0xff), line);
+        emit_byte((uint8_t)(fn_idx & 0xff), line);
+    }
     emit_byte((uint8_t)upvalue_count, line);
     for (size_t i = 0; i < upvalue_count; i++) {
         emit_byte(upvalues[i].is_local ? 1 : 0, line);
@@ -1939,7 +1959,7 @@ Chunk *compile(const Program *prog, char **error) {
                                       fn->contracts, fn->contract_count, 0);
                 /* Define the function as a global */
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
             }
 
@@ -1958,7 +1978,7 @@ Chunk *compile(const Program *prog, char **error) {
                 size_t arr_idx = chunk_add_constant(current_chunk(), arr);
                 emit_bytes(OP_CONSTANT, (uint8_t)arr_idx, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 /* Alloy: emit per-field phase metadata if any field has a phase annotation */
                 {
                     bool has_phase = false;
@@ -1976,7 +1996,7 @@ Chunk *compile(const Program *prog, char **error) {
                         size_t pi = chunk_add_constant(current_chunk(), phase_arr);
                         emit_bytes(OP_CONSTANT, (uint8_t)pi, 0);
                         size_t pn = chunk_add_constant(current_chunk(), value_string(phase_meta));
-                        emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)pn, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, pn, 0);
                     }
                 }
                 break;
@@ -1990,7 +2010,7 @@ Chunk *compile(const Program *prog, char **error) {
                 snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
                 emit_byte(OP_TRUE, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
             }
 
@@ -2007,7 +2027,7 @@ Chunk *compile(const Program *prog, char **error) {
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
-                    emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)key_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, 0);
                 }
                 break;
             }
@@ -2040,7 +2060,7 @@ Chunk *compile(const Program *prog, char **error) {
     }
     if (has_main) {
         size_t main_idx = chunk_add_constant(current_chunk(), value_string("main"));
-        emit_bytes(OP_GET_GLOBAL, (uint8_t)main_idx, 0);
+        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16, main_idx, 0);
         emit_bytes(OP_CALL, 0, 0);
         emit_byte(OP_POP, 0);
     }
@@ -2072,7 +2092,7 @@ Chunk *compile_module(const Program *prog, char **error) {
                                       fn->body, fn->body_count,
                                       fn->contracts, fn->contract_count, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
             }
             case ITEM_STRUCT: {
@@ -2087,7 +2107,7 @@ Chunk *compile_module(const Program *prog, char **error) {
                 size_t arr_idx = chunk_add_constant(current_chunk(), arr);
                 emit_bytes(OP_CONSTANT, (uint8_t)arr_idx, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 /* Alloy: emit per-field phase metadata if any field has a phase annotation */
                 {
                     bool has_phase = false;
@@ -2105,7 +2125,7 @@ Chunk *compile_module(const Program *prog, char **error) {
                         size_t pi = chunk_add_constant(current_chunk(), phase_arr);
                         emit_bytes(OP_CONSTANT, (uint8_t)pi, 0);
                         size_t pn = chunk_add_constant(current_chunk(), value_string(phase_meta));
-                        emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)pn, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, pn, 0);
                     }
                 }
                 break;
@@ -2117,7 +2137,7 @@ Chunk *compile_module(const Program *prog, char **error) {
                 snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
                 emit_byte(OP_TRUE, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
             }
             case ITEM_IMPL: {
@@ -2131,7 +2151,7 @@ Chunk *compile_module(const Program *prog, char **error) {
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
-                    emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)key_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, 0);
                 }
                 break;
             }
@@ -2188,7 +2208,7 @@ Chunk *compile_repl(const Program *prog, char **error) {
                                       fn->body, fn->body_count,
                                       fn->contracts, fn->contract_count, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
             }
             case ITEM_STRUCT: {
@@ -2203,7 +2223,7 @@ Chunk *compile_repl(const Program *prog, char **error) {
                 size_t arr_idx = chunk_add_constant(current_chunk(), arr);
                 emit_bytes(OP_CONSTANT, (uint8_t)arr_idx, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 {
                     bool has_phase = false;
                     for (size_t j = 0; j < sd->field_count; j++) {
@@ -2220,7 +2240,7 @@ Chunk *compile_repl(const Program *prog, char **error) {
                         size_t pi = chunk_add_constant(current_chunk(), phase_arr);
                         emit_bytes(OP_CONSTANT, (uint8_t)pi, 0);
                         size_t pn = chunk_add_constant(current_chunk(), value_string(phase_meta));
-                        emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)pn, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, pn, 0);
                     }
                 }
                 break;
@@ -2232,7 +2252,7 @@ Chunk *compile_repl(const Program *prog, char **error) {
                 snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
                 emit_byte(OP_TRUE, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
             }
             case ITEM_IMPL: {
@@ -2246,7 +2266,7 @@ Chunk *compile_repl(const Program *prog, char **error) {
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
-                    emit_bytes(OP_DEFINE_GLOBAL, (uint8_t)key_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, 0);
                 }
                 break;
             }

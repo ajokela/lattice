@@ -1,0 +1,2060 @@
+// ============================================================================
+// Lattice Self-Hosted Compiler — latc.lat
+// Reads .lat source, emits bytecode, writes .latc files.
+// Usage: clat compiler/latc.lat input.lat output.latc
+// ============================================================================
+
+// ============================================================================
+// Section 1: Opcode constants
+// ============================================================================
+
+let OP_CONSTANT       = 0
+let OP_NIL            = 1
+let OP_TRUE           = 2
+let OP_FALSE          = 3
+let OP_UNIT           = 4
+let OP_POP            = 5
+let OP_DUP            = 6
+let OP_SWAP           = 7
+
+let OP_ADD            = 8
+let OP_SUB            = 9
+let OP_MUL            = 10
+let OP_DIV            = 11
+let OP_MOD            = 12
+let OP_NEG            = 13
+let OP_NOT            = 14
+
+let OP_BIT_AND        = 15
+let OP_BIT_OR         = 16
+let OP_BIT_XOR        = 17
+let OP_BIT_NOT        = 18
+let OP_LSHIFT         = 19
+let OP_RSHIFT         = 20
+
+let OP_EQ             = 21
+let OP_NEQ            = 22
+let OP_LT             = 23
+let OP_GT             = 24
+let OP_LTEQ           = 25
+let OP_GTEQ           = 26
+
+let OP_CONCAT         = 27
+
+let OP_GET_LOCAL      = 28
+let OP_SET_LOCAL      = 29
+let OP_GET_GLOBAL     = 30
+let OP_SET_GLOBAL     = 31
+let OP_DEFINE_GLOBAL  = 32
+let OP_GET_UPVALUE    = 33
+let OP_SET_UPVALUE    = 34
+let OP_CLOSE_UPVALUE  = 35
+
+let OP_JUMP           = 36
+let OP_JUMP_IF_FALSE  = 37
+let OP_JUMP_IF_TRUE   = 38
+let OP_JUMP_IF_NOT_NIL = 39
+let OP_LOOP           = 40
+
+let OP_CALL           = 41
+let OP_CLOSURE        = 42
+let OP_RETURN         = 43
+
+let OP_ITER_INIT      = 44
+let OP_ITER_NEXT      = 45
+
+let OP_BUILD_ARRAY    = 46
+let OP_ARRAY_FLATTEN  = 47
+let OP_BUILD_MAP      = 48
+let OP_BUILD_TUPLE    = 49
+let OP_BUILD_STRUCT   = 50
+let OP_BUILD_RANGE    = 51
+let OP_BUILD_ENUM     = 52
+let OP_INDEX          = 53
+let OP_SET_INDEX      = 54
+let OP_GET_FIELD      = 55
+let OP_SET_FIELD      = 56
+let OP_INVOKE         = 57
+let OP_INVOKE_LOCAL   = 58
+let OP_INVOKE_GLOBAL  = 59
+let OP_SET_INDEX_LOCAL = 60
+
+let OP_PUSH_EXCEPTION_HANDLER = 61
+let OP_POP_EXCEPTION_HANDLER  = 62
+let OP_THROW          = 63
+let OP_TRY_UNWRAP     = 64
+
+let OP_DEFER_PUSH     = 65
+let OP_DEFER_RUN      = 66
+
+let OP_FREEZE         = 67
+let OP_THAW           = 68
+let OP_CLONE          = 69
+let OP_MARK_FLUID     = 70
+
+let OP_REACT          = 71
+let OP_UNREACT        = 72
+let OP_BOND           = 73
+let OP_UNBOND         = 74
+let OP_SEED           = 75
+let OP_UNSEED         = 76
+let OP_FREEZE_VAR     = 77
+let OP_THAW_VAR       = 78
+let OP_SUBLIMATE_VAR  = 79
+let OP_SUBLIMATE      = 80
+
+let OP_PRINT          = 81
+
+let OP_IMPORT         = 82
+
+let OP_SCOPE          = 83
+let OP_SELECT         = 84
+
+let OP_INC_LOCAL      = 85
+let OP_DEC_LOCAL      = 86
+let OP_ADD_INT        = 87
+let OP_SUB_INT        = 88
+let OP_MUL_INT        = 89
+let OP_LT_INT         = 90
+let OP_LTEQ_INT       = 91
+let OP_LOAD_INT8      = 92
+
+let OP_CONSTANT_16    = 93
+let OP_GET_GLOBAL_16  = 94
+let OP_SET_GLOBAL_16  = 95
+let OP_DEFINE_GLOBAL_16 = 96
+let OP_CLOSURE_16     = 97
+
+let OP_HALT           = 98
+
+// .latc constant tags
+let TAG_INT     = 0
+let TAG_FLOAT   = 1
+let TAG_BOOL    = 2
+let TAG_STR     = 3
+let TAG_NIL     = 4
+let TAG_UNIT    = 5
+let TAG_CLOSURE = 6
+
+// ============================================================================
+// Section 2: Token stream / cursor helpers
+// ============================================================================
+
+flux tokens = []
+flux pos = 0
+
+fn peek() {
+    if pos >= len(tokens) {
+        return nil
+    }
+    return tokens[pos]
+}
+
+fn peek_type() {
+    if pos >= len(tokens) {
+        return "EOF"
+    }
+    return tokens[pos].type
+}
+
+fn peek_text() {
+    if pos >= len(tokens) {
+        return ""
+    }
+    return tokens[pos].text
+}
+
+fn advance() {
+    let t = tokens[pos]
+    pos = pos + 1
+    return t
+}
+
+fn expect(typ: any, text: any) {
+    let t = peek()
+    if t == nil {
+        compiler_error("expected '" + to_string(text) + "' but got EOF", 0)
+    }
+    if typ != nil {
+        if t.type != typ {
+            compiler_error("expected token type '" + typ + "' but got '" + t.type + "' ('" + t.text + "')", t.line)
+        }
+    }
+    if text != nil {
+        if t.text != text {
+            compiler_error("expected '" + text + "' but got '" + t.text + "'", t.line)
+        }
+    }
+    return advance()
+}
+
+fn match_tok(typ: any, text: any) {
+    let t = peek()
+    if t == nil { return false }
+    if typ != nil {
+        if t.type != typ { return false }
+    }
+    if text != nil {
+        if t.text != text { return false }
+    }
+    advance()
+    return true
+}
+
+fn current_line() {
+    if pos < len(tokens) {
+        return tokens[pos].line
+    }
+    if pos > 0 {
+        return tokens[pos - 1].line
+    }
+    return 1
+}
+
+// ============================================================================
+// Section 3: Compiler state
+// ============================================================================
+
+// Chunk is represented as 4 separate arrays (since Lattice structs are
+// pass-by-value, nested array mutation doesn't propagate).
+// We use a "saved chunks" array for completed function chunks.
+
+flux code = []
+flux c_lines = []
+flux constants = []       // array of [tag, ...values]
+flux local_names = []
+
+// Local variable tracking
+// Each local stored as 3 parallel arrays for mutability
+flux local_name_arr = []
+flux local_depth_arr = []
+flux local_captured_arr = []
+flux local_count = 0
+flux scope_depth = 0
+
+// Upvalue tracking
+flux upvalue_index_arr = []
+flux upvalue_islocal_arr = []
+flux upvalue_count = 0
+flux func_type = "script"
+
+// Break/continue tracking
+flux break_jumps = []
+flux break_count = 0
+flux loop_start_pos = 0
+flux loop_depth = 0
+flux loop_break_local_count = 0
+flux loop_continue_local_count = 0
+
+// Compiler stack for save/restore during function compilation
+// Each entry is an array: [code, c_lines, constants, local_names,
+//   local_name_arr, local_depth_arr, local_captured_arr, local_count,
+//   scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
+//   func_type, break_jumps, break_count, loop_start_pos, loop_depth,
+//   loop_break_local_count, loop_continue_local_count]
+flux compiler_stack = []
+
+fn save_compiler() {
+    // Snapshot current state into an array
+    flux state = [
+        code, c_lines, constants, local_names,
+        local_name_arr, local_depth_arr, local_captured_arr, local_count,
+        scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
+        func_type, break_jumps, break_count, loop_start_pos, loop_depth,
+        loop_break_local_count, loop_continue_local_count
+    ]
+    compiler_stack.push(state)
+}
+
+fn restore_compiler() {
+    let idx = len(compiler_stack) - 1
+    let state = compiler_stack[idx]
+    // Pop from stack
+    flux new_stack = []
+    for i in 0..idx {
+        new_stack.push(compiler_stack[i])
+    }
+    compiler_stack = new_stack
+
+    code = state[0]
+    c_lines = state[1]
+    constants = state[2]
+    local_names = state[3]
+    local_name_arr = state[4]
+    local_depth_arr = state[5]
+    local_captured_arr = state[6]
+    local_count = state[7]
+    scope_depth = state[8]
+    upvalue_index_arr = state[9]
+    upvalue_islocal_arr = state[10]
+    upvalue_count = state[11]
+    func_type = state[12]
+    break_jumps = state[13]
+    break_count = state[14]
+    loop_start_pos = state[15]
+    loop_depth = state[16]
+    loop_break_local_count = state[17]
+    loop_continue_local_count = state[18]
+}
+
+// Snapshot the current chunk into an array for serialization
+// Returns [code, c_lines, constants, local_names]
+fn snapshot_chunk() {
+    return [code, c_lines, constants, local_names]
+}
+
+// ============================================================================
+// Section 4: Error reporting
+// ============================================================================
+
+fn compiler_error(msg: any, line: any) {
+    if line > 0 {
+        eprint("compile error [line " + to_string(line) + "]: " + msg)
+    } else {
+        eprint("compile error: " + msg)
+    }
+    exit(1)
+}
+
+// ============================================================================
+// Section 5: Emit helpers
+// ============================================================================
+
+fn emit_byte(byte: any, line: any) {
+    code.push(byte & 255)
+    c_lines.push(line)
+}
+
+fn emit_bytes(b1: any, b2: any, line: any) {
+    emit_byte(b1, line)
+    emit_byte(b2, line)
+}
+
+fn add_constant(val: any) {
+    let idx = len(constants)
+    if idx > 255 {
+        compiler_error("too many constants in one chunk", current_line())
+    }
+    constants.push(val)
+    return idx
+}
+
+fn emit_constant(val: any, line: any) {
+    let idx = add_constant(val)
+    emit_bytes(OP_CONSTANT, idx, line)
+    return idx
+}
+
+fn emit_jump(op: any, line: any) {
+    emit_byte(op, line)
+    emit_byte(255, line)
+    emit_byte(255, line)
+    return len(code) - 2
+}
+
+fn patch_jump(offset: any) {
+    let jump = len(code) - offset - 2
+    if jump > 65535 {
+        compiler_error("jump offset too large", current_line())
+    }
+    code[offset] = (jump >> 8) & 255
+    code[offset + 1] = jump & 255
+}
+
+fn emit_loop(loop_start: any, line: any) {
+    emit_byte(OP_LOOP, line)
+    let offset = len(code) - loop_start + 2
+    if offset > 65535 {
+        compiler_error("loop body too large", current_line())
+    }
+    emit_byte((offset >> 8) & 255, line)
+    emit_byte(offset & 255, line)
+}
+
+// ============================================================================
+// Section 6: Constant pool management
+// ============================================================================
+
+// Constants are stored as arrays: [TAG, ...data]
+// TAG_INT: [0, int_value]
+// TAG_FLOAT: [1, float_value]
+// TAG_BOOL: [2, bool_value]
+// TAG_STR: [3, string_value]
+// TAG_NIL: [4]
+// TAG_UNIT: [5]
+// TAG_CLOSURE: [6, param_count, has_variadic, chunk_snapshot]
+//   where chunk_snapshot = [code, lines, constants, local_names]
+
+fn make_int_const(val: any) {
+    return [TAG_INT, val]
+}
+
+fn make_float_const(val: any) {
+    return [TAG_FLOAT, val]
+}
+
+fn make_string_const(val: any) {
+    return [TAG_STR, val]
+}
+
+fn make_bool_const(val: any) {
+    return [TAG_BOOL, val]
+}
+
+fn make_nil_const() {
+    return [TAG_NIL]
+}
+
+fn make_unit_const() {
+    return [TAG_UNIT]
+}
+
+fn make_closure_const(param_count: any, has_variadic: any, chunk_snap: any) {
+    return [TAG_CLOSURE, param_count, has_variadic, chunk_snap]
+}
+
+fn string_constant(name: any) {
+    return add_constant(make_string_const(name))
+}
+
+// ============================================================================
+// Section 7: Scope & variable resolution
+// ============================================================================
+
+fn begin_scope() {
+    scope_depth = scope_depth + 1
+}
+
+fn end_scope(line: any) {
+    scope_depth = scope_depth - 1
+    while local_count > 0 {
+        if local_depth_arr[local_count - 1] <= scope_depth {
+            break
+        }
+        if local_captured_arr[local_count - 1] {
+            emit_byte(OP_CLOSE_UPVALUE, line)
+        } else {
+            emit_byte(OP_POP, line)
+        }
+        local_count = local_count - 1
+    }
+}
+
+fn add_local(name: any) {
+    let slot = local_count
+    if local_count >= len(local_name_arr) {
+        local_name_arr.push(name)
+        local_depth_arr.push(scope_depth)
+        local_captured_arr.push(false)
+    } else {
+        local_name_arr[local_count] = name
+        local_depth_arr[local_count] = scope_depth
+        local_captured_arr[local_count] = false
+    }
+    local_count = local_count + 1
+    while len(local_names) <= slot {
+        local_names.push(nil)
+    }
+    local_names[slot] = name
+}
+
+fn resolve_local(name: any) {
+    flux i = local_count - 1
+    while i >= 0 {
+        if local_name_arr[i] == name {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+fn add_upvalue(index: any, is_local: any) {
+    flux i = 0
+    while i < upvalue_count {
+        if upvalue_index_arr[i] == index {
+            if upvalue_islocal_arr[i] == is_local {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    if upvalue_count >= 256 {
+        compiler_error("too many upvalues in one function", current_line())
+    }
+    if upvalue_count >= len(upvalue_index_arr) {
+        upvalue_index_arr.push(index)
+        upvalue_islocal_arr.push(is_local)
+    } else {
+        upvalue_index_arr[upvalue_count] = index
+        upvalue_islocal_arr[upvalue_count] = is_local
+    }
+    let result = upvalue_count
+    upvalue_count = upvalue_count + 1
+    return result
+}
+
+fn resolve_upvalue_in(stack_idx: any, name: any) {
+    if stack_idx < 0 {
+        return -1
+    }
+    let enclosing = compiler_stack[stack_idx]
+    // enclosing[4] = local_name_arr, [7] = local_count, [6] = local_captured_arr
+    let enc_names = enclosing[4]
+    let enc_count = enclosing[7]
+    let enc_captured = enclosing[6]
+
+    flux i = enc_count - 1
+    while i >= 0 {
+        if enc_names[i] == name {
+            // Mark captured — but we can't mutate the saved array directly
+            // since arrays in the saved state are copies. We need to update
+            // the compiler_stack entry.
+            // Actually, arrays ARE mutated in place in Lattice for .push and []=
+            enc_captured[i] = true
+            return add_upvalue(i, true)
+        }
+        i = i - 1
+    }
+
+    if stack_idx > 0 {
+        let outer = resolve_upvalue_in(stack_idx - 1, name)
+        if outer >= 0 {
+            return add_upvalue(outer, false)
+        }
+    }
+
+    return -1
+}
+
+fn resolve_upvalue(name: any) {
+    let stack_idx = len(compiler_stack) - 1
+    return resolve_upvalue_in(stack_idx, name)
+}
+
+fn emit_variable_get(name: any, line: any) {
+    let slot = resolve_local(name)
+    if slot >= 0 {
+        emit_bytes(OP_GET_LOCAL, slot, line)
+        return
+    }
+    let up = resolve_upvalue(name)
+    if up >= 0 {
+        emit_bytes(OP_GET_UPVALUE, up, line)
+        return
+    }
+    let idx = string_constant(name)
+    emit_bytes(OP_GET_GLOBAL, idx, line)
+}
+
+fn emit_variable_set(name: any, line: any) {
+    let slot = resolve_local(name)
+    if slot >= 0 {
+        emit_bytes(OP_SET_LOCAL, slot, line)
+        return
+    }
+    let up = resolve_upvalue(name)
+    if up >= 0 {
+        emit_bytes(OP_SET_UPVALUE, up, line)
+        return
+    }
+    let idx = string_constant(name)
+    emit_bytes(OP_SET_GLOBAL, idx, line)
+}
+
+// ============================================================================
+// Section 8: Expression parsing — precedence climbing
+// ============================================================================
+
+fn parse_expression() {
+    return parse_or()
+}
+
+fn parse_or() {
+    let line = current_line()
+    parse_and()
+    while peek_text() == "||" {
+        advance()
+        let jump = emit_jump(OP_JUMP_IF_TRUE, line)
+        emit_byte(OP_POP, line)
+        parse_and()
+        patch_jump(jump)
+    }
+}
+
+fn parse_and() {
+    let line = current_line()
+    parse_equality()
+    while peek_text() == "&&" {
+        advance()
+        let jump = emit_jump(OP_JUMP_IF_FALSE, line)
+        emit_byte(OP_POP, line)
+        parse_equality()
+        patch_jump(jump)
+    }
+}
+
+fn parse_equality() {
+    let line = current_line()
+    parse_comparison()
+    while peek_text() == "==" || peek_text() == "!=" {
+        let op = advance().text
+        parse_comparison()
+        if op == "==" {
+            emit_byte(OP_EQ, line)
+        } else {
+            emit_byte(OP_NEQ, line)
+        }
+    }
+}
+
+fn parse_comparison() {
+    let line = current_line()
+    parse_bitwise_or()
+    while peek_text() == "<" || peek_text() == ">" || peek_text() == "<=" || peek_text() == ">=" {
+        let op = advance().text
+        parse_bitwise_or()
+        match op {
+            "<" => emit_byte(OP_LT, line),
+            ">" => emit_byte(OP_GT, line),
+            "<=" => emit_byte(OP_LTEQ, line),
+            _ => emit_byte(OP_GTEQ, line)
+        }
+    }
+}
+
+fn parse_bitwise_or() {
+    let line = current_line()
+    parse_bitwise_xor()
+    while peek_text() == "|" {
+        advance()
+        parse_bitwise_xor()
+        emit_byte(OP_BIT_OR, line)
+    }
+}
+
+fn parse_bitwise_xor() {
+    let line = current_line()
+    parse_bitwise_and()
+    while peek_text() == "^" {
+        advance()
+        parse_bitwise_and()
+        emit_byte(OP_BIT_XOR, line)
+    }
+}
+
+fn parse_bitwise_and() {
+    let line = current_line()
+    parse_shift()
+    while peek_text() == "&" {
+        advance()
+        parse_shift()
+        emit_byte(OP_BIT_AND, line)
+    }
+}
+
+fn parse_shift() {
+    let line = current_line()
+    parse_range()
+    while peek_text() == "<<" || peek_text() == ">>" {
+        let op = advance().text
+        parse_range()
+        if op == "<<" {
+            emit_byte(OP_LSHIFT, line)
+        } else {
+            emit_byte(OP_RSHIFT, line)
+        }
+    }
+}
+
+fn parse_range() {
+    let line = current_line()
+    parse_concat()
+    if peek_text() == ".." {
+        advance()
+        parse_concat()
+        emit_byte(OP_BUILD_RANGE, line)
+    }
+}
+
+fn parse_concat() {
+    let line = current_line()
+    parse_term()
+    while peek_text() == "++" {
+        advance()
+        parse_term()
+        emit_byte(OP_CONCAT, line)
+    }
+}
+
+fn parse_term() {
+    let line = current_line()
+    parse_factor()
+    while peek_text() == "+" || peek_text() == "-" {
+        let op = advance().text
+        parse_factor()
+        if op == "+" {
+            emit_byte(OP_ADD, line)
+        } else {
+            emit_byte(OP_SUB, line)
+        }
+    }
+}
+
+fn parse_factor() {
+    let line = current_line()
+    parse_unary()
+    while peek_text() == "*" || peek_text() == "/" || peek_text() == "%" {
+        let op = advance().text
+        parse_unary()
+        match op {
+            "*" => emit_byte(OP_MUL, line),
+            "/" => emit_byte(OP_DIV, line),
+            _ => emit_byte(OP_MOD, line)
+        }
+    }
+}
+
+fn parse_unary() {
+    let line = current_line()
+    if peek_text() == "-" {
+        advance()
+        parse_unary()
+        emit_byte(OP_NEG, line)
+        return
+    }
+    if peek_text() == "!" {
+        advance()
+        parse_unary()
+        emit_byte(OP_NOT, line)
+        return
+    }
+    if peek_text() == "~" {
+        advance()
+        parse_unary()
+        emit_byte(OP_BIT_NOT, line)
+        return
+    }
+    parse_postfix()
+}
+
+fn parse_postfix() {
+    let line = current_line()
+    parse_primary()
+
+    loop {
+        let pt = peek_text()
+        if pt == "(" {
+            advance()
+            flux arg_count = 0
+            if peek_text() != ")" {
+                parse_expression()
+                arg_count = arg_count + 1
+                while peek_text() == "," {
+                    advance()
+                    parse_expression()
+                    arg_count = arg_count + 1
+                }
+            }
+            expect(nil, ")")
+            emit_bytes(OP_CALL, arg_count, line)
+        } else { if pt == "[" {
+            advance()
+            parse_expression()
+            expect(nil, "]")
+            emit_byte(OP_INDEX, line)
+        } else { if pt == "." {
+            advance()
+            let field_name = expect("identifier", nil).text
+            if peek_text() == "(" {
+                advance()
+                flux arg_count = 0
+                if peek_text() != ")" {
+                    parse_expression()
+                    arg_count = arg_count + 1
+                    while peek_text() == "," {
+                        advance()
+                        parse_expression()
+                        arg_count = arg_count + 1
+                    }
+                }
+                expect(nil, ")")
+                let name_idx = string_constant(field_name)
+                emit_byte(OP_INVOKE, line)
+                emit_byte(name_idx, line)
+                emit_byte(arg_count, line)
+            } else {
+                let name_idx = string_constant(field_name)
+                emit_bytes(OP_GET_FIELD, name_idx, line)
+            }
+        } else {
+            break
+        } } }
+    }
+}
+
+fn parse_primary() {
+    let line = current_line()
+    let t = peek()
+
+    if t == nil {
+        compiler_error("unexpected end of input", line)
+    }
+
+    // Integer literal
+    if t.type == "integer" {
+        advance()
+        let val = parse_int(t.text)
+        if val >= -128 {
+            if val <= 127 {
+                if val < 0 {
+                    emit_bytes(OP_LOAD_INT8, (val + 256) & 255, line)
+                } else {
+                    emit_bytes(OP_LOAD_INT8, val, line)
+                }
+                return
+            }
+        }
+        emit_constant(make_int_const(val), line)
+        return
+    }
+
+    // Float literal
+    if t.type == "float" {
+        advance()
+        let val = parse_float(t.text)
+        emit_constant(make_float_const(val), line)
+        return
+    }
+
+    // String literal
+    if t.type == "string" {
+        advance()
+        emit_constant(make_string_const(t.text), line)
+        return
+    }
+
+    // String interpolation
+    if t.type == "INTERP_START" {
+        parse_string_interpolation()
+        return
+    }
+
+    // Boolean literals
+    if t.type == "true" {
+        advance()
+        emit_byte(OP_TRUE, line)
+        return
+    }
+    if t.type == "false" {
+        advance()
+        emit_byte(OP_FALSE, line)
+        return
+    }
+
+    // Nil literal
+    if t.type == "nil" {
+        advance()
+        emit_byte(OP_NIL, line)
+        return
+    }
+
+    // print(...) — special syntax
+    if t.type == "print" {
+        advance()
+        expect(nil, "(")
+        flux arg_count = 0
+        if peek_text() != ")" {
+            parse_expression()
+            arg_count = arg_count + 1
+            while peek_text() == "," {
+                advance()
+                parse_expression()
+                arg_count = arg_count + 1
+            }
+        }
+        expect(nil, ")")
+        emit_bytes(OP_PRINT, arg_count, line)
+        return
+    }
+
+    // if expression
+    if t.type == "if" {
+        parse_if_expression()
+        return
+    }
+
+    // Closure literal: |params| { body }
+    if t.type == "|" || t.text == "|" {
+        parse_closure_literal()
+        return
+    }
+
+    // Array literal [...]
+    if t.text == "[" {
+        advance()
+        flux count = 0
+        if peek_text() != "]" {
+            parse_expression()
+            count = count + 1
+            while peek_text() == "," {
+                advance()
+                if peek_text() == "]" { break }
+                parse_expression()
+                count = count + 1
+            }
+        }
+        expect(nil, "]")
+        emit_bytes(OP_BUILD_ARRAY, count, line)
+        return
+    }
+
+    // Identifier
+    if t.type == "identifier" {
+        advance()
+        // Check for struct construction: Name { ... }
+        if peek_text() == "{" {
+            let first_char = t.text[0]
+            if first_char != nil {
+                let c = ord(first_char)
+                if c >= 65 {
+                    if c <= 90 {
+                        parse_struct_literal(t.text, line)
+                        return
+                    }
+                }
+            }
+        }
+        // Namespaced: Foo::bar(...)
+        if peek_text() == "::" {
+            advance()
+            let method_name = expect("identifier", nil).text
+            let full_name = t.text + "::" + method_name
+            emit_variable_get(full_name, line)
+            return
+        }
+        emit_variable_get(t.text, line)
+        return
+    }
+
+    // Parenthesized expression
+    if t.text == "(" {
+        advance()
+        parse_expression()
+        expect(nil, ")")
+        return
+    }
+
+    compiler_error("unexpected token '" + t.text + "' (type: " + t.type + ")", line)
+}
+
+fn parse_struct_literal(name: any, line: any) {
+    expect(nil, "{")
+    flux field_names_arr = []
+    flux field_count = 0
+    if peek_text() != "}" {
+        let fname = expect("identifier", nil).text
+        expect(nil, ":")
+        parse_expression()
+        field_names_arr.push(fname)
+        field_count = field_count + 1
+        while peek_text() == "," {
+            advance()
+            if peek_text() == "}" { break }
+            let fn2 = expect("identifier", nil).text
+            expect(nil, ":")
+            parse_expression()
+            field_names_arr.push(fn2)
+            field_count = field_count + 1
+        }
+    }
+    expect(nil, "}")
+    let name_idx = string_constant(name)
+    emit_byte(OP_BUILD_STRUCT, line)
+    emit_byte(name_idx, line)
+    emit_byte(field_count, line)
+    for i in 0..field_count {
+        add_constant(make_string_const(field_names_arr[i]))
+    }
+}
+
+fn parse_string_interpolation() {
+    let line = current_line()
+    let start = advance()
+    emit_constant(make_string_const(start.text), line)
+
+    parse_expression()
+    emit_variable_get("to_string", line)
+    emit_byte(OP_SWAP, line)
+    emit_bytes(OP_CALL, 1, line)
+    emit_byte(OP_CONCAT, line)
+
+    while peek_type() == "INTERP_MID" {
+        let mid = advance()
+        emit_constant(make_string_const(mid.text), line)
+        emit_byte(OP_CONCAT, line)
+        parse_expression()
+        emit_variable_get("to_string", line)
+        emit_byte(OP_SWAP, line)
+        emit_bytes(OP_CALL, 1, line)
+        emit_byte(OP_CONCAT, line)
+    }
+
+    if peek_type() == "INTERP_END" {
+        let end_tok = advance()
+        if len(end_tok.text) > 0 {
+            emit_constant(make_string_const(end_tok.text), line)
+            emit_byte(OP_CONCAT, line)
+        }
+    }
+}
+
+fn parse_if_expression() {
+    let line = current_line()
+    expect("if", nil)
+    parse_expression()
+    let then_jump = emit_jump(OP_JUMP_IF_FALSE, line)
+    emit_byte(OP_POP, line)
+
+    if peek_text() == "{" {
+        parse_block_expression()
+    } else {
+        parse_expression()
+    }
+
+    let else_jump = emit_jump(OP_JUMP, line)
+    patch_jump(then_jump)
+    emit_byte(OP_POP, line)
+
+    if peek_text() == "else" {
+        advance()
+        if peek_text() == "if" {
+            parse_if_expression()
+        } else { if peek_text() == "{" {
+            parse_block_expression()
+        } else {
+            parse_expression()
+        } }
+    } else {
+        emit_byte(OP_NIL, line)
+    }
+    patch_jump(else_jump)
+}
+
+fn parse_block_expression() {
+    let line = current_line()
+    expect(nil, "{")
+    begin_scope()
+    flux last_was_expr = false
+
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input, expected '}'", line)
+        }
+        if last_was_expr {
+            emit_byte(OP_POP, line)
+        }
+        last_was_expr = false
+
+        if is_statement_start() {
+            parse_statement()
+        } else {
+            parse_expression()
+            last_was_expr = true
+        }
+    }
+    expect(nil, "}")
+    if !last_was_expr {
+        emit_byte(OP_NIL, line)
+    }
+    end_scope(line)
+}
+
+fn parse_closure_literal() {
+    let line = current_line()
+    expect(nil, "|")
+
+    flux param_names_arr = []
+    if peek_text() != "|" {
+        let p = expect("identifier", nil).text
+        param_names_arr.push(p)
+        while peek_text() == "," {
+            advance()
+            let p2 = expect("identifier", nil).text
+            param_names_arr.push(p2)
+        }
+    }
+    expect(nil, "|")
+
+    let param_count = len(param_names_arr)
+    save_compiler()
+
+    code = []
+    c_lines = []
+    constants = []
+    local_names = []
+    local_name_arr = []
+    local_depth_arr = []
+    local_captured_arr = []
+    local_count = 0
+    scope_depth = 0
+    upvalue_index_arr = []
+    upvalue_islocal_arr = []
+    upvalue_count = 0
+    func_type = "function"
+    break_jumps = []
+    break_count = 0
+    loop_start_pos = 0
+    loop_depth = 0
+
+    // Reserve slot 0 for the closure itself (VM convention)
+    add_local("")
+    begin_scope()
+    for i in 0..param_count {
+        add_local(param_names_arr[i])
+    }
+
+    if peek_text() == "{" {
+        expect(nil, "{")
+        flux last_was_expr = false
+        while peek_text() != "}" {
+            if peek() == nil {
+                compiler_error("unexpected end of input in closure body", line)
+            }
+            if last_was_expr {
+                emit_byte(OP_POP, line)
+            }
+            last_was_expr = false
+            if is_statement_start() {
+                parse_statement()
+            } else {
+                parse_expression()
+                last_was_expr = true
+            }
+        }
+        expect(nil, "}")
+        if !last_was_expr {
+            emit_byte(OP_UNIT, line)
+        }
+    } else {
+        parse_expression()
+    }
+
+    emit_byte(OP_RETURN, line)
+
+    let fn_snap = snapshot_chunk()
+    let fn_uv_idx = upvalue_index_arr
+    let fn_uv_loc = upvalue_islocal_arr
+    let fn_uv_count = upvalue_count
+
+    restore_compiler()
+
+    let fn_const = make_closure_const(param_count, false, fn_snap)
+    let fn_idx = add_constant(fn_const)
+
+    emit_byte(OP_CLOSURE, line)
+    emit_byte(fn_idx, line)
+    emit_byte(fn_uv_count, line)
+    flux i = 0
+    while i < fn_uv_count {
+        if fn_uv_loc[i] {
+            emit_byte(1, line)
+        } else {
+            emit_byte(0, line)
+        }
+        emit_byte(fn_uv_idx[i], line)
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Section 9: Statement parsing
+// ============================================================================
+
+fn is_statement_start() {
+    let t = peek()
+    if t == nil { return false }
+    let txt = t.text
+    if txt == "flux" { return true }
+    if txt == "fix" { return true }
+    if txt == "let" { return true }
+    if t.type == "fn" { return true }
+    if txt == "return" { return true }
+    if txt == "while" { return true }
+    if txt == "loop" { return true }
+    if txt == "for" { return true }
+    if txt == "break" { return true }
+    if txt == "continue" { return true }
+    if txt == "struct" { return true }
+    if txt == "enum" { return true }
+    if txt == "defer" { return true }
+    if txt == "try" { return true }
+    if txt == "import" { return true }
+    if t.type == "identifier" {
+        if pos + 1 < len(tokens) {
+            let next = tokens[pos + 1]
+            if next.text == "=" { return true }
+            if next.text == "+=" { return true }
+            if next.text == "-=" { return true }
+            if next.text == "*=" { return true }
+            if next.text == "/=" { return true }
+            if next.text == "%=" { return true }
+            if next.text == "." {
+                flux j = pos + 1
+                while j < len(tokens) {
+                    let nt = tokens[j]
+                    if nt.text == "=" || nt.text == "+=" || nt.text == "-=" || nt.text == "*=" || nt.text == "/=" || nt.text == "%=" {
+                        return true
+                    }
+                    if nt.text == "." || nt.type == "identifier" || nt.text == "[" {
+                        j = j + 1
+                    } else {
+                        break
+                    }
+                }
+            }
+            if next.text == "[" { return true }
+        }
+    }
+    return false
+}
+
+fn parse_statement() {
+    let t = peek()
+    let txt = t.text
+    let line = current_line()
+
+    if txt == "flux" || txt == "fix" || txt == "let" {
+        parse_declaration()
+        return
+    }
+
+    if t.type == "fn" {
+        parse_fn_declaration()
+        return
+    }
+
+    if txt == "return" {
+        parse_return()
+        return
+    }
+
+    if txt == "while" {
+        parse_while()
+        return
+    }
+
+    if txt == "loop" {
+        parse_loop_stmt()
+        return
+    }
+
+    if txt == "for" {
+        parse_for()
+        return
+    }
+
+    if txt == "break" {
+        parse_break()
+        return
+    }
+
+    if txt == "continue" {
+        parse_continue()
+        return
+    }
+
+    if txt == "struct" {
+        parse_struct_declaration()
+        return
+    }
+
+    if txt == "enum" {
+        parse_enum_declaration()
+        return
+    }
+
+    if txt == "defer" {
+        parse_defer()
+        return
+    }
+
+    if txt == "try" {
+        parse_try_catch()
+        return
+    }
+
+    if txt == "import" {
+        parse_import()
+        return
+    }
+
+    if t.type == "identifier" {
+        parse_assignment()
+        return
+    }
+
+    compiler_error("unexpected statement token '" + txt + "'", line)
+}
+
+fn parse_declaration() {
+    let line = current_line()
+    let kind = advance().text
+    let name = expect("identifier", nil).text
+    expect(nil, "=")
+    parse_expression()
+
+    if kind == "flux" {
+        emit_byte(OP_MARK_FLUID, line)
+    }
+
+    if scope_depth > 0 {
+        add_local(name)
+    } else {
+        let idx = string_constant(name)
+        emit_bytes(OP_DEFINE_GLOBAL, idx, line)
+    }
+}
+
+fn parse_fn_declaration() {
+    let line = current_line()
+    expect("fn", nil)
+    let name = expect("identifier", nil).text
+    expect(nil, "(")
+
+    flux param_names_arr = []
+    flux has_variadic = false
+    if peek_text() != ")" {
+        let p = expect("identifier", nil).text
+        // Consume optional type annotation
+        if peek_text() == ":" {
+            advance()
+            expect("identifier", nil)  // type name
+        }
+        param_names_arr.push(p)
+        while peek_text() == "," {
+            advance()
+            if peek_text() == "..." {
+                advance()
+                let vp = expect("identifier", nil).text
+                if peek_text() == ":" {
+                    advance()
+                    expect("identifier", nil)
+                }
+                param_names_arr.push(vp)
+                has_variadic = true
+                break
+            }
+            let p2 = expect("identifier", nil).text
+            if peek_text() == ":" {
+                advance()
+                expect("identifier", nil)
+            }
+            param_names_arr.push(p2)
+        }
+    }
+    expect(nil, ")")
+
+    // Skip optional return type annotation
+    if peek_text() == "->" {
+        advance()
+        expect("identifier", nil)
+    }
+
+    let param_count = len(param_names_arr)
+
+    save_compiler()
+
+    code = []
+    c_lines = []
+    constants = []
+    local_names = []
+    local_name_arr = []
+    local_depth_arr = []
+    local_captured_arr = []
+    local_count = 0
+    scope_depth = 0
+    upvalue_index_arr = []
+    upvalue_islocal_arr = []
+    upvalue_count = 0
+    func_type = "function"
+    break_jumps = []
+    break_count = 0
+    loop_start_pos = 0
+    loop_depth = 0
+
+    // Reserve slot 0 for the function itself (VM convention)
+    add_local("")
+    begin_scope()
+
+    for i in 0..param_count {
+        add_local(param_names_arr[i])
+    }
+
+    expect(nil, "{")
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in function body", line)
+        }
+        parse_statement_or_expression()
+    }
+    expect(nil, "}")
+
+    emit_byte(OP_UNIT, line)
+    emit_byte(OP_RETURN, line)
+
+    let fn_snap = snapshot_chunk()
+    let fn_uv_idx = upvalue_index_arr
+    let fn_uv_loc = upvalue_islocal_arr
+    let fn_uv_count = upvalue_count
+
+    restore_compiler()
+
+    let fn_const = make_closure_const(param_count, has_variadic, fn_snap)
+    let fn_idx = add_constant(fn_const)
+
+    emit_byte(OP_CLOSURE, line)
+    emit_byte(fn_idx, line)
+    emit_byte(fn_uv_count, line)
+    flux i = 0
+    while i < fn_uv_count {
+        if fn_uv_loc[i] {
+            emit_byte(1, line)
+        } else {
+            emit_byte(0, line)
+        }
+        emit_byte(fn_uv_idx[i], line)
+        i = i + 1
+    }
+
+    if scope_depth > 0 {
+        add_local(name)
+    } else {
+        let idx = string_constant(name)
+        emit_bytes(OP_DEFINE_GLOBAL, idx, line)
+    }
+}
+
+fn parse_statement_or_expression() {
+    if is_statement_start() {
+        parse_statement()
+    } else {
+        parse_expression()
+        emit_byte(OP_POP, current_line())
+    }
+}
+
+fn parse_return() {
+    let line = current_line()
+    advance()
+    if peek_text() == "}" || peek() == nil {
+        emit_byte(OP_UNIT, line)
+    } else {
+        parse_expression()
+    }
+    emit_byte(OP_DEFER_RUN, line)
+    emit_byte(OP_RETURN, line)
+}
+
+fn parse_while() {
+    let line = current_line()
+    advance()
+
+    let outer_break_jumps = break_jumps
+    let outer_break_count = break_count
+    let outer_loop_start = loop_start_pos
+    let outer_loop_depth = loop_depth
+    let outer_break_lc = loop_break_local_count
+    let outer_continue_lc = loop_continue_local_count
+
+    let loop_begin = len(code)
+    loop_start_pos = loop_begin
+    loop_depth = scope_depth
+    break_jumps = []
+    break_count = 0
+    loop_break_local_count = local_count
+    loop_continue_local_count = local_count
+
+    parse_expression()
+    let exit_jump = emit_jump(OP_JUMP_IF_FALSE, line)
+    emit_byte(OP_POP, line)
+
+    expect(nil, "{")
+    begin_scope()
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in while body", line)
+        }
+        parse_statement_or_expression()
+    }
+    expect(nil, "}")
+    end_scope(line)
+
+    emit_loop(loop_begin, line)
+    patch_jump(exit_jump)
+    emit_byte(OP_POP, line)
+
+    flux bi = 0
+    while bi < break_count {
+        patch_jump(break_jumps[bi])
+        bi = bi + 1
+    }
+
+    break_jumps = outer_break_jumps
+    break_count = outer_break_count
+    loop_start_pos = outer_loop_start
+    loop_depth = outer_loop_depth
+    loop_break_local_count = outer_break_lc
+    loop_continue_local_count = outer_continue_lc
+}
+
+fn parse_loop_stmt() {
+    let line = current_line()
+    advance()
+
+    let outer_break_jumps = break_jumps
+    let outer_break_count = break_count
+    let outer_loop_start = loop_start_pos
+    let outer_loop_depth = loop_depth
+    let outer_break_lc = loop_break_local_count
+    let outer_continue_lc = loop_continue_local_count
+
+    let loop_begin = len(code)
+    loop_start_pos = loop_begin
+    loop_depth = scope_depth
+    break_jumps = []
+    break_count = 0
+    loop_break_local_count = local_count
+    loop_continue_local_count = local_count
+
+    expect(nil, "{")
+    begin_scope()
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in loop body", line)
+        }
+        parse_statement_or_expression()
+    }
+    expect(nil, "}")
+    end_scope(line)
+
+    emit_loop(loop_begin, line)
+
+    flux bi = 0
+    while bi < break_count {
+        patch_jump(break_jumps[bi])
+        bi = bi + 1
+    }
+
+    break_jumps = outer_break_jumps
+    break_count = outer_break_count
+    loop_start_pos = outer_loop_start
+    loop_depth = outer_loop_depth
+    loop_break_local_count = outer_break_lc
+    loop_continue_local_count = outer_continue_lc
+}
+
+fn parse_for() {
+    let line = current_line()
+    advance()
+    let var_name = expect("identifier", nil).text
+    expect("in", nil)
+
+    parse_expression()
+    emit_byte(OP_ITER_INIT, line)
+
+    let outer_break_jumps = break_jumps
+    let outer_break_count = break_count
+    let outer_loop_start = loop_start_pos
+    let outer_loop_depth = loop_depth
+    let outer_break_lc = loop_break_local_count
+    let outer_continue_lc = loop_continue_local_count
+
+    begin_scope()
+    // Iterator state uses TWO stack slots: collection + index
+    add_local("")   // collection
+    add_local("")   // index
+
+    loop_continue_local_count = local_count
+
+    let loop_begin = len(code)
+    loop_start_pos = loop_begin
+    loop_depth = scope_depth
+    break_jumps = []
+    break_count = 0
+    loop_break_local_count = local_count
+
+    let exit_jump = emit_jump(OP_ITER_NEXT, line)
+    add_local(var_name)
+
+    expect(nil, "{")
+    begin_scope()
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in for body", line)
+        }
+        parse_statement_or_expression()
+    }
+    expect(nil, "}")
+    end_scope(line)
+
+    // Pop loop variable
+    emit_byte(OP_POP, line)
+    local_count = local_count - 1
+
+    emit_loop(loop_begin, line)
+    patch_jump(exit_jump)
+
+    // Pop iterator state (2 values)
+    emit_byte(OP_POP, line)
+    emit_byte(OP_POP, line)
+    local_count = local_count - 2
+
+    flux bi = 0
+    while bi < break_count {
+        patch_jump(break_jumps[bi])
+        bi = bi + 1
+    }
+
+    end_scope(line)
+
+    break_jumps = outer_break_jumps
+    break_count = outer_break_count
+    loop_start_pos = outer_loop_start
+    loop_depth = outer_loop_depth
+    loop_break_local_count = outer_break_lc
+    loop_continue_local_count = outer_continue_lc
+}
+
+fn parse_break() {
+    let line = current_line()
+    advance()
+    flux i = local_count - 1
+    while i >= loop_break_local_count {
+        emit_byte(OP_POP, line)
+        i = i - 1
+    }
+    let jump = emit_jump(OP_JUMP, line)
+    if break_count >= len(break_jumps) {
+        break_jumps.push(jump)
+    } else {
+        break_jumps[break_count] = jump
+    }
+    break_count = break_count + 1
+}
+
+fn parse_continue() {
+    let line = current_line()
+    advance()
+    flux i = local_count - 1
+    while i >= loop_continue_local_count {
+        emit_byte(OP_POP, line)
+        i = i - 1
+    }
+    emit_loop(loop_start_pos, line)
+}
+
+fn parse_assignment() {
+    let line = current_line()
+    let name = advance().text
+
+    if peek_text() == "." || peek_text() == "[" {
+        parse_compound_assignment_target(name, line)
+        return
+    }
+
+    let op = advance().text
+
+    if op == "=" {
+        parse_expression()
+        emit_variable_set(name, line)
+        emit_byte(OP_POP, line)
+    } else {
+        emit_variable_get(name, line)
+        parse_expression()
+        match op {
+            "+=" => emit_byte(OP_ADD, line),
+            "-=" => emit_byte(OP_SUB, line),
+            "*=" => emit_byte(OP_MUL, line),
+            "/=" => emit_byte(OP_DIV, line),
+            _ => emit_byte(OP_MOD, line)
+        }
+        emit_variable_set(name, line)
+        emit_byte(OP_POP, line)
+    }
+}
+
+fn parse_compound_assignment_target(name: any, line: any) {
+    emit_variable_get(name, line)
+
+    // Navigate to the second-to-last access, collecting info about the last
+    // For simplicity, handle single-level: obj.field = or obj[idx] =
+    if peek_text() == "." {
+        advance()
+        let field = expect("identifier", nil).text
+        let op = advance().text
+        if op == "=" {
+            parse_expression()
+            let fidx = string_constant(field)
+            emit_bytes(OP_SET_FIELD, fidx, line)
+        } else {
+            emit_byte(OP_DUP, line)
+            let fidx = string_constant(field)
+            emit_bytes(OP_GET_FIELD, fidx, line)
+            parse_expression()
+            match op {
+                "+=" => emit_byte(OP_ADD, line),
+                "-=" => emit_byte(OP_SUB, line),
+                "*=" => emit_byte(OP_MUL, line),
+                "/=" => emit_byte(OP_DIV, line),
+                _ => emit_byte(OP_MOD, line)
+            }
+            let fidx2 = string_constant(field)
+            emit_bytes(OP_SET_FIELD, fidx2, line)
+        }
+        emit_byte(OP_POP, line)
+    } else { if peek_text() == "[" {
+        advance()
+        parse_expression()
+        expect(nil, "]")
+        let op = advance().text
+        if op == "=" {
+            parse_expression()
+            emit_byte(OP_SET_INDEX, line)
+        } else {
+            compiler_error("compound index assignment not yet supported", line)
+        }
+        emit_byte(OP_POP, line)
+    } }
+}
+
+fn parse_struct_declaration() {
+    let line = current_line()
+    advance()
+    let name = expect("identifier", nil).text
+    expect(nil, "{")
+
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in struct declaration", line)
+        }
+        if peek_type() == "fn" {
+            advance()
+            expect("identifier", nil)
+            expect(nil, "(")
+            // Skip params with type annotations
+            while peek_text() != ")" {
+                advance()
+            }
+            expect(nil, ")")
+            // Skip optional return type
+            if peek_text() == "->" {
+                advance()
+                advance()
+            }
+            // Skip body
+            expect(nil, "{")
+            flux depth = 1
+            while depth > 0 {
+                let mt = advance()
+                if mt.text == "{" { depth = depth + 1 }
+                if mt.text == "}" { depth = depth - 1 }
+            }
+        } else {
+            expect("identifier", nil)
+            // Consume type annotation
+            if peek_text() == ":" {
+                advance()
+                // Skip type (could be array type like [any])
+                if peek_text() == "[" {
+                    advance()
+                    advance()
+                    expect(nil, "]")
+                } else {
+                    advance()
+                }
+            }
+            if peek_text() == "," {
+                advance()
+            }
+        }
+    }
+    expect(nil, "}")
+}
+
+fn parse_enum_declaration() {
+    let line = current_line()
+    advance()
+    let name = expect("identifier", nil).text
+    expect(nil, "{")
+
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in enum declaration", line)
+        }
+        expect("identifier", nil)
+        if peek_text() == "(" {
+            advance()
+            while peek_text() != ")" {
+                advance()
+                if peek_text() == "," { advance() }
+            }
+            expect(nil, ")")
+        }
+        if peek_text() == "," {
+            advance()
+        }
+    }
+    expect(nil, "}")
+}
+
+fn parse_defer() {
+    let line = current_line()
+    advance()
+    let jump = emit_jump(OP_DEFER_PUSH, line)
+
+    expect(nil, "{")
+    begin_scope()
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in defer body", line)
+        }
+        parse_statement_or_expression()
+    }
+    expect(nil, "}")
+    end_scope(line)
+    emit_byte(OP_RETURN, line)
+    patch_jump(jump)
+}
+
+fn parse_try_catch() {
+    let line = current_line()
+    advance()
+
+    let handler_jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line)
+
+    expect(nil, "{")
+    begin_scope()
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in try body", line)
+        }
+        parse_statement_or_expression()
+    }
+    expect(nil, "}")
+    end_scope(line)
+
+    emit_byte(OP_POP_EXCEPTION_HANDLER, line)
+    let skip_catch = emit_jump(OP_JUMP, line)
+
+    patch_jump(handler_jump)
+    expect(nil, "catch")
+    let err_name = expect("identifier", nil).text
+
+    expect(nil, "{")
+    begin_scope()
+    add_local(err_name)
+
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in catch body", line)
+        }
+        parse_statement_or_expression()
+    }
+    expect(nil, "}")
+    end_scope(line)
+
+    patch_jump(skip_catch)
+}
+
+fn parse_import() {
+    let line = current_line()
+    advance()
+    let path = expect("string", nil).text
+    let idx = string_constant(path)
+    emit_bytes(OP_IMPORT, idx, line)
+}
+
+// ============================================================================
+// Section 10: Top-level program compilation
+// ============================================================================
+
+fn compile_program() {
+    while pos < len(tokens) {
+        parse_statement_or_expression()
+    }
+    emit_byte(OP_UNIT, current_line())
+    emit_byte(OP_HALT, current_line())
+}
+
+// ============================================================================
+// Section 11: .latc serializer
+// ============================================================================
+
+// Global serialization buffer (Buffer is pass-by-value, so we must use global)
+flux ser_buf = nil
+
+fn write_u8(val: any) {
+    ser_buf.push(val & 255)
+}
+
+fn write_u16_le(val: any) {
+    ser_buf.push(val & 255)
+    ser_buf.push((val >> 8) & 255)
+}
+
+fn write_u32_le(val: any) {
+    ser_buf.push(val & 255)
+    ser_buf.push((val >> 8) & 255)
+    ser_buf.push((val >> 16) & 255)
+    ser_buf.push((val >> 24) & 255)
+}
+
+fn write_i64_le(val: any) {
+    flux v = val
+    if v < 0 {
+        flux remaining = v
+        for i in 0..8 {
+            let b = remaining & 255
+            if b < 0 { ser_buf.push(b + 256) } else { ser_buf.push(b) }
+            remaining = remaining >> 8
+        }
+        return
+    }
+    for i in 0..8 {
+        ser_buf.push(v & 255)
+        v = v >> 8
+    }
+}
+
+fn write_f64_le(val: any) {
+    let bits = float_to_bits(val)
+    write_i64_le(bits)
+}
+
+fn write_string(str_val: any) {
+    let slen = len(str_val)
+    write_u32_le(slen)
+    for i in 0..slen {
+        ser_buf.push(ord(str_val[i]))
+    }
+}
+
+fn serialize_constant(c: any) {
+    let tag = c[0]
+    if tag == TAG_INT {
+        write_u8(TAG_INT)
+        write_i64_le(c[1])
+    } else { if tag == TAG_FLOAT {
+        write_u8(TAG_FLOAT)
+        write_f64_le(c[1])
+    } else { if tag == TAG_BOOL {
+        write_u8(TAG_BOOL)
+        if c[1] { write_u8(1) } else { write_u8(0) }
+    } else { if tag == TAG_STR {
+        write_u8(TAG_STR)
+        write_string(c[1])
+    } else { if tag == TAG_NIL {
+        write_u8(TAG_NIL)
+    } else { if tag == TAG_UNIT {
+        write_u8(TAG_UNIT)
+    } else { if tag == TAG_CLOSURE {
+        write_u8(TAG_CLOSURE)
+        write_u32_le(c[1])   // param_count
+        if c[2] { write_u8(1) } else { write_u8(0) }  // has_variadic
+        serialize_chunk(c[3]) // chunk snapshot
+    } } } } } } }
+}
+
+fn serialize_chunk(ch: any) {
+    // ch = [code_arr, lines_arr, constants_arr, local_names_arr]
+    let ch_code = ch[0]
+    let ch_lines = ch[1]
+    let ch_constants = ch[2]
+    let ch_local_names = ch[3]
+
+    // Code
+    let code_len = len(ch_code)
+    write_u32_le(code_len)
+    for i in 0..code_len {
+        write_u8(ch_code[i])
+    }
+
+    // Lines
+    let lines_len = len(ch_lines)
+    write_u32_le(lines_len)
+    for i in 0..lines_len {
+        write_u32_le(ch_lines[i])
+    }
+
+    // Constants
+    let const_len = len(ch_constants)
+    write_u32_le(const_len)
+    for i in 0..const_len {
+        serialize_constant(ch_constants[i])
+    }
+
+    // Local names
+    let name_count = len(ch_local_names)
+    write_u32_le(name_count)
+    for i in 0..name_count {
+        if ch_local_names[i] == nil {
+            write_u8(0)
+        } else {
+            write_u8(1)
+            write_string(ch_local_names[i])
+        }
+    }
+}
+
+fn serialize_latc(ch: any) {
+    ser_buf = Buffer::new(0)
+
+    // Header: "LATC" + version(1) + reserved(0)
+    write_u8(76)    // 'L'
+    write_u8(65)    // 'A'
+    write_u8(84)    // 'T'
+    write_u8(67)    // 'C'
+    write_u16_le(1) // format version
+    write_u16_le(0) // reserved
+
+    serialize_chunk(ch)
+    return ser_buf
+}
+
+// ============================================================================
+// Section 12: Main entry point
+// ============================================================================
+
+fn main() {
+    let argv = args()
+    if len(argv) < 3 {
+        eprint("usage: clat compiler/latc.lat <input.lat> <output.latc>")
+        exit(1)
+    }
+
+    let input_path = argv[1]
+    let output_path = argv[2]
+
+    let source = read_file(input_path)
+    if source == nil {
+        eprint("error: cannot read '" + input_path + "'")
+        exit(1)
+    }
+
+    tokens = tokenize(source)
+    pos = 0
+
+    compile_program()
+
+    let ch_snap = snapshot_chunk()
+    let buf = serialize_latc(ch_snap)
+
+    let ok = write_file_bytes(output_path, buf)
+    if !ok {
+        eprint("error: cannot write '" + output_path + "'")
+        exit(1)
+    }
+}
+
+// main() is auto-called by the Lattice compiler

@@ -745,13 +745,12 @@ int main(int argc, char **argv) {
             no_assertions_mode = true;
         else if (strcmp(argv[i], "--tree-walk") == 0)
             tree_walk_mode = true;
-        else if (!file)
+        else if (!file) {
             file = argv[i];
-        else {
-            fprintf(stderr, "usage: clat [options] [file.lat | file.latc]\n"
-                            "       clat compile <file.lat> [-o output.latc]\n"
-                            "       clat test <file.lat>\n");
-            return 1;
+            /* Remaining args after filename are passed to the script via args() */
+            saved_argc = argc - i;
+            saved_argv = argv + i;
+            break;
         }
     }
 
