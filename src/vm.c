@@ -168,6 +168,12 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             v.as.str_val = strdup(src->as.str_val);
             return v;
         }
+        case VAL_BUFFER: {
+            LatValue v = *src;
+            v.as.buffer.data = malloc(src->as.buffer.cap);
+            memcpy(v.as.buffer.data, src->as.buffer.data, src->as.buffer.len);
+            return v;
+        }
         default:
             return value_deep_clone(src);
     }
@@ -219,6 +225,7 @@ static LatValue native_len(LatValue *args, int arg_count) {
     if (args[0].type == VAL_ARRAY) return value_int((int64_t)args[0].as.array.len);
     if (args[0].type == VAL_STR) return value_int((int64_t)strlen(args[0].as.str_val));
     if (args[0].type == VAL_MAP) return value_int((int64_t)lat_map_len(args[0].as.map.map));
+    if (args[0].type == VAL_BUFFER) return value_int((int64_t)args[0].as.buffer.len);
     return value_int(0);
 }
 
@@ -328,6 +335,62 @@ static LatValue native_channel_new(LatValue *args, int arg_count) {
     LatValue val = value_channel(ch);
     channel_release(ch);
     return val;
+}
+
+/* ── Buffer constructors ── */
+
+static LatValue native_buffer_new(LatValue *args, int arg_count) {
+    if (arg_count != 1 || args[0].type != VAL_INT) return value_buffer_alloc(0);
+    int64_t size = args[0].as.int_val;
+    if (size < 0) size = 0;
+    return value_buffer_alloc((size_t)size);
+}
+
+static LatValue native_buffer_from(LatValue *args, int arg_count) {
+    if (arg_count != 1 || args[0].type != VAL_ARRAY) return value_buffer(NULL, 0);
+    size_t len = args[0].as.array.len;
+    uint8_t *data = malloc(len > 0 ? len : 1);
+    for (size_t i = 0; i < len; i++) {
+        if (args[0].as.array.elems[i].type == VAL_INT)
+            data[i] = (uint8_t)(args[0].as.array.elems[i].as.int_val & 0xFF);
+        else
+            data[i] = 0;
+    }
+    LatValue buf = value_buffer(data, len);
+    free(data);
+    return buf;
+}
+
+static LatValue native_buffer_from_string(LatValue *args, int arg_count) {
+    if (arg_count != 1 || args[0].type != VAL_STR) return value_buffer(NULL, 0);
+    const char *s = args[0].as.str_val;
+    size_t len = strlen(s);
+    return value_buffer((const uint8_t *)s, len);
+}
+
+static LatValue native_read_file_bytes(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    FILE *f = fopen(args[0].as.str_val, "rb");
+    if (!f) return value_nil();
+    fseek(f, 0, SEEK_END);
+    long flen = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (flen < 0) { fclose(f); return value_nil(); }
+    uint8_t *data = malloc((size_t)flen);
+    size_t nread = fread(data, 1, (size_t)flen, f);
+    fclose(f);
+    LatValue buf = value_buffer(data, nread);
+    free(data);
+    return buf;
+}
+
+static LatValue native_write_file_bytes(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_BUFFER) return value_bool(false);
+    FILE *f = fopen(args[0].as.str_val, "wb");
+    if (!f) return value_bool(false);
+    size_t written = fwrite(args[1].as.buffer.data, 1, args[1].as.buffer.len, f);
+    fclose(f);
+    return value_bool(written == args[1].as.buffer.len);
 }
 
 /* ── Phase 6: Phase system helpers ── */
@@ -1984,6 +2047,9 @@ void vm_init(VM *vm) {
     vm_register_native(vm, "Set::new", native_set_new, 0);
     vm_register_native(vm, "Set::from", native_set_from, 1);
     vm_register_native(vm, "Channel::new", native_channel_new, 0);
+    vm_register_native(vm, "Buffer::new", native_buffer_new, 1);
+    vm_register_native(vm, "Buffer::from", native_buffer_from, 1);
+    vm_register_native(vm, "Buffer::from_string", native_buffer_from_string, 1);
     vm_register_native(vm, "phase_of", native_phase_of, 1);
     vm_register_native(vm, "assert", native_assert, 2);
     vm_register_native(vm, "version", native_version, 0);
@@ -2033,6 +2099,8 @@ void vm_init(VM *vm) {
     /* File system */
     vm_register_native(vm, "read_file", native_read_file, 1);
     vm_register_native(vm, "write_file", native_write_file, 2);
+    vm_register_native(vm, "read_file_bytes", native_read_file_bytes, 1);
+    vm_register_native(vm, "write_file_bytes", native_write_file_bytes, 2);
     vm_register_native(vm, "file_exists", native_file_exists, 1);
     vm_register_native(vm, "delete_file", native_delete_file, 1);
     vm_register_native(vm, "list_dir", native_list_dir, 1);
@@ -2518,6 +2586,21 @@ static const char *vm_find_pressure(VM *vm, const char *name) {
 #define MHASH_values           0x22383ff5u
 #define MHASH_variant_name     0xb2b2b8bau
 #define MHASH_zip              0x0b88c7d8u
+/* Buffer methods */
+#define MHASH_push_u16         0x1aaf75a0u
+#define MHASH_push_u32         0x1aaf75deu
+#define MHASH_read_u8          0x3ddb750du
+#define MHASH_write_u8         0x931616bcu
+#define MHASH_read_u16         0xf94a15fcu
+#define MHASH_write_u16        0xf5d8ed8bu
+#define MHASH_read_u32         0xf94a163au
+#define MHASH_write_u32        0xf5d8edc9u
+#define MHASH_clear            0x0f3b6d8cu
+#define MHASH_fill             0x7c96cb2cu
+#define MHASH_resize           0x192fa5b7u
+#define MHASH_to_string        0xd09c437eu
+#define MHASH_to_hex           0x1e83ed8cu
+#define MHASH_capacity         0x104ec913u
 
 static inline uint32_t method_hash(const char *s) {
     uint32_t h = 5381;
@@ -3661,6 +3744,212 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
         }
     }
 
+    /* ── Buffer methods ── */
+    if (obj->type == VAL_BUFFER) {
+        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+            push(vm, value_int((int64_t)obj->as.buffer.len));
+            return true;
+        }
+        if (mhash == MHASH_capacity && strcmp(method, "capacity") == 0 && arg_count == 0) {
+            push(vm, value_int((int64_t)obj->as.buffer.cap));
+            return true;
+        }
+        if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
+            LatValue val = pop(vm);
+            if (val.type != VAL_INT) { value_free(&val); push(vm, value_unit()); return true; }
+            if (obj->as.buffer.len >= obj->as.buffer.cap) {
+                obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
+                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
+            }
+            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(val.as.int_val & 0xFF);
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_push_u16 && strcmp(method, "push_u16") == 0 && arg_count == 1) {
+            LatValue val = pop(vm);
+            if (val.type != VAL_INT) { value_free(&val); push(vm, value_unit()); return true; }
+            uint16_t v = (uint16_t)(val.as.int_val & 0xFFFF);
+            while (obj->as.buffer.len + 2 > obj->as.buffer.cap) {
+                obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
+                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
+            }
+            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(v & 0xFF);
+            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_push_u32 && strcmp(method, "push_u32") == 0 && arg_count == 1) {
+            LatValue val = pop(vm);
+            if (val.type != VAL_INT) { value_free(&val); push(vm, value_unit()); return true; }
+            uint32_t v = (uint32_t)(val.as.int_val & 0xFFFFFFFF);
+            while (obj->as.buffer.len + 4 > obj->as.buffer.cap) {
+                obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
+                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
+            }
+            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(v & 0xFF);
+            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
+            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 16) & 0xFF);
+            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 24) & 0xFF);
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_read_u8 && strcmp(method, "read_u8") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val >= obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_u8: index out of bounds");
+                push(vm, value_int(0));
+                return true;
+            }
+            push(vm, value_int(obj->as.buffer.data[idx.as.int_val]));
+            return true;
+        }
+        if (mhash == MHASH_write_u8 && strcmp(method, "write_u8") == 0 && arg_count == 2) {
+            LatValue val = pop(vm);
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val >= obj->as.buffer.len) {
+                value_free(&idx); value_free(&val);
+                vm->error = strdup("Buffer.write_u8: index out of bounds");
+                push(vm, value_unit());
+                return true;
+            }
+            obj->as.buffer.data[idx.as.int_val] = (uint8_t)(val.as.int_val & 0xFF);
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_read_u16 && strcmp(method, "read_u16") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 2 > obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_u16: index out of bounds");
+                push(vm, value_int(0));
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            uint16_t v = (uint16_t)(obj->as.buffer.data[i] | (obj->as.buffer.data[i+1] << 8));
+            push(vm, value_int(v));
+            return true;
+        }
+        if (mhash == MHASH_write_u16 && strcmp(method, "write_u16") == 0 && arg_count == 2) {
+            LatValue val = pop(vm);
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 2 > obj->as.buffer.len) {
+                value_free(&idx); value_free(&val);
+                vm->error = strdup("Buffer.write_u16: index out of bounds");
+                push(vm, value_unit());
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            uint16_t v = (uint16_t)(val.as.int_val & 0xFFFF);
+            obj->as.buffer.data[i] = (uint8_t)(v & 0xFF);
+            obj->as.buffer.data[i+1] = (uint8_t)((v >> 8) & 0xFF);
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_read_u32 && strcmp(method, "read_u32") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_u32: index out of bounds");
+                push(vm, value_int(0));
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            uint32_t v = (uint32_t)obj->as.buffer.data[i]
+                       | ((uint32_t)obj->as.buffer.data[i+1] << 8)
+                       | ((uint32_t)obj->as.buffer.data[i+2] << 16)
+                       | ((uint32_t)obj->as.buffer.data[i+3] << 24);
+            push(vm, value_int((int64_t)v));
+            return true;
+        }
+        if (mhash == MHASH_write_u32 && strcmp(method, "write_u32") == 0 && arg_count == 2) {
+            LatValue val = pop(vm);
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
+                value_free(&idx); value_free(&val);
+                vm->error = strdup("Buffer.write_u32: index out of bounds");
+                push(vm, value_unit());
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            uint32_t v = (uint32_t)(val.as.int_val & 0xFFFFFFFF);
+            obj->as.buffer.data[i]   = (uint8_t)(v & 0xFF);
+            obj->as.buffer.data[i+1] = (uint8_t)((v >> 8) & 0xFF);
+            obj->as.buffer.data[i+2] = (uint8_t)((v >> 16) & 0xFF);
+            obj->as.buffer.data[i+3] = (uint8_t)((v >> 24) & 0xFF);
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && arg_count == 2) {
+            LatValue end_v = pop(vm);
+            LatValue start_v = pop(vm);
+            if (start_v.type != VAL_INT || end_v.type != VAL_INT) {
+                value_free(&start_v); value_free(&end_v);
+                vm->error = strdup("Buffer.slice: expected Int arguments");
+                push(vm, value_buffer(NULL, 0));
+                return true;
+            }
+            int64_t s = start_v.as.int_val, e = end_v.as.int_val;
+            if (s < 0) s = 0;
+            if (e > (int64_t)obj->as.buffer.len) e = (int64_t)obj->as.buffer.len;
+            if (s >= e) { push(vm, value_buffer(NULL, 0)); return true; }
+            push(vm, value_buffer(obj->as.buffer.data + s, (size_t)(e - s)));
+            return true;
+        }
+        if (mhash == MHASH_clear && strcmp(method, "clear") == 0 && arg_count == 0) {
+            obj->as.buffer.len = 0;
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_fill && strcmp(method, "fill") == 0 && arg_count == 1) {
+            LatValue val = pop(vm);
+            uint8_t byte = (val.type == VAL_INT) ? (uint8_t)(val.as.int_val & 0xFF) : 0;
+            memset(obj->as.buffer.data, byte, obj->as.buffer.len);
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_resize && strcmp(method, "resize") == 0 && arg_count == 1) {
+            LatValue val = pop(vm);
+            if (val.type != VAL_INT || val.as.int_val < 0) { value_free(&val); push(vm, value_unit()); return true; }
+            size_t new_len = (size_t)val.as.int_val;
+            if (new_len > obj->as.buffer.cap) {
+                obj->as.buffer.cap = new_len;
+                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
+            }
+            if (new_len > obj->as.buffer.len)
+                memset(obj->as.buffer.data + obj->as.buffer.len, 0, new_len - obj->as.buffer.len);
+            obj->as.buffer.len = new_len;
+            push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_to_string && strcmp(method, "to_string") == 0 && arg_count == 0) {
+            char *s = malloc(obj->as.buffer.len + 1);
+            memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
+            s[obj->as.buffer.len] = '\0';
+            push(vm, value_string_owned(s));
+            return true;
+        }
+        if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
+            size_t len = obj->as.buffer.len;
+            LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+            for (size_t i = 0; i < len; i++)
+                elems[i] = value_int(obj->as.buffer.data[i]);
+            LatValue arr = value_array(elems, len);
+            free(elems);
+            push(vm, arr);
+            return true;
+        }
+        if (mhash == MHASH_to_hex && strcmp(method, "to_hex") == 0 && arg_count == 0) {
+            size_t len = obj->as.buffer.len;
+            char *hex = malloc(len * 2 + 1);
+            for (size_t i = 0; i < len; i++)
+                snprintf(hex + i * 2, 3, "%02x", obj->as.buffer.data[i]);
+            hex[len * 2] = '\0';
+            push(vm, value_string_owned(hex));
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -4721,6 +5010,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     LatValue elem = value_deep_clone(&obj.as.tuple.elems[i]);
                     value_free(&obj);
                     push(vm, elem);
+                } else if (obj.type == VAL_BUFFER && idx.type == VAL_INT) {
+                    int64_t i = idx.as.int_val;
+                    if (i < 0 || (size_t)i >= obj.as.buffer.len) {
+                        value_free(&obj);
+                        VM_ERROR("buffer index out of bounds: %lld (len %zu)",
+                                 (long long)i, obj.as.buffer.len); break;
+                    }
+                    LatValue elem = value_int(obj.as.buffer.data[i]);
+                    value_free(&obj);
+                    push(vm, elem);
                 } else {
                     const char *ot = value_type_name(&obj);
                     const char *it = value_type_name(&idx);
@@ -4749,6 +5048,15 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 } else if (obj.type == VAL_MAP && idx.type == VAL_STR) {
                     lat_map_set(obj.as.map.map, idx.as.str_val, &val);
                     value_free(&idx);
+                    push(vm, obj);
+                } else if (obj.type == VAL_BUFFER && idx.type == VAL_INT) {
+                    int64_t i = idx.as.int_val;
+                    if (i < 0 || (size_t)i >= obj.as.buffer.len) {
+                        value_free(&obj); value_free(&val);
+                        VM_ERROR("buffer index out of bounds in assignment"); break;
+                    }
+                    obj.as.buffer.data[i] = (uint8_t)(val.as.int_val & 0xFF);
+                    value_free(&val);
                     push(vm, obj);
                 } else {
                     value_free(&obj); value_free(&idx); value_free(&val);
@@ -5351,6 +5659,15 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 } else if (obj->type == VAL_MAP && idx.type == VAL_STR) {
                     lat_map_set(obj->as.map.map, idx.as.str_val, &val);
                     value_free(&idx);
+                } else if (obj->type == VAL_BUFFER && idx.type == VAL_INT) {
+                    int64_t i = idx.as.int_val;
+                    if (i < 0 || (size_t)i >= obj->as.buffer.len) {
+                        value_free(&val);
+                        VM_ERROR("buffer index out of bounds: %lld (len %zu)",
+                            (long long)i, obj->as.buffer.len); break;
+                    }
+                    obj->as.buffer.data[i] = (uint8_t)(val.as.int_val & 0xFF);
+                    value_free(&val);
                 } else {
                     value_free(&val);
                     value_free(&idx);
@@ -6343,6 +6660,93 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 free(arm_info);
                 push(vm, select_result);
 #endif
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_LOAD_INT8:
+#endif
+            case OP_LOAD_INT8: {
+                int8_t val = (int8_t)READ_BYTE();
+                push(vm, value_int((int64_t)val));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_INC_LOCAL:
+#endif
+            case OP_INC_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                LatValue *lv = &frame->slots[slot];
+                if (lv->type == VAL_INT) {
+                    lv->as.int_val++;
+                } else {
+                    VM_ERROR("OP_INC_LOCAL: expected Int");
+                }
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_DEC_LOCAL:
+#endif
+            case OP_DEC_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                LatValue *lv = &frame->slots[slot];
+                if (lv->type == VAL_INT) {
+                    lv->as.int_val--;
+                } else {
+                    VM_ERROR("OP_DEC_LOCAL: expected Int");
+                }
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_ADD_INT:
+#endif
+            case OP_ADD_INT: {
+                LatValue b = pop(vm);
+                LatValue a = pop(vm);
+                push(vm, value_int(a.as.int_val + b.as.int_val));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SUB_INT:
+#endif
+            case OP_SUB_INT: {
+                LatValue b = pop(vm);
+                LatValue a = pop(vm);
+                push(vm, value_int(a.as.int_val - b.as.int_val));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_MUL_INT:
+#endif
+            case OP_MUL_INT: {
+                LatValue b = pop(vm);
+                LatValue a = pop(vm);
+                push(vm, value_int(a.as.int_val * b.as.int_val));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_LT_INT:
+#endif
+            case OP_LT_INT: {
+                LatValue b = pop(vm);
+                LatValue a = pop(vm);
+                push(vm, value_bool(a.as.int_val < b.as.int_val));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_LTEQ_INT:
+#endif
+            case OP_LTEQ_INT: {
+                LatValue b = pop(vm);
+                LatValue a = pop(vm);
+                push(vm, value_bool(a.as.int_val <= b.as.int_val));
                 break;
             }
 

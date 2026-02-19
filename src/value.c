@@ -194,6 +194,25 @@ LatValue value_tuple(LatValue *elems, size_t len) {
     return val;
 }
 
+LatValue value_buffer(const uint8_t *data, size_t len) {
+    LatValue val = { .type = VAL_BUFFER, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    size_t cap = len < 8 ? 8 : len;
+    val.as.buffer.data = lat_alloc(cap);
+    if (len > 0 && data) memcpy(val.as.buffer.data, data, len);
+    val.as.buffer.len = len;
+    val.as.buffer.cap = cap;
+    return val;
+}
+
+LatValue value_buffer_alloc(size_t size) {
+    LatValue val = { .type = VAL_BUFFER, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    size_t cap = size < 8 ? 8 : size;
+    val.as.buffer.data = lat_calloc(cap, 1);
+    val.as.buffer.len = size;
+    val.as.buffer.cap = cap;
+    return val;
+}
+
 /* ── Phase helpers ── */
 
 bool value_is_fluid(const LatValue *v) { return v->phase == VTAG_FLUID; }
@@ -381,6 +400,14 @@ LatValue value_deep_clone(const LatValue *v) {
             out.as.tuple.len = v->as.tuple.len;
             break;
         }
+        case VAL_BUFFER: {
+            size_t cap = v->as.buffer.cap;
+            out.as.buffer.data = lat_alloc(cap);
+            memcpy(out.as.buffer.data, v->as.buffer.data, v->as.buffer.len);
+            out.as.buffer.len = v->as.buffer.len;
+            out.as.buffer.cap = cap;
+            break;
+        }
     }
     return out;
 }
@@ -430,6 +457,7 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
             set_phase_recursive(&v->as.tuple.elems[i], phase);
         }
     }
+    /* VAL_BUFFER: just set phase tag (no nested values) */
 }
 
 LatValue value_freeze(LatValue v) {
@@ -627,6 +655,9 @@ char *value_display(const LatValue *v) {
             buf[tpos] = '\0';
             break;
         }
+        case VAL_BUFFER:
+            (void)asprintf(&buf, "Buffer<%zu bytes>", v->as.buffer.len);
+            break;
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
@@ -671,6 +702,19 @@ char *value_repr(const LatValue *v) {
         buf[slen + 2] = '\0';
         return buf;
     }
+    if (v->type == VAL_BUFFER) {
+        /* Buffer<N bytes: XX XX XX ...> (show first 8 bytes hex) */
+        size_t show = v->as.buffer.len < 8 ? v->as.buffer.len : 8;
+        size_t cap = 64 + show * 3;
+        char *buf = malloc(cap);
+        int pos = snprintf(buf, cap, "Buffer<%zu bytes:", v->as.buffer.len);
+        for (size_t i = 0; i < show; i++)
+            pos += snprintf(buf + pos, cap - (size_t)pos, " %02x", v->as.buffer.data[i]);
+        if (v->as.buffer.len > 8)
+            pos += snprintf(buf + pos, cap - (size_t)pos, " ...");
+        snprintf(buf + pos, cap - (size_t)pos, ">");
+        return buf;
+    }
     /* Everything else uses standard display */
     return value_display(v);
 }
@@ -694,6 +738,7 @@ const char *value_type_name(const LatValue *v) {
         case VAL_ENUM:    return "Enum";
         case VAL_SET:     return "Set";
         case VAL_TUPLE:   return "Tuple";
+        case VAL_BUFFER:  return "Buffer";
     }
     return "?";
 }
@@ -766,6 +811,9 @@ bool value_eq(const LatValue *a, const LatValue *b) {
                     return false;
             }
             return true;
+        case VAL_BUFFER:
+            if (a->as.buffer.len != b->as.buffer.len) return false;
+            return memcmp(a->as.buffer.data, b->as.buffer.data, a->as.buffer.len) == 0;
     }
     return false;
 }
@@ -861,6 +909,9 @@ void value_free(LatValue *v) {
                 value_free(&v->as.tuple.elems[i]);
             val_dealloc(v, v->as.tuple.elems);
             break;
+        case VAL_BUFFER:
+            val_dealloc(v, v->as.buffer.data);
+            break;
         default:
             break;
     }
@@ -881,6 +932,7 @@ bool value_is_truthy(const LatValue *v) {
         case VAL_SET:     return lat_map_len(v->as.set.map) > 0;
         case VAL_TUPLE:   return v->as.tuple.len > 0;
         case VAL_CHANNEL: return true;
+        case VAL_BUFFER:  return v->as.buffer.len > 0;
         default:          return true;
     }
 }

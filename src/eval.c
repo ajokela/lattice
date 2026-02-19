@@ -727,6 +727,7 @@ static bool type_matches_value(const LatValue *val, const TypeExpr *te) {
     if (strcmp(n, "Range") == 0)  return val->type == VAL_RANGE;
     if (strcmp(n, "Set") == 0)    return val->type == VAL_SET;
     if (strcmp(n, "Tuple") == 0)  return val->type == VAL_TUPLE;
+    if (strcmp(n, "Buffer") == 0) return val->type == VAL_BUFFER;
     if (strcmp(n, "Number") == 0) return val->type == VAL_INT || val->type == VAL_FLOAT;
     /* Struct name check */
     if (val->type == VAL_STRUCT && val->as.strct.name)
@@ -754,6 +755,7 @@ static const char *value_type_display(const LatValue *val) {
         case VAL_ENUM:    return val->as.enm.enum_name ? val->as.enm.enum_name : "Enum";
         case VAL_SET:     return "Set";
         case VAL_TUPLE:   return "Tuple";
+        case VAL_BUFFER:  return "Buffer";
     }
     return "Unknown";
 }
@@ -2232,6 +2234,44 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(arr);
                 }
 
+                /// @builtin read_file_bytes(path: String) -> Buffer
+                /// @category File System
+                /// Read the entire contents of a file as a Buffer.
+                /// @example read_file_bytes("data.bin")  // Buffer<...>
+                if (strcmp(fn_name, "read_file_bytes") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("read_file_bytes() expects 1 string argument")); }
+                    FILE *bf = fopen(args[0].as.str_val, "rb");
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (!bf) return eval_err(strdup("read_file_bytes: could not read file"));
+                    fseek(bf, 0, SEEK_END);
+                    long bflen = ftell(bf);
+                    fseek(bf, 0, SEEK_SET);
+                    if (bflen < 0) { fclose(bf); return eval_err(strdup("read_file_bytes: could not read file")); }
+                    uint8_t *bfdata = malloc((size_t)bflen);
+                    size_t bfnread = fread(bfdata, 1, (size_t)bflen, bf);
+                    fclose(bf);
+                    LatValue buf = value_buffer(bfdata, bfnread);
+                    free(bfdata);
+                    return eval_ok(buf);
+                }
+
+                /// @builtin write_file_bytes(path: String, buffer: Buffer) -> Bool
+                /// @category File System
+                /// Write a Buffer to a file.
+                /// @example write_file_bytes("out.bin", buf)  // true
+                if (strcmp(fn_name, "write_file_bytes") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_BUFFER) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("write_file_bytes() expects (String, Buffer)")); }
+                    FILE *wbf = fopen(args[0].as.str_val, "wb");
+                    if (!wbf) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("write_file_bytes: could not write file")); }
+                    size_t wbwritten = fwrite(args[1].as.buffer.data, 1, args[1].as.buffer.len, wbf);
+                    fclose(wbf);
+                    bool wbok = (wbwritten == args[1].as.buffer.len);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_bool(wbok));
+                }
+
                 /// @builtin append_file(path: String, content: String) -> Bool
                 /// @category File System
                 /// Append a string to the end of a file.
@@ -2849,6 +2889,65 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(set);
                 }
 
+                /// @builtin Buffer::new(size: Int) -> Buffer
+                /// @category Type Constructors
+                /// Create a new zero-filled buffer of the given size.
+                /// @example Buffer::new(16)  // Buffer<16 bytes>
+                if (strcmp(fn_name, "Buffer::new") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("Buffer::new() expects 1 Int argument"));
+                    }
+                    int64_t size = args[0].as.int_val;
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_buffer_alloc(size < 0 ? 0 : (size_t)size));
+                }
+
+                /// @builtin Buffer::from(arr: Array) -> Buffer
+                /// @category Type Constructors
+                /// Create a buffer from an array of byte integers (0-255).
+                /// @example Buffer::from([0xFF, 0x00, 0x42])
+                if (strcmp(fn_name, "Buffer::from") == 0) {
+                    if (argc != 1 || args[0].type != VAL_ARRAY) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("Buffer::from() expects 1 Array argument"));
+                    }
+                    size_t blen = args[0].as.array.len;
+                    uint8_t *data = malloc(blen > 0 ? blen : 1);
+                    for (size_t bi = 0; bi < blen; bi++) {
+                        if (args[0].as.array.elems[bi].type == VAL_INT)
+                            data[bi] = (uint8_t)(args[0].as.array.elems[bi].as.int_val & 0xFF);
+                        else
+                            data[bi] = 0;
+                    }
+                    LatValue buf = value_buffer(data, blen);
+                    free(data);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(buf);
+                }
+
+                /// @builtin Buffer::from_string(s: String) -> Buffer
+                /// @category Type Constructors
+                /// Create a buffer from a UTF-8 string.
+                /// @example Buffer::from_string("hello")
+                if (strcmp(fn_name, "Buffer::from_string") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("Buffer::from_string() expects 1 String argument"));
+                    }
+                    const char *s = args[0].as.str_val;
+                    size_t slen = strlen(s);
+                    LatValue buf = value_buffer((const uint8_t *)s, slen);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(buf);
+                }
+
                 /// @builtin parse_int(s: String) -> Int
                 /// @category Type Conversion
                 /// Parse a string as an integer.
@@ -2914,6 +3013,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     else if (args[0].type == VAL_ARRAY) l = (int64_t)args[0].as.array.len;
                     else if (args[0].type == VAL_MAP) l = (int64_t)lat_map_len(args[0].as.map.map);
                     else if (args[0].type == VAL_SET) l = (int64_t)lat_map_len(args[0].as.set.map);
+                    else if (args[0].type == VAL_BUFFER) l = (int64_t)args[0].as.buffer.len;
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (l < 0) return eval_err(strdup("len() not supported on this type"));
@@ -4758,9 +4858,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     (void)asprintf(&err, "undefined variable '%s'", var_name);
                     return eval_err(err);
                 }
-                if (existing.type != VAL_ARRAY) {
+                if (existing.type != VAL_ARRAY && existing.type != VAL_BUFFER) {
                     value_free(&existing);
                     return eval_err(strdup(".push() is not defined on non-array"));
+                }
+                /* Buffer push: handle via resolve_lvalue path below */
+                if (existing.type == VAL_BUFFER) {
+                    value_free(&existing);
+                    goto buffer_mutating_methods;
                 }
                 if (value_is_crystal(&existing)) {
                     value_free(&existing);
@@ -5074,6 +5179,180 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (lv_err) free(lv_err);
             }
 
+            /* ── Buffer mutating methods ── */
+            buffer_mutating_methods:
+            if (strcmp(expr->as.method_call.method, "push") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(vr)) return vr;
+                    uint8_t byte = (vr.value.type == VAL_INT) ? (uint8_t)(vr.value.as.int_val & 0xFF) : 0;
+                    value_free(&vr.value);
+                    if (buf_lv->as.buffer.len >= buf_lv->as.buffer.cap) {
+                        buf_lv->as.buffer.cap = buf_lv->as.buffer.cap ? buf_lv->as.buffer.cap * 2 : 8;
+                        buf_lv->as.buffer.data = realloc(buf_lv->as.buffer.data, buf_lv->as.buffer.cap);
+                    }
+                    buf_lv->as.buffer.data[buf_lv->as.buffer.len++] = byte;
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "push_u16") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(vr)) return vr;
+                    uint16_t v = (vr.value.type == VAL_INT) ? (uint16_t)(vr.value.as.int_val & 0xFFFF) : 0;
+                    value_free(&vr.value);
+                    while (buf_lv->as.buffer.len + 2 > buf_lv->as.buffer.cap) {
+                        buf_lv->as.buffer.cap = buf_lv->as.buffer.cap ? buf_lv->as.buffer.cap * 2 : 8;
+                        buf_lv->as.buffer.data = realloc(buf_lv->as.buffer.data, buf_lv->as.buffer.cap);
+                    }
+                    buf_lv->as.buffer.data[buf_lv->as.buffer.len++] = (uint8_t)(v & 0xFF);
+                    buf_lv->as.buffer.data[buf_lv->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "push_u32") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(vr)) return vr;
+                    uint32_t v = (vr.value.type == VAL_INT) ? (uint32_t)(vr.value.as.int_val & 0xFFFFFFFF) : 0;
+                    value_free(&vr.value);
+                    while (buf_lv->as.buffer.len + 4 > buf_lv->as.buffer.cap) {
+                        buf_lv->as.buffer.cap = buf_lv->as.buffer.cap ? buf_lv->as.buffer.cap * 2 : 8;
+                        buf_lv->as.buffer.data = realloc(buf_lv->as.buffer.data, buf_lv->as.buffer.cap);
+                    }
+                    buf_lv->as.buffer.data[buf_lv->as.buffer.len++] = (uint8_t)(v & 0xFF);
+                    buf_lv->as.buffer.data[buf_lv->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
+                    buf_lv->as.buffer.data[buf_lv->as.buffer.len++] = (uint8_t)((v >> 16) & 0xFF);
+                    buf_lv->as.buffer.data[buf_lv->as.buffer.len++] = (uint8_t)((v >> 24) & 0xFF);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "write_u8") == 0 &&
+                expr->as.method_call.arg_count == 2) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ir)) return ir;
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[1]);
+                    if (!IS_OK(vr)) { value_free(&ir.value); return vr; }
+                    if (ir.value.type != VAL_INT || ir.value.as.int_val < 0 || (size_t)ir.value.as.int_val >= buf_lv->as.buffer.len) {
+                        value_free(&ir.value); value_free(&vr.value);
+                        return eval_err(strdup("Buffer.write_u8: index out of bounds"));
+                    }
+                    buf_lv->as.buffer.data[ir.value.as.int_val] = (uint8_t)(vr.value.as.int_val & 0xFF);
+                    value_free(&ir.value); value_free(&vr.value);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "write_u16") == 0 &&
+                expr->as.method_call.arg_count == 2) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ir)) return ir;
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[1]);
+                    if (!IS_OK(vr)) { value_free(&ir.value); return vr; }
+                    size_t idx = (size_t)ir.value.as.int_val;
+                    if (ir.value.type != VAL_INT || idx + 2 > buf_lv->as.buffer.len) {
+                        value_free(&ir.value); value_free(&vr.value);
+                        return eval_err(strdup("Buffer.write_u16: index out of bounds"));
+                    }
+                    uint16_t v = (uint16_t)(vr.value.as.int_val & 0xFFFF);
+                    buf_lv->as.buffer.data[idx] = (uint8_t)(v & 0xFF);
+                    buf_lv->as.buffer.data[idx+1] = (uint8_t)((v >> 8) & 0xFF);
+                    value_free(&ir.value); value_free(&vr.value);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "write_u32") == 0 &&
+                expr->as.method_call.arg_count == 2) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ir)) return ir;
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[1]);
+                    if (!IS_OK(vr)) { value_free(&ir.value); return vr; }
+                    size_t idx = (size_t)ir.value.as.int_val;
+                    if (ir.value.type != VAL_INT || idx + 4 > buf_lv->as.buffer.len) {
+                        value_free(&ir.value); value_free(&vr.value);
+                        return eval_err(strdup("Buffer.write_u32: index out of bounds"));
+                    }
+                    uint32_t v = (uint32_t)(vr.value.as.int_val & 0xFFFFFFFF);
+                    buf_lv->as.buffer.data[idx]   = (uint8_t)(v & 0xFF);
+                    buf_lv->as.buffer.data[idx+1] = (uint8_t)((v >> 8) & 0xFF);
+                    buf_lv->as.buffer.data[idx+2] = (uint8_t)((v >> 16) & 0xFF);
+                    buf_lv->as.buffer.data[idx+3] = (uint8_t)((v >> 24) & 0xFF);
+                    value_free(&ir.value); value_free(&vr.value);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "clear") == 0 &&
+                expr->as.method_call.arg_count == 0) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    buf_lv->as.buffer.len = 0;
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "fill") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(vr)) return vr;
+                    uint8_t byte = (vr.value.type == VAL_INT) ? (uint8_t)(vr.value.as.int_val & 0xFF) : 0;
+                    value_free(&vr.value);
+                    memset(buf_lv->as.buffer.data, byte, buf_lv->as.buffer.len);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "resize") == 0 &&
+                expr->as.method_call.arg_count == 1) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(vr)) return vr;
+                    if (vr.value.type != VAL_INT || vr.value.as.int_val < 0) {
+                        value_free(&vr.value);
+                        return eval_ok(value_unit());
+                    }
+                    size_t new_len = (size_t)vr.value.as.int_val;
+                    value_free(&vr.value);
+                    if (new_len > buf_lv->as.buffer.cap) {
+                        buf_lv->as.buffer.cap = new_len;
+                        buf_lv->as.buffer.data = realloc(buf_lv->as.buffer.data, buf_lv->as.buffer.cap);
+                    }
+                    if (new_len > buf_lv->as.buffer.len)
+                        memset(buf_lv->as.buffer.data + buf_lv->as.buffer.len, 0, new_len - buf_lv->as.buffer.len);
+                    buf_lv->as.buffer.len = new_len;
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+
             EvalResult objr = eval_expr(ev, expr->as.method_call.object);
             if (!IS_OK(objr)) return objr;
             /* Optional chaining: if receiver is nil, return nil */
@@ -5224,6 +5503,21 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue result = found ? value_deep_clone(found) : value_unit();
                 value_free(&objr.value);
                 value_free(&idxr.value);
+                return eval_ok(result);
+            }
+            /* Buffer indexing: buf[i] -> Int (0-255) */
+            if (objr.value.type == VAL_BUFFER && idxr.value.type == VAL_INT) {
+                size_t bidx = (size_t)idxr.value.as.int_val;
+                value_free(&idxr.value);
+                if (bidx >= objr.value.as.buffer.len) {
+                    char *berr = NULL;
+                    (void)asprintf(&berr, "buffer index %zu out of bounds (length %zu)",
+                                   bidx, objr.value.as.buffer.len);
+                    value_free(&objr.value);
+                    return eval_err(berr);
+                }
+                LatValue result = value_int(objr.value.as.buffer.data[bidx]);
+                value_free(&objr.value);
                 return eval_ok(result);
             }
             char *err = NULL;
@@ -6887,6 +7181,38 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 return eval_ok(value_unit());
             }
 
+            /* Buffer index assignment: buf[i] = byte (must be handled before resolve_lvalue
+             * since buffers store raw bytes, not LatValues) */
+            if (stmt->as.assign.target->tag == EXPR_INDEX) {
+                char *buf_chk_err = NULL;
+                LatValue *buf_chk = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &buf_chk_err);
+                if (buf_chk_err) free(buf_chk_err);
+                if (buf_chk && buf_chk->type == VAL_BUFFER) {
+                    EvalResult buf_idxr = eval_expr(ev, stmt->as.assign.target->as.index.index);
+                    if (!IS_OK(buf_idxr)) { value_free(&valr.value); return buf_idxr; }
+                    if (buf_idxr.value.type != VAL_INT) {
+                        value_free(&buf_idxr.value); value_free(&valr.value);
+                        return eval_err(strdup("buffer index must be an integer"));
+                    }
+                    size_t bidx = (size_t)buf_idxr.value.as.int_val;
+                    value_free(&buf_idxr.value);
+                    if (bidx >= buf_chk->as.buffer.len) {
+                        value_free(&valr.value);
+                        char *berr = NULL;
+                        (void)asprintf(&berr, "buffer index %zu out of bounds (length %zu)",
+                                       bidx, buf_chk->as.buffer.len);
+                        return eval_err(berr);
+                    }
+                    if (valr.value.type != VAL_INT) {
+                        value_free(&valr.value);
+                        return eval_err(strdup("buffer element must be an integer"));
+                    }
+                    buf_chk->as.buffer.data[bidx] = (uint8_t)(valr.value.as.int_val & 0xFF);
+                    value_free(&valr.value);
+                    return eval_ok(value_unit());
+                }
+            }
+
             /* For field access, index, and nested chains: use resolve_lvalue */
             char *lv_err = NULL;
             LatValue *target = resolve_lvalue(ev, stmt->as.assign.target, &lv_err);
@@ -7515,6 +7841,180 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         return eval_err(err2);
     }
 
+    /* ── Buffer methods ── */
+    if (obj.type == VAL_BUFFER) {
+        /// @method Buffer.len() -> Int
+        /// @category Buffer Methods
+        /// Return the number of bytes in the buffer.
+        /// @example buf.len()
+        if (strcmp(method, "len") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".len() takes no arguments"));
+            return eval_ok(value_int((int64_t)obj.as.buffer.len));
+        }
+        /// @method Buffer.capacity() -> Int
+        /// @category Buffer Methods
+        /// Return the current capacity of the buffer.
+        /// @example buf.capacity()
+        if (strcmp(method, "capacity") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".capacity() takes no arguments"));
+            return eval_ok(value_int((int64_t)obj.as.buffer.cap));
+        }
+        /// @method Buffer.push(byte: Int) -> Unit
+        /// @category Buffer Methods
+        /// Append a single byte (0-255) to the buffer.
+        /// @example buf.push(0x42)
+        if (strcmp(method, "push") == 0) {
+            if (arg_count != 1) return eval_err(strdup("Buffer.push() expects 1 argument"));
+            /* Note: in tree-walker, push on copy doesn't mutate original */
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.push_u16(val: Int) -> Unit
+        /// @category Buffer Methods
+        /// Append a 16-bit value as 2 bytes (little-endian).
+        /// @example buf.push_u16(0x1234)
+        if (strcmp(method, "push_u16") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.push_u32(val: Int) -> Unit
+        /// @category Buffer Methods
+        /// Append a 32-bit value as 4 bytes (little-endian).
+        /// @example buf.push_u32(0x12345678)
+        if (strcmp(method, "push_u32") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.read_u8(idx: Int) -> Int
+        /// @category Buffer Methods
+        /// Read a single byte at the given index.
+        /// @example buf.read_u8(0)
+        if (strcmp(method, "read_u8") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_u8() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i >= obj.as.buffer.len) return eval_err(strdup("Buffer.read_u8: index out of bounds"));
+            return eval_ok(value_int(obj.as.buffer.data[i]));
+        }
+        /// @method Buffer.write_u8(idx: Int, val: Int) -> Unit
+        /// @category Buffer Methods
+        /// Write a single byte at the given index.
+        /// @example buf.write_u8(0, 42)
+        if (strcmp(method, "write_u8") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.read_u16(idx: Int) -> Int
+        /// @category Buffer Methods
+        /// Read a 16-bit value (little-endian) at the given index.
+        /// @example buf.read_u16(0)
+        if (strcmp(method, "read_u16") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_u16() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 2 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_u16: index out of bounds"));
+            uint16_t v = (uint16_t)(obj.as.buffer.data[i] | (obj.as.buffer.data[i+1] << 8));
+            return eval_ok(value_int(v));
+        }
+        /// @method Buffer.write_u16(idx: Int, val: Int) -> Unit
+        /// @category Buffer Methods
+        /// Write a 16-bit value (little-endian) at the given index.
+        /// @example buf.write_u16(0, 0x1234)
+        if (strcmp(method, "write_u16") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.read_u32(idx: Int) -> Int
+        /// @category Buffer Methods
+        /// Read a 32-bit value (little-endian) at the given index.
+        /// @example buf.read_u32(0)
+        if (strcmp(method, "read_u32") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_u32() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 4 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_u32: index out of bounds"));
+            uint32_t v = (uint32_t)obj.as.buffer.data[i]
+                       | ((uint32_t)obj.as.buffer.data[i+1] << 8)
+                       | ((uint32_t)obj.as.buffer.data[i+2] << 16)
+                       | ((uint32_t)obj.as.buffer.data[i+3] << 24);
+            return eval_ok(value_int((int64_t)v));
+        }
+        /// @method Buffer.write_u32(idx: Int, val: Int) -> Unit
+        /// @category Buffer Methods
+        /// Write a 32-bit value (little-endian) at the given index.
+        /// @example buf.write_u32(0, 0x12345678)
+        if (strcmp(method, "write_u32") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.slice(start: Int, end: Int) -> Buffer
+        /// @category Buffer Methods
+        /// Return a new buffer containing bytes from start (inclusive) to end (exclusive).
+        /// @example buf.slice(0, 4)
+        if (strcmp(method, "slice") == 0) {
+            if (arg_count != 2) return eval_err(strdup("Buffer.slice() expects 2 arguments"));
+            if (args[0].type != VAL_INT || args[1].type != VAL_INT) return eval_err(strdup("Buffer.slice() expects Int arguments"));
+            int64_t s = args[0].as.int_val, e = args[1].as.int_val;
+            if (s < 0) s = 0;
+            if (e > (int64_t)obj.as.buffer.len) e = (int64_t)obj.as.buffer.len;
+            if (s >= e) return eval_ok(value_buffer(NULL, 0));
+            return eval_ok(value_buffer(obj.as.buffer.data + s, (size_t)(e - s)));
+        }
+        /// @method Buffer.clear() -> Unit
+        /// @category Buffer Methods
+        /// Set the buffer length to 0 (capacity unchanged).
+        /// @example buf.clear()
+        if (strcmp(method, "clear") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.fill(byte: Int) -> Unit
+        /// @category Buffer Methods
+        /// Fill all bytes in the buffer with the given value.
+        /// @example buf.fill(0)
+        if (strcmp(method, "fill") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.resize(new_len: Int) -> Unit
+        /// @category Buffer Methods
+        /// Change the buffer length. New bytes are zero-filled.
+        /// @example buf.resize(32)
+        if (strcmp(method, "resize") == 0) {
+            return eval_ok(value_unit());
+        }
+        /// @method Buffer.to_string() -> String
+        /// @category Buffer Methods
+        /// Interpret the buffer contents as a UTF-8 string.
+        /// @example Buffer::from_string("hi").to_string()  // "hi"
+        if (strcmp(method, "to_string") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".to_string() takes no arguments"));
+            char *s = malloc(obj.as.buffer.len + 1);
+            memcpy(s, obj.as.buffer.data, obj.as.buffer.len);
+            s[obj.as.buffer.len] = '\0';
+            return eval_ok(value_string_owned(s));
+        }
+        /// @method Buffer.to_array() -> Array
+        /// @category Buffer Methods
+        /// Convert the buffer to an array of integers (0-255).
+        /// @example buf.to_array()
+        if (strcmp(method, "to_array") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".to_array() takes no arguments"));
+            size_t blen = obj.as.buffer.len;
+            LatValue *elems = malloc((blen > 0 ? blen : 1) * sizeof(LatValue));
+            for (size_t i = 0; i < blen; i++)
+                elems[i] = value_int(obj.as.buffer.data[i]);
+            LatValue arr = value_array(elems, blen);
+            free(elems);
+            return eval_ok(arr);
+        }
+        /// @method Buffer.to_hex() -> String
+        /// @category Buffer Methods
+        /// Convert the buffer contents to a hexadecimal string.
+        /// @example Buffer::from([0x48, 0x69]).to_hex()  // "4869"
+        if (strcmp(method, "to_hex") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".to_hex() takes no arguments"));
+            size_t blen = obj.as.buffer.len;
+            char *hex = malloc(blen * 2 + 1);
+            for (size_t i = 0; i < blen; i++)
+                snprintf(hex + i * 2, 3, "%02x", obj.as.buffer.data[i]);
+            hex[blen * 2] = '\0';
+            return eval_ok(value_string_owned(hex));
+        }
+        char *berr2 = NULL;
+        (void)asprintf(&berr2, "Buffer has no method '%s'", method);
+        return eval_err(berr2);
+    }
+
     /// @method Array.push(val: Any) -> Unit
     /// @category Array Methods
     /// Append a value to the end of the array (mutates in place).
@@ -7544,6 +8044,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (obj.type == VAL_STR) return eval_ok(value_int((int64_t)strlen(obj.as.str_val)));
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
         if (obj.type == VAL_TUPLE) return eval_ok(value_int((int64_t)obj.as.tuple.len));
+        if (obj.type == VAL_BUFFER) return eval_ok(value_int((int64_t)obj.as.buffer.len));
         return eval_err(strdup(".len() is not defined on this type"));
     }
     /// @method Array.map(fn: Closure) -> Array

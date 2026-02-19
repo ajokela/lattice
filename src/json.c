@@ -490,6 +490,17 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
             jb_append_char(b, ']');
             return true;
         }
+        case VAL_BUFFER: {
+            jb_append_char(b, '[');
+            for (size_t i = 0; i < val->as.buffer.len; i++) {
+                if (i > 0) jb_append_char(b, ',');
+                char num[8];
+                snprintf(num, sizeof(num), "%u", val->as.buffer.data[i]);
+                jb_append_str(b, num);
+            }
+            jb_append_char(b, ']');
+            return true;
+        }
         case VAL_STRUCT:
         case VAL_CLOSURE:
         case VAL_RANGE:

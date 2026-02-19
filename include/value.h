@@ -19,6 +19,7 @@ typedef enum {
     VAL_ENUM,
     VAL_SET,
     VAL_TUPLE,
+    VAL_BUFFER,
 } ValueType;
 
 /* Forward declarations */
@@ -82,6 +83,11 @@ struct LatValue {
             LatValue *elems;
             size_t    len;
         } tuple;
+        struct {
+            uint8_t *data;
+            size_t   len;
+            size_t   cap;
+        } buffer;
     } as;
 };
 
@@ -103,6 +109,8 @@ LatValue value_channel(struct LatChannel *ch);
 LatValue value_enum(const char *enum_name, const char *variant_name, LatValue *payload, size_t count);
 LatValue value_set_new(void);
 LatValue value_tuple(LatValue *elems, size_t len);
+LatValue value_buffer(const uint8_t *data, size_t len);
+LatValue value_buffer_alloc(size_t cap);
 
 /* ── Phase helpers ── */
 bool value_is_fluid(const LatValue *v);

@@ -1732,3 +1732,168 @@ TEST(trait_multiple_impls) {
         "}\n"
     );
 }
+
+/* ── Buffer tests ── */
+
+TEST(eval_buffer_new) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(16)\n"
+        "assert(len(buf) == 16)\n"
+        "assert(buf.len() == 16)\n"
+        "assert(buf[0] == 0)\n"
+    );
+}
+
+TEST(eval_buffer_from_array) {
+    ASSERT_RUNS(
+        "let buf = Buffer::from([255, 0, 66])\n"
+        "assert(buf.len() == 3)\n"
+        "assert(buf[0] == 255)\n"
+        "assert(buf[1] == 0)\n"
+        "assert(buf[2] == 66)\n"
+    );
+}
+
+TEST(eval_buffer_from_string) {
+    ASSERT_RUNS(
+        "let buf = Buffer::from_string(\"Hi\")\n"
+        "assert(buf.len() == 2)\n"
+        "assert(buf[0] == 72)\n"
+        "assert(buf[1] == 105)\n"
+    );
+}
+
+TEST(eval_buffer_index_read_write) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(4)\n"
+        "buf[0] = 42\n"
+        "buf[1] = 255\n"
+        "assert(buf[0] == 42)\n"
+        "assert(buf[1] == 255)\n"
+    );
+}
+
+TEST(eval_buffer_push) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(0)\n"
+        "buf.push(72)\n"
+        "buf.push(105)\n"
+        "assert(buf.len() == 2)\n"
+        "assert(buf[0] == 72)\n"
+        "assert(buf[1] == 105)\n"
+    );
+}
+
+TEST(eval_buffer_push_u16_u32) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(0)\n"
+        "buf.push_u16(258)\n"
+        "assert(buf.len() == 2)\n"
+        "assert(buf[0] == 2)\n"
+        "assert(buf[1] == 1)\n"
+        "buf.push_u32(67305985)\n"
+        "assert(buf.len() == 6)\n"
+        "assert(buf[2] == 1)\n"
+        "assert(buf[3] == 2)\n"
+        "assert(buf[4] == 3)\n"
+        "assert(buf[5] == 4)\n"
+    );
+}
+
+TEST(eval_buffer_read_write_u16) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(4)\n"
+        "buf.write_u16(0, 4660)\n"
+        "assert(buf.read_u16(0) == 4660)\n"
+        "assert(buf[0] == 52)\n"
+        "assert(buf[1] == 18)\n"
+    );
+}
+
+TEST(eval_buffer_read_write_u32) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(8)\n"
+        "buf.write_u32(0, 3735928559)\n"
+        "assert(buf.read_u32(0) == 3735928559)\n"
+        "assert(buf[0] == 239)\n"
+        "assert(buf[1] == 190)\n"
+        "assert(buf[2] == 173)\n"
+        "assert(buf[3] == 222)\n"
+    );
+}
+
+TEST(eval_buffer_slice) {
+    ASSERT_RUNS(
+        "let buf = Buffer::from([10, 20, 30, 40, 50])\n"
+        "let s = buf.slice(1, 4)\n"
+        "assert(s.len() == 3)\n"
+        "assert(s[0] == 20)\n"
+        "assert(s[1] == 30)\n"
+        "assert(s[2] == 40)\n"
+    );
+}
+
+TEST(eval_buffer_to_string) {
+    ASSERT_RUNS(
+        "let buf = Buffer::from_string(\"hello\")\n"
+        "assert(buf.to_string() == \"hello\")\n"
+    );
+}
+
+TEST(eval_buffer_to_array) {
+    ASSERT_RUNS(
+        "let buf = Buffer::from([1, 2, 3])\n"
+        "let arr = buf.to_array()\n"
+        "assert(len(arr) == 3)\n"
+        "assert(arr[0] == 1)\n"
+        "assert(arr[1] == 2)\n"
+        "assert(arr[2] == 3)\n"
+    );
+}
+
+TEST(eval_buffer_to_hex) {
+    ASSERT_RUNS(
+        "let buf = Buffer::from([72, 101, 108])\n"
+        "assert(buf.to_hex() == \"48656c\")\n"
+    );
+}
+
+TEST(eval_buffer_clear_fill_resize) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(4)\n"
+        "buf.fill(255)\n"
+        "assert(buf[0] == 255)\n"
+        "assert(buf[3] == 255)\n"
+        "buf.clear()\n"
+        "assert(buf.len() == 0)\n"
+        "buf.resize(8)\n"
+        "assert(buf.len() == 8)\n"
+        "assert(buf[0] == 0)\n"
+    );
+}
+
+TEST(eval_buffer_equality) {
+    ASSERT_RUNS(
+        "let a = Buffer::from([1, 2, 3])\n"
+        "let b = Buffer::from([1, 2, 3])\n"
+        "let c = Buffer::from([1, 2, 4])\n"
+        "assert(a == b)\n"
+        "assert(a != c)\n"
+    );
+}
+
+TEST(eval_buffer_typeof) {
+    ASSERT_RUNS(
+        "let buf = Buffer::new(4)\n"
+        "assert(typeof(buf) == \"Buffer\")\n"
+    );
+}
+
+TEST(eval_buffer_freeze_thaw) {
+    ASSERT_RUNS(
+        "flux buf = Buffer::from([1, 2, 3])\n"
+        "freeze(buf)\n"
+        "let buf2 = thaw(buf)\n"
+        "assert(buf2.len() == 3)\n"
+    );
+}
