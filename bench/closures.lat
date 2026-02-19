@@ -1,0 +1,21 @@
+// Benchmark: closure creation, capture, and invocation
+fn make_adder(x: Int) -> Fn {
+    return |y| { x + y }
+}
+
+fn compose(f: Fn, g: Fn) -> Fn {
+    return |x| { f(g(x)) }
+}
+
+fn main() {
+    flux total = 0
+    flux i = 0
+    while i < 1000 {
+        let add_i = make_adder(i)
+        let double = |x| { x * 2 }
+        let combined = compose(add_i, double)
+        total += combined(i)
+        i += 1
+    }
+    print(to_string(total))
+}

@@ -38,6 +38,7 @@ BENCHMARKS = [
     ("sieve",           "Array operations"),
     ("map_operations",  "Map operations"),
     ("string_concat",   "String operations"),
+    ("closures",        "Closures"),
 ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
