@@ -585,6 +585,25 @@ static void compile_expr(const Expr *e, int line) {
                     emit_bytes(OP_UNSEED, (uint8_t)idx, line);
                     break;
                 }
+                /* track(var) / history(var) / phases(var): pass var name as string */
+                if ((strcmp(fn, "track") == 0 || strcmp(fn, "history") == 0 ||
+                     strcmp(fn, "phases") == 0) &&
+                    e->as.call.arg_count == 1 &&
+                    e->as.call.args[0]->tag == EXPR_IDENT) {
+                    compile_expr(e->as.call.func, line);
+                    emit_constant(value_string(e->as.call.args[0]->as.str_val), line);
+                    emit_bytes(OP_CALL, 1, line);
+                    break;
+                }
+                /* rewind(var, n): pass var name as string, compile second arg normally */
+                if (strcmp(fn, "rewind") == 0 && e->as.call.arg_count == 2 &&
+                    e->as.call.args[0]->tag == EXPR_IDENT) {
+                    compile_expr(e->as.call.func, line);
+                    emit_constant(value_string(e->as.call.args[0]->as.str_val), line);
+                    compile_expr(e->as.call.args[1], line);
+                    emit_bytes(OP_CALL, 2, line);
+                    break;
+                }
                 /* pressurize(var, mode) / depressurize(var): pass var name as string */
                 if (strcmp(fn, "pressurize") == 0 && e->as.call.arg_count == 2 &&
                     e->as.call.args[0]->tag == EXPR_IDENT) {

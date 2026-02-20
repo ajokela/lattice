@@ -1354,7 +1354,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.8"
+        "0.3.9"
     );
 }
 
@@ -5309,7 +5309,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.8"
+        "Hello, Lattice!\nVersion 0.3.9"
     );
 }
 
@@ -6721,6 +6721,130 @@ static void test_phases_output_format(void) {
         "    print(h[0][\"value\"])\n"
         "}\n",
         "fluid\n42"
+    );
+}
+
+/* ======================================================================
+ * history() and identifier arguments
+ * ====================================================================== */
+
+static void test_history_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    track(\"x\")\n"
+        "    x = 20\n"
+        "    freeze(x)\n"
+        "    let h = history(\"x\")\n"
+        "    print(len(h))\n"
+        "    print(h[0][\"phase\"])\n"
+        "    print(h[0][\"value\"])\n"
+        "    print(h[2][\"phase\"])\n"
+        "    print(h[2][\"value\"])\n"
+        "}\n",
+        "3\nfluid\n10\ncrystal\n20"
+    );
+}
+
+static void test_history_has_line_and_fn(void) {
+    /* Tree-walker sets line=0, fn=nil; VM sets real values.
+     * This test verifies the keys exist in the map. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    track(\"x\")\n"
+        "    x = 20\n"
+        "    let h = history(\"x\")\n"
+        "    print(typeof(h[0][\"line\"]))\n"
+        "    print(typeof(h[1][\"line\"]))\n"
+        "    print(h[0][\"phase\"])\n"
+        "}\n",
+        "Int\nInt\nfluid"
+    );
+}
+
+static void test_history_ident_arg(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    track(x)\n"
+        "    x = 99\n"
+        "    let h = history(x)\n"
+        "    print(len(h))\n"
+        "    print(h[0][\"value\"])\n"
+        "    print(h[1][\"value\"])\n"
+        "}\n",
+        "2\n42\n99"
+    );
+}
+
+static void test_track_ident_arg(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 5\n"
+        "    track(x)\n"
+        "    x = 10\n"
+        "    let h = phases(x)\n"
+        "    print(len(h))\n"
+        "    print(h[1][\"value\"])\n"
+        "}\n",
+        "2\n10"
+    );
+}
+
+static void test_history_untracked_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let h = history(\"nonexistent\")\n"
+        "    print(len(h))\n"
+        "}\n",
+        "0"
+    );
+}
+
+static void test_phases_still_works_with_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 1\n"
+        "    track(\"x\")\n"
+        "    x = 2\n"
+        "    let h = phases(\"x\")\n"
+        "    print(len(h))\n"
+        "    print(h[0][\"value\"])\n"
+        "    print(h[1][\"value\"])\n"
+        "}\n",
+        "2\n1\n2"
+    );
+}
+
+static void test_rewind_ident_arg(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 100\n"
+        "    track(x)\n"
+        "    x = 200\n"
+        "    x = 300\n"
+        "    print(rewind(x, 0))\n"
+        "    print(rewind(x, 1))\n"
+        "    print(rewind(x, 2))\n"
+        "}\n",
+        "300\n200\n100"
+    );
+}
+
+static void test_phases_has_line_and_fn(void) {
+    /* Tree-walker sets line=0, fn=nil; verify keys exist. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux y = 5\n"
+        "    track(y)\n"
+        "    y = 10\n"
+        "    let h = phases(y)\n"
+        "    print(typeof(h[0][\"line\"]))\n"
+        "    print(typeof(h[0][\"phase\"]))\n"
+        "    print(h[0][\"value\"])\n"
+        "}\n",
+        "Int\nString\n5"
     );
 }
 
@@ -9214,6 +9338,16 @@ void register_stdlib_tests(void) {
     register_test("test_track_different_types", test_track_different_types);
     register_test("test_track_undefined_error", test_track_undefined_error);
     register_test("test_phases_output_format", test_phases_output_format);
+
+    /* history() and identifier arguments */
+    register_test("test_history_basic", test_history_basic);
+    register_test("test_history_has_line_and_fn", test_history_has_line_and_fn);
+    register_test("test_history_ident_arg", test_history_ident_arg);
+    register_test("test_track_ident_arg", test_track_ident_arg);
+    register_test("test_history_untracked_empty", test_history_untracked_empty);
+    register_test("test_phases_still_works_with_string", test_phases_still_works_with_string);
+    register_test("test_rewind_ident_arg", test_rewind_ident_arg);
+    register_test("test_phases_has_line_and_fn", test_phases_has_line_and_fn);
 
     /* Annealing */
     register_test("test_anneal_basic", test_anneal_basic);

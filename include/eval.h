@@ -88,6 +88,8 @@ typedef struct {
 typedef struct {
     char     *phase_name;  /* "fluid", "crystal", "unphased" */
     LatValue  value;       /* deep clone of value at this point */
+    int       line;        /* source line where change occurred */
+    char     *fn_name;     /* function name (NULL for top-level) */
 } HistorySnapshot;
 
 /* History tracking for a single variable */

@@ -464,6 +464,13 @@ static void vm_record_history(VM *vm, const char *name, LatValue *val) {
         const char *phase_name = builtin_phase_of_str(val);
         vm->tracked_vars[i].snapshots[si].phase = strdup(phase_name);
         vm->tracked_vars[i].snapshots[si].value = value_deep_clone(val);
+        vm->tracked_vars[i].snapshots[si].line = vm_current_line(vm);
+        const char *fn = NULL;
+        if (vm->frame_count > 0) {
+            CallFrame *f = &vm->frames[vm->frame_count - 1];
+            fn = f->chunk ? f->chunk->name : NULL;
+        }
+        vm->tracked_vars[i].snapshots[si].fn_name = fn ? strdup(fn) : NULL;
         return;
     }
 }
@@ -512,8 +519,48 @@ static LatValue native_phases(LatValue *args, int ac) {
             LatValue m = value_map_new();
             LatValue phase_val = value_string(current_vm->tracked_vars[i].snapshots[j].phase);
             LatValue val_clone = value_deep_clone(&current_vm->tracked_vars[i].snapshots[j].value);
+            LatValue line_val = value_int(current_vm->tracked_vars[i].snapshots[j].line);
+            LatValue fn_val = current_vm->tracked_vars[i].snapshots[j].fn_name
+                ? value_string(current_vm->tracked_vars[i].snapshots[j].fn_name)
+                : value_nil();
             lat_map_set(m.as.map.map, "phase", &phase_val);
             lat_map_set(m.as.map.map, "value", &val_clone);
+            lat_map_set(m.as.map.map, "line", &line_val);
+            lat_map_set(m.as.map.map, "fn", &fn_val);
+            elems[j] = m;
+        }
+        LatValue arr = value_array(elems, n);
+        free(elems);
+        return arr;
+    }
+    return value_array(NULL, 0);
+}
+
+/// @builtin history(name: String) -> Array
+/// @category Temporal
+/// Returns the full enriched timeline of a tracked variable as an array of Maps
+/// with keys: phase, value, line, fn.
+/// @example history(x)  // [{phase: "fluid", value: 10, line: 3, fn: "main"}, ...]
+static LatValue native_history(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_STR || !current_vm)
+        return value_array(NULL, 0);
+    const char *name = args[0].as.str_val;
+    for (size_t i = 0; i < current_vm->tracked_count; i++) {
+        if (strcmp(current_vm->tracked_vars[i].name, name) != 0) continue;
+        size_t n = current_vm->tracked_vars[i].snap_count;
+        LatValue *elems = malloc(n * sizeof(LatValue));
+        for (size_t j = 0; j < n; j++) {
+            LatValue m = value_map_new();
+            LatValue phase_val = value_string(current_vm->tracked_vars[i].snapshots[j].phase);
+            LatValue val_clone = value_deep_clone(&current_vm->tracked_vars[i].snapshots[j].value);
+            LatValue line_val = value_int(current_vm->tracked_vars[i].snapshots[j].line);
+            LatValue fn_val = current_vm->tracked_vars[i].snapshots[j].fn_name
+                ? value_string(current_vm->tracked_vars[i].snapshots[j].fn_name)
+                : value_nil();
+            lat_map_set(m.as.map.map, "phase", &phase_val);
+            lat_map_set(m.as.map.map, "value", &val_clone);
+            lat_map_set(m.as.map.map, "line", &line_val);
+            lat_map_set(m.as.map.map, "fn", &fn_val);
             elems[j] = m;
         }
         LatValue arr = value_array(elems, n);
@@ -2213,6 +2260,7 @@ void vm_init(VM *vm) {
     /* Phase system */
     vm_register_native(vm, "track", native_track, 1);
     vm_register_native(vm, "phases", native_phases, 1);
+    vm_register_native(vm, "history", native_history, 1);
     vm_register_native(vm, "rewind", native_rewind, 2);
     vm_register_native(vm, "pressurize", native_pressurize, 2);
     vm_register_native(vm, "depressurize", native_depressurize, 1);
@@ -2452,6 +2500,7 @@ void vm_free(VM *vm) {
         free(vm->tracked_vars[i].name);
         for (size_t j = 0; j < vm->tracked_vars[i].snap_count; j++) {
             free(vm->tracked_vars[i].snapshots[j].phase);
+            free(vm->tracked_vars[i].snapshots[j].fn_name);
             value_free(&vm->tracked_vars[i].snapshots[j].value);
         }
         free(vm->tracked_vars[i].snapshots);
@@ -2619,6 +2668,7 @@ void vm_free_child(VM *child) {
         free(child->tracked_vars[i].name);
         for (size_t j = 0; j < child->tracked_vars[i].snap_count; j++) {
             free(child->tracked_vars[i].snapshots[j].phase);
+            free(child->tracked_vars[i].snapshots[j].fn_name);
             value_free(&child->tracked_vars[i].snapshots[j].value);
         }
         free(child->tracked_vars[i].snapshots);

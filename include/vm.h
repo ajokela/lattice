@@ -79,7 +79,7 @@ typedef struct {
     /* Phase system: tracked variable history */
     struct {
         char *name;
-        struct { char *phase; LatValue value; } *snapshots;
+        struct { char *phase; LatValue value; int line; char *fn_name; } *snapshots;
         size_t snap_count;
         size_t snap_cap;
     } *tracked_vars;

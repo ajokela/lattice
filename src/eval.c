@@ -474,6 +474,8 @@ static void record_history(Evaluator *ev, const char *name) {
         const char *phase = builtin_phase_of_str(&cur);
         vh->snapshots[vh->count].phase_name = strdup(phase);
         vh->snapshots[vh->count].value = value_deep_clone(&cur);
+        vh->snapshots[vh->count].line = 0;
+        vh->snapshots[vh->count].fn_name = NULL;
         vh->count++;
         value_free(&cur);
         return;
@@ -1439,6 +1441,28 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         }
 
         case EXPR_CALL: {
+            /* ── track(x) / history(x) / phases(x) / rewind(x, n): convert ident to string ── */
+            if (expr->as.call.func->tag == EXPR_IDENT) {
+                const char *cfn = expr->as.call.func->as.str_val;
+                bool is_1arg = (strcmp(cfn, "track") == 0 || strcmp(cfn, "history") == 0 ||
+                                strcmp(cfn, "phases") == 0);
+                bool is_rewind = strcmp(cfn, "rewind") == 0;
+                if ((is_1arg && expr->as.call.arg_count == 1 &&
+                     expr->as.call.args[0]->tag == EXPR_IDENT) ||
+                    (is_rewind && expr->as.call.arg_count == 2 &&
+                     expr->as.call.args[0]->tag == EXPR_IDENT)) {
+                    /* Temporarily swap first arg to a string literal with the variable name */
+                    Expr *orig = expr->as.call.args[0];
+                    Expr tmp_str;
+                    tmp_str.tag = EXPR_STRING_LIT;
+                    tmp_str.as.str_val = orig->as.str_val;
+                    tmp_str.line = orig->line;
+                    expr->as.call.args[0] = &tmp_str;
+                    EvalResult r = eval_expr(ev, expr);
+                    expr->as.call.args[0] = orig; /* restore */
+                    return r;
+                }
+            }
             /* ── react() / unreact(): special handling before arg evaluation ── */
             if (expr->as.call.func->tag == EXPR_IDENT &&
                 strcmp(expr->as.call.func->as.str_val, "react") == 0) {
@@ -2008,6 +2032,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         }
                         tv->history.snapshots[tv->history.count].phase_name = strdup(phase);
                         tv->history.snapshots[tv->history.count].value = value_deep_clone(&cur);
+                        tv->history.snapshots[tv->history.count].line = 0;
+                        tv->history.snapshots[tv->history.count].fn_name = NULL;
                         tv->history.count++;
                     }
                     value_free(&cur);
@@ -2032,9 +2058,45 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < vh->count; i++) {
                         LatValue m = value_map_new();
                         LatValue pv = value_string(vh->snapshots[i].phase_name);
-                        lat_map_set(m.as.map.map, "phase", &pv);
                         LatValue vv = value_deep_clone(&vh->snapshots[i].value);
+                        LatValue lv = value_int(vh->snapshots[i].line);
+                        LatValue fv = vh->snapshots[i].fn_name ? value_string(vh->snapshots[i].fn_name) : value_nil();
+                        lat_map_set(m.as.map.map, "phase", &pv);
                         lat_map_set(m.as.map.map, "value", &vv);
+                        lat_map_set(m.as.map.map, "line", &lv);
+                        lat_map_set(m.as.map.map, "fn", &fv);
+                        elems[i] = m;
+                    }
+                    LatValue result = value_array(elems, vh->count);
+                    free(elems);
+                    return eval_ok(result);
+                }
+
+                /// @builtin history(name: String) -> Array
+                /// @category Temporal
+                /// Returns the full enriched timeline of a tracked variable as an array of Maps
+                /// with keys: phase, value, line, fn.
+                /// @example history(x)  // [{phase: "fluid", value: 10, line: 3, fn: "main"}, ...]
+                if (strcmp(fn_name, "history") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("history() expects 1 String argument")); }
+                    const char *vname = args[0].as.str_val;
+                    VariableHistory *vh = NULL;
+                    for (size_t i = 0; i < ev->tracked_count; i++) {
+                        if (strcmp(ev->tracked_vars[i].name, vname) == 0) { vh = &ev->tracked_vars[i].history; break; }
+                    }
+                    for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
+                    if (!vh || vh->count == 0) return eval_ok(value_array(NULL, 0));
+                    LatValue *elems = malloc(vh->count * sizeof(LatValue));
+                    for (size_t i = 0; i < vh->count; i++) {
+                        LatValue m = value_map_new();
+                        LatValue pv = value_string(vh->snapshots[i].phase_name);
+                        LatValue vv = value_deep_clone(&vh->snapshots[i].value);
+                        LatValue lv = value_int(vh->snapshots[i].line);
+                        LatValue fv = vh->snapshots[i].fn_name ? value_string(vh->snapshots[i].fn_name) : value_nil();
+                        lat_map_set(m.as.map.map, "phase", &pv);
+                        lat_map_set(m.as.map.map, "value", &vv);
+                        lat_map_set(m.as.map.map, "line", &lv);
+                        lat_map_set(m.as.map.map, "fn", &fv);
                         elems[i] = m;
                     }
                     LatValue result = value_array(elems, vh->count);
@@ -9700,6 +9762,7 @@ void evaluator_free(Evaluator *ev) {
         free(ev->tracked_vars[i].name);
         for (size_t j = 0; j < ev->tracked_vars[i].history.count; j++) {
             free(ev->tracked_vars[i].history.snapshots[j].phase_name);
+            free(ev->tracked_vars[i].history.snapshots[j].fn_name);
             value_free(&ev->tracked_vars[i].history.snapshots[j].value);
         }
         free(ev->tracked_vars[i].history.snapshots);
