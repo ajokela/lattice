@@ -5169,9 +5169,12 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         VM_ERROR("stack overflow (too many nested calls)"); break;
                     }
 
-                    /* Promote ephemeral args before entering function */
-                    for (int i = 0; i <= arg_count; i++)
-                        vm_promote_value(callee + i);
+                    /* Promote all ephemeral values in the current frame
+                     * (locals + expression temporaries + callee + args)
+                     * before entering the function, so its OP_RESET_EPHEMERAL
+                     * doesn't invalidate anything in this frame. */
+                    for (LatValue *slot = frame->slots; slot < vm->stack_top; slot++)
+                        vm_promote_value(slot);
 
                     /* Get upvalues from the callee closure */
                     ObjUpvalue **callee_upvalues = (ObjUpvalue **)callee->as.closure.captured_env;
@@ -5356,6 +5359,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     elems = malloc(count * sizeof(LatValue));
                     for (int i = count - 1; i >= 0; i--)
                         elems[i] = pop(vm);
+                    for (int i = 0; i < count; i++)
+                        vm_promote_value(&elems[i]);
                 }
                 LatValue arr = value_array(elems, count);
                 free(elems);
@@ -5413,6 +5418,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     for (uint8_t i = 0; i < pair_count; i++) {
                         LatValue key = pairs[i * 2];
                         LatValue val = pairs[i * 2 + 1];
+                        vm_promote_value(&val);
                         if (key.type == VAL_STR) {
                             lat_map_set(map.as.map.map, key.as.str_val, &val);
                         }
@@ -5434,6 +5440,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     elems = malloc(count * sizeof(LatValue));
                     for (int i = count - 1; i >= 0; i--)
                         elems[i] = pop(vm);
+                    for (int i = 0; i < count; i++)
+                        vm_promote_value(&elems[i]);
                 }
                 LatValue tup = value_tuple(elems, count);
                 free(elems);
@@ -5462,6 +5470,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 /* Pop field values in reverse */
                 for (int i = field_count - 1; i >= 0; i--)
                     field_values[i] = pop(vm);
+                for (int i = 0; i < field_count; i++)
+                    vm_promote_value(&field_values[i]);
 
                 LatValue s = value_struct(struct_name, field_names, field_values, field_count);
 
@@ -5745,6 +5755,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *field_name = frame->chunk->constants[name_idx].as.str_val;
                 LatValue obj = pop(vm);
                 LatValue val = pop(vm);
+                vm_promote_value(&val);
 
                 if (obj.type == VAL_STRUCT) {
                     /* Check per-field phase constraints (alloy types) */
@@ -7406,6 +7417,14 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_RESET_EPHEMERAL:
 #endif
             case OP_RESET_EPHEMERAL: {
+                /* Promote all ephemeral values on the entire stack before
+                 * resetting.  This covers local bindings (which stay on the
+                 * stack via add_local without an explicit clone) as well as
+                 * expression temporaries in parent frames that could be
+                 * invalidated when a callee resets the shared arena. */
+                for (LatValue *slot = vm->stack; slot < vm->stack_top; slot++) {
+                    vm_promote_value(slot);
+                }
                 bump_arena_reset(vm->ephemeral);
                 break;
             }
