@@ -35,6 +35,8 @@ struct LatValue {
     ValueType type;
     PhaseTag  phase;
     size_t    region_id;  /* Crystal region ID ((size_t)-1 = not in a region) */
+#define REGION_NONE       ((size_t)-1)  /* normal malloc (not in any arena) */
+#define REGION_EPHEMERAL  ((size_t)-2)  /* in ephemeral bump arena */
     union {
         int64_t int_val;
         double  float_val;

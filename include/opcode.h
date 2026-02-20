@@ -138,6 +138,9 @@ typedef enum {
     OP_DEFINE_GLOBAL_16, /* env_define(constants[BE16 operand], TOS), pop TOS */
     OP_CLOSURE_16,     /* Create closure from function constant (BE16 index) */
 
+    /* Ephemeral arena */
+    OP_RESET_EPHEMERAL, /* Reset ephemeral bump arena at statement boundaries */
+
     /* Fallback to tree-walker */
     OP_HALT,           /* Stop execution */
 } Opcode;

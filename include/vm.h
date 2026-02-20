@@ -5,6 +5,8 @@
 #include "value.h"
 #include "env.h"
 
+struct BumpArena;  /* forward declaration */
+
 #define VM_STACK_MAX 4096
 #define VM_FRAMES_MAX 256
 #define VM_HANDLER_MAX 64
@@ -117,6 +119,8 @@ typedef struct {
     size_t seed_cap;
     /* Pre-allocated buffer for native function call args (avoids malloc per call) */
     LatValue fast_args[16];
+    /* Ephemeral bump arena for short-lived string temporaries */
+    struct BumpArena *ephemeral;
 } VM;
 
 void vm_init(VM *vm);

@@ -125,7 +125,8 @@ let OP_SET_GLOBAL_16  = 95
 let OP_DEFINE_GLOBAL_16 = 96
 let OP_CLOSURE_16     = 97
 
-let OP_HALT           = 98
+let OP_RESET_EPHEMERAL = 98
+let OP_HALT           = 99
 
 // .latc constant tags
 let TAG_INT     = 0

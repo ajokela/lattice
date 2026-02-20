@@ -120,6 +120,75 @@ static void arena_page_free_list(ArenaPage *p) {
     }
 }
 
+/* ── Bump Arena ── */
+
+BumpArena *bump_arena_new(void) {
+    BumpArena *ba = calloc(1, sizeof(BumpArena));
+    ArenaPage *p = arena_page_new(ARENA_PAGE_SIZE);
+    ba->pages = p;
+    ba->first_page = p;
+    ba->total_bytes = 0;
+    return ba;
+}
+
+void bump_arena_free(BumpArena *ba) {
+    if (!ba) return;
+    arena_page_free_list(ba->first_page);
+    free(ba);
+}
+
+void bump_arena_reset(BumpArena *ba) {
+    if (!ba) return;
+    for (ArenaPage *p = ba->first_page; p; p = p->next)
+        p->used = 0;
+    ba->pages = ba->first_page;
+    ba->total_bytes = 0;
+}
+
+void *bump_alloc(BumpArena *ba, size_t size) {
+    size_t aligned = (size + 7) & ~(size_t)7;
+    ArenaPage *cur = ba->pages;
+
+    /* Try current page */
+    if (cur && cur->used + aligned <= cur->cap) {
+        void *ptr = cur->data + cur->used;
+        cur->used += aligned;
+        ba->total_bytes += aligned;
+        return ptr;
+    }
+
+    /* Try next page in chain (from prior reset) */
+    if (cur && cur->next && cur->next->used + aligned <= cur->next->cap) {
+        ba->pages = cur->next;
+        void *ptr = ba->pages->data + ba->pages->used;
+        ba->pages->used += aligned;
+        ba->total_bytes += aligned;
+        return ptr;
+    }
+
+    /* Allocate a new page */
+    size_t page_cap = aligned > ARENA_PAGE_SIZE ? aligned : ARENA_PAGE_SIZE;
+    ArenaPage *np = arena_page_new(page_cap);
+    if (cur) {
+        np->next = cur->next;
+        cur->next = np;
+    } else {
+        ba->first_page = np;
+    }
+    ba->pages = np;
+    void *ptr = np->data;
+    np->used = aligned;
+    ba->total_bytes += aligned;
+    return ptr;
+}
+
+char *bump_strdup(BumpArena *ba, const char *s) {
+    size_t len = strlen(s) + 1;
+    char *ptr = bump_alloc(ba, len);
+    memcpy(ptr, s, len);
+    return ptr;
+}
+
 /* ── Crystal Region ── */
 
 static CrystalRegion *crystal_region_new(RegionId id, Epoch epoch) {

@@ -128,6 +128,20 @@ void *arena_alloc(CrystalRegion *r, size_t size);
 void *arena_calloc(CrystalRegion *r, size_t count, size_t size);
 char *arena_strdup(CrystalRegion *r, const char *s);
 
+/* ── Bump Arena (ephemeral allocator) ── */
+
+typedef struct BumpArena {
+    ArenaPage  *pages;       /* current page pointer */
+    ArenaPage  *first_page;  /* head of chain (kept across resets) */
+    size_t      total_bytes;
+} BumpArena;
+
+BumpArena *bump_arena_new(void);
+void       bump_arena_free(BumpArena *ba);
+void       bump_arena_reset(BumpArena *ba);  /* reset all pages, keep chain */
+void      *bump_alloc(BumpArena *ba, size_t size);
+char      *bump_strdup(BumpArena *ba, const char *s);
+
 /* ── Dual Heap ── */
 
 typedef struct DualHeap {

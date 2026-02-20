@@ -191,25 +191,55 @@ static void close_upvalues(VM *vm, LatValue *last) {
 static inline LatValue value_clone_fast(const LatValue *src) {
     switch (src->type) {
         case VAL_INT: case VAL_FLOAT: case VAL_BOOL:
-        case VAL_UNIT: case VAL_NIL: case VAL_RANGE:
-            return *src;
+        case VAL_UNIT: case VAL_NIL: case VAL_RANGE: {
+            LatValue v = *src;
+            v.region_id = REGION_NONE;
+            return v;
+        }
         case VAL_STR: {
             LatValue v = *src;
             v.as.str_val = strdup(src->as.str_val);
+            v.region_id = REGION_NONE;
             return v;
         }
         case VAL_BUFFER: {
             LatValue v = *src;
             v.as.buffer.data = malloc(src->as.buffer.cap);
             memcpy(v.as.buffer.data, src->as.buffer.data, src->as.buffer.len);
+            v.region_id = REGION_NONE;
             return v;
         }
         case VAL_REF: {
             ref_retain(src->as.ref.ref);
-            return *src;
+            LatValue v = *src;
+            v.region_id = REGION_NONE;
+            return v;
         }
         default:
             return value_deep_clone(src);
+    }
+}
+
+/* Create a string value allocated in the ephemeral arena.
+ * The caller passes a malloc'd string; it's copied into the arena and the original is freed. */
+static inline LatValue vm_ephemeral_string(VM *vm, char *s) {
+    if (vm->ephemeral) {
+        char *arena_str = bump_strdup(vm->ephemeral, s);
+        free(s);
+        LatValue v;
+        v.type = VAL_STR;
+        v.phase = VTAG_UNPHASED;
+        v.region_id = REGION_EPHEMERAL;
+        v.as.str_val = arena_str;
+        return v;
+    }
+    return value_string_owned(s);
+}
+
+/* If value is ephemeral, deep-clone to malloc. */
+static inline void vm_promote_value(LatValue *v) {
+    if (v->region_id == REGION_EPHEMERAL) {
+        *v = value_deep_clone(v);
     }
 }
 
@@ -2229,6 +2259,7 @@ void vm_init(VM *vm) {
     vm->pressures = NULL;
     vm->pressure_count = 0;
     vm->pressure_cap = 0;
+    vm->ephemeral = bump_arena_new();
 
     /* Register builtin functions */
     vm_register_native(vm, "to_string", native_to_string, 1);
@@ -2542,6 +2573,7 @@ void vm_free(VM *vm) {
     }
     free(vm->seeds);
 
+    bump_arena_free(vm->ephemeral);
     intern_free();
 }
 
@@ -2618,6 +2650,7 @@ VM *vm_clone_for_thread(VM *parent) {
     child->seeds = NULL;
     child->seed_count = 0;
     child->seed_cap = 0;
+    child->ephemeral = bump_arena_new();
     return child;
 }
 
@@ -2679,6 +2712,7 @@ void vm_free_child(VM *child) {
         free(child->pressures[i].mode);
     }
     free(child->pressures);
+    bump_arena_free(child->ephemeral);
 
     free(child);
 }
@@ -2867,6 +2901,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 return true;
             }
             LatValue val = pop(vm);
+            vm_promote_value(&val);
             /* Mutate the array in-place */
             if (obj->as.array.len >= obj->as.array.cap) {
                 obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
@@ -4465,6 +4500,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
         [OP_SET_GLOBAL_16] = &&lbl_OP_SET_GLOBAL_16,
         [OP_DEFINE_GLOBAL_16] = &&lbl_OP_DEFINE_GLOBAL_16,
         [OP_CLOSURE_16] = &&lbl_OP_CLOSURE_16,
+        [OP_RESET_EPHEMERAL] = &&lbl_OP_RESET_EPHEMERAL,
         [OP_HALT] = &&lbl_OP_HALT,
     };
 #endif
@@ -4565,7 +4601,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     result_str[la + lb] = '\0';
                     free(ra); free(rb);
                     value_free(&a); value_free(&b);
-                    push(vm, value_string_owned(result_str));
+                    push(vm, vm_ephemeral_string(vm, result_str));
                     break;
                 } else {
                     value_free(&a); value_free(&b);
@@ -4862,7 +4898,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 res[la + lb] = '\0';
                 free(ra); free(rb);
                 value_free(&a); value_free(&b);
-                push(vm, value_string_owned(res));
+                push(vm, vm_ephemeral_string(vm, res));
                 break;
             }
 
@@ -4966,6 +5002,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t idx = READ_BYTE();
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue val = pop(vm);
+                vm_promote_value(&val);
                 env_define(vm->env, name, val);
                 break;
             }
@@ -4977,6 +5014,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint16_t idx = READ_U16();
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue val = pop(vm);
+                vm_promote_value(&val);
                 env_define(vm->env, name, val);
                 break;
             }
@@ -5131,9 +5169,13 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         VM_ERROR("stack overflow (too many nested calls)"); break;
                     }
 
+                    /* Promote ephemeral args before entering function */
+                    for (int i = 0; i <= arg_count; i++)
+                        vm_promote_value(callee + i);
+
                     /* Get upvalues from the callee closure */
                     ObjUpvalue **callee_upvalues = (ObjUpvalue **)callee->as.closure.captured_env;
-                    size_t callee_upvalue_count = callee->region_id != (size_t)-1 ?
+                    size_t callee_upvalue_count = callee->region_id != REGION_NONE ?
                         callee->region_id : 0;
 
                     CallFrame *new_frame = &vm->frames[vm->frame_count++];
@@ -6226,6 +6268,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t slot = READ_BYTE();
                 LatValue idx = pop(vm);
                 LatValue val = pop(vm);
+                vm_promote_value(&val);
                 LatValue *obj = &frame->slots[slot]; /* Direct pointer to local */
 
                 /* Ref proxy: delegate set-index to inner value */
@@ -7356,6 +7399,14 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 LatValue b = pop(vm);
                 LatValue a = pop(vm);
                 push(vm, value_bool(a.as.int_val <= b.as.int_val));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_RESET_EPHEMERAL:
+#endif
+            case OP_RESET_EPHEMERAL: {
+                bump_arena_reset(vm->ephemeral);
                 break;
             }
 

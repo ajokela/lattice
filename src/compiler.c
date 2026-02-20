@@ -224,6 +224,14 @@ static void push_break_jump(size_t offset) {
 
 static void compile_expr(const Expr *e, int line);
 static void compile_stmt(const Stmt *s);
+
+/* Compile a statement and emit OP_RESET_EPHEMERAL to reclaim temporaries. */
+static void compile_stmt_reset(const Stmt *s) {
+    compile_stmt(s);
+    if (!compile_error)
+        emit_byte(OP_RESET_EPHEMERAL, s->line);
+}
+
 static void compile_function_body(FunctionType type, const char *name,
                                   Param *params, size_t param_count,
                                   Stmt **body, size_t body_count,
@@ -460,12 +468,12 @@ static void compile_expr(const Expr *e, int line) {
             if (e->as.if_expr.then_count > 0 &&
                 e->as.if_expr.then_stmts[e->as.if_expr.then_count - 1]->tag == STMT_EXPR) {
                 for (size_t i = 0; i + 1 < e->as.if_expr.then_count; i++)
-                    compile_stmt(e->as.if_expr.then_stmts[i]);
+                    compile_stmt_reset(e->as.if_expr.then_stmts[i]);
                 /* Compile last expression WITHOUT pop — value stays on stack */
                 compile_expr(e->as.if_expr.then_stmts[e->as.if_expr.then_count - 1]->as.expr, line);
             } else {
                 for (size_t i = 0; i < e->as.if_expr.then_count; i++)
-                    compile_stmt(e->as.if_expr.then_stmts[i]);
+                    compile_stmt_reset(e->as.if_expr.then_stmts[i]);
                 emit_byte(OP_UNIT, line);
             }
             end_scope(line);
@@ -480,11 +488,11 @@ static void compile_expr(const Expr *e, int line) {
                 if (e->as.if_expr.else_count > 0 &&
                     e->as.if_expr.else_stmts[e->as.if_expr.else_count - 1]->tag == STMT_EXPR) {
                     for (size_t i = 0; i + 1 < e->as.if_expr.else_count; i++)
-                        compile_stmt(e->as.if_expr.else_stmts[i]);
+                        compile_stmt_reset(e->as.if_expr.else_stmts[i]);
                     compile_expr(e->as.if_expr.else_stmts[e->as.if_expr.else_count - 1]->as.expr, line);
                 } else {
                     for (size_t i = 0; i < e->as.if_expr.else_count; i++)
-                        compile_stmt(e->as.if_expr.else_stmts[i]);
+                        compile_stmt_reset(e->as.if_expr.else_stmts[i]);
                     emit_byte(OP_UNIT, line);
                 }
                 end_scope(line);
@@ -501,11 +509,11 @@ static void compile_expr(const Expr *e, int line) {
             if (e->as.block.count > 0 &&
                 e->as.block.stmts[e->as.block.count - 1]->tag == STMT_EXPR) {
                 for (size_t i = 0; i + 1 < e->as.block.count; i++)
-                    compile_stmt(e->as.block.stmts[i]);
+                    compile_stmt_reset(e->as.block.stmts[i]);
                 compile_expr(e->as.block.stmts[e->as.block.count - 1]->as.expr, line);
             } else {
                 for (size_t i = 0; i < e->as.block.count; i++)
-                    compile_stmt(e->as.block.stmts[i]);
+                    compile_stmt_reset(e->as.block.stmts[i]);
                 emit_byte(OP_UNIT, line);
             }
             end_scope(line);
@@ -885,11 +893,11 @@ static void compile_expr(const Expr *e, int line) {
                     if (arm->body_count > 0 &&
                         arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
                         for (size_t j = 0; j + 1 < arm->body_count; j++)
-                            compile_stmt(arm->body[j]);
+                            compile_stmt_reset(arm->body[j]);
                         compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
                     } else {
                         for (size_t j = 0; j < arm->body_count; j++)
-                            compile_stmt(arm->body[j]);
+                            compile_stmt_reset(arm->body[j]);
                         emit_byte(OP_UNIT, line);
                     }
 
@@ -957,11 +965,11 @@ static void compile_expr(const Expr *e, int line) {
                     if (arm->body_count > 0 &&
                         arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
                         for (size_t j = 0; j + 1 < arm->body_count; j++)
-                            compile_stmt(arm->body[j]);
+                            compile_stmt_reset(arm->body[j]);
                         compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
                     } else {
                         for (size_t j = 0; j < arm->body_count; j++)
-                            compile_stmt(arm->body[j]);
+                            compile_stmt_reset(arm->body[j]);
                         emit_byte(OP_UNIT, line);
                     }
 
@@ -1611,7 +1619,7 @@ static void compile_stmt(const Stmt *s) {
 
             begin_scope();
             for (size_t i = 0; i < s->as.while_loop.body_count; i++)
-                compile_stmt(s->as.while_loop.body[i]);
+                compile_stmt_reset(s->as.while_loop.body[i]);
             end_scope(0);
 
             emit_loop(current->loop_start, line);
@@ -1643,7 +1651,7 @@ static void compile_stmt(const Stmt *s) {
 
             begin_scope();
             for (size_t i = 0; i < s->as.loop.body_count; i++)
-                compile_stmt(s->as.loop.body[i]);
+                compile_stmt_reset(s->as.loop.body[i]);
             end_scope(0);
 
             emit_loop(current->loop_start, line);
@@ -1693,7 +1701,7 @@ static void compile_stmt(const Stmt *s) {
             /* Compile body in inner scope */
             begin_scope();
             for (size_t i = 0; i < s->as.for_loop.body_count; i++)
-                compile_stmt(s->as.for_loop.body[i]);
+                compile_stmt_reset(s->as.for_loop.body[i]);
             end_scope(0);
 
             /* Pop loop variable */
@@ -1908,7 +1916,7 @@ static void compile_function_body(FunctionType type, const char *name,
 
     /* Compile body statements */
     for (size_t i = 0; i < body_count; i++)
-        compile_stmt(body[i]);
+        compile_stmt_reset(body[i]);
 
     /* Implicit unit return */
     emit_byte(OP_UNIT, line);
@@ -1970,7 +1978,7 @@ Chunk *compile(const Program *prog, char **error) {
     for (size_t i = 0; i < prog->item_count; i++) {
         switch (prog->items[i].tag) {
             case ITEM_STMT:
-                compile_stmt(prog->items[i].as.stmt);
+                compile_stmt_reset(prog->items[i].as.stmt);
                 break;
 
             case ITEM_FUNCTION: {
@@ -2105,7 +2113,7 @@ Chunk *compile_module(const Program *prog, char **error) {
     for (size_t i = 0; i < prog->item_count; i++) {
         switch (prog->items[i].tag) {
             case ITEM_STMT:
-                compile_stmt(prog->items[i].as.stmt);
+                compile_stmt_reset(prog->items[i].as.stmt);
                 break;
             case ITEM_FUNCTION: {
                 FnDecl *fn = &prog->items[i].as.fn_decl;
@@ -2219,7 +2227,7 @@ Chunk *compile_repl(const Program *prog, char **error) {
                     compile_expr(s->as.expr, 0);
                     /* Skip OP_POP — value stays as return */
                 } else {
-                    compile_stmt(s);
+                    compile_stmt_reset(s);
                 }
                 break;
             }
