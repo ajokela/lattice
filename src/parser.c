@@ -253,7 +253,10 @@ static Expr *parse_or(Parser *p, char **err);
 static Expr *parse_nil_coalesce(Parser *p, char **err);
 
 static Expr *parse_expr(Parser *p, char **err) {
-    return parse_nil_coalesce(p, err);
+    int line = (int)peek(p)->line;
+    Expr *e = parse_nil_coalesce(p, err);
+    if (e && e->line == 0) e->line = line;
+    return e;
 }
 
 static Expr *parse_nil_coalesce(Parser *p, char **err) {
@@ -1496,7 +1499,16 @@ static Stmt *parse_import_stmt(Parser *p, char **err) {
     return stmt_import(path, alias, NULL, 0);
 }
 
+static Stmt *parse_stmt_inner(Parser *p, char **err);
+
 static Stmt *parse_stmt(Parser *p, char **err) {
+    int line = (int)peek(p)->line;
+    Stmt *s = parse_stmt_inner(p, err);
+    if (s) s->line = line;
+    return s;
+}
+
+static Stmt *parse_stmt_inner(Parser *p, char **err) {
     TokenType tt = peek_type(p);
 
     if (tt == TOK_FLUX)  return parse_binding(p, PHASE_FLUID, err);

@@ -165,6 +165,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
     VMResult vm_res = vm_run(&vm, chunk, &result);
     if (vm_res != VM_OK) {
         fprintf(stderr, "vm error: %s\n", vm.error);
+        vm_print_stack_trace(&vm);
         vm_free(&vm);
         chunk_free(chunk);
         evaluator_free(ev);
@@ -212,6 +213,7 @@ static int run_latc_file(const char *path) {
     VMResult vm_res = vm_run(&vm, chunk, &result);
     if (vm_res != VM_OK) {
         fprintf(stderr, "vm error: %s\n", vm.error);
+        vm_print_stack_trace(&vm);
         vm_free(&vm);
         chunk_free(chunk);
         return 1;
@@ -368,6 +370,7 @@ static void repl(void) {
         VMResult vm_res = vm_run(&vm, chunk, &result);
         if (vm_res != VM_OK) {
             fprintf(stderr, "error: %s\n", vm.error);
+            vm_print_stack_trace(&vm);
             free(vm.error);
             vm.error = NULL;
             /* Reset VM state for next iteration */

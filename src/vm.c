@@ -51,8 +51,8 @@ static _Thread_local VM *current_vm = NULL;
 
 static void push(VM *vm, LatValue val) {
     if (vm->stack_top - vm->stack >= VM_STACK_MAX) {
-        fprintf(stderr, "VM stack overflow\n");
-        return;
+        fprintf(stderr, "fatal: VM stack overflow\n");
+        exit(1);
     }
     *vm->stack_top = val;
     vm->stack_top++;
@@ -67,13 +67,32 @@ static LatValue *vm_peek(VM *vm, int distance) {
     return &vm->stack_top[-1 - distance];
 }
 
+/* Get the source line for the current instruction in the topmost frame. */
+static int vm_current_line(VM *vm) {
+    if (vm->frame_count == 0) return 0;
+    CallFrame *f = &vm->frames[vm->frame_count - 1];
+    if (!f->chunk || !f->chunk->lines || f->chunk->lines_len == 0) return 0;
+    size_t offset = (size_t)(f->ip - f->chunk->code);
+    if (offset > 0) offset--;  /* ip already advanced past the opcode */
+    if (offset >= f->chunk->lines_len) offset = f->chunk->lines_len - 1;
+    return f->chunk->lines[offset];
+}
+
 static VMResult runtime_error(VM *vm, const char *fmt, ...) {
-    char *msg = NULL;
+    char *inner = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&msg, fmt, args);
+    (void)vasprintf(&inner, fmt, args);
     va_end(args);
-    vm->error = msg;
+    int line = vm_current_line(vm);
+    if (line > 0) {
+        char *msg = NULL;
+        (void)asprintf(&msg, "[line %d] %s", line, inner);
+        free(inner);
+        vm->error = msg;
+    } else {
+        vm->error = inner;
+    }
     return VM_RUNTIME_ERROR;
 }
 
@@ -82,11 +101,21 @@ static VMResult runtime_error(VM *vm, const char *fmt, ...) {
  * (caller should `break` to continue the VM loop).
  * If no handler, returns VM_RUNTIME_ERROR (caller should `return` the result). */
 static VMResult vm_handle_error(VM *vm, CallFrame **frame_ptr, const char *fmt, ...) {
-    char *msg = NULL;
+    char *inner = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&msg, fmt, args);
+    (void)vasprintf(&inner, fmt, args);
     va_end(args);
+
+    /* Prepend line number if available */
+    int line = vm_current_line(vm);
+    char *msg;
+    if (line > 0) {
+        (void)asprintf(&msg, "[line %d] %s", line, inner);
+        free(inner);
+    } else {
+        msg = inner;
+    }
 
     if (vm->handler_count > 0) {
         ExceptionHandler h = vm->handlers[--vm->handler_count];
@@ -2465,6 +2494,27 @@ void vm_free(VM *vm) {
     free(vm->seeds);
 
     intern_free();
+}
+
+void vm_print_stack_trace(VM *vm) {
+    if (vm->frame_count <= 1) return;  /* No trace for top-level errors */
+    fprintf(stderr, "stack trace (most recent call last):\n");
+    for (size_t i = 0; i < vm->frame_count; i++) {
+        CallFrame *f = &vm->frames[i];
+        if (!f->chunk) continue;
+        size_t offset = (size_t)(f->ip - f->chunk->code);
+        if (offset > 0) offset--;
+        int line = 0;
+        if (f->chunk->lines && offset < f->chunk->lines_len)
+            line = f->chunk->lines[offset];
+        const char *name = f->chunk->name;
+        if (name && name[0])
+            fprintf(stderr, "  [line %d] in %s()\n", line, name);
+        else if (i == 0)
+            fprintf(stderr, "  [line %d] in <script>\n", line);
+        else
+            fprintf(stderr, "  [line %d] in <closure>\n", line);
+    }
 }
 
 /* ── Concurrency infrastructure ── */

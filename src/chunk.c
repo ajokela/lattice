@@ -33,6 +33,7 @@ void chunk_free(Chunk *c) {
     for (size_t i = 0; i < c->local_name_cap; i++)
         free(c->local_names[i]);
     free(c->local_names);
+    free(c->name);
     free(c);
 }
 

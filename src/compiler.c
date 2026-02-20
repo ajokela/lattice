@@ -278,6 +278,7 @@ static size_t add_chunk_constant(Chunk *ch) {
 
 static void compile_expr(const Expr *e, int line) {
     if (compile_error) return;
+    if (e->line > 0) line = e->line;
 
     switch (e->tag) {
         case EXPR_INT_LIT:
@@ -1430,30 +1431,31 @@ static void emit_index_write_back(Expr *node, int line) {
 static void compile_stmt(const Stmt *s) {
     if (compile_error) return;
 
+    int line = s->line;
     switch (s->tag) {
         case STMT_EXPR:
-            compile_expr(s->as.expr, 0);
-            emit_byte(OP_POP, 0);
+            compile_expr(s->as.expr, line);
+            emit_byte(OP_POP, line);
             break;
 
         case STMT_BINDING: {
             if (s->as.binding.value)
-                compile_expr(s->as.binding.value, 0);
+                compile_expr(s->as.binding.value, line);
             else
-                emit_byte(OP_NIL, 0);
+                emit_byte(OP_NIL, line);
 
             /* Apply phase tag for flux/fix declarations */
             if (s->as.binding.phase == PHASE_FLUID)
-                emit_byte(OP_MARK_FLUID, 0);
+                emit_byte(OP_MARK_FLUID, line);
             else if (s->as.binding.phase == PHASE_CRYSTAL)
-                emit_byte(OP_FREEZE, 0);
+                emit_byte(OP_FREEZE, line);
 
             if (current->scope_depth > 0) {
                 add_local(s->as.binding.name);
             } else {
                 size_t idx = chunk_add_constant(current_chunk(),
                     value_string(s->as.binding.name));
-                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line);
             }
             break;
         }
@@ -1473,51 +1475,51 @@ static void compile_stmt(const Stmt *s) {
                     int slot = resolve_local(current, name);
                     if (slot >= 0) {
                         if (val->as.binop.op == BINOP_ADD) {
-                            emit_bytes(OP_INC_LOCAL, (uint8_t)slot, 0);
+                            emit_bytes(OP_INC_LOCAL, (uint8_t)slot, line);
                             break; /* INC_LOCAL doesn't push; skip OP_POP at end */
                         }
                         if (val->as.binop.op == BINOP_SUB) {
-                            emit_bytes(OP_DEC_LOCAL, (uint8_t)slot, 0);
+                            emit_bytes(OP_DEC_LOCAL, (uint8_t)slot, line);
                             break;
                         }
                     }
                 }
             }
 
-            compile_expr(s->as.assign.value, 0);
+            compile_expr(s->as.assign.value, line);
             if (s->as.assign.target->tag == EXPR_IDENT) {
                 const char *name = s->as.assign.target->as.str_val;
                 int slot = resolve_local(current, name);
                 if (slot >= 0) {
-                    emit_bytes(OP_SET_LOCAL, (uint8_t)slot, 0);
+                    emit_bytes(OP_SET_LOCAL, (uint8_t)slot, line);
                 } else {
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
-                        emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, 0);
+                        emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
                     } else {
                         size_t idx = chunk_add_constant(current_chunk(), value_string(name));
-                        emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, idx, 0);
+                        emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, idx, line);
                     }
                 }
             } else if (s->as.assign.target->tag == EXPR_FIELD_ACCESS) {
-                compile_expr(s->as.assign.target->as.field_access.object, 0);
+                compile_expr(s->as.assign.target->as.field_access.object, line);
                 size_t idx = chunk_add_constant(current_chunk(),
                     value_string(s->as.assign.target->as.field_access.field));
-                emit_bytes(OP_SET_FIELD, (uint8_t)idx, 0);
+                emit_bytes(OP_SET_FIELD, (uint8_t)idx, line);
                 /* Write back the modified object to the variable */
                 Expr *obj_expr = s->as.assign.target->as.field_access.object;
                 if (obj_expr->tag == EXPR_IDENT) {
                     const char *name = obj_expr->as.str_val;
                     int slot = resolve_local(current, name);
                     if (slot >= 0) {
-                        emit_bytes(OP_SET_LOCAL, (uint8_t)slot, 0);
+                        emit_bytes(OP_SET_LOCAL, (uint8_t)slot, line);
                     } else {
                         int upvalue = resolve_upvalue(current, name);
                         if (upvalue >= 0) {
-                            emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, 0);
+                            emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
                         } else {
                             size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
-                            emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, 0);
+                            emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
                         }
                     }
                 }
@@ -1528,48 +1530,48 @@ static void compile_stmt(const Stmt *s) {
                     int slot = resolve_local(current,
                         target->as.index.object->as.str_val);
                     if (slot >= 0) {
-                        compile_expr(target->as.index.index, 0);
-                        emit_bytes(OP_SET_INDEX_LOCAL, (uint8_t)slot, 0);
+                        compile_expr(target->as.index.index, line);
+                        emit_bytes(OP_SET_INDEX_LOCAL, (uint8_t)slot, line);
                         break; /* OP_SET_INDEX_LOCAL pushes nothing, skip OP_POP */
                     }
                 }
                 /* Nested index (e.g. m[i][j] = val): compile intermediate,
                  * SET_INDEX, then write-back chain to root variable */
                 if (target->as.index.object->tag == EXPR_INDEX) {
-                    compile_expr(target->as.index.object, 0);
-                    compile_expr(target->as.index.index, 0);
-                    emit_byte(OP_SET_INDEX, 0);
-                    emit_index_write_back(target->as.index.object, 0);
+                    compile_expr(target->as.index.object, line);
+                    compile_expr(target->as.index.index, line);
+                    emit_byte(OP_SET_INDEX, line);
+                    emit_index_write_back(target->as.index.object, line);
                     break; /* write-back handles everything, skip OP_POP */
                 }
                 /* Fallback: non-local single-level index (global/upvalue) */
-                compile_expr(target->as.index.object, 0);
-                compile_expr(target->as.index.index, 0);
-                emit_byte(OP_SET_INDEX, 0);
+                compile_expr(target->as.index.object, line);
+                compile_expr(target->as.index.index, line);
+                emit_byte(OP_SET_INDEX, line);
                 /* Write back the modified object to the variable */
                 if (target->as.index.object->tag == EXPR_IDENT) {
                     const char *name = target->as.index.object->as.str_val;
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
-                        emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, 0);
+                        emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
                     } else {
                         size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
-                        emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, 0);
+                        emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
                     }
                 }
             }
-            emit_byte(OP_POP, 0);
+            emit_byte(OP_POP, line);
             break;
         }
 
         case STMT_RETURN:
             if (s->as.return_expr)
-                compile_expr(s->as.return_expr, 0);
+                compile_expr(s->as.return_expr, line);
             else
-                emit_byte(OP_UNIT, 0);
+                emit_byte(OP_UNIT, line);
             emit_ensure_checks(0);
-            emit_byte(OP_DEFER_RUN, 0);
-            emit_byte(OP_RETURN, 0);
+            emit_byte(OP_DEFER_RUN, line);
+            emit_byte(OP_RETURN, line);
             break;
 
         case STMT_WHILE: {
@@ -1584,18 +1586,18 @@ static void compile_stmt(const Stmt *s) {
             current->loop_start = current_chunk()->code_len;
             current->loop_depth++;
 
-            compile_expr(s->as.while_loop.cond, 0);
-            size_t exit_jump = emit_jump(OP_JUMP_IF_FALSE, 0);
-            emit_byte(OP_POP, 0);
+            compile_expr(s->as.while_loop.cond, line);
+            size_t exit_jump = emit_jump(OP_JUMP_IF_FALSE, line);
+            emit_byte(OP_POP, line);
 
             begin_scope();
             for (size_t i = 0; i < s->as.while_loop.body_count; i++)
                 compile_stmt(s->as.while_loop.body[i]);
             end_scope(0);
 
-            emit_loop(current->loop_start, 0);
+            emit_loop(current->loop_start, line);
             patch_jump(exit_jump);
-            emit_byte(OP_POP, 0);
+            emit_byte(OP_POP, line);
 
             /* Patch break jumps */
             for (size_t i = saved_break_count; i < current->break_count; i++)
@@ -1625,7 +1627,7 @@ static void compile_stmt(const Stmt *s) {
                 compile_stmt(s->as.loop.body[i]);
             end_scope(0);
 
-            emit_loop(current->loop_start, 0);
+            emit_loop(current->loop_start, line);
 
             /* Patch break jumps */
             for (size_t i = saved_break_count; i < current->break_count; i++)
@@ -1649,8 +1651,8 @@ static void compile_stmt(const Stmt *s) {
 
             begin_scope();
             /* Compile iterator expression and init */
-            compile_expr(s->as.for_loop.iter, 0);
-            emit_byte(OP_ITER_INIT, 0);
+            compile_expr(s->as.for_loop.iter, line);
+            emit_byte(OP_ITER_INIT, line);
 
             /* Track the iterator state (collection + index) as anonymous locals
              * so subsequent local slot numbers are correct. */
@@ -1664,7 +1666,7 @@ static void compile_stmt(const Stmt *s) {
             current->loop_depth++;
 
             /* OP_ITER_NEXT pushes next value or jumps to end */
-            size_t exit_jump = emit_jump(OP_ITER_NEXT, 0);
+            size_t exit_jump = emit_jump(OP_ITER_NEXT, line);
 
             /* Bind loop variable */
             add_local(s->as.for_loop.var);
@@ -1676,16 +1678,16 @@ static void compile_stmt(const Stmt *s) {
             end_scope(0);
 
             /* Pop loop variable */
-            emit_byte(OP_POP, 0);
+            emit_byte(OP_POP, line);
             free(current->locals[current->local_count - 1].name);
             current->local_count--;
 
-            emit_loop(current->loop_start, 0);
+            emit_loop(current->loop_start, line);
 
             patch_jump(exit_jump);
             /* Pop iterator state (two values: index + collection) */
-            emit_byte(OP_POP, 0);
-            emit_byte(OP_POP, 0);
+            emit_byte(OP_POP, line);
+            emit_byte(OP_POP, line);
             /* Remove iterator placeholder locals */
             free(current->locals[current->local_count - 1].name);
             current->local_count--;
@@ -1713,12 +1715,12 @@ static void compile_stmt(const Stmt *s) {
             /* Pop locals declared inside the loop before jumping out */
             for (size_t i = current->local_count; i > current->loop_break_local_count; i--) {
                 if (current->locals[i - 1].is_captured) {
-                    emit_byte(OP_CLOSE_UPVALUE, 0);
+                    emit_byte(OP_CLOSE_UPVALUE, line);
                 } else {
-                    emit_byte(OP_POP, 0);
+                    emit_byte(OP_POP, line);
                 }
             }
-            size_t jump = emit_jump(OP_JUMP, 0);
+            size_t jump = emit_jump(OP_JUMP, line);
             push_break_jump(jump);
             break;
         }
@@ -1731,34 +1733,34 @@ static void compile_stmt(const Stmt *s) {
             /* Pop locals declared inside the loop before jumping back */
             for (size_t i = current->local_count; i > current->loop_continue_local_count; i--) {
                 if (current->locals[i - 1].is_captured) {
-                    emit_byte(OP_CLOSE_UPVALUE, 0);
+                    emit_byte(OP_CLOSE_UPVALUE, line);
                 } else {
-                    emit_byte(OP_POP, 0);
+                    emit_byte(OP_POP, line);
                 }
             }
-            emit_loop(current->loop_start, 0);
+            emit_loop(current->loop_start, line);
             break;
         }
 
         case STMT_DESTRUCTURE: {
-            compile_expr(s->as.destructure.value, 0);
+            compile_expr(s->as.destructure.value, line);
             if (current->scope_depth > 0) {
                 /* Store source as hidden local so each extraction can reference it */
                 size_t src_slot = current->local_count;
                 add_local("");  /* hidden local */
                 if (s->as.destructure.kind == DESTRUCT_ARRAY) {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
-                        emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, 0);
-                        emit_constant(value_int((int64_t)i), 0);
-                        emit_byte(OP_INDEX, 0);
+                        emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
+                        emit_constant(value_int((int64_t)i), line);
+                        emit_byte(OP_INDEX, line);
                         add_local(s->as.destructure.names[i]);
                     }
                 } else {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
-                        emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, 0);
+                        emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
                         size_t fidx = chunk_add_constant(current_chunk(),
                             value_string(s->as.destructure.names[i]));
-                        emit_bytes(OP_GET_FIELD, (uint8_t)fidx, 0);
+                        emit_bytes(OP_GET_FIELD, (uint8_t)fidx, line);
                         add_local(s->as.destructure.names[i]);
                     }
                 }
@@ -1767,36 +1769,36 @@ static void compile_stmt(const Stmt *s) {
                 /* Global path: OP_DUP works because DEFINE_GLOBAL pops each value */
                 if (s->as.destructure.kind == DESTRUCT_ARRAY) {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
-                        emit_byte(OP_DUP, 0);
-                        emit_constant(value_int((int64_t)i), 0);
-                        emit_byte(OP_INDEX, 0);
+                        emit_byte(OP_DUP, line);
+                        emit_constant(value_int((int64_t)i), line);
+                        emit_byte(OP_INDEX, line);
                         size_t idx = chunk_add_constant(current_chunk(),
                             value_string(s->as.destructure.names[i]));
-                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line);
                     }
                 } else {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
-                        emit_byte(OP_DUP, 0);
+                        emit_byte(OP_DUP, line);
                         size_t fidx = chunk_add_constant(current_chunk(),
                             value_string(s->as.destructure.names[i]));
-                        emit_bytes(OP_GET_FIELD, (uint8_t)fidx, 0);
+                        emit_bytes(OP_GET_FIELD, (uint8_t)fidx, line);
                         size_t nidx = chunk_add_constant(current_chunk(),
                             value_string(s->as.destructure.names[i]));
-                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, nidx, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, nidx, line);
                     }
                 }
-                emit_byte(OP_POP, 0); /* pop the original value */
+                emit_byte(OP_POP, line); /* pop the original value */
             }
             break;
         }
 
         case STMT_DEFER: {
             /* Emit OP_DEFER_PUSH with offset past the defer body, then the body */
-            size_t defer_jump = emit_jump(OP_DEFER_PUSH, 0);
+            size_t defer_jump = emit_jump(OP_DEFER_PUSH, line);
             for (size_t i = 0; i < s->as.defer.body_count; i++)
                 compile_stmt(s->as.defer.body[i]);
-            emit_byte(OP_UNIT, 0);   /* implicit return value for defer block */
-            emit_byte(OP_RETURN, 0); /* return from defer block */
+            emit_byte(OP_UNIT, line);   /* implicit return value for defer block */
+            emit_byte(OP_RETURN, line); /* return from defer block */
             patch_jump(defer_jump);
             break;
         }
@@ -1804,33 +1806,33 @@ static void compile_stmt(const Stmt *s) {
         case STMT_IMPORT: {
             size_t path_idx = chunk_add_constant(current_chunk(),
                 value_string(s->as.import.module_path));
-            emit_bytes(OP_IMPORT, (uint8_t)path_idx, 0);
+            emit_bytes(OP_IMPORT, (uint8_t)path_idx, line);
             if (s->as.import.alias) {
                 if (current->scope_depth > 0) {
                     add_local(s->as.import.alias);
                 } else {
                     size_t name_idx = chunk_add_constant(current_chunk(),
                         value_string(s->as.import.alias));
-                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line);
                 }
             } else if (s->as.import.selective_names && s->as.import.selective_count > 0) {
                 /* Selective import: import { x, y } from "path" */
                 for (size_t i = 0; i < s->as.import.selective_count; i++) {
-                    emit_byte(OP_DUP, 0);  /* duplicate module map */
+                    emit_byte(OP_DUP, line);  /* duplicate module map */
                     size_t field_idx = chunk_add_constant(current_chunk(),
                         value_string(s->as.import.selective_names[i]));
-                    emit_bytes(OP_GET_FIELD, (uint8_t)field_idx, 0);
+                    emit_bytes(OP_GET_FIELD, (uint8_t)field_idx, line);
                     if (current->scope_depth > 0) {
                         add_local(s->as.import.selective_names[i]);
                     } else {
                         size_t name_idx = chunk_add_constant(current_chunk(),
                             value_string(s->as.import.selective_names[i]));
-                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line);
                     }
                 }
-                emit_byte(OP_POP, 0);  /* pop original module map */
+                emit_byte(OP_POP, line);  /* pop original module map */
             } else {
-                emit_byte(OP_POP, 0);
+                emit_byte(OP_POP, line);
             }
             break;
         }
@@ -1850,6 +1852,7 @@ static void compile_function_body(FunctionType type, const char *name,
     Compiler func_comp;
     compiler_init(&func_comp, current, type);
     func_comp.func_name = name ? strdup(name) : NULL;
+    func_comp.chunk->name = name ? strdup(name) : NULL;
 
     /* For impl methods, self occupies slot 0 (the reserved slot).
      * Rename it from "" to "self" and skip it in the param loop. */

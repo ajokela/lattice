@@ -113,6 +113,7 @@ typedef struct {
 /* Expression node */
 struct Expr {
     ExprTag tag;
+    int line;  /* Source line number (from parser) */
     union {
         int64_t int_val;
         double  float_val;
@@ -192,6 +193,7 @@ typedef struct SelectArm {
 /* Statement node */
 struct Stmt {
     StmtTag tag;
+    int line;  /* Source line number (from parser) */
     union {
         struct {
             AstPhase phase;

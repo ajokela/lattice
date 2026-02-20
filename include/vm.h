@@ -122,6 +122,9 @@ typedef struct {
 void vm_init(VM *vm);
 void vm_free(VM *vm);
 
+/* Print a stack trace to stderr from the VM's current call frames. */
+void vm_print_stack_trace(VM *vm);
+
 /* Run a compiled chunk. On success, returns VM_OK and sets *result.
  * On error, returns VM_RUNTIME_ERROR and vm->error is set. */
 VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result);

@@ -17,6 +17,7 @@ typedef struct {
     size_t    lines_cap;
     char    **local_names;  /* Debug: slot index -> variable name (for tracking) */
     size_t    local_name_cap;
+    char     *name;        /* Debug: function name (NULL for top-level script) */
 } Chunk;
 
 Chunk *chunk_new(void);
