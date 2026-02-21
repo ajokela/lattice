@@ -6,6 +6,9 @@
 #include <string.h>
 #include <stdio.h>
 
+_Static_assert(sizeof(LatValue) <= LAT_MAP_INLINE_MAX,
+               "LatValue must fit in LAT_MAP_INLINE_MAX bytes for inline hashmap storage");
+
 /* ── Heap-tracked allocation wrappers ── */
 
 #ifdef __EMSCRIPTEN__
@@ -107,6 +110,20 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
     val.as.strct.field_names = lat_alloc(count * sizeof(char *));
     val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
     val.as.strct.field_phases = NULL;  /* lazy-allocated on first field freeze */
+    for (size_t i = 0; i < count; i++) {
+        val.as.strct.field_names[i] = lat_strdup(field_names[i]);
+        val.as.strct.field_values[i] = field_values[i];
+    }
+    val.as.strct.field_count = count;
+    return val;
+}
+
+LatValue value_struct_vm(const char *name, const char **field_names, LatValue *field_values, size_t count) {
+    LatValue val = { .type = VAL_STRUCT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    val.as.strct.name = lat_strdup(name);
+    val.as.strct.field_names = lat_alloc(count * sizeof(char *));
+    val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
+    val.as.strct.field_phases = NULL;
     for (size_t i = 0; i < count; i++) {
         val.as.strct.field_names[i] = lat_strdup(field_names[i]);
         val.as.strct.field_values[i] = field_values[i];
@@ -336,18 +353,19 @@ LatValue value_deep_clone(const LatValue *v) {
                 LatMap *dst = lat_alloc(sizeof(LatMap));
                 dst->value_size = src->value_size;
                 dst->cap = src->cap;
-                dst->count = src->live;  /* only OCCUPIED entries are copied */
+                dst->count = src->count;  /* preserve tombstone count for probe chains */
                 dst->live = src->live;
                 dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
                 for (size_t i = 0; i < src->cap; i++) {
+                    dst->entries[i].value = dst->entries[i]._ibuf;
                     if (src->entries[i].state == MAP_OCCUPIED) {
                         dst->entries[i].state = MAP_OCCUPIED;
                         dst->entries[i].key = lat_strdup(src->entries[i].key);
                         LatValue *sv = (LatValue *)src->entries[i].value;
                         LatValue cloned = value_deep_clone(sv);
-                        LatValue *dv = lat_alloc(sizeof(LatValue));
-                        *dv = cloned;
-                        dst->entries[i].value = dv;
+                        *(LatValue *)dst->entries[i].value = cloned;
+                    } else if (src->entries[i].state == MAP_TOMBSTONE) {
+                        dst->entries[i].state = MAP_TOMBSTONE;
                     }
                 }
                 out.as.map.map = dst;
@@ -385,18 +403,19 @@ LatValue value_deep_clone(const LatValue *v) {
                 LatMap *dst = lat_alloc(sizeof(LatMap));
                 dst->value_size = src->value_size;
                 dst->cap = src->cap;
-                dst->count = src->live;
+                dst->count = src->count;  /* preserve tombstone count for probe chains */
                 dst->live = src->live;
                 dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
                 for (size_t i = 0; i < src->cap; i++) {
+                    dst->entries[i].value = dst->entries[i]._ibuf;
                     if (src->entries[i].state == MAP_OCCUPIED) {
                         dst->entries[i].state = MAP_OCCUPIED;
                         dst->entries[i].key = lat_strdup(src->entries[i].key);
                         LatValue *sv = (LatValue *)src->entries[i].value;
                         LatValue cloned = value_deep_clone(sv);
-                        LatValue *dv = lat_alloc(sizeof(LatValue));
-                        *dv = cloned;
-                        dst->entries[i].value = dv;
+                        *(LatValue *)dst->entries[i].value = cloned;
+                    } else if (src->entries[i].state == MAP_TOMBSTONE) {
+                        dst->entries[i].state = MAP_TOMBSTONE;
                     }
                 }
                 out.as.set.map = dst;

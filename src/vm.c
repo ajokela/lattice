@@ -39,6 +39,10 @@
 #endif
 #include "memory.h"
 
+/* In the VM dispatch loop, use the inline fast-path for value_free
+ * to avoid function call overhead on primitives (int, float, bool, etc.) */
+#define value_free(v) value_free_inline(v)
+
 /* Native function pointer for VM builtins.
  * Args array is arg_count elements. Returns a LatValue result. */
 typedef LatValue (*VMNativeFn)(LatValue *args, int arg_count);
@@ -172,17 +176,8 @@ static ObjUpvalue *capture_upvalue(VM *vm, LatValue *local) {
     return created;
 }
 
-static void close_upvalues(VM *vm, LatValue *last) {
-    while (vm->open_upvalues != NULL && vm->open_upvalues->location >= last) {
-        ObjUpvalue *uv = vm->open_upvalues;
-        uv->closed = value_deep_clone(uv->location);
-        uv->location = &uv->closed;
-        vm->open_upvalues = uv->next;
-    }
-}
-
 /* Sentinel to distinguish native C functions from compiled closures.
- * Defined here (before vm_call_closure) and also used by vm_register_native below. */
+ * Defined here (before value_clone_fast/close_upvalues) and also used by vm_register_native below. */
 #define VM_NATIVE_MARKER ((struct Expr **)(uintptr_t)0x1)
 #define VM_EXT_MARKER    ((struct Expr **)(uintptr_t)0x2)
 
@@ -215,13 +210,38 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             v.region_id = REGION_NONE;
             return v;
         }
+        case VAL_CLOSURE: {
+            if (src->as.closure.body == NULL && src->as.closure.native_fn != NULL &&
+                src->as.closure.default_values != VM_NATIVE_MARKER &&
+                src->as.closure.default_values != VM_EXT_MARKER) {
+                /* Bytecode closure: shallow copy + strdup param_names */
+                LatValue v = *src;
+                if (src->as.closure.param_names) {
+                    v.as.closure.param_names = malloc(src->as.closure.param_count * sizeof(char *));
+                    for (size_t i = 0; i < src->as.closure.param_count; i++)
+                        v.as.closure.param_names[i] = strdup(src->as.closure.param_names[i]);
+                }
+                return v;
+            }
+            return value_deep_clone(src);
+        }
         default:
             return value_deep_clone(src);
     }
 }
 
+static void close_upvalues(VM *vm, LatValue *last) {
+    while (vm->open_upvalues != NULL && vm->open_upvalues->location >= last) {
+        ObjUpvalue *uv = vm->open_upvalues;
+        uv->closed = value_clone_fast(uv->location);
+        uv->location = &uv->closed;
+        vm->open_upvalues = uv->next;
+    }
+}
+
 /* Create a string value allocated in the ephemeral arena.
  * The caller passes a malloc'd string; it's copied into the arena and the original is freed. */
+__attribute__((unused))
 static inline LatValue vm_ephemeral_string(VM *vm, char *s) {
     if (vm->ephemeral) {
         char *arena_str = bump_strdup(vm->ephemeral, s);
@@ -231,15 +251,51 @@ static inline LatValue vm_ephemeral_string(VM *vm, char *s) {
         v.phase = VTAG_UNPHASED;
         v.region_id = REGION_EPHEMERAL;
         v.as.str_val = arena_str;
+        vm->ephemeral_on_stack = true;
         return v;
     }
     return value_string_owned(s);
+}
+
+/* Concatenate two strings directly into the ephemeral arena (avoids malloc+free). */
+static inline LatValue vm_ephemeral_concat(VM *vm, const char *a, size_t la,
+                                            const char *b, size_t lb) {
+    size_t total = la + lb + 1;
+    if (vm->ephemeral) {
+        char *buf = bump_alloc(vm->ephemeral, total);
+        memcpy(buf, a, la);
+        memcpy(buf + la, b, lb);
+        buf[la + lb] = '\0';
+        vm->ephemeral_on_stack = true;
+        LatValue v;
+        v.type = VAL_STR;
+        v.phase = VTAG_UNPHASED;
+        v.region_id = REGION_EPHEMERAL;
+        v.as.str_val = buf;
+        return v;
+    }
+    char *buf = malloc(total);
+    memcpy(buf, a, la);
+    memcpy(buf + la, b, lb);
+    buf[la + lb] = '\0';
+    return value_string_owned(buf);
 }
 
 /* If value is ephemeral, deep-clone to malloc. */
 static inline void vm_promote_value(LatValue *v) {
     if (v->region_id == REGION_EPHEMERAL) {
         *v = value_deep_clone(v);
+    }
+}
+
+/* Promote all ephemeral values in the current frame before entering a new
+ * bytecode frame, so the callee's OP_RESET_EPHEMERAL won't invalidate
+ * anything in the caller's frame. */
+static inline void vm_promote_frame_ephemerals(VM *vm, CallFrame *frame) {
+    if (vm->ephemeral_on_stack) {
+        for (LatValue *slot = frame->slots; slot < vm->stack_top; slot++)
+            vm_promote_value(slot);
+        vm->ephemeral_on_stack = false;
     }
 }
 
@@ -252,20 +308,16 @@ static LatValue vm_call_closure(VM *vm, LatValue *closure, LatValue *args, int a
         return value_nil();
     }
 
-    /* Build a tiny wrapper chunk: [OP_CALL, arg_count, OP_RETURN] */
-    Chunk *wrapper = chunk_new();
-    chunk_write(wrapper, OP_CALL, 0);
-    chunk_write(wrapper, (uint8_t)arg_count, 0);
-    chunk_write(wrapper, OP_RETURN, 0);
+    /* Reuse the pre-built wrapper chunk, patching the arg count */
+    vm->call_wrapper.code[1] = (uint8_t)arg_count;
 
     /* Push closure + args onto the stack for the wrapper to invoke */
-    push(vm, value_deep_clone(closure));
+    push(vm, value_clone_fast(closure));
     for (int i = 0; i < arg_count; i++)
-        push(vm, value_deep_clone(&args[i]));
+        push(vm, value_clone_fast(&args[i]));
 
     LatValue result;
-    vm_run(vm, wrapper, &result);
-    chunk_free(wrapper);
+    vm_run(vm, &vm->call_wrapper, &result);
     return result;
 }
 
@@ -526,6 +578,7 @@ static LatValue native_track(LatValue *args, int ac) {
             current_vm->tracked_cap * sizeof(*current_vm->tracked_vars));
     }
     size_t idx = current_vm->tracked_count++;
+    current_vm->tracking_active = true;
     current_vm->tracked_vars[idx].name = strdup(name);
     current_vm->tracked_vars[idx].snapshots = NULL;
     current_vm->tracked_vars[idx].snap_count = 0;
@@ -2261,6 +2314,18 @@ void vm_init(VM *vm) {
     vm->pressure_cap = 0;
     vm->ephemeral = bump_arena_new();
 
+    /* Pre-build the call wrapper chunk: [OP_CALL, 0, OP_RETURN] */
+    memset(&vm->call_wrapper, 0, sizeof(Chunk));
+    vm->call_wrapper.code = malloc(3);
+    vm->call_wrapper.code[0] = OP_CALL;
+    vm->call_wrapper.code[1] = 0;
+    vm->call_wrapper.code[2] = OP_RETURN;
+    vm->call_wrapper.code_len = 3;
+    vm->call_wrapper.code_cap = 3;
+    vm->call_wrapper.lines = calloc(3, sizeof(int));
+    vm->call_wrapper.lines_len = 3;
+    vm->call_wrapper.lines_cap = 3;
+
     /* Register builtin functions */
     vm_register_native(vm, "to_string", native_to_string, 1);
     vm_register_native(vm, "typeof", native_typeof, 1);
@@ -2574,6 +2639,11 @@ void vm_free(VM *vm) {
     free(vm->seeds);
 
     bump_arena_free(vm->ephemeral);
+
+    /* Free call wrapper (inline Chunk, not heap-allocated) */
+    free(vm->call_wrapper.code);
+    free(vm->call_wrapper.lines);
+
     intern_free();
 }
 
@@ -2651,6 +2721,19 @@ VM *vm_clone_for_thread(VM *parent) {
     child->seed_count = 0;
     child->seed_cap = 0;
     child->ephemeral = bump_arena_new();
+
+    /* Pre-build the call wrapper chunk */
+    memset(&child->call_wrapper, 0, sizeof(Chunk));
+    child->call_wrapper.code = malloc(3);
+    child->call_wrapper.code[0] = OP_CALL;
+    child->call_wrapper.code[1] = 0;
+    child->call_wrapper.code[2] = OP_RETURN;
+    child->call_wrapper.code_len = 3;
+    child->call_wrapper.code_cap = 3;
+    child->call_wrapper.lines = calloc(3, sizeof(int));
+    child->call_wrapper.lines_len = 3;
+    child->call_wrapper.lines_cap = 3;
+
     return child;
 }
 
@@ -2713,6 +2796,10 @@ void vm_free_child(VM *child) {
     }
     free(child->pressures);
     bump_arena_free(child->ephemeral);
+
+    /* Free call wrapper */
+    free(child->call_wrapper.code);
+    free(child->call_wrapper.lines);
 
     free(child);
 }
@@ -2879,11 +2966,21 @@ static inline uint32_t method_hash(const char *s) {
     return h;
 }
 
+/* Returns true if the builtin method is "simple" — no user closures executed,
+ * safe for direct-pointer mutation without clone-mutate-writeback. */
+static inline bool vm_invoke_builtin_is_simple(const char *method) {
+    return !(strcmp(method, "map") == 0 || strcmp(method, "filter") == 0 ||
+             strcmp(method, "reduce") == 0 || strcmp(method, "each") == 0 ||
+             strcmp(method, "sort") == 0 || strcmp(method, "find") == 0 ||
+             strcmp(method, "any") == 0 || strcmp(method, "all") == 0);
+}
+
 static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg_count, const char *var_name) {
     uint32_t mhash = method_hash(method);
 
+    switch (obj->type) {
     /* Array methods */
-    if (obj->type == VAL_ARRAY) {
+    case VAL_ARRAY: {
         if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.array.len));
             return true;
@@ -3240,7 +3337,12 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             int64_t idx = idx_v.as.int_val;
             value_free(&idx_v);
             if (idx < 0 || (size_t)idx >= obj->as.array.len) { push(vm, value_nil()); return true; }
-            push(vm, value_deep_clone(&obj->as.array.elems[(size_t)idx]));
+            LatValue removed = obj->as.array.elems[(size_t)idx];
+            memmove(&obj->as.array.elems[(size_t)idx],
+                    &obj->as.array.elems[(size_t)idx + 1],
+                    (obj->as.array.len - (size_t)idx - 1) * sizeof(LatValue));
+            obj->as.array.len--;
+            push(vm, removed);
             return true;
         }
         if (mhash == MHASH_chunk && strcmp(method, "chunk") == 0 && arg_count == 1) {
@@ -3421,14 +3523,31 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 push(vm, value_unit()); return true;
             }
             LatValue val = pop(vm); LatValue idx_v = pop(vm);
-            /* insert is mutating in tree-walker but result discarded; VM just returns unit */
-            value_free(&val); value_free(&idx_v);
+            int64_t idx = idx_v.as.int_val;
+            value_free(&idx_v);
+            if (idx < 0 || (size_t)idx > obj->as.array.len) {
+                value_free(&val);
+                vm->error = strdup(".insert() index out of bounds");
+                push(vm, value_unit()); return true;
+            }
+            /* Grow if needed */
+            if (obj->as.array.len >= obj->as.array.cap) {
+                size_t new_cap = obj->as.array.cap < 4 ? 4 : obj->as.array.cap * 2;
+                obj->as.array.elems = realloc(obj->as.array.elems, new_cap * sizeof(LatValue));
+                obj->as.array.cap = new_cap;
+            }
+            /* Shift elements right */
+            memmove(&obj->as.array.elems[(size_t)idx + 1],
+                    &obj->as.array.elems[(size_t)idx],
+                    (obj->as.array.len - (size_t)idx) * sizeof(LatValue));
+            obj->as.array.elems[(size_t)idx] = val;
+            obj->as.array.len++;
             push(vm, value_unit()); return true;
         }
-    }
+    } break;
 
     /* String methods */
-    if (obj->type == VAL_STR) {
+    case VAL_STR: {
         if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)strlen(obj->as.str_val)));
             return true;
@@ -3633,10 +3752,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_bool(obj->as.str_val[0] == '\0'));
             return true;
         }
-    }
+    } break;
 
     /* Map methods */
-    if (obj->type == VAL_MAP) {
+    case VAL_MAP: {
         if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)lat_map_len(obj->as.map.map)));
             return true;
@@ -3792,10 +3911,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&closure);
             push(vm, result); return true;
         }
-    }
+    } break;
 
     /* Struct methods */
-    if (obj->type == VAL_STRUCT) {
+    case VAL_STRUCT: {
         if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1) {
             LatValue key = pop(vm);
             if (key.type == VAL_STR) {
@@ -3824,10 +3943,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 return false;
             }
         }
-    }
+    } break;
 
     /* Range methods */
-    if (obj->type == VAL_RANGE) {
+    case VAL_RANGE: {
         if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             int64_t len = obj->as.range.end - obj->as.range.start;
             push(vm, value_int(len > 0 ? len : 0));
@@ -3844,18 +3963,18 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&val);
             return true;
         }
-    }
+    } break;
 
     /* Tuple methods */
-    if (obj->type == VAL_TUPLE) {
+    case VAL_TUPLE: {
         if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.tuple.len));
             return true;
         }
-    }
+    } break;
 
     /* Enum methods */
-    if (obj->type == VAL_ENUM) {
+    case VAL_ENUM: {
         if (mhash == MHASH_tag && strcmp(method, "tag") == 0 && arg_count == 0) {
             push(vm, value_string(obj->as.enm.variant_name));
             return true;
@@ -3884,10 +4003,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&name);
             push(vm, value_bool(match)); return true;
         }
-    }
+    } break;
 
     /* ── Set methods ── */
-    if (obj->type == VAL_SET) {
+    case VAL_SET: {
         if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
             LatValue val = pop(vm);
             char *key = value_display(&val);
@@ -3995,10 +4114,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             value_free(&other);
             push(vm, value_bool(result)); return true;
         }
-    }
+    } break;
 
     /* ── Channel methods ── */
-    if (obj->type == VAL_CHANNEL) {
+    case VAL_CHANNEL: {
         if (mhash == MHASH_send && strcmp(method, "send") == 0 && arg_count == 1) {
             LatValue val = pop(vm);
             channel_send(obj->as.channel.ch, val);
@@ -4014,10 +4133,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             channel_close(obj->as.channel.ch);
             push(vm, value_unit()); return true;
         }
-    }
+    } break;
 
     /* ── Buffer methods ── */
-    if (obj->type == VAL_BUFFER) {
+    case VAL_BUFFER: {
         if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.buffer.len));
             return true;
@@ -4220,10 +4339,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             push(vm, value_string_owned(hex));
             return true;
         }
-    }
+    } break;
 
     /* ── Ref methods ── */
-    if (obj->type == VAL_REF) {
+    case VAL_REF: {
         LatRef *ref = obj->as.ref.ref;
         LatValue *inner = &ref->value;
 
@@ -4415,7 +4534,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 return true;
             }
         }
-    }
+    } break;
+
+    default: break;
+    } /* end switch */
 
     return false;
 }
@@ -4595,13 +4717,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     if (!pa) pa = ra;
                     if (!pb) pb = rb;
                     size_t la = strlen(pa), lb = strlen(pb);
-                    char *result_str = malloc(la + lb + 1);
-                    memcpy(result_str, pa, la);
-                    memcpy(result_str + la, pb, lb);
-                    result_str[la + lb] = '\0';
+                    LatValue result = vm_ephemeral_concat(vm, pa, la, pb, lb);
                     free(ra); free(rb);
                     value_free(&a); value_free(&b);
-                    push(vm, vm_ephemeral_string(vm, result_str));
+                    push(vm, result);
                     break;
                 } else {
                     value_free(&a); value_free(&b);
@@ -4892,13 +5011,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 if (!pa) pa = ra;
                 if (!pb) pb = rb;
                 size_t la = strlen(pa), lb = strlen(pb);
-                char *res = malloc(la + lb + 1);
-                memcpy(res, pa, la);
-                memcpy(res + la, pb, lb);
-                res[la + lb] = '\0';
+                LatValue result = vm_ephemeral_concat(vm, pa, la, pb, lb);
                 free(ra); free(rb);
                 value_free(&a); value_free(&b);
-                push(vm, vm_ephemeral_string(vm, res));
+                push(vm, result);
                 break;
             }
 
@@ -4920,7 +5036,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 value_free(&frame->slots[slot]);
                 frame->slots[slot] = value_clone_fast(vm_peek(vm, 0));
                 /* Record history for tracked variables */
-                if (vm->tracked_count > 0 && frame->chunk->local_names &&
+                if (vm->tracking_active && frame->chunk->local_names &&
                     slot < frame->chunk->local_name_cap && frame->chunk->local_names[slot]) {
                     vm_record_history(vm, frame->chunk->local_names[slot], &frame->slots[slot]);
                 }
@@ -4933,7 +5049,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_GET_GLOBAL: {
                 uint8_t idx = READ_BYTE();
                 const char *name = frame->chunk->constants[idx].as.str_val;
-                LatValue *ref = env_get_ref(vm->env, name);
+                size_t hash = frame->chunk->const_hashes[idx];
+                LatValue *ref = env_get_ref_prehashed(vm->env, name, hash);
                 if (!ref) {
                     VM_ERROR("undefined variable '%s'", name); break;
                 }
@@ -4942,7 +5059,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                      ref->as.closure.default_values == VM_EXT_MARKER)) {
                     push(vm, *ref);
                 } else {
-                    push(vm, value_deep_clone(ref));
+                    push(vm, value_clone_fast(ref));
                 }
                 break;
             }
@@ -4953,7 +5070,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_GET_GLOBAL_16: {
                 uint16_t idx = READ_U16();
                 const char *name = frame->chunk->constants[idx].as.str_val;
-                LatValue *ref = env_get_ref(vm->env, name);
+                size_t hash = frame->chunk->const_hashes[idx];
+                LatValue *ref = env_get_ref_prehashed(vm->env, name, hash);
                 if (!ref) {
                     VM_ERROR("undefined variable '%s'", name); break;
                 }
@@ -4962,7 +5080,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                      ref->as.closure.default_values == VM_EXT_MARKER)) {
                     push(vm, *ref);
                 } else {
-                    push(vm, value_deep_clone(ref));
+                    push(vm, value_clone_fast(ref));
                 }
                 break;
             }
@@ -4975,7 +5093,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue *val = vm_peek(vm, 0);
                 env_set(vm->env, name, value_deep_clone(val));
-                if (vm->tracked_count > 0) {
+                if (vm->tracking_active) {
                     vm_record_history(vm, name, val);
                 }
                 break;
@@ -4989,7 +5107,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue *val = vm_peek(vm, 0);
                 env_set(vm->env, name, value_deep_clone(val));
-                if (vm->tracked_count > 0) {
+                if (vm->tracking_active) {
                     vm_record_history(vm, name, val);
                 }
                 break;
@@ -5025,7 +5143,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_GET_UPVALUE: {
                 uint8_t slot = READ_BYTE();
                 if (frame->upvalues && slot < frame->upvalue_count && frame->upvalues[slot]) {
-                    push(vm, value_deep_clone(frame->upvalues[slot]->location));
+                    push(vm, value_clone_fast(frame->upvalues[slot]->location));
                 } else {
                     push(vm, value_nil());
                 }
@@ -5039,7 +5157,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t slot = READ_BYTE();
                 if (frame->upvalues && slot < frame->upvalue_count && frame->upvalues[slot]) {
                     value_free(frame->upvalues[slot]->location);
-                    *frame->upvalues[slot]->location = value_deep_clone(vm_peek(vm, 0));
+                    *frame->upvalues[slot]->location = value_clone_fast(vm_peek(vm, 0));
                 }
                 break;
             }
@@ -5169,12 +5287,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         VM_ERROR("stack overflow (too many nested calls)"); break;
                     }
 
-                    /* Promote all ephemeral values in the current frame
-                     * (locals + expression temporaries + callee + args)
-                     * before entering the function, so its OP_RESET_EPHEMERAL
-                     * doesn't invalidate anything in this frame. */
-                    for (LatValue *slot = frame->slots; slot < vm->stack_top; slot++)
-                        vm_promote_value(slot);
+                    vm_promote_frame_ephemerals(vm, frame);
 
                     /* Get upvalues from the callee closure */
                     ObjUpvalue **callee_upvalues = (ObjUpvalue **)callee->as.closure.captured_env;
@@ -5208,7 +5321,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_CLOSURE: {
                 uint8_t fn_idx = READ_BYTE();
                 uint8_t upvalue_count = READ_BYTE();
-                LatValue fn_val = value_deep_clone(&frame->chunk->constants[fn_idx]);
+                LatValue fn_val = value_clone_fast(&frame->chunk->constants[fn_idx]);
 
                 /* Read upvalue descriptors and capture */
                 ObjUpvalue **upvalues = NULL;
@@ -5249,7 +5362,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_CLOSURE_16: {
                 uint16_t fn_idx = READ_U16();
                 uint8_t upvalue_count = READ_BYTE();
-                LatValue fn_val = value_deep_clone(&frame->chunk->constants[fn_idx]);
+                LatValue fn_val = value_clone_fast(&frame->chunk->constants[fn_idx]);
 
                 ObjUpvalue **upvalues = NULL;
                 if (upvalue_count > 0) {
@@ -5340,7 +5453,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         frame->ip += offset;
                         break;
                     }
-                    push(vm, value_deep_clone(&iter->as.array.elems[idx]));
+                    push(vm, value_clone_fast(&iter->as.array.elems[idx]));
                     idx_val->as.int_val = idx + 1;
                 } else {
                     frame->ip += offset;
@@ -5457,15 +5570,13 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t field_count = READ_BYTE();
                 const char *struct_name = frame->chunk->constants[name_idx].as.str_val;
 
-                /* Field names follow in constants after name_idx */
-                char **field_names = malloc(field_count * sizeof(char *));
+                /* Borrow field name pointers from constant pool (no strdup here) */
+                const char **field_names = malloc(field_count * sizeof(const char *));
                 LatValue *field_values = malloc(field_count * sizeof(LatValue));
 
-                /* Get field names from the constants that follow */
                 size_t base_const = name_idx + 1;
-                for (uint8_t i = 0; i < field_count; i++) {
-                    field_names[i] = strdup(frame->chunk->constants[base_const + i].as.str_val);
-                }
+                for (uint8_t i = 0; i < field_count; i++)
+                    field_names[i] = frame->chunk->constants[base_const + i].as.str_val;
 
                 /* Pop field values in reverse */
                 for (int i = field_count - 1; i >= 0; i--)
@@ -5473,33 +5584,29 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 for (int i = 0; i < field_count; i++)
                     vm_promote_value(&field_values[i]);
 
-                LatValue s = value_struct(struct_name, field_names, field_values, field_count);
+                LatValue s = value_struct_vm(struct_name, field_names, field_values, field_count);
 
                 /* Alloy enforcement: apply per-field phase from struct declaration */
                 char phase_key[256];
                 snprintf(phase_key, sizeof(phase_key), "__struct_phases_%s", struct_name);
-                LatValue phase_meta;
-                if (env_get(vm->env, phase_key, &phase_meta)) {
-                    if (phase_meta.type == VAL_ARRAY && phase_meta.as.array.len == field_count) {
-                        s.as.strct.field_phases = calloc(field_count, sizeof(PhaseTag));
-                        for (uint8_t i = 0; i < field_count; i++) {
-                            int64_t p = phase_meta.as.array.elems[i].as.int_val;
-                            if (p == 1) { /* PHASE_CRYSTAL */
-                                s.as.strct.field_values[i] = value_freeze(s.as.strct.field_values[i]);
-                                s.as.strct.field_phases[i] = VTAG_CRYSTAL;
-                            } else if (p == 0) { /* PHASE_FLUID */
-                                s.as.strct.field_phases[i] = VTAG_FLUID;
-                            } else {
-                                s.as.strct.field_phases[i] = s.phase;
-                            }
+                LatValue *phase_ref = env_get_ref(vm->env, phase_key);
+                if (phase_ref &&
+                    phase_ref->type == VAL_ARRAY && phase_ref->as.array.len == field_count) {
+                    s.as.strct.field_phases = calloc(field_count, sizeof(PhaseTag));
+                    for (uint8_t i = 0; i < field_count; i++) {
+                        int64_t p = phase_ref->as.array.elems[i].as.int_val;
+                        if (p == 1) { /* PHASE_CRYSTAL */
+                            s.as.strct.field_values[i] = value_freeze(s.as.strct.field_values[i]);
+                            s.as.strct.field_phases[i] = VTAG_CRYSTAL;
+                        } else if (p == 0) { /* PHASE_FLUID */
+                            s.as.strct.field_phases[i] = VTAG_FLUID;
+                        } else {
+                            s.as.strct.field_phases[i] = s.phase;
                         }
                     }
-                    value_free(&phase_meta);
                 }
 
-                for (uint8_t i = 0; i < field_count; i++)
-                    free(field_names[i]);
-                free(field_names);
+                free(field_names);  /* just the pointer array, not the strings */
                 free(field_values);
                 push(vm, s);
                 break;
@@ -5710,7 +5817,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     bool found = false;
                     for (size_t i = 0; i < obj.as.strct.field_count; i++) {
                         if (strcmp(obj.as.strct.field_names[i], field_name) == 0) {
-                            push(vm, value_deep_clone(&obj.as.strct.field_values[i]));
+                            /* Steal the value from the dying struct */
+                            LatValue stolen = obj.as.strct.field_values[i];
+                            obj.as.strct.field_values[i] = (LatValue){.type = VAL_NIL};
+                            push(vm, stolen);
                             found = true;
                             break;
                         }
@@ -5722,19 +5832,27 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     value_free(&obj);
                 } else if (obj.type == VAL_MAP) {
                     LatValue *val = lat_map_get(obj.as.map.map, field_name);
-                    if (val)
-                        push(vm, value_deep_clone(val));
-                    else
+                    if (val) {
+                        /* Steal the value from the dying map */
+                        LatValue stolen = *val;
+                        val->type = VAL_NIL;
+                        push(vm, stolen);
+                    } else {
                         push(vm, value_nil());
+                    }
                     value_free(&obj);
                 } else if (obj.type == VAL_ENUM) {
                     if (strcmp(field_name, "tag") == 0) {
                         push(vm, value_string(obj.as.enm.variant_name));
                     } else if (strcmp(field_name, "payload") == 0) {
-                        if (obj.as.enm.payload_count == 1)
-                            push(vm, value_deep_clone(&obj.as.enm.payload[0]));
-                        else
+                        if (obj.as.enm.payload_count == 1) {
+                            /* Steal the payload from the dying enum */
+                            LatValue stolen = obj.as.enm.payload[0];
+                            obj.as.enm.payload[0] = (LatValue){.type = VAL_NIL};
+                            push(vm, stolen);
+                        } else {
                             push(vm, value_nil());
+                        }
                     } else {
                         push(vm, value_nil());
                     }
@@ -5837,6 +5955,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                             if (vm->frame_count >= VM_FRAMES_MAX) {
                                 VM_ERROR("stack overflow (too many nested calls)"); break;
                             }
+                            vm_promote_frame_ephemerals(vm, frame);
                             /* Replace the map on the stack with a closure placeholder
                              * so OP_RETURN can clean up properly. */
                             LatValue closure_copy = value_deep_clone(field);
@@ -5886,6 +6005,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                                 if (vm->frame_count >= VM_FRAMES_MAX) {
                                     VM_ERROR("stack overflow (too many nested calls)"); break;
                                 }
+                                vm_promote_frame_ephemerals(vm, frame);
                                 LatValue self_copy = value_deep_clone(obj);
                                 LatValue closure_copy = value_deep_clone(field);
                                 /* Shift args up by 1 to make room for self */
@@ -5936,16 +6056,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                                             value_type_name(obj);
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                    LatValue method_val;
-                    if (env_get(vm->env, key, &method_val) &&
-                        method_val.type == VAL_CLOSURE && method_val.as.closure.native_fn) {
+                    LatValue *method_ref = env_get_ref(vm->env, key);
+                    if (method_ref &&
+                        method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                         /* Found a compiled method - call it with self + args */
-                        Chunk *fn_chunk = (Chunk *)method_val.as.closure.native_fn;
+                        Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
                         /* Rearrange stack: obj is already below args, use as slot 0 */
                         if (vm->frame_count >= VM_FRAMES_MAX) {
-                            value_free(&method_val);
                             VM_ERROR("stack overflow (too many nested calls)"); break;
                         }
+                        vm_promote_frame_ephemerals(vm, frame);
                         CallFrame *new_frame = &vm->frames[vm->frame_count++];
                         new_frame->chunk = fn_chunk;
                         new_frame->ip = fn_chunk->code;
@@ -5953,7 +6073,6 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         new_frame->upvalues = NULL;
                         new_frame->upvalue_count = 0;
                         frame = new_frame;
-                        value_free(&method_val);
                     } else {
                         /* Method not found - pop args and object, push nil */
                         for (int i = 0; i < arg_count; i++) {
@@ -6008,6 +6127,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                             if (vm->frame_count >= VM_FRAMES_MAX) {
                                 VM_ERROR("stack overflow (too many nested calls)"); break;
                             }
+                            vm_promote_frame_ephemerals(vm, frame);
                             LatValue self_copy = value_deep_clone(obj);
                             LatValue closure_copy = value_deep_clone(field);
                             LatValue *arg_base = vm->stack_top - arg_count;
@@ -6056,14 +6176,14 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                                             value_type_name(obj);
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                    LatValue method_val;
-                    if (env_get(vm->env, key, &method_val) &&
-                        method_val.type == VAL_CLOSURE && method_val.as.closure.native_fn) {
-                        Chunk *fn_chunk = (Chunk *)method_val.as.closure.native_fn;
+                    LatValue *method_ref = env_get_ref(vm->env, key);
+                    if (method_ref &&
+                        method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
+                        Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
                         if (vm->frame_count >= VM_FRAMES_MAX) {
-                            value_free(&method_val);
                             VM_ERROR("stack overflow (too many nested calls)"); break;
                         }
+                        vm_promote_frame_ephemerals(vm, frame);
                         /* Push self (deep clone of local) below args for the new frame. */
                         LatValue *arg_base = vm->stack_top - arg_count;
                         push(vm, value_nil());
@@ -6077,7 +6197,6 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         new_frame->upvalues = NULL;
                         new_frame->upvalue_count = 0;
                         frame = new_frame;
-                        value_free(&method_val);
                     } else {
                         /* Method not found - pop args, push nil */
                         for (int i = 0; i < arg_count; i++) {
@@ -6100,7 +6219,28 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *global_name = frame->chunk->constants[name_idx].as.str_val;
                 const char *method_name = frame->chunk->constants[method_idx].as.str_val;
 
-                /* Get a clone of the global value */
+                /* Fast path: simple builtins (no closures) can mutate in place */
+                if (vm_invoke_builtin_is_simple(method_name)) {
+                    LatValue *ref = env_get_ref(vm->env, global_name);
+                    if (!ref) {
+                        VM_ERROR("undefined variable '%s'", global_name); break;
+                    }
+                    if (vm_invoke_builtin(vm, ref, method_name, arg_count, global_name)) {
+                        if (vm->error) {
+                            VMResult r = vm_handle_error(vm, &frame, "%s", vm->error);
+                            free(vm->error); vm->error = NULL;
+                            if (r != VM_OK) return r;
+                            break;
+                        }
+                        /* Record history for tracked variables */
+                        if (vm->tracking_active) {
+                            vm_record_history(vm, global_name, ref);
+                        }
+                        break;
+                    }
+                }
+
+                /* Slow path: closure-invoking builtins or non-builtin dispatch */
                 LatValue obj_val;
                 if (!env_get(vm->env, global_name, &obj_val)) {
                     VM_ERROR("undefined variable '%s'", global_name); break;
@@ -6117,7 +6257,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     /* Write back the mutated object to the global env */
                     env_set(vm->env, global_name, obj_val);
                     /* Record history for tracked variables */
-                    if (vm->tracked_count > 0) {
+                    if (vm->tracking_active) {
                         LatValue cur;
                         if (env_get(vm->env, global_name, &cur)) {
                             vm_record_history(vm, global_name, &cur);
@@ -6146,6 +6286,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         if (vm->frame_count >= VM_FRAMES_MAX) {
                             VM_ERROR("stack overflow (too many nested calls)"); break;
                         }
+                        vm_promote_frame_ephemerals(vm, frame);
                         LatValue closure_copy = value_deep_clone(field);
                         value_free(obj);
                         *obj = closure_copy;
@@ -6190,6 +6331,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                             if (vm->frame_count >= VM_FRAMES_MAX) {
                                 VM_ERROR("stack overflow (too many nested calls)"); break;
                             }
+                            vm_promote_frame_ephemerals(vm, frame);
                             LatValue self_copy = value_deep_clone(obj);
                             LatValue closure_copy = value_deep_clone(field);
                             push(vm, value_nil());
@@ -6239,14 +6381,14 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                                             value_type_name(obj);
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                    LatValue method_val;
-                    if (env_get(vm->env, key, &method_val) &&
-                        method_val.type == VAL_CLOSURE && method_val.as.closure.native_fn) {
-                        Chunk *fn_chunk = (Chunk *)method_val.as.closure.native_fn;
+                    LatValue *method_ref = env_get_ref(vm->env, key);
+                    if (method_ref &&
+                        method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
+                        Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
                         if (vm->frame_count >= VM_FRAMES_MAX) {
-                            value_free(&method_val);
                             VM_ERROR("stack overflow (too many nested calls)"); break;
                         }
+                        vm_promote_frame_ephemerals(vm, frame);
                         /* Replace obj with self clone, shift args */
                         LatValue self_copy = value_deep_clone(obj);
                         value_free(obj);
@@ -6258,7 +6400,6 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         new_frame->upvalues = NULL;
                         new_frame->upvalue_count = 0;
                         frame = new_frame;
-                        value_free(&method_val);
                     } else {
                         for (int i = 0; i < arg_count; i++) {
                             LatValue v = pop(vm);
@@ -7422,8 +7563,11 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                  * stack via add_local without an explicit clone) as well as
                  * expression temporaries in parent frames that could be
                  * invalidated when a callee resets the shared arena. */
-                for (LatValue *slot = vm->stack; slot < vm->stack_top; slot++) {
-                    vm_promote_value(slot);
+                if (vm->ephemeral_on_stack) {
+                    for (LatValue *slot = vm->stack; slot < vm->stack_top; slot++) {
+                        vm_promote_value(slot);
+                    }
+                    vm->ephemeral_on_stack = false;
                 }
                 bump_arena_reset(vm->ephemeral);
                 break;

@@ -760,6 +760,65 @@ cursor, pushes the next element, or jumps to the specified offset when
 exhausted.  This design avoids allocating a closure object for
 \texttt{for}~loops, unlike the tree-walker which used closure-based iterators.
 
+\subsection{Reference-Counted Shared Values: \texttt{Ref<T>}}
+
+Lattice's deep-clone-on-read semantics eliminate aliasing: every variable
+read produces an independent copy, and mutations never propagate across
+scope boundaries.  While this provides strong safety guarantees, it makes
+shared mutable state impossible by default.  The \texttt{Ref<T>} type is
+an explicit opt-in to reference semantics.
+
+\needspace{8\baselineskip}
+A \texttt{Ref} wraps a value in a reference-counted, heap-allocated
+container:
+
+\begin{lstlisting}[style=clang,caption={The LatRef structure.}]
+struct LatRef {
+    LatValue value;      // wrapped inner value
+    size_t   refcount;   // reference count
+};
+\end{lstlisting}
+
+When a \texttt{VAL\_REF} is cloned---which occurs on every variable
+read, like all other types---the VM calls \texttt{ref\_retain()} to
+increment the reference count and copies the pointer.  It does \emph{not}
+deep-clone the inner value.  Multiple copies of a \texttt{Ref} therefore
+share the same underlying \texttt{LatRef}, and mutations through any copy
+are visible through all others.
+
+The VM provides transparent proxying for \texttt{Ref} values.  The
+\opcode{INDEX}, \opcode{SET\_INDEX}, and \opcode{INVOKE} handlers check
+for \texttt{VAL\_REF} and delegate to the inner value: indexing into a
+\texttt{Ref<Array>} indexes the inner array, calling \texttt{.push()} on
+a \texttt{Ref<Array>} mutates the inner array directly.  This
+transparency extends to the builtin dispatch in
+\texttt{vm\_invoke\_builtin()}, which proxies map operations
+(\texttt{get}, \texttt{set}, \texttt{keys}, \texttt{values}), array
+operations (\texttt{push}, \texttt{pop}), and other type-specific methods
+through the \texttt{Ref} wrapper.
+
+\texttt{Ref}-specific methods include \texttt{get()}/\texttt{deref()}
+(deep-clone the inner value out), \texttt{set(v)} (replace the inner
+value), and \texttt{inner\_type()} (return the type name of the wrapped
+value).  A \texttt{Ref} is created via \texttt{Ref::new(value)},
+registered as a native function in the VM.
+
+The phase system applies to \texttt{Ref} values: freezing a \texttt{Ref}
+sets its phase tag to $\crystal$, and all mutation methods
+(\texttt{set()}, \texttt{push()}, index assignment) check the phase and
+produce a runtime error if the \texttt{Ref} is frozen.  Frozen
+\texttt{Ref} values are safe to share across concurrent boundaries, as
+they provide immutable handles to immutable data.
+
+\texttt{Ref<T>} introduces a third memory management strategy alongside
+the dual-heap architecture (mark-and-sweep for fluid values, arena-based
+regions for crystal values) and the ephemeral bump arena.  Reference
+counting is simple and deterministic: \texttt{ref\_retain()} on clone,
+\texttt{ref\_release()} on free, with the inner value deallocated when
+the count reaches zero.  Since \texttt{Ref} is the uncommon case---most
+Lattice code relies on value semantics---cycle collection has not been
+necessary.
+
 \subsection{Architecture Overview}
 
 Figure~\ref{fig:vm-arch} illustrates the VM's runtime data structures and

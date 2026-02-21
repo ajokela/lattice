@@ -112,6 +112,8 @@ LatValue value_string(const char *s);
 LatValue value_string_owned(char *s);
 LatValue value_array(LatValue *elems, size_t len);
 LatValue value_struct(const char *name, char **field_names, LatValue *field_values, size_t count);
+/* VM-optimized: borrows field names from const pool (single strdup, not double) */
+LatValue value_struct_vm(const char *name, const char **field_names, LatValue *field_values, size_t count);
 LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured,
                        struct Expr **default_values, bool has_variadic);
 LatValue value_unit(void);
@@ -165,6 +167,17 @@ char *lat_strdup_routed(const char *s);
 
 /* ── Destructor ── */
 void value_free(LatValue *v);
+
+/* Inline fast-path: skip function call for primitive types with no heap data */
+static inline void value_free_inline(LatValue *v) {
+    if (v->type <= VAL_BOOL || v->type == VAL_UNIT ||
+        v->type == VAL_NIL || v->type == VAL_RANGE) {
+        v->type = VAL_NIL;
+        v->region_id = REGION_NONE;
+        return;
+    }
+    value_free(v);
+}
 
 /* ── Truthiness ── */
 bool value_is_truthy(const LatValue *v);

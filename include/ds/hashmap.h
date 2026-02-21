@@ -11,11 +11,17 @@ typedef enum {
     MAP_TOMBSTONE,
 } LatMapState;
 
+/* Max value size for inline storage in map entries.
+ * Values <= this size are stored inline (no heap allocation per entry).
+ * value pointer always points to ibuf for inline values. */
+#define LAT_MAP_INLINE_MAX 72
+
 /* A single map entry */
 typedef struct {
     char       *key;
-    void       *value;      /* heap-allocated copy of value_size bytes */
+    void       *value;      /* points to ibuf (inline storage, no separate heap alloc) */
     LatMapState state;
+    char        _ibuf[LAT_MAP_INLINE_MAX] __attribute__((aligned(8)));
 } LatMapEntry;
 
 /* Open-addressing hash map with string keys */
@@ -38,6 +44,9 @@ bool lat_map_set(LatMap *m, const char *key, const void *value);
 
 /* Get a pointer to the stored value, or NULL if not found */
 void *lat_map_get(const LatMap *m, const char *key);
+
+/* Get with pre-computed hash (avoids rehashing known constant keys) */
+void *lat_map_get_prehashed(const LatMap *m, const char *key, size_t hash);
 
 /* Remove a key. Returns true if it was present. */
 bool lat_map_remove(LatMap *m, const char *key);

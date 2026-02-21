@@ -4,12 +4,22 @@
 #include <stdio.h>
 #include <string.h>
 
+static size_t chunk_fnv1a(const char *key) {
+    size_t hash = 14695981039346656037ULL;
+    for (const char *p = key; *p; p++) {
+        hash ^= (size_t)(unsigned char)*p;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 Chunk *chunk_new(void) {
     Chunk *c = calloc(1, sizeof(Chunk));
     c->code_cap = 256;
     c->code = malloc(c->code_cap);
     c->const_cap = 32;
     c->constants = malloc(c->const_cap * sizeof(LatValue));
+    c->const_hashes = calloc(c->const_cap, sizeof(size_t));
     c->lines_cap = 256;
     c->lines = malloc(c->lines_cap * sizeof(int));
     return c;
@@ -29,6 +39,7 @@ void chunk_free(Chunk *c) {
         value_free(&c->constants[i]);
     }
     free(c->constants);
+    free(c->const_hashes);
     free(c->lines);
     for (size_t i = 0; i < c->local_name_cap; i++)
         free(c->local_names[i]);
@@ -68,9 +79,13 @@ size_t chunk_add_constant(Chunk *c, LatValue val) {
     if (c->const_len >= c->const_cap) {
         c->const_cap *= 2;
         c->constants = realloc(c->constants, c->const_cap * sizeof(LatValue));
+        c->const_hashes = realloc(c->const_hashes, c->const_cap * sizeof(size_t));
     }
-    c->constants[c->const_len] = val;
-    return c->const_len++;
+    size_t idx = c->const_len++;
+    c->constants[idx] = val;
+    c->const_hashes[idx] = (val.type == VAL_STR && val.as.str_val) ?
+                            chunk_fnv1a(val.as.str_val) : 0;
+    return idx;
 }
 
 void chunk_write_u16(Chunk *c, uint16_t val, int line) {

@@ -121,6 +121,12 @@ typedef struct {
     LatValue fast_args[16];
     /* Ephemeral bump arena for short-lived string temporaries */
     struct BumpArena *ephemeral;
+    /* Fast cache of (tracked_count > 0) — avoids compound guard on hot path */
+    bool tracking_active;
+    /* True when ephemeral values exist on the stack (avoids scanning on every call) */
+    bool ephemeral_on_stack;
+    /* Pre-built wrapper chunk for vm_call_closure [OP_CALL, arg_count, OP_RETURN] */
+    Chunk call_wrapper;
 } VM;
 
 void vm_init(VM *vm);

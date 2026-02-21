@@ -10,6 +10,7 @@ typedef struct {
     size_t    code_len;
     size_t    code_cap;
     LatValue *constants;   /* Constants pool */
+    size_t   *const_hashes; /* Pre-computed FNV-1a hashes for string constants (0 for non-strings) */
     size_t    const_len;
     size_t    const_cap;
     int      *lines;       /* Line number per bytecode byte (parallel to code) */

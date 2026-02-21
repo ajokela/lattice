@@ -1,7 +1,7 @@
 #ifndef LATTICE_H
 #define LATTICE_H
 
-#define LATTICE_VERSION "0.3.10"
+#define LATTICE_VERSION "0.3.11"
 
 #include <stddef.h>
 #include <stdint.h>

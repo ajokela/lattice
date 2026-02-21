@@ -70,6 +70,11 @@ void env_define_at(Env *env, size_t scope_idx, const char *name, LatValue value)
 }
 
 bool env_get(const Env *env, const char *name, LatValue *out) {
+    if (env->count == 1) {
+        LatValue *v = lat_map_get(&env->scopes[0], name);
+        if (v) { *out = value_deep_clone(v); return true; }
+        return false;
+    }
     for (size_t i = env->count; i > 0; i--) {
         LatValue *v = lat_map_get(&env->scopes[i - 1], name);
         if (v) {
@@ -81,6 +86,8 @@ bool env_get(const Env *env, const char *name, LatValue *out) {
 }
 
 LatValue *env_get_ref(const Env *env, const char *name) {
+    if (env->count == 1)
+        return lat_map_get(&env->scopes[0], name);
     for (size_t i = env->count; i > 0; i--) {
         LatValue *v = lat_map_get(&env->scopes[i - 1], name);
         if (v) return v;
@@ -88,7 +95,26 @@ LatValue *env_get_ref(const Env *env, const char *name) {
     return NULL;
 }
 
+LatValue *env_get_ref_prehashed(const Env *env, const char *name, size_t hash) {
+    if (env->count == 1)
+        return lat_map_get_prehashed(&env->scopes[0], name, hash);
+    for (size_t i = env->count; i > 0; i--) {
+        LatValue *v = lat_map_get_prehashed(&env->scopes[i - 1], name, hash);
+        if (v) return v;
+    }
+    return NULL;
+}
+
 bool env_set(Env *env, const char *name, LatValue value) {
+    if (env->count == 1) {
+        LatValue *existing = lat_map_get(&env->scopes[0], name);
+        if (existing) {
+            value_free(existing);
+            lat_map_set(&env->scopes[0], name, &value);
+            return true;
+        }
+        return false;
+    }
     for (size_t i = env->count; i > 0; i--) {
         LatValue *existing = lat_map_get(&env->scopes[i - 1], name);
         if (existing) {
@@ -146,18 +172,20 @@ static Env *env_clone_arena(const Env *env) {
         LatMap *dst = &new_env->scopes[i];
         dst->value_size = src->value_size;
         dst->cap = src->cap;
-        dst->count = src->live;  /* only OCCUPIED entries are copied */
+        dst->count = src->count;  /* preserve tombstone count for probe chains */
         dst->live = src->live;
         dst->entries = lat_calloc_routed(src->cap, sizeof(LatMapEntry));
         for (size_t j = 0; j < src->cap; j++) {
+            /* Point value to inline buffer for all entries */
+            dst->entries[j].value = dst->entries[j]._ibuf;
             if (src->entries[j].state == MAP_OCCUPIED) {
                 dst->entries[j].state = MAP_OCCUPIED;
                 dst->entries[j].key = lat_strdup_routed(src->entries[j].key);
                 LatValue *sv = (LatValue *)src->entries[j].value;
                 LatValue cloned = value_deep_clone(sv);
-                LatValue *dv = lat_alloc_routed(sizeof(LatValue));
-                *dv = cloned;
-                dst->entries[j].value = dv;
+                *(LatValue *)dst->entries[j].value = cloned;
+            } else if (src->entries[j].state == MAP_TOMBSTONE) {
+                dst->entries[j].state = MAP_TOMBSTONE;
             }
         }
     }

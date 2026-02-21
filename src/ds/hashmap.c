@@ -1,6 +1,7 @@
 #include "ds/hashmap.h"
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 #define INITIAL_CAP  16
 #define LOAD_FACTOR  70  /* percent */
@@ -17,12 +18,16 @@ static size_t fnv1a(const char *key) {
 
 static void lat_map_alloc_entries(LatMap *m, size_t cap) {
     m->entries = calloc(cap, sizeof(LatMapEntry));
+    /* Point each entry's value to its inline buffer */
+    for (size_t i = 0; i < cap; i++)
+        m->entries[i].value = m->entries[i]._ibuf;
     m->cap = cap;
     m->count = 0;
     m->live = 0;
 }
 
 LatMap lat_map_new(size_t value_size) {
+    assert(value_size <= LAT_MAP_INLINE_MAX);
     LatMap m;
     m.value_size = value_size;
     lat_map_alloc_entries(&m, INITIAL_CAP);
@@ -33,7 +38,7 @@ void lat_map_free(LatMap *m) {
     for (size_t i = 0; i < m->cap; i++) {
         if (m->entries[i].state == MAP_OCCUPIED) {
             free(m->entries[i].key);
-            free(m->entries[i].value);
+            /* value is inline — no free needed */
         }
     }
     free(m->entries);
@@ -73,7 +78,10 @@ static void lat_map_rehash(LatMap *m) {
     for (size_t i = 0; i < old_cap; i++) {
         if (old[i].state == MAP_OCCUPIED) {
             size_t pos = lat_map_find_slot(m, old[i].key);
-            m->entries[pos] = old[i];
+            m->entries[pos].key = old[i].key;
+            m->entries[pos].state = MAP_OCCUPIED;
+            /* value pointer already points to _ibuf; copy inline data */
+            memcpy(m->entries[pos]._ibuf, old[i]._ibuf, m->value_size);
             m->count++;
             m->live++;
         }
@@ -90,15 +98,14 @@ bool lat_map_set(LatMap *m, const char *key, const void *value) {
     LatMapEntry *e = &m->entries[pos];
 
     if (e->state == MAP_OCCUPIED) {
-        /* Update existing */
+        /* Update existing — value is inline */
         memcpy(e->value, value, m->value_size);
         return false;
     }
 
-    /* New entry */
+    /* New entry — value stored inline (e->value already points to e->_ibuf) */
     bool was_empty = (e->state == MAP_EMPTY);
     e->key = strdup(key);
-    e->value = malloc(m->value_size);
     memcpy(e->value, value, m->value_size);
     e->state = MAP_OCCUPIED;
     if (was_empty) m->count++;
@@ -120,6 +127,20 @@ void *lat_map_get(const LatMap *m, const char *key) {
     return NULL;
 }
 
+void *lat_map_get_prehashed(const LatMap *m, const char *key, size_t hash) {
+    if (m->live == 0) return NULL;
+    size_t idx = hash % m->cap;
+    for (size_t i = 0; i < m->cap; i++) {
+        size_t pos = (idx + i) % m->cap;
+        LatMapEntry *e = &m->entries[pos];
+        if (e->state == MAP_EMPTY) return NULL;
+        if (e->state == MAP_OCCUPIED && strcmp(e->key, key) == 0) {
+            return e->value;
+        }
+    }
+    return NULL;
+}
+
 bool lat_map_remove(LatMap *m, const char *key) {
     if (m->live == 0) return false;
     size_t idx = fnv1a(key) % m->cap;
@@ -129,9 +150,8 @@ bool lat_map_remove(LatMap *m, const char *key) {
         if (e->state == MAP_EMPTY) return false;
         if (e->state == MAP_OCCUPIED && strcmp(e->key, key) == 0) {
             free(e->key);
-            free(e->value);
             e->key = NULL;
-            e->value = NULL;
+            /* value is inline, no free needed */
             e->state = MAP_TOMBSTONE;
             m->live--;
             return true;

@@ -40,6 +40,9 @@ bool env_get(const Env *env, const char *name, LatValue *out);
 /* Look up a name without cloning. Returns pointer to value or NULL if not found. */
 LatValue *env_get_ref(const Env *env, const char *name);
 
+/* Look up with pre-computed hash (avoids rehashing constant keys). */
+LatValue *env_get_ref_prehashed(const Env *env, const char *name, size_t hash);
+
 /* Update an existing binding. Returns false if not defined. */
 bool env_set(Env *env, const char *name, LatValue value);
 
