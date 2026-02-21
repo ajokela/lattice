@@ -337,6 +337,7 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
             return offset + 4 + uvc * 2;
         }
         case OP_RESET_EPHEMERAL: return simple_instruction("OP_RESET_EPHEMERAL", offset);
+        case OP_SET_LOCAL_POP: return byte_instruction("OP_SET_LOCAL_POP", c, offset);
         case OP_HALT:          return simple_instruction("OP_HALT", offset);
         default:
             fprintf(stderr, "Unknown opcode %d\n", op);

@@ -1513,12 +1513,14 @@ static void compile_stmt(const Stmt *s) {
                 }
             }
 
+            bool skip_pop = false;
             compile_expr(s->as.assign.value, line);
             if (s->as.assign.target->tag == EXPR_IDENT) {
                 const char *name = s->as.assign.target->as.str_val;
                 int slot = resolve_local(current, name);
                 if (slot >= 0) {
-                    emit_bytes(OP_SET_LOCAL, (uint8_t)slot, line);
+                    emit_bytes(OP_SET_LOCAL_POP, (uint8_t)slot, line);
+                    skip_pop = true;
                 } else {
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
@@ -1587,7 +1589,7 @@ static void compile_stmt(const Stmt *s) {
                     }
                 }
             }
-            emit_byte(OP_POP, line);
+            if (!skip_pop) emit_byte(OP_POP, line);
             break;
         }
 

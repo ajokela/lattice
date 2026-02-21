@@ -225,6 +225,63 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             }
             return value_deep_clone(src);
         }
+        case VAL_STRUCT: {
+            LatValue v = *src;
+            size_t fc = src->as.strct.field_count;
+            v.as.strct.name = strdup(src->as.strct.name);
+            v.as.strct.field_names = malloc(fc * sizeof(char *));
+            v.as.strct.field_values = malloc(fc * sizeof(LatValue));
+            for (size_t i = 0; i < fc; i++) {
+                v.as.strct.field_names[i] = strdup(src->as.strct.field_names[i]);
+                v.as.strct.field_values[i] = value_clone_fast(&src->as.strct.field_values[i]);
+            }
+            if (src->as.strct.field_phases) {
+                v.as.strct.field_phases = malloc(fc * sizeof(PhaseTag));
+                memcpy(v.as.strct.field_phases, src->as.strct.field_phases, fc * sizeof(PhaseTag));
+            }
+            v.region_id = REGION_NONE;
+            return v;
+        }
+        case VAL_ARRAY: {
+            LatValue v = *src;
+            size_t len = src->as.array.len;
+            size_t cap = src->as.array.cap;
+            v.as.array.elems = malloc(cap * sizeof(LatValue));
+            for (size_t i = 0; i < len; i++)
+                v.as.array.elems[i] = value_clone_fast(&src->as.array.elems[i]);
+            v.region_id = REGION_NONE;
+            return v;
+        }
+        case VAL_TUPLE: {
+            LatValue v = *src;
+            size_t len = src->as.tuple.len;
+            v.as.tuple.elems = malloc(len * sizeof(LatValue));
+            for (size_t i = 0; i < len; i++)
+                v.as.tuple.elems[i] = value_clone_fast(&src->as.tuple.elems[i]);
+            v.region_id = REGION_NONE;
+            return v;
+        }
+        case VAL_MAP: {
+            LatValue v = value_map_new();
+            LatMap *sm = src->as.map.map;
+            for (size_t i = 0; i < sm->cap; i++) {
+                if (sm->entries[i].state == MAP_OCCUPIED) {
+                    LatValue cloned = value_clone_fast((LatValue *)sm->entries[i].value);
+                    lat_map_set(v.as.map.map, sm->entries[i].key, &cloned);
+                }
+            }
+            if (src->as.map.key_phases) {
+                LatMap *ksrc = src->as.map.key_phases;
+                v.as.map.key_phases = malloc(sizeof(LatMap));
+                *v.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+                for (size_t i = 0; i < ksrc->cap; i++) {
+                    if (ksrc->entries[i].state == MAP_OCCUPIED)
+                        lat_map_set(v.as.map.key_phases, ksrc->entries[i].key, ksrc->entries[i].value);
+                }
+            }
+            v.region_id = REGION_NONE;
+            return v;
+        }
         default:
             return value_deep_clone(src);
     }
@@ -2968,11 +3025,11 @@ static inline uint32_t method_hash(const char *s) {
 
 /* Returns true if the builtin method is "simple" — no user closures executed,
  * safe for direct-pointer mutation without clone-mutate-writeback. */
-static inline bool vm_invoke_builtin_is_simple(const char *method) {
-    return !(strcmp(method, "map") == 0 || strcmp(method, "filter") == 0 ||
-             strcmp(method, "reduce") == 0 || strcmp(method, "each") == 0 ||
-             strcmp(method, "sort") == 0 || strcmp(method, "find") == 0 ||
-             strcmp(method, "any") == 0 || strcmp(method, "all") == 0);
+static inline bool vm_invoke_builtin_is_simple(uint32_t mhash) {
+    return !(mhash == MHASH_map || mhash == MHASH_filter ||
+             mhash == MHASH_reduce || mhash == MHASH_each ||
+             mhash == MHASH_sort || mhash == MHASH_find ||
+             mhash == MHASH_any || mhash == MHASH_all);
 }
 
 static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg_count, const char *var_name) {
@@ -3043,11 +3100,10 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             /* Build array of [index, element] pairs */
             LatValue *pairs = malloc(obj->as.array.len * sizeof(LatValue));
             for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue *pair_elems = malloc(2 * sizeof(LatValue));
+                LatValue pair_elems[2];
                 pair_elems[0] = value_int((int64_t)i);
-                pair_elems[1] = value_deep_clone(&obj->as.array.elems[i]);
+                pair_elems[1] = value_clone_fast(&obj->as.array.elems[i]);
                 pairs[i] = value_array(pair_elems, 2);
-                free(pair_elems);
             }
             LatValue result = value_array(pairs, obj->as.array.len);
             free(pairs);
@@ -3066,24 +3122,28 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
         if (mhash == MHASH_join && strcmp(method, "join") == 0 && arg_count == 1) {
             LatValue sep = pop(vm);
             const char *sep_str = (sep.type == VAL_STR) ? sep.as.str_val : "";
+            size_t sep_len = strlen(sep_str);
+            size_t n = obj->as.array.len;
+            char **parts = malloc(n * sizeof(char *));
+            size_t *lens = malloc(n * sizeof(size_t));
             size_t total = 0;
-            char **parts = malloc(obj->as.array.len * sizeof(char *));
-            for (size_t i = 0; i < obj->as.array.len; i++) {
+            for (size_t i = 0; i < n; i++) {
                 parts[i] = value_display(&obj->as.array.elems[i]);
-                total += strlen(parts[i]);
-                if (i > 0) total += strlen(sep_str);
+                lens[i] = strlen(parts[i]);
+                total += lens[i];
             }
+            if (n > 1) total += sep_len * (n - 1);
             char *buf = malloc(total + 1);
-            buf[0] = '\0';
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (i > 0) strcat(buf, sep_str);
-                strcat(buf, parts[i]);
+            size_t pos = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (i > 0) { memcpy(buf + pos, sep_str, sep_len); pos += sep_len; }
+                memcpy(buf + pos, parts[i], lens[i]); pos += lens[i];
                 free(parts[i]);
             }
-            free(parts);
+            buf[pos] = '\0';
+            free(parts); free(lens);
             value_free(&sep);
-            push(vm, value_string(buf));
-            free(buf);
+            push(vm, value_string_owned(buf));
             return true;
         }
         if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
@@ -3171,8 +3231,8 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                     bool should_swap;
                     if (has_cmp) {
                         LatValue args[2];
-                        args[0] = value_deep_clone(&elems[j - 1]);
-                        args[1] = value_deep_clone(&key);
+                        args[0] = value_clone_fast(&elems[j - 1]);
+                        args[1] = value_clone_fast(&key);
                         LatValue cmp = vm_call_closure(vm, &closure, args, 2);
                         should_swap = (cmp.type == VAL_INT && cmp.as.int_val > 0) ||
                                       (cmp.type == VAL_BOOL && !cmp.as.bool_val);
@@ -3218,7 +3278,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 value_free(&arg); value_free(&pred);
                 if (match) {
                     value_free(&closure);
-                    push(vm, value_deep_clone(&obj->as.array.elems[i]));
+                    push(vm, value_clone_fast(&obj->as.array.elems[i]));
                     return true;
                 }
             }
@@ -3447,11 +3507,14 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             LatValue *buf = malloc((total > 0 ? total : 1) * sizeof(LatValue));
             size_t pos = 0;
             for (size_t i = 0; i < n; i++) {
-                if (mapped[i].type == VAL_ARRAY)
+                if (mapped[i].type == VAL_ARRAY) {
                     for (size_t j = 0; j < mapped[i].as.array.len; j++)
-                        buf[pos++] = value_deep_clone(&mapped[i].as.array.elems[j]);
-                else
-                    buf[pos++] = value_deep_clone(&mapped[i]);
+                        buf[pos++] = mapped[i].as.array.elems[j];
+                    mapped[i].as.array.len = 0; /* prevent double-free of moved elements */
+                } else {
+                    buf[pos++] = mapped[i];
+                    mapped[i].type = VAL_NIL; /* prevent double-free */
+                }
             }
             for (size_t i = 0; i < n; i++) value_free(&mapped[i]);
             free(mapped);
@@ -3470,8 +3533,8 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                 size_t j = i;
                 while (j > 0) {
                     LatValue ca[2];
-                    ca[0] = value_deep_clone(&key);
-                    ca[1] = value_deep_clone(&buf[j - 1]);
+                    ca[0] = value_clone_fast(&key);
+                    ca[1] = value_clone_fast(&buf[j - 1]);
                     LatValue cmp = vm_call_closure(vm, &closure, ca, 2);
                     value_free(&ca[0]); value_free(&ca[1]);
                     if (cmp.type != VAL_INT || cmp.as.int_val >= 0) { value_free(&cmp); break; }
@@ -3595,9 +3658,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             char *trimmed = malloc((size_t)(e - s) + 1);
             memcpy(trimmed, s, (size_t)(e - s));
             trimmed[e - s] = '\0';
-            LatValue result = value_string(trimmed);
-            free(trimmed);
-            push(vm, result);
+            push(vm, value_string_owned(trimmed));
             return true;
         }
         if (mhash == MHASH_to_upper && strcmp(method, "to_upper") == 0 && arg_count == 0) {
@@ -3715,7 +3776,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             char pad = (ch_v.type == VAL_STR && ch_v.as.str_val[0]) ? ch_v.as.str_val[0] : ' ';
             value_free(&n_v); value_free(&ch_v);
             size_t slen = strlen(obj->as.str_val);
-            if ((int64_t)slen >= n) { push(vm, value_deep_clone(obj)); return true; }
+            if ((int64_t)slen >= n) { push(vm, value_clone_fast(obj)); return true; }
             size_t pad_n = (size_t)n - slen;
             char *r = malloc((size_t)n + 1);
             memset(r, pad, pad_n);
@@ -3729,7 +3790,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             char pad = (ch_v.type == VAL_STR && ch_v.as.str_val[0]) ? ch_v.as.str_val[0] : ' ';
             value_free(&n_v); value_free(&ch_v);
             size_t slen = strlen(obj->as.str_val);
-            if ((int64_t)slen >= n) { push(vm, value_deep_clone(obj)); return true; }
+            if ((int64_t)slen >= n) { push(vm, value_clone_fast(obj)); return true; }
             size_t pad_n = (size_t)n - slen;
             char *r = malloc((size_t)n + 1);
             memcpy(r, obj->as.str_val, slen);
@@ -3885,10 +3946,11 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                     ca[1] = value_deep_clone((LatValue *)obj->as.map.map->entries[i].value);
                     LatValue r = vm_call_closure(vm, &closure, ca, 2);
                     bool keep = (r.type == VAL_BOOL && r.as.bool_val);
-                    value_free(&ca[0]); value_free(&ca[1]); value_free(&r);
+                    value_free(&ca[0]); value_free(&r);
                     if (keep) {
-                        LatValue cloned = value_deep_clone((LatValue *)obj->as.map.map->entries[i].value);
-                        lat_map_set(result.as.map.map, obj->as.map.map->entries[i].key, &cloned);
+                        lat_map_set(result.as.map.map, obj->as.map.map->entries[i].key, &ca[1]);
+                    } else {
+                        value_free(&ca[1]);
                     }
                 }
             }
@@ -4623,6 +4685,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
         [OP_DEFINE_GLOBAL_16] = &&lbl_OP_DEFINE_GLOBAL_16,
         [OP_CLOSURE_16] = &&lbl_OP_CLOSURE_16,
         [OP_RESET_EPHEMERAL] = &&lbl_OP_RESET_EPHEMERAL,
+        [OP_SET_LOCAL_POP] = &&lbl_OP_SET_LOCAL_POP,
         [OP_HALT] = &&lbl_OP_HALT,
     };
 #endif
@@ -4673,8 +4736,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_POP:
 #endif
             case OP_POP: {
-                LatValue v = pop(vm);
-                value_free(&v);
+                vm->stack_top--;
+                value_free(vm->stack_top);
                 break;
             }
 
@@ -5044,6 +5107,22 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             }
 
 #ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_SET_LOCAL_POP:
+#endif
+            case OP_SET_LOCAL_POP: {
+                uint8_t slot = READ_BYTE();
+                LatValue *dest = &frame->slots[slot];
+                value_free(dest);
+                *dest = value_clone_fast(vm_peek(vm, 0));
+                if (vm->tracking_active && frame->chunk->local_names &&
+                    slot < frame->chunk->local_name_cap && frame->chunk->local_names[slot]) {
+                    vm_record_history(vm, frame->chunk->local_names[slot], dest);
+                }
+                vm->stack_top--;
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
             lbl_OP_GET_GLOBAL:
 #endif
             case OP_GET_GLOBAL: {
@@ -5092,7 +5171,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t idx = READ_BYTE();
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue *val = vm_peek(vm, 0);
-                env_set(vm->env, name, value_deep_clone(val));
+                env_set(vm->env, name, value_clone_fast(val));
                 if (vm->tracking_active) {
                     vm_record_history(vm, name, val);
                 }
@@ -5106,7 +5185,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint16_t idx = READ_U16();
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue *val = vm_peek(vm, 0);
-                env_set(vm->env, name, value_deep_clone(val));
+                env_set(vm->env, name, value_clone_fast(val));
                 if (vm->tracking_active) {
                     vm_record_history(vm, name, val);
                 }
@@ -5468,15 +5547,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_BUILD_ARRAY: {
                 uint8_t count = READ_BYTE();
                 LatValue *elems = NULL;
+                LatValue elem_buf[16];
                 if (count > 0) {
-                    elems = malloc(count * sizeof(LatValue));
+                    elems = (count <= 16) ? elem_buf : malloc(count * sizeof(LatValue));
                     for (int i = count - 1; i >= 0; i--)
                         elems[i] = pop(vm);
                     for (int i = 0; i < count; i++)
                         vm_promote_value(&elems[i]);
                 }
                 LatValue arr = value_array(elems, count);
-                free(elems);
+                if (count > 16) free(elems);
                 push(vm, arr);
                 break;
             }
@@ -5549,15 +5629,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_BUILD_TUPLE: {
                 uint8_t count = READ_BYTE();
                 LatValue *elems = NULL;
+                LatValue elem_buf[16];
                 if (count > 0) {
-                    elems = malloc(count * sizeof(LatValue));
+                    elems = (count <= 16) ? elem_buf : malloc(count * sizeof(LatValue));
                     for (int i = count - 1; i >= 0; i--)
                         elems[i] = pop(vm);
                     for (int i = 0; i < count; i++)
                         vm_promote_value(&elems[i]);
                 }
                 LatValue tup = value_tuple(elems, count);
-                free(elems);
+                if (count > 16) free(elems);
                 push(vm, tup);
                 break;
             }
@@ -5571,8 +5652,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *struct_name = frame->chunk->constants[name_idx].as.str_val;
 
                 /* Borrow field name pointers from constant pool (no strdup here) */
-                const char **field_names = malloc(field_count * sizeof(const char *));
-                LatValue *field_values = malloc(field_count * sizeof(LatValue));
+                const char *fn_buf[16];
+                LatValue fv_buf[16];
+                const char **field_names = (field_count <= 16) ? fn_buf : malloc(field_count * sizeof(const char *));
+                LatValue *field_values = (field_count <= 16) ? fv_buf : malloc(field_count * sizeof(LatValue));
 
                 size_t base_const = name_idx + 1;
                 for (uint8_t i = 0; i < field_count; i++)
@@ -5606,8 +5689,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     }
                 }
 
-                free(field_names);  /* just the pointer array, not the strings */
-                free(field_values);
+                if (field_count > 16) { free(field_names); free(field_values); }
                 push(vm, s);
                 break;
             }
@@ -6220,7 +6302,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *method_name = frame->chunk->constants[method_idx].as.str_val;
 
                 /* Fast path: simple builtins (no closures) can mutate in place */
-                if (vm_invoke_builtin_is_simple(method_name)) {
+                uint32_t mhash_g = method_hash(method_name);
+                if (vm_invoke_builtin_is_simple(mhash_g)) {
                     LatValue *ref = env_get_ref(vm->env, global_name);
                     if (!ref) {
                         VM_ERROR("undefined variable '%s'", global_name); break;
@@ -7508,9 +7591,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_ADD_INT:
 #endif
             case OP_ADD_INT: {
-                LatValue b = pop(vm);
-                LatValue a = pop(vm);
-                push(vm, value_int(a.as.int_val + b.as.int_val));
+                vm->stack_top--;
+                vm->stack_top[-1].as.int_val += vm->stack_top[0].as.int_val;
                 break;
             }
 
@@ -7518,9 +7600,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_SUB_INT:
 #endif
             case OP_SUB_INT: {
-                LatValue b = pop(vm);
-                LatValue a = pop(vm);
-                push(vm, value_int(a.as.int_val - b.as.int_val));
+                vm->stack_top--;
+                vm->stack_top[-1].as.int_val -= vm->stack_top[0].as.int_val;
                 break;
             }
 
@@ -7528,9 +7609,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_MUL_INT:
 #endif
             case OP_MUL_INT: {
-                LatValue b = pop(vm);
-                LatValue a = pop(vm);
-                push(vm, value_int(a.as.int_val * b.as.int_val));
+                vm->stack_top--;
+                vm->stack_top[-1].as.int_val *= vm->stack_top[0].as.int_val;
                 break;
             }
 
@@ -7538,9 +7618,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_LT_INT:
 #endif
             case OP_LT_INT: {
-                LatValue b = pop(vm);
-                LatValue a = pop(vm);
-                push(vm, value_bool(a.as.int_val < b.as.int_val));
+                vm->stack_top--;
+                int64_t a = vm->stack_top[-1].as.int_val;
+                vm->stack_top[-1].type = VAL_BOOL;
+                vm->stack_top[-1].as.bool_val = a < vm->stack_top[0].as.int_val;
                 break;
             }
 
@@ -7548,9 +7629,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_LTEQ_INT:
 #endif
             case OP_LTEQ_INT: {
-                LatValue b = pop(vm);
-                LatValue a = pop(vm);
-                push(vm, value_bool(a.as.int_val <= b.as.int_val));
+                vm->stack_top--;
+                int64_t a = vm->stack_top[-1].as.int_val;
+                vm->stack_top[-1].type = VAL_BOOL;
+                vm->stack_top[-1].as.bool_val = a <= vm->stack_top[0].as.int_val;
                 break;
             }
 

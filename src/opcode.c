@@ -101,6 +101,7 @@ static const char *names[] = {
     [OP_DEFINE_GLOBAL_16] = "OP_DEFINE_GLOBAL_16",
     [OP_CLOSURE_16]    = "OP_CLOSURE_16",
     [OP_RESET_EPHEMERAL] = "OP_RESET_EPHEMERAL",
+    [OP_SET_LOCAL_POP] = "OP_SET_LOCAL_POP",
     [OP_HALT]          = "OP_HALT",
 };
 

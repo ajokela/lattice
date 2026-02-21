@@ -141,6 +141,9 @@ typedef enum {
     /* Ephemeral arena */
     OP_RESET_EPHEMERAL, /* Reset ephemeral bump arena at statement boundaries */
 
+    /* Combined ops */
+    OP_SET_LOCAL_POP,  /* Set local at stack slot [operand] and pop (SET_LOCAL + POP) */
+
     /* Fallback to tree-walker */
     OP_HALT,           /* Stop execution */
 } Opcode;

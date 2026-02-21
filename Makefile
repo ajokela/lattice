@@ -1,5 +1,5 @@
 CC      = cc
-CFLAGS  = -std=c11 -Wall -Wextra -Werror -Iinclude
+CFLAGS  = -std=c11 -Wall -Wextra -Werror -Iinclude -O2 -DVM_USE_COMPUTED_GOTO
 LDFLAGS =
 
 SRC_DIR    = src
