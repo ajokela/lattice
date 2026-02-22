@@ -6692,7 +6692,6 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     else if (arm->pattern->phase_qualifier == PHASE_CRYSTAL)
                         phase_ok = (scr.value.phase == VTAG_CRYSTAL);
                     if (!phase_ok) {
-                        matched = false;
                         if (bind_name) { value_free(&bind_val); bind_name = NULL; }
                         continue;
                     }
@@ -6992,7 +6991,6 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             select_result = eval_block_stmts(ev, arms[timeout_idx].body, arms[timeout_idx].body_count);
                             env_pop_scope(ev->env);
                         }
-                        found = true;
                         break;
                     }
                 } else {

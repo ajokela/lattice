@@ -40,6 +40,8 @@ typedef struct Compiler {
     /* Ensure contracts (postconditions) for the current function */
     ContractClause *contracts;
     size_t       contract_count;
+    /* Return type name (borrowed from AST, NULL if none) */
+    const char  *return_type_name;
 } Compiler;
 
 /* Compile a program to bytecode. Returns a Chunk on success.

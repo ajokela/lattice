@@ -7,6 +7,10 @@
 #include "parser.h"
 #include "phase_check.h"
 #include "eval.h"
+#include "compiler.h"
+#include "vm.h"
+#include "regvm.h"
+#include "test_backend.h"
 
 /* Import test macros from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
@@ -109,18 +113,91 @@ static int run_source_ok(const char *source, char **err_out) {
         lat_vec_free(&errors);
     }
 
-    /* Evaluate */
-    Evaluator *ev = evaluator_new();
-    if (gc_stress) evaluator_set_gc_stress(ev, true);
-    char *eval_err = evaluator_run(ev, &prog);
+    /* Evaluate — dispatch based on selected backend */
     int result = 0;
-    if (eval_err) {
-        if (err_out) *err_out = eval_err;
-        else free(eval_err);
-        result = 1;
+
+    if (test_backend == BACKEND_TREE_WALK) {
+        /* Tree-walk evaluator (legacy) */
+        Evaluator *ev = evaluator_new();
+        if (gc_stress) evaluator_set_gc_stress(ev, true);
+        char *eval_err = evaluator_run(ev, &prog);
+        if (eval_err) {
+            if (err_out) *err_out = eval_err;
+            else free(eval_err);
+            result = 1;
+        }
+        evaluator_free(ev);
+    } else if (test_backend == BACKEND_STACK_VM) {
+        /* Bytecode stack VM (production default) */
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+
+        char *comp_err = NULL;
+        Chunk *chunk = compile(&prog, &comp_err);
+        if (!chunk) {
+            if (err_out) *err_out = comp_err;
+            else free(comp_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            return 1;
+        }
+
+        VM vm;
+        vm_init(&vm);
+        LatValue vm_result;
+        VMResult vm_res = vm_run(&vm, chunk, &vm_result);
+        if (vm_res != VM_OK) {
+            if (err_out) *err_out = strdup(vm.error ? vm.error : "vm error");
+            result = 1;
+        } else {
+            value_free(&vm_result);
+        }
+        vm_free(&vm);
+        chunk_free(chunk);
+    } else if (test_backend == BACKEND_REG_VM) {
+        /* Register VM (POC) */
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+
+        char *rcomp_err = NULL;
+        RegChunk *rchunk = reg_compile(&prog, &rcomp_err);
+        if (!rchunk) {
+            if (err_out) *err_out = rcomp_err;
+            else free(rcomp_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            return 1;
+        }
+
+        RegVM rvm;
+        regvm_init(&rvm);
+
+        /* Borrow native functions from a temp stack VM */
+        {
+            VM tmp_vm;
+            vm_init(&tmp_vm);
+            env_free(rvm.env);
+            rvm.env = tmp_vm.env;
+            tmp_vm.env = env_new();
+            vm_free(&tmp_vm);
+        }
+
+        LatValue rresult;
+        RegVMResult rvm_res = regvm_run(&rvm, rchunk, &rresult);
+        if (rvm_res != REGVM_OK) {
+            if (err_out) *err_out = strdup(rvm.error ? rvm.error : "regvm error");
+            result = 1;
+        } else {
+            value_free(&rresult);
+        }
+        regvm_free(&rvm);
+        regchunk_free(rchunk);
     }
 
-    evaluator_free(ev);
     program_free(&prog);
     for (size_t i = 0; i < tokens.len; i++)
         token_free(lat_vec_get(&tokens, i));

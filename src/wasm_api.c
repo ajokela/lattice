@@ -5,9 +5,12 @@
 #include "parser.h"
 #include "compiler.h"
 #include "vm.h"
+#include "regvm.h"
 #include <emscripten.h>
 
 static VM *g_vm = NULL;
+static RegVM *g_rvm = NULL;
+static int g_use_regvm = 0;
 
 /* Keep parsed programs alive so struct/fn/enum decl pointers referenced by
  * compiled chunks remain valid. */
@@ -171,6 +174,111 @@ void lat_destroy(void) {
         g_vm = NULL;
     }
     compiler_free_known_enums();
+    free_stored_programs();
+}
+
+/* ── Register VM WASM API ── */
+
+EMSCRIPTEN_KEEPALIVE
+void lat_init_regvm(void) {
+    if (g_rvm) {
+        regvm_free(g_rvm);
+        free(g_rvm);
+        reg_compiler_free_known_enums();
+        free_stored_programs();
+    }
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    g_rvm = malloc(sizeof(RegVM));
+    regvm_init(g_rvm);
+
+    /* Borrow native functions from a temp stack VM */
+    VM tmp_vm;
+    vm_init(&tmp_vm);
+    env_free(g_rvm->env);
+    g_rvm->env = tmp_vm.env;
+    tmp_vm.env = env_new();
+    vm_free(&tmp_vm);
+
+    g_use_regvm = 1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char *lat_run_line_regvm(const char *source) {
+    if (!g_rvm) return "error: RegVM not initialized";
+
+    /* Lex */
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        fprintf(stderr, "error: %s\n", lex_err);
+        free(lex_err);
+        lat_vec_free(&tokens);
+        return NULL;
+    }
+
+    /* Parse */
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        fprintf(stderr, "error: %s\n", parse_err);
+        free(parse_err);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        return NULL;
+    }
+
+    /* Compile for REPL */
+    char *comp_err = NULL;
+    RegChunk *chunk = reg_compile_repl(&prog, &comp_err);
+    if (!chunk) {
+        fprintf(stderr, "compile error: %s\n", comp_err);
+        free(comp_err);
+        store_program(prog, tokens);
+        return NULL;
+    }
+
+    /* Run */
+    LatValue result;
+    RegVMResult rvm_res = regvm_run(g_rvm, chunk, &result);
+    if (rvm_res != REGVM_OK) {
+        fprintf(stderr, "error: %s\n", g_rvm->error);
+        free(g_rvm->error);
+        g_rvm->error = NULL;
+        /* Reset state */
+        for (size_t i = 0; i < g_rvm->reg_stack_top; i++)
+            value_free_inline(&g_rvm->reg_stack[i]);
+        g_rvm->reg_stack_top = 0;
+        g_rvm->frame_count = 0;
+        g_rvm->handler_count = 0;
+        g_rvm->defer_count = 0;
+    } else if (result.type != VAL_UNIT && result.type != VAL_NIL) {
+        char *repr = value_repr(&result);
+        printf("=> %s\n", repr);
+        free(repr);
+        value_free(&result);
+    } else {
+        value_free(&result);
+    }
+
+    regchunk_free(chunk);
+    store_program(prog, tokens);
+    return NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void lat_destroy_regvm(void) {
+    if (g_rvm) {
+        regvm_free(g_rvm);
+        free(g_rvm);
+        g_rvm = NULL;
+    }
+    reg_compiler_free_known_enums();
     free_stored_programs();
 }
 

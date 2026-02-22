@@ -21,6 +21,8 @@
 #include "compiler.h"
 #include "vm.h"
 #include "latc.h"
+#include "regvm.h"
+#include "test_backend.h"
 
 /* Import test harness from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
@@ -82,12 +84,98 @@ static char *run_capture(const char *source) {
         return strdup("PARSE_ERROR");
     }
 
-    Evaluator *ev = evaluator_new();
-    char *eval_err_str = evaluator_run(ev, &prog);
+    /* Run via selected backend */
+    char *eval_err_str = NULL;
 
-    fflush(stdout);
-    dup2(old_stdout, fileno(stdout));
-    close(old_stdout);
+    if (test_backend == BACKEND_TREE_WALK) {
+        Evaluator *ev = evaluator_new();
+        eval_err_str = evaluator_run(ev, &prog);
+        fflush(stdout);
+        dup2(old_stdout, fileno(stdout));
+        close(old_stdout);
+        evaluator_free(ev);
+    } else if (test_backend == BACKEND_STACK_VM) {
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+        char *comp_err = NULL;
+        Chunk *chunk = compile(&prog, &comp_err);
+        if (!chunk) {
+            fflush(stdout);
+            dup2(old_stdout, fileno(stdout));
+            close(old_stdout);
+            fclose(tmp);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            size_t err_len = strlen(comp_err) + 12;
+            char *out = malloc(err_len);
+            snprintf(out, err_len, "EVAL_ERROR:%s", comp_err);
+            free(comp_err);
+            return out;
+        }
+        VM vm;
+        vm_init(&vm);
+        LatValue result;
+        VMResult vm_res = vm_run(&vm, chunk, &result);
+        if (vm_res != VM_OK) {
+            eval_err_str = strdup(vm.error ? vm.error : "vm error");
+        } else {
+            value_free(&result);
+        }
+        fflush(stdout);
+        dup2(old_stdout, fileno(stdout));
+        close(old_stdout);
+        vm_free(&vm);
+        chunk_free(chunk);
+    } else if (test_backend == BACKEND_REG_VM) {
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+        char *rcomp_err = NULL;
+        RegChunk *rchunk = reg_compile(&prog, &rcomp_err);
+        if (!rchunk) {
+            fflush(stdout);
+            dup2(old_stdout, fileno(stdout));
+            close(old_stdout);
+            fclose(tmp);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            size_t err_len = strlen(rcomp_err) + 12;
+            char *out = malloc(err_len);
+            snprintf(out, err_len, "EVAL_ERROR:%s", rcomp_err);
+            free(rcomp_err);
+            return out;
+        }
+        RegVM rvm;
+        regvm_init(&rvm);
+        /* Borrow native functions from a temp stack VM */
+        {
+            VM tmp_vm;
+            vm_init(&tmp_vm);
+            env_free(rvm.env);
+            rvm.env = tmp_vm.env;
+            tmp_vm.env = env_new();
+            vm_free(&tmp_vm);
+        }
+        LatValue rresult;
+        RegVMResult rvm_res = regvm_run(&rvm, rchunk, &rresult);
+        if (rvm_res != REGVM_OK) {
+            eval_err_str = strdup(rvm.error ? rvm.error : "regvm error");
+        } else {
+            value_free(&rresult);
+        }
+        fflush(stdout);
+        dup2(old_stdout, fileno(stdout));
+        close(old_stdout);
+        regvm_free(&rvm);
+        regchunk_free(rchunk);
+    } else {
+        fflush(stdout);
+        dup2(old_stdout, fileno(stdout));
+        close(old_stdout);
+    }
 
     /* Read captured output */
     fseek(tmp, 0, SEEK_END);
@@ -109,7 +197,6 @@ static char *run_capture(const char *source) {
         free(eval_err_str);
     }
 
-    evaluator_free(ev);
     program_free(&prog);
     for (size_t i = 0; i < tokens.len; i++)
         token_free(lat_vec_get(&tokens, i));
@@ -1354,7 +1441,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.12"
+        "0.3.13"
     );
 }
 
@@ -5309,7 +5396,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.12"
+        "Hello, Lattice!\nVersion 0.3.13"
     );
 }
 

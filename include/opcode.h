@@ -144,6 +144,15 @@ typedef enum {
     /* Combined ops */
     OP_SET_LOCAL_POP,  /* Set local at stack slot [operand] and pop (SET_LOCAL + POP) */
 
+    /* Runtime type checking */
+    OP_CHECK_TYPE,     /* operands: slot, type_name_const, err_msg_const. Check local matches type. */
+    OP_CHECK_RETURN_TYPE, /* operands: type_name_const, err_msg_const. Check TOS matches type. */
+
+    /* Phase queries */
+    OP_IS_CRYSTAL,     /* Pop value, push bool (true if phase == VTAG_CRYSTAL) */
+    OP_FREEZE_EXCEPT,  /* operands: name_idx, loc_type, loc_slot, except_count. Stack: [except_name1, ...] → [frozen_value] */
+    OP_FREEZE_FIELD,   /* operands: parent_name_idx, loc_type, loc_slot. Stack: [key_str] → [frozen_value] */
+
     /* Fallback to tree-walker */
     OP_HALT,           /* Stop execution */
 } Opcode;

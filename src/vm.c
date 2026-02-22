@@ -1,5 +1,6 @@
 #include "vm.h"
 #include "opcode.h"
+#include "compiler.h"  /* for AstPhase (PHASE_FLUID, PHASE_CRYSTAL, PHASE_UNSPECIFIED) */
 #include "intern.h"
 #include "builtins.h"
 #include "lattice.h"
@@ -88,15 +89,7 @@ static VMResult runtime_error(VM *vm, const char *fmt, ...) {
     va_start(args, fmt);
     (void)vasprintf(&inner, fmt, args);
     va_end(args);
-    int line = vm_current_line(vm);
-    if (line > 0) {
-        char *msg = NULL;
-        (void)asprintf(&msg, "[line %d] %s", line, inner);
-        free(inner);
-        vm->error = msg;
-    } else {
-        vm->error = inner;
-    }
+    vm->error = inner;
     return VM_RUNTIME_ERROR;
 }
 
@@ -111,16 +104,28 @@ static VMResult vm_handle_error(VM *vm, CallFrame **frame_ptr, const char *fmt, 
     (void)vasprintf(&inner, fmt, args);
     va_end(args);
 
-    /* Prepend line number if available */
-    int line = vm_current_line(vm);
-    char *msg;
-    if (line > 0) {
-        (void)asprintf(&msg, "[line %d] %s", line, inner);
+    if (vm->handler_count > 0) {
+        /* Caught by try/catch — pass raw error message without line prefix */
+        ExceptionHandler h = vm->handlers[--vm->handler_count];
+        while (vm->frame_count - 1 > h.frame_index)
+            vm->frame_count--;
+        *frame_ptr = &vm->frames[vm->frame_count - 1];
+        vm->stack_top = h.stack_top;
+        (*frame_ptr)->ip = h.ip;
+        push(vm, value_string(inner));
         free(inner);
-    } else {
-        msg = inner;
+        return VM_OK;
     }
 
+    /* Uncaught — store raw error (stack trace provides line info) */
+    vm->error = inner;
+    return VM_RUNTIME_ERROR;
+}
+
+/* Like vm_handle_error but for native function errors that already have
+ * a message in vm->error.  Does NOT prepend [line N] to match tree-walker
+ * behaviour (native errors carry their own descriptive messages). */
+static VMResult vm_handle_native_error(VM *vm, CallFrame **frame_ptr) {
     if (vm->handler_count > 0) {
         ExceptionHandler h = vm->handlers[--vm->handler_count];
         while (vm->frame_count - 1 > h.frame_index)
@@ -128,12 +133,12 @@ static VMResult vm_handle_error(VM *vm, CallFrame **frame_ptr, const char *fmt, 
         *frame_ptr = &vm->frames[vm->frame_count - 1];
         vm->stack_top = h.stack_top;
         (*frame_ptr)->ip = h.ip;
-        push(vm, value_string(msg));
-        free(msg);
+        push(vm, value_string(vm->error));
+        free(vm->error);
+        vm->error = NULL;
         return VM_OK;
     }
-
-    vm->error = msg;
+    /* Uncaught — vm->error already set by native function, no line prefix */
     return VM_RUNTIME_ERROR;
 }
 
@@ -263,6 +268,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
         }
         case VAL_MAP: {
             LatValue v = value_map_new();
+            v.phase = src->phase;  /* Preserve phase tag */
             LatMap *sm = src->as.map.map;
             for (size_t i = 0; i < sm->cap; i++) {
                 if (sm->entries[i].state == MAP_OCCUPIED) {
@@ -627,7 +633,12 @@ static LatValue native_track(LatValue *args, int ac) {
     LatValue val;
     bool found = env_get(current_vm->env, name, &val);
     if (!found) found = vm_find_local_value(current_vm, name, &val);
-    if (!found) return value_unit(); /* Variable not found */
+    if (!found) {
+        char *msg = NULL;
+        (void)asprintf(&msg, "track: undefined variable '%s'", name);
+        current_vm->error = msg;
+        return value_unit();
+    }
     /* Register tracking */
     if (current_vm->tracked_count >= current_vm->tracked_cap) {
         current_vm->tracked_cap = current_vm->tracked_cap ? current_vm->tracked_cap * 2 : 4;
@@ -823,7 +834,7 @@ static void vm_write_back(VM *vm, CallFrame *frame, uint8_t loc_type, uint8_t lo
             frame->slots[loc_slot] = value_deep_clone(&val);
             break;
         case 1: /* upvalue */
-            if (loc_slot < frame->upvalue_count && frame->upvalues[loc_slot]) {
+            if (frame->upvalues && loc_slot < frame->upvalue_count && frame->upvalues[loc_slot]) {
                 value_free(frame->upvalues[loc_slot]->location);
                 *frame->upvalues[loc_slot]->location = value_deep_clone(&val);
             }
@@ -854,6 +865,11 @@ static VMResult vm_fire_reactions(VM *vm, CallFrame **frame_ptr, const char *nam
             value_free(&args[1]);
             value_free(&result);
             if (vm->error) {
+                /* Wrap the error with "reaction error:" prefix */
+                char *wrapped = NULL;
+                (void)asprintf(&wrapped, "reaction error: %s", vm->error);
+                free(vm->error);
+                vm->error = wrapped;
                 value_free(&cur);
                 return VM_RUNTIME_ERROR;
             }
@@ -1002,8 +1018,15 @@ static LatValue native_assert(LatValue *args, int arg_count) {
     else ok = args[0].type != VAL_NIL;
     if (!ok) {
         const char *msg = (arg_count >= 2 && args[1].type == VAL_STR) ? args[1].as.str_val : "assertion failed";
-        fprintf(stderr, "assertion failed: %s\n", msg);
-        exit(1);
+        /* Use VM error mechanism instead of exit() so tests can catch failures */
+        if (current_vm) {
+            char *err = NULL;
+            (void)asprintf(&err, "assertion failed: %s", msg);
+            current_vm->error = err;
+        } else {
+            fprintf(stderr, "assertion failed: %s\n", msg);
+            exit(1);
+        }
     }
     return value_unit();
 }
@@ -1030,7 +1053,7 @@ static LatValue cname(LatValue *args, int ac) { \
     if (ac != 1) return value_nil(); \
     char *err = NULL; \
     LatValue r = mathfn(&args[0], &err); \
-    if (err) { free(err); return value_nil(); } \
+    if (err) { current_vm->error = err; return value_nil(); } \
     return r; \
 }
 
@@ -1039,7 +1062,7 @@ static LatValue cname(LatValue *args, int ac) { \
     if (ac != 2) return value_nil(); \
     char *err = NULL; \
     LatValue r = mathfn(&args[0], &args[1], &err); \
-    if (err) { free(err); return value_nil(); } \
+    if (err) { current_vm->error = err; return value_nil(); } \
     return r; \
 }
 
@@ -1048,7 +1071,7 @@ static LatValue cname(LatValue *args, int ac) { \
     if (ac != 3) return value_nil(); \
     char *err = NULL; \
     LatValue r = mathfn(&args[0], &args[1], &args[2], &err); \
-    if (err) { free(err); return value_nil(); } \
+    if (err) { current_vm->error = err; return value_nil(); } \
     return r; \
 }
 
@@ -1087,7 +1110,7 @@ static LatValue native_random_int(LatValue *args, int ac) {
     if (ac != 2) return value_nil();
     char *err = NULL;
     LatValue r = math_random_int(&args[0], &args[1], &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_math_pi(LatValue *args, int ac) {
@@ -1106,32 +1129,38 @@ static LatValue native_math_e(LatValue *args, int ac) {
 /* ── File system natives ── */
 
 static LatValue native_read_file(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) { current_vm->error = strdup("read_file() expects (path: String)"); return value_nil(); }
     char *contents = builtin_read_file(args[0].as.str_val);
     if (!contents) return value_nil();
     return value_string_owned(contents);
 }
 static LatValue native_write_file(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_bool(false);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { current_vm->error = strdup("write_file() expects (path: String, data: String)"); return value_bool(false); }
     return value_bool(builtin_write_file(args[0].as.str_val, args[1].as.str_val));
 }
 static LatValue native_file_exists(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_bool(false);
+    if (ac != 1 || args[0].type != VAL_STR) { current_vm->error = strdup("file_exists() expects (path: String)"); return value_bool(false); }
     return value_bool(fs_file_exists(args[0].as.str_val));
 }
 static LatValue native_delete_file(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_bool(false);
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("delete_file: expected (path: Str)");
+        return value_bool(false);
+    }
     char *err = NULL;
     bool ok = fs_delete_file(args[0].as.str_val, &err);
-    free(err);
+    if (err) { current_vm->error = err; return value_bool(false); }
     return value_bool(ok);
 }
 static LatValue native_list_dir(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_array(NULL, 0);
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("list_dir: expected (path: Str)");
+        return value_array(NULL, 0);
+    }
     char *err = NULL;
     size_t count = 0;
     char **entries = fs_list_dir(args[0].as.str_val, &count, &err);
-    free(err);
+    if (err) { current_vm->error = err; return value_array(NULL, 0); }
     if (!entries) return value_array(NULL, 0);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
     for (size_t i = 0; i < count; i++) {
@@ -1144,24 +1173,27 @@ static LatValue native_list_dir(LatValue *args, int ac) {
     return r;
 }
 static LatValue native_append_file(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_bool(false);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { current_vm->error = strdup("append_file() expects (path: String, data: String)"); return value_bool(false); }
     char *err = NULL;
     bool ok = fs_append_file(args[0].as.str_val, args[1].as.str_val, &err);
-    free(err);
+    if (err) { current_vm->error = err; return value_bool(false); }
     return value_bool(ok);
 }
 static LatValue native_mkdir(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR) return value_bool(false);
     char *err = NULL;
     bool ok = fs_mkdir(args[0].as.str_val, &err);
-    free(err);
+    if (err) { current_vm->error = err; return value_bool(false); }
     return value_bool(ok);
 }
 static LatValue native_fs_rename(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_bool(false);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_vm->error = strdup("rename: expected (from: Str, to: Str)");
+        return value_bool(false);
+    }
     char *err = NULL;
     bool ok = fs_rename(args[0].as.str_val, args[1].as.str_val, &err);
-    free(err);
+    if (err) { current_vm->error = err; return value_bool(false); }
     return value_bool(ok);
 }
 static LatValue native_is_dir(LatValue *args, int ac) {
@@ -1173,10 +1205,13 @@ static LatValue native_is_file(LatValue *args, int ac) {
     return value_bool(fs_is_file(args[0].as.str_val));
 }
 static LatValue native_rmdir(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_bool(false);
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("rmdir: expected (path: Str)");
+        return value_bool(false);
+    }
     char *err = NULL;
     bool ok = fs_rmdir(args[0].as.str_val, &err);
-    free(err);
+    if (err) { current_vm->error = err; return value_bool(false); }
     return value_bool(ok);
 }
 static LatValue native_glob(LatValue *args, int ac) {
@@ -1184,7 +1219,7 @@ static LatValue native_glob(LatValue *args, int ac) {
     char *err = NULL;
     size_t count = 0;
     char **matches = fs_glob(args[0].as.str_val, &count, &err);
-    free(err);
+    if (err) { current_vm->error = err; return value_array(NULL, 0); }
     if (!matches) return value_array(NULL, 0);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
     for (size_t i = 0; i < count; i++) {
@@ -1197,120 +1232,161 @@ static LatValue native_glob(LatValue *args, int ac) {
     return r;
 }
 static LatValue native_stat(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("stat: expected (path: Str)");
+        return value_nil();
+    }
     int64_t sz, mt, md;
     const char *tp;
     char *err = NULL;
     if (!fs_stat(args[0].as.str_val, &sz, &mt, &md, &tp, &err)) {
-        free(err); return value_nil();
+        if (err) current_vm->error = err;
+        return value_nil();
     }
     LatValue map = value_map_new();
     LatValue v_sz = value_int(sz); lat_map_set(map.as.map.map, "size", &v_sz);
     LatValue v_mt = value_int(mt); lat_map_set(map.as.map.map, "mtime", &v_mt);
     LatValue v_md = value_int(md); lat_map_set(map.as.map.map, "mode", &v_md);
     LatValue v_tp = value_string(tp); lat_map_set(map.as.map.map, "type", &v_tp);
+    LatValue v_pm = value_int(md); lat_map_set(map.as.map.map, "permissions", &v_pm);
     return map;
 }
 static LatValue native_copy_file(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_bool(false);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_vm->error = strdup("copy_file: expected (src: Str, dst: Str)");
+        return value_bool(false);
+    }
     char *err = NULL;
     bool ok = fs_copy_file(args[0].as.str_val, args[1].as.str_val, &err);
-    free(err); return value_bool(ok);
+    if (err) { current_vm->error = err; return value_bool(false); }
+    return value_bool(ok);
 }
 static LatValue native_realpath(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("realpath: expected (path: Str)");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = fs_realpath(args[0].as.str_val, &err);
-    free(err); if (!r) return value_nil();
+    if (err) { current_vm->error = err; return value_nil(); }
+    if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_tempdir(LatValue *args, int ac) {
     (void)args; (void)ac;
     char *err = NULL; char *r = fs_tempdir(&err);
-    free(err); if (!r) return value_nil();
+    if (err) { current_vm->error = err; return value_nil(); }
+    if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_tempfile(LatValue *args, int ac) {
     (void)args; (void)ac;
     char *err = NULL; char *r = fs_tempfile(&err);
-    free(err); if (!r) return value_nil();
+    if (err) { current_vm->error = err; return value_nil(); }
+    if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_chmod(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) return value_bool(false);
     char *err = NULL;
     bool ok = fs_chmod(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    free(err); return value_bool(ok);
+    if (err) { current_vm->error = err; return value_bool(false); }
+    return value_bool(ok);
 }
 static LatValue native_file_size(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_int(-1);
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("file_size: expected (path: Str)");
+        return value_int(-1);
+    }
     char *err = NULL;
     int64_t sz = fs_file_size(args[0].as.str_val, &err);
-    free(err); return value_int(sz);
+    if (err) { current_vm->error = err; return value_int(-1); }
+    return value_int(sz);
 }
 
 /* ── Path natives ── */
 
 static LatValue native_path_join(LatValue *args, int ac) {
-    if (ac < 1) return value_string("");
+    if (ac < 1) { current_vm->error = strdup("path_join() expects at least 1 argument"); return value_string(""); }
+    for (int i = 0; i < ac; i++) {
+        if (args[i].type != VAL_STR) { current_vm->error = strdup("path_join() expects (String...)"); return value_string(""); }
+    }
     const char **parts = malloc((size_t)ac * sizeof(char *));
     for (int i = 0; i < ac; i++)
-        parts[i] = (args[i].type == VAL_STR) ? args[i].as.str_val : "";
+        parts[i] = args[i].as.str_val;
     char *r = path_join(parts, (size_t)ac);
     free(parts); return value_string_owned(r);
 }
 static LatValue native_path_dir(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_string(".");
+    if (ac != 1 || args[0].type != VAL_STR) { current_vm->error = strdup("path_dir() expects (path: String)"); return value_string("."); }
     return value_string_owned(path_dir(args[0].as.str_val));
 }
 static LatValue native_path_base(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_string("");
+    if (ac != 1 || args[0].type != VAL_STR) { current_vm->error = strdup("path_base() expects (path: String)"); return value_string(""); }
     return value_string_owned(path_base(args[0].as.str_val));
 }
 static LatValue native_path_ext(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_string("");
+    if (ac != 1 || args[0].type != VAL_STR) { current_vm->error = strdup("path_ext() expects (path: String)"); return value_string(""); }
     return value_string_owned(path_ext(args[0].as.str_val));
 }
 
 /* ── Network TCP natives ── */
 
 static LatValue native_tcp_listen(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) return value_int(-1);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) {
+        current_vm->error = strdup("tcp_listen: expected (host: Str, port: Int)");
+        return value_int(-1);
+    }
     char *err = NULL;
     int fd = net_tcp_listen(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    free(err); return value_int(fd);
+    if (err) { current_vm->error = err; return value_int(-1); }
+    return value_int(fd);
 }
 static LatValue native_tcp_accept(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) return value_int(-1);
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_vm->error = strdup("tcp_accept: expected (fd: Int)");
+        return value_int(-1);
+    }
     char *err = NULL;
     int fd = net_tcp_accept((int)args[0].as.int_val, &err);
-    free(err); return value_int(fd);
+    if (err) { current_vm->error = err; return value_int(-1); }
+    return value_int(fd);
 }
 static LatValue native_tcp_connect(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) return value_int(-1);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) {
+        current_vm->error = strdup("tcp_connect: expected (host: Str, port: Int)");
+        return value_int(-1);
+    }
     char *err = NULL;
     int fd = net_tcp_connect(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    free(err); return value_int(fd);
+    if (err) { current_vm->error = err; return value_int(-1); }
+    return value_int(fd);
 }
 static LatValue native_tcp_read(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) return value_string("");
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_vm->error = strdup("tcp_read: expected (fd: Int)");
+        return value_string("");
+    }
     char *err = NULL;
     char *data = net_tcp_read((int)args[0].as.int_val, &err);
-    free(err); if (!data) return value_string("");
+    if (err) { current_vm->error = err; return value_string(""); }
+    if (!data) return value_string("");
     return value_string_owned(data);
 }
 static LatValue native_tcp_read_bytes(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) return value_string("");
     char *err = NULL;
     char *data = net_tcp_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &err);
-    free(err); if (!data) return value_string("");
+    if (err) { current_vm->error = err; return value_string(""); }
+    if (!data) return value_string("");
     return value_string_owned(data);
 }
 static LatValue native_tcp_write(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) return value_bool(false);
     char *err = NULL;
     bool ok = net_tcp_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &err);
-    free(err); return value_bool(ok);
+    if (err) { current_vm->error = err; return value_bool(false); }
+    return value_bool(ok);
 }
 static LatValue native_tcp_close(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_INT) return value_unit();
@@ -1320,46 +1396,55 @@ static LatValue native_tcp_peer_addr(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_INT) return value_nil();
     char *err = NULL;
     char *addr = net_tcp_peer_addr((int)args[0].as.int_val, &err);
-    free(err); if (!addr) return value_nil();
+    if (err) { current_vm->error = err; return value_nil(); }
+    if (!addr) return value_nil();
     return value_string_owned(addr);
 }
 static LatValue native_tcp_set_timeout(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) return value_bool(false);
     char *err = NULL;
     bool ok = net_tcp_set_timeout((int)args[0].as.int_val, (int)args[1].as.int_val, &err);
-    free(err); return value_bool(ok);
+    if (err) { current_vm->error = err; return value_bool(false); }
+    return value_bool(ok);
 }
 
 /* ── TLS natives ── */
 
 static LatValue native_tls_connect(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) return value_int(-1);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) {
+        current_vm->error = strdup("tls_connect: expected (host: Str, port: Int)");
+        return value_int(-1);
+    }
     char *err = NULL;
     int fd = net_tls_connect(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    free(err); return value_int(fd);
+    if (err) { current_vm->error = err; return value_int(-1); }
+    return value_int(fd);
 }
 static LatValue native_tls_read(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) return value_string("");
+    if (ac != 1 || args[0].type != VAL_INT) { current_vm->error = strdup("tls_read() expects (fd: Int)"); return value_string(""); }
     char *err = NULL;
     char *data = net_tls_read((int)args[0].as.int_val, &err);
-    free(err); if (!data) return value_string("");
+    if (err) { current_vm->error = err; return value_string(""); }
+    if (!data) return value_string("");
     return value_string_owned(data);
 }
 static LatValue native_tls_read_bytes(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) return value_string("");
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { current_vm->error = strdup("tls_read_bytes() expects (fd: Int, n: Int)"); return value_string(""); }
     char *err = NULL;
     char *data = net_tls_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &err);
-    free(err); if (!data) return value_string("");
+    if (err) { current_vm->error = err; return value_string(""); }
+    if (!data) return value_string("");
     return value_string_owned(data);
 }
 static LatValue native_tls_write(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) return value_bool(false);
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { current_vm->error = strdup("tls_write() expects (fd: Int, data: String)"); return value_bool(false); }
     char *err = NULL;
     bool ok = net_tls_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &err);
-    free(err); return value_bool(ok);
+    if (err) { current_vm->error = err; return value_bool(false); }
+    return value_bool(ok);
 }
 static LatValue native_tls_close(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) return value_unit();
+    if (ac != 1 || args[0].type != VAL_INT) { current_vm->error = strdup("tls_close() expects (fd: Int)"); return value_unit(); }
     net_tls_close((int)args[0].as.int_val); return value_unit();
 }
 static LatValue native_tls_available(LatValue *args, int ac) {
@@ -1384,82 +1469,116 @@ static LatValue vm_build_http_response(HttpResponse *resp) {
     return map;
 }
 static LatValue native_http_get(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("http_get() expects (url: String)");
+        return value_nil();
+    }
     HttpRequest req = {0}; req.method = "GET"; req.url = args[0].as.str_val;
     char *err = NULL;
     HttpResponse *resp = http_execute(&req, &err);
-    if (!resp) { free(err); return value_nil(); }
+    if (!resp) { current_vm->error = err ? err : strdup("http_get: request failed"); return value_nil(); }
     return vm_build_http_response(resp);
 }
 static LatValue native_http_post(LatValue *args, int ac) {
-    if (ac < 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_nil();
+    if (ac < 1 || ac > 2 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("http_post() expects (url: String, options?: Map)");
+        return value_nil();
+    }
     HttpRequest req = {0}; req.method = "POST"; req.url = args[0].as.str_val;
-    req.body = args[1].as.str_val; req.body_len = strlen(args[1].as.str_val);
-    char *err = NULL;
-    HttpResponse *resp = http_execute(&req, &err);
-    if (!resp) { free(err); return value_nil(); }
-    return vm_build_http_response(resp);
-}
-static LatValue native_http_request(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_MAP) return value_nil();
-    LatValue *url_v = lat_map_get(args[0].as.map.map, "url");
-    LatValue *method_v = lat_map_get(args[0].as.map.map, "method");
-    LatValue *body_v = lat_map_get(args[0].as.map.map, "body");
-    if (!url_v || url_v->type != VAL_STR) return value_nil();
-    HttpRequest req = {0}; req.url = url_v->as.str_val;
-    req.method = (method_v && method_v->type == VAL_STR) ? method_v->as.str_val : "GET";
-    if (body_v && body_v->type == VAL_STR) {
-        req.body = body_v->as.str_val; req.body_len = strlen(body_v->as.str_val);
+    if (ac >= 2 && args[1].type == VAL_STR) {
+        req.body = args[1].as.str_val; req.body_len = strlen(args[1].as.str_val);
+    } else if (ac >= 2 && args[1].type == VAL_MAP) {
+        LatValue *bv = lat_map_get(args[1].as.map.map, "body");
+        if (bv && bv->type == VAL_STR) { req.body = bv->as.str_val; req.body_len = strlen(bv->as.str_val); }
     }
     char *err = NULL;
     HttpResponse *resp = http_execute(&req, &err);
-    if (!resp) { free(err); return value_nil(); }
+    if (!resp) { current_vm->error = err ? err : strdup("http_post: request failed"); return value_nil(); }
+    return vm_build_http_response(resp);
+}
+static LatValue native_http_request(LatValue *args, int ac) {
+    if (ac < 2 || ac > 3 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_vm->error = strdup("http_request() expects (method: String, url: String, options?: Map)");
+        return value_nil();
+    }
+    HttpRequest req = {0};
+    req.method = args[0].as.str_val;
+    req.url = args[1].as.str_val;
+    if (ac == 3 && args[2].type == VAL_MAP) {
+        LatValue *bv = lat_map_get(args[2].as.map.map, "body");
+        if (bv && bv->type == VAL_STR) { req.body = bv->as.str_val; req.body_len = strlen(bv->as.str_val); }
+    }
+    char *err = NULL;
+    HttpResponse *resp = http_execute(&req, &err);
+    if (!resp) { current_vm->error = err ? err : strdup("http_request: request failed"); return value_nil(); }
     return vm_build_http_response(resp);
 }
 
 /* ── JSON/TOML/YAML natives ── */
 
 static LatValue native_json_parse(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("json_parse: expected (str: Str)");
+        return value_nil();
+    }
     char *err = NULL;
     LatValue r = json_parse(args[0].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_json_stringify(LatValue *args, int ac) {
-    if (ac != 1) return value_nil();
+    if (ac != 1) {
+        current_vm->error = strdup("json_stringify: expected 1 argument");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = json_stringify(&args[0], &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return value_string_owned(r);
 }
 static LatValue native_toml_parse(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("toml_parse() expects (String)");
+        return value_nil();
+    }
     char *err = NULL;
     LatValue r = toml_ops_parse(args[0].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_toml_stringify(LatValue *args, int ac) {
-    if (ac != 1) return value_nil();
+    if (ac != 1) {
+        current_vm->error = strdup("toml_stringify: expected 1 argument");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = toml_ops_stringify(&args[0], &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_yaml_parse(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("yaml_parse() expects (String)");
+        return value_nil();
+    }
     char *err = NULL;
     LatValue r = yaml_ops_parse(args[0].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_yaml_stringify(LatValue *args, int ac) {
-    if (ac != 1) return value_nil();
+    if (ac != 1) {
+        current_vm->error = strdup("yaml_stringify: expected 1 argument");
+        return value_nil();
+    }
+    if (args[0].type != VAL_MAP && args[0].type != VAL_ARRAY) {
+        current_vm->error = strdup("yaml_stringify: value must be a Map or Array");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = yaml_ops_stringify(&args[0], &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
@@ -1467,45 +1586,63 @@ static LatValue native_yaml_stringify(LatValue *args, int ac) {
 /* ── Crypto natives ── */
 
 static LatValue native_sha256(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("sha256: expected (str: Str)");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = crypto_sha256(args[0].as.str_val, strlen(args[0].as.str_val), &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return value_string_owned(r);
 }
 static LatValue native_md5(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("md5: expected (str: Str)");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = crypto_md5(args[0].as.str_val, strlen(args[0].as.str_val), &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return value_string_owned(r);
 }
 static LatValue native_base64_encode(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("base64_encode: expected (str: Str)");
+        return value_nil();
+    }
     return value_string_owned(crypto_base64_encode(args[0].as.str_val, strlen(args[0].as.str_val)));
 }
 static LatValue native_base64_decode(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("base64_decode: expected (str: Str)");
+        return value_nil();
+    }
     char *err = NULL; size_t dl = 0;
     char *r = crypto_base64_decode(args[0].as.str_val, strlen(args[0].as.str_val), &dl, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return value_string_owned(r);
 }
 
 /* ── Regex natives ── */
 
 static LatValue native_regex_match(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_bool(false);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_vm->error = strdup("regex_match: expected (pattern: Str, input: Str)");
+        return value_bool(false);
+    }
     char *err = NULL;
     LatValue r = regex_match(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { free(err); return value_bool(false); }
+    if (err) { current_vm->error = err; return value_bool(false); }
     return r;
 }
 static LatValue native_regex_find_all(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_array(NULL, 0);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_vm->error = strdup("regex_find_all: expected (pattern: Str, input: Str)");
+        return value_array(NULL, 0);
+    }
     char *err = NULL;
     LatValue r = regex_find_all(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { free(err); return value_array(NULL, 0); }
+    if (err) { current_vm->error = err; return value_array(NULL, 0); }
     return r;
 }
 static LatValue native_regex_replace(LatValue *args, int ac) {
@@ -1513,7 +1650,7 @@ static LatValue native_regex_replace(LatValue *args, int ac) {
         return value_nil();
     char *err = NULL;
     char *r = regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
@@ -1521,41 +1658,54 @@ static LatValue native_regex_replace(LatValue *args, int ac) {
 /* ── Time/DateTime natives ── */
 
 static LatValue native_time(LatValue *args, int ac) {
-    (void)args; (void)ac; return value_int(time_now_ms());
+    (void)args;
+    if (ac != 0) { current_vm->error = strdup("time() expects no arguments"); return value_int(0); }
+    return value_int(time_now_ms());
 }
 static LatValue native_sleep(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) return value_unit();
-    char *err = NULL; time_sleep_ms(args[0].as.int_val, &err); free(err);
+    if (ac != 1 || args[0].type != VAL_INT) { current_vm->error = strdup("sleep() expects (ms: Int)"); return value_unit(); }
+    char *err = NULL; time_sleep_ms(args[0].as.int_val, &err);
+    if (err) { current_vm->error = err; return value_unit(); }
     return value_unit();
 }
 static LatValue native_time_format(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) return value_nil();
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) {
+        current_vm->error = strdup("time_format: expected (timestamp: Int, format: Str)");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = datetime_format(args[0].as.int_val, args[1].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return value_string_owned(r);
 }
 static LatValue native_time_parse(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_nil();
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_vm->error = strdup("time_parse: expected (str: Str, format: Str)");
+        return value_nil();
+    }
     char *err = NULL;
     int64_t r = datetime_parse(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return value_int(r);
 }
 
 /* ── Environment natives ── */
 
 static LatValue native_env(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) return value_unit();
+    if (ac != 1 || args[0].type != VAL_STR) { current_vm->error = strdup("env() expects (key: String)"); return value_unit(); }
     char *val = envvar_get(args[0].as.str_val);
     if (!val) return value_unit();
     return value_string_owned(val);
 }
 static LatValue native_env_set(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) return value_bool(false);
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_vm->error = strdup("env_set: expected (key: Str, value: Str)");
+        return value_bool(false);
+    }
     char *err = NULL;
     bool ok = envvar_set(args[0].as.str_val, args[1].as.str_val, &err);
-    free(err); return value_bool(ok);
+    if (err) { current_vm->error = err; return value_bool(false); }
+    return value_bool(ok);
 }
 static LatValue native_env_keys(LatValue *args, int ac) {
     (void)args; (void)ac;
@@ -1573,21 +1723,22 @@ static LatValue native_env_keys(LatValue *args, int ac) {
 static LatValue native_cwd(LatValue *args, int ac) {
     (void)args; (void)ac;
     char *err = NULL; char *r = process_cwd(&err);
-    free(err); if (!r) return value_nil();
+    if (err) { current_vm->error = err; return value_nil(); }
+    if (!r) return value_nil();
     return value_string_owned(r);
 }
-static LatValue native_exec(LatValue *args, int ac) {
+static LatValue native_exec_cmd(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR) return value_nil();
     char *err = NULL;
     LatValue r = process_exec(args[0].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_shell(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR) return value_nil();
     char *err = NULL;
     LatValue r = process_shell(args[0].as.str_val, &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_platform(LatValue *args, int ac) {
@@ -1596,7 +1747,8 @@ static LatValue native_platform(LatValue *args, int ac) {
 static LatValue native_hostname(LatValue *args, int ac) {
     (void)args; (void)ac;
     char *err = NULL; char *r = process_hostname(&err);
-    free(err); if (!r) return value_nil();
+    if (err) { current_vm->error = err; return value_nil(); }
+    if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_pid(LatValue *args, int ac) {
@@ -1609,14 +1761,14 @@ static LatValue native_to_int(LatValue *args, int ac) {
     if (ac != 1) return value_nil();
     char *err = NULL;
     LatValue r = type_to_int(&args[0], &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_to_float(LatValue *args, int ac) {
     if (ac != 1) return value_nil();
     char *err = NULL;
     LatValue r = type_to_float(&args[0], &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return r;
 }
 static LatValue native_struct_name(LatValue *args, int ac) {
@@ -1643,25 +1795,44 @@ static LatValue native_struct_to_map(LatValue *args, int ac) {
 }
 static LatValue native_repr(LatValue *args, int ac) {
     if (ac != 1) return value_nil();
+    /* Check for custom repr closure on structs */
+    if (args[0].type == VAL_STRUCT) {
+        for (size_t i = 0; i < args[0].as.strct.field_count; i++) {
+            if (strcmp(args[0].as.strct.field_names[i], "repr") == 0 &&
+                args[0].as.strct.field_values[i].type == VAL_CLOSURE) {
+                LatValue self = value_deep_clone(&args[0]);
+                LatValue result = vm_call_closure(current_vm, &args[0].as.strct.field_values[i], &self, 1);
+                value_free(&self);
+                if (result.type == VAL_STR) return result;
+                value_free(&result);
+                break; /* fall through to default */
+            }
+        }
+    }
     return value_string_owned(value_repr(&args[0]));
 }
 static LatValue native_format(LatValue *args, int ac) {
-    if (ac < 1 || args[0].type != VAL_STR) return value_nil();
+    if (ac < 1 || args[0].type != VAL_STR) {
+        current_vm->error = strdup("format: expected (fmt: Str, ...)");
+        return value_nil();
+    }
     char *err = NULL;
     char *r = format_string(args[0].as.str_val, args + 1, (size_t)(ac - 1), &err);
-    if (err) { free(err); return value_nil(); }
+    if (err) { current_vm->error = err; return value_nil(); }
     return value_string_owned(r);
 }
 static LatValue native_range(LatValue *args, int ac) {
-    if (ac < 2 || ac > 3 || args[0].type != VAL_INT || args[1].type != VAL_INT)
+    if (ac < 2 || ac > 3 || args[0].type != VAL_INT || args[1].type != VAL_INT) {
+        current_vm->error = strdup("range() expects (start: Int, end: Int, step?: Int)");
         return value_array(NULL, 0);
+    }
     int64_t rstart = args[0].as.int_val, rend = args[1].as.int_val;
     int64_t rstep = (rstart <= rend) ? 1 : -1;
     if (ac == 3) {
-        if (args[2].type != VAL_INT) return value_array(NULL, 0);
+        if (args[2].type != VAL_INT) { current_vm->error = strdup("range() step must be Int"); return value_array(NULL, 0); }
         rstep = args[2].as.int_val;
     }
-    if (rstep == 0) return value_array(NULL, 0);
+    if (rstep == 0) { current_vm->error = strdup("range() step cannot be zero"); return value_array(NULL, 0); }
     size_t rcount = 0;
     if (rstep > 0 && rstart < rend)
         rcount = (size_t)((rend - rstart + rstep - 1) / rstep);
@@ -1700,16 +1871,28 @@ static LatValue native_debug_assert(LatValue *args, int ac) {
               args[0].type != VAL_NIL;
     if (!ok) {
         const char *msg = (ac >= 2 && args[1].type == VAL_STR) ? args[1].as.str_val : "debug assertion failed";
-        fprintf(stderr, "debug assertion failed: %s\n", msg);
-        exit(1);
+        if (current_vm) {
+            char *err = NULL;
+            (void)asprintf(&err, "debug assertion failed: %s", msg);
+            current_vm->error = err;
+        } else {
+            fprintf(stderr, "debug assertion failed: %s\n", msg);
+            exit(1);
+        }
     }
+    return value_unit();
+}
+
+static LatValue native_panic(LatValue *args, int ac) {
+    const char *msg = (ac >= 1 && args[0].type == VAL_STR) ? args[0].as.str_val : "panic";
+    current_vm->error = strdup(msg);
     return value_unit();
 }
 
 /* Native require: load and execute a file in the global scope (no isolation) */
 static LatValue native_require(LatValue *args, int arg_count) {
     if (arg_count < 1 || args[0].type != VAL_STR) {
-        fprintf(stderr, "require: expected a string argument\n");
+        current_vm->error = strdup("require: expected a string argument");
         return value_bool(false);
     }
     VM *vm = current_vm;
@@ -1736,7 +1919,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
         found = (realpath(script_rel, resolved) != NULL);
     }
     if (!found) {
-        fprintf(stderr, "require: cannot find '%s'\n", raw_path);
+        (void)asprintf(&current_vm->error, "require: cannot find '%s'", raw_path);
         free(file_path);
         return value_bool(false);
     }
@@ -1754,7 +1937,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     /* Read the file */
     char *source = builtin_read_file(resolved);
     if (!source) {
-        fprintf(stderr, "require: cannot read '%s'\n", resolved);
+        (void)asprintf(&current_vm->error, "require: cannot read '%s'", resolved);
         return value_bool(false);
     }
 
@@ -1764,7 +1947,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     LatVec req_toks = lexer_tokenize(&req_lex, &lex_err);
     free(source);
     if (lex_err) {
-        fprintf(stderr, "require '%s': %s\n", resolved, lex_err);
+        (void)asprintf(&current_vm->error, "require '%s': %s", resolved, lex_err);
         free(lex_err);
         lat_vec_free(&req_toks);
         return value_bool(false);
@@ -1775,7 +1958,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     char *parse_err = NULL;
     Program req_prog = parser_parse(&req_parser, &parse_err);
     if (parse_err) {
-        fprintf(stderr, "require '%s': %s\n", resolved, parse_err);
+        (void)asprintf(&current_vm->error, "require '%s': %s", resolved, parse_err);
         free(parse_err);
         program_free(&req_prog);
         for (size_t ti = 0; ti < req_toks.len; ti++)
@@ -1795,7 +1978,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     lat_vec_free(&req_toks);
 
     if (!req_chunk) {
-        fprintf(stderr, "require '%s': %s\n", resolved,
+        (void)asprintf(&current_vm->error, "require '%s': %s", resolved,
                 comp_err ? comp_err : "compile error");
         free(comp_err);
         return value_bool(false);
@@ -1813,10 +1996,8 @@ static LatValue native_require(LatValue *args, int arg_count) {
     LatValue req_result;
     VMResult req_r = vm_run(vm, req_chunk, &req_result);
     if (req_r != VM_OK) {
-        fprintf(stderr, "require '%s': runtime error: %s\n", resolved,
+        (void)asprintf(&current_vm->error, "require '%s': runtime error: %s", resolved,
                 vm->error ? vm->error : "(unknown)");
-        free(vm->error);
-        vm->error = NULL;
         return value_bool(false);
     }
     value_free(&req_result);
@@ -1827,7 +2008,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
 /* Native require_ext: load a native extension (.dylib/.so) and return a Map */
 static LatValue native_require_ext(LatValue *args, int arg_count) {
     if (arg_count < 1 || args[0].type != VAL_STR) {
-        fprintf(stderr, "require_ext: expected a string argument\n");
+        current_vm->error = strdup("require_ext: expected a string argument");
         return value_nil();
     }
     VM *vm = current_vm;
@@ -1843,7 +2024,7 @@ static LatValue native_require_ext(LatValue *args, int arg_count) {
     char *ext_err = NULL;
     LatValue ext_map = ext_load(NULL, ext_name, &ext_err);
     if (ext_err) {
-        fprintf(stderr, "require_ext: %s\n", ext_err);
+        (void)asprintf(&current_vm->error, "require_ext: %s", ext_err);
         free(ext_err);
         return value_nil();
     }
@@ -1886,15 +2067,20 @@ static LatValue native_args(LatValue *args, int arg_count) {
 }
 
 static LatValue native_struct_from_map(LatValue *args, int arg_count) {
-    if (arg_count < 2 || args[0].type != VAL_STR || args[1].type != VAL_MAP)
+    if (arg_count < 2 || args[0].type != VAL_STR || args[1].type != VAL_MAP) {
+        current_vm->error = strdup("struct_from_map: expected (name: Str, fields: Map)");
         return value_nil();
+    }
     VM *vm = current_vm;
     const char *sname = args[0].as.str_val;
     /* Look up struct field names from env metadata */
     char meta_key[256];
     snprintf(meta_key, sizeof(meta_key), "__struct_%s", sname);
     LatValue meta;
-    if (!env_get(vm->env, meta_key, &meta)) return value_nil();
+    if (!env_get(vm->env, meta_key, &meta)) {
+        (void)asprintf(&current_vm->error, "struct_from_map: unknown struct '%s'", sname);
+        return value_nil();
+    }
     if (meta.type != VAL_ARRAY) { value_free(&meta); return value_nil(); }
     size_t fc = meta.as.array.len;
     char **names = malloc(fc * sizeof(char *));
@@ -2135,7 +2321,7 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     char *lex_err = NULL;
     LatVec toks = lexer_tokenize(&lex, &lex_err);
     if (lex_err) {
-        fprintf(stderr, "lat_eval: %s\n", lex_err);
+        (void)asprintf(&current_vm->error, "lat_eval: %s", lex_err);
         free(lex_err); lat_vec_free(&toks);
         return value_nil();
     }
@@ -2143,19 +2329,19 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     char *parse_err = NULL;
     Program prog = parser_parse(&parser, &parse_err);
     if (parse_err) {
-        fprintf(stderr, "lat_eval: %s\n", parse_err);
+        (void)asprintf(&current_vm->error, "lat_eval: %s", parse_err);
         free(parse_err); program_free(&prog);
         for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
         lat_vec_free(&toks);
         return value_nil();
     }
     char *comp_err = NULL;
-    Chunk *chunk = compile_module(&prog, &comp_err);
+    Chunk *chunk = compile_repl(&prog, &comp_err);
     program_free(&prog);
     for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
     lat_vec_free(&toks);
     if (!chunk) {
-        fprintf(stderr, "lat_eval: %s\n", comp_err ? comp_err : "compile error");
+        (void)asprintf(&current_vm->error, "lat_eval: %s", comp_err ? comp_err : "compile error");
         free(comp_err);
         return value_nil();
     }
@@ -2167,8 +2353,7 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     LatValue result;
     VMResult r = vm_run(vm, chunk, &result);
     if (r != VM_OK) {
-        fprintf(stderr, "lat_eval: %s\n", vm->error ? vm->error : "(unknown)");
-        free(vm->error); vm->error = NULL;
+        /* Propagate the nested VM error */
         return value_nil();
     }
     return result;
@@ -2240,7 +2425,9 @@ static char *latc_read_file(const char *path) {
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (len < 0) { fclose(f); return NULL; }
     char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
     size_t n = fread(buf, 1, (size_t)len, f);
     buf[n] = '\0';
     fclose(f);
@@ -2342,6 +2529,7 @@ static void vm_register_native(VM *vm, const char *name, VMNativeFn fn, int arit
     v.as.closure.default_values = VM_NATIVE_MARKER;
     v.as.closure.has_variadic = false;
     v.as.closure.native_fn = (void *)fn;
+    v.region_id = REGION_NONE;
     env_define(vm->env, name, v);
 }
 
@@ -2507,7 +2695,7 @@ void vm_init(VM *vm) {
     /* HTTP */
     vm_register_native(vm, "http_get", native_http_get, 1);
     vm_register_native(vm, "http_post", native_http_post, 2);
-    vm_register_native(vm, "http_request", native_http_request, 1);
+    vm_register_native(vm, "http_request", native_http_request, 3);
 
     /* JSON/TOML/YAML */
     vm_register_native(vm, "json_parse", native_json_parse, 1);
@@ -2541,7 +2729,7 @@ void vm_init(VM *vm) {
 
     /* Process */
     vm_register_native(vm, "cwd", native_cwd, 0);
-    vm_register_native(vm, "exec", native_exec, 1);
+    vm_register_native(vm, "exec", native_exec_cmd, 1);
     vm_register_native(vm, "shell", native_shell, 1);
     vm_register_native(vm, "platform", native_platform, 0);
     vm_register_native(vm, "hostname", native_hostname, 0);
@@ -2560,6 +2748,7 @@ void vm_init(VM *vm) {
     vm_register_native(vm, "eprint", native_eprint, -1);
     vm_register_native(vm, "identity", native_identity, 1);
     vm_register_native(vm, "debug_assert", native_debug_assert, 2);
+    vm_register_native(vm, "panic", native_panic, 1);
 
     /* Module loading */
     vm_register_native(vm, "require", native_require, 1);
@@ -2972,6 +3161,8 @@ static const char *vm_find_pressure(VM *vm, const char *name) {
 #define MHASH_push             0x7c9c7ae5u
 #define MHASH_recv             0x7c9d4d95u
 #define MHASH_reduce           0x19279c1du
+#define MHASH_add              0x0b885cceu
+#define MHASH_remove           0x192c7473u
 #define MHASH_remove_at        0xd988a4a7u
 #define MHASH_repeat           0x192dec66u
 #define MHASH_replace          0x3eef4e01u
@@ -3043,6 +3234,17 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             return true;
         }
         if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
+            /* Check phase: crystal and sublimated values are immutable */
+            if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
+                LatValue val = pop(vm);
+                value_free(&val);
+                const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
+                char *err = NULL;
+                (void)asprintf(&err, "cannot push to %s array", phase_name);
+                current_vm->error = err;
+                push(vm, value_unit());
+                return true;
+            }
             /* Check pressure constraint */
             const char *pmode = vm_find_pressure(vm, var_name);
             if (pressure_blocks_grow(pmode)) {
@@ -3067,6 +3269,15 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             return true;
         }
         if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
+            /* Check phase: crystal and sublimated values are immutable */
+            if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
+                const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
+                char *err = NULL;
+                (void)asprintf(&err, "cannot pop from %s array", phase_name);
+                current_vm->error = err;
+                push(vm, value_unit());
+                return true;
+            }
             /* Check pressure constraint */
             const char *pmode = vm_find_pressure(vm, var_name);
             if (pressure_blocks_shrink(pmode)) {
@@ -3240,9 +3451,27 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
                         value_free(&args[1]);
                         value_free(&cmp);
                     } else {
-                        /* Default: numeric ascending */
-                        should_swap = (elems[j - 1].type == VAL_INT && key.type == VAL_INT &&
-                                       elems[j - 1].as.int_val > key.as.int_val);
+                        /* Default: ascending for ints, floats, strings */
+                        if (elems[j - 1].type == VAL_INT && key.type == VAL_INT) {
+                            should_swap = elems[j - 1].as.int_val > key.as.int_val;
+                        } else if (elems[j - 1].type == VAL_FLOAT && key.type == VAL_FLOAT) {
+                            should_swap = elems[j - 1].as.float_val > key.as.float_val;
+                        } else if ((elems[j - 1].type == VAL_INT || elems[j - 1].type == VAL_FLOAT) &&
+                                   (key.type == VAL_INT || key.type == VAL_FLOAT)) {
+                            double a_d = elems[j - 1].type == VAL_INT ?
+                                (double)elems[j - 1].as.int_val : elems[j - 1].as.float_val;
+                            double b_d = key.type == VAL_INT ? (double)key.as.int_val : key.as.float_val;
+                            should_swap = a_d > b_d;
+                        } else if (elems[j - 1].type == VAL_STR && key.type == VAL_STR) {
+                            should_swap = strcmp(elems[j - 1].as.str_val, key.as.str_val) > 0;
+                        } else {
+                            /* Mixed non-numeric types — error */
+                            for (size_t fi = 0; fi < len; fi++) value_free(&elems[fi]);
+                            free(elems);
+                            current_vm->error = strdup("sort: cannot compare mixed types");
+                            push(vm, value_unit());
+                            return true;
+                        }
                     }
                     if (!should_swap) break;
                     elems[j] = elems[j - 1];
@@ -3441,7 +3670,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             return true;
         }
         if (mhash == MHASH_min && strcmp(method, "min") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { push(vm, value_nil()); return true; }
+            if (obj->as.array.len == 0) { current_vm->error = strdup("min() called on empty array"); push(vm, value_nil()); return true; }
             bool hf = false;
             for (size_t i = 0; i < obj->as.array.len; i++)
                 if (obj->as.array.elems[i].type == VAL_FLOAT) hf = true;
@@ -3463,7 +3692,7 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             return true;
         }
         if (mhash == MHASH_max && strcmp(method, "max") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { push(vm, value_nil()); return true; }
+            if (obj->as.array.len == 0) { current_vm->error = strdup("max() called on empty array"); push(vm, value_nil()); return true; }
             bool hf = false;
             for (size_t i = 0; i < obj->as.array.len; i++)
                 if (obj->as.array.elems[i].type == VAL_FLOAT) hf = true;
@@ -3865,6 +4094,19 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             return true;
         }
         if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) {
+            /* Check phase: crystal and sublimated values are immutable */
+            if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
+                LatValue val = pop(vm);
+                LatValue key = pop(vm);
+                value_free(&val);
+                value_free(&key);
+                const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
+                char *err = NULL;
+                (void)asprintf(&err, "cannot set on %s map", phase_name);
+                current_vm->error = err;
+                push(vm, value_unit());
+                return true;
+            }
             LatValue val = pop(vm);
             LatValue key = pop(vm);
             if (key.type == VAL_STR) {
@@ -3893,6 +4135,14 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             else
                 push(vm, value_bool(false));
             value_free(&key); return true;
+        }
+        if (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1) {
+            LatValue key = pop(vm);
+            if (key.type == VAL_STR) {
+                lat_map_remove(obj->as.map.map, key.as.str_val);
+            }
+            value_free(&key);
+            push(vm, value_unit()); return true;
         }
         if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
             size_t n = lat_map_len(obj->as.map.map);
@@ -4042,12 +4292,15 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             return true;
         }
         if (mhash == MHASH_payload && strcmp(method, "payload") == 0 && arg_count == 0) {
-            if (obj->as.enm.payload_count == 1) {
-                push(vm, value_deep_clone(&obj->as.enm.payload[0]));
-            } else if (obj->as.enm.payload_count > 1) {
-                push(vm, value_tuple(obj->as.enm.payload, obj->as.enm.payload_count));
+            /* Always return an array of all payloads */
+            if (obj->as.enm.payload_count > 0) {
+                LatValue *elems = malloc(obj->as.enm.payload_count * sizeof(LatValue));
+                for (size_t pi = 0; pi < obj->as.enm.payload_count; pi++)
+                    elems[pi] = value_deep_clone(&obj->as.enm.payload[pi]);
+                push(vm, value_array(elems, obj->as.enm.payload_count));
+                free(elems);
             } else {
-                push(vm, value_nil());
+                push(vm, value_array(NULL, 0));
             }
             return true;
         }
@@ -4076,6 +4329,23 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
             free(key);
             value_free(&val);
             push(vm, value_bool(found)); return true;
+        }
+        if (mhash == MHASH_add && strcmp(method, "add") == 0 && arg_count == 1) {
+            LatValue val = pop(vm);
+            char *key = value_display(&val);
+            LatValue clone = value_deep_clone(&val);
+            lat_map_set(obj->as.set.map, key, &clone);
+            free(key);
+            value_free(&val);
+            push(vm, value_unit()); return true;
+        }
+        if (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1) {
+            LatValue val = pop(vm);
+            char *key = value_display(&val);
+            lat_map_remove(obj->as.set.map, key);
+            free(key);
+            value_free(&val);
+            push(vm, value_unit()); return true;
         }
         if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
             push(vm, value_int((int64_t)lat_map_len(obj->as.set.map))); return true;
@@ -4182,6 +4452,11 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
     case VAL_CHANNEL: {
         if (mhash == MHASH_send && strcmp(method, "send") == 0 && arg_count == 1) {
             LatValue val = pop(vm);
+            if (val.phase == VTAG_FLUID) {
+                value_free(&val);
+                current_vm->error = strdup("channel.send: can only send crystal (immutable) values");
+                push(vm, value_unit()); return true;
+            }
             channel_send(obj->as.channel.ch, val);
             push(vm, value_unit()); return true;
         }
@@ -4604,6 +4879,59 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
     return false;
 }
 
+/* ── Runtime type checking (mirrors eval.c type_matches_value) ── */
+
+static bool vm_type_matches(const LatValue *val, const char *type_name) {
+    if (!type_name || strcmp(type_name, "Any") == 0) return true;
+    if (strcmp(type_name, "Int") == 0)     return val->type == VAL_INT;
+    if (strcmp(type_name, "Float") == 0)   return val->type == VAL_FLOAT;
+    if (strcmp(type_name, "String") == 0)  return val->type == VAL_STR;
+    if (strcmp(type_name, "Bool") == 0)    return val->type == VAL_BOOL;
+    if (strcmp(type_name, "Nil") == 0)     return val->type == VAL_NIL;
+    if (strcmp(type_name, "Map") == 0)     return val->type == VAL_MAP;
+    if (strcmp(type_name, "Array") == 0)   return val->type == VAL_ARRAY;
+    if (strcmp(type_name, "Fn") == 0 || strcmp(type_name, "Closure") == 0)
+        return val->type == VAL_CLOSURE;
+    if (strcmp(type_name, "Channel") == 0) return val->type == VAL_CHANNEL;
+    if (strcmp(type_name, "Range") == 0)   return val->type == VAL_RANGE;
+    if (strcmp(type_name, "Set") == 0)     return val->type == VAL_SET;
+    if (strcmp(type_name, "Tuple") == 0)   return val->type == VAL_TUPLE;
+    if (strcmp(type_name, "Buffer") == 0)  return val->type == VAL_BUFFER;
+    if (strcmp(type_name, "Ref") == 0)     return val->type == VAL_REF;
+    if (strcmp(type_name, "Number") == 0)
+        return val->type == VAL_INT || val->type == VAL_FLOAT;
+    /* Struct name check */
+    if (val->type == VAL_STRUCT && val->as.strct.name)
+        return strcmp(val->as.strct.name, type_name) == 0;
+    /* Enum name check */
+    if (val->type == VAL_ENUM && val->as.enm.enum_name)
+        return strcmp(val->as.enm.enum_name, type_name) == 0;
+    return false;
+}
+
+static const char *vm_value_type_display(const LatValue *val) {
+    switch (val->type) {
+        case VAL_INT:     return "Int";
+        case VAL_FLOAT:   return "Float";
+        case VAL_BOOL:    return "Bool";
+        case VAL_STR:     return "String";
+        case VAL_ARRAY:   return "Array";
+        case VAL_STRUCT:  return val->as.strct.name ? val->as.strct.name : "Struct";
+        case VAL_CLOSURE: return "Fn";
+        case VAL_UNIT:    return "Unit";
+        case VAL_NIL:     return "Nil";
+        case VAL_RANGE:   return "Range";
+        case VAL_MAP:     return "Map";
+        case VAL_CHANNEL: return "Channel";
+        case VAL_ENUM:    return val->as.enm.enum_name ? val->as.enm.enum_name : "Enum";
+        case VAL_SET:     return "Set";
+        case VAL_TUPLE:   return "Tuple";
+        case VAL_BUFFER:  return "Buffer";
+        case VAL_REF:     return "Ref";
+    }
+    return "Unknown";
+}
+
 /* ── Execution ── */
 
 #define READ_BYTE() (*frame->ip++)
@@ -4616,13 +4944,94 @@ static bool vm_invoke_builtin(VM *vm, LatValue *obj, const char *method, int arg
     if (_err != VM_OK) return _err; \
 } while(0)
 
+/* Adjust stack for default parameters and variadic arguments before a compiled
+ * closure call. Returns the adjusted arg_count, or -1 on error. On error,
+ * vm->error is set with a heap-allocated message. */
+/* Convert a Map or Set on the stack (pointed to by iter) to a key/value array in-place. */
+static void vm_iter_convert_to_array(LatValue *iter) {
+    bool is_map = (iter->type == VAL_MAP);
+    LatMap *hm = is_map ? iter->as.map.map : iter->as.set.map;
+    size_t len = lat_map_len(hm);
+    LatValue *elms = malloc((len ? len : 1) * sizeof(LatValue));
+    size_t ei = 0;
+    for (size_t i = 0; i < hm->cap; i++) {
+        if (hm->entries[i].state == MAP_OCCUPIED) {
+            if (is_map)
+                elms[ei++] = value_string(hm->entries[i].key);
+            else
+                elms[ei++] = value_deep_clone((LatValue *)hm->entries[i].value);
+        }
+    }
+    LatValue arr = value_array(elms, ei);
+    free(elms);
+    value_free(iter);
+    *iter = arr;
+}
+
+static int vm_adjust_call_args(VM *vm, Chunk *fn_chunk, int arity, int arg_count) {
+    int dc = fn_chunk->default_count;
+    bool vd = fn_chunk->fn_has_variadic;
+    if (dc == 0 && !vd) {
+        if (arg_count != arity) {
+            (void)asprintf(&vm->error, "expected %d arguments but got %d", arity, arg_count);
+            return -1;
+        }
+        return arg_count;
+    }
+    int required = arity - dc - (vd ? 1 : 0);
+    int non_variadic = vd ? arity - 1 : arity;
+
+    if (arg_count < required || (!vd && arg_count > arity)) {
+        if (vd)
+            (void)asprintf(&vm->error, "expected at least %d arguments but got %d", required, arg_count);
+        else if (dc > 0)
+            (void)asprintf(&vm->error, "expected %d to %d arguments but got %d", required, arity, arg_count);
+        else
+            (void)asprintf(&vm->error, "expected %d arguments but got %d", arity, arg_count);
+        return -1;
+    }
+
+    /* Push defaults for missing non-variadic params */
+    if (arg_count < non_variadic && fn_chunk->default_values) {
+        for (int i = arg_count; i < non_variadic; i++) {
+            int def_idx = i - required;
+            push(vm, value_clone_fast(&fn_chunk->default_values[def_idx]));
+        }
+        arg_count = non_variadic;
+    }
+
+    /* Bundle variadic args into array */
+    if (vd) {
+        int extra = arg_count - non_variadic;
+        if (extra < 0) extra = 0;
+        LatValue *elems = NULL;
+        if (extra > 0) {
+            elems = malloc(extra * sizeof(LatValue));
+            for (int i = extra - 1; i >= 0; i--)
+                elems[i] = pop(vm);
+        }
+        push(vm, value_array(elems, extra));
+        free(elems);
+        arg_count = arity;
+    }
+
+    return arg_count;
+}
+
 VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
     current_vm = vm;
     size_t base_frame = vm->frame_count;
     CallFrame *frame = &vm->frames[vm->frame_count++];
     frame->chunk = chunk;
     frame->ip = chunk->code;
-    frame->slots = vm->stack_top;
+    if (vm->next_frame_slots) {
+        frame->slots = vm->next_frame_slots;
+        frame->cleanup_base = vm->stack_top;  /* Only free above this point on return */
+        vm->next_frame_slots = NULL;
+    } else {
+        frame->slots = vm->stack_top;
+        frame->cleanup_base = NULL;
+    }
     frame->upvalues = NULL;
     frame->upvalue_count = 0;
 
@@ -4686,6 +5095,11 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
         [OP_CLOSURE_16] = &&lbl_OP_CLOSURE_16,
         [OP_RESET_EPHEMERAL] = &&lbl_OP_RESET_EPHEMERAL,
         [OP_SET_LOCAL_POP] = &&lbl_OP_SET_LOCAL_POP,
+        [OP_CHECK_TYPE] = &&lbl_OP_CHECK_TYPE,
+        [OP_CHECK_RETURN_TYPE] = &&lbl_OP_CHECK_RETURN_TYPE,
+        [OP_IS_CRYSTAL] = &&lbl_OP_IS_CRYSTAL,
+        [OP_FREEZE_EXCEPT] = &&lbl_OP_FREEZE_EXCEPT,
+        [OP_FREEZE_FIELD] = &&lbl_OP_FREEZE_FIELD,
         [OP_HALT] = &&lbl_OP_HALT,
     };
 #endif
@@ -4843,7 +5257,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 } else if (a.type == VAL_FLOAT || b.type == VAL_FLOAT) {
                     double fa = a.type == VAL_INT ? (double)a.as.int_val : a.as.float_val;
                     double fb = b.type == VAL_INT ? (double)b.as.int_val : b.as.float_val;
-                    if (fb == 0.0) { VM_ERROR("division by zero"); break; }
+                    /* Let IEEE 754 produce NaN/Inf for float division by zero */
                     push(vm, value_float(fa / fb));
                 } else {
                     value_free(&a); value_free(&b);
@@ -5041,6 +5455,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_LSHIFT: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
+                    if (b.as.int_val < 0 || b.as.int_val > 63) {
+                        VM_ERROR("shift amount out of range (0..63)"); break;
+                    }
                     push(vm, value_int(a.as.int_val << b.as.int_val));
                 } else {
                     value_free(&a); value_free(&b);
@@ -5054,6 +5471,9 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             case OP_RSHIFT: {
                 LatValue b = pop(vm), a = pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
+                    if (b.as.int_val < 0 || b.as.int_val > 63) {
+                        VM_ERROR("shift amount out of range (0..63)"); break;
+                    }
                     push(vm, value_int(a.as.int_val >> b.as.int_val));
                 } else {
                     value_free(&a); value_free(&b);
@@ -5200,6 +5620,47 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 const char *name = frame->chunk->constants[idx].as.str_val;
                 LatValue val = pop(vm);
                 vm_promote_value(&val);
+
+                /* Phase-dispatch overloading: if defining a phase-constrained
+                 * closure and one already exists, create an overload array */
+                if (val.type == VAL_CLOSURE && val.as.closure.native_fn != NULL &&
+                    val.as.closure.default_values != VM_NATIVE_MARKER &&
+                    val.as.closure.default_values != VM_EXT_MARKER) {
+                    Chunk *ch = (Chunk *)val.as.closure.native_fn;
+                    if (ch->param_phases) {
+                        LatValue existing;
+                        if (env_get(vm->env, name, &existing)) {
+                            if (existing.type == VAL_CLOSURE && existing.as.closure.native_fn != NULL &&
+                                existing.as.closure.default_values != VM_NATIVE_MARKER &&
+                                existing.as.closure.default_values != VM_EXT_MARKER) {
+                                Chunk *ech = (Chunk *)existing.as.closure.native_fn;
+                                if (ech->param_phases) {
+                                    LatValue elems[2] = { existing, val };
+                                    LatValue arr = value_array(elems, 2);
+                                    value_free(&existing);
+                                    value_free(&val);
+                                    env_define(vm->env, name, arr);
+                                    break;
+                                }
+                            } else if (existing.type == VAL_ARRAY) {
+                                /* Append to existing overload set */
+                                size_t new_len = existing.as.array.len + 1;
+                                LatValue *new_elems = malloc(new_len * sizeof(LatValue));
+                                for (size_t i = 0; i < existing.as.array.len; i++)
+                                    new_elems[i] = existing.as.array.elems[i];
+                                new_elems[existing.as.array.len] = val;
+                                LatValue arr = value_array(new_elems, new_len);
+                                free(new_elems);
+                                value_free(&existing);
+                                value_free(&val);
+                                env_define(vm->env, name, arr);
+                                break;
+                            }
+                            value_free(&existing);
+                        }
+                    }
+                }
+
                 env_define(vm->env, name, val);
                 break;
             }
@@ -5325,10 +5786,8 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     /* Check if native set an error (e.g. grow() seed failure) */
                     if (vm->error) {
                         value_free(&ret);
-                        char *err = vm->error;
-                        vm->error = NULL;
-                        VM_ERROR("%s", err);
-                        free(err);
+                        VMResult r = vm_handle_native_error(vm, &frame);
+                        if (r != VM_OK) return r;
                         break;
                     }
                     push(vm, ret);
@@ -5349,8 +5808,60 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         value_free(&args[i]);
                     if (arg_count > 16) free(args);
                     value_free(&callee_val);
+                    /* Extension errors return strings prefixed with "EVAL_ERROR:" */
+                    if (ret.type == VAL_STR && strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                        vm->error = strdup(ret.as.str_val + 11);
+                        value_free(&ret);
+                        VMResult r = vm_handle_native_error(vm, &frame);
+                        if (r != VM_OK) return r;
+                        break;
+                    }
                     push(vm, ret);
                     break;
+                }
+
+                /* Phase-dispatch overload resolution: VAL_ARRAY of closures */
+                if (callee->type == VAL_ARRAY) {
+                    int best_score = -1;
+                    int best_idx = -1;
+                    for (size_t ci = 0; ci < callee->as.array.len; ci++) {
+                        LatValue *cand = &callee->as.array.elems[ci];
+                        if (cand->type != VAL_CLOSURE || cand->as.closure.native_fn == NULL) continue;
+                        if (cand->as.closure.default_values == VM_NATIVE_MARKER) continue;
+                        if (cand->as.closure.default_values == VM_EXT_MARKER) continue;
+                        Chunk *ch = (Chunk *)cand->as.closure.native_fn;
+                        if (!ch->param_phases) continue;
+                        bool compatible = true;
+                        int score = 0;
+                        for (int j = 0; j < ch->param_phase_count && j < (int)arg_count; j++) {
+                            uint8_t pp = ch->param_phases[j];
+                            LatValue *arg = vm_peek(vm, arg_count - 1 - j);
+                            if (pp == PHASE_FLUID) {
+                                if (arg->phase == VTAG_CRYSTAL) { compatible = false; break; }
+                                if (arg->phase == VTAG_FLUID) score += 3;
+                                else score += 1;
+                            } else if (pp == PHASE_CRYSTAL) {
+                                if (arg->phase == VTAG_FLUID) { compatible = false; break; }
+                                if (arg->phase == VTAG_CRYSTAL) score += 3;
+                                else score += 1;
+                            } else {
+                                if (arg->phase == VTAG_UNPHASED) score += 2;
+                                else score += 1;
+                            }
+                        }
+                        if (compatible && score > best_score) {
+                            best_score = score;
+                            best_idx = (int)ci;
+                        }
+                    }
+                    if (best_idx >= 0) {
+                        LatValue matched = value_clone_fast(&callee->as.array.elems[best_idx]);
+                        value_free(callee);
+                        *callee = matched;
+                        /* Fall through to compiled closure call below */
+                    } else {
+                        VM_ERROR("no matching overload for given argument phases"); break;
+                    }
                 }
 
                 if (callee->type == VAL_CLOSURE && callee->as.closure.native_fn != NULL) {
@@ -5358,9 +5869,29 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     Chunk *fn_chunk = (Chunk *)callee->as.closure.native_fn;
                     int arity = (int)callee->as.closure.param_count;
 
-                    if (arg_count != arity) {
-                        VM_ERROR("expected %d arguments but got %d", arity, arg_count); break;
+                    /* Phase constraint check */
+                    if (fn_chunk->param_phases) {
+                        bool phase_mismatch = false;
+                        for (int i = 0; i < fn_chunk->param_phase_count && i < (int)arg_count; i++) {
+                            uint8_t pp = fn_chunk->param_phases[i];
+                            if (pp == PHASE_UNSPECIFIED) continue;
+                            LatValue *arg = vm_peek(vm, arg_count - 1 - i);
+                            if (pp == PHASE_FLUID && arg->phase == VTAG_CRYSTAL) { phase_mismatch = true; break; }
+                            if (pp == PHASE_CRYSTAL && arg->phase == VTAG_FLUID) { phase_mismatch = true; break; }
+                        }
+                        if (phase_mismatch) {
+                            VM_ERROR("phase constraint violation in function '%s'",
+                                fn_chunk->name ? fn_chunk->name : "<anonymous>");
+                            break;
+                        }
                     }
+
+                    int adjusted = vm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
+                    if (adjusted < 0) {
+                        char *err = vm->error; vm->error = NULL;
+                        VM_ERROR("%s", err); free(err); break;
+                    }
+                    (void)adjusted;
 
                     if (vm->frame_count >= VM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)"); break;
@@ -5472,12 +6003,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 #endif
             case OP_RETURN: {
                 LatValue ret = pop(vm);
-                close_upvalues(vm, frame->slots);
+                /* For defer frames (cleanup_base != NULL), only close upvalues
+                 * and free stack values above the entry point, preserving
+                 * the parent frame's locals that we share via next_frame_slots. */
+                LatValue *base = frame->cleanup_base ? frame->cleanup_base : frame->slots;
+                close_upvalues(vm, base);
                 vm->frame_count--;
                 if (vm->frame_count == base_frame) {
                     /* Returned to the entry frame of this vm_run invocation.
                      * Free remaining stack values down to our entry point. */
-                    while (vm->stack_top > frame->slots) {
+                    while (vm->stack_top > base) {
                         vm->stack_top--;
                         value_free(vm->stack_top);
                     }
@@ -5485,7 +6020,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     return VM_OK;
                 }
                 /* Free the callee and args/locals from this frame */
-                while (vm->stack_top > frame->slots) {
+                while (vm->stack_top > base) {
                     vm->stack_top--;
                     value_free(vm->stack_top);
                 }
@@ -5499,8 +6034,12 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_ITER_INIT:
 #endif
             case OP_ITER_INIT: {
-                /* TOS is a range or array. Push index 0 on top. */
+                /* TOS is a range, array, map, or set. Push index 0 on top. */
                 LatValue *iter = vm_peek(vm, 0);
+                if (iter->type == VAL_MAP || iter->type == VAL_SET) {
+                    /* Convert map/set to array for iteration */
+                    vm_iter_convert_to_array(iter);
+                }
                 if (iter->type != VAL_RANGE && iter->type != VAL_ARRAY) {
                     VM_ERROR("cannot iterate over %s", value_type_name(iter)); break;
                 }
@@ -5803,6 +6342,47 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     LatValue elem = value_deep_clone(&obj.as.tuple.elems[i]);
                     value_free(&obj);
                     push(vm, elem);
+                } else if (obj.type == VAL_STR && idx.type == VAL_RANGE) {
+                    /* String range slicing: "hello"[1..4] → "ell" */
+                    int64_t start = idx.as.range.start;
+                    int64_t end = idx.as.range.end;
+                    size_t len = strlen(obj.as.str_val);
+                    if (start < 0) start = 0;
+                    if (end < 0) end = 0;
+                    if ((size_t)start > len) start = (int64_t)len;
+                    if ((size_t)end > len) end = (int64_t)len;
+                    if (start >= end) {
+                        value_free(&obj);
+                        push(vm, value_string(""));
+                    } else {
+                        size_t slice_len = (size_t)(end - start);
+                        char *slice = malloc(slice_len + 1);
+                        memcpy(slice, obj.as.str_val + start, slice_len);
+                        slice[slice_len] = '\0';
+                        value_free(&obj);
+                        push(vm, value_string_owned(slice));
+                    }
+                } else if (obj.type == VAL_ARRAY && idx.type == VAL_RANGE) {
+                    /* Array range slicing: [1,2,3,4][1..3] → [2,3] */
+                    int64_t start = idx.as.range.start;
+                    int64_t end = idx.as.range.end;
+                    size_t len = obj.as.array.len;
+                    if (start < 0) start = 0;
+                    if ((size_t)start > len) start = (int64_t)len;
+                    if (end < 0) end = 0;
+                    if ((size_t)end > len) end = (int64_t)len;
+                    if (start >= end) {
+                        value_free(&obj);
+                        push(vm, value_array(NULL, 0));
+                    } else {
+                        size_t slice_len = (size_t)(end - start);
+                        LatValue *elems = malloc(slice_len * sizeof(LatValue));
+                        for (size_t i = 0; i < slice_len; i++)
+                            elems[i] = value_deep_clone(&obj.as.array.elems[start + i]);
+                        value_free(&obj);
+                        push(vm, value_array(elems, slice_len));
+                        free(elems);
+                    }
                 } else if (obj.type == VAL_BUFFER && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= obj.as.buffer.len) {
@@ -5923,17 +6503,34 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         push(vm, value_nil());
                     }
                     value_free(&obj);
+                } else if (obj.type == VAL_TUPLE) {
+                    /* Tuple field access: t.0, t.1, etc. */
+                    char *end;
+                    long idx = strtol(field_name, &end, 10);
+                    if (*end == '\0' && idx >= 0 && (size_t)idx < obj.as.tuple.len) {
+                        LatValue stolen = obj.as.tuple.elems[idx];
+                        obj.as.tuple.elems[idx] = (LatValue){.type = VAL_NIL};
+                        push(vm, stolen);
+                    } else {
+                        value_free(&obj);
+                        VM_ERROR("tuple has no field '%s'", field_name); break;
+                    }
+                    value_free(&obj);
                 } else if (obj.type == VAL_ENUM) {
                     if (strcmp(field_name, "tag") == 0) {
                         push(vm, value_string(obj.as.enm.variant_name));
                     } else if (strcmp(field_name, "payload") == 0) {
-                        if (obj.as.enm.payload_count == 1) {
-                            /* Steal the payload from the dying enum */
-                            LatValue stolen = obj.as.enm.payload[0];
-                            obj.as.enm.payload[0] = (LatValue){.type = VAL_NIL};
-                            push(vm, stolen);
+                        /* Always return an array of all payloads */
+                        if (obj.as.enm.payload_count > 0) {
+                            LatValue *elems = malloc(obj.as.enm.payload_count * sizeof(LatValue));
+                            for (size_t i = 0; i < obj.as.enm.payload_count; i++) {
+                                elems[i] = obj.as.enm.payload[i];
+                                obj.as.enm.payload[i] = (LatValue){.type = VAL_NIL};
+                            }
+                            push(vm, value_array(elems, obj.as.enm.payload_count));
+                            free(elems);
                         } else {
-                            push(vm, value_nil());
+                            push(vm, value_array(NULL, 0));
                         }
                     } else {
                         push(vm, value_nil());
@@ -5958,6 +6555,13 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 vm_promote_value(&val);
 
                 if (obj.type == VAL_STRUCT) {
+                    /* Check overall struct phase (only if no per-field phases set) */
+                    if ((obj.phase == VTAG_CRYSTAL || obj.phase == VTAG_SUBLIMATED) &&
+                        !obj.as.strct.field_phases) {
+                        value_free(&obj); value_free(&val);
+                        VM_ERROR("cannot assign to field '%s' on a %s struct", field_name,
+                            obj.phase == VTAG_CRYSTAL ? "frozen" : "sublimated"); break;
+                    }
                     /* Check per-field phase constraints (alloy types) */
                     bool field_frozen = false;
                     if (obj.as.strct.field_phases) {
@@ -6010,8 +6614,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 
                 if (vm_invoke_builtin(vm, obj, method_name, arg_count, NULL)) {
                     if (vm->error) {
-                        VMResult r = vm_handle_error(vm, &frame, "%s", vm->error);
-                        free(vm->error); vm->error = NULL;
+                        VMResult r = vm_handle_native_error(vm, &frame);
                         if (r != VM_OK) return r;
                         break;
                     }
@@ -6032,6 +6635,13 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                             field->as.closure.default_values != VM_NATIVE_MARKER) {
                             /* Bytecode closure stored in map - call it */
                             Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                            int arity = (int)field->as.closure.param_count;
+                            int adjusted = vm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
+                            if (adjusted < 0) {
+                                char *err = vm->error; vm->error = NULL;
+                                VM_ERROR("%s", err); free(err); break;
+                            }
+                            (void)adjusted;
                             ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                             size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
                             if (vm->frame_count >= VM_FRAMES_MAX) {
@@ -6156,14 +6766,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         new_frame->upvalue_count = 0;
                         frame = new_frame;
                     } else {
-                        /* Method not found - pop args and object, push nil */
+                        /* Method not found - error */
+                        const char *tname = value_type_name(obj);
                         for (int i = 0; i < arg_count; i++) {
                             LatValue v = pop(vm);
                             value_free(&v);
                         }
                         LatValue obj_val = pop(vm);
                         value_free(&obj_val);
-                        push(vm, value_nil());
+                        VM_ERROR("type '%s' has no method '%s'", tname, method_name);
+                        break;
                     }
                 }
                 break;
@@ -6183,14 +6795,71 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     ? frame->chunk->local_names[slot] : NULL;
                 if (vm_invoke_builtin(vm, obj, method_name, arg_count, local_var_name)) {
                     if (vm->error) {
-                        VMResult r = vm_handle_error(vm, &frame, "%s", vm->error);
-                        free(vm->error); vm->error = NULL;
+                        VMResult r = vm_handle_native_error(vm, &frame);
                         if (r != VM_OK) return r;
                         break;
                     }
                     /* Builtin popped args and pushed result.
                      * obj was mutated in-place (e.g. push modified the array). */
                     break;
+                }
+
+                /* Check if map has a callable closure field */
+                if (obj->type == VAL_MAP) {
+                    LatValue *field = lat_map_get(obj->as.map.map, method_name);
+                    if (field && field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                        field->as.closure.default_values != VM_NATIVE_MARKER) {
+                        /* Bytecode closure stored in local map - call it */
+                        Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        int arity = (int)field->as.closure.param_count;
+                        int adjusted = vm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
+                        if (adjusted < 0) {
+                            char *err = vm->error; vm->error = NULL;
+                            VM_ERROR("%s", err); free(err); break;
+                        }
+                        arg_count = (uint8_t)adjusted;
+                        ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        if (vm->frame_count >= VM_FRAMES_MAX) {
+                            VM_ERROR("stack overflow (too many nested calls)"); break;
+                        }
+                        vm_promote_frame_ephemerals(vm, frame);
+                        /* Set up frame: closure in slot 0, args follow */
+                        LatValue closure_copy = value_deep_clone(field);
+                        LatValue *arg_base = vm->stack_top - arg_count;
+                        push(vm, value_nil()); /* make room */
+                        for (int si = arg_count - 1; si >= 0; si--)
+                            arg_base[si + 1] = arg_base[si];
+                        arg_base[0] = closure_copy;
+                        CallFrame *new_frame = &vm->frames[vm->frame_count++];
+                        new_frame->chunk = fn_chunk;
+                        new_frame->ip = fn_chunk->code;
+                        new_frame->slots = arg_base;
+                        new_frame->upvalues = upvals;
+                        new_frame->upvalue_count = uv_count;
+                        frame = new_frame;
+                        break;
+                    }
+                    if (field && field->type == VAL_CLOSURE &&
+                        field->as.closure.default_values == VM_NATIVE_MARKER) {
+                        /* VM native function stored in local map */
+                        VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                        LatValue *args = (arg_count <= 16) ? vm->fast_args
+                                       : malloc(arg_count * sizeof(LatValue));
+                        for (int i = arg_count - 1; i >= 0; i--)
+                            args[i] = pop(vm);
+                        LatValue ret = native(args, arg_count);
+                        for (int i = 0; i < arg_count; i++)
+                            value_free(&args[i]);
+                        if (arg_count > 16) free(args);
+                        if (vm->error) {
+                            value_free(&ret);
+                            char *err = vm->error; vm->error = NULL;
+                            VM_ERROR("%s", err); free(err); break;
+                        }
+                        push(vm, ret);
+                        break;
+                    }
                 }
 
                 /* Check if struct has a callable closure field */
@@ -6310,8 +6979,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     }
                     if (vm_invoke_builtin(vm, ref, method_name, arg_count, global_name)) {
                         if (vm->error) {
-                            VMResult r = vm_handle_error(vm, &frame, "%s", vm->error);
-                            free(vm->error); vm->error = NULL;
+                            VMResult r = vm_handle_native_error(vm, &frame);
                             if (r != VM_OK) return r;
                             break;
                         }
@@ -6332,8 +7000,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 if (vm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name)) {
                     if (vm->error) {
                         value_free(&obj_val);
-                        VMResult r = vm_handle_error(vm, &frame, "%s", vm->error);
-                        free(vm->error); vm->error = NULL;
+                        VMResult r = vm_handle_native_error(vm, &frame);
                         if (r != VM_OK) return r;
                         break;
                     }
@@ -6364,6 +7031,16 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     if (field && field->type == VAL_CLOSURE && field->as.closure.native_fn &&
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        int arity = (int)field->as.closure.param_count;
+                        int adjusted = vm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
+                        if (adjusted < 0) {
+                            char *err = vm->error; vm->error = NULL;
+                            value_free(&obj_val);
+                            VM_ERROR("%s", err); free(err); break;
+                        }
+                        arg_count = (uint8_t)adjusted;
+                        /* Recalculate obj pointer — vm_adjust may have pushed defaults */
+                        obj = vm->stack_top - arg_count - 1;
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
                         if (vm->frame_count >= VM_FRAMES_MAX) {
@@ -6534,6 +7211,28 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     value_free(&val); value_free(&idx);
                     VM_ERROR("invalid index assignment on Ref"); break;
                 }
+                /* Phase check: reject mutation on crystal/sublimated values */
+                if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
+                    /* Check per-field phases for structs/maps with partial freeze */
+                    bool field_frozen = false;
+                    if (obj->type == VAL_MAP && idx.type == VAL_STR && obj->as.map.key_phases) {
+                        PhaseTag *kp = lat_map_get(obj->as.map.key_phases, idx.as.str_val);
+                        if (kp && *kp == VTAG_CRYSTAL) field_frozen = true;
+                    }
+                    if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED || field_frozen) {
+                        value_free(&val); value_free(&idx);
+                        VM_ERROR("cannot modify a %s value",
+                            obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated"); break;
+                    }
+                }
+                /* Check per-key phase on non-frozen maps */
+                if (obj->type == VAL_MAP && idx.type == VAL_STR && obj->as.map.key_phases) {
+                    PhaseTag *kp = lat_map_get(obj->as.map.key_phases, idx.as.str_val);
+                    if (kp && *kp == VTAG_CRYSTAL) {
+                        value_free(&val); value_free(&idx);
+                        VM_ERROR("cannot modify frozen key '%s'", idx.as.str_val); break;
+                    }
+                }
                 if (obj->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= obj->as.array.len) {
@@ -6605,9 +7304,14 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     frame->ip = h.ip;
                     push(vm, err);
                 } else {
-                    char *repr = value_repr(&err);
-                    VMResult res = runtime_error(vm, "unhandled exception: %s", repr);
-                    free(repr);
+                    VMResult res;
+                    if (err.type == VAL_STR) {
+                        res = runtime_error(vm, "%s", err.as.str_val);
+                    } else {
+                        char *repr = value_repr(&err);
+                        res = runtime_error(vm, "unhandled exception: %s", repr);
+                        free(repr);
+                    }
                     value_free(&err);
                     return res;
                 }
@@ -6646,7 +7350,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         }
                     }
                 }
-                /* Not a result map - leave as-is */
+                /* Not a result map - error */
+                value_free(val);
+                (void)pop(vm);  /* we already freed the peeked value */
+                VM_ERROR("'?' operator requires a result map with {tag: \"ok\"|\"err\", value: ...}");
                 break;
             }
 
@@ -6655,6 +7362,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
             lbl_OP_DEFER_PUSH:
 #endif
             case OP_DEFER_PUSH: {
+                uint8_t sdepth = READ_BYTE();
                 uint16_t offset = READ_U16();
                 if (vm->defer_count < VM_DEFER_MAX) {
                     VMDeferEntry *d = &vm->defers[vm->defer_count++];
@@ -6662,6 +7370,7 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     d->chunk = frame->chunk;
                     d->frame_index = vm->frame_count - 1;
                     d->slots = frame->slots;
+                    d->scope_depth = sdepth;
                 }
                 frame->ip += offset; /* skip defer body */
                 break;
@@ -6672,11 +7381,14 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 #endif
             case OP_DEFER_RUN: {
                 /* Execute pending defers for the current function in LIFO order.
-                 * Only run defers that belong to the current call frame. */
+                 * Only run defers that belong to the current call frame AND
+                 * have scope_depth >= the operand (scope-aware execution). */
+                uint8_t min_depth = READ_BYTE();
                 size_t current_frame_idx = vm->frame_count - 1;
                 while (vm->defer_count > 0) {
                     VMDeferEntry *d = &vm->defers[vm->defer_count - 1];
                     if (d->frame_index != current_frame_idx) break;
+                    if (d->scope_depth < min_depth) break;
                     vm->defer_count--;
 
                     /* Save return value (TOS) — we push it back after defer */
@@ -6684,14 +7396,19 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 
                     /* Create a view chunk over the defer body's bytecode.
                      * The body starts at d->ip and ends with OP_RETURN.
-                     * vm_run will push a new frame and execute until OP_RETURN. */
+                     * vm_run will push a new frame and execute until OP_RETURN.
+                     * Use next_frame_slots so the defer body shares the parent
+                     * frame's locals (defer body bytecode uses parent slot indices). */
                     Chunk wrapper;
                     memset(&wrapper, 0, sizeof(wrapper));
                     wrapper.code = d->ip;
                     wrapper.code_len = (size_t)(d->chunk->code + d->chunk->code_len - d->ip);
                     wrapper.constants = d->chunk->constants;
                     wrapper.const_len = d->chunk->const_len;
+                    wrapper.const_hashes = d->chunk->const_hashes;
+                    wrapper.lines = d->chunk->lines ? d->chunk->lines + (d->ip - d->chunk->code) : NULL;
 
+                    vm->next_frame_slots = d->slots;
                     LatValue defer_result;
                     vm_run(vm, &wrapper, &defer_result);
                     value_free(&defer_result);
@@ -6708,6 +7425,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
 #endif
             case OP_FREEZE: {
                 LatValue val = pop(vm);
+                if (val.type == VAL_CHANNEL) {
+                    value_free(&val);
+                    VM_ERROR("cannot freeze a channel"); break;
+                }
                 LatValue frozen = value_freeze(val);
                 push(vm, frozen);
                 break;
@@ -6813,6 +7534,49 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 LatValue dep_v = pop(vm);
                 const char *dep_name = (dep_v.type == VAL_STR) ? dep_v.as.str_val : "";
                 const char *strategy = (strategy_v.type == VAL_STR) ? strategy_v.as.str_val : "mirror";
+
+                /* Validate: dep must be a named variable (non-empty) */
+                if (dep_name[0] == '\0') {
+                    value_free(&dep_v); value_free(&strategy_v);
+                    vm->error = strdup("bond() requires variable names for dependencies");
+                    VMResult r = vm_handle_native_error(vm, &frame);
+                    if (r != VM_OK) return r;
+                    break;
+                }
+                /* Validate: target must not be already frozen */
+                {
+                    LatValue target_val;
+                    bool target_found = env_get(vm->env, target_name, &target_val);
+                    if (!target_found) target_found = vm_find_local_value(vm, target_name, &target_val);
+                    if (target_found) {
+                        if (target_val.phase == VTAG_CRYSTAL) {
+                            value_free(&target_val); value_free(&dep_v); value_free(&strategy_v);
+                            char *msg = NULL;
+                            (void)asprintf(&msg, "cannot bond already-frozen variable '%s'", target_name);
+                            vm->error = msg;
+                            VMResult r = vm_handle_native_error(vm, &frame);
+                            if (r != VM_OK) return r;
+                            break;
+                        }
+                        value_free(&target_val);
+                    }
+                }
+                /* Validate: dep variable must exist */
+                {
+                    LatValue dep_val;
+                    bool dep_found = env_get(vm->env, dep_name, &dep_val);
+                    if (!dep_found) dep_found = vm_find_local_value(vm, dep_name, &dep_val);
+                    if (!dep_found) {
+                        char *msg = NULL;
+                        (void)asprintf(&msg, "cannot bond undefined variable '%s'", dep_name);
+                        value_free(&dep_v); value_free(&strategy_v);
+                        vm->error = msg;
+                        VMResult r = vm_handle_native_error(vm, &frame);
+                        if (r != VM_OK) return r;
+                        break;
+                    }
+                    value_free(&dep_val);
+                }
                 /* Find or create bond entry */
                 size_t bi = vm->bond_count;
                 for (size_t i = 0; i < vm->bond_count; i++) {
@@ -6931,13 +7695,17 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t loc_slot = READ_BYTE();
                 const char *var_name = frame->chunk->constants[name_idx].as.str_val;
                 LatValue val = pop(vm);
+                if (val.type == VAL_CHANNEL) {
+                    value_free(&val);
+                    VM_ERROR("cannot freeze a channel"); break;
+                }
                 /* Validate seed contracts (don't consume — matches tree-walker freeze behavior) */
                 char *seed_err = vm_validate_seeds(vm, var_name, &val, false);
                 if (seed_err) {
                     value_free(&val);
-                    VMResult r = vm_handle_error(vm, &frame, "%s", seed_err);
-                    free(seed_err);
-                    if (r == VM_RUNTIME_ERROR) return r;
+                    vm->error = seed_err;
+                    VMResult r = vm_handle_native_error(vm, &frame);
+                    if (r != VM_OK) return r;
                     break;
                 }
                 LatValue frozen = value_freeze(val);
@@ -7001,6 +7769,180 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_IS_CRYSTAL:
+#endif
+            case OP_IS_CRYSTAL: {
+                LatValue val = pop(vm);
+                bool is_crystal = (val.phase == VTAG_CRYSTAL);
+                value_free(&val);
+                push(vm, value_bool(is_crystal));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_FREEZE_EXCEPT:
+#endif
+            case OP_FREEZE_EXCEPT: {
+                uint8_t name_idx = READ_BYTE();
+                uint8_t loc_type = READ_BYTE();
+                uint8_t loc_slot = READ_BYTE();
+                uint8_t except_count = READ_BYTE();
+                const char *var_name = frame->chunk->constants[name_idx].as.str_val;
+
+                /* Pop except field names from stack (pushed first-to-last) */
+                char **except_names = malloc(except_count * sizeof(char *));
+                for (int i = except_count - 1; i >= 0; i--) {
+                    LatValue v = pop(vm);
+                    except_names[i] = (v.type == VAL_STR) ? strdup(v.as.str_val) : strdup("");
+                    value_free(&v);
+                }
+
+                /* Get a working copy of the variable value */
+                LatValue val;
+                switch (loc_type) {
+                    case 0: val = value_deep_clone(&frame->slots[loc_slot]); break;
+                    case 1:
+                        if (frame->upvalues && loc_slot < frame->upvalue_count && frame->upvalues[loc_slot])
+                            val = value_deep_clone(frame->upvalues[loc_slot]->location);
+                        else val = value_nil();
+                        break;
+                    default: {
+                        LatValue tmp;
+                        if (!env_get(vm->env, var_name, &tmp)) tmp = value_nil();
+                        val = tmp;
+                        break;
+                    }
+                }
+
+                if (val.type == VAL_STRUCT) {
+                    if (!val.as.strct.field_phases) {
+                        val.as.strct.field_phases = calloc(val.as.strct.field_count, sizeof(PhaseTag));
+                        for (size_t i = 0; i < val.as.strct.field_count; i++)
+                            val.as.strct.field_phases[i] = val.phase;
+                    }
+                    for (size_t i = 0; i < val.as.strct.field_count; i++) {
+                        bool exempted = false;
+                        for (uint8_t j = 0; j < except_count; j++) {
+                            if (strcmp(val.as.strct.field_names[i], except_names[j]) == 0) {
+                                exempted = true; break;
+                            }
+                        }
+                        if (!exempted) {
+                            val.as.strct.field_values[i] = value_freeze(val.as.strct.field_values[i]);
+                            val.as.strct.field_phases[i] = VTAG_CRYSTAL;
+                        } else {
+                            val.as.strct.field_phases[i] = VTAG_FLUID;
+                        }
+                    }
+                } else if (val.type == VAL_MAP) {
+                    if (!val.as.map.key_phases) {
+                        val.as.map.key_phases = calloc(1, sizeof(LatMap));
+                        *val.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+                    }
+                    for (size_t i = 0; i < val.as.map.map->cap; i++) {
+                        if (val.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                        const char *key = val.as.map.map->entries[i].key;
+                        bool exempted = false;
+                        for (uint8_t j = 0; j < except_count; j++) {
+                            if (strcmp(key, except_names[j]) == 0) {
+                                exempted = true; break;
+                            }
+                        }
+                        PhaseTag phase;
+                        if (!exempted) {
+                            LatValue *vp = (LatValue *)val.as.map.map->entries[i].value;
+                            *vp = value_freeze(*vp);
+                            phase = VTAG_CRYSTAL;
+                        } else {
+                            phase = VTAG_FLUID;
+                        }
+                        lat_map_set(val.as.map.key_phases, key, &phase);
+                    }
+                }
+
+                /* Write back and push result */
+                LatValue ret = value_deep_clone(&val);
+                vm_write_back(vm, frame, loc_type, loc_slot, var_name, val);
+                value_free(&val);
+                push(vm, ret);
+                for (uint8_t i = 0; i < except_count; i++) free(except_names[i]);
+                free(except_names);
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_FREEZE_FIELD:
+#endif
+            case OP_FREEZE_FIELD: {
+                uint8_t pname_idx = READ_BYTE();
+                uint8_t loc_type = READ_BYTE();
+                uint8_t loc_slot = READ_BYTE();
+                const char *parent_name = frame->chunk->constants[pname_idx].as.str_val;
+                LatValue field_name = pop(vm);
+
+                /* Get a working copy of the parent variable */
+                LatValue parent;
+                switch (loc_type) {
+                    case 0: parent = value_deep_clone(&frame->slots[loc_slot]); break;
+                    case 1:
+                        if (frame->upvalues && loc_slot < frame->upvalue_count && frame->upvalues[loc_slot])
+                            parent = value_deep_clone(frame->upvalues[loc_slot]->location);
+                        else parent = value_nil();
+                        break;
+                    default: {
+                        LatValue tmp;
+                        if (!env_get(vm->env, parent_name, &tmp)) tmp = value_nil();
+                        parent = tmp;
+                        break;
+                    }
+                }
+
+                if (parent.type == VAL_STRUCT && field_name.type == VAL_STR) {
+                    const char *fname = field_name.as.str_val;
+                    size_t fi = (size_t)-1;
+                    for (size_t i = 0; i < parent.as.strct.field_count; i++) {
+                        if (strcmp(parent.as.strct.field_names[i], fname) == 0) { fi = i; break; }
+                    }
+                    if (fi == (size_t)-1) {
+                        value_free(&parent); value_free(&field_name);
+                        VM_ERROR("struct has no field '%s'", fname); break;
+                    }
+                    parent.as.strct.field_values[fi] = value_freeze(parent.as.strct.field_values[fi]);
+                    if (!parent.as.strct.field_phases)
+                        parent.as.strct.field_phases = calloc(parent.as.strct.field_count, sizeof(PhaseTag));
+                    parent.as.strct.field_phases[fi] = VTAG_CRYSTAL;
+                    LatValue ret = value_deep_clone(&parent.as.strct.field_values[fi]);
+                    vm_write_back(vm, frame, loc_type, loc_slot, parent_name, parent);
+                    value_free(&parent);
+                    value_free(&field_name);
+                    push(vm, ret);
+                } else if (parent.type == VAL_MAP && field_name.type == VAL_STR) {
+                    const char *key = field_name.as.str_val;
+                    LatValue *val_ptr = (LatValue *)lat_map_get(parent.as.map.map, key);
+                    if (!val_ptr) {
+                        value_free(&parent); value_free(&field_name);
+                        VM_ERROR("map has no key '%s'", key); break;
+                    }
+                    *val_ptr = value_freeze(*val_ptr);
+                    if (!parent.as.map.key_phases) {
+                        parent.as.map.key_phases = calloc(1, sizeof(LatMap));
+                        *parent.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+                    }
+                    PhaseTag crystal = VTAG_CRYSTAL;
+                    lat_map_set(parent.as.map.key_phases, key, &crystal);
+                    LatValue ret = value_deep_clone(val_ptr);
+                    vm_write_back(vm, frame, loc_type, loc_slot, parent_name, parent);
+                    value_free(&parent);
+                    value_free(&field_name);
+                    push(vm, ret);
+                } else {
+                    value_free(&parent); value_free(&field_name);
+                    VM_ERROR("freeze field requires a struct or map"); break;
+                }
+                break;
+            }
+
             /* ── Print ── */
 #ifdef VM_USE_COMPUTED_GOTO
             lbl_OP_PRINT:
@@ -7049,8 +7991,10 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                 /* Resolve to absolute path */
                 char resolved[PATH_MAX];
                 if (!realpath(file_path, resolved)) {
+                    char errbuf[512];
+                    snprintf(errbuf, sizeof(errbuf), "import: cannot find '%s'", file_path);
                     free(file_path);
-                    VM_ERROR("import: cannot find '%s'", raw_path); break;
+                    VM_ERROR("%s", errbuf); break;
                 }
                 free(file_path);
 
@@ -7207,11 +8151,11 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                         if (sr != VM_OK) {
                             return runtime_error(vm, "%s", vm->error ? vm->error : "scope error");
                         }
-                        value_free(&scope_result);
+                        push(vm, scope_result);
                     } else {
                         env_pop_scope(vm->env);
+                        push(vm, value_unit());
                     }
-                    push(vm, value_unit());
                 } else {
                     /* Has spawns — run concurrently */
                     char *first_error = NULL;
@@ -7513,7 +8457,6 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                                 }
                                 env_pop_scope(vm->env);
                             }
-                            select_found = true;
                             break;
                         }
                     } else {
@@ -7652,6 +8595,41 @@ VMResult vm_run(VM *vm, Chunk *chunk, LatValue *result) {
                     vm->ephemeral_on_stack = false;
                 }
                 bump_arena_reset(vm->ephemeral);
+                break;
+            }
+
+            /* ── Runtime type checking ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CHECK_TYPE:
+#endif
+            case OP_CHECK_TYPE: {
+                uint8_t slot = READ_BYTE();
+                uint8_t type_idx = READ_BYTE();
+                uint8_t err_idx = READ_BYTE();
+                LatValue *val = &frame->slots[slot];
+                const char *type_name = frame->chunk->constants[type_idx].as.str_val;
+                if (!vm_type_matches(val, type_name)) {
+                    const char *err_fmt = frame->chunk->constants[err_idx].as.str_val;
+                    const char *actual = vm_value_type_display(val);
+                    /* err_fmt has a %s placeholder for the actual type */
+                    VM_ERROR(err_fmt, actual);
+                }
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_CHECK_RETURN_TYPE:
+#endif
+            case OP_CHECK_RETURN_TYPE: {
+                uint8_t type_idx = READ_BYTE();
+                uint8_t err_idx = READ_BYTE();
+                LatValue *val = vm_peek(vm, 0);
+                const char *type_name = frame->chunk->constants[type_idx].as.str_val;
+                if (!vm_type_matches(val, type_name)) {
+                    const char *err_fmt = frame->chunk->constants[err_idx].as.str_val;
+                    const char *actual = vm_value_type_display(val);
+                    VM_ERROR(err_fmt, actual);
+                }
                 break;
             }
 

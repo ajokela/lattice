@@ -37,6 +37,8 @@ static void free_known_enums(void) {
     known_enum_cap = 0;
 }
 
+static LatValue const_eval_expr(Expr *e);
+
 static void compiler_init(Compiler *comp, Compiler *enclosing, FunctionType type) {
     comp->enclosing = enclosing;
     comp->chunk = chunk_new();
@@ -58,6 +60,7 @@ static void compiler_init(Compiler *comp, Compiler *enclosing, FunctionType type
     comp->loop_continue_local_count = 0;
     comp->contracts = NULL;
     comp->contract_count = 0;
+    comp->return_type_name = NULL;
 
     /* Reserve slot 0 for the function itself (or empty for script) */
     if (type != FUNC_SCRIPT) {
@@ -141,9 +144,37 @@ static void emit_loop(size_t loop_start, int line) {
 static void begin_scope(void) { current->scope_depth++; }
 
 static void end_scope(int line) {
+    /* Run any defers registered at the current scope depth before popping locals.
+     * Push a dummy value because OP_DEFER_RUN saves/restores TOS for each defer. */
+    emit_byte(OP_UNIT, line);
+    emit_byte(OP_DEFER_RUN, line);
+    emit_byte((uint8_t)current->scope_depth, line);
+    emit_byte(OP_POP, line);  /* pop the dummy unit */
     current->scope_depth--;
     while (current->local_count > 0 &&
            current->locals[current->local_count - 1].depth > current->scope_depth) {
+        if (current->locals[current->local_count - 1].is_captured) {
+            emit_byte(OP_CLOSE_UPVALUE, line);
+        } else {
+            emit_byte(OP_POP, line);
+        }
+        free(current->locals[current->local_count - 1].name);
+        current->local_count--;
+    }
+}
+
+/* Like end_scope but preserves TOS (the expression result) across local pops.
+ * Emits OP_SWAP before each OP_POP/OP_CLOSE_UPVALUE to sink the result
+ * value past each local being removed. */
+static void end_scope_preserve_tos(int line) {
+    /* Run any defers registered at the current scope depth.
+     * TOS is already the expression result; OP_DEFER_RUN saves/restores it. */
+    emit_byte(OP_DEFER_RUN, line);
+    emit_byte((uint8_t)current->scope_depth, line);
+    current->scope_depth--;
+    while (current->local_count > 0 &&
+           current->locals[current->local_count - 1].depth > current->scope_depth) {
+        emit_byte(OP_SWAP, line);
         if (current->locals[current->local_count - 1].is_captured) {
             emit_byte(OP_CLOSE_UPVALUE, line);
         } else {
@@ -236,7 +267,7 @@ static void compile_function_body(FunctionType type, const char *name,
                                   Param *params, size_t param_count,
                                   Stmt **body, size_t body_count,
                                   ContractClause *contracts, size_t contract_count,
-                                  int line);
+                                  TypeExpr *return_type, int line);
 
 /* Compile a list of statements into a standalone sub-chunk.
  * Saves/restores the current compiler so this can be called mid-compilation. */
@@ -245,10 +276,16 @@ static Chunk *compile_sub_body(Stmt **stmts, size_t count, int line) {
     Compiler sub;
     compiler_init(&sub, NULL, FUNC_SCRIPT);
 
-    for (size_t i = 0; i < count; i++)
-        compile_stmt(stmts[i]);
-
-    emit_byte(OP_UNIT, line);
+    /* If last statement is an expression, use its value as the sub-body result */
+    if (count > 0 && stmts[count - 1]->tag == STMT_EXPR) {
+        for (size_t i = 0; i + 1 < count; i++)
+            compile_stmt(stmts[i]);
+        compile_expr(stmts[count - 1]->as.expr, line);
+    } else {
+        for (size_t i = 0; i < count; i++)
+            compile_stmt(stmts[i]);
+        emit_byte(OP_UNIT, line);
+    }
     emit_byte(OP_RETURN, line);
 
     Chunk *ch = sub.chunk;
@@ -511,12 +548,13 @@ static void compile_expr(const Expr *e, int line) {
                 for (size_t i = 0; i + 1 < e->as.block.count; i++)
                     compile_stmt_reset(e->as.block.stmts[i]);
                 compile_expr(e->as.block.stmts[e->as.block.count - 1]->as.expr, line);
+                end_scope_preserve_tos(line);
             } else {
                 for (size_t i = 0; i < e->as.block.count; i++)
                     compile_stmt_reset(e->as.block.stmts[i]);
+                end_scope(line);
                 emit_byte(OP_UNIT, line);
             }
-            end_scope(line);
             break;
         }
 
@@ -822,6 +860,29 @@ static void compile_expr(const Expr *e, int line) {
                 upvalues = malloc(upvalue_count * sizeof(CompilerUpvalue));
                 memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(CompilerUpvalue));
             }
+
+            /* Store default parameter values and variadic flag on the chunk */
+            {
+                int dc = 0;
+                bool vd = e->as.closure.has_variadic;
+                if (e->as.closure.default_values) {
+                    for (size_t i = 0; i < e->as.closure.param_count; i++) {
+                        if (e->as.closure.default_values[i]) dc++;
+                    }
+                }
+                fn_chunk->default_count = dc;
+                fn_chunk->fn_has_variadic = vd;
+                if (dc > 0) {
+                    fn_chunk->default_values = malloc(dc * sizeof(LatValue));
+                    int di = 0;
+                    for (size_t i = 0; i < e->as.closure.param_count; i++) {
+                        if (e->as.closure.default_values && e->as.closure.default_values[i]) {
+                            fn_chunk->default_values[di++] = const_eval_expr(e->as.closure.default_values[i]);
+                        }
+                    }
+                }
+            }
+
             compiler_cleanup(&func_comp);
             current = func_comp.enclosing;
 
@@ -832,7 +893,13 @@ static void compile_expr(const Expr *e, int line) {
             fn_val.type = VAL_CLOSURE;
             fn_val.phase = VTAG_UNPHASED;
             fn_val.region_id = (size_t)-1;
-            fn_val.as.closure.param_names = NULL;
+            if (e->as.closure.param_count > 0) {
+                fn_val.as.closure.param_names = malloc(e->as.closure.param_count * sizeof(char *));
+                for (size_t i = 0; i < e->as.closure.param_count; i++)
+                    fn_val.as.closure.param_names[i] = strdup(e->as.closure.params[i]);
+            } else {
+                fn_val.as.closure.param_names = NULL;
+            }
             fn_val.as.closure.param_count = (size_t)func_comp.arity;
             fn_val.as.closure.body = NULL;
             fn_val.as.closure.captured_env = NULL;
@@ -875,9 +942,12 @@ static void compile_expr(const Expr *e, int line) {
                 MatchArm *arm = &e->as.match_expr.arms[i];
 
                 if (arm->pattern->tag == PAT_BINDING) {
-                    /* Binding: S' becomes local BEFORE guard so guard can reference it */
-                    emit_byte(OP_DUP, line); /* [S, S'] */
+                    /* Binding: Track scrutinee with a dummy local so that the
+                     * binding variable and body-locals get correct slot indices.
+                     * Stack: [..., S]. After DUP: [..., S, S']. */
                     begin_scope();
+                    add_local("");  /* dummy slot tracks scrutinee S */
+                    emit_byte(OP_DUP, line); /* [S, S'] */
                     add_local(arm->pattern->as.binding_name);
 
                     /* Compile guard (or TRUE if none) */
@@ -889,30 +959,42 @@ static void compile_expr(const Expr *e, int line) {
                     size_t next_arm = emit_jump(OP_JUMP_IF_FALSE, line);
                     emit_byte(OP_POP, line); /* pop bool: [S, n] */
 
-                    /* Compile arm body */
+                    /* Compile arm body in a nested scope so body-locals
+                     * are cleaned up before the binding variable. */
+                    begin_scope();
                     if (arm->body_count > 0 &&
                         arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
                         for (size_t j = 0; j + 1 < arm->body_count; j++)
                             compile_stmt_reset(arm->body[j]);
                         compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
+                        end_scope_preserve_tos(line);
                     } else {
                         for (size_t j = 0; j < arm->body_count; j++)
                             compile_stmt_reset(arm->body[j]);
+                        end_scope(line);
                         emit_byte(OP_UNIT, line);
                     }
 
-                    /* Stack: [S, n(local), result]. Clean up: */
-                    emit_byte(OP_SWAP, line); /* [S, result, n] */
-                    end_scope(line);          /* POP n: [S, result] */
-                    emit_byte(OP_SWAP, line); /* [result, S] */
-                    emit_byte(OP_POP, line);  /* [result] */
+                    /* Stack: [S(dummy), n(binding), result].
+                     * Swap result past n, then pop n and S via end_scope. */
+                    emit_byte(OP_SWAP, line);  /* [S, result, n] */
+                    emit_byte(OP_POP, line);   /* [S, result] — pop n manually */
+                    emit_byte(OP_SWAP, line);  /* [result, S] */
+                    emit_byte(OP_POP, line);   /* [result] — pop S manually */
+                    /* Remove locals from compiler without emitting more pops */
+                    current->scope_depth--;
+                    while (current->local_count > 0 &&
+                           current->locals[current->local_count - 1].depth > current->scope_depth) {
+                        free(current->locals[current->local_count - 1].name);
+                        current->local_count--;
+                    }
 
                     end_jumps[end_jump_count++] = emit_jump(OP_JUMP, line);
 
                     patch_jump(next_arm);
                     /* JUMP_IF_FALSE doesn't pop: [S, n, false] */
                     emit_byte(OP_POP, line); /* pop false: [S, n] */
-                    emit_byte(OP_POP, line); /* pop n (raw POP; scope already ended): [S] */
+                    emit_byte(OP_POP, line); /* pop n: [S] */
                 } else {
                     /* Non-binding: LITERAL, WILDCARD, RANGE */
                     emit_byte(OP_DUP, line); /* [S, S'] */
@@ -925,7 +1007,18 @@ static void compile_expr(const Expr *e, int line) {
                             emit_byte(OP_EQ, line);  /* [S, S', bool] */
                             break;
                         case PAT_WILDCARD:
-                            emit_byte(OP_TRUE, line); /* [S, S', true] */
+                            if (arm->pattern->phase_qualifier == PHASE_FLUID) {
+                                /* fluid _ => check phase is NOT crystal */
+                                emit_byte(OP_DUP, line);       /* [S, S', S''] */
+                                emit_byte(OP_IS_CRYSTAL, line); /* [S, S', is_crystal] */
+                                emit_byte(OP_NOT, line);       /* [S, S', !is_crystal] */
+                            } else if (arm->pattern->phase_qualifier == PHASE_CRYSTAL) {
+                                /* crystal _ => check phase IS crystal */
+                                emit_byte(OP_DUP, line);       /* [S, S', S''] */
+                                emit_byte(OP_IS_CRYSTAL, line); /* [S, S', is_crystal] */
+                            } else {
+                                emit_byte(OP_TRUE, line); /* [S, S', true] */
+                            }
                             break;
                         case PAT_RANGE:
                             emit_byte(OP_DUP, line);
@@ -995,6 +1088,11 @@ static void compile_expr(const Expr *e, int line) {
         case EXPR_TRY_CATCH: {
             size_t handler_jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line);
 
+            /* Save compiler state before try body so we can restore it
+             * for the catch path (the error handler resets the stack). */
+            size_t saved_local_count = current->local_count;
+            int saved_scope_depth = current->scope_depth;
+
             /* Try body — if last stmt is an expression, use its value */
             if (e->as.try_catch.try_count > 0 &&
                 e->as.try_catch.try_stmts[e->as.try_catch.try_count - 1]->tag == STMT_EXPR) {
@@ -1010,8 +1108,15 @@ static void compile_expr(const Expr *e, int line) {
             emit_byte(OP_POP_EXCEPTION_HANDLER, line);
             size_t end_jump = emit_jump(OP_JUMP, line);
 
-            /* Catch block */
+            /* Catch block — restore compiler state to match the stack
+             * state after the error handler fires (stack reset + error pushed). */
             patch_jump(handler_jump);
+            /* Free any locals created in the try body */
+            while (current->local_count > saved_local_count) {
+                free(current->locals[--current->local_count].name);
+            }
+            current->scope_depth = saved_scope_depth;
+
             /* Error value is on stack */
             if (e->as.try_catch.catch_var) {
                 add_local(e->as.try_catch.catch_var);
@@ -1113,7 +1218,127 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_FREEZE: {
+            /* ── Partial freeze: freeze(s.field) for struct fields ── */
+            if (e->as.freeze.expr->tag == EXPR_FIELD_ACCESS) {
+                Expr *parent = e->as.freeze.expr->as.field_access.object;
+                const char *field = e->as.freeze.expr->as.field_access.field;
+                if (parent->tag == EXPR_IDENT) {
+                    const char *pname = parent->as.str_val;
+                    emit_constant(value_string(field), line);
+                    size_t pname_idx = chunk_add_constant(current_chunk(), value_string(pname));
+                    int slot = resolve_local(current, pname);
+                    emit_byte(OP_FREEZE_FIELD, line);
+                    emit_byte((uint8_t)pname_idx, line);
+                    if (slot >= 0) {
+                        emit_byte(0, line);
+                        emit_byte((uint8_t)slot, line);
+                    } else {
+                        int upvalue = resolve_upvalue(current, pname);
+                        if (upvalue >= 0) {
+                            emit_byte(1, line);
+                            emit_byte((uint8_t)upvalue, line);
+                        } else {
+                            emit_byte(2, line);
+                            emit_byte(0, line);
+                        }
+                    }
+                } else {
+                    /* Non-ident parent: fall back to OP_FREEZE on field value */
+                    compile_expr(e->as.freeze.expr, line);
+                    emit_byte(OP_FREEZE, line);
+                }
+                break;
+            }
+
+            /* ── Partial freeze: freeze(m["key"]) for map keys ── */
+            if (e->as.freeze.expr->tag == EXPR_INDEX) {
+                Expr *parent = e->as.freeze.expr->as.index.object;
+                if (parent->tag == EXPR_IDENT) {
+                    const char *pname = parent->as.str_val;
+                    compile_expr(e->as.freeze.expr->as.index.index, line);
+                    size_t pname_idx = chunk_add_constant(current_chunk(), value_string(pname));
+                    int slot = resolve_local(current, pname);
+                    emit_byte(OP_FREEZE_FIELD, line);
+                    emit_byte((uint8_t)pname_idx, line);
+                    if (slot >= 0) {
+                        emit_byte(0, line);
+                        emit_byte((uint8_t)slot, line);
+                    } else {
+                        int upvalue = resolve_upvalue(current, pname);
+                        if (upvalue >= 0) {
+                            emit_byte(1, line);
+                            emit_byte((uint8_t)upvalue, line);
+                        } else {
+                            emit_byte(2, line);
+                            emit_byte(0, line);
+                        }
+                    }
+                } else {
+                    compile_expr(e->as.freeze.expr, line);
+                    emit_byte(OP_FREEZE, line);
+                }
+                break;
+            }
+
+            /* ── Freeze-except: freeze(x) except ["field1", ...] ── */
+            if (e->as.freeze.except_count > 0 && e->as.freeze.expr->tag == EXPR_IDENT) {
+                const char *name = e->as.freeze.expr->as.str_val;
+                size_t name_idx = chunk_add_constant(current_chunk(), value_string(name));
+                for (size_t i = 0; i < e->as.freeze.except_count; i++)
+                    compile_expr(e->as.freeze.except_fields[i], line);
+                emit_byte(OP_FREEZE_EXCEPT, line);
+                emit_byte((uint8_t)name_idx, line);
+                int slot = resolve_local(current, name);
+                if (slot >= 0) {
+                    emit_byte(0, line);
+                    emit_byte((uint8_t)slot, line);
+                } else {
+                    int upvalue = resolve_upvalue(current, name);
+                    if (upvalue >= 0) {
+                        emit_byte(1, line);
+                        emit_byte((uint8_t)upvalue, line);
+                    } else {
+                        emit_byte(2, line);
+                        emit_byte(0, line);
+                    }
+                }
+                emit_byte((uint8_t)e->as.freeze.except_count, line);
+                break;
+            }
+
+            /* ── Normal freeze (with optional contract) ── */
             compile_expr(e->as.freeze.expr, line);
+
+            /* Freeze contract: freeze(x) where |v| { ... } */
+            if (e->as.freeze.contract && e->as.freeze.expr->tag == EXPR_IDENT) {
+                /* Stack: [value]. Handler saves this state. */
+                size_t handler_jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line);
+                emit_byte(OP_DUP, line);
+                compile_expr(e->as.freeze.contract, line);
+                emit_byte(OP_SWAP, line);
+                emit_byte(OP_CALL, line);
+                emit_byte(1, line);
+                emit_byte(OP_POP, line);
+                emit_byte(OP_POP_EXCEPTION_HANDLER, line);
+                size_t past_catch = emit_jump(OP_JUMP, line);
+                /* Catch: stack restored to [value], then error pushed → [value, error] */
+                patch_jump(handler_jump);
+                {
+                    size_t prefix_idx = chunk_add_constant(current_chunk(),
+                        value_string("freeze contract failed: "));
+                    emit_byte(OP_CONSTANT, line);
+                    emit_byte((uint8_t)prefix_idx, line);
+                }
+                emit_byte(OP_SWAP, line);
+                emit_byte(OP_CONCAT, line);
+                /* [value, "freeze contract failed: <msg>"] → throw */
+                emit_byte(OP_SWAP, line);
+                emit_byte(OP_POP, line); /* pop value */
+                emit_byte(OP_THROW, line);
+                patch_jump(past_catch);
+                /* Stack: [value] — proceed with freeze */
+            }
+
             if (e->as.freeze.expr->tag == EXPR_IDENT) {
                 const char *name = e->as.freeze.expr->as.str_val;
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(name));
@@ -1121,19 +1346,19 @@ static void compile_expr(const Expr *e, int line) {
                 if (slot >= 0) {
                     emit_byte(OP_FREEZE_VAR, line);
                     emit_byte((uint8_t)name_idx, line);
-                    emit_byte(0, line); /* loc_type = local */
+                    emit_byte(0, line);
                     emit_byte((uint8_t)slot, line);
                 } else {
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
                         emit_byte(OP_FREEZE_VAR, line);
                         emit_byte((uint8_t)name_idx, line);
-                        emit_byte(1, line); /* loc_type = upvalue */
+                        emit_byte(1, line);
                         emit_byte((uint8_t)upvalue, line);
                     } else {
                         emit_byte(OP_FREEZE_VAR, line);
                         emit_byte((uint8_t)name_idx, line);
-                        emit_byte(2, line); /* loc_type = global */
+                        emit_byte(2, line);
                         emit_byte(0, line);
                     }
                 }
@@ -1199,7 +1424,32 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_ANNEAL: {
-            /* anneal(target, closure) - thaw, call closure, refreeze */
+            /* anneal(target, closure) - thaw, call closure, refreeze
+             * Must check: target is crystal; wrap closure errors with "anneal failed:" */
+
+            /* Phase check: target must be crystal */
+            compile_expr(e->as.anneal.expr, line);   /* push target value */
+            emit_byte(OP_IS_CRYSTAL, line);           /* replace with bool */
+            size_t anneal_ok = emit_jump(OP_JUMP_IF_FALSE, line);
+            /* is_crystal=true → continue */
+            emit_byte(OP_POP, line);  /* pop true */
+            size_t anneal_past_check = emit_jump(OP_JUMP, line);
+            /* is_crystal=false → error */
+            patch_jump(anneal_ok);
+            emit_byte(OP_POP, line);  /* pop false */
+            {
+                size_t err_idx = chunk_add_constant(current_chunk(),
+                    value_string("anneal requires a crystal value"));
+                emit_bytes(OP_CONSTANT, (uint8_t)err_idx, line);
+                emit_byte(OP_THROW, line);
+            }
+            patch_jump(anneal_past_check);
+
+            /* Wrap in try/catch for error prefix */
+            size_t anneal_handler = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line);
+            size_t saved_lc = current->local_count;
+            int saved_sd = current->scope_depth;
+
             compile_expr(e->as.anneal.closure, line);
             compile_expr(e->as.anneal.expr, line);
             emit_byte(OP_THAW, line);
@@ -1230,12 +1480,82 @@ static void compile_expr(const Expr *e, int line) {
             } else {
                 emit_byte(OP_FREEZE, line);
             }
+
+            /* End of try block — pop handler, jump past catch */
+            emit_byte(OP_POP_EXCEPTION_HANDLER, line);
+            size_t anneal_end = emit_jump(OP_JUMP, line);
+
+            /* Catch block — wrap error with "anneal failed: " prefix */
+            patch_jump(anneal_handler);
+            while (current->local_count > saved_lc) {
+                free(current->locals[--current->local_count].name);
+            }
+            current->scope_depth = saved_sd;
+            /* Error string is on TOS. Concatenate with prefix. */
+            {
+                size_t prefix_idx = chunk_add_constant(current_chunk(),
+                    value_string("anneal failed: "));
+                emit_bytes(OP_CONSTANT, (uint8_t)prefix_idx, line);
+                emit_byte(OP_SWAP, line);
+                emit_byte(OP_CONCAT, line);
+                emit_byte(OP_THROW, line);
+            }
+            patch_jump(anneal_end);
             break;
         }
 
         case EXPR_CRYSTALLIZE: {
-            compile_expr(e->as.crystallize.expr, line);
-            emit_byte(OP_FREEZE, line);
+            /* crystallize(target) { body } — freeze target, run body, thaw target
+             * If already crystal, just run body without thaw afterward. */
+            if (e->as.crystallize.expr->tag == EXPR_IDENT) {
+                const char *name = e->as.crystallize.expr->as.str_val;
+                size_t name_idx = chunk_add_constant(current_chunk(), value_string(name));
+                int loc_type = 2; uint8_t slot = 0;
+                int local_slot = resolve_local(current, name);
+                if (local_slot != -1) { loc_type = 0; slot = (uint8_t)local_slot; }
+                else {
+                    int up_idx = resolve_upvalue(current, name);
+                    if (up_idx != -1) { loc_type = 1; slot = (uint8_t)up_idx; }
+                }
+                /* Check if already crystal — save result as a local */
+                begin_scope();
+                compile_expr(e->as.crystallize.expr, line); /* push current value */
+                emit_byte(OP_IS_CRYSTAL, line);              /* replace with bool */
+                add_local(""); /* track the was_crystal flag */
+                int flag_slot = current->local_count - 1;
+                /* Freeze the variable */
+                compile_expr(e->as.crystallize.expr, line);
+                emit_byte(OP_FREEZE_VAR, line);
+                emit_byte((uint8_t)name_idx, line);
+                emit_byte((uint8_t)loc_type, line);
+                emit_byte(slot, line);
+                emit_byte(OP_POP, line); /* discard freeze result */
+                /* Execute body */
+                for (size_t i = 0; i < e->as.crystallize.body_count; i++)
+                    compile_stmt(e->as.crystallize.body[i]);
+                /* Conditional thaw: only if was NOT already crystal */
+                emit_bytes(OP_GET_LOCAL, (uint8_t)flag_slot, line); /* push was_crystal */
+                size_t skip_thaw = emit_jump(OP_JUMP_IF_FALSE, line);
+                /* was_crystal=true → skip thaw */
+                emit_byte(OP_POP, line);  /* pop true */
+                size_t past_thaw = emit_jump(OP_JUMP, line);
+                /* was_crystal=false → do thaw */
+                patch_jump(skip_thaw);
+                emit_byte(OP_POP, line);  /* pop false */
+                compile_expr(e->as.crystallize.expr, line);
+                emit_byte(OP_THAW_VAR, line);
+                emit_byte((uint8_t)name_idx, line);
+                emit_byte((uint8_t)loc_type, line);
+                emit_byte(slot, line);
+                emit_byte(OP_POP, line); /* discard thaw result */
+                patch_jump(past_thaw);
+                end_scope(line); /* clean up was_crystal flag */
+                emit_byte(OP_UNIT, line);
+            } else {
+                /* Fallback: just freeze the expression */
+                compile_expr(e->as.crystallize.expr, line);
+                emit_byte(OP_FREEZE, line);
+            }
             break;
         }
 
@@ -1276,10 +1596,13 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_SPAWN: {
-            /* Compile as a synchronous block (standalone spawn outside scope) */
-            for (size_t i = 0; i < e->as.block.count; i++)
-                compile_stmt(e->as.block.stmts[i]);
-            emit_byte(OP_UNIT, line);
+            /* Compile as OP_SCOPE with 0 spawns (sub-chunk so return works) */
+            Chunk *spawn_ch = compile_sub_body(
+                e->as.block.stmts, e->as.block.count, line);
+            uint8_t body_idx = (uint8_t)add_chunk_constant(spawn_ch);
+            emit_byte(OP_SCOPE, line);
+            emit_byte(0, line);        /* spawn_count = 0 */
+            emit_byte(body_idx, line); /* sync_idx */
             break;
         }
 
@@ -1419,6 +1742,22 @@ static void emit_ensure_checks(int line) {
         patch_jump(ok_jump);
         emit_byte(OP_POP, line);            /* pop true */
     }
+}
+
+/* ── Emit return type check (if return_type_name is set) ── */
+/* Expects the return value on TOS. Leaves it on TOS unchanged. */
+static void emit_return_type_check(int line) {
+    if (!current->return_type_name) return;
+    if (strcmp(current->return_type_name, "Any") == 0) return;
+    char err_msg[512];
+    snprintf(err_msg, sizeof(err_msg), "function '%s' return type expects %s, got %%s",
+             current->func_name ? current->func_name : "<anonymous>",
+             current->return_type_name);
+    size_t type_idx = chunk_add_constant(current_chunk(), value_string(current->return_type_name));
+    size_t err_idx = chunk_add_constant(current_chunk(), value_string(err_msg));
+    emit_byte(OP_CHECK_RETURN_TYPE, line);
+    emit_byte((uint8_t)type_idx, line);
+    emit_byte((uint8_t)err_idx, line);
 }
 
 /* Emit write-back chain for nested index assignment.
@@ -1598,8 +1937,10 @@ static void compile_stmt(const Stmt *s) {
                 compile_expr(s->as.return_expr, line);
             else
                 emit_byte(OP_UNIT, line);
+            emit_return_type_check(line);
             emit_ensure_checks(0);
             emit_byte(OP_DEFER_RUN, line);
+            emit_byte(0, line);  /* scope_depth 0 = run all defers */
             emit_byte(OP_RETURN, line);
             break;
 
@@ -1784,6 +2125,20 @@ static void compile_stmt(const Stmt *s) {
                         emit_byte(OP_INDEX, line);
                         add_local(s->as.destructure.names[i]);
                     }
+                    if (s->as.destructure.rest_name) {
+                        /* ...rest: slice array from name_count to end */
+                        emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
+                        int64_t start = (int64_t)s->as.destructure.name_count;
+                        emit_constant(value_int(start), line);
+                        /* Use native "len" to get end index */
+                        emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
+                        size_t len_idx = chunk_add_constant(current_chunk(), value_string("len"));
+                        emit_bytes(OP_INVOKE, (uint8_t)len_idx, line);
+                        emit_byte(0, line); /* 0 args to .len() */
+                        emit_byte(OP_BUILD_RANGE, line);
+                        emit_byte(OP_INDEX, line);
+                        add_local(s->as.destructure.rest_name);
+                    }
                 } else {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
                         emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
@@ -1805,6 +2160,23 @@ static void compile_stmt(const Stmt *s) {
                             value_string(s->as.destructure.names[i]));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line);
                     }
+                    if (s->as.destructure.rest_name) {
+                        /* Stack: [source]
+                         * Need: source[name_count..source.len()] as rest */
+                        int64_t start = (int64_t)s->as.destructure.name_count;
+                        emit_byte(OP_DUP, line);        /* [source, source] */
+                        emit_byte(OP_DUP, line);        /* [source, source, source] */
+                        size_t len_idx2 = chunk_add_constant(current_chunk(), value_string("len"));
+                        emit_bytes(OP_INVOKE, (uint8_t)len_idx2, line);
+                        emit_byte(0, line);             /* [source, source, len] — invoke consumes TOS source, pushes len */
+                        emit_constant(value_int(start), line); /* [source, source, len, start] */
+                        emit_byte(OP_SWAP, line);       /* [source, source, start, len] */
+                        emit_byte(OP_BUILD_RANGE, line);/* [source, source, Range(start..len)] */
+                        emit_byte(OP_INDEX, line);      /* [source, rest_slice] */
+                        size_t rest_idx = chunk_add_constant(current_chunk(),
+                            value_string(s->as.destructure.rest_name));
+                        emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, rest_idx, line);
+                    }
                 } else {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
                         emit_byte(OP_DUP, line);
@@ -1822,8 +2194,16 @@ static void compile_stmt(const Stmt *s) {
         }
 
         case STMT_DEFER: {
-            /* Emit OP_DEFER_PUSH with offset past the defer body, then the body */
-            size_t defer_jump = emit_jump(OP_DEFER_PUSH, line);
+            /* Emit OP_DEFER_PUSH with scope_depth + offset past the defer body.
+             * Format: OP_DEFER_PUSH, scope_depth(1), offset(2).
+             * The scope_depth byte lets OP_DEFER_RUN run only defers
+             * registered at a given scope level. */
+            emit_byte(OP_DEFER_PUSH, line);
+            emit_byte((uint8_t)current->scope_depth, line);
+            /* Emit 2-byte jump offset placeholder */
+            emit_byte(0xff, line);
+            emit_byte(0xff, line);
+            size_t defer_jump = current_chunk()->code_len - 2;
             for (size_t i = 0; i < s->as.defer.body_count; i++)
                 compile_stmt(s->as.defer.body[i]);
             emit_byte(OP_UNIT, line);   /* implicit return value for defer block */
@@ -1851,6 +2231,24 @@ static void compile_stmt(const Stmt *s) {
                     size_t field_idx = chunk_add_constant(current_chunk(),
                         value_string(s->as.import.selective_names[i]));
                     emit_bytes(OP_GET_FIELD, (uint8_t)field_idx, line);
+                    /* Check that the export exists (not nil) */
+                    emit_byte(OP_DUP, line);
+                    size_t import_ok = emit_jump(OP_JUMP_IF_NOT_NIL, line);
+                    /* nil → error: module does not export this name */
+                    emit_byte(OP_POP, line); /* pop nil dup */
+                    emit_byte(OP_POP, line); /* pop nil val */
+                    emit_byte(OP_POP, line); /* pop module map */
+                    {
+                        char err_msg[512];
+                        snprintf(err_msg, sizeof(err_msg),
+                            "module '%s' does not export '%s'",
+                            s->as.import.module_path, s->as.import.selective_names[i]);
+                        size_t err_idx = chunk_add_constant(current_chunk(), value_string(err_msg));
+                        emit_bytes(OP_CONSTANT, (uint8_t)err_idx, line);
+                        emit_byte(OP_THROW, line);
+                    }
+                    patch_jump(import_ok);
+                    emit_byte(OP_POP, line); /* pop non-nil dup */
                     if (current->scope_depth > 0) {
                         add_local(s->as.import.selective_names[i]);
                     } else {
@@ -1871,13 +2269,27 @@ static void compile_stmt(const Stmt *s) {
     }
 }
 
+/* ── Constant-evaluate a default parameter expression ── */
+
+static LatValue const_eval_expr(Expr *e) {
+    if (!e) return value_nil();
+    switch (e->tag) {
+        case EXPR_INT_LIT:    return value_int(e->as.int_val);
+        case EXPR_FLOAT_LIT:  return value_float(e->as.float_val);
+        case EXPR_STRING_LIT: return value_string(e->as.str_val);
+        case EXPR_BOOL_LIT:   return value_bool(e->as.bool_val);
+        case EXPR_NIL_LIT:    return value_nil();
+        default:              return value_nil();
+    }
+}
+
 /* ── Compile function body (for ITEM_FUNCTION and closures) ── */
 
 static void compile_function_body(FunctionType type, const char *name,
                                   Param *params, size_t param_count,
                                   Stmt **body, size_t body_count,
                                   ContractClause *contracts, size_t contract_count,
-                                  int line) {
+                                  TypeExpr *return_type, int line) {
     Compiler func_comp;
     compiler_init(&func_comp, current, type);
     func_comp.func_name = name ? strdup(name) : NULL;
@@ -1894,10 +2306,29 @@ static void compile_function_body(FunctionType type, const char *name,
     func_comp.arity = (int)(param_count - first_param);
     func_comp.contracts = contracts;
     func_comp.contract_count = contract_count;
+    func_comp.return_type_name = (return_type && return_type->name) ? return_type->name : NULL;
 
     /* Add remaining params as locals */
     for (size_t i = first_param; i < param_count; i++)
         add_local(params[i].name);
+
+    /* Emit runtime parameter type checks */
+    for (size_t i = first_param; i < param_count; i++) {
+        if (params[i].is_variadic) break;
+        if (!params[i].ty.name || strcmp(params[i].ty.name, "Any") == 0) continue;
+        /* Resolve slot: slot 0 is reserved, params start at slot 1 (or first_param-adjusted) */
+        int slot = resolve_local(current, params[i].name);
+        if (slot < 0) continue;
+        char err_msg[512];
+        snprintf(err_msg, sizeof(err_msg), "function '%s' parameter '%s' expects type %s, got %%s",
+                 name ? name : "<anonymous>", params[i].name, params[i].ty.name);
+        size_t type_idx = chunk_add_constant(current_chunk(), value_string(params[i].ty.name));
+        size_t err_idx = chunk_add_constant(current_chunk(), value_string(err_msg));
+        emit_byte(OP_CHECK_TYPE, line);
+        emit_byte((uint8_t)slot, line);
+        emit_byte((uint8_t)type_idx, line);
+        emit_byte((uint8_t)err_idx, line);
+    }
 
     /* Compile require contracts (preconditions) */
     for (size_t i = 0; i < contract_count; i++) {
@@ -1922,8 +2353,10 @@ static void compile_function_body(FunctionType type, const char *name,
 
     /* Implicit unit return */
     emit_byte(OP_UNIT, line);
+    emit_return_type_check(line);
     emit_ensure_checks(line);
     emit_byte(OP_DEFER_RUN, line);
+    emit_byte(0, line);  /* scope_depth 0 = run all defers */
     emit_byte(OP_RETURN, line);
 
     Chunk *fn_chunk = func_comp.chunk;
@@ -1933,18 +2366,64 @@ static void compile_function_body(FunctionType type, const char *name,
         upvalues = malloc(upvalue_count * sizeof(CompilerUpvalue));
         memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(CompilerUpvalue));
     }
+
+    /* Store default parameter values and variadic flag on the chunk */
+    int default_count = 0;
+    bool has_variadic = false;
+    for (size_t i = first_param; i < param_count; i++) {
+        if (params[i].default_value) default_count++;
+        if (params[i].is_variadic) has_variadic = true;
+    }
+    fn_chunk->default_count = default_count;
+    fn_chunk->fn_has_variadic = has_variadic;
+    if (default_count > 0) {
+        fn_chunk->default_values = malloc(default_count * sizeof(LatValue));
+        int di = 0;
+        for (size_t i = first_param; i < param_count; i++) {
+            if (params[i].default_value) {
+                fn_chunk->default_values[di++] = const_eval_expr(params[i].default_value);
+            }
+        }
+    }
+
+    /* Store per-parameter phase constraints (for phase dispatch/checking) */
+    {
+        bool has_phase_constraints = false;
+        for (size_t i = first_param; i < param_count; i++) {
+            if (params[i].is_variadic) break;
+            if (params[i].ty.phase != PHASE_UNSPECIFIED) {
+                has_phase_constraints = true;
+                break;
+            }
+        }
+        if (has_phase_constraints) {
+            int pc = (int)(param_count - first_param);
+            fn_chunk->param_phases = calloc(pc, sizeof(uint8_t));
+            fn_chunk->param_phase_count = pc;
+            for (size_t i = first_param; i < param_count; i++) {
+                if (params[i].is_variadic) break;
+                fn_chunk->param_phases[i - first_param] = (uint8_t)params[i].ty.phase;
+            }
+        }
+    }
+
     compiler_cleanup(&func_comp);
     current = func_comp.enclosing;
 
-    /* Store the function's chunk as a constant.
-     * We construct the closure manually to avoid allocating param_names
-     * (compiled functions don't use param_names). */
+    /* Store the function's chunk as a constant. */
     LatValue fn_val;
     memset(&fn_val, 0, sizeof(fn_val));
     fn_val.type = VAL_CLOSURE;
     fn_val.phase = VTAG_UNPHASED;
     fn_val.region_id = (size_t)-1;
-    fn_val.as.closure.param_names = NULL;
+    /* Set param_names for display (e.g. value_repr shows <closure|name|>) */
+    if (param_count > 0) {
+        fn_val.as.closure.param_names = malloc(param_count * sizeof(char *));
+        for (size_t i = 0; i < param_count; i++)
+            fn_val.as.closure.param_names[i] = strdup(params[i].name);
+    } else {
+        fn_val.as.closure.param_names = NULL;
+    }
     fn_val.as.closure.param_count = param_count;
     fn_val.as.closure.body = NULL;
     fn_val.as.closure.captured_env = NULL;
@@ -1988,7 +2467,8 @@ Chunk *compile(const Program *prog, char **error) {
                 compile_function_body(FUNC_FUNCTION, fn->name,
                                       fn->params, fn->param_count,
                                       fn->body, fn->body_count,
-                                      fn->contracts, fn->contract_count, 0);
+                                      fn->contracts, fn->contract_count,
+                                      fn->return_type, 0);
                 /* Define the function as a global */
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
                 emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
@@ -2054,7 +2534,8 @@ Chunk *compile(const Program *prog, char **error) {
                     compile_function_body(FUNC_FUNCTION, method->name,
                                           method->params, method->param_count,
                                           method->body, method->body_count,
-                                          method->contracts, method->contract_count, 0);
+                                          method->contracts, method->contract_count,
+                                          method->return_type, 0);
                     /* Register as "TypeName::method" global */
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
@@ -2122,7 +2603,8 @@ Chunk *compile_module(const Program *prog, char **error) {
                 compile_function_body(FUNC_FUNCTION, fn->name,
                                       fn->params, fn->param_count,
                                       fn->body, fn->body_count,
-                                      fn->contracts, fn->contract_count, 0);
+                                      fn->contracts, fn->contract_count,
+                                      fn->return_type, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
                 emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
@@ -2179,7 +2661,8 @@ Chunk *compile_module(const Program *prog, char **error) {
                     compile_function_body(FUNC_FUNCTION, method->name,
                                           method->params, method->param_count,
                                           method->body, method->body_count,
-                                          method->contracts, method->contract_count, 0);
+                                          method->contracts, method->contract_count,
+                                          method->return_type, 0);
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
@@ -2238,7 +2721,8 @@ Chunk *compile_repl(const Program *prog, char **error) {
                 compile_function_body(FUNC_FUNCTION, fn->name,
                                       fn->params, fn->param_count,
                                       fn->body, fn->body_count,
-                                      fn->contracts, fn->contract_count, 0);
+                                      fn->contracts, fn->contract_count,
+                                      fn->return_type, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
                 emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 break;
@@ -2294,7 +2778,8 @@ Chunk *compile_repl(const Program *prog, char **error) {
                     compile_function_body(FUNC_FUNCTION, method->name,
                                           method->params, method->param_count,
                                           method->body, method->body_count,
-                                          method->contracts, method->contract_count, 0);
+                                          method->contracts, method->contract_count,
+                                          method->return_type, 0);
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));

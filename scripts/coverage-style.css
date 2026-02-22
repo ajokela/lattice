@@ -1,0 +1,325 @@
+/*
+ * Lattice Coverage Report Theme
+ * Dark-mode styling to match lattice-lang.org
+ */
+
+/* ── Reset & Base ── */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #08080d;
+  color: #c8c8d4;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Headings ── */
+h2, h4 {
+  color: #e8e8f0;
+  font-weight: 600;
+}
+
+h2 {
+  font-size: 1.5rem;
+  padding: 24px 32px 16px;
+  color: #4fc3f7;
+}
+
+h4 {
+  font-size: 0.95rem;
+  padding: 12px 32px;
+  color: #8a8aa0;
+  font-weight: 400;
+}
+
+/* ── Links ── */
+a {
+  color: #4fc3f7;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+a:hover {
+  color: #2a7ea8;
+}
+
+/* ── Centered Container ── */
+.centered {
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+/* ── Source File Title Bar ── */
+.source-name-title {
+  background: #0e0e18;
+  border: 1px solid #1a1a2e;
+  border-radius: 8px;
+  padding: 16px 24px;
+  margin: 16px 0;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+  color: #e8e8f0;
+}
+
+/* ── Tables ── */
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: #0e0e18;
+  border: 1px solid #1a1a2e;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 8px 0 24px;
+}
+
+/* Column headers */
+td.column-entry-bold {
+  background: #12121f;
+  color: #e8e8f0;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 12px 16px;
+  border-bottom: 2px solid #1a1a2e;
+}
+
+/* Regular table cells */
+td {
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(26, 26, 46, 0.5);
+  font-size: 0.85rem;
+  vertical-align: middle;
+}
+
+/* File name links in coverage table */
+td.column-entry-left a {
+  color: #4fc3f7;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+td.column-entry-left a:hover {
+  color: #7fd8ff;
+}
+
+/* Coverage cells */
+td.column-entry-green,
+td.column-entry-yellow,
+td.column-entry-red {
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-align: right;
+}
+
+td.column-entry-green {
+  background: rgba(195, 232, 141, 0.1);
+  color: #c3e88d;
+}
+
+td.column-entry-yellow {
+  background: rgba(255, 203, 107, 0.1);
+  color: #ffcb6b;
+}
+
+td.column-entry-red {
+  background: rgba(255, 83, 112, 0.1);
+  color: #ff5370;
+}
+
+/* Row hover */
+tr:hover td {
+  background: rgba(79, 195, 247, 0.04);
+}
+
+tr:hover td.column-entry-green {
+  background: rgba(195, 232, 141, 0.15);
+}
+
+tr:hover td.column-entry-yellow {
+  background: rgba(255, 203, 107, 0.15);
+}
+
+tr:hover td.column-entry-red {
+  background: rgba(255, 83, 112, 0.15);
+}
+
+/* Last row: no bottom border */
+tr:last-child td {
+  border-bottom: none;
+}
+
+/* ── Source Code View ── */
+pre {
+  margin: 0;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Line number column */
+td.line-number {
+  color: #6a6a80;
+  text-align: right;
+  padding: 0 12px 0 16px;
+  user-select: none;
+  -webkit-user-select: none;
+  white-space: nowrap;
+  width: 1%;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 12px;
+  border-right: 1px solid #1a1a2e;
+  background: #0a0a14;
+}
+
+/* Coverage count column */
+td.covered-line {
+  color: #4fc3f7;
+  text-align: right;
+  padding: 0 12px;
+  white-space: nowrap;
+  width: 1%;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+td.uncovered-line {
+  color: #ff5370;
+  text-align: right;
+  padding: 0 12px;
+  white-space: nowrap;
+  width: 1%;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* Source code column */
+td.code {
+  padding: 0 16px;
+  white-space: pre;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: #c8c8d4;
+}
+
+/* Uncovered region highlight */
+.red {
+  background: rgba(255, 83, 112, 0.2);
+  border-radius: 2px;
+}
+
+/* Covered line background (subtle) */
+.light-row {
+  background: transparent;
+}
+
+.light-row-bold {
+  background: rgba(79, 195, 247, 0.03);
+}
+
+/* ── Expansion View (macro/template expansions) ── */
+.expansion-view {
+  background: #0a0a14;
+  border-left: 3px solid #1a1a2e;
+  margin: 4px 0;
+}
+
+/* ── Navigation / Control Bar ── */
+.control-bar {
+  background: #0e0e18;
+  border: 1px solid #1a1a2e;
+  border-radius: 24px;
+  padding: 8px 20px;
+  margin: 16px auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 0.85rem;
+}
+
+/* Back to index link */
+.source-name-title a {
+  color: #4fc3f7;
+}
+
+/* ── Coverage Bar (if present) ── */
+.coverage-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: #1a1a2e;
+  overflow: hidden;
+}
+
+.coverage-bar .covered {
+  height: 100%;
+  background: #4fc3f7;
+}
+
+/* ── Footer ── */
+p {
+  color: #6a6a80;
+  font-size: 0.75rem;
+  padding: 16px 32px;
+  text-align: center;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  body {
+    font-size: 13px;
+  }
+
+  h2 {
+    font-size: 1.2rem;
+    padding: 16px;
+  }
+
+  h4 {
+    padding: 8px 16px;
+  }
+
+  .centered {
+    padding: 8px;
+  }
+
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  td {
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+}
+
+/* ── Scrollbar Styling ── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #08080d;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1a1a2e;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2a2a3e;
+}

@@ -6,6 +6,7 @@
 #include "compiler.h"
 #include "vm.h"
 #include "latc.h"
+#include "regvm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,9 @@ static char *read_file(const char *path) {
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (len < 0) { fclose(f); return NULL; }
     char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
     size_t n = fread(buf, 1, (size_t)len, f);
     buf[n] = '\0';
     fclose(f);
@@ -49,6 +52,7 @@ static bool gc_stress_mode = false;
 static bool no_regions_mode = false;
 static bool no_assertions_mode = false;
 static bool tree_walk_mode = false;
+static bool regvm_mode = false;
 static int  saved_argc = 0;
 static char **saved_argv = NULL;
 
@@ -127,6 +131,62 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             memory_stats_print(evaluator_stats(ev), stderr);
         }
 
+        evaluator_free(ev);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        return 0;
+    }
+
+    /* Register VM (POC) */
+    if (regvm_mode) {
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+
+        char *rcomp_err = NULL;
+        RegChunk *rchunk = reg_compile(&prog, &rcomp_err);
+        if (!rchunk) {
+            fprintf(stderr, "regvm compile error: %s\n", rcomp_err);
+            free(rcomp_err);
+            evaluator_free(ev);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            return 1;
+        }
+
+        RegVM rvm;
+        regvm_init(&rvm);
+
+        /* Borrow native functions from the stack VM's env.
+         * Create a temp stack VM, steal its env, then give it a dummy. */
+        {
+            VM tmp_vm;
+            vm_init(&tmp_vm);
+            env_free(rvm.env);
+            rvm.env = tmp_vm.env;
+            tmp_vm.env = env_new();
+            vm_free(&tmp_vm);
+        }
+
+        LatValue rresult;
+        RegVMResult rvm_res = regvm_run(&rvm, rchunk, &rresult);
+        if (rvm_res != REGVM_OK) {
+            fprintf(stderr, "regvm error: %s\n", rvm.error);
+            regvm_free(&rvm);
+            regchunk_free(rchunk);
+            evaluator_free(ev);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            return 1;
+        }
+        value_free(&rresult);
+        regvm_free(&rvm);
+        regchunk_free(rchunk);
         evaluator_free(ev);
         program_free(&prog);
         for (size_t i = 0; i < tokens.len; i++)
@@ -415,6 +475,155 @@ static void repl(void) {
 
     vm_free(&vm);
     compiler_free_known_enums();
+    for (size_t i = 0; i < prog_count; i++)
+        program_free(&kept_progs[i]);
+    free(kept_progs);
+    for (size_t i = 0; i < tok_count; i++) {
+        for (size_t j = 0; j < kept_tokens[i].len; j++)
+            token_free(lat_vec_get(&kept_tokens[i], j));
+        lat_vec_free(&kept_tokens[i]);
+    }
+    free(kept_tokens);
+}
+
+static void repl_regvm(void) {
+    printf("Lattice v%s — crystallization-based programming language (regvm)\n", LATTICE_VERSION);
+    printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
+    printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    RegVM rvm;
+    regvm_init(&rvm);
+
+    /* Borrow native functions from a temp stack VM */
+    {
+        VM tmp_vm;
+        vm_init(&tmp_vm);
+        env_free(rvm.env);
+        rvm.env = tmp_vm.env;
+        tmp_vm.env = env_new();
+        vm_free(&tmp_vm);
+    }
+
+    /* Keep programs/tokens alive for struct/fn/enum lifetime */
+    size_t prog_cap = 16, prog_count = 0;
+    Program *kept_progs = malloc(prog_cap * sizeof(Program));
+    size_t tok_cap = 16, tok_count = 0;
+    LatVec *kept_tokens = malloc(tok_cap * sizeof(LatVec));
+
+    char accumulated[65536];
+    accumulated[0] = '\0';
+
+    for (;;) {
+        const char *prompt = (accumulated[0] == '\0') ? "lattice> " : "    ...> ";
+        char *line = readline(prompt);
+        if (!line) {
+            printf("\n");
+            break;
+        }
+
+        if (accumulated[0] != '\0')
+            strcat(accumulated, "\n");
+        strcat(accumulated, line);
+
+        if (line[0] != '\0')
+            add_history(line);
+        free(line);
+
+        if (!input_is_complete(accumulated))
+            continue;
+
+        /* Lex */
+        Lexer lex = lexer_new(accumulated);
+        char *lex_err = NULL;
+        LatVec tokens = lexer_tokenize(&lex, &lex_err);
+        if (lex_err) {
+            fprintf(stderr, "error: %s\n", lex_err);
+            free(lex_err);
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Parse */
+        Parser parser = parser_new(&tokens);
+        char *parse_err = NULL;
+        Program prog = parser_parse(&parser, &parse_err);
+        if (parse_err) {
+            fprintf(stderr, "error: %s\n", parse_err);
+            free(parse_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++)
+                token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Compile for REPL */
+        char *comp_err = NULL;
+        RegChunk *chunk = reg_compile_repl(&prog, &comp_err);
+        if (!chunk) {
+            fprintf(stderr, "compile error: %s\n", comp_err);
+            free(comp_err);
+            if (prog_count >= prog_cap) {
+                prog_cap *= 2;
+                kept_progs = realloc(kept_progs, prog_cap * sizeof(Program));
+            }
+            kept_progs[prog_count++] = prog;
+            if (tok_count >= tok_cap) {
+                tok_cap *= 2;
+                kept_tokens = realloc(kept_tokens, tok_cap * sizeof(LatVec));
+            }
+            kept_tokens[tok_count++] = tokens;
+            accumulated[0] = '\0';
+            continue;
+        }
+
+        /* Run */
+        LatValue result;
+        RegVMResult rvm_res = regvm_run_repl(&rvm, chunk, &result);
+        if (rvm_res != REGVM_OK) {
+            fprintf(stderr, "error: %s\n", rvm.error);
+            free(rvm.error);
+            rvm.error = NULL;
+            /* Reset VM state for next iteration */
+            for (size_t i = 0; i < rvm.reg_stack_top; i++)
+                value_free_inline(&rvm.reg_stack[i]);
+            rvm.reg_stack_top = 0;
+            rvm.frame_count = 0;
+            rvm.handler_count = 0;
+            rvm.defer_count = 0;
+        } else if (result.type != VAL_UNIT && result.type != VAL_NIL) {
+            char *repr = value_repr(&result);
+            printf("=> %s\n", repr);
+            free(repr);
+            value_free(&result);
+        } else {
+            value_free(&result);
+        }
+
+        /* Track chunk with VM (don't free — closures may reference sub-chunks) */
+        regvm_track_chunk(&rvm, chunk);
+
+        /* Keep program and tokens alive */
+        if (prog_count >= prog_cap) {
+            prog_cap *= 2;
+            kept_progs = realloc(kept_progs, prog_cap * sizeof(Program));
+        }
+        kept_progs[prog_count++] = prog;
+        if (tok_count >= tok_cap) {
+            tok_cap *= 2;
+            kept_tokens = realloc(kept_tokens, tok_cap * sizeof(LatVec));
+        }
+        kept_tokens[tok_count++] = tokens;
+
+        accumulated[0] = '\0';
+    }
+
+    regvm_free(&rvm);
+    reg_compiler_free_known_enums();
     for (size_t i = 0; i < prog_count; i++)
         program_free(&kept_progs[i]);
     free(kept_progs);
@@ -748,6 +957,8 @@ int main(int argc, char **argv) {
             no_assertions_mode = true;
         else if (strcmp(argv[i], "--tree-walk") == 0)
             tree_walk_mode = true;
+        else if (strcmp(argv[i], "--regvm") == 0)
+            regvm_mode = true;
         else if (!file) {
             file = argv[i];
             /* Remaining args after filename are passed to the script via args() */
@@ -761,6 +972,8 @@ int main(int argc, char **argv) {
         return run_file(file, show_stats);
     else if (tree_walk_mode)
         repl_tree_walk();
+    else if (regvm_mode)
+        repl_regvm();
     else
         repl();
 

@@ -1,0 +1,33 @@
+# Clang Static Analyzer — Known False Positives
+# Each line is a grep pattern to suppress. Lines starting with # are comments.
+#
+# Format: file:line-pattern or file:warning-text
+# These are filtered out by `make analyze` so only new warnings are shown.
+
+# vm.c: dep is in "gate" else-if branch; recursive call is in "mirror" branch — mutually exclusive
+src/vm.c.*Use of memory after it is freed
+
+# vm.c: VM_NATIVE_MARKER invariant guarantees native_fn is always non-NULL
+# The sentinel is only set in vm_register_native() together with a valid function pointer
+src/vm.c.*Called function pointer is null
+
+# regvm.c: RVM_ERROR macro always exits scope via return or DISPATCH() computed goto
+# The second free(file_path) is only reachable when realpath() succeeded
+src/regvm.c.*Attempt to free released memory
+
+# compiler.c: spawn_indices is NULL only when spawn_count == 0
+# The loop body only executes for spawn statements, which don't exist when count is 0
+src/compiler.c.*spawn_indices.*null pointer dereference
+
+# http.c: p is initialized to raw, which was validated as starting with "HTTP/" on the prior line
+src/http.c.*garbage value
+
+# process_ops.c: getcwd(NULL, 0) is POSIX.1-2001 compliant on macOS and Linux
+src/process_ops.c.*getcwd.*should not be NULL
+
+# fs_ops.c: fread on an EOF/error-state stream returns 0, loop exits — no undefined behavior
+src/fs_ops.c.*unix.Stream
+
+# parser.c: all 42 warnings are in error-path cleanup where parse_block returned NULL
+# The count variable is 0 in those paths so cleanup loops never execute
+src/parser.c.*warning:

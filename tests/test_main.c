@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "test_backend.h"
 
 /* Minimal test harness */
 static int tests_run = 0;
@@ -8,6 +9,9 @@ static int tests_passed = 0;
 static int tests_failed = 0;
 
 int test_current_failed = 0;
+
+/* Global backend selection (default: stack VM to match production) */
+TestBackend test_backend = BACKEND_STACK_VM;
 
 typedef void (*TestFn)(void);
 typedef struct {
@@ -30,10 +34,37 @@ void register_test(const char *name, TestFn fn) {
 /* Forward declarations for manual registration */
 extern void register_stdlib_tests(void);
 
-int main(void) {
+static const char *backend_name(TestBackend b) {
+    switch (b) {
+        case BACKEND_TREE_WALK: return "tree-walk";
+        case BACKEND_STACK_VM:  return "stack-vm";
+        case BACKEND_REG_VM:   return "regvm";
+    }
+    return "unknown";
+}
+
+int main(int argc, char *argv[]) {
+    /* Parse --backend flag */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
+            i++;
+            if (strcmp(argv[i], "tree-walk") == 0) {
+                test_backend = BACKEND_TREE_WALK;
+            } else if (strcmp(argv[i], "stack-vm") == 0) {
+                test_backend = BACKEND_STACK_VM;
+            } else if (strcmp(argv[i], "regvm") == 0) {
+                test_backend = BACKEND_REG_VM;
+            } else {
+                fprintf(stderr, "Unknown backend: %s\n", argv[i]);
+                fprintf(stderr, "Valid backends: tree-walk, stack-vm, regvm\n");
+                return 1;
+            }
+        }
+    }
+
     register_stdlib_tests();
 
-    printf("Running %d tests...\n\n", test_count);
+    printf("Running %d tests (backend: %s)...\n\n", test_count, backend_name(test_backend));
 
     for (int i = 0; i < test_count; i++) {
         test_current_failed = 0;

@@ -25,6 +25,8 @@ typedef struct {
     LatValue *slots;   /* Pointer to this frame's base on the value stack */
     ObjUpvalue **upvalues;  /* Array of upvalue pointers for closures */
     size_t    upvalue_count;
+    LatValue *cleanup_base;  /* If non-NULL, OP_RETURN frees down to here (not slots).
+                              * Used by defer bodies that share parent frame's slots. */
 } CallFrame;
 
 typedef struct {
@@ -39,6 +41,7 @@ typedef struct {
     Chunk    *chunk;       /* Which chunk */
     size_t    frame_index; /* Which call frame */
     LatValue *slots;       /* Frame slots */
+    uint8_t   scope_depth; /* Compiler scope depth at registration */
 } VMDeferEntry;
 
 typedef enum {
@@ -127,6 +130,8 @@ typedef struct {
     bool ephemeral_on_stack;
     /* Pre-built wrapper chunk for vm_call_closure [OP_CALL, arg_count, OP_RETURN] */
     Chunk call_wrapper;
+    /* Override for next vm_run frame's slots (used by defer to share parent locals) */
+    LatValue *next_frame_slots;
 } VM;
 
 void vm_init(VM *vm);

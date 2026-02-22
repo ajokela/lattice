@@ -50,6 +50,7 @@ char *builtin_read_file(const char *path) {
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (len < 0) { fclose(f); return NULL; }
 
     char *buf = malloc((size_t)len + 1);
     if (buf == NULL) {

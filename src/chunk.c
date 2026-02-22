@@ -45,6 +45,12 @@ void chunk_free(Chunk *c) {
         free(c->local_names[i]);
     free(c->local_names);
     free(c->name);
+    if (c->default_values) {
+        for (int i = 0; i < c->default_count; i++)
+            value_free(&c->default_values[i]);
+        free(c->default_values);
+    }
+    free(c->param_phases);
     free(c);
 }
 

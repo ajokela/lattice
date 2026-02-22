@@ -19,6 +19,11 @@ typedef struct {
     char    **local_names;  /* Debug: slot index -> variable name (for tracking) */
     size_t    local_name_cap;
     char     *name;        /* Debug: function name (NULL for top-level script) */
+    LatValue *default_values; /* Default param values (NULL if none) */
+    int       default_count;  /* Number of params with defaults */
+    bool      fn_has_variadic; /* Whether last param is variadic */
+    uint8_t  *param_phases;   /* Per-param phase constraint (AstPhase values, NULL if none) */
+    int       param_phase_count;
 } Chunk;
 
 Chunk *chunk_new(void);

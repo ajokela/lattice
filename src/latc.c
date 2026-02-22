@@ -499,3 +499,289 @@ Chunk *chunk_load(const char *path, char **err) {
     free(data);
     return c;
 }
+
+/* ═══════════════════════════════════════════════════════
+ * Register VM bytecode serialization (.rlatc)
+ *
+ * Format: RLATC_MAGIC(4) + version(u16) + reserved(u16)
+ *         + serialize_regchunk(...)
+ *
+ * RegChunk layout:
+ *   code_len(u32) + code(u32[] LE)
+ *   lines_len(u32) + lines(u32[])
+ *   const_len(u32) + tagged constants
+ *   local_name_cap(u32) + local names
+ * ═══════════════════════════════════════════════════════ */
+
+static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
+    /* Instructions (fixed-width u32) */
+    bb_write_u32_le(bb, (uint32_t)c->code_len);
+    for (size_t i = 0; i < c->code_len; i++)
+        bb_write_u32_le(bb, c->code[i]);
+
+    /* Line numbers */
+    bb_write_u32_le(bb, (uint32_t)c->lines_len);
+    for (size_t i = 0; i < c->lines_len; i++)
+        bb_write_u32_le(bb, (uint32_t)c->lines[i]);
+
+    /* Constants — same tagging as stack VM */
+    bb_write_u32_le(bb, (uint32_t)c->const_len);
+    for (size_t i = 0; i < c->const_len; i++) {
+        const LatValue *v = &c->constants[i];
+        switch (v->type) {
+            case VAL_INT:
+                bb_write_u8(bb, TAG_INT);
+                bb_write_i64_le(bb, v->as.int_val);
+                break;
+            case VAL_FLOAT:
+                bb_write_u8(bb, TAG_FLOAT);
+                bb_write_f64_le(bb, v->as.float_val);
+                break;
+            case VAL_BOOL:
+                bb_write_u8(bb, TAG_BOOL);
+                bb_write_u8(bb, v->as.bool_val ? 1 : 0);
+                break;
+            case VAL_STR: {
+                bb_write_u8(bb, TAG_STR);
+                uint32_t slen = (uint32_t)strlen(v->as.str_val);
+                bb_write_u32_le(bb, slen);
+                bb_write_bytes(bb, v->as.str_val, slen);
+                break;
+            }
+            case VAL_NIL:
+                bb_write_u8(bb, TAG_NIL);
+                break;
+            case VAL_UNIT:
+                bb_write_u8(bb, TAG_UNIT);
+                break;
+            case VAL_CLOSURE:
+                /* Compiled sub-chunk: body==NULL, native_fn holds RegChunk* */
+                if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) {
+                    bb_write_u8(bb, TAG_CLOSURE);
+                    bb_write_u32_le(bb, (uint32_t)v->as.closure.param_count);
+                    bb_write_u8(bb, v->as.closure.has_variadic ? 1 : 0);
+                    serialize_regchunk(bb, (const RegChunk *)v->as.closure.native_fn);
+                } else {
+                    bb_write_u8(bb, TAG_NIL);
+                }
+                break;
+            default:
+                bb_write_u8(bb, TAG_NIL);
+                break;
+        }
+    }
+
+    /* Local names */
+    bb_write_u32_le(bb, (uint32_t)c->local_name_cap);
+    for (size_t i = 0; i < c->local_name_cap; i++) {
+        if (c->local_names && c->local_names[i]) {
+            bb_write_u8(bb, 1);
+            uint32_t nlen = (uint32_t)strlen(c->local_names[i]);
+            bb_write_u32_le(bb, nlen);
+            bb_write_bytes(bb, c->local_names[i], nlen);
+        } else {
+            bb_write_u8(bb, 0);
+        }
+    }
+}
+
+static RegChunk *deserialize_regchunk(ByteReader *br, char **err) {
+    uint32_t code_len;
+    if (!br_read_u32_le(br, &code_len)) {
+        *err = strdup("truncated: missing code_len");
+        return NULL;
+    }
+
+    RegChunk *c = regchunk_new();
+
+    /* Instructions */
+    for (uint32_t i = 0; i < code_len; i++) {
+        uint32_t instr;
+        if (!br_read_u32_le(br, &instr)) {
+            *err = strdup("truncated: incomplete instructions");
+            regchunk_free(c);
+            return NULL;
+        }
+        regchunk_write(c, instr, 0);
+    }
+
+    /* Line numbers — overwrite the zeros written by regchunk_write */
+    uint32_t line_count;
+    if (!br_read_u32_le(br, &line_count)) {
+        *err = strdup("truncated: missing line_count");
+        regchunk_free(c);
+        return NULL;
+    }
+    if (line_count <= c->lines_len) {
+        for (uint32_t i = 0; i < line_count; i++) {
+            uint32_t line_val;
+            if (!br_read_u32_le(br, &line_val)) {
+                *err = strdup("truncated: incomplete line data");
+                regchunk_free(c);
+                return NULL;
+            }
+            c->lines[i] = (int)line_val;
+        }
+    }
+
+    /* Constants */
+    uint32_t const_count;
+    if (!br_read_u32_le(br, &const_count)) {
+        *err = strdup("truncated: missing const_count");
+        regchunk_free(c);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < const_count; i++) {
+        uint8_t tag;
+        if (!br_read_u8(br, &tag)) {
+            *err = strdup("truncated: missing constant type tag");
+            regchunk_free(c);
+            return NULL;
+        }
+        switch (tag) {
+            case TAG_INT: {
+                int64_t val;
+                if (!br_read_i64_le(br, &val)) { *err = strdup("truncated int"); regchunk_free(c); return NULL; }
+                regchunk_add_constant(c, value_int(val));
+                break;
+            }
+            case TAG_FLOAT: {
+                double val;
+                if (!br_read_f64_le(br, &val)) { *err = strdup("truncated float"); regchunk_free(c); return NULL; }
+                regchunk_add_constant(c, value_float(val));
+                break;
+            }
+            case TAG_BOOL: {
+                uint8_t val;
+                if (!br_read_u8(br, &val)) { *err = strdup("truncated bool"); regchunk_free(c); return NULL; }
+                regchunk_add_constant(c, value_bool(val != 0));
+                break;
+            }
+            case TAG_STR: {
+                uint32_t slen;
+                if (!br_read_u32_le(br, &slen)) { *err = strdup("truncated string len"); regchunk_free(c); return NULL; }
+                char *s = malloc(slen + 1);
+                if (!br_read_bytes(br, s, slen)) { free(s); *err = strdup("truncated string data"); regchunk_free(c); return NULL; }
+                s[slen] = '\0';
+                regchunk_add_constant(c, value_string_owned(s));
+                break;
+            }
+            case TAG_NIL:
+                regchunk_add_constant(c, value_nil());
+                break;
+            case TAG_UNIT:
+                regchunk_add_constant(c, value_unit());
+                break;
+            case TAG_CLOSURE: {
+                uint32_t param_count;
+                uint8_t has_variadic;
+                if (!br_read_u32_le(br, &param_count)) { *err = strdup("truncated closure"); regchunk_free(c); return NULL; }
+                if (!br_read_u8(br, &has_variadic)) { *err = strdup("truncated closure"); regchunk_free(c); return NULL; }
+                RegChunk *sub = deserialize_regchunk(br, err);
+                if (!sub) { regchunk_free(c); return NULL; }
+                LatValue fn_val;
+                memset(&fn_val, 0, sizeof(fn_val));
+                fn_val.type = VAL_CLOSURE;
+                fn_val.phase = VTAG_UNPHASED;
+                fn_val.region_id = (size_t)-1;
+                fn_val.as.closure.param_names = NULL;
+                fn_val.as.closure.param_count = (size_t)param_count;
+                fn_val.as.closure.body = NULL;
+                fn_val.as.closure.captured_env = NULL;
+                fn_val.as.closure.default_values = NULL;
+                fn_val.as.closure.has_variadic = (has_variadic != 0);
+                fn_val.as.closure.native_fn = sub;
+                regchunk_add_constant(c, fn_val);
+                break;
+            }
+            default: {
+                char msg[64];
+                snprintf(msg, sizeof(msg), "unknown constant type tag: %d", tag);
+                *err = strdup(msg);
+                regchunk_free(c);
+                return NULL;
+            }
+        }
+    }
+
+    /* Local names */
+    uint32_t local_name_count;
+    if (!br_read_u32_le(br, &local_name_count)) {
+        *err = strdup("truncated: missing local_name_count");
+        regchunk_free(c);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < local_name_count; i++) {
+        uint8_t present;
+        if (!br_read_u8(br, &present)) { *err = strdup("truncated local name"); regchunk_free(c); return NULL; }
+        if (present) {
+            uint32_t nlen;
+            if (!br_read_u32_le(br, &nlen)) { *err = strdup("truncated local name len"); regchunk_free(c); return NULL; }
+            char *name = malloc(nlen + 1);
+            if (!br_read_bytes(br, name, nlen)) { free(name); *err = strdup("truncated local name data"); regchunk_free(c); return NULL; }
+            name[nlen] = '\0';
+            regchunk_set_local_name(c, (size_t)i, name);
+            free(name);
+        }
+    }
+
+    return c;
+}
+
+uint8_t *regchunk_serialize(const RegChunk *c, size_t *out_len) {
+    ByteBuf bb;
+    bb_init(&bb);
+    bb_write_bytes(&bb, RLATC_MAGIC, 4);
+    bb_write_u16_le(&bb, RLATC_FORMAT);
+    bb_write_u16_le(&bb, 0);
+    serialize_regchunk(&bb, c);
+    *out_len = bb.len;
+    return bb.data;
+}
+
+RegChunk *regchunk_deserialize(const uint8_t *data, size_t len, char **err) {
+    ByteReader br = { data, len, 0 };
+    if (len < 8) { *err = strdup("file too small for .rlatc header"); return NULL; }
+    if (memcmp(data, RLATC_MAGIC, 4) != 0) { *err = strdup("invalid magic: not a .rlatc file"); return NULL; }
+    br.pos = 4;
+    uint16_t version;
+    if (!br_read_u16_le(&br, &version)) { *err = strdup("truncated version"); return NULL; }
+    if (version != RLATC_FORMAT) { *err = strdup("unsupported .rlatc format version"); return NULL; }
+    uint16_t reserved;
+    br_read_u16_le(&br, &reserved);
+    return deserialize_regchunk(&br, err);
+}
+
+int regchunk_save(const RegChunk *c, const char *path) {
+    size_t len;
+    uint8_t *data = regchunk_serialize(c, &len);
+    if (!data) return -1;
+    FILE *f = fopen(path, "wb");
+    if (!f) { free(data); return -1; }
+    size_t written = fwrite(data, 1, len, f);
+    fclose(f);
+    free(data);
+    return (written == len) ? 0 : -1;
+}
+
+RegChunk *regchunk_load(const char *path, char **err) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "cannot open '%s'", path);
+        *err = strdup(msg);
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    long flen = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (flen < 0) { fclose(f); *err = strdup("cannot determine file size"); return NULL; }
+    size_t len = (size_t)flen;
+    uint8_t *data = malloc(len);
+    size_t n = fread(data, 1, len, f);
+    fclose(f);
+    if (n != len) { free(data); *err = strdup("failed to read file"); return NULL; }
+    RegChunk *c = regchunk_deserialize(data, len, err);
+    free(data);
+    return c;
+}

@@ -1,0 +1,303 @@
+// Register VM parity test — runs through both VMs, output should be identical.
+// Covers: arithmetic, strings, arrays, maps, structs, closures, control flow,
+// for/while/loop, enums, try/catch, defer, destructuring, phases, builtins.
+
+// ── Arithmetic ──
+print(1 + 2)
+print(10 - 3)
+print(4 * 5)
+print(15 / 3)
+print(17 % 5)
+print(-42)
+print(2 + 3 * 4)
+print((2 + 3) * 4)
+
+// ── Float arithmetic ──
+print(3.14 + 1.0)
+print(10.0 / 3.0)
+
+// ── Comparison & logic ──
+print(1 < 2)
+print(2 > 1)
+print(1 <= 1)
+print(1 >= 2)
+print(1 == 1)
+print(1 != 2)
+print(true && false)
+print(true || false)
+print(!true)
+
+// ── Bitwise ──
+print(5 & 3)
+print(5 | 3)
+print(5 ^ 3)
+print(~0)
+print(1 << 4)
+print(16 >> 2)
+
+// ── Strings ──
+print("hello" + " " + "world")
+print("abc".len())
+print("hello".to_upper())
+print("HELLO".to_lower())
+print("  trim  ".trim())
+print("hello world".split(" "))
+print("hello".contains("ell"))
+print("abcdef".substring(2, 4))
+print("ha".repeat(3))
+print("hello world".replace("world", "lattice"))
+print("hello".starts_with("hel"))
+print("hello".ends_with("llo"))
+
+// ── Variables ──
+let x = 42
+print(x)
+flux y = 10
+y = 20
+print(y)
+
+// ── Arrays ──
+let arr = [1, 2, 3, 4, 5]
+print(arr)
+print(arr.len())
+print(arr[0])
+print(arr[4])
+print(arr.first())
+print(arr.last())
+print(arr.contains(3))
+print(arr.index_of(4))
+print(arr.reverse())
+print(arr.slice(1, 3))
+
+// ── Array mutation ──
+flux items = [10, 20]
+items.push(30)
+print(items)
+print(items.pop())
+print(items)
+
+// ── Array methods returning new arrays ──
+print([3, 1, 2].map(|x| { x * 2 }))
+print([1, 2, 3, 4].filter(|x| { x > 2 }))
+print([1, 2, 3].reduce(0, |acc, x| { acc + x }))
+print([1, 2, 3].any(|x| { x > 2 }))
+print([1, 2, 3].all(|x| { x > 0 }))
+print([1, 2, 3].find(|x| { x == 2 }))
+print([3, 1, 2].enumerate())
+
+// ── Maps ──
+let m = Map::new()
+m["a"] = 1
+m["b"] = 2
+print(m["a"])
+print(m.len())
+print(m.has("a"))
+print(m.has("c"))
+print(m.keys())
+print(m.values())
+
+// ── Structs ──
+struct Point { x: int, y: int }
+let p = Point { x: 10, y: 20 }
+print(p.x)
+print(p.y)
+print(p.x + p.y)
+
+// ── Struct with methods ──
+struct Counter {
+    value: int,
+    inc: any,
+}
+let c = Counter {
+    value: 0,
+    inc: |self| { self.value + 1 },
+}
+print(c.inc())
+
+// ── Functions ──
+fn add(a: int, b: int) { a + b }
+fn greet(name: str) { "Hello, " + name + "!" }
+print(add(3, 4))
+print(greet("World"))
+
+// ── Recursion ──
+fn factorial(n: int) {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+print(factorial(10))
+
+// ── Closures ──
+fn make_adder(n: int) {
+    |x| { x + n }
+}
+let add5 = make_adder(5)
+print(add5(10))
+
+// ── Higher-order functions ──
+fn apply(f: any, val: int) { f(val) }
+print(apply(|x| { x * 3 }, 7))
+
+// ── If/else ──
+let val = if true { "yes" } else { "no" }
+print(val)
+let val2 = if false { "yes" } else { "no" }
+print(val2)
+
+// ── Match ──
+let grade = "A"
+let desc = match grade {
+    "A" => "Excellent",
+    "B" => "Good",
+    _ => "Other",
+}
+print(desc)
+
+// ── While loop ──
+flux i = 0
+flux total = 0
+while i < 5 {
+    total = total + i
+    i = i + 1
+}
+print(total)
+
+// ── For loop ──
+flux sum2 = 0
+for n in [10, 20, 30] {
+    sum2 = sum2 + n
+}
+print(sum2)
+
+// ── For loop with index ──
+for item in ["a", "b", "c"] {
+    print(item)
+}
+
+// ── Loop with break ──
+flux counter = 0
+loop {
+    if counter >= 3 { break }
+    counter = counter + 1
+}
+print(counter)
+
+// ── Ranges ──
+flux range_sum = 0
+for n in 1..5 {
+    range_sum = range_sum + n
+}
+print(range_sum)
+
+// ── Closures capturing variables ──
+fn make_adder2(n: int) {
+    |x| { x + n }
+}
+let add10 = make_adder2(10)
+print(add10(5))
+
+// ── Enums ──
+enum Color { Red, Green, Blue }
+let c1 = Color::Red
+print(c1)
+print(c1.tag())
+print(c1.enum_name())
+
+// ── Enum with payload ──
+enum Shape {
+    Circle(radius),
+    Rect(w, h),
+}
+let s1 = Shape::Circle(5.0)
+print(s1.tag())
+print(s1.payload())
+
+// ── Try/catch ──
+let result = try {
+    let x = 10 / 0
+    "ok"
+} catch err {
+    "caught: " + err
+}
+print(result)
+
+// ── Nil coalescing ──
+let maybe_nil = nil
+let fallback = maybe_nil ?? "default"
+print(fallback)
+
+// ── String interpolation ──
+let name = "Lattice"
+print("Hello, ${name}!")
+print("1 + 2 = ${1 + 2}")
+
+// ── Tuples ──
+let t = (1, "hello", true)
+print(t)
+print(t.len())
+
+// ── Type checking via string representation ──
+print(42)
+print("hello")
+print(true)
+print([1,2])
+print(nil)
+
+// ── Global array mutation (INVOKE_GLOBAL test) ──
+flux global_arr = []
+global_arr.push(1)
+global_arr.push(2)
+global_arr.push(3)
+print(global_arr)
+print(global_arr.len())
+
+// ── Nested array mutation ──
+flux matrix = [[1, 2], [3, 4]]
+print(matrix[0])
+print(matrix[1])
+
+// ── Defer ──
+fn with_defer() {
+    defer { print("deferred") }
+    print("before defer")
+}
+with_defer()
+
+// ── Destructuring ──
+let [a, b, c2] = [10, 20, 30]
+print(a)
+print(b)
+print(c2)
+
+// ── Phases: freeze/thaw ──
+flux mutable_val = 42
+print(mutable_val)
+fix frozen = 100
+print(frozen)
+
+// ── Clone ──
+let original = [1, 2, 3]
+let copied = clone(original)
+print(copied)
+
+// ── Multiple return values via array ──
+fn divmod(a: int, b: int) {
+    return [a / b, a % b]
+}
+let dm = divmod(17, 5)
+print(dm[0])
+print(dm[1])
+
+// ── Complex nested ──
+fn process_list(items: any) {
+    items.map(|x| { x * 2 }).filter(|x| { x > 4 })
+}
+print(process_list([1, 2, 3, 4, 5]))
+
+// ── Chained operations ──
+let nums = [5, 3, 1, 4, 2]
+let sorted = nums.map(|x| { x * 10 })
+print(sorted)
+
+// Final marker
+print("ALL TESTS COMPLETE")

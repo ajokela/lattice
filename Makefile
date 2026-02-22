@@ -1,5 +1,5 @@
 CC      = cc
-CFLAGS  = -std=c11 -Wall -Wextra -Werror -Iinclude -O2 -DVM_USE_COMPUTED_GOTO
+CFLAGS  = -std=c11 -Wall -Wextra -Werror -Iinclude -O3 -DVM_USE_COMPUTED_GOTO
 LDFLAGS =
 
 SRC_DIR    = src
@@ -93,7 +93,10 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/compiler.c \
        $(SRC_DIR)/vm.c \
        $(SRC_DIR)/intern.c \
-       $(SRC_DIR)/latc.c
+       $(SRC_DIR)/latc.c \
+       $(SRC_DIR)/regopcode.c \
+       $(SRC_DIR)/regcompiler.c \
+       $(SRC_DIR)/regvm.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
@@ -141,7 +144,7 @@ FUZZ_SRC    = $(FUZZ_DIR)/fuzz_eval.c
 FUZZ_OBJ    = $(BUILD_DIR)/fuzz/fuzz_eval.o
 FUZZ_TARGET = $(BUILD_DIR)/fuzz_eval
 
-.PHONY: all clean test asan tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite lsp
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends asan tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -172,6 +175,17 @@ $(TEST_TARGET): $(LIB_OBJS) $(TEST_OBJS)
 test: $(TEST_TARGET)
 	./$(BUILD_DIR)/test_runner
 
+test-tree-walk: $(TEST_TARGET)
+	./$(BUILD_DIR)/test_runner --backend tree-walk
+
+test-regvm: $(TEST_TARGET)
+	./$(BUILD_DIR)/test_runner --backend regvm
+
+test-all-backends: $(TEST_TARGET)
+	@echo "=== stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
+	@echo "=== tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
+	@echo "=== regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
+
 asan: CFLAGS += -fsanitize=address,undefined -g -O1
 asan: LDFLAGS += -fsanitize=address,undefined
 asan: clean $(TEST_TARGET)
@@ -185,11 +199,14 @@ tsan: clean $(TEST_TARGET)
 coverage: CFLAGS += -fprofile-instr-generate -fcoverage-mapping -g -O0
 coverage: LDFLAGS += -fprofile-instr-generate
 coverage: clean $(TEST_TARGET)
-	LLVM_PROFILE_FILE=$(BUILD_DIR)/default.profraw ./$(BUILD_DIR)/test_runner
-	llvm-profdata merge -sparse $(BUILD_DIR)/default.profraw -o $(BUILD_DIR)/default.profdata
+	LLVM_PROFILE_FILE=$(BUILD_DIR)/stackvm.profraw ./$(BUILD_DIR)/test_runner
+	LLVM_PROFILE_FILE=$(BUILD_DIR)/treewalk.profraw ./$(BUILD_DIR)/test_runner --backend tree-walk
+	llvm-profdata merge -sparse $(BUILD_DIR)/stackvm.profraw $(BUILD_DIR)/treewalk.profraw -o $(BUILD_DIR)/default.profdata
 	llvm-cov report ./$(BUILD_DIR)/test_runner -instr-profile=$(BUILD_DIR)/default.profdata $(LIB_SRCS)
 	llvm-cov show ./$(BUILD_DIR)/test_runner -instr-profile=$(BUILD_DIR)/default.profdata \
 		-format=html -output-dir=$(BUILD_DIR)/coverage $(LIB_SRCS)
+	cp scripts/coverage-style.css $(BUILD_DIR)/coverage/style.css
+	find $(BUILD_DIR)/coverage -name '*.html' -exec sed -i '' 's|</head>|<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600\&display=swap" rel="stylesheet"></head>|' {} +
 	@echo "\n==> Coverage report: $(BUILD_DIR)/coverage/index.html"
 
 ifeq ($(UNAME_S),Darwin)
@@ -198,12 +215,33 @@ else
     ANALYZE_CC = clang
 endif
 
+SUPPRESSIONS = scripts/analyzer-suppressions.txt
+
 analyze:
-	@for f in $(LIB_SRCS); do \
-		echo "--- $$f ---"; \
+	@ALL_OUT=$$(mktemp); \
+	for f in $(LIB_SRCS); do \
 		$(ANALYZE_CC) --analyze -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) $$f 2>&1 || true; \
-	done
-	@echo "\n==> Static analysis complete."
+	done > "$$ALL_OUT" 2>&1; \
+	TOTAL=$$(grep -c 'warning:' "$$ALL_OUT" || true); \
+	if [ -f $(SUPPRESSIONS) ]; then \
+		PATTERN=$$(grep -v '^#' $(SUPPRESSIONS) | grep -v '^$$' | paste -sd'|' -); \
+		NEW_OUT=$$(mktemp); \
+		grep 'warning:' "$$ALL_OUT" | grep -Ev "$$PATTERN" > "$$NEW_OUT" || true; \
+		NEW_COUNT=$$(wc -l < "$$NEW_OUT" | tr -d ' '); \
+	else \
+		NEW_OUT=$$(mktemp); \
+		grep 'warning:' "$$ALL_OUT" > "$$NEW_OUT" || true; \
+		NEW_COUNT=$$(wc -l < "$$NEW_OUT" | tr -d ' '); \
+	fi; \
+	SUPPRESSED=$$((TOTAL - NEW_COUNT)); \
+	if [ "$$NEW_COUNT" -gt 0 ]; then \
+		cat "$$NEW_OUT"; \
+		echo ""; \
+		echo "==> $$TOTAL warnings total, $$SUPPRESSED suppressed, $$NEW_COUNT new warnings need attention"; \
+	else \
+		echo "==> $$TOTAL warnings total, all suppressed (known false positives)"; \
+	fi; \
+	rm -f "$$ALL_OUT" "$$NEW_OUT"
 
 $(BUILD_DIR)/fuzz/%.o: $(FUZZ_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -244,6 +282,25 @@ ext-pg:
 
 ext-sqlite:
 	$(MAKE) -C extensions/sqlite
+
+SITE_DIR = ../lattice-lang.org
+
+deploy-coverage: coverage
+	rm -rf $(SITE_DIR)/coverage
+	cp -r $(BUILD_DIR)/coverage $(SITE_DIR)/coverage
+	@VERSION=$$(grep 'LATTICE_VERSION' include/lattice.h | head -1 | sed 's/.*"\(.*\)".*/\1/'); \
+	SRC_LINES=$$(cat $(LIB_SRCS) include/*.h | wc -l | tr -d ' '); \
+	TEST_MACRO=$$(grep -c '^[[:space:]]*TEST(' tests/test_*.c | awk -F: '{s+=$$2} END{print s}'); \
+	TEST_REG=$$(grep -c 'register_test("' tests/test_*.c | awk -F: '{s+=$$2} END{print s}'); \
+	TEST_COUNT=$$((TEST_MACRO + TEST_REG)); \
+	sed -i '' "s/__VERSION__/v$$VERSION/g; s/__SRC_LINES__/$$SRC_LINES/g; s/__TEST_COUNT__/$$TEST_COUNT/g" $(SITE_DIR)/dev.html; \
+	echo ""; \
+	echo "==> Coverage deployed to $(SITE_DIR)/coverage/"; \
+	echo "    Stats updated in $(SITE_DIR)/dev.html"; \
+	cd $(SITE_DIR) && firebase deploy; \
+	cd - > /dev/null; \
+	sed -i '' "s/v$$VERSION/__VERSION__/g; s/$$SRC_LINES/__SRC_LINES__/g; s/$$TEST_COUNT/__TEST_COUNT__/g" $(SITE_DIR)/dev.html; \
+	echo "    Placeholders restored in dev.html"
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(LSP_TARGET)
