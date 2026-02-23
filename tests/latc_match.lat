@@ -1,0 +1,57 @@
+// Test: match expression round-trip through self-hosted compiler
+
+fn test_string_match() {
+    let op = "+"
+    match op {
+        "+" => print("add"),
+        "-" => print("sub"),
+        "*" => print("mul"),
+        _ => print("other")
+    }
+}
+
+fn test_wildcard() {
+    let x = "unknown"
+    match x {
+        "a" => print("FAIL"),
+        _ => print("wildcard")
+    }
+}
+
+fn test_integer_match() {
+    let n = 2
+    match n {
+        1 => print("one"),
+        2 => print("two"),
+        3 => print("three"),
+        _ => print("many")
+    }
+}
+
+fn test_match_as_expression() {
+    let op = "*"
+    let result = match op {
+        "+" => "add",
+        "-" => "sub",
+        "*" => "mul",
+        _ => "other"
+    }
+    print(result)
+}
+
+fn test_no_match_fallback() {
+    let x = "z"
+    let result = match x {
+        "a" => "alpha",
+        "b" => "beta"
+    }
+    print(result)
+}
+
+fn main() {
+    test_string_match()
+    test_wildcard()
+    test_integer_match()
+    test_match_as_expression()
+    test_no_match_fallback()
+}
