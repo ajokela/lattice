@@ -500,6 +500,11 @@ void stackvm_init(StackVM *vm, LatRuntime *rt) {
 }
 
 void stackvm_free(StackVM *vm) {
+    /* Clear thread-local runtime pointer if it still refers to this VM's runtime,
+     * preventing dangling pointer after the caller's stack-allocated LatRuntime dies. */
+    if (lat_runtime_current() == vm->rt)
+        lat_runtime_set_current(NULL);
+
     /* Free any remaining stack values */
     while (vm->stack_top > vm->stack) {
         vm->stack_top--;

@@ -129,6 +129,11 @@ void regvm_init(RegVM *vm, LatRuntime *rt) {
 }
 
 void regvm_free(RegVM *vm) {
+    /* Clear thread-local runtime pointer if it still refers to this VM's runtime,
+     * preventing dangling pointer after the caller's stack-allocated LatRuntime dies. */
+    if (lat_runtime_current() == vm->rt)
+        lat_runtime_set_current(NULL);
+
     /* Don't free env/struct_meta — runtime owns them */
     for (size_t i = 0; i < vm->fn_chunk_count; i++)
         regchunk_free(vm->fn_chunks[i]);

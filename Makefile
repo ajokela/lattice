@@ -145,7 +145,7 @@ FUZZ_SRC    = $(FUZZ_DIR)/fuzz_eval.c
 FUZZ_OBJ    = $(BUILD_DIR)/fuzz/fuzz_eval.o
 FUZZ_TARGET = $(BUILD_DIR)/fuzz_eval
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends asan tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite lsp deploy-coverage
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends asan asan-all tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -191,6 +191,13 @@ asan: CFLAGS += -fsanitize=address,undefined -g -O1
 asan: LDFLAGS += -fsanitize=address,undefined
 asan: clean $(TEST_TARGET)
 	./$(BUILD_DIR)/test_runner
+
+asan-all: CFLAGS += -fsanitize=address,undefined -g -O1
+asan-all: LDFLAGS += -fsanitize=address,undefined
+asan-all: clean $(TEST_TARGET)
+	@echo "=== asan: stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
+	@echo "=== asan: tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
+	@echo "=== asan: regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
 
 tsan: CFLAGS += -fsanitize=thread -g -O1
 tsan: LDFLAGS += -fsanitize=thread
