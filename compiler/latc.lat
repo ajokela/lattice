@@ -126,7 +126,13 @@ let OP_DEFINE_GLOBAL_16 = 96
 let OP_CLOSURE_16     = 97
 
 let OP_RESET_EPHEMERAL = 98
-let OP_HALT           = 99
+let OP_SET_LOCAL_POP  = 99
+let OP_CHECK_TYPE     = 100
+let OP_CHECK_RETURN_TYPE = 101
+let OP_IS_CRYSTAL     = 102
+let OP_FREEZE_EXCEPT  = 103
+let OP_FREEZE_FIELD   = 104
+let OP_HALT           = 105
 
 // .latc constant tags
 let TAG_INT     = 0
@@ -246,6 +252,9 @@ flux loop_start_pos = 0
 flux loop_depth = 0
 flux loop_break_local_count = 0
 flux loop_continue_local_count = 0
+
+// Auto-call main() tracking
+flux has_main_fn = false
 
 // String constant deduplication (per-chunk intern map)
 flux string_intern_map = Map::new()
@@ -1443,6 +1452,7 @@ fn parse_fn_declaration() {
     let line = current_line()
     expect("fn", nil)
     let name = expect("identifier", nil).text
+    if name == "main" { has_main_fn = true }
     expect(nil, "(")
 
     flux param_names_arr = []
@@ -2007,8 +2017,16 @@ fn compile_program() {
     while pos < total_tokens {
         parse_statement_or_expression()
     }
-    emit_byte(OP_UNIT, current_line())
-    emit_byte(OP_HALT, current_line())
+    let line = current_line()
+    // Auto-call main() if defined (matches C compiler behavior)
+    if has_main_fn {
+        let idx = string_constant("main")
+        emit_wide_op(OP_GET_GLOBAL, OP_GET_GLOBAL_16, idx, line)
+        emit_bytes(OP_CALL, 0, line)
+        emit_byte(OP_POP, line)
+    }
+    emit_byte(OP_UNIT, line)
+    emit_byte(OP_RETURN, line)
 }
 
 // ============================================================================
