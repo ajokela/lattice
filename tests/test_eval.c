@@ -1971,3 +1971,64 @@ TEST(eval_buffer_freeze_thaw) {
         "assert(buf2.len() == 3)\n"
     );
 }
+
+/* ── Tests: else if ── */
+
+TEST(eval_else_if_basic) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let x = 2\n"
+        "    if false { assert(false) }\n"
+        "    else if true { assert(x == 2) }\n"
+        "    else { assert(false) }\n"
+        "}\n"
+    );
+}
+
+TEST(eval_else_if_chain) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let x = 3\n"
+        "    if false { assert(false) }\n"
+        "    else if false { assert(false) }\n"
+        "    else if true { assert(x == 3) }\n"
+        "    else { assert(false) }\n"
+        "}\n"
+    );
+}
+
+TEST(eval_else_if_fallthrough) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    if false { assert(false) }\n"
+        "    else if false { assert(false) }\n"
+        "    else { assert(true) }\n"
+        "}\n"
+    );
+}
+
+TEST(eval_else_if_no_else) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    flux hit = false\n"
+        "    if false { assert(false) }\n"
+        "    else if true { hit = true }\n"
+        "    assert(hit)\n"
+        "}\n"
+    );
+}
+
+TEST(eval_else_if_nested) {
+    ASSERT_RUNS(
+        "fn check(x: Int) -> String {\n"
+        "    if x > 100 { return \"big\" }\n"
+        "    else if x > 10 { return \"medium\" }\n"
+        "    else { return \"small\" }\n"
+        "}\n"
+        "fn main() {\n"
+        "    assert(check(200) == \"big\")\n"
+        "    assert(check(42) == \"medium\")\n"
+        "    assert(check(5) == \"small\")\n"
+        "}\n"
+    );
+}

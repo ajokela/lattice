@@ -1033,26 +1033,40 @@ static Expr *parse_primary(Parser *p, char **err) {
         size_t else_count = 0;
         if (peek_type(p) == TOK_ELSE) {
             advance(p);
-            if (!expect(p, TOK_LBRACE, err)) {
-                expr_free(cond);
-                for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
-                free(then_stmts);
-                return NULL;
-            }
-            else_stmts = parse_block_stmts(p, &else_count, err);
-            if (!else_stmts && *err) {
-                expr_free(cond);
-                for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
-                free(then_stmts);
-                return NULL;
-            }
-            if (!expect(p, TOK_RBRACE, err)) {
-                expr_free(cond);
-                for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
-                free(then_stmts);
-                for (size_t i = 0; i < else_count; i++) stmt_free(else_stmts[i]);
-                free(else_stmts);
-                return NULL;
+            if (peek_type(p) == TOK_IF) {
+                /* else if → desugar to else { if ... } */
+                Expr *inner_if = parse_primary(p, err);
+                if (!inner_if) {
+                    expr_free(cond);
+                    for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
+                    free(then_stmts);
+                    return NULL;
+                }
+                else_stmts = malloc(sizeof(Stmt *));
+                else_stmts[0] = stmt_expr(inner_if);
+                else_count = 1;
+            } else {
+                if (!expect(p, TOK_LBRACE, err)) {
+                    expr_free(cond);
+                    for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
+                    free(then_stmts);
+                    return NULL;
+                }
+                else_stmts = parse_block_stmts(p, &else_count, err);
+                if (!else_stmts && *err) {
+                    expr_free(cond);
+                    for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
+                    free(then_stmts);
+                    return NULL;
+                }
+                if (!expect(p, TOK_RBRACE, err)) {
+                    expr_free(cond);
+                    for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
+                    free(then_stmts);
+                    for (size_t i = 0; i < else_count; i++) stmt_free(else_stmts[i]);
+                    free(else_stmts);
+                    return NULL;
+                }
             }
         }
         return expr_if(cond, then_stmts, then_count, else_stmts, else_count);
