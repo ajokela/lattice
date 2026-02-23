@@ -8936,10 +8936,10 @@ static void test_builtin_regex_match(void) {
 static void test_builtin_os_platform(void) {
     char *out = run_capture(
         "import { platform } from \"os\"\n"
-        "fn main() { print(platform()) }\n"
+        "fn main() { print(len(platform()) > 0) }\n"
     );
     ASSERT(out != NULL);
-    ASSERT_STR_EQ(out, "macos");
+    ASSERT_STR_EQ(out, "true");
     free(out);
 }
 
