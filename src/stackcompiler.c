@@ -1748,7 +1748,7 @@ static void emit_ensure_checks(int line) {
 /* Expects the return value on TOS. Leaves it on TOS unchanged. */
 static void emit_return_type_check(int line) {
     if (!current->return_type_name) return;
-    if (strcmp(current->return_type_name, "Any") == 0) return;
+    if (strcmp(current->return_type_name, "Any") == 0 || strcmp(current->return_type_name, "any") == 0) return;
     char err_msg[512];
     snprintf(err_msg, sizeof(err_msg), "function '%s' return type expects %s, got %%s",
              current->func_name ? current->func_name : "<anonymous>",
@@ -2315,7 +2315,7 @@ static void compile_function_body(FunctionType type, const char *name,
     /* Emit runtime parameter type checks */
     for (size_t i = first_param; i < param_count; i++) {
         if (params[i].is_variadic) break;
-        if (!params[i].ty.name || strcmp(params[i].ty.name, "Any") == 0) continue;
+        if (!params[i].ty.name || strcmp(params[i].ty.name, "Any") == 0 || strcmp(params[i].ty.name, "any") == 0) continue;
         /* Resolve slot: slot 0 is reserved, params start at slot 1 (or first_param-adjusted) */
         int slot = resolve_local(current, params[i].name);
         if (slot < 0) continue;

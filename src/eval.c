@@ -745,7 +745,7 @@ static bool phase_compatible(PhaseTag value_phase, AstPhase param_phase) {
 
 static bool type_matches_value(const LatValue *val, const TypeExpr *te) {
     if (!te || !te->name) return true;  /* no annotation = Any */
-    if (strcmp(te->name, "Any") == 0) return true;
+    if (strcmp(te->name, "Any") == 0 || strcmp(te->name, "any") == 0) return true;
     if (te->kind == TYPE_ARRAY) {
         if (val->type != VAL_ARRAY) return false;
         if (!te->inner) return true;  /* [Any] or unspecified inner */

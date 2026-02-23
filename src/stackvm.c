@@ -2530,7 +2530,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
 /* ── Runtime type checking (mirrors eval.c type_matches_value) ── */
 
 static bool stackvm_type_matches(const LatValue *val, const char *type_name) {
-    if (!type_name || strcmp(type_name, "Any") == 0) return true;
+    if (!type_name || strcmp(type_name, "Any") == 0 || strcmp(type_name, "any") == 0) return true;
     if (strcmp(type_name, "Int") == 0)     return val->type == VAL_INT;
     if (strcmp(type_name, "Float") == 0)   return val->type == VAL_FLOAT;
     if (strcmp(type_name, "String") == 0)  return val->type == VAL_STR;

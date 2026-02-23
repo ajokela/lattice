@@ -2639,7 +2639,7 @@ static void compile_function_body(RegFuncType type, const char *name,
     /* Emit runtime parameter type checks */
     for (size_t i = 0; i < param_count; i++) {
         if (params[i].is_variadic) break;
-        if (!params[i].ty.name || strcmp(params[i].ty.name, "Any") == 0) continue;
+        if (!params[i].ty.name || strcmp(params[i].ty.name, "Any") == 0 || strcmp(params[i].ty.name, "any") == 0) continue;
         uint8_t preg = local_reg((int)(i + 1));
         uint16_t type_ki = add_constant(value_string(params[i].ty.name));
         emit_ABx(ROP_CHECK_TYPE, preg, type_ki, line);

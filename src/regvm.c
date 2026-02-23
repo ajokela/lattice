@@ -5100,7 +5100,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         const char *expected = frame->chunk->constants[bx].as.str_val;
         /* Type matching logic (mirrors vm_type_matches from stack VM) */
         bool type_ok = false;
-        if (!expected || strcmp(expected, "Any") == 0) {
+        if (!expected || strcmp(expected, "Any") == 0 || strcmp(expected, "any") == 0) {
             type_ok = true;
         } else if (strcmp(expected, "Int") == 0) {
             type_ok = R[a].type == VAL_INT;
