@@ -1273,6 +1273,8 @@ fn parse_closure_literal() {
         parse_expression()
     }
 
+    emit_byte(OP_DEFER_RUN, line)
+    emit_byte(0, line)  // scope_depth 0 = run all defers
     emit_byte(OP_RETURN, line)
 
     let fn_snap = snapshot_chunk()
@@ -1535,6 +1537,8 @@ fn parse_fn_declaration() {
     expect(nil, "}")
 
     emit_byte(OP_UNIT, line)
+    emit_byte(OP_DEFER_RUN, line)
+    emit_byte(0, line)  // scope_depth 0 = run all defers
     emit_byte(OP_RETURN, line)
 
     let fn_snap = snapshot_chunk()
@@ -1569,12 +1573,14 @@ fn parse_fn_declaration() {
 }
 
 fn parse_statement_or_expression() {
+    let line = current_line()
     if is_statement_start() {
         parse_statement()
     } else {
         parse_expression()
-        emit_byte(OP_POP, current_line())
+        emit_byte(OP_POP, line)
     }
+    emit_byte(OP_RESET_EPHEMERAL, line)
 }
 
 fn parse_return() {
@@ -1586,6 +1592,7 @@ fn parse_return() {
         parse_expression()
     }
     emit_byte(OP_DEFER_RUN, line)
+    emit_byte(0, line)  // scope_depth 0 = run all defers
     emit_byte(OP_RETURN, line)
 }
 
@@ -1818,11 +1825,9 @@ fn parse_assignment() {
 }
 
 fn parse_compound_assignment_target(name: any, line: any) {
-    emit_variable_get(name, line)
-
-    // Navigate to the second-to-last access, collecting info about the last
     // For simplicity, handle single-level: obj.field = or obj[idx] =
     if peek_text() == "." {
+        emit_variable_get(name, line)
         advance()
         let field = expect("identifier", nil).text
         let op = advance().text
@@ -1848,16 +1853,43 @@ fn parse_compound_assignment_target(name: any, line: any) {
         emit_byte(OP_POP, line)
     } else { if peek_text() == "[" {
         advance()
-        parse_expression()
-        expect(nil, "]")
-        let op = advance().text
-        if op == "=" {
+        let slot = resolve_local(name)
+        if slot >= 0 {
+            // Local array: use OP_SET_INDEX_LOCAL for in-place mutation
+            // C compiler order: push value, push index, SET_INDEX_LOCAL slot
+            // But source is: name[index] = value — so parse index first, then value, then swap
             parse_expression()
-            emit_byte(OP_SET_INDEX, line)
+            expect(nil, "]")
+            let op = advance().text
+            if op == "=" {
+                parse_expression()
+                // Stack: [index, value]. Need [value, index].
+                emit_byte(OP_SWAP, line)
+                emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
+            } else {
+                compiler_error("compound index assignment not yet supported", line)
+            }
         } else {
-            compiler_error("compound index assignment not yet supported", line)
+            // Non-local: use OP_SET_INDEX
+            // VM expects stack: [value, object, index] (value deepest)
+            // Parse index, then ], =, then value. Then push object and index.
+            parse_expression()
+            expect(nil, "]")
+            let op = advance().text
+            if op == "=" {
+                parse_expression()
+                // Stack: [index, value]. Need [value, object, index].
+                emit_byte(OP_SWAP, line)
+                // Stack: [value, index]. Now push object and reorder.
+                emit_variable_get(name, line)
+                emit_byte(OP_SWAP, line)
+                // Stack: [value, object, index]. Correct!
+                emit_byte(OP_SET_INDEX, line)
+            } else {
+                compiler_error("compound index assignment not yet supported", line)
+            }
+            emit_byte(OP_POP, line)
         }
-        emit_byte(OP_POP, line)
     } }
 }
 

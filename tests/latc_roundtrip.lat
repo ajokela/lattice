@@ -1,0 +1,337 @@
+// Comprehensive round-trip test for the self-hosted compiler.
+// Run direct, via self-hosted .latc, and via C .latc — all three must match.
+
+fn add(a: any, b: any) {
+    return a + b
+}
+
+fn factorial(n: any) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn nothing() {
+}
+
+fn sum3(a: any, b: any, c: any) {
+    return a + b + c
+}
+
+fn make_adder(n: any) {
+    return |x| { return x + n }
+}
+
+fn counter(start: any) {
+    flux n = start
+    return |inc| {
+        n = n + inc
+        return n
+    }
+}
+
+fn square(n: any) { return n * n }
+fn add1(n: any) { return n + 1 }
+
+fn test_arithmetic() {
+    print("--- arithmetic ---")
+    print(2 + 3)
+    print(10 - 4)
+    print(3 * 7)
+    print(20 / 4)
+    print(17 % 5)
+    print(-42)
+    print(1 + 2 * 3)
+    print((1 + 2) * 3)
+    print(10 / 2 + 3)
+
+    // comparisons
+    print(3 < 5)
+    print(5 < 3)
+    print(3 > 5)
+    print(5 > 3)
+    print(3 <= 3)
+    print(3 >= 4)
+    print(3 == 3)
+    print(3 != 4)
+
+    // boolean logic
+    print(true && false)
+    print(true || false)
+    print(!true)
+    print(!false)
+
+    // bitwise
+    print(6 & 3)
+    print(6 | 3)
+    print(6 ^ 3)
+    print(~0)
+    print(1 << 3)
+    print(16 >> 2)
+}
+
+fn test_variables() {
+    print("--- variables ---")
+    let x = 10
+    print(x)
+
+    flux y = 20
+    print(y)
+    y = 30
+    print(y)
+
+    // shadowing
+    let a = 1
+    if true {
+        let a = 2
+        print(a)
+    }
+    print(a)
+
+    // compound assignment
+    flux c = 10
+    c += 5
+    print(c)
+    c -= 3
+    print(c)
+    c *= 2
+    print(c)
+    c /= 6
+    print(c)
+    c %= 3
+    print(c)
+}
+
+fn test_control_flow() {
+    print("--- control flow ---")
+
+    // if/else
+    if true {
+        print("if-true")
+    }
+    if false {
+        print("FAIL")
+    } else {
+        print("else")
+    }
+
+    // else if
+    let n = 2
+    if n == 1 {
+        print("FAIL")
+    } else if n == 2 {
+        print("elseif")
+    } else {
+        print("FAIL")
+    }
+
+    // while + break
+    flux i = 0
+    while i < 5 {
+        if i == 3 {
+            break
+        }
+        print(i)
+        i = i + 1
+    }
+
+    // for..in range
+    for x in 0..4 {
+        print(x)
+    }
+
+    // loop + break + continue
+    flux j = 0
+    loop {
+        if j >= 5 {
+            break
+        }
+        if j == 2 {
+            j = j + 1
+            continue
+        }
+        print(j)
+        j = j + 1
+    }
+}
+
+fn test_functions() {
+    print("--- functions ---")
+    print(add(3, 4))
+    print(factorial(5))
+    print(nothing())
+    print(sum3(10, 20, 30))
+}
+
+fn test_arrays() {
+    print("--- arrays ---")
+
+    let arr = [10, 20, 30]
+    print(arr[0])
+    print(arr[1])
+    print(arr[2])
+    print(len(arr))
+
+    // index write
+    flux nums = [0, 0, 0]
+    nums[1] = 42
+    print(nums[1])
+
+    // for-in iteration
+    let vals = [100, 200, 300]
+    for v in vals {
+        print(v)
+    }
+}
+
+fn test_strings() {
+    print("--- strings ---")
+
+    // concatenation
+    let greeting = "hello" + " " + "world"
+    print(greeting)
+
+    // interpolation
+    let name = "lattice"
+    print("lang: ${name}")
+
+    let x = 42
+    print("x is ${x}")
+
+    // len
+    print(len("abc"))
+
+    // string comparison
+    print("abc" == "abc")
+    print("abc" != "def")
+    print("abc" == "def")
+}
+
+fn test_closures() {
+    print("--- closures ---")
+
+    // basic capture
+    let x = 10
+    let add_x = |n| { return n + x }
+    print(add_x(5))
+
+    // returned from function
+    let add3 = make_adder(3)
+    print(add3(7))
+
+    // multi-statement closure
+    let compute = |a, b| {
+        let sum = a + b
+        let product = a * b
+        return sum + product
+    }
+    print(compute(3, 4))
+
+    // single-expression body
+    let double = |n| n * 2
+    print(double(8))
+}
+
+fn test_match() {
+    print("--- match ---")
+
+    // string match
+    let op = "+"
+    match op {
+        "+" => print("add"),
+        "-" => print("sub"),
+        _ => print("FAIL")
+    }
+
+    // integer match
+    let n = 3
+    match n {
+        1 => print("FAIL"),
+        2 => print("FAIL"),
+        3 => print("three"),
+        _ => print("FAIL")
+    }
+
+    // wildcard
+    let z = "unknown"
+    match z {
+        "a" => print("FAIL"),
+        _ => print("wildcard")
+    }
+
+    // match as expression
+    let result = match "hello" {
+        "world" => "w",
+        "hello" => "h",
+        _ => "?"
+    }
+    print(result)
+
+    // no-match returns nil
+    let miss = match 99 {
+        1 => "one",
+        2 => "two"
+    }
+    print(miss)
+}
+
+fn test_try_catch() {
+    print("--- try/catch ---")
+
+    try {
+        let x = 1 / 0
+        print("FAIL")
+    } catch e {
+        print("caught")
+    }
+
+    // normal flow (no error)
+    try {
+        let y = 2 + 3
+        print(y)
+    } catch e {
+        print("FAIL")
+    }
+}
+
+fn test_nested() {
+    print("--- nested ---")
+
+    // function returning closure
+    let c = counter(10)
+    print(c(1))
+    print(c(5))
+
+    // nested function calls
+    print(add1(square(4)))
+
+    // closures in arrays
+    let fns = [|x| x + 1, |x| x * 2, |x| x - 3]
+    for f in fns {
+        print(f(10))
+    }
+
+    // nested loops
+    for i in 0..3 {
+        for j in 0..3 {
+            if i == j {
+                print(i)
+            }
+        }
+    }
+}
+
+fn main() {
+    test_arithmetic()
+    test_variables()
+    test_control_flow()
+    test_functions()
+    test_arrays()
+    test_strings()
+    test_closures()
+    test_match()
+    test_try_catch()
+    test_nested()
+    print("ALL PASSED")
+}
