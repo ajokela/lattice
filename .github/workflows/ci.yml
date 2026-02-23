@@ -42,8 +42,8 @@ jobs:
       - name: Build extensions
         run: make ext-sqlite
 
-      - name: ASan + UBSan
-        run: make asan
+      - name: ASan + UBSan (all backends)
+        run: make asan-all
         env:
           ASAN_OPTIONS: detect_leaks=0
 
