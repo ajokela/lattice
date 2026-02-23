@@ -1,5 +1,5 @@
-#ifndef COMPILER_H
-#define COMPILER_H
+#ifndef STACKCOMPILER_H
+#define STACKCOMPILER_H
 
 #include "ast.h"
 #include "chunk.h"
@@ -46,17 +46,17 @@ typedef struct Compiler {
 
 /* Compile a program to bytecode. Returns a Chunk on success.
  * On error, returns NULL and sets *error to a heap-allocated message. */
-Chunk *compile(const Program *prog, char **error);
+Chunk *stack_compile(const Program *prog, char **error);
 
 /* Compile a module (does not auto-call main). */
-Chunk *compile_module(const Program *prog, char **error);
+Chunk *stack_compile_module(const Program *prog, char **error);
 
-/* Compile for REPL: like compile_module but keeps last expression on stack
+/* Compile for REPL: like stack_compile_module but keeps last expression on stack
  * as the return value, and does NOT free known enums (they persist across
- * REPL iterations). Call compiler_free_known_enums() on REPL exit. */
-Chunk *compile_repl(const Program *prog, char **error);
+ * REPL iterations). Call stack_compiler_free_known_enums() on REPL exit. */
+Chunk *stack_compile_repl(const Program *prog, char **error);
 
 /* Free the compiler's known-enum table. Call once when the bytecode REPL exits. */
-void compiler_free_known_enums(void);
+void stack_compiler_free_known_enums(void);
 
-#endif /* COMPILER_H */
+#endif /* STACKCOMPILER_H */

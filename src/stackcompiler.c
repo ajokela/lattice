@@ -1,5 +1,5 @@
-#include "compiler.h"
-#include "opcode.h"
+#include "stackcompiler.h"
+#include "stackopcode.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -2450,7 +2450,7 @@ static void compile_function_body(FunctionType type, const char *name,
 
 /* ── Public API ── */
 
-Chunk *compile(const Program *prog, char **error) {
+Chunk *stack_compile(const Program *prog, char **error) {
     Compiler top;
     compiler_init(&top, NULL, FUNC_SCRIPT);
     *error = NULL;
@@ -2588,7 +2588,7 @@ Chunk *compile(const Program *prog, char **error) {
     return result;
 }
 
-Chunk *compile_module(const Program *prog, char **error) {
+Chunk *stack_compile_module(const Program *prog, char **error) {
     Compiler top;
     compiler_init(&top, NULL, FUNC_SCRIPT);
     *error = NULL;
@@ -2691,13 +2691,23 @@ Chunk *compile_module(const Program *prog, char **error) {
     emit_byte(OP_RETURN, 0);
 
     Chunk *result = top.chunk;
+
+    /* Copy export metadata from Program to Chunk */
+    if (prog->has_exports) {
+        result->has_exports = true;
+        result->export_count = prog->export_count;
+        result->export_names = malloc(prog->export_count * sizeof(char *));
+        for (size_t i = 0; i < prog->export_count; i++)
+            result->export_names[i] = strdup(prog->export_names[i]);
+    }
+
     compiler_cleanup(&top);
     current = NULL;
     free_known_enums();
     return result;
 }
 
-Chunk *compile_repl(const Program *prog, char **error) {
+Chunk *stack_compile_repl(const Program *prog, char **error) {
     Compiler top;
     compiler_init(&top, NULL, FUNC_SCRIPT);
     *error = NULL;
@@ -2822,7 +2832,7 @@ Chunk *compile_repl(const Program *prog, char **error) {
     return result;
 }
 
-void compiler_free_known_enums(void) {
+void stack_compiler_free_known_enums(void) {
     free_known_enums();
 }
 

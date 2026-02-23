@@ -3,10 +3,11 @@
 #include "parser.h"
 #include "eval.h"
 #include "phase_check.h"
-#include "compiler.h"
-#include "vm.h"
+#include "stackcompiler.h"
+#include "stackvm.h"
 #include "latc.h"
 #include "regvm.h"
+#include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,7 +140,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 0;
     }
 
-    /* Register VM (POC) */
+    /* Register StackVM (POC) */
     if (regvm_mode) {
         value_set_heap(NULL);
         value_set_arena(NULL);
@@ -157,25 +158,22 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             return 1;
         }
 
-        RegVM rvm;
-        regvm_init(&rvm);
+        LatRuntime rrt;
+        lat_runtime_init(&rrt);
+        if (script_dir)
+            rrt.script_dir = strdup(script_dir);
+        rrt.prog_argc = saved_argc;
+        rrt.prog_argv = saved_argv;
 
-        /* Borrow native functions from the stack VM's env.
-         * Create a temp stack VM, steal its env, then give it a dummy. */
-        {
-            VM tmp_vm;
-            vm_init(&tmp_vm);
-            env_free(rvm.env);
-            rvm.env = tmp_vm.env;
-            tmp_vm.env = env_new();
-            vm_free(&tmp_vm);
-        }
+        RegVM rvm;
+        regvm_init(&rvm, &rrt);
 
         LatValue rresult;
         RegVMResult rvm_res = regvm_run(&rvm, rchunk, &rresult);
         if (rvm_res != REGVM_OK) {
             fprintf(stderr, "regvm error: %s\n", rvm.error);
             regvm_free(&rvm);
+            lat_runtime_free(&rrt);
             regchunk_free(rchunk);
             evaluator_free(ev);
             program_free(&prog);
@@ -186,6 +184,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         }
         value_free(&rresult);
         regvm_free(&rvm);
+        lat_runtime_free(&rrt);
         regchunk_free(rchunk);
         evaluator_free(ev);
         program_free(&prog);
@@ -195,15 +194,15 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 0;
     }
 
-    /* Bytecode VM (default) */
-    /* Disconnect the fluid heap so the compiler and VM use plain
+    /* Bytecode StackVM (default) */
+    /* Disconnect the fluid heap so the compiler and StackVM use plain
      * malloc/free. The DualHeap doesn't support realloc, which
-     * the VM needs for growing arrays. */
+     * the StackVM needs for growing arrays. */
     value_set_heap(NULL);
     value_set_arena(NULL);
 
     char *comp_err = NULL;
-    Chunk *chunk = compile(&prog, &comp_err);
+    Chunk *chunk = stack_compile(&prog, &comp_err);
     if (!chunk) {
         fprintf(stderr, "compile error: %s\n", comp_err);
         free(comp_err);
@@ -215,18 +214,22 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 1;
     }
 
-    VM vm;
-    vm_init(&vm);
+    LatRuntime rt;
+    lat_runtime_init(&rt);
     if (script_dir)
-        vm.script_dir = strdup(script_dir);
-    vm.prog_argc = saved_argc;
-    vm.prog_argv = saved_argv;
+        rt.script_dir = strdup(script_dir);
+    rt.prog_argc = saved_argc;
+    rt.prog_argv = saved_argv;
+
+    StackVM vm;
+    stackvm_init(&vm, &rt);
     LatValue result;
-    VMResult vm_res = vm_run(&vm, chunk, &result);
-    if (vm_res != VM_OK) {
+    StackVMResult vm_res = stackvm_run(&vm, chunk, &result);
+    if (vm_res != STACKVM_OK) {
         fprintf(stderr, "vm error: %s\n", vm.error);
-        vm_print_stack_trace(&vm);
-        vm_free(&vm);
+        stackvm_print_stack_trace(&vm);
+        stackvm_free(&vm);
+        lat_runtime_free(&rt);
         chunk_free(chunk);
         evaluator_free(ev);
         program_free(&prog);
@@ -236,7 +239,8 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 1;
     }
     value_free(&result);
-    vm_free(&vm);
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
     chunk_free(chunk);
     evaluator_free(ev);
     program_free(&prog);
@@ -264,22 +268,27 @@ static int run_latc_file(const char *path) {
     value_set_heap(NULL);
     value_set_arena(NULL);
 
-    VM vm;
-    vm_init(&vm);
-    vm.prog_argc = saved_argc;
-    vm.prog_argv = saved_argv;
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    rt.prog_argc = saved_argc;
+    rt.prog_argv = saved_argv;
+
+    StackVM vm;
+    stackvm_init(&vm, &rt);
 
     LatValue result;
-    VMResult vm_res = vm_run(&vm, chunk, &result);
-    if (vm_res != VM_OK) {
+    StackVMResult vm_res = stackvm_run(&vm, chunk, &result);
+    if (vm_res != STACKVM_OK) {
         fprintf(stderr, "vm error: %s\n", vm.error);
-        vm_print_stack_trace(&vm);
-        vm_free(&vm);
+        stackvm_print_stack_trace(&vm);
+        stackvm_free(&vm);
+        lat_runtime_free(&rt);
         chunk_free(chunk);
         return 1;
     }
     value_free(&result);
-    vm_free(&vm);
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
     chunk_free(chunk);
     return 0;
 }
@@ -341,14 +350,17 @@ static void repl(void) {
     printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
 
-    /* Disconnect the fluid heap so the compiler and VM use plain malloc/free */
+    /* Disconnect the fluid heap so the compiler and StackVM use plain malloc/free */
     value_set_heap(NULL);
     value_set_arena(NULL);
 
-    VM vm;
-    vm_init(&vm);
-    vm.prog_argc = saved_argc;
-    vm.prog_argv = saved_argv;
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    rt.prog_argc = saved_argc;
+    rt.prog_argv = saved_argv;
+
+    StackVM vm;
+    stackvm_init(&vm, &rt);
 
     /* Keep programs/tokens alive — scope/select store Expr* pointers in chunks */
     size_t prog_cap = 16, prog_count = 0;
@@ -406,7 +418,7 @@ static void repl(void) {
 
         /* Compile for REPL (keeps last expression value on stack) */
         char *comp_err = NULL;
-        Chunk *chunk = compile_repl(&prog, &comp_err);
+        Chunk *chunk = stack_compile_repl(&prog, &comp_err);
         if (!chunk) {
             fprintf(stderr, "compile error: %s\n", comp_err);
             free(comp_err);
@@ -427,13 +439,13 @@ static void repl(void) {
 
         /* Run */
         LatValue result;
-        VMResult vm_res = vm_run(&vm, chunk, &result);
-        if (vm_res != VM_OK) {
+        StackVMResult vm_res = stackvm_run(&vm, chunk, &result);
+        if (vm_res != STACKVM_OK) {
             fprintf(stderr, "error: %s\n", vm.error);
-            vm_print_stack_trace(&vm);
+            stackvm_print_stack_trace(&vm);
             free(vm.error);
             vm.error = NULL;
-            /* Reset VM state for next iteration */
+            /* Reset StackVM state for next iteration */
             for (LatValue *slot = vm.stack; slot < vm.stack_top; slot++)
                 value_free(slot);
             vm.stack_top = vm.stack;
@@ -473,8 +485,9 @@ static void repl(void) {
         accumulated[0] = '\0';
     }
 
-    vm_free(&vm);
-    compiler_free_known_enums();
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
+    stack_compiler_free_known_enums();
     for (size_t i = 0; i < prog_count; i++)
         program_free(&kept_progs[i]);
     free(kept_progs);
@@ -494,18 +507,13 @@ static void repl_regvm(void) {
     value_set_heap(NULL);
     value_set_arena(NULL);
 
-    RegVM rvm;
-    regvm_init(&rvm);
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    rt.prog_argc = saved_argc;
+    rt.prog_argv = saved_argv;
 
-    /* Borrow native functions from a temp stack VM */
-    {
-        VM tmp_vm;
-        vm_init(&tmp_vm);
-        env_free(rvm.env);
-        rvm.env = tmp_vm.env;
-        tmp_vm.env = env_new();
-        vm_free(&tmp_vm);
-    }
+    RegVM rvm;
+    regvm_init(&rvm, &rt);
 
     /* Keep programs/tokens alive for struct/fn/enum lifetime */
     size_t prog_cap = 16, prog_count = 0;
@@ -588,7 +596,7 @@ static void repl_regvm(void) {
             fprintf(stderr, "error: %s\n", rvm.error);
             free(rvm.error);
             rvm.error = NULL;
-            /* Reset VM state for next iteration */
+            /* Reset StackVM state for next iteration */
             for (size_t i = 0; i < rvm.reg_stack_top; i++)
                 value_free_inline(&rvm.reg_stack[i]);
             rvm.reg_stack_top = 0;
@@ -604,7 +612,7 @@ static void repl_regvm(void) {
             value_free(&result);
         }
 
-        /* Track chunk with VM (don't free — closures may reference sub-chunks) */
+        /* Track chunk with StackVM (don't free — closures may reference sub-chunks) */
         regvm_track_chunk(&rvm, chunk);
 
         /* Keep program and tokens alive */
@@ -623,6 +631,7 @@ static void repl_regvm(void) {
     }
 
     regvm_free(&rvm);
+    lat_runtime_free(&rt);
     reg_compiler_free_known_enums();
     for (size_t i = 0; i < prog_count; i++)
         program_free(&kept_progs[i]);
@@ -886,7 +895,7 @@ int main(int argc, char **argv) {
         value_set_arena(NULL);
 
         char *comp_err = NULL;
-        Chunk *chunk = compile(&prog, &comp_err);
+        Chunk *chunk = stack_compile(&prog, &comp_err);
         if (!chunk) {
             fprintf(stderr, "compile error: %s\n", comp_err);
             free(comp_err);

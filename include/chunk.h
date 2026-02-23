@@ -24,6 +24,9 @@ typedef struct {
     bool      fn_has_variadic; /* Whether last param is variadic */
     uint8_t  *param_phases;   /* Per-param phase constraint (AstPhase values, NULL if none) */
     int       param_phase_count;
+    char    **export_names;   /* Module export list (NULL = export-all) */
+    size_t    export_count;
+    bool      has_exports;    /* true if module uses explicit exports */
 } Chunk;
 
 Chunk *chunk_new(void);

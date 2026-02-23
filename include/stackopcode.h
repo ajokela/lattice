@@ -1,5 +1,5 @@
-#ifndef OPCODE_H
-#define OPCODE_H
+#ifndef STACKOPCODE_H
+#define STACKOPCODE_H
 
 typedef enum {
     /* Stack manipulation */
@@ -159,4 +159,4 @@ typedef enum {
 
 const char *opcode_name(Opcode op);
 
-#endif /* OPCODE_H */
+#endif /* STACKOPCODE_H */

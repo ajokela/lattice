@@ -18,10 +18,11 @@
 #include "env_ops.h"
 #include "time_ops.h"
 #include "fs_ops.h"
-#include "compiler.h"
-#include "vm.h"
+#include "stackcompiler.h"
+#include "stackvm.h"
 #include "latc.h"
 #include "regvm.h"
+#include "runtime.h"
 #include "test_backend.h"
 
 /* Import test harness from test_main.c */
@@ -98,7 +99,7 @@ static char *run_capture(const char *source) {
         value_set_heap(NULL);
         value_set_arena(NULL);
         char *comp_err = NULL;
-        Chunk *chunk = compile(&prog, &comp_err);
+        Chunk *chunk = stack_compile(&prog, &comp_err);
         if (!chunk) {
             fflush(stdout);
             dup2(old_stdout, fileno(stdout));
@@ -114,11 +115,13 @@ static char *run_capture(const char *source) {
             free(comp_err);
             return out;
         }
-        VM vm;
-        vm_init(&vm);
+        LatRuntime rt;
+        lat_runtime_init(&rt);
+        StackVM vm;
+        stackvm_init(&vm, &rt);
         LatValue result;
-        VMResult vm_res = vm_run(&vm, chunk, &result);
-        if (vm_res != VM_OK) {
+        StackVMResult vm_res = stackvm_run(&vm, chunk, &result);
+        if (vm_res != STACKVM_OK) {
             eval_err_str = strdup(vm.error ? vm.error : "vm error");
         } else {
             value_free(&result);
@@ -126,7 +129,8 @@ static char *run_capture(const char *source) {
         fflush(stdout);
         dup2(old_stdout, fileno(stdout));
         close(old_stdout);
-        vm_free(&vm);
+        stackvm_free(&vm);
+        lat_runtime_free(&rt);
         chunk_free(chunk);
     } else if (test_backend == BACKEND_REG_VM) {
         value_set_heap(NULL);
@@ -148,17 +152,10 @@ static char *run_capture(const char *source) {
             free(rcomp_err);
             return out;
         }
+        LatRuntime rrt;
+        lat_runtime_init(&rrt);
         RegVM rvm;
-        regvm_init(&rvm);
-        /* Borrow native functions from a temp stack VM */
-        {
-            VM tmp_vm;
-            vm_init(&tmp_vm);
-            env_free(rvm.env);
-            rvm.env = tmp_vm.env;
-            tmp_vm.env = env_new();
-            vm_free(&tmp_vm);
-        }
+        regvm_init(&rvm, &rrt);
         LatValue rresult;
         RegVMResult rvm_res = regvm_run(&rvm, rchunk, &rresult);
         if (rvm_res != REGVM_OK) {
@@ -170,6 +167,7 @@ static char *run_capture(const char *source) {
         dup2(old_stdout, fileno(stdout));
         close(old_stdout);
         regvm_free(&rvm);
+        lat_runtime_free(&rrt);
         regchunk_free(rchunk);
     } else {
         fflush(stdout);
@@ -1441,7 +1439,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.13"
+        "0.3.14"
     );
 }
 
@@ -5396,7 +5394,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.13"
+        "Hello, Lattice!\nVersion 0.3.14"
     );
 }
 
@@ -5811,6 +5809,91 @@ static void test_import_missing_export(void) {
         "    print(nonexistent)\n"
         "}\n",
         "EVAL_ERROR:module 'tests/modules/math_utils' does not export 'nonexistent'"
+    );
+}
+
+/* ── Export system ── */
+
+static void test_export_selective_visible(void) {
+    ASSERT_OUTPUT(
+        "import { add } from \"tests/modules/export_explicit\"\n"
+        "fn main() {\n"
+        "    print(add(1, 2))\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_export_selective_variable(void) {
+    ASSERT_OUTPUT(
+        "import { PI } from \"tests/modules/export_explicit\"\n"
+        "fn main() {\n"
+        "    print(PI)\n"
+        "}\n",
+        "3.14159"
+    );
+}
+
+static void test_export_hidden_name(void) {
+    ASSERT_OUTPUT(
+        "import { secret } from \"tests/modules/export_explicit\"\n"
+        "fn main() {\n"
+        "    print(secret)\n"
+        "}\n",
+        "EVAL_ERROR:module 'tests/modules/export_explicit' does not export 'secret'"
+    );
+}
+
+static void test_export_alias_filters(void) {
+    ASSERT_OUTPUT(
+        "import \"tests/modules/export_explicit\" as m\n"
+        "fn main() {\n"
+        "    print(m.add(1, 2))\n"
+        "    print(m.PI)\n"
+        "}\n",
+        "3\n3.14159"
+    );
+}
+
+static void test_export_alias_hidden(void) {
+    /* Non-exported names should not be in the module map.
+     * VM backends return nil, tree-walk throws error — both indicate hidden. */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/export_explicit\" as m\n"
+        "fn main() {\n"
+        "    try {\n"
+        "        let v = m.secret\n"
+        "        print(v == nil)\n"
+        "    } catch e {\n"
+        "        print(true)\n"
+        "    }\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_no_export_keyword_legacy(void) {
+    /* math_utils.lat has no export keywords → everything exported */
+    ASSERT_OUTPUT(
+        "import { add, sub, PI } from \"tests/modules/math_utils\"\n"
+        "fn main() {\n"
+        "    print(add(1, 2))\n"
+        "    print(sub(5, 3))\n"
+        "    print(PI)\n"
+        "}\n",
+        "3\n2\n3.14159"
+    );
+}
+
+static void test_export_struct(void) {
+    ASSERT_OUTPUT(
+        "import { make_point } from \"tests/modules/export_struct\"\n"
+        "fn main() {\n"
+        "    let p = make_point(3, 4)\n"
+        "    print(p.x)\n"
+        "    print(p.y)\n"
+        "}\n",
+        "3\n4"
     );
 }
 
@@ -6834,7 +6917,7 @@ static void test_history_basic(void) {
 }
 
 static void test_history_has_line_and_fn(void) {
-    /* Tree-walker sets line=0, fn=nil; VM sets real values.
+    /* Tree-walker sets line=0, fn=nil; StackVM sets real values.
      * This test verifies the keys exist in the map. */
     ASSERT_OUTPUT(
         "fn main() {\n"
@@ -8566,7 +8649,7 @@ static char *latc_round_trip_capture(const char *source) {
     value_set_arena(NULL);
 
     char *comp_err = NULL;
-    Chunk *chunk = compile(&prog, &comp_err);
+    Chunk *chunk = stack_compile(&prog, &comp_err);
     program_free(&prog);
     for (size_t i = 0; i < tokens.len; i++)
         token_free(lat_vec_get(&tokens, i));
@@ -8598,10 +8681,12 @@ static char *latc_round_trip_capture(const char *source) {
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
-    VM vm;
-    vm_init(&vm);
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    StackVM vm;
+    stackvm_init(&vm, &rt);
     LatValue result;
-    VMResult vm_res = vm_run(&vm, loaded, &result);
+    StackVMResult vm_res = stackvm_run(&vm, loaded, &result);
 
     fflush(stdout);
     dup2(old_stdout, fileno(stdout));
@@ -8616,7 +8701,7 @@ static char *latc_round_trip_capture(const char *source) {
     fclose(tmp);
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
 
-    if (vm_res != VM_OK) {
+    if (vm_res != STACKVM_OK) {
         free(output);
         size_t elen = strlen(vm.error) + 16;
         output = malloc(elen);
@@ -8624,7 +8709,8 @@ static char *latc_round_trip_capture(const char *source) {
     } else {
         value_free(&result);
     }
-    vm_free(&vm);
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
     chunk_free(loaded);
     return output;
 }
@@ -8708,7 +8794,7 @@ static void test_latc_file_save_load(void) {
     value_set_arena(NULL);
 
     char *comp_err = NULL;
-    Chunk *chunk = compile(&prog, &comp_err);
+    Chunk *chunk = stack_compile(&prog, &comp_err);
     ASSERT(chunk != NULL);
 
     /* Save to temp file */
@@ -8727,10 +8813,12 @@ static void test_latc_file_save_load(void) {
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
-    VM vm;
-    vm_init(&vm);
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    StackVM vm;
+    stackvm_init(&vm, &rt);
     LatValue result;
-    VMResult vm_res = vm_run(&vm, loaded, &result);
+    StackVMResult vm_res = stackvm_run(&vm, loaded, &result);
 
     fflush(stdout);
     dup2(old_stdout, fileno(stdout));
@@ -8745,18 +8833,145 @@ static void test_latc_file_save_load(void) {
     fclose(tmp);
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
 
-    ASSERT(vm_res == VM_OK);
+    ASSERT(vm_res == STACKVM_OK);
     ASSERT_STR_EQ(output, "file round-trip");
 
     free(output);
     value_free(&result);
-    vm_free(&vm);
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
     chunk_free(loaded);
     program_free(&prog);
     for (size_t i = 0; i < tokens.len; i++)
         token_free(lat_vec_get(&tokens, i));
     lat_vec_free(&tokens);
     unlink(tmp_path);
+}
+
+/* ── Built-in stdlib module tests ── */
+
+static void test_builtin_math_sin(void) {
+    char *out = run_capture(
+        "import { sin } from \"math\"\n"
+        "fn main() { print(sin(0)) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "0");
+    free(out);
+}
+
+static void test_builtin_math_pi(void) {
+    char *out = run_capture(
+        "import { PI } from \"math\"\n"
+        "fn main() { print(PI()) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT(strncmp(out, "3.14159", 7) == 0);
+    free(out);
+}
+
+static void test_builtin_math_alias(void) {
+    char *out = run_capture(
+        "import \"math\" as m\n"
+        "fn main() { print(m.sqrt(4)) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "2");
+    free(out);
+}
+
+static void test_builtin_fs_exists(void) {
+    char *out = run_capture(
+        "import { file_exists } from \"fs\"\n"
+        "fn main() { print(file_exists(\"Makefile\")) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "true");
+    free(out);
+}
+
+static void test_builtin_json_parse(void) {
+    char *out = run_capture(
+        "import { parse } from \"json\"\n"
+        "fn main() {\n"
+        "  let arr = parse(\"[1,2,3]\")\n"
+        "  print(len(arr))\n"
+        "}\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "3");
+    free(out);
+}
+
+static void test_builtin_path_join(void) {
+    char *out = run_capture(
+        "import { join } from \"path\"\n"
+        "fn main() { print(join(\"a\", \"b\")) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "a/b");
+    free(out);
+}
+
+static void test_builtin_time_now(void) {
+    char *out = run_capture(
+        "import { now } from \"time\"\n"
+        "fn main() { print(now() > 0) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "true");
+    free(out);
+}
+
+static void test_builtin_regex_match(void) {
+    char *out = run_capture(
+        "import { find_all } from \"regex\"\n"
+        "fn main() { print(len(find_all(\"[0-9]+\", \"abc123\"))) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "1");
+    free(out);
+}
+
+static void test_builtin_os_platform(void) {
+    char *out = run_capture(
+        "import { platform } from \"os\"\n"
+        "fn main() { print(platform()) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "macos");
+    free(out);
+}
+
+static void test_builtin_crypto_base64(void) {
+    char *out = run_capture(
+        "import { base64_encode } from \"crypto\"\n"
+        "fn main() { print(base64_encode(\"hello\")) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "aGVsbG8=");
+    free(out);
+}
+
+static void test_builtin_legacy_sin(void) {
+    /* Flat native sin() should still work */
+    char *out = run_capture(
+        "fn main() { print(sin(0)) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "0");
+    free(out);
+}
+
+static void test_builtin_full_module_access(void) {
+    /* import "math" as m gives a Map; access via dot notation */
+    char *out = run_capture(
+        "import \"math\" as m\n"
+        "fn main() { print(m.floor(3.7)) }\n"
+    );
+    ASSERT(out != NULL);
+    ASSERT_STR_EQ(out, "3");
+    free(out);
 }
 
 void register_stdlib_tests(void) {
@@ -9328,6 +9543,15 @@ void register_stdlib_tests(void) {
     register_test("test_import_not_found", test_import_not_found);
     register_test("test_import_missing_export", test_import_missing_export);
 
+    /* Export system */
+    register_test("test_export_selective_visible", test_export_selective_visible);
+    register_test("test_export_selective_variable", test_export_selective_variable);
+    register_test("test_export_hidden_name", test_export_hidden_name);
+    register_test("test_export_alias_filters", test_export_alias_filters);
+    register_test("test_export_alias_hidden", test_export_alias_hidden);
+    register_test("test_no_export_keyword_legacy", test_no_export_keyword_legacy);
+    register_test("test_export_struct", test_export_struct);
+
     /* repr() builtin */
     register_test("test_repr_int", test_repr_int);
     register_test("test_repr_string", test_repr_string);
@@ -9597,4 +9821,18 @@ void register_stdlib_tests(void) {
     register_test("test_latc_invalid_magic", test_latc_invalid_magic);
     register_test("test_latc_truncated", test_latc_truncated);
     register_test("test_latc_file_save_load", test_latc_file_save_load);
+
+    /* Built-in stdlib modules */
+    register_test("test_builtin_math_sin", test_builtin_math_sin);
+    register_test("test_builtin_math_pi", test_builtin_math_pi);
+    register_test("test_builtin_math_alias", test_builtin_math_alias);
+    register_test("test_builtin_fs_exists", test_builtin_fs_exists);
+    register_test("test_builtin_json_parse", test_builtin_json_parse);
+    register_test("test_builtin_path_join", test_builtin_path_join);
+    register_test("test_builtin_time_now", test_builtin_time_now);
+    register_test("test_builtin_regex_match", test_builtin_regex_match);
+    register_test("test_builtin_os_platform", test_builtin_os_platform);
+    register_test("test_builtin_crypto_base64", test_builtin_crypto_base64);
+    register_test("test_builtin_legacy_sin", test_builtin_legacy_sin);
+    register_test("test_builtin_full_module_access", test_builtin_full_module_access);
 }

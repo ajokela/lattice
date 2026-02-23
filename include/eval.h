@@ -169,6 +169,10 @@ typedef struct Evaluator {
     size_t         defer_cap;
     /* Contract/assertion control */
     bool           assertions_enabled;
+    /* Call stack trace */
+    const char   **call_stack;
+    size_t         call_depth;
+    size_t         call_stack_cap;
 } Evaluator;
 
 /* Create a new evaluator */

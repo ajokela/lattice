@@ -180,6 +180,19 @@ typedef enum {
     ROP_SETINDEX_LOCAL,/* A, B, C   : R[A][R[B]] = R[C] (in-place)     */
     ROP_INVOKE_GLOBAL, /* 2-word: [INVOKE_GLOBAL dst, name_ki, argc] [method_ki, args_base, 0] */
 
+    /* Phase query */
+    ROP_IS_CRYSTAL,    /* A, B      : R[A] = (R[B].phase == CRYSTAL)    */
+
+    /* Type checking */
+    ROP_CHECK_TYPE,    /* A, Bx     : throw if type_name(R[A]) != K[Bx] + err word */
+
+    /* Per-field phase control */
+    ROP_FREEZE_FIELD,  /* A, B, C   : freeze R[A].field[K[B]] (mark CRYSTAL)      */
+    ROP_THAW_FIELD,    /* A, B, C   : mark R[A].field[K[B]] as FLUID (key_phases) */
+
+    /* Require (no scope isolation, defs go to global) */
+    ROP_REQUIRE,       /* A, Bx     : require(K[Bx]), R[A] = bool      */
+
     /* Misc */
     ROP_HALT,          /* stop execution                                */
 

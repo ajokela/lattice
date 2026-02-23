@@ -7,9 +7,10 @@
 #include "parser.h"
 #include "phase_check.h"
 #include "eval.h"
-#include "compiler.h"
-#include "vm.h"
+#include "stackcompiler.h"
+#include "stackvm.h"
 #include "regvm.h"
+#include "runtime.h"
 #include "test_backend.h"
 
 /* Import test macros from test_main.c */
@@ -128,12 +129,12 @@ static int run_source_ok(const char *source, char **err_out) {
         }
         evaluator_free(ev);
     } else if (test_backend == BACKEND_STACK_VM) {
-        /* Bytecode stack VM (production default) */
+        /* Bytecode stack StackVM (production default) */
         value_set_heap(NULL);
         value_set_arena(NULL);
 
         char *comp_err = NULL;
-        Chunk *chunk = compile(&prog, &comp_err);
+        Chunk *chunk = stack_compile(&prog, &comp_err);
         if (!chunk) {
             if (err_out) *err_out = comp_err;
             else free(comp_err);
@@ -144,20 +145,23 @@ static int run_source_ok(const char *source, char **err_out) {
             return 1;
         }
 
-        VM vm;
-        vm_init(&vm);
+        LatRuntime rt;
+        lat_runtime_init(&rt);
+        StackVM vm;
+        stackvm_init(&vm, &rt);
         LatValue vm_result;
-        VMResult vm_res = vm_run(&vm, chunk, &vm_result);
-        if (vm_res != VM_OK) {
+        StackVMResult vm_res = stackvm_run(&vm, chunk, &vm_result);
+        if (vm_res != STACKVM_OK) {
             if (err_out) *err_out = strdup(vm.error ? vm.error : "vm error");
             result = 1;
         } else {
             value_free(&vm_result);
         }
-        vm_free(&vm);
+        stackvm_free(&vm);
+        lat_runtime_free(&rt);
         chunk_free(chunk);
     } else if (test_backend == BACKEND_REG_VM) {
-        /* Register VM (POC) */
+        /* Register StackVM (POC) */
         value_set_heap(NULL);
         value_set_arena(NULL);
 
@@ -173,18 +177,10 @@ static int run_source_ok(const char *source, char **err_out) {
             return 1;
         }
 
+        LatRuntime rrt;
+        lat_runtime_init(&rrt);
         RegVM rvm;
-        regvm_init(&rvm);
-
-        /* Borrow native functions from a temp stack VM */
-        {
-            VM tmp_vm;
-            vm_init(&tmp_vm);
-            env_free(rvm.env);
-            rvm.env = tmp_vm.env;
-            tmp_vm.env = env_new();
-            vm_free(&tmp_vm);
-        }
+        regvm_init(&rvm, &rrt);
 
         LatValue rresult;
         RegVMResult rvm_res = regvm_run(&rvm, rchunk, &rresult);
@@ -195,6 +191,7 @@ static int run_source_ok(const char *source, char **err_out) {
             value_free(&rresult);
         }
         regvm_free(&rvm);
+        lat_runtime_free(&rrt);
         regchunk_free(rchunk);
     }
 

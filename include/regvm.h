@@ -7,6 +7,7 @@
 #include "chunk.h"
 #include "ast.h"
 #include "memory.h"
+#include "runtime.h"
 
 /* ── Register VM structures ── */
 
@@ -21,7 +22,10 @@ struct ObjUpvalue;
 
 /* A "RegChunk" stores 32-bit instructions + a constant pool.
  * We reuse LatValue constants from the existing Chunk infra. */
+#define REGCHUNK_MAGIC 0x524C4154  /* "RLAT" */
+
 typedef struct RegChunk {
+    uint32_t  magic;           /* REGCHUNK_MAGIC — distinguishes from stack-VM Chunk */
     RegInstr *code;          /* 32-bit instruction array */
     size_t    code_len;
     size_t    code_cap;
@@ -34,6 +38,11 @@ typedef struct RegChunk {
     char    **local_names;   /* Debug: register -> variable name */
     size_t    local_name_cap;
     char     *name;          /* Debug: function name */
+    uint8_t  *param_phases;  /* Phase constraints per parameter (AstPhase enum) */
+    int       param_phase_count;
+    char    **export_names;  /* Module export list (NULL = export-all) */
+    size_t    export_count;
+    bool      has_exports;   /* true if module uses explicit exports */
 } RegChunk;
 
 RegChunk *regchunk_new(void);
@@ -74,6 +83,7 @@ typedef struct {
     RegChunk *chunk;
     size_t    frame_index;
     LatValue  *regs;
+    int       scope_depth;   /* Scope depth when defer was registered */
 } RegDefer;
 
 /* The register VM */
@@ -97,14 +107,15 @@ typedef struct RegVM {
     /* Defer stack */
     RegDefer     defers[REGVM_DEFER_MAX];
     size_t       defer_count;
-    /* Module system */
+    /* Per-VM module cache (for OP_IMPORT in dispatch loop) */
     LatMap      *module_cache;
-    char        *script_dir;
     /* Ephemeral bump arena */
     BumpArena   *ephemeral;
+    /* Shared runtime (not owned by RegVM) */
+    LatRuntime  *rt;
 } RegVM;
 
-void regvm_init(RegVM *vm);
+void regvm_init(RegVM *vm, LatRuntime *rt);
 void regvm_free(RegVM *vm);
 RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result);
 RegVMResult regvm_run_repl(RegVM *vm, RegChunk *chunk, LatValue *result);

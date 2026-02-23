@@ -815,4 +815,23 @@ void program_free(Program *p) {
         item_free(&p->items[i]);
     }
     free(p->items);
+    if (p->export_names) {
+        for (size_t i = 0; i < p->export_count; i++)
+            free(p->export_names[i]);
+        free(p->export_names);
+    }
+}
+
+bool module_should_export(const char *name, const char **export_names,
+                          size_t export_count, bool has_exports) {
+    /* Always skip internal metadata */
+    if ((name[0] == '_' && name[1] == '_') || strchr(name, ':'))
+        return false;
+    /* Legacy mode: no export keywords → export everything */
+    if (!has_exports)
+        return true;
+    /* Explicit mode: only export listed names */
+    for (size_t i = 0; i < export_count; i++)
+        if (strcmp(export_names[i], name) == 0) return true;
+    return false;
 }

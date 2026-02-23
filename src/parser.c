@@ -1883,6 +1883,15 @@ static bool parse_impl_block(Parser *p, ImplBlock *out, char **err) {
 
 /* ── Program ── */
 
+static void prog_add_export(Program *prog, const char *name) {
+    if (prog->export_count >= prog->export_cap) {
+        prog->export_cap = prog->export_cap ? prog->export_cap * 2 : 8;
+        prog->export_names = realloc(prog->export_names,
+                                     prog->export_cap * sizeof(char *));
+    }
+    prog->export_names[prog->export_count++] = strdup(name);
+}
+
 Program parser_parse(Parser *p, char **err) {
     Program prog;
     memset(&prog, 0, sizeof(prog));
@@ -1909,18 +1918,32 @@ Program parser_parse(Parser *p, char **err) {
             prog.items = realloc(prog.items, cap * sizeof(Item));
         }
 
+        /* Check for 'export' keyword */
+        bool is_exported = false;
+        if (peek_type(p) == TOK_EXPORT) {
+            is_exported = true;
+            prog.has_exports = true;
+            advance(p);
+        }
+
+        prog.items[n].exported = is_exported;
+
         if (peek_type(p) == TOK_FN) {
             prog.items[n].tag = ITEM_FUNCTION;
             if (!parse_fn_decl(p, &prog.items[n].as.fn_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }
+            if (is_exported)
+                prog_add_export(&prog, prog.items[n].as.fn_decl.name);
         } else if (peek_type(p) == TOK_STRUCT) {
             prog.items[n].tag = ITEM_STRUCT;
             if (!parse_struct_decl(p, &prog.items[n].as.struct_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }
+            if (is_exported)
+                prog_add_export(&prog, prog.items[n].as.struct_decl.name);
         } else if (peek_type(p) == TOK_TEST) {
             prog.items[n].tag = ITEM_TEST;
             if (!parse_test_decl(p, &prog.items[n].as.test_decl, err)) {
@@ -1933,12 +1956,16 @@ Program parser_parse(Parser *p, char **err) {
                 prog.item_count = n;
                 return prog;
             }
+            if (is_exported)
+                prog_add_export(&prog, prog.items[n].as.enum_decl.name);
         } else if (peek_type(p) == TOK_TRAIT) {
             prog.items[n].tag = ITEM_TRAIT;
             if (!parse_trait_decl(p, &prog.items[n].as.trait_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }
+            if (is_exported)
+                prog_add_export(&prog, prog.items[n].as.trait_decl.name);
         } else if (peek_type(p) == TOK_IMPL) {
             prog.items[n].tag = ITEM_IMPL;
             if (!parse_impl_block(p, &prog.items[n].as.impl_block, err)) {
@@ -1946,11 +1973,26 @@ Program parser_parse(Parser *p, char **err) {
                 return prog;
             }
         } else {
+            if (is_exported) {
+                /* export must precede fn, struct, enum, trait, or a binding stmt */
+                TokenType next = peek_type(p);
+                if (next != TOK_LET && next != TOK_FLUX && next != TOK_FIX) {
+                    *err = NULL;
+                    Token *t = peek(p);
+                    (void)asprintf(err, "%zu:%zu: 'export' must precede fn, struct, enum, trait, or variable binding",
+                                   t->line, t->col);
+                    prog.item_count = n;
+                    return prog;
+                }
+            }
             prog.items[n].tag = ITEM_STMT;
             prog.items[n].as.stmt = parse_stmt(p, err);
             if (!prog.items[n].as.stmt) {
                 prog.item_count = n;
                 return prog;
+            }
+            if (is_exported && prog.items[n].as.stmt->tag == STMT_BINDING) {
+                prog_add_export(&prog, prog.items[n].as.stmt->as.binding.name);
             }
         }
         n++;

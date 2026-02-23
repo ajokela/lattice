@@ -122,6 +122,7 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "defer") == 0) return TOK_DEFER;
     if (strcmp(ident, "trait") == 0) return TOK_TRAIT;
     if (strcmp(ident, "impl") == 0) return TOK_IMPL;
+    if (strcmp(ident, "export") == 0) return TOK_EXPORT;
     return TOK_IDENT;
 }
 

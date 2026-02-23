@@ -103,6 +103,14 @@ static const char *names[] = {
     [ROP_DEC_REG]      = "DEC_REG",
     [ROP_SETINDEX_LOCAL] = "SETINDEX_LOCAL",
     [ROP_INVOKE_GLOBAL] = "INVOKE_GLOBAL",
+    /* Phase query */
+    [ROP_IS_CRYSTAL]   = "IS_CRYSTAL",
+    /* Type checking */
+    [ROP_CHECK_TYPE]   = "CHECK_TYPE",
+    [ROP_FREEZE_FIELD] = "FREEZE_FIELD",
+    [ROP_THAW_FIELD]   = "THAW_FIELD",
+    /* Require */
+    [ROP_REQUIRE]      = "REQUIRE",
     /* Misc */
     [ROP_HALT]         = "HALT",
 };

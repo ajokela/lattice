@@ -88,10 +88,11 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/toml_ops.c \
        $(SRC_DIR)/yaml_ops.c \
        $(SRC_DIR)/ext.c \
-       $(SRC_DIR)/opcode.c \
+       $(SRC_DIR)/stackopcode.c \
        $(SRC_DIR)/chunk.c \
-       $(SRC_DIR)/compiler.c \
-       $(SRC_DIR)/vm.c \
+       $(SRC_DIR)/stackcompiler.c \
+       $(SRC_DIR)/stackvm.c \
+       $(SRC_DIR)/runtime.c \
        $(SRC_DIR)/intern.c \
        $(SRC_DIR)/latc.c \
        $(SRC_DIR)/regopcode.c \

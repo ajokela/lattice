@@ -766,6 +766,33 @@ exports.set("sub", sub)
 exports  // return the exports map
 ```
 
+#### Built-in Modules
+
+Lattice provides built-in standard library modules that resolve without file I/O. Use `import` with a bare module name (no path separators or `.lat` extension):
+
+```lattice
+import "math" as m            // full module as a Map
+import { sin, cos } from "math"  // selective import
+import { parse } from "json"
+```
+
+| Module | Contents |
+|--------|----------|
+| `math` | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `sqrt`, `pow`, `abs`, `floor`, `ceil`, `round`, `log`, `log2`, `log10`, `exp`, `min`, `max`, `clamp`, `sign`, `gcd`, `lcm`, `lerp`, `is_nan`, `is_inf`, `random`, `random_int`, `PI`, `E` |
+| `fs` | `read_file`, `write_file`, `read_file_bytes`, `write_file_bytes`, `append_file`, `copy_file`, `file_exists`, `is_file`, `is_dir`, `file_size`, `delete_file`, `mkdir`, `rmdir`, `rename`, `chmod`, `list_dir`, `glob`, `stat`, `realpath`, `tempdir`, `tempfile` |
+| `path` | `join`, `dir`, `base`, `ext` |
+| `json` | `parse`, `stringify` |
+| `toml` | `parse`, `stringify` |
+| `yaml` | `parse`, `stringify` |
+| `crypto` | `sha256`, `md5`, `base64_encode`, `base64_decode`, `url_encode`, `url_decode` |
+| `http` | `get`, `post`, `request` |
+| `net` | `tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_read`, `tcp_read_bytes`, `tcp_write`, `tcp_close`, `tcp_peer_addr`, `tcp_set_timeout`, `tls_connect`, `tls_read`, `tls_read_bytes`, `tls_write`, `tls_close`, `tls_available` |
+| `os` | `exec`, `shell`, `env`, `env_set`, `env_keys`, `cwd`, `platform`, `hostname`, `pid`, `args` |
+| `time` | `now`, `sleep`, `format`, `parse` |
+| `regex` | `match`, `find_all`, `replace` |
+
+All functions remain available as flat globals (e.g. `sin(x)`, `read_file(path)`) for backwards compatibility.
+
 ### Native Extensions
 
 Lattice supports native extensions — shared libraries (`.dylib` on macOS, `.so` on Linux) loaded at runtime via `require_ext()`. Extensions register functions through a C API and appear as a Map of callable closures in Lattice code.

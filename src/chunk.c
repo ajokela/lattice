@@ -1,5 +1,5 @@
 #include "chunk.h"
-#include "opcode.h"
+#include "stackopcode.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -51,6 +51,11 @@ void chunk_free(Chunk *c) {
         free(c->default_values);
     }
     free(c->param_phases);
+    if (c->export_names) {
+        for (size_t i = 0; i < c->export_count; i++)
+            free(c->export_names[i]);
+        free(c->export_names);
+    }
     free(c);
 }
 

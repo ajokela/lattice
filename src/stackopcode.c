@@ -1,4 +1,4 @@
-#include "opcode.h"
+#include "stackopcode.h"
 #include <stddef.h>
 
 static const char *names[] = {

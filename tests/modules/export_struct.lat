@@ -1,0 +1,12 @@
+export struct Point {
+    x: Int,
+    y: Int
+}
+
+export fn make_point(x: Int, y: Int) -> Point {
+    return Point { x: x, y: y }
+}
+
+struct Internal {
+    data: Int
+}

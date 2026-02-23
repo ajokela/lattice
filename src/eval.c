@@ -24,7 +24,9 @@
 #include "parser.h"
 #include "channel.h"
 #include "ext.h"
+#include "runtime.h"
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -67,6 +69,41 @@ static void stats_scope_push(MemoryStats *s) {
 static void stats_scope_pop(MemoryStats *s) {
     s->scope_pops++;
     if (s->current_scope_depth > 0) s->current_scope_depth--;
+}
+
+/* ── Call stack helpers (stack traces) ── */
+
+static void ev_push_frame(Evaluator *ev, const char *name) {
+    if (ev->call_depth >= ev->call_stack_cap) {
+        ev->call_stack_cap = ev->call_stack_cap ? ev->call_stack_cap * 2 : 16;
+        ev->call_stack = realloc(ev->call_stack, ev->call_stack_cap * sizeof(const char *));
+    }
+    ev->call_stack[ev->call_depth++] = name;
+}
+
+static void ev_pop_frame(Evaluator *ev) {
+    if (ev->call_depth > 0) ev->call_depth--;
+}
+
+/* Format a stack trace and append it to an error message */
+static char *ev_attach_trace(Evaluator *ev, char *msg) {
+    if (ev->call_depth == 0) return msg;
+    size_t msg_len = strlen(msg);
+    /* Estimate space: header + per-frame lines */
+    size_t extra = 32;
+    for (size_t i = 0; i < ev->call_depth; i++)
+        extra += strlen(ev->call_stack[i]) + 16;
+    char *out = realloc(msg, msg_len + extra);
+    if (!out) return msg;
+    size_t pos = msg_len;
+    size_t rem = extra;
+    int n = snprintf(out + pos, rem, "\nstack trace:");
+    pos += (size_t)n; rem -= (size_t)n;
+    for (size_t i = ev->call_depth; i > 0; i--) {
+        n = snprintf(out + pos, rem, "\n  in %s()", ev->call_stack[i - 1]);
+        pos += (size_t)n; rem -= (size_t)n;
+    }
+    return out;
 }
 
 /* ── EvalResult helpers ── */
@@ -944,6 +981,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
         }
     }
     stats_fn_call(&ev->stats);
+    ev_push_frame(ev, decl->name);
     stats_scope_push(&ev->stats);
     env_push_scope(ev->env);
     for (size_t i = 0; i < decl->param_count; i++) {
@@ -1082,6 +1120,9 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
 
     env_pop_scope(ev->env);
     stats_scope_pop(&ev->stats);
+
+    if (IS_ERR(result)) return result; /* leave frame on stack for trace */
+    ev_pop_frame(ev);
 
     if (IS_SIGNAL(result) && result.cf.tag == CF_RETURN) {
         return eval_ok(result.cf.value);
@@ -3072,6 +3113,18 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(msg));
                 }
 
+                /// @builtin panic(msg: String) -> Unit
+                /// @category Error Handling
+                /// Trigger an immediate fatal error that cannot be caught by try/catch.
+                /// @example panic("unrecoverable state")
+                if (strcmp(fn_name, "panic") == 0) {
+                    const char *msg = (argc >= 1 && args[0].type == VAL_STR) ? args[0].as.str_val : "panic";
+                    char *err = strdup(msg);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_err(err);
+                }
+
                 /// @builtin is_error(val: Any) -> Bool
                 /// @category Error Handling
                 /// Check if a value is an error value.
@@ -3918,6 +3971,32 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(args);
                     if (merr) return eval_err(merr);
                     return eval_ok(result);
+                }
+
+                /// @builtin float_to_bits(x: Float) -> Int
+                /// @category Math
+                /// Reinterpret a float as its IEEE 754 bit pattern (64-bit integer).
+                /// @example float_to_bits(1.0)  // 4607182418800017408
+                if (strcmp(fn_name, "float_to_bits") == 0) {
+                    if (argc != 1 || args[0].type != VAL_FLOAT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("float_to_bits() expects 1 Float argument")); }
+                    double d = args[0].as.float_val;
+                    uint64_t bits; memcpy(&bits, &d, 8);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_int((int64_t)bits));
+                }
+
+                /// @builtin bits_to_float(x: Int) -> Float
+                /// @category Math
+                /// Reinterpret a 64-bit integer as an IEEE 754 float.
+                /// @example bits_to_float(4607182418800017408)  // 1.0
+                if (strcmp(fn_name, "bits_to_float") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("bits_to_float() expects 1 Int argument")); }
+                    uint64_t bits = (uint64_t)args[0].as.int_val;
+                    double d; memcpy(&d, &bits, 8);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_float(d));
                 }
 
                 /// @builtin is_nan(x: Int|Float) -> Bool
@@ -4901,10 +4980,41 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 free(args);
                 return eval_err(err);
             }
-            /* Native extension closure dispatch */
+            /* Derive a name for stack traces */
+            const char *closure_name = (expr->as.call.func->tag == EXPR_IDENT)
+                ? expr->as.call.func->as.str_val : "<closure>";
+            /* Native closure dispatch */
             if (callee_r.value.as.closure.native_fn && !callee_r.value.as.closure.body) {
-                EvalResult res = call_native_closure(ev,
-                    callee_r.value.as.closure.native_fn, args, argc);
+                ev_push_frame(ev, closure_name);
+                EvalResult res;
+                if (callee_r.value.as.closure.default_values == (struct Expr **)(uintptr_t)0x1) {
+                    /* VM-style native (VMNativeFn signature) — used by builtin modules */
+                    typedef LatValue (*VMNativeFn)(LatValue *, int);
+                    VMNativeFn fn = (VMNativeFn)callee_r.value.as.closure.native_fn;
+                    /* Ensure current_rt exists for native error reporting */
+                    LatRuntime *prev_rt = lat_runtime_current();
+                    LatRuntime tmp_rt;
+                    if (!prev_rt) {
+                        memset(&tmp_rt, 0, sizeof(tmp_rt));
+                        lat_runtime_set_current(&tmp_rt);
+                    }
+                    LatRuntime *rt = lat_runtime_current();
+                    LatValue result = fn(args, (int)argc);
+                    if (rt->error) {
+                        char *msg = rt->error;
+                        rt->error = NULL;
+                        value_free(&result);
+                        res = eval_err(msg);
+                    } else {
+                        res = eval_ok(result);
+                    }
+                    if (!prev_rt) lat_runtime_set_current(NULL);
+                } else {
+                    /* Extension native (LatExtFn signature) */
+                    res = call_native_closure(ev,
+                        callee_r.value.as.closure.native_fn, args, argc);
+                }
+                if (!IS_ERR(res)) ev_pop_frame(ev);
                 for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                 value_free(&callee_r.value);
                 free(args);
@@ -4913,6 +5023,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             /* Root callee and args so GC inside block-body closures won't sweep them */
             GC_PUSH(ev, &callee_r.value);
             for (size_t i = 0; i < argc; i++) GC_PUSH(ev, &args[i]);
+            ev_push_frame(ev, closure_name);
             EvalResult res = call_closure(ev,
                 callee_r.value.as.closure.param_names,
                 callee_r.value.as.closure.param_count,
@@ -4920,6 +5031,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 callee_r.value.as.closure.captured_env,
                 args, argc,
                 callee_r.value.as.closure.default_values, callee_r.value.as.closure.has_variadic);
+            if (!IS_ERR(res)) ev_pop_frame(ev);
             GC_POP_N(ev, argc);
             GC_POP(ev);
             /* Don't free captured_env since closure still owns it - just cleanup */
@@ -7022,6 +7134,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 /* ── Module loading ── */
 
 static EvalResult load_module(Evaluator *ev, const char *raw_path) {
+    /* Check for built-in stdlib module */
+    LatValue builtin_mod;
+    if (rt_try_builtin_import(raw_path, &builtin_mod)) {
+        return eval_ok(builtin_mod);
+    }
+
     /* Resolve file path: append .lat if not present */
     size_t plen = strlen(raw_path);
     char *file_path;
@@ -7159,6 +7277,10 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     for (size_t i = 0; i < mod_scope->cap; i++) {
         if (mod_scope->entries[i].state == MAP_OCCUPIED) {
             const char *name = mod_scope->entries[i].key;
+            if (!module_should_export(name,
+                    (const char **)mod_prog.export_names,
+                    mod_prog.export_count, mod_prog.has_exports))
+                continue;
             LatValue *val_ptr = (LatValue *)mod_scope->entries[i].value;
             LatValue exported = value_deep_clone(val_ptr);
             lat_map_set(module_map.as.map.map, name, &exported);
@@ -7169,6 +7291,13 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     for (size_t j = 0; j < mod_prog.item_count; j++) {
         if (mod_prog.items[j].tag == ITEM_FUNCTION) {
             FnDecl *fn = &mod_prog.items[j].as.fn_decl;
+
+            /* Filter based on export declarations */
+            if (!module_should_export(fn->name,
+                    (const char **)mod_prog.export_names,
+                    mod_prog.export_count, mod_prog.has_exports))
+                continue;
+
             /* Create an expr_block wrapping the function body.
              * This borrows fn->body (kept alive via program items). */
             Expr *body = calloc(1, sizeof(Expr));
@@ -9467,6 +9596,31 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     if (obj.type == VAL_MAP) {
         LatValue *field = (LatValue *)lat_map_get(obj.as.map.map, method);
         if (field && field->type == VAL_CLOSURE) {
+            if (field->as.closure.native_fn && !field->as.closure.body
+                && field->as.closure.default_values == (struct Expr **)(uintptr_t)0x1) {
+                /* VM-style native from builtin module */
+                typedef LatValue (*VMNativeFn)(LatValue *, int);
+                VMNativeFn fn = (VMNativeFn)field->as.closure.native_fn;
+                LatRuntime *prev_rt = lat_runtime_current();
+                LatRuntime tmp_rt;
+                if (!prev_rt) {
+                    memset(&tmp_rt, 0, sizeof(tmp_rt));
+                    lat_runtime_set_current(&tmp_rt);
+                }
+                LatRuntime *rt = lat_runtime_current();
+                LatValue result = fn(args, (int)arg_count);
+                EvalResult res;
+                if (rt->error) {
+                    char *msg = rt->error;
+                    rt->error = NULL;
+                    value_free(&result);
+                    res = eval_err(msg);
+                } else {
+                    res = eval_ok(result);
+                }
+                if (!prev_rt) lat_runtime_set_current(NULL);
+                return res;
+            }
             LatValue *cloned_args = malloc(arg_count * sizeof(LatValue));
             for (size_t i = 0; i < arg_count; i++)
                 cloned_args[i] = value_deep_clone(&args[i]);
@@ -9787,6 +9941,7 @@ void evaluator_free(Evaluator *ev) {
     }
     free(ev->pressures);
     free(ev->defer_stack);
+    free(ev->call_stack);
     value_set_heap(NULL);         /* disconnect before freeing the heap itself */
     dual_heap_free(ev->heap);     /* frees any remaining tracked allocs */
     lat_vec_free(&ev->gc_roots);
@@ -9845,7 +10000,11 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STMT) {
             EvalResult r = eval_stmt(ev, prog->items[i].as.stmt);
-            if (IS_ERR(r)) return r.error;
+            if (IS_ERR(r)) {
+                r.error = ev_attach_trace(ev, r.error);
+                ev->call_depth = 0;
+                return r.error;
+            }
             if (IS_SIGNAL(r)) return strdup("unexpected control flow at top level");
             value_free(&r.value);
         }
@@ -9855,7 +10014,11 @@ char *evaluator_run(Evaluator *ev, const Program *prog) {
     FnDecl *main_fn = find_fn(ev, "main");
     if (main_fn) {
         EvalResult r = call_fn(ev, main_fn, NULL, 0, NULL);
-        if (IS_ERR(r)) return r.error;
+        if (IS_ERR(r)) {
+            r.error = ev_attach_trace(ev, r.error);
+            ev->call_depth = 0;
+            return r.error;
+        }
         value_free(&r.value);
     }
 
@@ -9933,7 +10096,8 @@ int evaluator_run_tests(Evaluator *ev, const Program *prog) {
             EvalResult r = eval_stmt(ev, td->body[j]);
             if (IS_ERR(r)) {
                 ok = false;
-                errmsg = r.error;
+                errmsg = ev_attach_trace(ev, r.error);
+                ev->call_depth = 0;
                 break;
             }
             if (IS_SIGNAL(r)) {
@@ -9993,7 +10157,11 @@ char *evaluator_run_repl(Evaluator *ev, const Program *prog) {
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STMT) {
             EvalResult r = eval_stmt(ev, prog->items[i].as.stmt);
-            if (IS_ERR(r)) return r.error;
+            if (IS_ERR(r)) {
+                r.error = ev_attach_trace(ev, r.error);
+                ev->call_depth = 0;
+                return r.error;
+            }
             if (IS_SIGNAL(r)) return strdup("unexpected control flow at top level");
             value_free(&r.value);
         }
@@ -10032,7 +10200,11 @@ EvalResult evaluator_run_repl_result(Evaluator *ev, const Program *prog) {
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag == ITEM_STMT) {
             EvalResult r = eval_stmt(ev, prog->items[i].as.stmt);
-            if (IS_ERR(r)) return r;
+            if (IS_ERR(r)) {
+                r.error = ev_attach_trace(ev, r.error);
+                ev->call_depth = 0;
+                return r;
+            }
             if (IS_SIGNAL(r)) {
                 value_free(&last);
                 return eval_err(strdup("unexpected control flow at top level"));

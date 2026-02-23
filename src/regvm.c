@@ -1,12 +1,15 @@
 #include "regvm.h"
 #include "regopcode.h"
+#include "runtime.h"
 #include "value.h"
 #include "env.h"
-#include "vm.h"   /* For ObjUpvalue */
+#include "stackvm.h"   /* For ObjUpvalue */
+#include "channel.h"
 #include "lexer.h"
 #include "parser.h"
 #include "ast.h"
 #include "builtins.h"
+#include "ext.h"
 #include "memory.h"
 #include <stdlib.h>
 #include <string.h>
@@ -19,11 +22,14 @@
 
 /* Native function marker — same sentinel as stack VM (defined in vm.c) */
 #define VM_NATIVE_MARKER ((struct Expr **)(uintptr_t)0x1)
+/* Extension function marker — same sentinel as stack VM */
+#define VM_EXT_MARKER    ((struct Expr **)(uintptr_t)0x2)
 
 /* ── RegChunk implementation ── */
 
 RegChunk *regchunk_new(void) {
     RegChunk *c = calloc(1, sizeof(RegChunk));
+    c->magic = REGCHUNK_MAGIC;
     c->code_cap = 128;
     c->code = malloc(c->code_cap * sizeof(RegInstr));
     c->const_cap = 32;
@@ -43,7 +49,8 @@ void regchunk_free(RegChunk *c) {
         LatValue *v = &c->constants[i];
         if (v->type == VAL_CLOSURE && v->as.closure.body == NULL &&
             v->as.closure.native_fn != NULL &&
-            v->as.closure.default_values != VM_NATIVE_MARKER) {
+            v->as.closure.default_values != VM_NATIVE_MARKER &&
+            v->as.closure.default_values != VM_EXT_MARKER) {
             regchunk_free((RegChunk *)v->as.closure.native_fn);
             v->as.closure.native_fn = NULL;
         } else {
@@ -59,6 +66,12 @@ void regchunk_free(RegChunk *c) {
         free(c->local_names);
     }
     free(c->name);
+    free(c->param_phases);
+    if (c->export_names) {
+        for (size_t i = 0; i < c->export_count; i++)
+            free(c->export_names[i]);
+        free(c->export_names);
+    }
     free(c);
 }
 
@@ -100,15 +113,15 @@ void regchunk_set_local_name(RegChunk *c, size_t reg, const char *name) {
 
 /* ── Register VM ── */
 
-void regvm_init(RegVM *vm) {
+void regvm_init(RegVM *vm, LatRuntime *rt) {
     memset(vm, 0, sizeof(RegVM));
-    vm->env = env_new();
-    vm->struct_meta = env_new();
     vm->fn_chunk_cap = 16;
     vm->fn_chunks = malloc(vm->fn_chunk_cap * sizeof(RegChunk *));
     vm->module_cache = NULL;
-    vm->script_dir = NULL;
     vm->ephemeral = bump_arena_new();
+    vm->rt = rt;
+    vm->env = rt->env;
+    vm->struct_meta = rt->struct_meta;
     /* Initialize register stack to nil */
     for (size_t i = 0; i < REGVM_REG_MAX * REGVM_FRAMES_MAX; i++) {
         vm->reg_stack[i] = value_nil();
@@ -116,13 +129,11 @@ void regvm_init(RegVM *vm) {
 }
 
 void regvm_free(RegVM *vm) {
-    env_free(vm->env);
-    env_free(vm->struct_meta);
+    /* Don't free env/struct_meta — runtime owns them */
     for (size_t i = 0; i < vm->fn_chunk_count; i++)
         regchunk_free(vm->fn_chunks[i]);
     free(vm->fn_chunks);
     free(vm->error);
-    free(vm->script_dir);
     if (vm->module_cache) {
         for (size_t i = 0; i < vm->module_cache->cap; i++) {
             if (vm->module_cache->entries[i].state == MAP_OCCUPIED) {
@@ -149,6 +160,7 @@ void regvm_free(RegVM *vm) {
         free(uv);
         uv = next;
     }
+    /* Reactions, bonds, seeds are owned by LatRuntime — not freed here */
 }
 
 void regvm_track_chunk(RegVM *vm, RegChunk *ch) {
@@ -177,7 +189,8 @@ static inline LatValue rvm_clone(const LatValue *src) {
         }
         case VAL_CLOSURE: {
             if (src->as.closure.body == NULL && src->as.closure.native_fn != NULL &&
-                src->as.closure.default_values != VM_NATIVE_MARKER) {
+                src->as.closure.default_values != VM_NATIVE_MARKER &&
+                src->as.closure.default_values != VM_EXT_MARKER) {
                 LatValue v = *src;
                 if (src->as.closure.param_names) {
                     v.as.closure.param_names = malloc(src->as.closure.param_count * sizeof(char *));
@@ -246,22 +259,7 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr,
     (void)vasprintf(&inner, fmt, args);
     va_end(args);
 
-    /* Prepend line info */
-    RegCallFrame *f = &vm->frames[vm->frame_count - 1];
-    int line = 0;
-    if (f->ip > f->chunk->code) {
-        size_t offset = (size_t)(f->ip - f->chunk->code - 1);
-        if (offset < f->chunk->lines_len)
-            line = f->chunk->lines[offset];
-    }
-    char *msg;
-    if (line > 0) {
-        (void)asprintf(&msg, "[line %d] %s", line, inner);
-        free(inner);
-    } else {
-        msg = inner;
-    }
-
+    /* If there's an active handler, pass raw message to catch variable */
     if (vm->handler_count > 0) {
         RegHandler h = vm->handlers[--vm->handler_count];
 
@@ -277,11 +275,26 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr,
         *frame_ptr = &vm->frames[vm->frame_count - 1];
         *R_ptr = (*frame_ptr)->regs;
         (*frame_ptr)->ip = h.ip;
-        reg_set(&(*R_ptr)[h.error_reg], value_string_owned(msg));
+        reg_set(&(*R_ptr)[h.error_reg], value_string_owned(inner));
         return REGVM_OK;
     }
 
-    vm->error = msg;
+    /* Uncaught error: prepend line info */
+    RegCallFrame *f = &vm->frames[vm->frame_count - 1];
+    int line = 0;
+    if (f->ip > f->chunk->code) {
+        size_t offset = (size_t)(f->ip - f->chunk->code - 1);
+        if (offset < f->chunk->lines_len)
+            line = f->chunk->lines[offset];
+    }
+    if (line > 0) {
+        char *msg;
+        (void)asprintf(&msg, "[line %d] %s", line, inner);
+        free(inner);
+        vm->error = msg;
+    } else {
+        vm->error = inner;
+    }
     return REGVM_RUNTIME_ERROR;
 }
 
@@ -318,7 +331,18 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
     new_frame->upvalue_count = 0;
     new_frame->caller_result_reg = 0;
 
-    return regvm_dispatch(vm, saved_base, result);
+    RegVMResult res = regvm_dispatch(vm, saved_base, result);
+
+    /* Clean up any frames left by HALT (which doesn't pop the frame) */
+    while (vm->frame_count > saved_base) {
+        RegCallFrame *f = &vm->frames[vm->frame_count - 1];
+        for (int i = 0; i < REGVM_REG_MAX; i++)
+            value_free_inline(&f->regs[i]);
+        vm->frame_count--;
+        vm->reg_stack_top -= REGVM_REG_MAX;
+    }
+
+    return res;
 }
 
 /* ── Invoke builtin method ── */
@@ -333,6 +357,41 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (strcmp(method, "push") == 0 && arg_count == 1) {
+            if (value_is_crystal(obj)) {
+                vm->error = strdup("cannot push to a crystal array");
+                *result = value_unit();
+                return true;
+            }
+            if (obj->phase == VTAG_SUBLIMATED) {
+                vm->error = strdup("cannot push to a sublimated array");
+                *result = value_unit();
+                return true;
+            }
+            /* Check pressure constraints */
+            {
+                if (vm->rt && vm->rt->pressure_count > 0) {
+                    /* Find variable name for this object by checking register names */
+                    RegCallFrame *cf = &vm->frames[vm->frame_count - 1];
+                    if (cf->chunk && cf->chunk->local_names) {
+                        for (size_t r = 0; r < cf->chunk->local_name_cap; r++) {
+                            if (&cf->regs[r] == obj && cf->chunk->local_names[r] && cf->chunk->local_names[r][0]) {
+                                for (size_t pi = 0; pi < vm->rt->pressure_count; pi++) {
+                                    if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
+                                        const char *mode = vm->rt->pressures[pi].mode;
+                                        if (strcmp(mode, "no_grow") == 0 || strcmp(mode, "no_resize") == 0) {
+                                            (void)asprintf(&vm->error, "pressurized (%s): cannot push to '%s'",
+                                                           mode, cf->chunk->local_names[r]);
+                                            *result = value_unit();
+                                            return true;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             LatValue val = rvm_clone(&args[0]);
             if (obj->as.array.len >= obj->as.array.cap) {
                 obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
@@ -344,6 +403,40 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (strcmp(method, "pop") == 0 && arg_count == 0) {
+            if (value_is_crystal(obj)) {
+                vm->error = strdup("cannot pop from a crystal array");
+                *result = value_unit();
+                return true;
+            }
+            if (obj->phase == VTAG_SUBLIMATED) {
+                vm->error = strdup("cannot pop from a sublimated array");
+                *result = value_unit();
+                return true;
+            }
+            /* Check pressure constraints */
+            {
+                if (vm->rt && vm->rt->pressure_count > 0) {
+                    RegCallFrame *cf = &vm->frames[vm->frame_count - 1];
+                    if (cf->chunk && cf->chunk->local_names) {
+                        for (size_t r = 0; r < cf->chunk->local_name_cap; r++) {
+                            if (&cf->regs[r] == obj && cf->chunk->local_names[r] && cf->chunk->local_names[r][0]) {
+                                for (size_t pi = 0; pi < vm->rt->pressure_count; pi++) {
+                                    if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
+                                        const char *mode = vm->rt->pressures[pi].mode;
+                                        if (strcmp(mode, "no_shrink") == 0 || strcmp(mode, "no_resize") == 0) {
+                                            (void)asprintf(&vm->error, "pressurized (%s): cannot pop from '%s'",
+                                                           mode, cf->chunk->local_names[r]);
+                                            *result = value_unit();
+                                            return true;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             if (obj->as.array.len == 0) {
                 *result = value_nil();
             } else {
@@ -521,16 +614,14 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         }
         if (strcmp(method, "merge") == 0 && arg_count == 1) {
             if (args[0].type == VAL_MAP) {
-                LatValue merged = rvm_clone(obj);
+                /* Mutate obj in place (like stack VM) */
                 for (size_t i = 0; i < args[0].as.map.map->cap; i++) {
                     if (args[0].as.map.map->entries[i].state != MAP_OCCUPIED) continue;
                     LatValue v = rvm_clone((LatValue *)args[0].as.map.map->entries[i].value);
-                    lat_map_set(merged.as.map.map, args[0].as.map.map->entries[i].key, &v);
+                    lat_map_set(obj->as.map.map, args[0].as.map.map->entries[i].key, &v);
                 }
-                *result = merged;
-            } else {
-                *result = rvm_clone(obj);
             }
+            *result = value_unit();
             return true;
         }
         if (strcmp(method, "for_each") == 0 && arg_count == 1) {
@@ -642,12 +733,19 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                     } else {
                         if (sorted[j].type == VAL_INT && key.type == VAL_INT)
                             swap = sorted[j].as.int_val > key.as.int_val;
-                        else if (sorted[j].type == VAL_FLOAT || key.type == VAL_FLOAT) {
+                        else if ((sorted[j].type == VAL_FLOAT || sorted[j].type == VAL_INT) &&
+                                 (key.type == VAL_FLOAT || key.type == VAL_INT)) {
                             double a = sorted[j].type == VAL_FLOAT ? sorted[j].as.float_val : (double)sorted[j].as.int_val;
                             double b = key.type == VAL_FLOAT ? key.as.float_val : (double)key.as.int_val;
                             swap = a > b;
                         } else if (sorted[j].type == VAL_STR && key.type == VAL_STR) {
                             swap = strcmp(sorted[j].as.str_val, key.as.str_val) > 0;
+                        } else {
+                            for (size_t k = 0; k < len; k++) value_free(&sorted[k]);
+                            free(sorted);
+                            vm->error = strdup("sort: cannot compare values of different types");
+                            *result = value_unit();
+                            return true;
                         }
                     }
                     if (!swap) break;
@@ -663,37 +761,27 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (strcmp(method, "sort_by") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             size_t len = obj->as.array.len;
-            LatValue *sorted = malloc(len * sizeof(LatValue));
-            LatValue *keys = malloc(len * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++) {
-                sorted[i] = rvm_clone(&obj->as.array.elems[i]);
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                keys[i] = regvm_call_closure(vm, closure, &arg, 1);
-                value_free(&arg);
-            }
-            for (size_t i = 1; i < len; i++) {
-                LatValue key_val = keys[i];
-                LatValue elem = sorted[i];
-                int64_t j = (int64_t)i - 1;
-                while (j >= 0) {
-                    bool swap = false;
-                    if (keys[j].type == VAL_INT && key_val.type == VAL_INT)
-                        swap = keys[j].as.int_val > key_val.as.int_val;
-                    else if (keys[j].type == VAL_STR && key_val.type == VAL_STR)
-                        swap = strcmp(keys[j].as.str_val, key_val.as.str_val) > 0;
-                    if (!swap) break;
-                    sorted[j + 1] = sorted[j];
-                    keys[j + 1] = keys[j];
-                    j--;
-                }
-                sorted[j + 1] = elem;
-                keys[j + 1] = key_val;
-            }
-            *result = value_array(sorted, len);
+            LatValue *buf = malloc((len > 0 ? len : 1) * sizeof(LatValue));
             for (size_t i = 0; i < len; i++)
-                value_free(&keys[i]);
-            free(keys);
-            free(sorted);
+                buf[i] = rvm_clone(&obj->as.array.elems[i]);
+            /* Insertion sort using comparator: closure(a, b) < 0 means a < b */
+            for (size_t i = 1; i < len; i++) {
+                LatValue key = buf[i];
+                size_t j = i;
+                while (j > 0) {
+                    LatValue ca[2];
+                    ca[0] = rvm_clone(&key);
+                    ca[1] = rvm_clone(&buf[j - 1]);
+                    LatValue cmp = regvm_call_closure(vm, closure, ca, 2);
+                    value_free(&ca[0]); value_free(&ca[1]);
+                    if (cmp.type != VAL_INT || cmp.as.int_val >= 0) { value_free(&cmp); break; }
+                    value_free(&cmp);
+                    buf[j] = buf[j - 1]; j--;
+                }
+                buf[j] = key;
+            }
+            *result = value_array(buf, len);
+            free(buf);
             return true;
         }
         if (strcmp(method, "find") == 0 && arg_count == 1) {
@@ -706,7 +794,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 if (found) { *result = arg; return true; }
                 value_free(&arg);
             }
-            *result = value_nil();
+            *result = value_unit();
             return true;
         }
         if (strcmp(method, "any") == 0 && arg_count == 1) {
@@ -785,11 +873,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (strcmp(method, "first") == 0 && arg_count == 0) {
-            *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[0]) : value_nil();
+            *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[0]) : value_unit();
             return true;
         }
         if (strcmp(method, "last") == 0 && arg_count == 0) {
-            *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_nil();
+            *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit();
             return true;
         }
         if (strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
@@ -875,33 +963,41 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (strcmp(method, "min") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { *result = value_nil(); return true; }
-            LatValue min = obj->as.array.elems[0];
+            if (obj->as.array.len == 0) {
+                vm->error = strdup("min() called on empty array");
+                *result = value_unit();
+                return true;
+            }
+            LatValue min_val = obj->as.array.elems[0];
             for (size_t i = 1; i < obj->as.array.len; i++) {
-                if (obj->as.array.elems[i].type == VAL_INT && min.type == VAL_INT) {
-                    if (obj->as.array.elems[i].as.int_val < min.as.int_val) min = obj->as.array.elems[i];
-                } else if (obj->as.array.elems[i].type == VAL_FLOAT || min.type == VAL_FLOAT) {
+                if (obj->as.array.elems[i].type == VAL_INT && min_val.type == VAL_INT) {
+                    if (obj->as.array.elems[i].as.int_val < min_val.as.int_val) min_val = obj->as.array.elems[i];
+                } else if (obj->as.array.elems[i].type == VAL_FLOAT || min_val.type == VAL_FLOAT) {
                     double a = obj->as.array.elems[i].type == VAL_FLOAT ? obj->as.array.elems[i].as.float_val : (double)obj->as.array.elems[i].as.int_val;
-                    double b = min.type == VAL_FLOAT ? min.as.float_val : (double)min.as.int_val;
-                    if (a < b) min = obj->as.array.elems[i];
+                    double b = min_val.type == VAL_FLOAT ? min_val.as.float_val : (double)min_val.as.int_val;
+                    if (a < b) min_val = obj->as.array.elems[i];
                 }
             }
-            *result = rvm_clone(&min);
+            *result = rvm_clone(&min_val);
             return true;
         }
         if (strcmp(method, "max") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { *result = value_nil(); return true; }
-            LatValue max = obj->as.array.elems[0];
+            if (obj->as.array.len == 0) {
+                vm->error = strdup("max() called on empty array");
+                *result = value_unit();
+                return true;
+            }
+            LatValue max_val = obj->as.array.elems[0];
             for (size_t i = 1; i < obj->as.array.len; i++) {
-                if (obj->as.array.elems[i].type == VAL_INT && max.type == VAL_INT) {
-                    if (obj->as.array.elems[i].as.int_val > max.as.int_val) max = obj->as.array.elems[i];
-                } else if (obj->as.array.elems[i].type == VAL_FLOAT || max.type == VAL_FLOAT) {
+                if (obj->as.array.elems[i].type == VAL_INT && max_val.type == VAL_INT) {
+                    if (obj->as.array.elems[i].as.int_val > max_val.as.int_val) max_val = obj->as.array.elems[i];
+                } else if (obj->as.array.elems[i].type == VAL_FLOAT || max_val.type == VAL_FLOAT) {
                     double a = obj->as.array.elems[i].type == VAL_FLOAT ? obj->as.array.elems[i].as.float_val : (double)obj->as.array.elems[i].as.int_val;
-                    double b = max.type == VAL_FLOAT ? max.as.float_val : (double)max.as.int_val;
-                    if (a > b) max = obj->as.array.elems[i];
+                    double b = max_val.type == VAL_FLOAT ? max_val.as.float_val : (double)max_val.as.int_val;
+                    if (a > b) max_val = obj->as.array.elems[i];
                 }
             }
-            *result = rvm_clone(&max);
+            *result = rvm_clone(&max_val);
             return true;
         }
         if (strcmp(method, "insert") == 0 && arg_count == 2) {
@@ -975,6 +1071,75 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 free(key_str);
             }
             *result = map;
+            return true;
+        }
+    }
+
+    /* ── Array additional methods ── */
+    if (obj->type == VAL_ARRAY) {
+        if (strcmp(method, "flat") == 0 && arg_count == 0) {
+            size_t cap = obj->as.array.len * 2;
+            if (cap == 0) cap = 1;
+            LatValue *elems = malloc(cap * sizeof(LatValue));
+            size_t out = 0;
+            for (size_t i = 0; i < obj->as.array.len; i++) {
+                LatValue *el = &obj->as.array.elems[i];
+                if (el->type == VAL_ARRAY) {
+                    for (size_t j = 0; j < el->as.array.len; j++) {
+                        if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
+                        elems[out++] = rvm_clone(&el->as.array.elems[j]);
+                    }
+                } else {
+                    if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
+                    elems[out++] = rvm_clone(el);
+                }
+            }
+            *result = value_array(elems, out);
+            free(elems);
+            return true;
+        }
+        if (strcmp(method, "first") == 0 && arg_count == 0) {
+            *result = (obj->as.array.len > 0) ? rvm_clone(&obj->as.array.elems[0]) : value_unit();
+            return true;
+        }
+        if (strcmp(method, "last") == 0 && arg_count == 0) {
+            *result = (obj->as.array.len > 0) ? rvm_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit();
+            return true;
+        }
+        if (strcmp(method, "min") == 0 && arg_count == 0) {
+            if (obj->as.array.len == 0) { *result = value_unit(); return true; }
+            LatValue best = rvm_clone(&obj->as.array.elems[0]);
+            for (size_t i = 1; i < obj->as.array.len; i++) {
+                LatValue *el = &obj->as.array.elems[i];
+                bool less = false;
+                if (el->type == VAL_INT && best.type == VAL_INT)
+                    less = el->as.int_val < best.as.int_val;
+                else if (el->type == VAL_FLOAT || best.type == VAL_FLOAT) {
+                    double a = el->type == VAL_FLOAT ? el->as.float_val : (double)el->as.int_val;
+                    double b = best.type == VAL_FLOAT ? best.as.float_val : (double)best.as.int_val;
+                    less = a < b;
+                }
+                if (less) { value_free(&best); best = rvm_clone(el); }
+            }
+            *result = best;
+            return true;
+        }
+        if (strcmp(method, "max") == 0 && arg_count == 0) {
+            if (obj->as.array.len == 0) { *result = value_unit(); return true; }
+            LatValue best = rvm_clone(&obj->as.array.elems[0]);
+            for (size_t i = 1; i < obj->as.array.len; i++) {
+                LatValue *el = &obj->as.array.elems[i];
+                bool greater = false;
+                if (el->type == VAL_INT && best.type == VAL_INT)
+                    greater = el->as.int_val > best.as.int_val;
+                else if (el->type == VAL_FLOAT || best.type == VAL_FLOAT) {
+                    double a = el->type == VAL_FLOAT ? el->as.float_val : (double)el->as.int_val;
+                    double b = best.type == VAL_FLOAT ? best.as.float_val : (double)best.as.int_val;
+                    greater = a > b;
+                }
+                if (greater) { value_free(&best); best = rvm_clone(el); }
+            }
+            *result = best;
             return true;
         }
     }
@@ -1181,10 +1346,15 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (strcmp(method, "payload") == 0) {
-            if (obj->as.enm.payload_count > 0)
-                *result = rvm_clone(&obj->as.enm.payload[0]);
-            else
-                *result = value_nil();
+            if (obj->as.enm.payload_count > 0) {
+                LatValue *elems = malloc(obj->as.enm.payload_count * sizeof(LatValue));
+                for (size_t pi = 0; pi < obj->as.enm.payload_count; pi++)
+                    elems[pi] = rvm_clone(&obj->as.enm.payload[pi]);
+                *result = value_array(elems, obj->as.enm.payload_count);
+                free(elems);
+            } else {
+                *result = value_array(NULL, 0);
+            }
             return true;
         }
         if (strcmp(method, "is_variant") == 0 && arg_count == 1) {
@@ -1235,6 +1405,21 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_bool(found);
             return true;
         }
+        if (strcmp(method, "add") == 0 && arg_count == 1) {
+            char *key = value_display(&args[0]);
+            LatValue val = rvm_clone(&args[0]);
+            lat_map_set(obj->as.set.map, key, &val);
+            free(key);
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "remove") == 0 && arg_count == 1) {
+            char *key = value_display(&args[0]);
+            lat_map_remove(obj->as.set.map, key);
+            free(key);
+            *result = value_unit();
+            return true;
+        }
         if (strcmp(method, "to_array") == 0 && arg_count == 0) {
             size_t len = lat_map_len(obj->as.set.map);
             LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
@@ -1248,10 +1433,460 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
+        if (strcmp(method, "union") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+            LatValue result_set = value_set_new();
+            for (size_t i = 0; i < obj->as.set.map->cap; i++) {
+                if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue v = rvm_clone((LatValue *)obj->as.set.map->entries[i].value);
+                lat_map_set(result_set.as.set.map, obj->as.set.map->entries[i].key, &v);
+            }
+            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
+                if (args[0].as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue v = rvm_clone((LatValue *)args[0].as.set.map->entries[i].value);
+                lat_map_set(result_set.as.set.map, args[0].as.set.map->entries[i].key, &v);
+            }
+            *result = result_set;
+            return true;
+        }
+        if (strcmp(method, "intersection") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+            LatValue result_set = value_set_new();
+            for (size_t i = 0; i < obj->as.set.map->cap; i++) {
+                if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                if (lat_map_contains(args[0].as.set.map, obj->as.set.map->entries[i].key)) {
+                    LatValue v = rvm_clone((LatValue *)obj->as.set.map->entries[i].value);
+                    lat_map_set(result_set.as.set.map, obj->as.set.map->entries[i].key, &v);
+                }
+            }
+            *result = result_set;
+            return true;
+        }
+        if (strcmp(method, "difference") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+            LatValue result_set = value_set_new();
+            for (size_t i = 0; i < obj->as.set.map->cap; i++) {
+                if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                if (!lat_map_contains(args[0].as.set.map, obj->as.set.map->entries[i].key)) {
+                    LatValue v = rvm_clone((LatValue *)obj->as.set.map->entries[i].value);
+                    lat_map_set(result_set.as.set.map, obj->as.set.map->entries[i].key, &v);
+                }
+            }
+            *result = result_set;
+            return true;
+        }
+        if (strcmp(method, "is_subset") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+            bool is = true;
+            for (size_t i = 0; i < obj->as.set.map->cap; i++) {
+                if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                if (!lat_map_contains(args[0].as.set.map, obj->as.set.map->entries[i].key)) {
+                    is = false; break;
+                }
+            }
+            *result = value_bool(is);
+            return true;
+        }
+        if (strcmp(method, "is_superset") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+            bool is = true;
+            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
+                if (args[0].as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                if (!lat_map_contains(obj->as.set.map, args[0].as.set.map->entries[i].key)) {
+                    is = false; break;
+                }
+            }
+            *result = value_bool(is);
+            return true;
+        }
+    }
+
+    /* ── String additional: count, is_empty ── */
+    if (obj->type == VAL_STR) {
+        if (strcmp(method, "count") == 0 && arg_count == 1) {
+            int64_t cnt = 0;
+            if (args[0].type == VAL_STR && args[0].as.str_val[0]) {
+                const char *p = obj->as.str_val;
+                size_t nlen = strlen(args[0].as.str_val);
+                while ((p = strstr(p, args[0].as.str_val)) != NULL) { cnt++; p += nlen; }
+            }
+            *result = value_int(cnt);
+            return true;
+        }
+        if (strcmp(method, "is_empty") == 0 && arg_count == 0) {
+            *result = value_bool(obj->as.str_val[0] == '\0');
+            return true;
+        }
+    }
+
+    /* ── Map additional: remove/delete ── */
+    if (obj->type == VAL_MAP) {
+        if ((strcmp(method, "remove") == 0 || strcmp(method, "delete") == 0) && arg_count == 1) {
+            if (args[0].type == VAL_STR)
+                lat_map_remove(obj->as.map.map, args[0].as.str_val);
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "map") == 0 && arg_count == 1) {
+            LatValue *closure = &args[0];
+            LatValue mapped = value_map_new();
+            for (size_t i = 0; i < obj->as.map.map->cap; i++) {
+                if (obj->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue cb_args[2];
+                cb_args[0] = value_string(obj->as.map.map->entries[i].key);
+                cb_args[1] = rvm_clone((LatValue *)obj->as.map.map->entries[i].value);
+                LatValue ret = regvm_call_closure(vm, closure, cb_args, 2);
+                lat_map_set(mapped.as.map.map, obj->as.map.map->entries[i].key, &ret);
+                value_free(&cb_args[0]);
+                value_free(&cb_args[1]);
+            }
+            *result = mapped;
+            return true;
+        }
+    }
+
+    /* ── Buffer methods ── */
+    if (obj->type == VAL_BUFFER) {
+        if (strcmp(method, "len") == 0 && arg_count == 0) {
+            *result = value_int((int64_t)obj->as.buffer.len);
+            return true;
+        }
+        if (strcmp(method, "capacity") == 0 && arg_count == 0) {
+            *result = value_int((int64_t)obj->as.buffer.cap);
+            return true;
+        }
+        if (strcmp(method, "push") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                if (obj->as.buffer.len >= obj->as.buffer.cap) {
+                    obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
+                    obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
+                }
+                obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)args[0].as.int_val;
+            }
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "push_u16") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                uint16_t v = (uint16_t)args[0].as.int_val;
+                while (obj->as.buffer.len + 2 > obj->as.buffer.cap) {
+                    obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
+                    obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
+                }
+                obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(v & 0xFF);
+                obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
+            }
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "push_u32") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                uint32_t v = (uint32_t)args[0].as.int_val;
+                while (obj->as.buffer.len + 4 > obj->as.buffer.cap) {
+                    obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
+                    obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
+                }
+                obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(v & 0xFF);
+                obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
+                obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 16) & 0xFF);
+                obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 24) & 0xFF);
+            }
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "read_u8") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx >= obj->as.buffer.len) {
+                    *result = value_nil();
+                } else {
+                    *result = value_int((int64_t)obj->as.buffer.data[idx]);
+                }
+            } else {
+                *result = value_nil();
+            }
+            return true;
+        }
+        if (strcmp(method, "write_u8") == 0 && arg_count == 2) {
+            if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx >= 0 && (size_t)idx < obj->as.buffer.len)
+                    obj->as.buffer.data[idx] = (uint8_t)args[1].as.int_val;
+            }
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "read_u16") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx + 2 > obj->as.buffer.len) {
+                    *result = value_nil();
+                } else {
+                    uint16_t v = (uint16_t)(obj->as.buffer.data[idx]) |
+                                 ((uint16_t)(obj->as.buffer.data[idx + 1]) << 8);
+                    *result = value_int((int64_t)v);
+                }
+            } else {
+                *result = value_nil();
+            }
+            return true;
+        }
+        if (strcmp(method, "write_u16") == 0 && arg_count == 2) {
+            if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                uint16_t v = (uint16_t)args[1].as.int_val;
+                if (idx >= 0 && (size_t)idx + 1 < obj->as.buffer.len) {
+                    obj->as.buffer.data[idx] = (uint8_t)(v & 0xFF);
+                    obj->as.buffer.data[idx + 1] = (uint8_t)(v >> 8);
+                }
+            }
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "read_u32") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) {
+                    *result = value_nil();
+                } else {
+                    uint32_t v = (uint32_t)(obj->as.buffer.data[idx]) |
+                                 ((uint32_t)(obj->as.buffer.data[idx + 1]) << 8) |
+                                 ((uint32_t)(obj->as.buffer.data[idx + 2]) << 16) |
+                                 ((uint32_t)(obj->as.buffer.data[idx + 3]) << 24);
+                    *result = value_int((int64_t)v);
+                }
+            } else {
+                *result = value_nil();
+            }
+            return true;
+        }
+        if (strcmp(method, "write_u32") == 0 && arg_count == 2) {
+            if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                uint32_t v = (uint32_t)args[1].as.int_val;
+                if (idx >= 0 && (size_t)idx + 3 < obj->as.buffer.len) {
+                    obj->as.buffer.data[idx] = (uint8_t)(v & 0xFF);
+                    obj->as.buffer.data[idx + 1] = (uint8_t)((v >> 8) & 0xFF);
+                    obj->as.buffer.data[idx + 2] = (uint8_t)((v >> 16) & 0xFF);
+                    obj->as.buffer.data[idx + 3] = (uint8_t)((v >> 24) & 0xFF);
+                }
+            }
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
+            int64_t start = args[0].type == VAL_INT ? args[0].as.int_val : 0;
+            int64_t end = arg_count == 2 && args[1].type == VAL_INT ? args[1].as.int_val : (int64_t)obj->as.buffer.len;
+            if (start < 0) start = 0;
+            if (end > (int64_t)obj->as.buffer.len) end = (int64_t)obj->as.buffer.len;
+            if (start >= end) { *result = value_buffer(NULL, 0); return true; }
+            *result = value_buffer(obj->as.buffer.data + start, (size_t)(end - start));
+            return true;
+        }
+        if (strcmp(method, "clear") == 0 && arg_count == 0) {
+            obj->as.buffer.len = 0;
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "fill") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT)
+                memset(obj->as.buffer.data, (uint8_t)args[0].as.int_val, obj->as.buffer.len);
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "resize") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT && args[0].as.int_val >= 0) {
+                size_t new_len = (size_t)args[0].as.int_val;
+                if (new_len > obj->as.buffer.cap) {
+                    obj->as.buffer.cap = new_len;
+                    obj->as.buffer.data = realloc(obj->as.buffer.data, new_len);
+                }
+                if (new_len > obj->as.buffer.len)
+                    memset(obj->as.buffer.data + obj->as.buffer.len, 0, new_len - obj->as.buffer.len);
+                obj->as.buffer.len = new_len;
+            }
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "to_string") == 0 && arg_count == 0) {
+            char *s = malloc(obj->as.buffer.len + 1);
+            memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
+            s[obj->as.buffer.len] = '\0';
+            *result = value_string_owned(s);
+            return true;
+        }
+        if (strcmp(method, "to_array") == 0 && arg_count == 0) {
+            LatValue *elems = malloc((obj->as.buffer.len > 0 ? obj->as.buffer.len : 1) * sizeof(LatValue));
+            for (size_t i = 0; i < obj->as.buffer.len; i++)
+                elems[i] = value_int((int64_t)obj->as.buffer.data[i]);
+            *result = value_array(elems, obj->as.buffer.len);
+            free(elems);
+            return true;
+        }
+        if (strcmp(method, "to_hex") == 0 && arg_count == 0) {
+            char *hex = malloc(obj->as.buffer.len * 2 + 1);
+            for (size_t i = 0; i < obj->as.buffer.len; i++)
+                snprintf(hex + i * 2, 3, "%02x", obj->as.buffer.data[i]);
+            hex[obj->as.buffer.len * 2] = '\0';
+            *result = value_string_owned(hex);
+            return true;
+        }
+    }
+
+    /* ── Ref methods ── */
+    if (obj->type == VAL_REF) {
+        LatRef *ref = obj->as.ref.ref;
+        if ((strcmp(method, "get") == 0 || strcmp(method, "deref") == 0) && arg_count == 0) {
+            *result = value_deep_clone(&ref->value);
+            return true;
+        }
+        if (strcmp(method, "set") == 0 && arg_count == 1 && arg_count == 1) {
+            if (obj->phase == VTAG_CRYSTAL) {
+                *result = value_unit();
+                return true;
+            }
+            value_free(&ref->value);
+            ref->value = rvm_clone(&args[0]);
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "inner_type") == 0 && arg_count == 0) {
+            *result = value_string(value_type_name(&ref->value));
+            return true;
+        }
+        /* Proxy: delegate to inner value's methods if applicable */
+        if (ref->value.type == VAL_MAP) {
+            if (strcmp(method, "get") == 0 && arg_count == 1 && args[0].type == VAL_STR) {
+                LatValue *val = lat_map_get(ref->value.as.map.map, args[0].as.str_val);
+                *result = val ? value_deep_clone(val) : value_nil();
+                return true;
+            }
+            if (strcmp(method, "set") == 0 && arg_count == 2 && args[0].type == VAL_STR) {
+                if (obj->phase != VTAG_CRYSTAL) {
+                    LatValue cloned = rvm_clone(&args[1]);
+                    lat_map_set(ref->value.as.map.map, args[0].as.str_val, &cloned);
+                }
+                *result = value_unit();
+                return true;
+            }
+            if ((strcmp(method, "has") == 0 || strcmp(method, "contains") == 0) && arg_count == 1 && args[0].type == VAL_STR) {
+                *result = value_bool(lat_map_get(ref->value.as.map.map, args[0].as.str_val) != NULL);
+                return true;
+            }
+            if (strcmp(method, "keys") == 0 && arg_count == 0) {
+                size_t cap = ref->value.as.map.map->cap;
+                LatValue *keys = malloc(cap * sizeof(LatValue));
+                size_t cnt = 0;
+                for (size_t i = 0; i < cap; i++) {
+                    if (ref->value.as.map.map->entries[i].state == MAP_OCCUPIED)
+                        keys[cnt++] = value_string(ref->value.as.map.map->entries[i].key);
+                }
+                *result = value_array(keys, cnt);
+                free(keys);
+                return true;
+            }
+            if (strcmp(method, "values") == 0 && arg_count == 0) {
+                size_t cap = ref->value.as.map.map->cap;
+                LatValue *vals = malloc(cap * sizeof(LatValue));
+                size_t cnt = 0;
+                for (size_t i = 0; i < cap; i++) {
+                    if (ref->value.as.map.map->entries[i].state == MAP_OCCUPIED)
+                        vals[cnt++] = value_deep_clone((LatValue *)ref->value.as.map.map->entries[i].value);
+                }
+                *result = value_array(vals, cnt);
+                free(vals);
+                return true;
+            }
+            if (strcmp(method, "entries") == 0 && arg_count == 0) {
+                size_t cap = ref->value.as.map.map->cap;
+                LatValue *entries = malloc(cap * sizeof(LatValue));
+                size_t cnt = 0;
+                for (size_t i = 0; i < cap; i++) {
+                    if (ref->value.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                    LatValue pair[2];
+                    pair[0] = value_string(ref->value.as.map.map->entries[i].key);
+                    pair[1] = value_deep_clone((LatValue *)ref->value.as.map.map->entries[i].value);
+                    entries[cnt++] = value_array(pair, 2);
+                }
+                *result = value_array(entries, cnt);
+                free(entries);
+                return true;
+            }
+            if (strcmp(method, "len") == 0 && arg_count == 0) {
+                *result = value_int((int64_t)lat_map_len(ref->value.as.map.map));
+                return true;
+            }
+            if (strcmp(method, "merge") == 0 && arg_count == 1 && args[0].type == VAL_MAP) {
+                if (obj->phase != VTAG_CRYSTAL) {
+                    for (size_t i = 0; i < args[0].as.map.map->cap; i++) {
+                        if (args[0].as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                        LatValue v = rvm_clone((LatValue *)args[0].as.map.map->entries[i].value);
+                        lat_map_set(ref->value.as.map.map, args[0].as.map.map->entries[i].key, &v);
+                    }
+                }
+                *result = value_unit();
+                return true;
+            }
+        }
+        if (ref->value.type == VAL_ARRAY) {
+            if (strcmp(method, "push") == 0 && arg_count == 1) {
+                LatValue val = rvm_clone(&args[0]);
+                if (ref->value.as.array.len >= ref->value.as.array.cap) {
+                    ref->value.as.array.cap = ref->value.as.array.cap ? ref->value.as.array.cap * 2 : 4;
+                    ref->value.as.array.elems = realloc(ref->value.as.array.elems,
+                        ref->value.as.array.cap * sizeof(LatValue));
+                }
+                ref->value.as.array.elems[ref->value.as.array.len++] = val;
+                *result = value_unit();
+                return true;
+            }
+            if (strcmp(method, "pop") == 0 && arg_count == 0) {
+                if (ref->value.as.array.len == 0) { *result = value_nil(); }
+                else { *result = ref->value.as.array.elems[--ref->value.as.array.len]; }
+                return true;
+            }
+            if (strcmp(method, "len") == 0 && arg_count == 0) {
+                *result = value_int((int64_t)ref->value.as.array.len);
+                return true;
+            }
+            if (strcmp(method, "contains") == 0 && arg_count == 1) {
+                bool found = false;
+                for (size_t i = 0; i < ref->value.as.array.len; i++) {
+                    if (value_eq(&ref->value.as.array.elems[i], &args[0])) { found = true; break; }
+                }
+                *result = value_bool(found);
+                return true;
+            }
+        }
+    }
+
+    /* ── Channel methods ── */
+    if (obj->type == VAL_CHANNEL) {
+        if (strcmp(method, "send") == 0 && arg_count == 1) {
+            if (!value_is_crystal(&args[0]) && args[0].phase != VTAG_UNPHASED) {
+                vm->error = strdup("channel send requires crystal or unphased values");
+                *result = value_unit();
+                return true;
+            }
+            LatValue val = rvm_clone(&args[0]);
+            channel_send(obj->as.channel.ch, val);
+            *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "recv") == 0 && arg_count == 0) {
+            bool ok = false;
+            *result = channel_recv(obj->as.channel.ch, &ok);
+            if (!ok) *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "close") == 0 && arg_count == 0) {
+            channel_close(obj->as.channel.ch);
+            *result = value_unit();
+            return true;
+        }
     }
 
     return false;
 }
+
+/* Phase system functions (regvm_fire_reactions, regvm_freeze_cascade,
+ * regvm_validate_seeds, regvm_sync_env_to_register) have been moved to
+ * runtime.c as rt_* functions. */
 
 /* ── VM Dispatch Loop ── */
 
@@ -1265,11 +1900,34 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
     /* Check for native C function */
     if (closure->as.closure.default_values == VM_NATIVE_MARKER) {
         VMNativeFn native = (VMNativeFn)closure->as.closure.native_fn;
-        return native(args, argc);
+        LatValue ret = native(args, argc);
+        /* Check runtime for native errors — propagate to regvm */
+        if (vm->rt->error) {
+            vm->error = vm->rt->error;
+            vm->rt->error = NULL;
+            value_free(&ret);
+            return value_nil();
+        }
+        return ret;
+    }
+
+    /* Extension native function */
+    if (closure->as.closure.default_values == VM_EXT_MARKER) {
+        LatValue ret = ext_call_native(closure->as.closure.native_fn, args, (size_t)argc);
+        if (ret.type == VAL_STR && ret.as.str_val &&
+            strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+            vm->error = strdup(ret.as.str_val + 11);
+            value_free(&ret);
+            return value_nil();
+        }
+        return ret;
     }
 
     RegChunk *fn_chunk = (RegChunk *)closure->as.closure.native_fn;
     if (!fn_chunk) return value_nil();
+
+    /* Guard: detect stack-VM closures that can't run in regvm */
+    if (fn_chunk->magic != REGCHUNK_MAGIC) return value_nil();
 
     if (vm->frame_count >= REGVM_FRAMES_MAX) return value_nil();
 
@@ -1303,7 +1961,23 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
 
     LatValue ret;
     RegVMResult res = regvm_dispatch(vm, saved_base, &ret);
-    if (res != REGVM_OK) return value_nil();
+    if (res != REGVM_OK) {
+        /* Unwind any frames left by the failed dispatch back to saved_base */
+        while (vm->frame_count > saved_base) {
+            RegCallFrame *uf = &vm->frames[vm->frame_count - 1];
+            for (int i = 0; i < REGVM_REG_MAX; i++)
+                value_free_inline(&uf->regs[i]);
+            vm->frame_count--;
+            vm->reg_stack_top -= REGVM_REG_MAX;
+        }
+        /* Propagate vm->error to rt->error so runtime-level callers
+         * (e.g. rt_fire_reactions) can see and wrap the error */
+        if (vm->error && !vm->rt->error) {
+            vm->rt->error = vm->error;
+            vm->error = NULL;
+        }
+        return value_nil();
+    }
     return ret;
 }
 
@@ -1427,6 +2101,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_DEC_REG]      = &&L_DEC_REG,
         [ROP_SETINDEX_LOCAL] = &&L_SETINDEX_LOCAL,
         [ROP_INVOKE_GLOBAL] = &&L_INVOKE_GLOBAL,
+        /* Phase query */
+        [ROP_IS_CRYSTAL]   = &&L_IS_CRYSTAL,
+        /* Type checking */
+        [ROP_CHECK_TYPE]   = &&L_CHECK_TYPE,
+        [ROP_FREEZE_FIELD] = &&L_FREEZE_FIELD,
+        [ROP_THAW_FIELD]   = &&L_THAW_FIELD,
+        /* Require */
+        [ROP_REQUIRE]      = &&L_REQUIRE,
         /* Misc */
         [ROP_HALT]         = &&L_HALT,
     };
@@ -1463,6 +2145,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         reg_set(&R[a], rvm_clone(&R[b]));
+        /* Record history for tracked variables */
+        {
+            if (vm->rt->tracking_active &&
+                frame->chunk->local_names && a < frame->chunk->local_name_cap &&
+                frame->chunk->local_names[a] && frame->chunk->local_names[a][0]) {
+                rt_record_history(vm->rt, frame->chunk->local_names[a], &R[a]);
+            }
+        }
         DISPATCH();
     }
 
@@ -1470,6 +2160,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint16_t bx = REG_GET_Bx(instr);
         reg_set(&R[a], rvm_clone(&frame->chunk->constants[bx]));
+        /* Record history for tracked variables */
+        {
+            if (vm->rt->tracking_active &&
+                frame->chunk->local_names && a < frame->chunk->local_name_cap &&
+                frame->chunk->local_names[a] && frame->chunk->local_names[a][0]) {
+                rt_record_history(vm->rt, frame->chunk->local_names[a], &R[a]);
+            }
+        }
         DISPATCH();
     }
 
@@ -1477,6 +2175,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         int16_t sbx = REG_GET_sBx(instr);
         reg_set(&R[a], value_int((int64_t)sbx));
+        /* Record history for tracked variables */
+        {
+            if (vm->rt->tracking_active &&
+                frame->chunk->local_names && a < frame->chunk->local_name_cap &&
+                frame->chunk->local_names[a] && frame->chunk->local_names[a][0]) {
+                rt_record_history(vm->rt, frame->chunk->local_names[a], &R[a]);
+            }
+        }
         DISPATCH();
     }
 
@@ -1489,12 +2195,26 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     CASE(LOADTRUE) {
         uint8_t a = REG_GET_A(instr);
         reg_set(&R[a], value_bool(true));
+        {
+            if (vm->rt->tracking_active &&
+                frame->chunk->local_names && a < frame->chunk->local_name_cap &&
+                frame->chunk->local_names[a] && frame->chunk->local_names[a][0]) {
+                rt_record_history(vm->rt, frame->chunk->local_names[a], &R[a]);
+            }
+        }
         DISPATCH();
     }
 
     CASE(LOADFALSE) {
         uint8_t a = REG_GET_A(instr);
         reg_set(&R[a], value_bool(false));
+        {
+            if (vm->rt->tracking_active &&
+                frame->chunk->local_names && a < frame->chunk->local_name_cap &&
+                frame->chunk->local_names[a] && frame->chunk->local_names[a][0]) {
+                rt_record_history(vm->rt, frame->chunk->local_names[a], &R[a]);
+            }
+        }
         DISPATCH();
     }
 
@@ -1517,11 +2237,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[b].type == VAL_STR && R[c].type == VAL_STR) {
             size_t lb = strlen(R[b].as.str_val);
             size_t lc = strlen(R[c].as.str_val);
-            char *buf = malloc(lb + lc + 1);
+            char *buf = bump_alloc(vm->ephemeral, lb + lc + 1);
             memcpy(buf, R[b].as.str_val, lb);
             memcpy(buf + lb, R[c].as.str_val, lc);
             buf[lb + lc] = '\0';
-            reg_set(&R[a], value_string_owned(buf));
+            LatValue v = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_EPHEMERAL };
+            v.as.str_val = buf;
+            reg_set(&R[a], v);
         } else {
             RVM_ERROR("cannot add %s and %s",
                 value_type_name(&R[b]), value_type_name(&R[c]));
@@ -1573,10 +2295,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             reg_set(&R[a], value_int(R[b].as.int_val / R[c].as.int_val));
         } else if (R[b].type == VAL_FLOAT || R[c].type == VAL_FLOAT) {
             double rv = R[c].type == VAL_FLOAT ? R[c].as.float_val : (double)R[c].as.int_val;
-            if (rv == 0.0)
-                RVM_ERROR("division by zero");
             double lv = R[b].type == VAL_FLOAT ? R[b].as.float_val : (double)R[b].as.int_val;
-            reg_set(&R[a], value_float(lv / rv));
+            reg_set(&R[a], value_float(lv / rv));  /* float div by zero → Inf/NaN */
         } else {
             RVM_ERROR("cannot divide %s by %s",
                 value_type_name(&R[b]), value_type_name(&R[c]));
@@ -1633,12 +2353,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         char *ls = value_display(&R[b]);
         char *rs = value_display(&R[c]);
         size_t ll = strlen(ls), rl = strlen(rs);
-        char *buf = malloc(ll + rl + 1);
+        char *buf = bump_alloc(vm->ephemeral, ll + rl + 1);
         memcpy(buf, ls, ll);
         memcpy(buf + ll, rs, rl);
         buf[ll + rl] = '\0';
         free(ls); free(rs);
-        reg_set(&R[a], value_string_owned(buf));
+        LatValue v = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_EPHEMERAL };
+        v.as.str_val = buf;
+        reg_set(&R[a], v);
         DISPATCH();
     }
 
@@ -1772,6 +2494,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         const char *name = frame->chunk->constants[bx].as.str_val;
         if (!env_set(vm->env, name, rvm_clone(&R[a])))
             RVM_ERROR("undefined variable '%s'", name);
+        /* Record history for tracked globals */
+        {
+            if (vm->rt->tracking_active)
+                rt_record_history(vm->rt, name, &R[a]);
+        }
         DISPATCH();
     }
 
@@ -1779,7 +2506,49 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint16_t bx = REG_GET_Bx(instr);
         const char *name = frame->chunk->constants[bx].as.str_val;
-        env_define(vm->env, name, rvm_clone(&R[a]));
+        LatValue val = rvm_clone(&R[a]);
+
+        /* Phase-dispatch overloading: if defining a phase-constrained
+         * closure and one already exists, create an overload array */
+        if (val.type == VAL_CLOSURE && val.as.closure.native_fn != NULL &&
+            val.as.closure.default_values != VM_NATIVE_MARKER) {
+            uint32_t magic;
+            memcpy(&magic, val.as.closure.native_fn, sizeof(uint32_t));
+            if (magic == REGCHUNK_MAGIC) {
+                RegChunk *ch = (RegChunk *)val.as.closure.native_fn;
+                if (ch->param_phases) {
+                    LatValue existing;
+                    if (env_get(vm->env, name, &existing)) {
+                        if (existing.type == VAL_CLOSURE && existing.as.closure.native_fn != NULL &&
+                            existing.as.closure.default_values != VM_NATIVE_MARKER) {
+                            uint32_t emag;
+                            memcpy(&emag, existing.as.closure.native_fn, sizeof(uint32_t));
+                            if (emag == REGCHUNK_MAGIC) {
+                                RegChunk *ech = (RegChunk *)existing.as.closure.native_fn;
+                                if (ech->param_phases) {
+                                    LatValue elems[2] = { value_deep_clone(&existing), val };
+                                    LatValue arr = value_array(elems, 2);
+                                    env_define(vm->env, name, arr);
+                                    DISPATCH();
+                                }
+                            }
+                        } else if (existing.type == VAL_ARRAY) {
+                            size_t new_len = existing.as.array.len + 1;
+                            LatValue *new_elems = malloc(new_len * sizeof(LatValue));
+                            for (size_t i = 0; i < existing.as.array.len; i++)
+                                new_elems[i] = value_deep_clone(&existing.as.array.elems[i]);
+                            new_elems[existing.as.array.len] = val;
+                            LatValue arr = value_array(new_elems, new_len);
+                            free(new_elems);
+                            env_define(vm->env, name, arr);
+                            DISPATCH();
+                        }
+                    }
+                }
+            }
+        }
+
+        env_define(vm->env, name, val);
         DISPATCH();
     }
 
@@ -1807,6 +2576,30 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 reg_set(&R[a], rvm_clone(val));
             else
                 reg_set(&R[a], value_nil());
+        } else if (R[b].type == VAL_TUPLE) {
+            char *endp;
+            long idx = strtol(field_name, &endp, 10);
+            if (*endp == '\0' && idx >= 0 && (size_t)idx < R[b].as.tuple.len)
+                reg_set(&R[a], rvm_clone(&R[b].as.tuple.elems[idx]));
+            else
+                RVM_ERROR("tuple has no field '%s'", field_name);
+        } else if (R[b].type == VAL_ENUM) {
+            if (strcmp(field_name, "tag") == 0 || strcmp(field_name, "variant_name") == 0)
+                reg_set(&R[a], value_string(R[b].as.enm.variant_name));
+            else if (strcmp(field_name, "enum_name") == 0)
+                reg_set(&R[a], value_string(R[b].as.enm.enum_name));
+            else if (strcmp(field_name, "payload") == 0) {
+                if (R[b].as.enm.payload_count > 0) {
+                    LatValue *elems = malloc(R[b].as.enm.payload_count * sizeof(LatValue));
+                    for (size_t pi = 0; pi < R[b].as.enm.payload_count; pi++)
+                        elems[pi] = rvm_clone(&R[b].as.enm.payload[pi]);
+                    reg_set(&R[a], value_array(elems, R[b].as.enm.payload_count));
+                    free(elems);
+                } else {
+                    reg_set(&R[a], value_array(NULL, 0));
+                }
+            } else
+                RVM_ERROR("enum has no field '%s'", field_name);
         } else {
             RVM_ERROR("cannot access field '%s' on %s",
                 field_name, value_type_name(&R[b]));
@@ -1819,6 +2612,33 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t b = REG_GET_B(instr);  /* field name constant */
         uint8_t c = REG_GET_C(instr);  /* value reg */
         const char *field_name = frame->chunk->constants[b].as.str_val;
+
+        /* Phase checks */
+        if (R[a].phase == VTAG_CRYSTAL) {
+            /* Check per-field phases for structs with partial freeze (freeze except) */
+            bool blocked = true;
+            if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases) {
+                for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
+                    if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
+                        if (R[a].as.strct.field_phases[i] != VTAG_CRYSTAL) blocked = false;
+                        break;
+                    }
+                }
+            }
+            if (blocked)
+                RVM_ERROR("cannot set field '%s' on a frozen value", field_name);
+        }
+        /* Also check per-field phases (alloy types) even on non-frozen structs */
+        if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases &&
+            R[a].phase != VTAG_CRYSTAL) {
+            for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
+                if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
+                    if (R[a].as.strct.field_phases[i] == VTAG_CRYSTAL)
+                        RVM_ERROR("cannot assign to frozen field '%s'", field_name);
+                    break;
+                }
+            }
+        }
 
         if (R[a].type == VAL_STRUCT) {
             for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
@@ -1840,7 +2660,44 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t b = REG_GET_B(instr);
         uint8_t c = REG_GET_C(instr);
 
-        if (R[b].type == VAL_ARRAY) {
+        if (R[b].type == VAL_ARRAY && R[c].type == VAL_RANGE) {
+            /* Array range slicing: arr[start..end] */
+            int64_t start = R[c].as.range.start;
+            int64_t end = R[c].as.range.end;
+            size_t len = R[b].as.array.len;
+            if (start < 0) start = 0;
+            if ((size_t)start > len) start = (int64_t)len;
+            if (end < 0) end = 0;
+            if ((size_t)end > len) end = (int64_t)len;
+            if (start >= end) {
+                reg_set(&R[a], value_array(NULL, 0));
+            } else {
+                size_t slice_len = (size_t)(end - start);
+                LatValue *elems = malloc(slice_len * sizeof(LatValue));
+                for (size_t i = 0; i < slice_len; i++)
+                    elems[i] = rvm_clone(&R[b].as.array.elems[start + (int64_t)i]);
+                reg_set(&R[a], value_array(elems, slice_len));
+                free(elems);
+            }
+        } else if (R[b].type == VAL_STR && R[c].type == VAL_RANGE) {
+            /* String range slicing: str[start..end] */
+            int64_t start = R[c].as.range.start;
+            int64_t end = R[c].as.range.end;
+            size_t len = strlen(R[b].as.str_val);
+            if (start < 0) start = 0;
+            if ((size_t)start > len) start = (int64_t)len;
+            if (end < 0) end = 0;
+            if ((size_t)end > len) end = (int64_t)len;
+            if (start >= end) {
+                reg_set(&R[a], value_string(""));
+            } else {
+                size_t slice_len = (size_t)(end - start);
+                char *slice = malloc(slice_len + 1);
+                memcpy(slice, R[b].as.str_val + start, slice_len);
+                slice[slice_len] = '\0';
+                reg_set(&R[a], value_string_owned(slice));
+            }
+        } else if (R[b].type == VAL_ARRAY) {
             if (R[c].type != VAL_INT)
                 RVM_ERROR("array index must be an integer");
             int64_t idx = R[c].as.int_val;
@@ -1867,6 +2724,30 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 RVM_ERROR("string index out of bounds");
             char buf[2] = { R[b].as.str_val[idx], '\0' };
             reg_set(&R[a], value_string(buf));
+        } else if (R[b].type == VAL_BUFFER) {
+            if (R[c].type != VAL_INT)
+                RVM_ERROR("buffer index must be an integer");
+            int64_t idx = R[c].as.int_val;
+            if (idx < 0 || (size_t)idx >= R[b].as.buffer.len)
+                RVM_ERROR("buffer index out of bounds");
+            reg_set(&R[a], value_int((int64_t)R[b].as.buffer.data[idx]));
+        } else if (R[b].type == VAL_REF) {
+            /* Proxy indexing on Ref inner value */
+            LatRef *ref = R[b].as.ref.ref;
+            if (ref->value.type == VAL_MAP) {
+                if (R[c].type != VAL_STR) RVM_ERROR("map key must be a string");
+                LatValue *val = lat_map_get(ref->value.as.map.map, R[c].as.str_val);
+                reg_set(&R[a], val ? rvm_clone(val) : value_nil());
+            } else if (ref->value.type == VAL_ARRAY) {
+                if (R[c].type != VAL_INT) RVM_ERROR("array index must be an integer");
+                int64_t idx = R[c].as.int_val;
+                if (idx < 0) idx += (int64_t)ref->value.as.array.len;
+                if (idx < 0 || (size_t)idx >= ref->value.as.array.len)
+                    RVM_ERROR("array index out of bounds");
+                reg_set(&R[a], rvm_clone(&ref->value.as.array.elems[idx]));
+            } else {
+                RVM_ERROR("cannot index Ref(%s)", value_type_name(&ref->value));
+            }
         } else {
             RVM_ERROR("cannot index %s", value_type_name(&R[b]));
         }
@@ -1877,6 +2758,26 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);  /* object */
         uint8_t b = REG_GET_B(instr);  /* index */
         uint8_t c = REG_GET_C(instr);  /* value */
+
+        /* Phase checks for mutation */
+        if (R[a].phase == VTAG_CRYSTAL) {
+            /* Allow mutation on maps with per-key phases (freeze except) if key is not frozen */
+            bool blocked = true;
+            if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
+                PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
+                if (!kp || *kp != VTAG_CRYSTAL) blocked = false;
+            }
+            if (blocked)
+                RVM_ERROR("cannot modify a frozen value");
+        }
+        if (R[a].phase == VTAG_SUBLIMATED && R[a].type == VAL_MAP)
+            RVM_ERROR("cannot add keys to a sublimated map");
+        /* Per-key phase check for non-frozen maps */
+        if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
+            PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
+            if (kp && *kp == VTAG_CRYSTAL)
+                RVM_ERROR("cannot modify frozen key '%s'", R[b].as.str_val);
+        }
 
         if (R[a].type == VAL_ARRAY) {
             if (R[b].type != VAL_INT)
@@ -1892,6 +2793,31 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 RVM_ERROR("map key must be a string");
             LatValue cloned = rvm_clone(&R[c]);
             lat_map_set(R[a].as.map.map, R[b].as.str_val, &cloned);
+        } else if (R[a].type == VAL_BUFFER) {
+            if (R[b].type != VAL_INT) RVM_ERROR("buffer index must be an integer");
+            int64_t idx = R[b].as.int_val;
+            if (idx < 0 || (size_t)idx >= R[a].as.buffer.len)
+                RVM_ERROR("buffer index out of bounds");
+            if (R[c].type != VAL_INT) RVM_ERROR("buffer value must be an integer");
+            R[a].as.buffer.data[(size_t)idx] = (uint8_t)(R[c].as.int_val & 0xFF);
+        } else if (R[a].type == VAL_REF) {
+            /* Proxy: set index on inner value */
+            LatRef *ref = R[a].as.ref.ref;
+            if (ref->value.type == VAL_MAP) {
+                if (R[b].type != VAL_STR) RVM_ERROR("map key must be a string");
+                LatValue cloned = rvm_clone(&R[c]);
+                lat_map_set(ref->value.as.map.map, R[b].as.str_val, &cloned);
+            } else if (ref->value.type == VAL_ARRAY) {
+                if (R[b].type != VAL_INT) RVM_ERROR("array index must be an integer");
+                int64_t idx = R[b].as.int_val;
+                if (idx < 0) idx += (int64_t)ref->value.as.array.len;
+                if (idx < 0 || (size_t)idx >= ref->value.as.array.len)
+                    RVM_ERROR("array index out of bounds");
+                value_free(&ref->value.as.array.elems[idx]);
+                ref->value.as.array.elems[idx] = rvm_clone(&R[c]);
+            } else {
+                RVM_ERROR("cannot set index on Ref(%s)", value_type_name(&ref->value));
+            }
         } else {
             RVM_ERROR("cannot set index on %s", value_type_name(&R[a]));
         }
@@ -1944,6 +2870,50 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         LatValue *func = &R[a];
 
+        /* Phase-dispatch overload resolution: VAL_ARRAY of closures */
+        if (func->type == VAL_ARRAY) {
+            int best_score = -1;
+            int best_idx = -1;
+            for (size_t ci = 0; ci < func->as.array.len; ci++) {
+                LatValue *cand = &func->as.array.elems[ci];
+                if (cand->type != VAL_CLOSURE || cand->as.closure.native_fn == NULL) continue;
+                if (cand->as.closure.default_values == VM_NATIVE_MARKER) continue;
+                uint32_t cmag;
+                memcpy(&cmag, cand->as.closure.native_fn, sizeof(uint32_t));
+                if (cmag != REGCHUNK_MAGIC) continue;
+                RegChunk *ch = (RegChunk *)cand->as.closure.native_fn;
+                if (!ch->param_phases) continue;
+                bool compatible = true;
+                int score = 0;
+                for (int j = 0; j < ch->param_phase_count && j < (int)b; j++) {
+                    uint8_t pp = ch->param_phases[j];
+                    LatValue *arg = &R[a + 1 + j];
+                    if (pp == PHASE_FLUID) {
+                        if (arg->phase == VTAG_CRYSTAL) { compatible = false; break; }
+                        if (arg->phase == VTAG_FLUID) score += 3;
+                        else score += 1;
+                    } else if (pp == PHASE_CRYSTAL) {
+                        if (arg->phase == VTAG_FLUID) { compatible = false; break; }
+                        if (arg->phase == VTAG_CRYSTAL) score += 3;
+                        else score += 1;
+                    } else {
+                        if (arg->phase == VTAG_UNPHASED) score += 2;
+                        else score += 1;
+                    }
+                }
+                if (compatible && score > best_score) {
+                    best_score = score;
+                    best_idx = (int)ci;
+                }
+            }
+            if (best_idx >= 0) {
+                LatValue matched = value_deep_clone(&func->as.array.elems[best_idx]);
+                reg_set(func, matched);
+            } else {
+                RVM_ERROR("no matching overload for given argument phases");
+            }
+        }
+
         if (func->type != VAL_CLOSURE)
             RVM_ERROR("attempt to call a non-function (%s)",
                 value_type_name(func));
@@ -1951,6 +2921,23 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Check for native function */
         if (func->as.closure.default_values == VM_NATIVE_MARKER) {
             VMNativeFn native = (VMNativeFn)func->as.closure.native_fn;
+
+            /* Sync named locals from current call chain to env.
+             * Needed for natives that access variables by name (track, react, bond, seed, etc.)
+             * and for phase system operations that read env. */
+            {
+                for (int fi = 0; fi < vm->frame_count; fi++) {
+                    RegCallFrame *sf = &vm->frames[fi];
+                    if (!sf->chunk || !sf->chunk->local_names) continue;
+                    for (size_t li = 0; li < sf->chunk->local_name_cap; li++) {
+                        if (sf->chunk->local_names[li] && sf->chunk->local_names[li][0]) {
+                            LatValue clone = value_deep_clone(&sf->regs[li]);
+                            if (!env_set(vm->env, sf->chunk->local_names[li], clone))
+                                env_define(vm->env, sf->chunk->local_names[li], clone);
+                        }
+                    }
+                }
+            }
             /* Collect args */
             LatValue args[16];
             for (int i = 0; i < b; i++)
@@ -1958,6 +2945,40 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             LatValue ret = native(args, b);
             for (int i = 0; i < b; i++)
                 value_free(&args[i]);
+            /* Check runtime for native errors */
+            if (vm->rt->error) {
+                char *err = vm->rt->error;
+                vm->rt->error = NULL;
+                value_free(&ret);
+                RVM_ERROR("%s", err);
+            }
+            /* Also check if regvm itself got an error (from re-entrant dispatch callbacks) */
+            if (vm->error) {
+                value_free(&ret);
+                return REGVM_RUNTIME_ERROR;
+            }
+            /* Note: no reverse env→locals sync here — it's too broad and can break
+             * closure-captured values. grow() and similar natives that modify variables
+             * by name will need specialized handling if needed. */
+            reg_set(&R[a], ret);
+            DISPATCH();
+        }
+
+        /* Extension native function (loaded via require_ext) */
+        if (func->as.closure.default_values == VM_EXT_MARKER) {
+            LatValue args[16];
+            for (int i = 0; i < b; i++)
+                args[i] = rvm_clone(&R[a + 1 + i]);
+            LatValue ret = ext_call_native(func->as.closure.native_fn, args, (size_t)b);
+            for (int i = 0; i < b; i++)
+                value_free(&args[i]);
+            /* Extension errors return strings prefixed with "EVAL_ERROR:" */
+            if (ret.type == VAL_STR && ret.as.str_val &&
+                strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                char *msg = strdup(ret.as.str_val + 11);
+                value_free(&ret);
+                RVM_ERROR("%s", msg);
+            }
             reg_set(&R[a], ret);
             DISPATCH();
         }
@@ -1966,6 +2987,34 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         RegChunk *fn_chunk = (RegChunk *)func->as.closure.native_fn;
         if (!fn_chunk)
             RVM_ERROR("attempt to call a closure with NULL chunk");
+
+        /* Guard: detect stack-VM closures (from require()) that can't run in regvm.
+         * RegChunks have a magic header; stack-VM Chunks don't.
+         * Use memcpy to avoid misaligned read when fn_chunk is actually a stack Chunk. */
+        {
+            uint32_t magic;
+            memcpy(&magic, fn_chunk, sizeof(uint32_t));
+            if (magic != REGCHUNK_MAGIC)
+                RVM_ERROR("cannot call stack-VM closure from register VM "
+                          "(use 'import' instead of 'require')");
+        }
+
+        /* Phase constraint check on parameters */
+        if (fn_chunk->param_phases) {
+            for (int i = 0; i < fn_chunk->param_phase_count && i < (int)b; i++) {
+                uint8_t pp = fn_chunk->param_phases[i];
+                if (pp == PHASE_UNSPECIFIED) continue;
+                LatValue *arg = &R[a + 1 + i];
+                if (pp == PHASE_FLUID && arg->phase == VTAG_CRYSTAL) {
+                    RVM_ERROR("phase constraint violation in function '%s'",
+                        fn_chunk->name ? fn_chunk->name : "<anonymous>");
+                }
+                if (pp == PHASE_CRYSTAL && arg->phase == VTAG_FLUID) {
+                    RVM_ERROR("phase constraint violation in function '%s'",
+                        fn_chunk->name ? fn_chunk->name : "<anonymous>");
+                }
+            }
+        }
 
         if (vm->frame_count >= REGVM_FRAMES_MAX)
             RVM_ERROR("call stack overflow");
@@ -2068,28 +3117,24 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         closure.as.closure.body = NULL;
         closure.as.closure.native_fn = fn_proto.as.closure.native_fn;
         closure.as.closure.param_count = fn_proto.as.closure.param_count;
-        closure.as.closure.param_names = NULL;
+        /* Copy param_names from prototype */
+        if (fn_proto.as.closure.param_names && fn_proto.as.closure.param_count > 0) {
+            closure.as.closure.param_names = malloc(fn_proto.as.closure.param_count * sizeof(char *));
+            for (size_t pi = 0; pi < fn_proto.as.closure.param_count; pi++)
+                closure.as.closure.param_names[pi] = fn_proto.as.closure.param_names[pi]
+                    ? strdup(fn_proto.as.closure.param_names[pi]) : NULL;
+        } else {
+            closure.as.closure.param_names = NULL;
+        }
         closure.as.closure.default_values = NULL;
-        closure.as.closure.has_variadic = false;
+        closure.as.closure.has_variadic = fn_proto.as.closure.has_variadic;
         closure.as.closure.captured_env = NULL;
 
         /* Process upvalue descriptors that follow the CLOSURE instruction */
         /* Each upvalue descriptor is encoded as a MOVE instruction:
          * A=1 means local, A=0 means upvalue; B=index */
-        size_t uv_count = 0;
+        size_t uv_count = fn_proto.region_id;  /* upvalue count stored by compiler */
         ObjUpvalue **upvals = NULL;
-
-        /* Count upvalue descriptors by peeking ahead */
-        RegInstr *peek = frame->ip;
-        while (peek < frame->chunk->code + frame->chunk->code_len) {
-            RegInstr desc = *peek;
-            uint8_t desc_op = REG_GET_OP(desc);
-            if (desc_op != ROP_MOVE) break;
-            uint8_t desc_a = REG_GET_A(desc);
-            if (desc_a > 1) break;  /* Not an upvalue descriptor */
-            uv_count++;
-            peek++;
-        }
 
         if (uv_count > 0) {
             upvals = malloc(uv_count * sizeof(ObjUpvalue *));
@@ -2192,6 +3237,29 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             free(field_names[i]);
         free(field_names);
         free(field_values);
+
+        /* Alloy enforcement: apply per-field phase from struct declaration */
+        {
+            char phase_key[256];
+            snprintf(phase_key, sizeof(phase_key), "__struct_phases_%s", struct_name);
+            LatValue *phase_ref = env_get_ref(vm->env, phase_key);
+            if (phase_ref &&
+                phase_ref->type == VAL_ARRAY && (int)phase_ref->as.array.len == c) {
+                strct.as.strct.field_phases = calloc(c, sizeof(PhaseTag));
+                for (int i = 0; i < c; i++) {
+                    int64_t p = phase_ref->as.array.elems[i].as.int_val;
+                    if (p == 1) { /* PHASE_CRYSTAL */
+                        strct.as.strct.field_values[i] = value_freeze(strct.as.strct.field_values[i]);
+                        strct.as.strct.field_phases[i] = VTAG_CRYSTAL;
+                    } else if (p == 0) { /* PHASE_FLUID */
+                        strct.as.strct.field_phases[i] = VTAG_FLUID;
+                    } else {
+                        strct.as.strct.field_phases[i] = strct.phase;
+                    }
+                }
+            }
+        }
+
         reg_set(&R[a], strct);
         DISPATCH();
     }
@@ -2217,6 +3285,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             int64_t len = R[b].as.range.end - R[b].as.range.start;
             if (len < 0) len = 0;
             reg_set(&R[a], value_int(len));
+        } else if (R[b].type == VAL_MAP) {
+            reg_set(&R[a], value_int((int64_t)lat_map_len(R[b].as.map.map)));
+        } else if (R[b].type == VAL_SET) {
+            reg_set(&R[a], value_int((int64_t)lat_map_len(R[b].as.set.map)));
+        } else if (R[b].type == VAL_TUPLE) {
+            reg_set(&R[a], value_int((int64_t)R[b].as.tuple.len));
+        } else if (R[b].type == VAL_BUFFER) {
+            reg_set(&R[a], value_int((int64_t)R[b].as.buffer.len));
         } else {
             RVM_ERROR("cannot get length of %s", value_type_name(&R[b]));
         }
@@ -2260,6 +3336,83 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* Object was mutated in-place at R[obj_reg]; result goes to R[dst] */
             reg_set(&R[dst], invoke_result);
             DISPATCH();
+        }
+
+        /* Check for callable closure field in map */
+        if (R[obj_reg].type == VAL_MAP) {
+            LatValue *field = lat_map_get(R[obj_reg].as.map.map, method_name);
+            if (field && field->type == VAL_CLOSURE) {
+                /* Native C function in map */
+                if (field->as.closure.default_values == VM_NATIVE_MARKER) {
+                    VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = native(call_args, argc);
+                    if (vm->rt->error) {
+                        vm->error = vm->rt->error;
+                        vm->rt->error = NULL;
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                /* Extension native function in map */
+                if (field->as.closure.default_values == VM_EXT_MARKER) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = ext_call_native(field->as.closure.native_fn,
+                                                   call_args, (size_t)argc);
+                    if (ret.type == VAL_STR && ret.as.str_val &&
+                        strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                        vm->error = strdup(ret.as.str_val + 11);
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                /* RegChunk closure in map */
+                RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                if (fn_chunk && fn_chunk->magic == REGCHUNK_MAGIC) {
+                    if (vm->frame_count >= REGVM_FRAMES_MAX)
+                        RVM_ERROR("call stack overflow");
+
+                    size_t new_base = vm->reg_stack_top;
+                    LatValue *new_regs = &vm->reg_stack[new_base];
+                    vm->reg_stack_top += REGVM_REG_MAX;
+                    for (int i = 0; i < REGVM_REG_MAX; i++)
+                        new_regs[i] = value_nil();
+
+                    /* Slot 0 = reserved, slots 1+ = args (no self for map closures) */
+                    new_regs[0] = value_unit();
+                    for (int i = 0; i < argc; i++) {
+                        value_free(&new_regs[1 + i]);
+                        new_regs[1 + i] = rvm_clone(&R[args_base + i]);
+                    }
+
+                    ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+
+                    RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->chunk = fn_chunk;
+                    new_frame->ip = fn_chunk->code;
+                    new_frame->regs = new_regs;
+                    new_frame->reg_count = REGVM_REG_MAX;
+                    new_frame->upvalues = upvals;
+                    new_frame->upvalue_count = uv_count;
+                    new_frame->caller_result_reg = dst;
+                    frame = new_frame;
+                    R = new_regs;
+                    DISPATCH();
+                }
+                /* Stack-VM closure in map — use regvm bridge */
+                if (field->as.closure.native_fn) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = regvm_call_closure(vm, field, call_args, argc);
+                    if (vm->error) return REGVM_RUNTIME_ERROR;
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+            }
         }
 
         /* Check for callable closure field in struct */
@@ -2322,12 +3475,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 for (int i = 0; i < REGVM_REG_MAX; i++)
                     new_regs[i] = value_nil();
 
-                /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
-                new_regs[0] = value_unit();
-                new_regs[1] = rvm_clone(&R[obj_reg]);  /* self = first param */
+                /* ITEM_IMPL compiles self at slot 0, other params at slot 1+ */
+                new_regs[0] = rvm_clone(&R[obj_reg]);  /* self */
                 for (int i = 0; i < argc; i++) {
-                    value_free(&new_regs[2 + i]);
-                    new_regs[2 + i] = rvm_clone(&R[args_base + i]);
+                    value_free(&new_regs[1 + i]);
+                    new_regs[1 + i] = rvm_clone(&R[args_base + i]);
                 }
 
                 ObjUpvalue **upvals = (ObjUpvalue **)impl_fn.as.closure.captured_env;
@@ -2354,6 +3506,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     CASE(FREEZE) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
+        if (R[b].type == VAL_CHANNEL)
+            RVM_ERROR("cannot freeze a channel");
         LatValue frozen = value_freeze(rvm_clone(&R[b]));
         reg_set(&R[a], frozen);
         DISPATCH();
@@ -2378,8 +3532,49 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* A = destination (collection stays in A), B = source */
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
-        if (a != b)
-            reg_set(&R[a], rvm_clone(&R[b]));
+        if (R[b].type == VAL_MAP) {
+            /* Convert map to array of [key, value] pairs for uniform iteration */
+            LatMap *m = R[b].as.map.map;
+            size_t cap = m->cap;
+            size_t count = lat_map_len(m);
+            LatValue *entries = malloc((count > 0 ? count : 1) * sizeof(LatValue));
+            size_t idx = 0;
+            for (size_t i = 0; i < cap; i++) {
+                if (m->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue pair[2];
+                pair[0] = value_string(m->entries[i].key);
+                pair[1] = rvm_clone((LatValue *)m->entries[i].value);
+                entries[idx++] = value_array(pair, 2);
+            }
+            reg_set(&R[a], value_array(entries, idx));
+            free(entries);
+        } else if (R[b].type == VAL_SET) {
+            /* Convert set to array of values for uniform iteration */
+            LatMap *m = R[b].as.set.map;
+            size_t cap = m->cap;
+            size_t count = lat_map_len(m);
+            LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
+            size_t idx = 0;
+            for (size_t i = 0; i < cap; i++) {
+                if (m->entries[i].state != MAP_OCCUPIED) continue;
+                elems[idx++] = rvm_clone((LatValue *)m->entries[i].value);
+            }
+            reg_set(&R[a], value_array(elems, idx));
+            free(elems);
+        } else if (R[b].type == VAL_STR) {
+            /* Convert string to array of characters for uniform iteration */
+            size_t len = strlen(R[b].as.str_val);
+            LatValue *chars = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+            for (size_t i = 0; i < len; i++) {
+                char ch[2] = { R[b].as.str_val[i], '\0' };
+                chars[i] = value_string(ch);
+            }
+            reg_set(&R[a], value_array(chars, len));
+            free(chars);
+        } else {
+            if (a != b)
+                reg_set(&R[a], rvm_clone(&R[b]));
+        }
         /* The collection stays in R[a]. Index starts at 0 (set by compiler). */
         DISPATCH();
     }
@@ -2467,6 +3662,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t c = REG_GET_C(instr);
         if (R[b].type != VAL_INT || R[c].type != VAL_INT)
             RVM_ERROR("left shift requires integers");
+        if (R[c].as.int_val < 0 || R[c].as.int_val > 63)
+            RVM_ERROR("shift amount out of range (0..63)");
         reg_set(&R[a], value_int(R[b].as.int_val << R[c].as.int_val));
         DISPATCH();
     }
@@ -2492,7 +3689,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             elems[i] = rvm_clone(&R[b + i]);
         LatValue tup;
         tup.type = VAL_TUPLE;
-        tup.phase = VTAG_UNPHASED;
+        tup.phase = VTAG_CRYSTAL;
         tup.region_id = REGION_NONE;
         tup.as.tuple.elems = elems;
         tup.as.tuple.len = c;
@@ -2597,11 +3794,18 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatValue thrown = rvm_clone(&R[a]);
 
         if (vm->handler_count == 0) {
-            char *msg = value_display(&thrown);
-            RegVMResult err = rvm_error(vm, "unhandled exception: %s", msg);
-            free(msg);
+            /* Match stack VM behavior: string exceptions pass directly,
+             * non-string exceptions get "unhandled exception:" wrapper.
+             * No [line N] prefix for thrown exceptions. */
+            if (thrown.type == VAL_STR) {
+                vm->error = strdup(thrown.as.str_val);
+            } else {
+                char *repr = value_display(&thrown);
+                (void)asprintf(&vm->error, "unhandled exception: %s", repr);
+                free(repr);
+            }
             value_free(&thrown);
-            return err;
+            return REGVM_RUNTIME_ERROR;
         }
 
         /* Unwind to handler */
@@ -2680,15 +3884,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 DISPATCH();
             }
         }
-        /* Not a Result — pass through */
-        DISPATCH();
+        /* Not a Result — error */
+        RVM_ERROR("'?' operator requires a Result value, got %s", value_type_name(&R[a]));
     }
 
     /* ── Defer ── */
 
     CASE(DEFER_PUSH) {
-        /* sBx = offset to jump past the defer body */
-        int32_t offset = REG_GET_sBx24(instr);
+        /* A = scope_depth, sBx = offset to jump past the defer body */
+        uint8_t scope_d = REG_GET_A(instr);
+        int16_t offset = REG_GET_sBx(instr);
         if (vm->defer_count >= REGVM_DEFER_MAX)
             RVM_ERROR("defer stack overflow");
         RegDefer *d = &vm->defers[vm->defer_count++];
@@ -2696,19 +3901,24 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         d->chunk = frame->chunk;
         d->frame_index = (size_t)(vm->frame_count - 1);
         d->regs = frame->regs;
+        d->scope_depth = (int)scope_d;
         /* Skip past the defer body */
         frame->ip += offset;
         DISPATCH();
     }
 
     CASE(DEFER_RUN) {
-        /* Execute all defers for the current frame in LIFO order.
-         * Each defer body runs in a NEW frame with copies of the current
-         * frame's registers, so RETURN in the defer body pops cleanly. */
+        /* Execute defers for the current frame in LIFO order.
+         * A=min_scope_depth: only run defers with scope_depth >= A.
+         * A=0 runs all defers for this frame (used at function return).
+         * After each defer body runs, copy modified registers back to
+         * the original frame so deferred mutations are visible. */
+        uint8_t min_scope = REG_GET_A(instr);
         size_t frame_idx = (size_t)(vm->frame_count - 1);
         while (vm->defer_count > 0) {
             RegDefer *d = &vm->defers[vm->defer_count - 1];
             if (d->frame_index != frame_idx) break;
+            if (min_scope > 0 && d->scope_depth < (int)min_scope) break;
             vm->defer_count--;
 
             /* Push a new frame for the defer body */
@@ -2734,12 +3944,32 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             df->caller_result_reg = 0;
 
             LatValue defer_result;
-            RegVMResult dr = regvm_dispatch(vm, (int)(vm->frame_count - 1), &defer_result);
+            int saved_frame = (int)(vm->frame_count - 1);
+            RegVMResult dr = regvm_dispatch(vm, saved_frame, &defer_result);
             value_free(&defer_result);
             (void)dr;
 
-            /* Restore frame state */
-            frame = &vm->frames[vm->frame_count - 1];
+            /* HALT leaves the defer frame on the stack with registers intact.
+             * Copy modified registers back to the original frame, then pop. */
+            frame = &vm->frames[frame_idx];
+            R = frame->regs;
+            /* The defer frame may still be on the stack (HALT) or popped (error) */
+            if (vm->frame_count > (int)frame_idx + 1) {
+                RegCallFrame *defer_frame = &vm->frames[vm->frame_count - 1];
+                LatValue *defer_regs = defer_frame->regs;
+                for (int i = 0; i < REGVM_REG_MAX; i++) {
+                    value_free(&R[i]);
+                    R[i] = defer_regs[i];
+                    defer_regs[i] = value_nil(); /* prevent double-free on cleanup */
+                }
+                /* Pop the defer frame */
+                for (int i = 0; i < REGVM_REG_MAX; i++)
+                    value_free_inline(&defer_frame->regs[i]);
+                vm->frame_count--;
+                vm->reg_stack_top -= REGVM_REG_MAX;
+            }
+            /* Restore frame/R to the original frame */
+            frame = &vm->frames[frame_idx];
             R = frame->regs;
         }
         DISPATCH();
@@ -2767,30 +3997,67 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     /* ── Advanced phase system ── */
 
     CASE(FREEZE_VAR) {
-        /* A=name constant index, B=loc_type (0=local, 1=upvalue, 2=global), C=slot */
+        /* A=name constant index, B=loc_type (0=local, 1=upvalue, 2=global; high bit=consume seeds), C=slot */
         uint8_t name_ki = REG_GET_A(instr);
-        uint8_t loc_type = REG_GET_B(instr);
+        uint8_t raw_loc = REG_GET_B(instr);
         uint8_t slot = REG_GET_C(instr);
-        (void)name_ki;
-
+        bool consume_seeds = (raw_loc & 0x80) != 0;
+        uint8_t loc_type = raw_loc & 0x7F;
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
         LatValue *target = NULL;
         if (loc_type == 0) {
+            if (R[slot].type == VAL_CHANNEL)
+                RVM_ERROR("cannot freeze a channel");
             target = &R[slot];
         } else if (loc_type == 1 && frame->upvalues && slot < frame->upvalue_count) {
             target = frame->upvalues[slot]->location;
         } else if (loc_type == 2) {
-            const char *name = frame->chunk->constants[name_ki].as.str_val;
             LatValue gval;
-            if (env_get(vm->env, name, &gval)) {
+            if (env_get(vm->env, var_name, &gval)) {
+                /* Validate seed contracts */
+                char *seed_err = rt_validate_seeds(vm->rt, var_name, &gval, consume_seeds);
+                if (seed_err) {
+                    value_free(&gval);
+                    RVM_ERROR("%s", seed_err);
+                }
                 LatValue frozen = value_freeze(rvm_clone(&gval));
-                env_set(vm->env, name, frozen);
+                value_free(&gval);
+                env_set(vm->env, var_name, frozen);
+                rt_freeze_cascade(vm->rt, var_name);
+                if (vm->rt->error) { vm->error = vm->rt->error; vm->rt->error = NULL; return REGVM_RUNTIME_ERROR; } if (vm->error) return REGVM_RUNTIME_ERROR;
+                rt_fire_reactions(vm->rt, var_name, "crystal");
+                if (vm->rt->error) { vm->error = vm->rt->error; vm->rt->error = NULL; return REGVM_RUNTIME_ERROR; } if (vm->error) return REGVM_RUNTIME_ERROR;
+                /* Record history for tracked globals */
+                {
+                    if (vm->rt->tracking_active)
+                        rt_record_history(vm->rt, var_name, &frozen);
+                }
             }
             DISPATCH();
         }
         if (target) {
+            /* Validate seed contracts */
+            char *seed_err = rt_validate_seeds(vm->rt, var_name, target, consume_seeds);
+            if (seed_err) {
+                RVM_ERROR("%s", seed_err);
+            }
             LatValue frozen = value_freeze(rvm_clone(target));
             value_free(target);
             *target = frozen;
+            /* Sync to env for cascade/reactions (locals aren't in env) */
+            if (loc_type != 2) { /* not already global */
+                if (!env_set(vm->env, var_name, value_deep_clone(&frozen)))
+                    env_define(vm->env, var_name, value_deep_clone(&frozen));
+            }
+            rt_freeze_cascade(vm->rt, var_name);
+            if (vm->rt->error) { vm->error = vm->rt->error; vm->rt->error = NULL; return REGVM_RUNTIME_ERROR; } if (vm->error) return REGVM_RUNTIME_ERROR;
+            rt_fire_reactions(vm->rt, var_name, "crystal");
+            if (vm->rt->error) { vm->error = vm->rt->error; vm->rt->error = NULL; return REGVM_RUNTIME_ERROR; } if (vm->error) return REGVM_RUNTIME_ERROR;
+            /* Record history for tracked variables after phase change */
+            {
+                if (vm->rt->tracking_active)
+                    rt_record_history(vm->rt, var_name, target);
+            }
         }
         DISPATCH();
     }
@@ -2799,7 +4066,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t name_ki = REG_GET_A(instr);
         uint8_t loc_type = REG_GET_B(instr);
         uint8_t slot = REG_GET_C(instr);
-        (void)name_ki;
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
 
         LatValue *target = NULL;
         if (loc_type == 0) {
@@ -2807,11 +4074,17 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (loc_type == 1 && frame->upvalues && slot < frame->upvalue_count) {
             target = frame->upvalues[slot]->location;
         } else if (loc_type == 2) {
-            const char *name = frame->chunk->constants[name_ki].as.str_val;
             LatValue gval;
-            if (env_get(vm->env, name, &gval)) {
+            if (env_get(vm->env, var_name, &gval)) {
                 LatValue thawed = value_thaw(&gval);
-                env_set(vm->env, name, thawed);
+                value_free(&gval);
+                env_set(vm->env, var_name, thawed);
+                rt_fire_reactions(vm->rt, var_name, "fluid");
+                /* Record history for tracked globals */
+                {
+                    if (vm->rt->tracking_active)
+                        rt_record_history(vm->rt, var_name, &thawed);
+                }
             }
             DISPATCH();
         }
@@ -2819,6 +4092,17 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             LatValue thawed = value_thaw(target);
             value_free(target);
             *target = thawed;
+            /* Sync to env for cascade/reactions */
+            if (loc_type != 2) {
+                if (!env_set(vm->env, var_name, value_deep_clone(&thawed)))
+                    env_define(vm->env, var_name, value_deep_clone(&thawed));
+            }
+            rt_fire_reactions(vm->rt, var_name, "fluid");
+            /* Record history for tracked variables after phase change */
+            {
+                if (vm->rt->tracking_active)
+                    rt_record_history(vm->rt, var_name, target);
+            }
         }
         DISPATCH();
     }
@@ -2827,7 +4111,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t name_ki = REG_GET_A(instr);
         uint8_t loc_type = REG_GET_B(instr);
         uint8_t slot = REG_GET_C(instr);
-        (void)name_ki;
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
 
         LatValue *target = NULL;
         if (loc_type == 0) {
@@ -2835,52 +4119,214 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (loc_type == 1 && frame->upvalues && slot < frame->upvalue_count) {
             target = frame->upvalues[slot]->location;
         } else if (loc_type == 2) {
-            const char *name = frame->chunk->constants[name_ki].as.str_val;
             LatValue gval;
-            if (env_get(vm->env, name, &gval)) {
+            if (env_get(vm->env, var_name, &gval)) {
                 gval.phase = VTAG_SUBLIMATED;
-                env_set(vm->env, name, gval);
+                env_set(vm->env, var_name, gval);
+                rt_fire_reactions(vm->rt, var_name, "sublimated");
             }
             DISPATCH();
         }
         if (target) {
             target->phase = VTAG_SUBLIMATED;
+            /* Sync to env */
+            if (loc_type != 2) {
+                if (!env_set(vm->env, var_name, value_deep_clone(target)))
+                    env_define(vm->env, var_name, value_deep_clone(target));
+            }
+            rt_fire_reactions(vm->rt, var_name, "sublimated");
         }
         DISPATCH();
     }
 
     CASE(REACT) {
-        /* A=closure_reg, B=target_reg: register reaction callback */
-        /* Placeholder: reactions are not yet implemented in regvm */
-        (void)REG_GET_A(instr);
-        (void)REG_GET_B(instr);
+        /* Compiler emits: emit_ABx(ROP_REACT, dst, name_ki) → A=cb_reg, Bx=name_ki */
+        uint8_t cb_reg = REG_GET_A(instr);
+        uint16_t name_ki = REG_GET_Bx(instr);
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
+        if (R[cb_reg].type != VAL_CLOSURE) DISPATCH();
+        /* Find or create reaction entry */
+        size_t ri = vm->rt->reaction_count;
+        for (size_t i = 0; i < vm->rt->reaction_count; i++) {
+            if (strcmp(vm->rt->reactions[i].var_name, var_name) == 0) { ri = i; break; }
+        }
+        if (ri == vm->rt->reaction_count) {
+            if (vm->rt->reaction_count >= vm->rt->reaction_cap) {
+                vm->rt->reaction_cap = vm->rt->reaction_cap ? vm->rt->reaction_cap * 2 : 4;
+                vm->rt->reactions = realloc(vm->rt->reactions, vm->rt->reaction_cap * sizeof(*vm->rt->reactions));
+            }
+            vm->rt->reactions[ri].var_name = strdup(var_name);
+            vm->rt->reactions[ri].callbacks = NULL;
+            vm->rt->reactions[ri].cb_count = 0;
+            vm->rt->reactions[ri].cb_cap = 0;
+            vm->rt->reaction_count++;
+        }
+        if (vm->rt->reactions[ri].cb_count >= vm->rt->reactions[ri].cb_cap) {
+            vm->rt->reactions[ri].cb_cap = vm->rt->reactions[ri].cb_cap ? vm->rt->reactions[ri].cb_cap * 2 : 4;
+            vm->rt->reactions[ri].callbacks = realloc(vm->rt->reactions[ri].callbacks,
+                vm->rt->reactions[ri].cb_cap * sizeof(LatValue));
+        }
+        vm->rt->reactions[ri].callbacks[vm->rt->reactions[ri].cb_count++] = value_deep_clone(&R[cb_reg]);
         DISPATCH();
     }
 
     CASE(UNREACT) {
-        (void)REG_GET_A(instr);
+        /* Compiler emits: emit_ABx(ROP_UNREACT, dst, name_ki) → A=dst, Bx=name_ki */
+        uint16_t name_ki = REG_GET_Bx(instr);
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
+        for (size_t i = 0; i < vm->rt->reaction_count; i++) {
+            if (strcmp(vm->rt->reactions[i].var_name, var_name) != 0) continue;
+            free(vm->rt->reactions[i].var_name);
+            for (size_t j = 0; j < vm->rt->reactions[i].cb_count; j++)
+                value_free(&vm->rt->reactions[i].callbacks[j]);
+            free(vm->rt->reactions[i].callbacks);
+            vm->rt->reactions[i] = vm->rt->reactions[--vm->rt->reaction_count];
+            break;
+        }
         DISPATCH();
     }
 
     CASE(BOND) {
-        (void)REG_GET_A(instr);
-        (void)REG_GET_B(instr);
+        /* Compiler emits: emit_ABC(ROP_BOND, target_ki, dep_reg, strat_reg) → A=target_ki, B=dep_reg, C=strat_reg */
+        uint8_t target_ki = REG_GET_A(instr);
+        uint8_t dep_reg = REG_GET_B(instr);
+        uint8_t strat_reg = REG_GET_C(instr);
+        const char *target_name = frame->chunk->constants[target_ki].as.str_val;
+        const char *dep_name = (R[dep_reg].type == VAL_STR) ? R[dep_reg].as.str_val : "";
+        const char *strategy = (R[strat_reg].type == VAL_STR) ? R[strat_reg].as.str_val : "mirror";
+        if (dep_name[0] == '\0') {
+            RVM_ERROR("bond() requires variable names for dependencies");
+        }
+        /* Validate: check variables exist and target is not already frozen */
+        {
+            /* Find target variable's phase */
+            PhaseTag target_phase = VTAG_UNPHASED;
+            LatValue tval;
+            bool t_env = env_get(vm->env, target_name, &tval);
+            if (t_env) { target_phase = tval.phase; value_free(&tval); }
+            else {
+                for (int fi = 0; fi < (int)vm->frame_count; fi++) {
+                    RegCallFrame *f = &vm->frames[fi];
+                    if (!f->chunk || !f->chunk->local_names) continue;
+                    for (size_t r = 0; r < f->chunk->local_name_cap; r++) {
+                        if (f->chunk->local_names[r] && strcmp(f->chunk->local_names[r], target_name) == 0) {
+                            target_phase = f->regs[r].phase;
+                            goto found_target;
+                        }
+                    }
+                }
+                found_target:;
+            }
+            if (target_phase == VTAG_CRYSTAL)
+                RVM_ERROR("bond: variable '%s' is already frozen", target_name);
+
+            /* Check dep variable exists */
+            LatValue dep_val;
+            bool dep_found = env_get(vm->env, dep_name, &dep_val);
+            if (dep_found) { value_free(&dep_val); }
+            else {
+                bool found_local = false;
+                for (int fi = 0; fi < (int)vm->frame_count; fi++) {
+                    RegCallFrame *f = &vm->frames[fi];
+                    if (!f->chunk || !f->chunk->local_names) continue;
+                    for (size_t r = 0; r < f->chunk->local_name_cap; r++) {
+                        if (f->chunk->local_names[r] && strcmp(f->chunk->local_names[r], dep_name) == 0) {
+                            found_local = true; break;
+                        }
+                    }
+                    if (found_local) break;
+                }
+                if (!found_local)
+                    RVM_ERROR("bond: undefined variable '%s'", dep_name);
+            }
+        }
+        /* Find or create bond entry */
+        size_t bi = vm->rt->bond_count;
+        for (size_t i = 0; i < vm->rt->bond_count; i++) {
+            if (strcmp(vm->rt->bonds[i].target, target_name) == 0) { bi = i; break; }
+        }
+        if (bi == vm->rt->bond_count) {
+            if (vm->rt->bond_count >= vm->rt->bond_cap) {
+                vm->rt->bond_cap = vm->rt->bond_cap ? vm->rt->bond_cap * 2 : 4;
+                vm->rt->bonds = realloc(vm->rt->bonds, vm->rt->bond_cap * sizeof(*vm->rt->bonds));
+            }
+            vm->rt->bonds[bi].target = strdup(target_name);
+            vm->rt->bonds[bi].deps = NULL;
+            vm->rt->bonds[bi].dep_strategies = NULL;
+            vm->rt->bonds[bi].dep_count = 0;
+            vm->rt->bonds[bi].dep_cap = 0;
+            vm->rt->bond_count++;
+        }
+        if (vm->rt->bonds[bi].dep_count >= vm->rt->bonds[bi].dep_cap) {
+            vm->rt->bonds[bi].dep_cap = vm->rt->bonds[bi].dep_cap ? vm->rt->bonds[bi].dep_cap * 2 : 4;
+            vm->rt->bonds[bi].deps = realloc(vm->rt->bonds[bi].deps,
+                vm->rt->bonds[bi].dep_cap * sizeof(char *));
+            vm->rt->bonds[bi].dep_strategies = realloc(vm->rt->bonds[bi].dep_strategies,
+                vm->rt->bonds[bi].dep_cap * sizeof(char *));
+        }
+        vm->rt->bonds[bi].deps[vm->rt->bonds[bi].dep_count] = strdup(dep_name);
+        vm->rt->bonds[bi].dep_strategies[vm->rt->bonds[bi].dep_count] = strdup(strategy);
+        vm->rt->bonds[bi].dep_count++;
         DISPATCH();
     }
 
     CASE(UNBOND) {
-        (void)REG_GET_A(instr);
+        /* Compiler emits: emit_ABx(ROP_UNBOND, target_ki, dep_reg) → A=target_ki, Bx=dep_reg */
+        uint8_t target_ki = REG_GET_A(instr);
+        uint8_t dep_reg = (uint8_t)REG_GET_Bx(instr);
+        const char *target_name = frame->chunk->constants[target_ki].as.str_val;
+        const char *dep_name = (R[dep_reg].type == VAL_STR) ? R[dep_reg].as.str_val : "";
+        for (size_t i = 0; i < vm->rt->bond_count; i++) {
+            if (strcmp(vm->rt->bonds[i].target, target_name) != 0) continue;
+            for (size_t j = 0; j < vm->rt->bonds[i].dep_count; j++) {
+                if (strcmp(vm->rt->bonds[i].deps[j], dep_name) != 0) continue;
+                free(vm->rt->bonds[i].deps[j]);
+                if (vm->rt->bonds[i].dep_strategies)
+                    free(vm->rt->bonds[i].dep_strategies[j]);
+                vm->rt->bonds[i].deps[j] = vm->rt->bonds[i].deps[vm->rt->bonds[i].dep_count - 1];
+                if (vm->rt->bonds[i].dep_strategies)
+                    vm->rt->bonds[i].dep_strategies[j] = vm->rt->bonds[i].dep_strategies[vm->rt->bonds[i].dep_count - 1];
+                vm->rt->bonds[i].dep_count--;
+                break;
+            }
+            if (vm->rt->bonds[i].dep_count == 0) {
+                free(vm->rt->bonds[i].target);
+                free(vm->rt->bonds[i].deps);
+                free(vm->rt->bonds[i].dep_strategies);
+                vm->rt->bonds[i] = vm->rt->bonds[--vm->rt->bond_count];
+            }
+            break;
+        }
         DISPATCH();
     }
 
     CASE(SEED) {
-        (void)REG_GET_A(instr);
-        (void)REG_GET_B(instr);
+        /* Compiler emits: emit_ABx(ROP_SEED, dst, name_ki) → A=contract_reg, Bx=name_ki */
+        uint8_t contract_reg = REG_GET_A(instr);
+        uint16_t name_ki = REG_GET_Bx(instr);
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
+        if (R[contract_reg].type != VAL_CLOSURE) DISPATCH();
+        if (vm->rt->seed_count >= vm->rt->seed_cap) {
+            vm->rt->seed_cap = vm->rt->seed_cap ? vm->rt->seed_cap * 2 : 4;
+            vm->rt->seeds = realloc(vm->rt->seeds, vm->rt->seed_cap * sizeof(*vm->rt->seeds));
+        }
+        vm->rt->seeds[vm->rt->seed_count].var_name = strdup(var_name);
+        vm->rt->seeds[vm->rt->seed_count].contract = value_deep_clone(&R[contract_reg]);
+        vm->rt->seed_count++;
         DISPATCH();
     }
 
     CASE(UNSEED) {
-        (void)REG_GET_A(instr);
+        /* Compiler emits: emit_ABx(ROP_UNSEED, dst, name_ki) → A=dst, Bx=name_ki */
+        uint16_t name_ki = REG_GET_Bx(instr);
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
+        for (size_t i = 0; i < vm->rt->seed_count; i++) {
+            if (strcmp(vm->rt->seeds[i].var_name, var_name) != 0) continue;
+            free(vm->rt->seeds[i].var_name);
+            value_free(&vm->rt->seeds[i].contract);
+            vm->rt->seeds[i] = vm->rt->seeds[--vm->rt->seed_count];
+            break;
+        }
         DISPATCH();
     }
 
@@ -2890,6 +4336,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint16_t bx = REG_GET_Bx(instr);
         const char *raw_path = frame->chunk->constants[bx].as.str_val;
+
+        /* Check for built-in stdlib module */
+        LatValue builtin_mod;
+        if (rt_try_builtin_import(raw_path, &builtin_mod)) {
+            reg_set(&R[a], builtin_mod);
+            DISPATCH();
+        }
 
         /* Resolve file path: append .lat if not present */
         size_t plen = strlen(raw_path);
@@ -2905,8 +4358,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Resolve to absolute path */
         char resolved[PATH_MAX];
         if (!realpath(file_path, resolved)) {
+            char *emsg = NULL;
+            (void)asprintf(&emsg, "import: cannot find '%s'", file_path);
             free(file_path);
-            RVM_ERROR("import: cannot find '%s'", raw_path);
+            /* Set error directly without [line N] prefix for import errors */
+            vm->error = emsg;
+            return REGVM_RUNTIME_ERROR;
         }
         free(file_path);
 
@@ -3001,8 +4458,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* Copy all module bindings to base scope for closures */
             env_define_at(vm->env, 0, name, value_deep_clone(val_ptr));
 
-            /* Skip internal metadata */
-            if ((name[0] == '_' && name[1] == '_') || strchr(name, ':'))
+            /* Filter based on export declarations */
+            if (!module_should_export(name,
+                    (const char **)mod_chunk->export_names,
+                    mod_chunk->export_count, mod_chunk->has_exports))
                 continue;
 
             LatValue exported = rvm_clone(val_ptr);
@@ -3023,26 +4482,149 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         DISPATCH();
     }
 
+    CASE(REQUIRE) {
+        uint8_t a = REG_GET_A(instr);
+        uint16_t bx = REG_GET_Bx(instr);
+        const char *raw_path = frame->chunk->constants[bx].as.str_val;
+
+        /* Resolve file path: append .lat if not present */
+        size_t plen = strlen(raw_path);
+        char *file_path;
+        if (plen >= 4 && strcmp(raw_path + plen - 4, ".lat") == 0) {
+            file_path = strdup(raw_path);
+        } else {
+            file_path = malloc(plen + 5);
+            memcpy(file_path, raw_path, plen);
+            memcpy(file_path + plen, ".lat", 5);
+        }
+
+        /* Resolve to absolute path: try CWD first, then script_dir */
+        char resolved[PATH_MAX];
+        bool found = (realpath(file_path, resolved) != NULL);
+        if (!found && vm->rt->script_dir && file_path[0] != '/') {
+            char script_rel[PATH_MAX];
+            snprintf(script_rel, sizeof(script_rel), "%s/%s",
+                     vm->rt->script_dir, file_path);
+            found = (realpath(script_rel, resolved) != NULL);
+        }
+        if (!found) {
+            char *emsg = NULL;
+            (void)asprintf(&emsg, "require: cannot find '%s'", raw_path);
+            free(file_path);
+            /* Set error directly without [line N] prefix, matching native_require */
+            vm->error = emsg;
+            return REGVM_RUNTIME_ERROR;
+        }
+        free(file_path);
+
+        /* Dedup: skip if already required */
+        if (vm->module_cache) {
+            LatValue *cached = lat_map_get(vm->module_cache, resolved);
+            if (cached) {
+                reg_set(&R[a], value_bool(true));
+                DISPATCH();
+            }
+        }
+
+        /* Read the file */
+        char *source = builtin_read_file(resolved);
+        if (!source)
+            RVM_ERROR("require: cannot read '%s'", resolved);
+
+        /* Lex */
+        Lexer req_lex = lexer_new(source);
+        char *lex_err = NULL;
+        LatVec req_toks = lexer_tokenize(&req_lex, &lex_err);
+        free(source);
+        if (lex_err) {
+            char errmsg[1024];
+            snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved, lex_err);
+            free(lex_err);
+            lat_vec_free(&req_toks);
+            RVM_ERROR("%s", errmsg);
+        }
+
+        /* Parse */
+        Parser req_parser = parser_new(&req_toks);
+        char *parse_err = NULL;
+        Program req_prog = parser_parse(&req_parser, &parse_err);
+        if (parse_err) {
+            char errmsg[1024];
+            snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved, parse_err);
+            free(parse_err);
+            program_free(&req_prog);
+            for (size_t ti = 0; ti < req_toks.len; ti++)
+                token_free(lat_vec_get(&req_toks, ti));
+            lat_vec_free(&req_toks);
+            RVM_ERROR("%s", errmsg);
+        }
+
+        /* Compile as module (via regcompiler, not stack VM compiler) */
+        char *comp_err = NULL;
+        RegChunk *req_chunk = reg_compile_module(&req_prog, &comp_err);
+
+        /* Free parse artifacts */
+        program_free(&req_prog);
+        for (size_t ti = 0; ti < req_toks.len; ti++)
+            token_free(lat_vec_get(&req_toks, ti));
+        lat_vec_free(&req_toks);
+
+        if (!req_chunk) {
+            char errmsg[1024];
+            snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved,
+                     comp_err ? comp_err : "compile error");
+            free(comp_err);
+            RVM_ERROR("%s", errmsg);
+        }
+
+        /* Track chunk */
+        regvm_track_chunk(vm, req_chunk);
+
+        /* Mark as loaded (for dedup) before execution */
+        if (!vm->module_cache) {
+            vm->module_cache = malloc(sizeof(LatMap));
+            *vm->module_cache = lat_map_new(sizeof(LatValue));
+        }
+        LatValue loaded_marker = value_bool(true);
+        lat_map_set(vm->module_cache, resolved, &loaded_marker);
+
+        /* Run module — NO scope isolation, defs go directly to global env */
+        LatValue req_result;
+        RegVMResult req_r = regvm_run_sub(vm, req_chunk, &req_result);
+        /* Restore frame/R pointers after dispatch */
+        frame = &vm->frames[vm->frame_count - 1];
+        R = frame->regs;
+
+        if (req_r != REGVM_OK) {
+            /* Propagate the error */
+            return REGVM_RUNTIME_ERROR;
+        }
+        value_free(&req_result);
+
+        reg_set(&R[a], value_bool(true));
+        DISPATCH();
+    }
+
     /* ── Concurrency ── */
 
     CASE(SCOPE) {
+        uint8_t dst_reg = REG_GET_A(instr);
         /* Variable-length: read spawn_count, sync_idx, spawn_indices */
         RegInstr data1 = READ_INSTR();
         uint8_t spawn_count = REG_GET_A(data1);
         uint8_t sync_idx = REG_GET_B(data1);
         uint8_t spawn_indices[256];
-        /* Read spawn indices from follow-up data words */
-        for (uint8_t i = 0; i < spawn_count; i += 4) {
+        /* Read spawn indices from follow-up data words (3 per word: A, B, C) */
+        for (uint8_t i = 0; i < spawn_count; i += 3) {
             RegInstr sp = READ_INSTR();
             spawn_indices[i] = REG_GET_A(sp);
             if (i + 1 < spawn_count) spawn_indices[i + 1] = REG_GET_B(sp);
             if (i + 2 < spawn_count) spawn_indices[i + 2] = REG_GET_C(sp);
-            /* 4th byte would need another encoding — keep it simple for now */
         }
 
         /* Export locals to env for sub-chunk access */
         env_push_scope(vm->env);
-        for (size_t fi2 = 0; fi2 < (size_t)vm->frame_count; fi2++) {
+        for (int fi2 = 0; fi2 < vm->frame_count; fi2++) {
             RegCallFrame *f2 = &vm->frames[fi2];
             if (!f2->chunk) continue;
             for (size_t sl = 0; sl < f2->chunk->local_name_cap; sl++) {
@@ -3052,11 +4634,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
-        /* Run sync body */
+        /* Run sync body — its return value becomes the scope result */
+        LatValue scope_result = value_unit();
         if (sync_idx != 0xFF) {
             RegChunk *sync_body = (RegChunk *)frame->chunk->constants[sync_idx].as.closure.native_fn;
             if (sync_body) {
-                LatValue scope_result;
                 RegVMResult sr = regvm_run_sub(vm, sync_body, &scope_result);
                 /* Restore frame/R pointers */
                 frame = &vm->frames[vm->frame_count - 1];
@@ -3065,7 +4647,6 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     env_pop_scope(vm->env);
                     RVM_ERROR("%s", vm->error ? vm->error : "scope error");
                 }
-                value_free(&scope_result);
             }
         }
 
@@ -3079,27 +4660,133 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 frame = &vm->frames[vm->frame_count - 1];
                 R = frame->regs;
                 value_free(&sp_result);
-                (void)sr;
+                if (sr != REGVM_OK) {
+                    value_free(&scope_result);
+                    env_pop_scope(vm->env);
+                    RVM_ERROR("%s", vm->error ? vm->error : "spawn error");
+                }
             }
         }
 
         env_pop_scope(vm->env);
+        reg_set(&R[dst_reg], scope_result);
         DISPATCH();
     }
 
     CASE(SELECT) {
+        uint8_t dst_reg = REG_GET_A(instr);
         /* Variable-length: arm_count, per-arm data */
         RegInstr data1 = READ_INSTR();
         uint8_t arm_count = REG_GET_A(data1);
 
-        /* Read arm descriptors */
-        for (uint8_t i = 0; i < arm_count; i++) {
-            RegInstr arm_data = READ_INSTR();
-            (void)arm_data;  /* flags, chan_idx, body_idx, binding_idx */
+        /* Read all arm descriptors (2 data words per arm) */
+        typedef struct { uint8_t flags, chan_idx, body_idx, binding_idx; } RSelArm;
+        RSelArm sel_arms[64];
+        for (uint8_t i = 0; i < arm_count && i < 64; i++) {
+            RegInstr d1 = READ_INSTR();
+            RegInstr d2 = READ_INSTR();
+            sel_arms[i].flags = REG_GET_A(d1);
+            sel_arms[i].chan_idx = REG_GET_B(d1);
+            sel_arms[i].body_idx = REG_GET_C(d1);
+            sel_arms[i].binding_idx = REG_GET_A(d2);
         }
 
-        /* Placeholder: select not yet fully implemented */
-        /* Just produce unit for now */
+        /* Export locals to env for sub-chunk visibility */
+        env_push_scope(vm->env);
+        for (int fi2 = 0; fi2 < vm->frame_count; fi2++) {
+            RegCallFrame *f2 = &vm->frames[fi2];
+            if (!f2->chunk) continue;
+            for (size_t sl = 0; sl < f2->chunk->local_name_cap; sl++) {
+                if (f2->chunk->local_names[sl])
+                    env_define(vm->env, f2->chunk->local_names[sl],
+                               rvm_clone(&f2->regs[sl]));
+            }
+        }
+
+        /* Find default arm */
+        int default_arm = -1;
+        for (uint8_t i = 0; i < arm_count; i++) {
+            if (sel_arms[i].flags & 0x01) { default_arm = (int)i; break; }
+        }
+
+        /* Evaluate channel expressions */
+        LatChannel **channels = calloc(arm_count, sizeof(LatChannel *));
+        for (uint8_t i = 0; i < arm_count; i++) {
+            if (sel_arms[i].flags & 0x03) continue;  /* skip default/timeout */
+            RegChunk *ch_chunk = (RegChunk *)frame->chunk->constants[sel_arms[i].chan_idx].as.closure.native_fn;
+            LatValue ch_val;
+            RegVMResult cr = regvm_run_sub(vm, ch_chunk, &ch_val);
+            frame = &vm->frames[vm->frame_count - 1];
+            R = frame->regs;
+            if (cr != REGVM_OK || ch_val.type != VAL_CHANNEL) {
+                value_free(&ch_val);
+                for (uint8_t j = 0; j < i; j++)
+                    if (channels[j]) channel_release(channels[j]);
+                free(channels);
+                env_pop_scope(vm->env);
+                RVM_ERROR("select arm: expression is not a Channel");
+            }
+            channels[i] = ch_val.as.channel.ch;
+            channel_retain(channels[i]);
+            value_free(&ch_val);
+        }
+
+        /* Try non-blocking recv on each channel arm */
+        LatValue select_result = value_unit();
+        bool select_found = false;
+        for (uint8_t i = 0; i < arm_count; i++) {
+            if (sel_arms[i].flags & 0x03) continue;
+            LatValue recv_val;
+            bool closed = false;
+            if (channel_try_recv(channels[i], &recv_val, &closed)) {
+                /* Got a value — bind in env, run body */
+                env_push_scope(vm->env);
+                if (sel_arms[i].flags & 0x04) {
+                    const char *binding = frame->chunk->constants[sel_arms[i].binding_idx].as.str_val;
+                    if (binding)
+                        env_define(vm->env, binding, recv_val);
+                    else
+                        value_free(&recv_val);
+                } else {
+                    value_free(&recv_val);
+                }
+                RegChunk *body_chunk = (RegChunk *)frame->chunk->constants[sel_arms[i].body_idx].as.closure.native_fn;
+                LatValue arm_result;
+                RegVMResult ar = regvm_run_sub(vm, body_chunk, &arm_result);
+                frame = &vm->frames[vm->frame_count - 1];
+                R = frame->regs;
+                env_pop_scope(vm->env);
+                if (ar == REGVM_OK) {
+                    value_free(&select_result);
+                    select_result = arm_result;
+                }
+                select_found = true;
+                break;
+            }
+            (void)closed;
+        }
+
+        /* If no channel was ready, execute default arm if present */
+        if (!select_found && default_arm >= 0) {
+            env_push_scope(vm->env);
+            RegChunk *def_chunk = (RegChunk *)frame->chunk->constants[sel_arms[default_arm].body_idx].as.closure.native_fn;
+            LatValue def_result;
+            RegVMResult dr = regvm_run_sub(vm, def_chunk, &def_result);
+            frame = &vm->frames[vm->frame_count - 1];
+            R = frame->regs;
+            env_pop_scope(vm->env);
+            if (dr == REGVM_OK) {
+                value_free(&select_result);
+                select_result = def_result;
+            }
+        }
+
+        for (uint8_t i = 0; i < arm_count; i++)
+            if (channels[i]) channel_release(channels[i]);
+        free(channels);
+        env_pop_scope(vm->env);
+
+        reg_set(&R[dst_reg], select_result);
         DISPATCH();
     }
 
@@ -3163,6 +4850,23 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     CASE(SETINDEX_LOCAL) {
         /* R[A][R[B]] = R[C] — in-place array/map mutation */
         uint8_t a = REG_GET_A(instr), b = REG_GET_B(instr), c = REG_GET_C(instr);
+        /* Phase checks */
+        if (R[a].phase == VTAG_CRYSTAL) {
+            bool blocked = true;
+            if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
+                PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
+                if (!kp || *kp != VTAG_CRYSTAL) blocked = false;
+            }
+            if (blocked)
+                RVM_ERROR("cannot modify a frozen value");
+        }
+        if (R[a].phase == VTAG_SUBLIMATED && R[a].type == VAL_MAP)
+            RVM_ERROR("cannot add keys to a sublimated map");
+        if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
+            PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
+            if (kp && *kp == VTAG_CRYSTAL)
+                RVM_ERROR("cannot modify frozen key '%s'", R[b].as.str_val);
+        }
         if (R[a].type == VAL_ARRAY) {
             if (R[b].type == VAL_INT) {
                 int64_t idx = R[b].as.int_val;
@@ -3176,6 +4880,26 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (R[b].type == VAL_STR) {
                 LatValue cloned = rvm_clone(&R[c]);
                 lat_map_set(R[a].as.map.map, R[b].as.str_val, &cloned);
+            }
+        } else if (R[a].type == VAL_REF) {
+            /* Proxy: set index on inner value */
+            LatRef *ref = R[a].as.ref.ref;
+            if (value_is_crystal(&R[a]))
+                RVM_ERROR("cannot mutate a frozen Ref");
+            if (ref->value.type == VAL_MAP) {
+                if (R[b].type == VAL_STR) {
+                    LatValue cloned = rvm_clone(&R[c]);
+                    lat_map_set(ref->value.as.map.map, R[b].as.str_val, &cloned);
+                }
+            } else if (ref->value.type == VAL_ARRAY) {
+                if (R[b].type == VAL_INT) {
+                    int64_t idx = R[b].as.int_val;
+                    if (idx < 0) idx += (int64_t)ref->value.as.array.len;
+                    if (idx >= 0 && (size_t)idx < ref->value.as.array.len) {
+                        value_free(&ref->value.as.array.elems[idx]);
+                        ref->value.as.array.elems[idx] = rvm_clone(&R[c]);
+                    }
+                }
             }
         }
         DISPATCH();
@@ -3228,7 +4952,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     LatValue closure = rvm_clone(field);
                     if (closure.as.closure.body == NULL &&
                         closure.as.closure.native_fn != NULL &&
-                        closure.as.closure.default_values != VM_NATIVE_MARKER) {
+                        closure.as.closure.default_values != VM_NATIVE_MARKER &&
+                        closure.as.closure.default_values != VM_EXT_MARKER) {
                         /* Compiled closure */
                         RegChunk *fn_chunk = (RegChunk *)closure.as.closure.native_fn;
                         if (vm->frame_count >= REGVM_FRAMES_MAX) {
@@ -3271,6 +4996,70 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
+        /* Check for callable closure field in map (global) */
+        if (obj_ref->type == VAL_MAP) {
+            LatValue *field = lat_map_get(obj_ref->as.map.map, method_name);
+            if (field && field->type == VAL_CLOSURE) {
+                if (field->as.closure.default_values == VM_NATIVE_MARKER) {
+                    VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = native(call_args, argc);
+                    if (vm->rt->error) {
+                        vm->error = vm->rt->error;
+                        vm->rt->error = NULL;
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                if (field->as.closure.default_values == VM_EXT_MARKER) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = ext_call_native(field->as.closure.native_fn,
+                                                   call_args, (size_t)argc);
+                    if (ret.type == VAL_STR && ret.as.str_val &&
+                        strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                        vm->error = strdup(ret.as.str_val + 11);
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                if (fn_chunk) {
+                    uint32_t magic;
+                    memcpy(&magic, fn_chunk, sizeof(uint32_t));
+                    if (magic == REGCHUNK_MAGIC) {
+                        if (vm->frame_count >= REGVM_FRAMES_MAX)
+                            RVM_ERROR("call stack overflow");
+                        LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
+                        vm->reg_stack_top += REGVM_REG_MAX;
+                        for (int ri = 0; ri < REGVM_REG_MAX; ri++)
+                            new_regs[ri] = value_nil();
+                        new_regs[0] = value_unit();
+                        for (int ai = 0; ai < argc; ai++)
+                            new_regs[1 + ai] = rvm_clone(&R[args_base + ai]);
+
+                        ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+
+                        RegCallFrame *nf = &vm->frames[vm->frame_count++];
+                        nf->chunk = fn_chunk;
+                        nf->ip = fn_chunk->code;
+                        nf->regs = new_regs;
+                        nf->reg_count = REGVM_REG_MAX;
+                        nf->upvalues = upvals;
+                        nf->upvalue_count = uv_count;
+                        nf->caller_result_reg = dst;
+                        frame = nf;
+                        R = frame->regs;
+                        DISPATCH();
+                    }
+                }
+            }
+        }
+
         /* Fallback: copy global into temp, do regular invoke */
         {
             LatValue obj_copy = rvm_clone(obj_ref);
@@ -3285,6 +5074,139 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 value_free(&obj_copy);
                 reg_set(&R[dst], value_nil());
             }
+        }
+        DISPATCH();
+    }
+
+    CASE(IS_CRYSTAL) {
+        uint8_t a = REG_GET_A(instr);
+        uint8_t b = REG_GET_B(instr);
+        reg_set(&R[a], value_bool(R[b].phase == VTAG_CRYSTAL));
+        DISPATCH();
+    }
+
+    CASE(CHECK_TYPE) {
+        /* 2-word instruction:
+         * word 1: A=value reg, Bx=expected type name constant index
+         * word 2: error message constant index (raw 32-bit, 0xFFFFFFFF = default) */
+        uint8_t a = REG_GET_A(instr);
+        uint16_t bx = REG_GET_Bx(instr);
+        uint32_t err_word = *frame->ip++;
+        const char *expected = frame->chunk->constants[bx].as.str_val;
+        /* Type matching logic (mirrors vm_type_matches from stack VM) */
+        bool type_ok = false;
+        if (!expected || strcmp(expected, "Any") == 0) {
+            type_ok = true;
+        } else if (strcmp(expected, "Int") == 0) {
+            type_ok = R[a].type == VAL_INT;
+        } else if (strcmp(expected, "Float") == 0) {
+            type_ok = R[a].type == VAL_FLOAT;
+        } else if (strcmp(expected, "String") == 0) {
+            type_ok = R[a].type == VAL_STR;
+        } else if (strcmp(expected, "Bool") == 0) {
+            type_ok = R[a].type == VAL_BOOL;
+        } else if (strcmp(expected, "Nil") == 0) {
+            type_ok = R[a].type == VAL_NIL;
+        } else if (strcmp(expected, "Map") == 0) {
+            type_ok = R[a].type == VAL_MAP;
+        } else if (strcmp(expected, "Array") == 0) {
+            type_ok = R[a].type == VAL_ARRAY;
+        } else if (strcmp(expected, "Fn") == 0 || strcmp(expected, "Closure") == 0) {
+            type_ok = R[a].type == VAL_CLOSURE;
+        } else if (strcmp(expected, "Channel") == 0) {
+            type_ok = R[a].type == VAL_CHANNEL;
+        } else if (strcmp(expected, "Range") == 0) {
+            type_ok = R[a].type == VAL_RANGE;
+        } else if (strcmp(expected, "Set") == 0) {
+            type_ok = R[a].type == VAL_SET;
+        } else if (strcmp(expected, "Tuple") == 0) {
+            type_ok = R[a].type == VAL_TUPLE;
+        } else if (strcmp(expected, "Buffer") == 0) {
+            type_ok = R[a].type == VAL_BUFFER;
+        } else if (strcmp(expected, "Ref") == 0) {
+            type_ok = R[a].type == VAL_REF;
+        } else if (strcmp(expected, "Number") == 0) {
+            type_ok = R[a].type == VAL_INT || R[a].type == VAL_FLOAT;
+        } else if (R[a].type == VAL_STRUCT && R[a].as.strct.name) {
+            type_ok = strcmp(R[a].as.strct.name, expected) == 0;
+        } else if (R[a].type == VAL_ENUM && R[a].as.enm.enum_name) {
+            type_ok = strcmp(R[a].as.enm.enum_name, expected) == 0;
+        }
+        if (!type_ok) {
+            const char *display;
+            if (R[a].type == VAL_STRUCT && R[a].as.strct.name)
+                display = R[a].as.strct.name;
+            else if (R[a].type == VAL_ENUM && R[a].as.enm.enum_name)
+                display = R[a].as.enm.enum_name;
+            else if (R[a].type == VAL_CLOSURE)
+                display = "Fn";
+            else
+                display = value_type_name(&R[a]);
+            if (err_word != 0xFFFFFFFF) {
+                /* Custom error format with %s placeholder for actual type */
+                const char *fmt = frame->chunk->constants[err_word].as.str_val;
+                RVM_ERROR(fmt, display);
+            } else {
+                RVM_ERROR("return type expects %s, got %s", expected, display);
+            }
+        }
+        DISPATCH();
+    }
+
+    CASE(FREEZE_FIELD) {
+        /* A=var reg, B=field name constant */
+        uint8_t a = REG_GET_A(instr);
+        uint8_t b_ki = REG_GET_B(instr);
+        const char *field_name = frame->chunk->constants[b_ki].as.str_val;
+
+        if (R[a].type == VAL_STRUCT) {
+            size_t fi = (size_t)-1;
+            for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
+                if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) { fi = i; break; }
+            }
+            if (fi == (size_t)-1) RVM_ERROR("struct has no field '%s'", field_name);
+            R[a].as.strct.field_values[fi] = value_freeze(R[a].as.strct.field_values[fi]);
+            if (!R[a].as.strct.field_phases)
+                R[a].as.strct.field_phases = calloc(R[a].as.strct.field_count, sizeof(PhaseTag));
+            R[a].as.strct.field_phases[fi] = VTAG_CRYSTAL;
+        } else if (R[a].type == VAL_MAP) {
+            LatValue *val_ptr = (LatValue *)lat_map_get(R[a].as.map.map, field_name);
+            if (val_ptr) *val_ptr = value_freeze(*val_ptr);
+            if (!R[a].as.map.key_phases) {
+                R[a].as.map.key_phases = calloc(1, sizeof(LatMap));
+                *R[a].as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+            }
+            PhaseTag phase = VTAG_CRYSTAL;
+            lat_map_set(R[a].as.map.key_phases, field_name, &phase);
+        }
+        DISPATCH();
+    }
+
+    CASE(THAW_FIELD) {
+        /* A=var reg, B=field name constant */
+        uint8_t a = REG_GET_A(instr);
+        uint8_t b_ki = REG_GET_B(instr);
+        const char *field_name = frame->chunk->constants[b_ki].as.str_val;
+
+        if (R[a].type == VAL_STRUCT) {
+            if (!R[a].as.strct.field_phases) {
+                R[a].as.strct.field_phases = calloc(R[a].as.strct.field_count, sizeof(PhaseTag));
+                for (size_t i = 0; i < R[a].as.strct.field_count; i++)
+                    R[a].as.strct.field_phases[i] = R[a].phase;
+            }
+            for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
+                if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
+                    R[a].as.strct.field_phases[i] = VTAG_FLUID;
+                    break;
+                }
+            }
+        } else if (R[a].type == VAL_MAP) {
+            if (!R[a].as.map.key_phases) {
+                R[a].as.map.key_phases = calloc(1, sizeof(LatMap));
+                *R[a].as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+            }
+            PhaseTag phase = VTAG_FLUID;
+            lat_map_set(R[a].as.map.key_phases, field_name, &phase);
         }
         DISPATCH();
     }
@@ -3305,24 +5227,130 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 #endif
 }
 
+/* ── Dispatch adapters for LatRuntime ── */
+
+/* call_closure: delegates to the register VM's closure call */
+static LatValue regvm_dispatch_call_closure(void *opaque_vm, LatValue *closure, LatValue *args, int argc) {
+    return regvm_call_closure((RegVM *)opaque_vm, closure, args, argc);
+}
+
+/* find_local_value: searches register frame locals for a named variable */
+static bool regvm_dispatch_find_local_value(void *opaque_vm, const char *name, LatValue *out) {
+    RegVM *rvm = (RegVM *)opaque_vm;
+    for (int fi = 0; fi < rvm->frame_count; fi++) {
+        RegCallFrame *f = &rvm->frames[fi];
+        if (!f->chunk || !f->chunk->local_names) continue;
+        for (size_t r = 0; r < f->chunk->local_name_cap; r++) {
+            if (f->chunk->local_names[r] && strcmp(f->chunk->local_names[r], name) == 0) {
+                *out = value_deep_clone(&f->regs[r]);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* current_line: returns the source line of the current instruction */
+static int regvm_dispatch_current_line(void *opaque_vm) {
+    RegVM *rvm = (RegVM *)opaque_vm;
+    if (rvm->frame_count <= 0) return 0;
+    RegCallFrame *f = &rvm->frames[rvm->frame_count - 1];
+    if (f->ip > f->chunk->code) {
+        size_t offset = (size_t)(f->ip - f->chunk->code - 1);
+        if (offset < f->chunk->lines_len)
+            return f->chunk->lines[offset];
+    }
+    return 0;
+}
+
+/* get_var_by_name: searches locals then globals */
+static bool regvm_dispatch_get_var_by_name(void *opaque_vm, const char *name, LatValue *out) {
+    RegVM *rvm = (RegVM *)opaque_vm;
+    /* Search frame locals first */
+    for (int fi = 0; fi < rvm->frame_count; fi++) {
+        RegCallFrame *f = &rvm->frames[fi];
+        if (!f->chunk || !f->chunk->local_names) continue;
+        for (size_t r = 0; r < f->chunk->local_name_cap; r++) {
+            if (f->chunk->local_names[r] && strcmp(f->chunk->local_names[r], name) == 0) {
+                *out = value_deep_clone(&f->regs[r]);
+                return true;
+            }
+        }
+    }
+    /* Fall back to globals */
+    return env_get(rvm->env, name, out);
+}
+
+/* set_var_by_name: sets in locals (if found) or globals */
+static bool regvm_dispatch_set_var_by_name(void *opaque_vm, const char *name, LatValue val) {
+    RegVM *rvm = (RegVM *)opaque_vm;
+    /* Try frame locals first */
+    for (int fi = 0; fi < rvm->frame_count; fi++) {
+        RegCallFrame *f = &rvm->frames[fi];
+        if (!f->chunk || !f->chunk->local_names) continue;
+        for (size_t r = 0; r < f->chunk->local_name_cap; r++) {
+            if (f->chunk->local_names[r] && strcmp(f->chunk->local_names[r], name) == 0) {
+                value_free(&f->regs[r]);
+                f->regs[r] = val;
+                /* Also sync to env */
+                LatValue clone = value_deep_clone(&val);
+                if (!env_set(rvm->env, name, clone))
+                    env_define(rvm->env, name, clone);
+                return true;
+            }
+        }
+    }
+    /* Fall back to globals */
+    if (env_set(rvm->env, name, val))
+        return true;
+    env_define(rvm->env, name, val);
+    return true;
+}
+
+/* Set up runtime dispatch pointers for the register VM */
+static void regvm_setup_dispatch(RegVM *vm) {
+    vm->rt->backend = RT_BACKEND_REG_VM;
+    vm->rt->active_vm = vm;
+    vm->rt->call_closure = regvm_dispatch_call_closure;
+    vm->rt->find_local_value = regvm_dispatch_find_local_value;
+    vm->rt->current_line = regvm_dispatch_current_line;
+    vm->rt->get_var_by_name = regvm_dispatch_get_var_by_name;
+    vm->rt->set_var_by_name = regvm_dispatch_set_var_by_name;
+    lat_runtime_set_current(vm->rt);
+}
+
 RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
-    /* Set up initial frame */
-    RegCallFrame *frame = &vm->frames[0];
+    /* Set up runtime dispatch so native functions can call back into regvm */
+    regvm_setup_dispatch(vm);
+
+    /* Reentrant: push a new frame on top of the existing stack.
+     * This is safe for recursive calls (e.g. native_lat_eval, native_require)
+     * because we don't clobber existing frames. */
+    int base_frame = vm->frame_count;
+    if (vm->frame_count >= REGVM_FRAMES_MAX) {
+        vm->error = strdup("regvm_run: frame overflow");
+        return REGVM_RUNTIME_ERROR;
+    }
+    RegCallFrame *frame = &vm->frames[vm->frame_count++];
     frame->chunk = chunk;
     frame->ip = chunk->code;
-    frame->regs = vm->reg_stack;
+    frame->regs = &vm->reg_stack[vm->reg_stack_top];
     frame->reg_count = REGVM_REG_MAX;
     frame->upvalues = NULL;
     frame->upvalue_count = 0;
     frame->caller_result_reg = 0;
-    vm->frame_count = 1;
-    vm->reg_stack_top = REGVM_REG_MAX;
+    vm->reg_stack_top += REGVM_REG_MAX;
 
-    return regvm_dispatch(vm, 0, result);
+    /* Zero the new register window */
+    memset(frame->regs, 0, REGVM_REG_MAX * sizeof(LatValue));
+
+    return regvm_dispatch(vm, base_frame, result);
 }
 
 /* REPL variant: reuses existing frame 0 registers (preserves globals/locals) */
 RegVMResult regvm_run_repl(RegVM *vm, RegChunk *chunk, LatValue *result) {
+    /* Set up runtime dispatch so native functions can call back into regvm */
+    regvm_setup_dispatch(vm);
     RegCallFrame *frame = &vm->frames[0];
     frame->chunk = chunk;
     frame->ip = chunk->code;

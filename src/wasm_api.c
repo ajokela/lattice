@@ -3,13 +3,16 @@
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
-#include "compiler.h"
-#include "vm.h"
+#include "stackcompiler.h"
+#include "stackvm.h"
 #include "regvm.h"
+#include "runtime.h"
 #include <emscripten.h>
 
-static VM *g_vm = NULL;
+static StackVM *g_vm = NULL;
+static LatRuntime *g_rt = NULL;
 static RegVM *g_rvm = NULL;
+static LatRuntime *g_rrt = NULL;
 static int g_use_regvm = 0;
 
 /* Keep parsed programs alive so struct/fn/enum decl pointers referenced by
@@ -48,22 +51,26 @@ static void free_stored_programs(void) {
 EMSCRIPTEN_KEEPALIVE
 void lat_init(void) {
     if (g_vm) {
-        vm_free(g_vm);
+        stackvm_free(g_vm);
         free(g_vm);
-        compiler_free_known_enums();
+        lat_runtime_free(g_rt);
+        free(g_rt);
+        stack_compiler_free_known_enums();
         free_stored_programs();
     }
-    /* Disconnect the fluid heap so the compiler and VM use plain malloc/free */
+    /* Disconnect the fluid heap so the compiler and StackVM use plain malloc/free */
     value_set_heap(NULL);
     value_set_arena(NULL);
 
-    g_vm = malloc(sizeof(VM));
-    vm_init(g_vm);
+    g_rt = malloc(sizeof(LatRuntime));
+    lat_runtime_init(g_rt);
+    g_vm = malloc(sizeof(StackVM));
+    stackvm_init(g_vm, g_rt);
 }
 
 EMSCRIPTEN_KEEPALIVE
 const char *lat_run_line(const char *source) {
-    if (!g_vm) return "error: VM not initialized";
+    if (!g_vm) return "error: StackVM not initialized";
 
     /* Lex */
     Lexer lex = lexer_new(source);
@@ -92,7 +99,7 @@ const char *lat_run_line(const char *source) {
 
     /* Compile for REPL (keeps last expression value on stack) */
     char *comp_err = NULL;
-    Chunk *chunk = compile_repl(&prog, &comp_err);
+    Chunk *chunk = stack_compile_repl(&prog, &comp_err);
     if (!chunk) {
         fprintf(stderr, "compile error: %s\n", comp_err);
         free(comp_err);
@@ -100,14 +107,14 @@ const char *lat_run_line(const char *source) {
         return NULL;
     }
 
-    /* Run on VM */
+    /* Run on StackVM */
     LatValue result;
-    VMResult vm_res = vm_run(g_vm, chunk, &result);
-    if (vm_res != VM_OK) {
+    StackVMResult vm_res = stackvm_run(g_vm, chunk, &result);
+    if (vm_res != STACKVM_OK) {
         fprintf(stderr, "error: %s\n", g_vm->error);
         free(g_vm->error);
         g_vm->error = NULL;
-        /* Reset VM state for next iteration */
+        /* Reset StackVM state for next iteration */
         for (LatValue *slot = g_vm->stack; slot < g_vm->stack_top; slot++)
             value_free(slot);
         g_vm->stack_top = g_vm->stack;
@@ -169,37 +176,38 @@ int lat_is_complete(const char *source) {
 EMSCRIPTEN_KEEPALIVE
 void lat_destroy(void) {
     if (g_vm) {
-        vm_free(g_vm);
+        stackvm_free(g_vm);
         free(g_vm);
         g_vm = NULL;
     }
-    compiler_free_known_enums();
+    if (g_rt) {
+        lat_runtime_free(g_rt);
+        free(g_rt);
+        g_rt = NULL;
+    }
+    stack_compiler_free_known_enums();
     free_stored_programs();
 }
 
-/* ── Register VM WASM API ── */
+/* ── Register StackVM WASM API ── */
 
 EMSCRIPTEN_KEEPALIVE
 void lat_init_regvm(void) {
     if (g_rvm) {
         regvm_free(g_rvm);
         free(g_rvm);
+        lat_runtime_free(g_rrt);
+        free(g_rrt);
         reg_compiler_free_known_enums();
         free_stored_programs();
     }
     value_set_heap(NULL);
     value_set_arena(NULL);
 
+    g_rrt = malloc(sizeof(LatRuntime));
+    lat_runtime_init(g_rrt);
     g_rvm = malloc(sizeof(RegVM));
-    regvm_init(g_rvm);
-
-    /* Borrow native functions from a temp stack VM */
-    VM tmp_vm;
-    vm_init(&tmp_vm);
-    env_free(g_rvm->env);
-    g_rvm->env = tmp_vm.env;
-    tmp_vm.env = env_new();
-    vm_free(&tmp_vm);
+    regvm_init(g_rvm, g_rrt);
 
     g_use_regvm = 1;
 }
@@ -277,6 +285,11 @@ void lat_destroy_regvm(void) {
         regvm_free(g_rvm);
         free(g_rvm);
         g_rvm = NULL;
+    }
+    if (g_rrt) {
+        lat_runtime_free(g_rrt);
+        free(g_rrt);
+        g_rrt = NULL;
     }
     reg_compiler_free_known_enums();
     free_stored_programs();

@@ -330,6 +330,7 @@ typedef enum {
 
 typedef struct {
     ItemTag tag;
+    bool    exported;   /* true if 'export' keyword precedes this item */
     union {
         FnDecl     fn_decl;
         StructDecl struct_decl;
@@ -346,6 +347,10 @@ typedef struct {
     AstMode mode;
     Item   *items;
     size_t  item_count;
+    char  **export_names;   /* NULL = export-all (legacy) */
+    size_t  export_count;
+    size_t  export_cap;
+    bool    has_exports;    /* true if any 'export' keyword present */
 } Program;
 
 /* ── Constructors ── */
@@ -427,5 +432,11 @@ void trait_decl_free(TraitDecl *t);
 void impl_block_free(ImplBlock *ib);
 void item_free(Item *item);
 void program_free(Program *p);
+
+/* Check whether a name should be exported from a module.
+ * If no 'export' keywords are present, all names are exported (legacy mode).
+ * Otherwise, only explicitly exported names are included. */
+bool module_should_export(const char *name, const char **export_names,
+                          size_t export_count, bool has_exports);
 
 #endif /* AST_H */
