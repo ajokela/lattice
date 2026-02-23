@@ -247,12 +247,15 @@ flux loop_depth = 0
 flux loop_break_local_count = 0
 flux loop_continue_local_count = 0
 
+// String constant deduplication (per-chunk intern map)
+flux string_intern_map = Map::new()
+
 // Compiler stack for save/restore during function compilation
 // Each entry is an array: [code, c_lines, constants, local_names,
 //   local_name_arr, local_depth_arr, local_captured_arr, local_count,
 //   scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
 //   func_type, break_jumps, break_count, loop_start_pos, loop_depth,
-//   loop_break_local_count, loop_continue_local_count]
+//   loop_break_local_count, loop_continue_local_count, string_intern_map]
 flux compiler_stack = []
 
 fn save_compiler() {
@@ -262,21 +265,13 @@ fn save_compiler() {
         local_name_arr, local_depth_arr, local_captured_arr, local_count,
         scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
         func_type, break_jumps, break_count, loop_start_pos, loop_depth,
-        loop_break_local_count, loop_continue_local_count
+        loop_break_local_count, loop_continue_local_count, string_intern_map
     ]
     compiler_stack.push(state)
 }
 
 fn restore_compiler() {
-    let idx = len(compiler_stack) - 1
-    let state = compiler_stack[idx]
-    // Pop from stack
-    flux new_stack = []
-    for i in 0..idx {
-        new_stack.push(compiler_stack[i])
-    }
-    compiler_stack = new_stack
-
+    let state = compiler_stack.pop()
     code = state[0]
     c_lines = state[1]
     constants = state[2]
@@ -296,6 +291,7 @@ fn restore_compiler() {
     loop_depth = state[16]
     loop_break_local_count = state[17]
     loop_continue_local_count = state[18]
+    string_intern_map = state[19]
 }
 
 // Snapshot the current chunk into an array for serialization
@@ -331,9 +327,19 @@ fn emit_bytes(b1: any, b2: any, line: any) {
     emit_byte(b2, line)
 }
 
+fn emit_wide_op(op: any, op16: any, idx: any, line: any) {
+    if idx > 255 {
+        emit_byte(op16, line)
+        emit_byte((idx >> 8) & 255, line)
+        emit_byte(idx & 255, line)
+    } else {
+        emit_bytes(op, idx, line)
+    }
+}
+
 fn add_constant(val: any) {
     let idx = len(constants)
-    if idx > 255 {
+    if idx > 65535 {
         compiler_error("too many constants in one chunk", current_line())
     }
     constants.push(val)
@@ -342,7 +348,7 @@ fn add_constant(val: any) {
 
 fn emit_constant(val: any, line: any) {
     let idx = add_constant(val)
-    emit_bytes(OP_CONSTANT, idx, line)
+    emit_wide_op(OP_CONSTANT, OP_CONSTANT_16, idx, line)
     return idx
 }
 
@@ -415,7 +421,11 @@ fn make_closure_const(param_count: any, has_variadic: any, chunk_snap: any) {
 }
 
 fn string_constant(name: any) {
-    return add_constant(make_string_const(name))
+    let cached = string_intern_map[name]
+    if cached != nil { return cached }
+    let idx = add_constant(make_string_const(name))
+    string_intern_map[name] = idx
+    return idx
 }
 
 // ============================================================================
@@ -545,7 +555,7 @@ fn emit_variable_get(name: any, line: any) {
         return
     }
     let idx = string_constant(name)
-    emit_bytes(OP_GET_GLOBAL, idx, line)
+    emit_wide_op(OP_GET_GLOBAL, OP_GET_GLOBAL_16, idx, line)
 }
 
 fn emit_variable_set(name: any, line: any) {
@@ -560,7 +570,7 @@ fn emit_variable_set(name: any, line: any) {
         return
     }
     let idx = string_constant(name)
-    emit_bytes(OP_SET_GLOBAL, idx, line)
+    emit_wide_op(OP_SET_GLOBAL, OP_SET_GLOBAL_16, idx, line)
 }
 
 // ============================================================================
@@ -574,7 +584,7 @@ fn parse_expression() {
 fn parse_or() {
     let line = current_line()
     parse_and()
-    while peek_text() == "||" {
+    while peek_type() == "||" {
         advance()
         let jump = emit_jump(OP_JUMP_IF_TRUE, line)
         emit_byte(OP_POP, line)
@@ -586,7 +596,7 @@ fn parse_or() {
 fn parse_and() {
     let line = current_line()
     parse_equality()
-    while peek_text() == "&&" {
+    while peek_type() == "&&" {
         advance()
         let jump = emit_jump(OP_JUMP_IF_FALSE, line)
         emit_byte(OP_POP, line)
@@ -598,7 +608,8 @@ fn parse_and() {
 fn parse_equality() {
     let line = current_line()
     parse_comparison()
-    while peek_text() == "==" || peek_text() == "!=" {
+    flux pt = peek_type()
+    while pt == "==" || pt == "!=" {
         let op = advance().text
         parse_comparison()
         if op == "==" {
@@ -606,13 +617,15 @@ fn parse_equality() {
         } else {
             emit_byte(OP_NEQ, line)
         }
+        pt = peek_type()
     }
 }
 
 fn parse_comparison() {
     let line = current_line()
     parse_bitwise_or()
-    while peek_text() == "<" || peek_text() == ">" || peek_text() == "<=" || peek_text() == ">=" {
+    flux pt = peek_type()
+    while pt == "<" || pt == ">" || pt == "<=" || pt == ">=" {
         let op = advance().text
         parse_bitwise_or()
         match op {
@@ -621,13 +634,14 @@ fn parse_comparison() {
             "<=" => emit_byte(OP_LTEQ, line),
             _ => emit_byte(OP_GTEQ, line)
         }
+        pt = peek_type()
     }
 }
 
 fn parse_bitwise_or() {
     let line = current_line()
     parse_bitwise_xor()
-    while peek_text() == "|" {
+    while peek_type() == "|" {
         advance()
         parse_bitwise_xor()
         emit_byte(OP_BIT_OR, line)
@@ -637,7 +651,7 @@ fn parse_bitwise_or() {
 fn parse_bitwise_xor() {
     let line = current_line()
     parse_bitwise_and()
-    while peek_text() == "^" {
+    while peek_type() == "^" {
         advance()
         parse_bitwise_and()
         emit_byte(OP_BIT_XOR, line)
@@ -647,7 +661,7 @@ fn parse_bitwise_xor() {
 fn parse_bitwise_and() {
     let line = current_line()
     parse_shift()
-    while peek_text() == "&" {
+    while peek_type() == "&" {
         advance()
         parse_shift()
         emit_byte(OP_BIT_AND, line)
@@ -657,7 +671,8 @@ fn parse_bitwise_and() {
 fn parse_shift() {
     let line = current_line()
     parse_range()
-    while peek_text() == "<<" || peek_text() == ">>" {
+    flux pt = peek_type()
+    while pt == "<<" || pt == ">>" {
         let op = advance().text
         parse_range()
         if op == "<<" {
@@ -665,13 +680,14 @@ fn parse_shift() {
         } else {
             emit_byte(OP_RSHIFT, line)
         }
+        pt = peek_type()
     }
 }
 
 fn parse_range() {
     let line = current_line()
     parse_concat()
-    if peek_text() == ".." {
+    if peek_type() == ".." {
         advance()
         parse_concat()
         emit_byte(OP_BUILD_RANGE, line)
@@ -681,7 +697,7 @@ fn parse_range() {
 fn parse_concat() {
     let line = current_line()
     parse_term()
-    while peek_text() == "++" {
+    while peek_type() == "++" {
         advance()
         parse_term()
         emit_byte(OP_CONCAT, line)
@@ -691,7 +707,8 @@ fn parse_concat() {
 fn parse_term() {
     let line = current_line()
     parse_factor()
-    while peek_text() == "+" || peek_text() == "-" {
+    flux pt = peek_type()
+    while pt == "+" || pt == "-" {
         let op = advance().text
         parse_factor()
         if op == "+" {
@@ -699,13 +716,15 @@ fn parse_term() {
         } else {
             emit_byte(OP_SUB, line)
         }
+        pt = peek_type()
     }
 }
 
 fn parse_factor() {
     let line = current_line()
     parse_unary()
-    while peek_text() == "*" || peek_text() == "/" || peek_text() == "%" {
+    flux pt = peek_type()
+    while pt == "*" || pt == "/" || pt == "%" {
         let op = advance().text
         parse_unary()
         match op {
@@ -713,24 +732,25 @@ fn parse_factor() {
             "/" => emit_byte(OP_DIV, line),
             _ => emit_byte(OP_MOD, line)
         }
+        pt = peek_type()
     }
 }
 
 fn parse_unary() {
     let line = current_line()
-    if peek_text() == "-" {
+    if peek_type() == "-" {
         advance()
         parse_unary()
         emit_byte(OP_NEG, line)
         return
     }
-    if peek_text() == "!" {
+    if peek_type() == "!" {
         advance()
         parse_unary()
         emit_byte(OP_NOT, line)
         return
     }
-    if peek_text() == "~" {
+    if peek_type() == "~" {
         advance()
         parse_unary()
         emit_byte(OP_BIT_NOT, line)
@@ -744,14 +764,14 @@ fn parse_postfix() {
     parse_primary()
 
     loop {
-        let pt = peek_text()
+        let pt = peek_type()
         if pt == "(" {
             advance()
             flux arg_count = 0
-            if peek_text() != ")" {
+            if peek_type() != ")" {
                 parse_expression()
                 arg_count = arg_count + 1
-                while peek_text() == "," {
+                while peek_type() == "," {
                     advance()
                     parse_expression()
                     arg_count = arg_count + 1
@@ -767,13 +787,13 @@ fn parse_postfix() {
         } else { if pt == "." {
             advance()
             let field_name = expect("identifier", nil).text
-            if peek_text() == "(" {
+            if peek_type() == "(" {
                 advance()
                 flux arg_count = 0
-                if peek_text() != ")" {
+                if peek_type() != ")" {
                     parse_expression()
                     arg_count = arg_count + 1
-                    while peek_text() == "," {
+                    while peek_type() == "," {
                         advance()
                         parse_expression()
                         arg_count = arg_count + 1
@@ -792,6 +812,16 @@ fn parse_postfix() {
             break
         } } }
     }
+}
+
+fn is_struct_literal_ahead() {
+    // After '{', check for 'ident :' or empty '}'
+    if pos + 1 >= len(tokens) { return false }
+    let next = tokens[pos + 1]
+    if next.text == "}" { return true }
+    if next.type != "identifier" { return false }
+    if pos + 2 >= len(tokens) { return false }
+    return tokens[pos + 2].text == ":"
 }
 
 fn parse_primary() {
@@ -885,6 +915,12 @@ fn parse_primary() {
         return
     }
 
+    // match expression
+    if t.type == "match" {
+        parse_match_expression()
+        return
+    }
+
     // Closure literal: |params| { body }
     if t.type == "|" || t.text == "|" {
         parse_closure_literal()
@@ -914,7 +950,7 @@ fn parse_primary() {
     if t.type == "identifier" {
         advance()
         // Check for struct construction: Name { ... }
-        if peek_text() == "{" {
+        if peek_text() == "{" && is_struct_literal_ahead() {
             let first_char = t.text[0]
             if first_char != nil {
                 let c = ord(first_char)
@@ -1042,6 +1078,92 @@ fn parse_if_expression() {
     patch_jump(else_jump)
 }
 
+fn parse_match_expression() {
+    let line = current_line()
+    advance()  // consume 'match'
+    parse_expression()  // scrutinee -> on stack
+    expect(nil, "{")
+
+    flux end_jumps = []
+
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in match", line)
+        }
+
+        let is_wildcard = peek_text() == "_"
+
+        // DUP scrutinee for this arm
+        emit_byte(OP_DUP, line)
+
+        if is_wildcard {
+            advance()
+            emit_byte(OP_TRUE, line)
+        } else {
+            emit_byte(OP_DUP, line)     // extra dup for OP_EQ consumption
+            // Parse pattern as literal directly — parse_expression() would
+            // misinterpret string text like "-" or "*" as operators
+            let pat = peek()
+            if pat.type == "string" {
+                advance()
+                emit_constant(make_string_const(pat.text), line)
+            } else { if pat.type == "integer" {
+                advance()
+                let val = parse_int(pat.text)
+                emit_constant(make_int_const(val), line)
+            } else { if pat.type == "float" {
+                advance()
+                let val = parse_float(pat.text)
+                emit_constant(make_float_const(val), line)
+            } else { if pat.type == "true" {
+                advance()
+                emit_byte(OP_TRUE, line)
+            } else { if pat.type == "false" {
+                advance()
+                emit_byte(OP_FALSE, line)
+            } else { if pat.type == "nil" {
+                advance()
+                emit_byte(OP_NIL, line)
+            } else {
+                parse_expression()
+            } } } } } }
+            emit_byte(OP_EQ, line)
+        }
+
+        let next_arm = emit_jump(OP_JUMP_IF_FALSE, line)
+
+        // Match succeeded: pop bool, pop dup, pop scrutinee
+        emit_byte(OP_POP, line)
+        emit_byte(OP_POP, line)
+        emit_byte(OP_POP, line)
+
+        expect(nil, "=>")
+        parse_expression()  // body
+
+        end_jumps.push(emit_jump(OP_JUMP, line))
+
+        // Match failed: patch here, pop bool + pop dup
+        patch_jump(next_arm)
+        emit_byte(OP_POP, line)
+        emit_byte(OP_POP, line)
+
+        // Optional trailing comma
+        if peek_text() == "," {
+            advance()
+        }
+    }
+    expect(nil, "}")
+
+    // No match fallback: pop scrutinee, push nil
+    emit_byte(OP_POP, line)
+    emit_byte(OP_NIL, line)
+
+    // Patch all end jumps to here
+    for i in 0..len(end_jumps) {
+        patch_jump(end_jumps[i])
+    }
+}
+
 fn parse_block_expression() {
     let line = current_line()
     expect(nil, "{")
@@ -1107,6 +1229,7 @@ fn parse_closure_literal() {
     break_count = 0
     loop_start_pos = 0
     loop_depth = 0
+    string_intern_map = Map::new()
 
     // Reserve slot 0 for the closure itself (VM convention)
     add_local("")
@@ -1153,8 +1276,7 @@ fn parse_closure_literal() {
     let fn_const = make_closure_const(param_count, false, fn_snap)
     let fn_idx = add_constant(fn_const)
 
-    emit_byte(OP_CLOSURE, line)
-    emit_byte(fn_idx, line)
+    emit_wide_op(OP_CLOSURE, OP_CLOSURE_16, fn_idx, line)
     emit_byte(fn_uv_count, line)
     flux i = 0
     while i < fn_uv_count {
@@ -1313,7 +1435,7 @@ fn parse_declaration() {
         add_local(name)
     } else {
         let idx = string_constant(name)
-        emit_bytes(OP_DEFINE_GLOBAL, idx, line)
+        emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
     }
 }
 
@@ -1383,6 +1505,7 @@ fn parse_fn_declaration() {
     break_count = 0
     loop_start_pos = 0
     loop_depth = 0
+    string_intern_map = Map::new()
 
     // Reserve slot 0 for the function itself (VM convention)
     add_local("")
@@ -1414,8 +1537,7 @@ fn parse_fn_declaration() {
     let fn_const = make_closure_const(param_count, has_variadic, fn_snap)
     let fn_idx = add_constant(fn_const)
 
-    emit_byte(OP_CLOSURE, line)
-    emit_byte(fn_idx, line)
+    emit_wide_op(OP_CLOSURE, OP_CLOSURE_16, fn_idx, line)
     emit_byte(fn_uv_count, line)
     flux i = 0
     while i < fn_uv_count {
@@ -1432,7 +1554,7 @@ fn parse_fn_declaration() {
         add_local(name)
     } else {
         let idx = string_constant(name)
-        emit_bytes(OP_DEFINE_GLOBAL, idx, line)
+        emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
     }
 }
 
@@ -1881,7 +2003,8 @@ fn parse_import() {
 // ============================================================================
 
 fn compile_program() {
-    while pos < len(tokens) {
+    let total_tokens = len(tokens)
+    while pos < total_tokens {
         parse_statement_or_expression()
     }
     emit_byte(OP_UNIT, current_line())
