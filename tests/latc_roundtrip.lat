@@ -322,6 +322,23 @@ fn test_nested() {
     }
 }
 
+struct Point { x: any, y: any }
+
+fn test_structs() {
+    print("--- structs ---")
+    let p = Point { x: 10, y: 20 }
+    print(p.x)
+    print(p.y)
+}
+
+fn test_push() {
+    print("--- push ---")
+    flux arr = [1, 2, 3]
+    arr.push(4)
+    print(len(arr))
+    print(arr[3])
+}
+
 fn main() {
     test_arithmetic()
     test_variables()
@@ -333,5 +350,7 @@ fn main() {
     test_match()
     test_try_catch()
     test_nested()
+    test_structs()
+    test_push()
     print("ALL PASSED")
 }

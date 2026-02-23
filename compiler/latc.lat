@@ -446,6 +446,12 @@ fn begin_scope() {
 }
 
 fn end_scope(line: any) {
+    // Run defers at current scope level (before decrementing)
+    emit_byte(OP_UNIT, line)
+    emit_byte(OP_DEFER_RUN, line)
+    emit_byte(scope_depth, line)
+    emit_byte(OP_POP, line)
+
     scope_depth = scope_depth - 1
     while local_count > 0 {
         if local_depth_arr[local_count - 1] <= scope_depth {
@@ -794,9 +800,23 @@ fn parse_postfix() {
             expect(nil, "]")
             emit_byte(OP_INDEX, line)
         } else { if pt == "." {
+            let receiver_code_pos = len(code)
             advance()
             let field_name = expect("identifier", nil).text
             if peek_type() == "(" {
+                // Check if receiver was a simple local or global load
+                let is_local_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_LOCAL
+                let is_global_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_GLOBAL
+                let receiver_slot = 0
+                if is_local_recv || is_global_recv {
+                    receiver_slot = code[receiver_code_pos - 1]
+                    // Remove the GET_LOCAL/GET_GLOBAL we already emitted
+                    code.pop()
+                    code.pop()
+                    c_lines.pop()
+                    c_lines.pop()
+                }
+
                 advance()
                 flux arg_count = 0
                 if peek_type() != ")" {
@@ -810,9 +830,21 @@ fn parse_postfix() {
                 }
                 expect(nil, ")")
                 let name_idx = string_constant(field_name)
-                emit_byte(OP_INVOKE, line)
-                emit_byte(name_idx, line)
-                emit_byte(arg_count, line)
+                if is_local_recv {
+                    emit_byte(OP_INVOKE_LOCAL, line)
+                    emit_byte(receiver_slot, line)
+                    emit_byte(name_idx, line)
+                    emit_byte(arg_count, line)
+                } else { if is_global_recv {
+                    emit_byte(OP_INVOKE_GLOBAL, line)
+                    emit_byte(receiver_slot, line)
+                    emit_byte(name_idx, line)
+                    emit_byte(arg_count, line)
+                } else {
+                    emit_byte(OP_INVOKE, line)
+                    emit_byte(name_idx, line)
+                    emit_byte(arg_count, line)
+                } }
             } else {
                 let name_idx = string_constant(field_name)
                 emit_bytes(OP_GET_FIELD, name_idx, line)
@@ -1976,7 +2008,13 @@ fn parse_enum_declaration() {
 fn parse_defer() {
     let line = current_line()
     advance()
-    let jump = emit_jump(OP_DEFER_PUSH, line)
+
+    // OP_DEFER_PUSH format: opcode(1) + scope_depth(1) + offset(2)
+    emit_byte(OP_DEFER_PUSH, line)
+    emit_byte(scope_depth, line)
+    emit_byte(255, line)
+    emit_byte(255, line)
+    let jump = len(code) - 2
 
     expect(nil, "{")
     begin_scope()
