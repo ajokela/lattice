@@ -179,10 +179,18 @@ static void gc_mark_env_value(LatValue *v, void *ctx) {
  * IDs into the supplied vector.
  */
 static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions) {
-    /* Crystal values have no fluid pointers — just record the region ID */
-    if (v->phase == VTAG_CRYSTAL && v->region_id != (size_t)-1) {
-        lat_vec_push(reachable_regions, &v->region_id);
-        return;
+    /* Arena-backed values: record the region as reachable and skip traversal.
+     * All child pointers reside in the same region, so no fluid marking needed.
+     * Note: compiled bytecode closures repurpose region_id as upvalue count,
+     * so exclude them from this check. */
+    if (v->region_id != REGION_NONE && v->region_id != REGION_EPHEMERAL) {
+        bool is_compiled_closure = (v->type == VAL_CLOSURE &&
+                                    v->as.closure.body == NULL &&
+                                    v->as.closure.native_fn != NULL);
+        if (!is_compiled_closure) {
+            lat_vec_push(reachable_regions, &v->region_id);
+            return;
+        }
     }
     switch (v->type) {
         case VAL_STR:
@@ -5034,8 +5042,6 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (!IS_ERR(res)) ev_pop_frame(ev);
             GC_POP_N(ev, argc);
             GC_POP(ev);
-            /* Don't free captured_env since closure still owns it - just cleanup */
-            callee_r.value.as.closure.captured_env = NULL;
             value_free(&callee_r.value);
             free(args);
             return res;
@@ -6845,7 +6851,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             }
 
             GC_POP(ev); value_free(&scr.value);
-            return eval_err(strdup("no matching pattern in match expression"));
+            return eval_ok(value_nil());
         }
 
         case EXPR_ENUM_VARIANT: {

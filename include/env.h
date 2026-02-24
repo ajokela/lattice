@@ -12,6 +12,7 @@ struct Env {
     Scope  *scopes;
     size_t  count;
     size_t  cap;
+    size_t  refcount;
     bool    arena_backed;
 };
 
@@ -20,6 +21,12 @@ Env *env_new(void);
 
 /* Free the environment and all its scopes */
 void env_free(Env *env);
+
+/* Increment reference count (for shared closure environments) */
+void env_retain(Env *env);
+
+/* Decrement reference count and free when it reaches 0 */
+void env_release(Env *env);
 
 /* Push a fresh scope */
 void env_push_scope(Env *env);

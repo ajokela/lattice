@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, traits with `impl` blocks, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), bytecode compilation to `.latc` files (with both C and self-hosted compiler backends), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -548,6 +548,33 @@ let p = Point {
 }
 print(repr(p))  // (10, 20)
 ```
+
+### Traits & Impl
+
+Define shared behavior with traits and implement them for structs:
+
+```lattice
+trait Geometric {
+    fn area(self: Any) -> Float
+    fn scale(self: Any, factor: Float) -> Any
+}
+
+impl Geometric for Point {
+    fn area(self: Any) -> Float {
+        return to_float(self.x * self.y)
+    }
+    fn scale(self: Any, factor: Float) -> Any {
+        return Point { x: self.x * factor, y: self.y * factor }
+    }
+}
+
+let p = Point { x: 3, y: 4 }
+print(p.area())       // 12.0
+let q = p.scale(2.0)
+print(q.x)            // 6.0
+```
+
+Trait methods are dispatched via the struct type — `p.area()` resolves to `Point::area(p)`.
 
 ### Error Handling
 
@@ -1473,17 +1500,38 @@ The VM supports the full phase system (freeze/thaw, react/bond/seed, sublimate, 
 
 The tree-walking interpreter is available as a fallback via `--tree-walk`.
 
+### Bytecode Compilation (.latc)
+
+Lattice can compile source files to standalone `.latc` bytecode files using the C compiler backend:
+
+```sh
+./clat compile program.lat -o program.latc   # compile to bytecode
+./clat program.latc                           # run compiled bytecode
+```
+
+A self-hosted compiler written in Lattice itself (`compiler/latc.lat`) can also produce `.latc` files:
+
+```sh
+./clat compiler/latc.lat program.lat output.latc   # compile via self-hosted compiler
+./clat output.latc                                  # run the result
+```
+
+Both backends produce identical output. The self-hosted compiler supports the full language including structs, enums, traits/impl, closures, match expressions, destructuring, phase semantics (fix/freeze/thaw/clone), and nil coalescing.
+
 ## CLI Reference
 
 ```
-clat [--stats] [--gc-stress] [--no-assertions] [--tree-walk] [file.lat]
+clat [options] [file.lat]
+clat compile <file.lat> -o <output.latc>
 ```
 
 | Flag | Description |
 |------|-------------|
-| `file.lat` | Run a Lattice source file |
+| `file.lat` | Run a Lattice source file (or `.latc` bytecode file) |
 | *(no file)* | Start the interactive REPL |
+| `compile file.lat -o out.latc` | Compile source to bytecode file |
 | `--tree-walk` | Use the tree-walking interpreter instead of the bytecode VM |
+| `--regvm` | Use the register-based VM backend |
 | `--stats` | Print memory/GC statistics to stderr after execution (tree-walk mode) |
 | `--gc-stress` | Force garbage collection on every allocation (for testing) |
 | `--no-assertions` | Disable `debug_assert()` and `require`/`ensure` contracts |

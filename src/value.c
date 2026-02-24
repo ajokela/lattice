@@ -309,10 +309,21 @@ LatValue value_deep_clone(const LatValue *v) {
             out.as.closure.body = v->as.closure.body;  /* borrowed */
             /* Compiled bytecode closures store ObjUpvalue** in captured_env (not Env*).
              * Shallow-copy the pointer; the VM manages upvalue lifetime. */
-            if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL)
+            if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) {
                 out.as.closure.captured_env = v->as.closure.captured_env;
-            else
-                out.as.closure.captured_env = v->as.closure.captured_env ? env_clone(v->as.closure.captured_env) : NULL;
+            } else {
+                /* Tree-walk closures: share the env (refcounted) so mutations
+                 * inside the closure persist across calls.
+                 * Exception: when an arena is active (during freeze), we must
+                 * clone the env into the arena so GC can safely skip crystal
+                 * values without traversing their fluid-heap env pointers. */
+                if (value_get_arena()) {
+                    out.as.closure.captured_env = env_clone(v->as.closure.captured_env);
+                } else {
+                    out.as.closure.captured_env = v->as.closure.captured_env;
+                    env_retain(v->as.closure.captured_env);
+                }
+            }
             out.as.closure.default_values = v->as.closure.default_values;  /* borrowed */
             out.as.closure.has_variadic = v->as.closure.has_variadic;
             out.as.closure.native_fn = v->as.closure.native_fn;  /* shared, not owned */
@@ -918,11 +929,11 @@ void value_free(LatValue *v) {
                     val_dealloc(v, v->as.closure.param_names[i]);
                 val_dealloc(v, v->as.closure.param_names);
             }
-            /* Don't env_free compiled bytecode closures — they store ObjUpvalue**,
+            /* Don't free compiled bytecode closures' env — they store ObjUpvalue**,
              * not Env*. The VM manages upvalue lifetime. */
             if (v->as.closure.captured_env &&
                 !(v->as.closure.body == NULL && v->as.closure.native_fn != NULL))
-                env_free(v->as.closure.captured_env);
+                env_release(v->as.closure.captured_env);
             break;
         case VAL_MAP:
             if (v->as.map.map) {

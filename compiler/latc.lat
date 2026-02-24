@@ -256,6 +256,9 @@ flux loop_continue_local_count = 0
 // Auto-call main() tracking
 flux has_main_fn = false
 
+// Known enum names for BUILD_ENUM codegen
+flux known_enums = []
+
 // String constant deduplication (per-chunk intern map)
 flux string_intern_map = Map::new()
 
@@ -466,6 +469,26 @@ fn end_scope(line: any) {
     }
 }
 
+fn end_scope_preserve_tos(line: any) {
+    // Like end_scope but preserves TOS (expression result) across local pops.
+    // Emits OP_SWAP before each POP/CLOSE_UPVALUE to sink result past each local.
+    emit_byte(OP_DEFER_RUN, line)
+    emit_byte(scope_depth, line)
+    scope_depth = scope_depth - 1
+    while local_count > 0 {
+        if local_depth_arr[local_count - 1] <= scope_depth {
+            break
+        }
+        emit_byte(OP_SWAP, line)
+        if local_captured_arr[local_count - 1] {
+            emit_byte(OP_CLOSE_UPVALUE, line)
+        } else {
+            emit_byte(OP_POP, line)
+        }
+        local_count = local_count - 1
+    }
+}
+
 fn add_local(name: any) {
     let slot = local_count
     if local_count >= len(local_name_arr) {
@@ -598,13 +621,25 @@ fn parse_expression() {
 
 fn parse_or() {
     let line = current_line()
-    parse_and()
+    parse_nil_coalesce()
     while peek_type() == "||" {
         advance()
         let jump = emit_jump(OP_JUMP_IF_TRUE, line)
         emit_byte(OP_POP, line)
-        parse_and()
+        parse_nil_coalesce()
         patch_jump(jump)
+    }
+}
+
+fn parse_nil_coalesce() {
+    let line = current_line()
+    parse_and()
+    while peek_type() == "??" {
+        advance()
+        let end_jump = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+        emit_byte(OP_POP, line)
+        parse_and()
+        patch_jump(end_jump)
     }
 }
 
@@ -806,7 +841,7 @@ fn parse_postfix() {
             if peek_type() == "(" {
                 // Check if receiver was a simple local or global load
                 let is_local_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_LOCAL
-                let is_global_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_GLOBAL
+                let is_global_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_GLOBAL && !(receiver_code_pos >= 3 && code[receiver_code_pos - 3] == OP_GET_GLOBAL_16)
                 let receiver_slot = 0
                 if is_local_recv || is_global_recv {
                     receiver_slot = code[receiver_code_pos - 1]
@@ -987,6 +1022,14 @@ fn parse_primary() {
         return
     }
 
+    // freeze/thaw/clone builtins
+    if t.text == "freeze" || t.text == "thaw" || t.text == "clone" {
+        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_freeze_thaw_clone(t.text, line)
+            return
+        }
+    }
+
     // Identifier
     if t.type == "identifier" {
         advance()
@@ -1007,6 +1050,38 @@ fn parse_primary() {
         if peek_text() == "::" {
             advance()
             let method_name = expect("identifier", nil).text
+            // Check if this is a known enum
+            let is_enum = false
+            for ei in 0..len(known_enums) {
+                if known_enums[ei] == t.text {
+                    is_enum = true
+                    break
+                }
+            }
+            if is_enum {
+                // Emit args if present
+                flux arg_count = 0
+                if peek_text() == "(" {
+                    advance()
+                    if peek_text() != ")" {
+                        parse_expression()
+                        arg_count = arg_count + 1
+                        while peek_text() == "," {
+                            advance()
+                            parse_expression()
+                            arg_count = arg_count + 1
+                        }
+                    }
+                    expect(nil, ")")
+                }
+                let enum_idx = string_constant(t.text)
+                let var_idx = string_constant(method_name)
+                emit_byte(OP_BUILD_ENUM, line)
+                emit_byte(enum_idx, line)
+                emit_byte(var_idx, line)
+                emit_byte(arg_count, line)
+                return
+            }
             let full_name = t.text + "::" + method_name
             emit_variable_get(full_name, line)
             return
@@ -1024,6 +1099,68 @@ fn parse_primary() {
     }
 
     compiler_error("unexpected token '" + t.text + "' (type: " + t.type + ")", line)
+}
+
+fn parse_freeze_thaw_clone(keyword: any, line: any) {
+    advance()  // consume keyword (freeze/thaw/clone)
+    expect(nil, "(")
+
+    // Check if inner expression is a simple identifier
+    let is_simple_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    let ident_name = ""
+    if is_simple_ident {
+        ident_name = peek_text()
+    }
+
+    parse_expression()
+    expect(nil, ")")
+
+    if keyword == "clone" {
+        emit_byte(OP_CLONE, line)
+        return
+    }
+
+    if is_simple_ident {
+        let name_idx = string_constant(ident_name)
+        let slot = resolve_local(ident_name)
+        if slot >= 0 {
+            if keyword == "freeze" {
+                emit_byte(OP_FREEZE_VAR, line)
+            } else {
+                emit_byte(OP_THAW_VAR, line)
+            }
+            emit_byte(name_idx, line)
+            emit_byte(0, line)
+            emit_byte(slot, line)
+        } else {
+            let up = resolve_upvalue(ident_name)
+            if up >= 0 {
+                if keyword == "freeze" {
+                    emit_byte(OP_FREEZE_VAR, line)
+                } else {
+                    emit_byte(OP_THAW_VAR, line)
+                }
+                emit_byte(name_idx, line)
+                emit_byte(1, line)
+                emit_byte(up, line)
+            } else {
+                if keyword == "freeze" {
+                    emit_byte(OP_FREEZE_VAR, line)
+                } else {
+                    emit_byte(OP_THAW_VAR, line)
+                }
+                emit_byte(name_idx, line)
+                emit_byte(2, line)
+                emit_byte(0, line)
+            }
+        }
+    } else {
+        if keyword == "freeze" {
+            emit_byte(OP_FREEZE, line)
+        } else {
+            emit_byte(OP_THAW, line)
+        }
+    }
 }
 
 fn parse_struct_literal(name: any, line: any) {
@@ -1179,7 +1316,11 @@ fn parse_match_expression() {
         emit_byte(OP_POP, line)
 
         expect(nil, "=>")
-        parse_expression()  // body
+        if peek_text() == "{" {
+            parse_block_expression()
+        } else {
+            parse_expression()
+        }
 
         end_jumps.push(emit_jump(OP_JUMP, line))
 
@@ -1228,10 +1369,12 @@ fn parse_block_expression() {
         }
     }
     expect(nil, "}")
-    if !last_was_expr {
+    if last_was_expr {
+        end_scope_preserve_tos(line)
+    } else {
+        end_scope(line)
         emit_byte(OP_NIL, line)
     }
-    end_scope(line)
 }
 
 fn parse_closure_literal() {
@@ -1356,6 +1499,8 @@ fn is_statement_start() {
     if txt == "defer" { return true }
     if txt == "try" { return true }
     if txt == "import" { return true }
+    if txt == "impl" { return true }
+    if txt == "trait" { return true }
     if t.type == "identifier" {
         if pos + 1 < len(tokens) {
             let next = tokens[pos + 1]
@@ -1455,6 +1600,16 @@ fn parse_statement() {
         return
     }
 
+    if txt == "impl" {
+        parse_impl_block()
+        return
+    }
+
+    if txt == "trait" {
+        parse_trait_declaration()
+        return
+    }
+
     if t.type == "identifier" {
         parse_assignment()
         return
@@ -1466,10 +1621,24 @@ fn parse_statement() {
 fn parse_declaration() {
     let line = current_line()
     let kind = advance().text
+
+    // Check for destructuring: let [a, b] = ... or let { x, y } = ...
+    if peek_text() == "[" {
+        parse_array_destructure(kind, line)
+        return
+    }
+    if peek_text() == "{" {
+        parse_struct_destructure(kind, line)
+        return
+    }
+
     let name = expect("identifier", nil).text
     expect(nil, "=")
     parse_expression()
 
+    if kind == "fix" {
+        emit_byte(OP_FREEZE, line)
+    }
     if kind == "flux" {
         emit_byte(OP_MARK_FLUID, line)
     }
@@ -1479,6 +1648,98 @@ fn parse_declaration() {
     } else {
         let idx = string_constant(name)
         emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
+    }
+}
+
+fn parse_array_destructure(kind: any, line: any) {
+    advance()  // consume '['
+    flux names = []
+    while peek_text() != "]" {
+        names.push(expect("identifier", nil).text)
+        if peek_text() == "," { advance() }
+    }
+    expect(nil, "]")
+    expect(nil, "=")
+    parse_expression()
+
+    let name_count = len(names)
+    if scope_depth > 0 {
+        // Local scope: store source as hidden local
+        add_local("")
+        let src_slot = local_count - 1
+        for i in 0..name_count {
+            emit_bytes(OP_GET_LOCAL, src_slot, line)
+            emit_constant(make_int_const(i), line)
+            emit_byte(OP_INDEX, line)
+            if kind == "fix" {
+                emit_byte(OP_FREEZE, line)
+            }
+            if kind == "flux" {
+                emit_byte(OP_MARK_FLUID, line)
+            }
+            add_local(names[i])
+        }
+    } else {
+        // Global scope: use DUP
+        for i in 0..name_count {
+            emit_byte(OP_DUP, line)
+            emit_constant(make_int_const(i), line)
+            emit_byte(OP_INDEX, line)
+            if kind == "fix" {
+                emit_byte(OP_FREEZE, line)
+            }
+            if kind == "flux" {
+                emit_byte(OP_MARK_FLUID, line)
+            }
+            let idx = string_constant(names[i])
+            emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
+        }
+        emit_byte(OP_POP, line)
+    }
+}
+
+fn parse_struct_destructure(kind: any, line: any) {
+    advance()  // consume '{'
+    flux names = []
+    while peek_text() != "}" {
+        names.push(expect("identifier", nil).text)
+        if peek_text() == "," { advance() }
+    }
+    expect(nil, "}")
+    expect(nil, "=")
+    parse_expression()
+
+    let name_count = len(names)
+    if scope_depth > 0 {
+        add_local("")
+        let src_slot = local_count - 1
+        for i in 0..name_count {
+            emit_bytes(OP_GET_LOCAL, src_slot, line)
+            let fidx = string_constant(names[i])
+            emit_bytes(OP_GET_FIELD, fidx, line)
+            if kind == "fix" {
+                emit_byte(OP_FREEZE, line)
+            }
+            if kind == "flux" {
+                emit_byte(OP_MARK_FLUID, line)
+            }
+            add_local(names[i])
+        }
+    } else {
+        for i in 0..name_count {
+            emit_byte(OP_DUP, line)
+            let fidx = string_constant(names[i])
+            emit_bytes(OP_GET_FIELD, fidx, line)
+            if kind == "fix" {
+                emit_byte(OP_FREEZE, line)
+            }
+            if kind == "flux" {
+                emit_byte(OP_MARK_FLUID, line)
+            }
+            let nidx = string_constant(names[i])
+            emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, nidx, line)
+        }
+        emit_byte(OP_POP, line)
     }
 }
 
@@ -1803,7 +2064,11 @@ fn parse_break() {
     advance()
     flux i = local_count - 1
     while i >= loop_break_local_count {
-        emit_byte(OP_POP, line)
+        if local_captured_arr[i] {
+            emit_byte(OP_CLOSE_UPVALUE, line)
+        } else {
+            emit_byte(OP_POP, line)
+        }
         i = i - 1
     }
     let jump = emit_jump(OP_JUMP, line)
@@ -1820,7 +2085,11 @@ fn parse_continue() {
     advance()
     flux i = local_count - 1
     while i >= loop_continue_local_count {
-        emit_byte(OP_POP, line)
+        if local_captured_arr[i] {
+            emit_byte(OP_CLOSE_UPVALUE, line)
+        } else {
+            emit_byte(OP_POP, line)
+        }
         i = i - 1
     }
     emit_loop(loop_start_pos, line)
@@ -1931,25 +2200,25 @@ fn parse_struct_declaration() {
     let name = expect("identifier", nil).text
     expect(nil, "{")
 
+    flux field_names_arr = []
+
     while peek_text() != "}" {
         if peek() == nil {
             compiler_error("unexpected end of input in struct declaration", line)
         }
         if peek_type() == "fn" {
+            // Skip methods in struct body (handled by impl blocks)
             advance()
             expect("identifier", nil)
             expect(nil, "(")
-            // Skip params with type annotations
             while peek_text() != ")" {
                 advance()
             }
             expect(nil, ")")
-            // Skip optional return type
             if peek_text() == "->" {
                 advance()
                 advance()
             }
-            // Skip body
             expect(nil, "{")
             flux depth = 1
             while depth > 0 {
@@ -1958,11 +2227,10 @@ fn parse_struct_declaration() {
                 if mt.text == "}" { depth = depth - 1 }
             }
         } else {
-            expect("identifier", nil)
-            // Consume type annotation
+            let fname = expect("identifier", nil).text
+            field_names_arr.push(fname)
             if peek_text() == ":" {
                 advance()
-                // Skip type (could be array type like [any])
                 if peek_text() == "[" {
                     advance()
                     advance()
@@ -1977,6 +2245,16 @@ fn parse_struct_declaration() {
         }
     }
     expect(nil, "}")
+
+    // Emit struct metadata: array of field name strings as __struct_<Name>
+    let field_count = len(field_names_arr)
+    for i in 0..field_count {
+        emit_constant(make_string_const(field_names_arr[i]), line)
+    }
+    emit_bytes(OP_BUILD_ARRAY, field_count, line)
+    let meta_name = "__struct_" + name
+    let idx = string_constant(meta_name)
+    emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
 }
 
 fn parse_enum_declaration() {
@@ -2003,6 +2281,13 @@ fn parse_enum_declaration() {
         }
     }
     expect(nil, "}")
+
+    // Register known enum and emit metadata
+    known_enums.push(name)
+    let meta_name = "__enum_" + name
+    emit_byte(OP_TRUE, line)
+    let idx = string_constant(meta_name)
+    emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
 }
 
 fn parse_defer() {
@@ -2076,6 +2361,169 @@ fn parse_import() {
     let path = expect("string", nil).text
     let idx = string_constant(path)
     emit_bytes(OP_IMPORT, idx, line)
+}
+
+fn parse_trait_declaration() {
+    let line = current_line()
+    advance()  // consume 'trait'
+    expect("identifier", nil)  // trait name
+    expect(nil, "{")
+    // Skip trait body (method signatures)
+    flux depth = 1
+    while depth > 0 {
+        if peek() == nil {
+            compiler_error("unexpected end of input in trait declaration", line)
+        }
+        let t = advance()
+        if t.text == "{" { depth = depth + 1 }
+        if t.text == "}" { depth = depth - 1 }
+    }
+    // Traits are metadata only — no bytecode emitted
+}
+
+fn parse_impl_block() {
+    let line = current_line()
+    advance()  // consume 'impl'
+    let trait_name = expect("identifier", nil).text
+    expect(nil, "for")
+    let type_name = expect("identifier", nil).text
+    expect(nil, "{")
+
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in impl block", line)
+        }
+        expect("fn", nil)
+        let method_name = expect("identifier", nil).text
+        let full_name = type_name + "::" + method_name
+        if method_name == "main" { has_main_fn = true }
+        expect(nil, "(")
+
+        flux param_names_arr = []
+        flux has_variadic = false
+        if peek_text() != ")" {
+            let p = expect("identifier", nil).text
+            if peek_text() == ":" {
+                advance()
+                expect("identifier", nil)
+            }
+            param_names_arr.push(p)
+            while peek_text() == "," {
+                advance()
+                if peek_text() == "..." {
+                    advance()
+                    let vp = expect("identifier", nil).text
+                    if peek_text() == ":" {
+                        advance()
+                        expect("identifier", nil)
+                    }
+                    param_names_arr.push(vp)
+                    has_variadic = true
+                    break
+                }
+                let p2 = expect("identifier", nil).text
+                if peek_text() == ":" {
+                    advance()
+                    expect("identifier", nil)
+                }
+                param_names_arr.push(p2)
+            }
+        }
+        expect(nil, ")")
+
+        if peek_text() == "->" {
+            advance()
+            expect("identifier", nil)
+        }
+
+        let param_count = len(param_names_arr)
+
+        // If first param is "self", it occupies slot 0 (the reserved slot)
+        // and is excluded from arity
+        flux first_param = 0
+        if param_count > 0 && param_names_arr[0] == "self" {
+            first_param = 1
+        }
+        let arity = param_count - first_param
+
+        save_compiler()
+
+        code = []
+        c_lines = []
+        constants = []
+        local_names = []
+        local_name_arr = []
+        local_depth_arr = []
+        local_captured_arr = []
+        local_count = 0
+        scope_depth = 0
+        upvalue_index_arr = []
+        upvalue_islocal_arr = []
+        upvalue_count = 0
+        func_type = "function"
+        break_jumps = []
+        break_count = 0
+        loop_start_pos = 0
+        loop_depth = 0
+        string_intern_map = Map::new()
+
+        if first_param == 1 {
+            // self occupies slot 0
+            add_local("self")
+        } else {
+            add_local("")
+        }
+        begin_scope()
+
+        for i in first_param..param_count {
+            add_local(param_names_arr[i])
+        }
+
+        expect(nil, "{")
+        while peek_text() != "}" {
+            if peek() == nil {
+                compiler_error("unexpected end of input in method body", line)
+            }
+            parse_statement_or_expression()
+        }
+        expect(nil, "}")
+
+        emit_byte(OP_UNIT, line)
+        emit_byte(OP_DEFER_RUN, line)
+        emit_byte(0, line)
+        emit_byte(OP_RETURN, line)
+
+        let fn_snap = snapshot_chunk()
+        let fn_uv_idx = upvalue_index_arr
+        let fn_uv_loc = upvalue_islocal_arr
+        let fn_uv_count = upvalue_count
+
+        restore_compiler()
+
+        let fn_const = make_closure_const(arity, has_variadic, fn_snap)
+        let fn_idx = add_constant(fn_const)
+
+        emit_wide_op(OP_CLOSURE, OP_CLOSURE_16, fn_idx, line)
+        emit_byte(fn_uv_count, line)
+        flux ui = 0
+        while ui < fn_uv_count {
+            if fn_uv_loc[ui] {
+                emit_byte(1, line)
+            } else {
+                emit_byte(0, line)
+            }
+            emit_byte(fn_uv_idx[ui], line)
+            ui = ui + 1
+        }
+
+        if scope_depth > 0 {
+            add_local(full_name)
+        } else {
+            let name_idx = string_constant(full_name)
+            emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line)
+        }
+    }
+    expect(nil, "}")
 }
 
 // ============================================================================

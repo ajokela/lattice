@@ -339,6 +339,121 @@ fn test_push() {
     print(arr[3])
 }
 
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Rgb(any, any, any)
+}
+
+fn test_enum() {
+    print("--- enum ---")
+    let r = Color::Red
+    print(r)
+    let g = Color::Green
+    print(g)
+    let rgb = Color::Rgb(255, 128, 0)
+    print(rgb)
+}
+
+fn test_fix() {
+    print("--- fix ---")
+    fix x = 42
+    print(x)
+    fix name = "frozen"
+    print(name)
+}
+
+fn test_freeze_thaw() {
+    print("--- freeze/thaw ---")
+    flux val = [1, 2, 3]
+    freeze(val)
+    print(val)
+    thaw(val)
+    print(val)
+
+    let c = clone(val)
+    print(c)
+}
+
+fn test_match_blocks() {
+    print("--- match blocks ---")
+    let result = match 2 {
+        1 => { "one" },
+        2 => {
+            let x = "tw"
+            let y = "o"
+            x + y
+        },
+        _ => { "other" }
+    }
+    print(result)
+
+    let simple = match "a" {
+        "a" => "alpha",
+        _ => "?"
+    }
+    print(simple)
+}
+
+fn test_nil_coalesce() {
+    print("--- nil coalesce ---")
+    let a = nil ?? "default"
+    print(a)
+    let b = "value" ?? "default"
+    print(b)
+    let c = nil ?? nil ?? "last"
+    print(c)
+}
+
+fn test_throw() {
+    print("--- throw ---")
+    // throw is not a language-level keyword in Lattice;
+    // OP_THROW is used internally. Test error propagation via division by zero.
+    try {
+        let x = 1 / 0
+        print("FAIL")
+    } catch e {
+        print("caught error")
+    }
+}
+
+trait Geometric {
+    fn distance(self: any)
+    fn scale(self: any, factor: any)
+}
+
+impl Geometric for Point {
+    fn distance(self: any) {
+        return self.x + self.y
+    }
+    fn scale(self: any, factor: any) {
+        return Point { x: self.x * factor, y: self.y * factor }
+    }
+}
+
+fn test_impl() {
+    print("--- impl ---")
+    let p = Point { x: 3, y: 4 }
+    print(p.distance())
+    let q = p.scale(2)
+    print(q.x)
+    print(q.y)
+}
+
+fn test_destructure() {
+    print("--- destructure ---")
+    let [a, b, c] = [10, 20, 30]
+    print(a)
+    print(b)
+    print(c)
+
+    let p = Point { x: 100, y: 200 }
+    let { x, y } = p
+    print(x)
+    print(y)
+}
+
 fn main() {
     test_arithmetic()
     test_variables()
@@ -352,5 +467,13 @@ fn main() {
     test_nested()
     test_structs()
     test_push()
+    test_enum()
+    test_fix()
+    test_freeze_thaw()
+    test_match_blocks()
+    test_nil_coalesce()
+    test_throw()
+    test_impl()
+    test_destructure()
     print("ALL PASSED")
 }

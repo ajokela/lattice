@@ -24,10 +24,21 @@ Env *env_new(void) {
     Env *env = malloc(sizeof(Env));
     env->cap = INITIAL_SCOPE_CAP;
     env->count = 1;
+    env->refcount = 1;
     env->arena_backed = false;
     env->scopes = malloc(env->cap * sizeof(Scope));
     env->scopes[0] = scope_new();
     return env;
+}
+
+void env_retain(Env *env) {
+    if (env) env->refcount++;
+}
+
+void env_release(Env *env) {
+    if (!env) return;
+    if (--env->refcount == 0)
+        env_free(env);
 }
 
 void env_free(Env *env) {
@@ -164,6 +175,7 @@ static Env *env_clone_arena(const Env *env) {
     Env *new_env = lat_alloc_routed(sizeof(Env));
     new_env->cap = env->cap;
     new_env->count = env->count;
+    new_env->refcount = 1;
     new_env->scopes = lat_alloc_routed(new_env->cap * sizeof(Scope));
 
     new_env->arena_backed = true;
@@ -198,6 +210,7 @@ Env *env_clone(const Env *env) {
     Env *new_env = malloc(sizeof(Env));
     new_env->cap = env->cap;
     new_env->count = env->count;
+    new_env->refcount = 1;
     new_env->arena_backed = false;
     new_env->scopes = malloc(new_env->cap * sizeof(Scope));
 
