@@ -13,6 +13,7 @@
 #include "builtins.h"
 #include "net.h"
 #include "tls.h"
+#include "http.h"
 #include "json.h"
 #include "math_ops.h"
 #include "env_ops.h"
@@ -4864,7 +4865,477 @@ static void test_set_typeof(void) {
     );
 }
 
-/* ── HTTP client tests ── */
+/* ── HTTP mock server + integration tests ── */
+
+/* Helper: run a mock HTTP server in a forked child.
+ * Accepts one connection on server_fd, reads the request, writes `response`, closes. */
+static void mock_http_server(int server_fd, const char *response) {
+    char *err = NULL;
+    int client = net_tcp_accept(server_fd, &err);
+    if (client < 0) _exit(1);
+
+    /* Read request (just drain it) */
+    char *req = net_tcp_read(client, &err);
+    free(req);
+
+    /* Write canned response */
+    net_tcp_write(client, response, strlen(response), &err);
+    net_tcp_close(client);
+    net_tcp_close(server_fd);
+    _exit(0);
+}
+
+/* Helper: listen on random port, return server_fd and set *port_out */
+static int mock_listen(int *port_out) {
+    char *err = NULL;
+    int server = net_tcp_listen("127.0.0.1", 0, &err);
+    if (server < 0) return -1;
+    struct sockaddr_in addr;
+    socklen_t alen = sizeof(addr);
+    getsockname(server, (struct sockaddr *)&addr, &alen);
+    *port_out = ntohs(addr.sin_port);
+    return server;
+}
+
+static void test_http_url_parse_basic(void) {
+    char *err = NULL;
+    HttpUrl url;
+
+    /* http URL */
+    ASSERT(http_parse_url("http://example.com/foo", &url, &err));
+    ASSERT(err == NULL);
+    ASSERT_STR_EQ(url.scheme, "http");
+    ASSERT_STR_EQ(url.host, "example.com");
+    ASSERT(url.port == 80);
+    ASSERT_STR_EQ(url.path, "/foo");
+    http_url_free(&url);
+
+    /* https URL */
+    ASSERT(http_parse_url("https://secure.io/bar", &url, &err));
+    ASSERT_STR_EQ(url.scheme, "https");
+    ASSERT_STR_EQ(url.host, "secure.io");
+    ASSERT(url.port == 443);
+    ASSERT_STR_EQ(url.path, "/bar");
+    http_url_free(&url);
+
+    /* No path defaults to "/" */
+    ASSERT(http_parse_url("http://nopath.com", &url, &err));
+    ASSERT_STR_EQ(url.path, "/");
+    http_url_free(&url);
+}
+
+static void test_http_url_parse_custom_port(void) {
+    char *err = NULL;
+    HttpUrl url;
+
+    ASSERT(http_parse_url("http://localhost:8080/api?q=1", &url, &err));
+    ASSERT_STR_EQ(url.host, "localhost");
+    ASSERT(url.port == 8080);
+    ASSERT_STR_EQ(url.path, "/api?q=1");
+    http_url_free(&url);
+}
+
+static void test_http_url_parse_errors(void) {
+    char *err = NULL;
+    HttpUrl url;
+
+    /* Bad scheme */
+    ASSERT(!http_parse_url("ftp://x.com", &url, &err));
+    ASSERT(err != NULL);
+    free(err); err = NULL;
+
+    /* Empty host */
+    ASSERT(!http_parse_url("http:///path", &url, &err));
+    ASSERT(err != NULL);
+    free(err); err = NULL;
+
+    /* Bad port */
+    ASSERT(!http_parse_url("http://host:99999/x", &url, &err));
+    ASSERT(err != NULL);
+    free(err); err = NULL;
+
+    /* Port 0 */
+    ASSERT(!http_parse_url("http://host:0/x", &url, &err));
+    ASSERT(err != NULL);
+    free(err);
+}
+
+static void test_http_execute_get(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        mock_http_server(server,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 5\r\n"
+            "\r\n"
+            "hello");
+    }
+
+    /* Parent: close server fd (child owns it) and make request */
+    net_tcp_close(server);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", port);
+
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.url = url;
+
+    char *err = NULL;
+    HttpResponse *resp = http_execute(&req, &err);
+    ASSERT(resp != NULL);
+    ASSERT(err == NULL);
+    ASSERT(resp->status_code == 200);
+    ASSERT_STR_EQ(resp->body, "hello");
+    ASSERT(resp->body_len == 5);
+
+    /* Check headers were parsed */
+    bool found_ct = false;
+    for (size_t i = 0; i < resp->header_count; i++) {
+        if (strcmp(resp->header_keys[i], "content-type") == 0) {
+            ASSERT_STR_EQ(resp->header_values[i], "text/plain");
+            found_ct = true;
+        }
+    }
+    ASSERT(found_ct);
+
+    http_response_free(resp);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+static void test_http_execute_post_body(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        /* Child: accept, read request (verify body), send response */
+        char *err = NULL;
+        int client = net_tcp_accept(server, &err);
+        if (client < 0) _exit(1);
+
+        /* Read request */
+        char *req_data = net_tcp_read(client, &err);
+        /* Verify POST body was received */
+        int ok = (req_data && strstr(req_data, "test body") != NULL);
+        free(req_data);
+
+        const char *resp = ok ?
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" :
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 4\r\n\r\nfail";
+        net_tcp_write(client, resp, strlen(resp), &err);
+        net_tcp_close(client);
+        net_tcp_close(server);
+        _exit(0);
+    }
+
+    net_tcp_close(server);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/post", port);
+
+    HttpRequest req = {0};
+    req.method = "POST";
+    req.url = url;
+    req.body = "test body";
+    req.body_len = 9;
+
+    char *err = NULL;
+    HttpResponse *resp = http_execute(&req, &err);
+    ASSERT(resp != NULL);
+    ASSERT(resp->status_code == 200);
+    ASSERT_STR_EQ(resp->body, "ok");
+
+    http_response_free(resp);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+static void test_http_execute_custom_headers(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        /* Child: verify custom header was sent */
+        char *err = NULL;
+        int client = net_tcp_accept(server, &err);
+        if (client < 0) _exit(1);
+
+        char *req_data = net_tcp_read(client, &err);
+        int ok = (req_data && strstr(req_data, "X-Custom: myval") != NULL);
+        free(req_data);
+
+        const char *resp = ok ?
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ngood" :
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\n\r\nbad";
+        net_tcp_write(client, resp, strlen(resp), &err);
+        net_tcp_close(client);
+        net_tcp_close(server);
+        _exit(0);
+    }
+
+    net_tcp_close(server);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/hdrs", port);
+
+    char *keys[] = {"X-Custom"};
+    char *vals[] = {"myval"};
+
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.url = url;
+    req.header_keys = keys;
+    req.header_values = vals;
+    req.header_count = 1;
+
+    char *err = NULL;
+    HttpResponse *resp = http_execute(&req, &err);
+    ASSERT(resp != NULL);
+    ASSERT(resp->status_code == 200);
+    ASSERT_STR_EQ(resp->body, "good");
+
+    http_response_free(resp);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+static void test_http_execute_chunked(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        mock_http_server(server,
+            "HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "5\r\n"
+            "Hello\r\n"
+            "7\r\n"
+            " World!\r\n"
+            "0\r\n"
+            "\r\n");
+    }
+
+    net_tcp_close(server);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/chunked", port);
+
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.url = url;
+
+    char *err = NULL;
+    HttpResponse *resp = http_execute(&req, &err);
+    ASSERT(resp != NULL);
+    ASSERT(resp->status_code == 200);
+    ASSERT_STR_EQ(resp->body, "Hello World!");
+    ASSERT(resp->body_len == 12);
+
+    http_response_free(resp);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+static void test_http_execute_multi_headers(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        mock_http_server(server,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "X-Request-Id: abc123\r\n"
+            "X-Server: testmock\r\n"
+            "Content-Length: 2\r\n"
+            "\r\n"
+            "{}");
+    }
+
+    net_tcp_close(server);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/multi", port);
+
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.url = url;
+
+    char *err = NULL;
+    HttpResponse *resp = http_execute(&req, &err);
+    ASSERT(resp != NULL);
+    ASSERT(resp->status_code == 200);
+    ASSERT(resp->header_count >= 4);
+
+    /* Headers should be lowercased */
+    bool found_rid = false;
+    for (size_t i = 0; i < resp->header_count; i++) {
+        if (strcmp(resp->header_keys[i], "x-request-id") == 0) {
+            ASSERT_STR_EQ(resp->header_values[i], "abc123");
+            found_rid = true;
+        }
+    }
+    ASSERT(found_rid);
+
+    http_response_free(resp);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+static void test_http_execute_non_standard_port(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        /* Child: verify Host header includes port */
+        char *err = NULL;
+        int client = net_tcp_accept(server, &err);
+        if (client < 0) _exit(1);
+
+        char *req_data = net_tcp_read(client, &err);
+        char expected_host[64];
+        snprintf(expected_host, sizeof(expected_host), "Host: 127.0.0.1:%d", port);
+        int ok = (req_data && strstr(req_data, expected_host) != NULL);
+        free(req_data);
+
+        const char *resp = ok ?
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" :
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\n\r\nbad";
+        net_tcp_write(client, resp, strlen(resp), &err);
+        net_tcp_close(client);
+        net_tcp_close(server);
+        _exit(0);
+    }
+
+    net_tcp_close(server);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/port", port);
+
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.url = url;
+
+    char *err = NULL;
+    HttpResponse *resp = http_execute(&req, &err);
+    ASSERT(resp != NULL);
+    ASSERT(resp->status_code == 200);
+    ASSERT_STR_EQ(resp->body, "ok");
+
+    http_response_free(resp);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+static void test_http_execute_connect_refused(void) {
+    /* Use a port that nothing is listening on */
+    char *err = NULL;
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.url = "http://127.0.0.1:1/refused";
+
+    HttpResponse *resp = http_execute(&req, &err);
+    ASSERT(resp == NULL);
+    ASSERT(err != NULL);
+    free(err);
+}
+
+static void test_http_execute_lattice_get(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        mock_http_server(server,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 11\r\n"
+            "\r\n"
+            "from server");
+    }
+
+    net_tcp_close(server);
+
+    char source[256];
+    snprintf(source, sizeof(source),
+        "fn main() {\n"
+        "    let r = http_get(\"http://127.0.0.1:%d/lat\")\n"
+        "    print(r[\"status\"])\n"
+        "    print(r[\"body\"])\n"
+        "}\n", port);
+
+    char *out = run_capture(source);
+    ASSERT_STR_EQ(out, "200\nfrom server");
+    free(out);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+static void test_http_execute_lattice_post(void) {
+    int port;
+    int server = mock_listen(&port);
+    ASSERT(server >= 0);
+
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        /* Child: accept, drain request, respond with 201 */
+        mock_http_server(server,
+            "HTTP/1.1 201 Created\r\n"
+            "Content-Length: 7\r\n"
+            "\r\n"
+            "created");
+    }
+
+    net_tcp_close(server);
+
+    char source[256];
+    snprintf(source, sizeof(source),
+        "fn main() {\n"
+        "    let r = http_post(\"http://127.0.0.1:%d/lat\", \"payload\")\n"
+        "    print(r[\"status\"])\n"
+        "    print(r[\"body\"])\n"
+        "}\n", port);
+
+    char *out = run_capture(source);
+    ASSERT_STR_EQ(out, "201\ncreated");
+    free(out);
+
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+/* ── HTTP client error tests ── */
 
 static void test_http_get_wrong_type(void) {
     ASSERT_OUTPUT(
@@ -9440,7 +9911,21 @@ void register_stdlib_tests(void) {
     register_test("test_set_duplicate_add", test_set_duplicate_add);
     register_test("test_set_typeof", test_set_typeof);
 
-    /* HTTP client */
+    /* HTTP mock server integration tests */
+    register_test("test_http_url_parse_basic", test_http_url_parse_basic);
+    register_test("test_http_url_parse_custom_port", test_http_url_parse_custom_port);
+    register_test("test_http_url_parse_errors", test_http_url_parse_errors);
+    register_test("test_http_execute_get", test_http_execute_get);
+    register_test("test_http_execute_post_body", test_http_execute_post_body);
+    register_test("test_http_execute_custom_headers", test_http_execute_custom_headers);
+    register_test("test_http_execute_chunked", test_http_execute_chunked);
+    register_test("test_http_execute_multi_headers", test_http_execute_multi_headers);
+    register_test("test_http_execute_non_standard_port", test_http_execute_non_standard_port);
+    register_test("test_http_execute_connect_refused", test_http_execute_connect_refused);
+    register_test("test_http_execute_lattice_get", test_http_execute_lattice_get);
+    register_test("test_http_execute_lattice_post", test_http_execute_lattice_post);
+
+    /* HTTP client error tests */
     register_test("test_http_get_wrong_type", test_http_get_wrong_type);
     register_test("test_http_get_no_args", test_http_get_no_args);
     register_test("test_http_get_invalid_url", test_http_get_invalid_url);
