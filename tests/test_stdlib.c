@@ -9631,6 +9631,180 @@ static void test_is_leap_year(void) {
     );
 }
 
+/* ======================================================================
+ * Nested index assignment
+ * ====================================================================== */
+
+static void test_nested_index_assign(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux arr = [[1, 2], [3, 4], [5, 6]]\n"
+        "    arr[0][1] = 99\n"
+        "    print(arr[0][1])\n"
+        "}\n",
+        "99"
+    );
+}
+
+static void test_nested_index_assign_3d(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux grid = [[[0, 1], [2, 3]], [[4, 5], [6, 7]]]\n"
+        "    grid[1][0][1] = 42\n"
+        "    print(grid[1][0][1])\n"
+        "}\n",
+        "42"
+    );
+}
+
+/* ======================================================================
+ * .length() alias for Map and Tuple
+ * ====================================================================== */
+
+static void test_length_alias_map(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"a\"] = 1\n"
+        "    m[\"b\"] = 2\n"
+        "    print(m.length())\n"
+        "}\n",
+        "2"
+    );
+}
+
+static void test_length_alias_tuple(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = (1, 2, 3, 4, 5)\n"
+        "    print(t.length())\n"
+        "}\n",
+        "5"
+    );
+}
+
+/* ======================================================================
+ * compose() multi-call and chained
+ * ====================================================================== */
+
+static void test_compose_multi_call(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let double = |x| { x * 2 }\n"
+        "    let add1 = |x| { x + 1 }\n"
+        "    let f = compose(double, add1)\n"
+        "    print(\"${f(5)},${f(10)},${f(0)}\")\n"
+        "}\n",
+        "12,22,2"
+    );
+}
+
+static void test_compose_chained(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let add1 = |x| { x + 1 }\n"
+        "    let double = |x| { x * 2 }\n"
+        "    let square = |x| { x * x }\n"
+        "    let f = compose(square, compose(double, add1))\n"
+        "    print(f(3))\n"
+        "}\n",
+        "64"
+    );
+}
+
+/* ======================================================================
+ * String concat in loop
+ * ====================================================================== */
+
+static void test_string_concat_loop(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux s = \"\"\n"
+        "    flux i = 0\n"
+        "    while i < 5 {\n"
+        "        s = s + to_string(i)\n"
+        "        i += 1\n"
+        "    }\n"
+        "    print(s)\n"
+        "}\n",
+        "01234"
+    );
+}
+
+/* ======================================================================
+ * to_int / to_float builtins
+ * ====================================================================== */
+
+static void test_to_int_from_float(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(to_int(3.9)) }\n",
+        "3"
+    );
+}
+
+static void test_to_int_from_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(to_int(\"42\")) }\n",
+        "42"
+    );
+}
+
+static void test_to_float_from_int(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(to_float(42)) }\n",
+        "42"
+    );
+}
+
+static void test_to_float_from_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() { print(to_float(\"3.14\")) }\n",
+        "3.14"
+    );
+}
+
+/* ======================================================================
+ * float_to_bits / bits_to_float roundtrip
+ * ====================================================================== */
+
+static void test_float_bits_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let bits = float_to_bits(1.0)\n"
+        "    let f = bits_to_float(bits)\n"
+        "    print(f)\n"
+        "}\n",
+        "1"
+    );
+}
+
+static void test_float_bits_zero(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let bits = float_to_bits(0.0)\n"
+        "    print(bits)\n"
+        "}\n",
+        "0"
+    );
+}
+
+/* ======================================================================
+ * panic() builtin
+ * ====================================================================== */
+
+static void test_panic_message(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    try {\n"
+        "        panic(\"test boom\")\n"
+        "    } catch e {\n"
+        "        print(e)\n"
+        "    }\n"
+        "}\n",
+        "test boom"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -10531,4 +10705,32 @@ void register_stdlib_tests(void) {
     register_test("test_time_year", test_time_year);
     register_test("test_time_month", test_time_month);
     register_test("test_is_leap_year", test_is_leap_year);
+
+    /* Nested index assignment */
+    register_test("test_nested_index_assign", test_nested_index_assign);
+    register_test("test_nested_index_assign_3d", test_nested_index_assign_3d);
+
+    /* .length() alias for Map and Tuple */
+    register_test("test_length_alias_map", test_length_alias_map);
+    register_test("test_length_alias_tuple", test_length_alias_tuple);
+
+    /* compose() multi-call and chained */
+    register_test("test_compose_multi_call", test_compose_multi_call);
+    register_test("test_compose_chained", test_compose_chained);
+
+    /* String concat in loop */
+    register_test("test_string_concat_loop", test_string_concat_loop);
+
+    /* to_int / to_float */
+    register_test("test_to_int_from_float", test_to_int_from_float);
+    register_test("test_to_int_from_string", test_to_int_from_string);
+    register_test("test_to_float_from_int", test_to_float_from_int);
+    register_test("test_to_float_from_string", test_to_float_from_string);
+
+    /* float_to_bits / bits_to_float */
+    register_test("test_float_bits_roundtrip", test_float_bits_roundtrip);
+    register_test("test_float_bits_zero", test_float_bits_zero);
+
+    /* panic() */
+    register_test("test_panic_message", test_panic_message);
 }

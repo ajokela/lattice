@@ -189,6 +189,8 @@ static inline LatValue rvm_clone(const LatValue *src) {
         }
         case VAL_STR: {
             LatValue v = *src;
+            if (src->region_id == REGION_INTERNED)
+                return v;  /* interned strings are never freed — no need to strdup */
             v.as.str_val = strdup(src->as.str_val);
             v.region_id = REGION_NONE;
             return v;
@@ -325,7 +327,7 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
     LatValue *new_regs = &vm->reg_stack[new_base];
     vm->reg_stack_top += REGVM_REG_MAX;
     int mr = chunk->max_reg ? chunk->max_reg : REGVM_REG_MAX;
-    memset(new_regs, 0, mr * sizeof(LatValue));
+    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
     int saved_base = vm->frame_count;
     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
@@ -2004,7 +2006,7 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
     LatValue *new_regs = &vm->reg_stack[new_base];
     vm->reg_stack_top += REGVM_REG_MAX;
     int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
-    memset(new_regs, 0, mr * sizeof(LatValue));
+    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
     new_regs[0] = value_unit();
     for (int i = 0; i < argc; i++) {
@@ -2302,12 +2304,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[b].type == VAL_STR && R[c].type == VAL_STR) {
             size_t lb = strlen(R[b].as.str_val);
             size_t lc = strlen(R[c].as.str_val);
-            char *buf = bump_alloc(vm->ephemeral, lb + lc + 1);
+            /* Direct malloc (not ephemeral) — avoids unbounded arena growth and
+             * allows move semantics in register assignment without promotion */
+            char *buf = malloc(lb + lc + 1);
             memcpy(buf, R[b].as.str_val, lb);
             memcpy(buf + lb, R[c].as.str_val, lc);
             buf[lb + lc] = '\0';
-            LatValue v = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_EPHEMERAL };
-            v.as.str_val = buf;
+            LatValue v = value_string_owned(buf);
             reg_set(&R[a], v);
         } else {
             RVM_ERROR("cannot add %s and %s",
@@ -2987,10 +2990,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (func->as.closure.default_values == VM_NATIVE_MARKER) {
             VMNativeFn native = (VMNativeFn)func->as.closure.native_fn;
 
-            /* Sync named locals from current call chain to env.
-             * Needed for natives that access variables by name (track, react, bond, seed, etc.)
-             * and for phase system operations that read env. */
-            {
+            /* Sync named locals to env only when reactive primitives are in use
+             * (track, react, bond, pressurize, etc.). Skipping the sync for
+             * regular natives like print/to_string avoids deep-cloning all locals
+             * on every call — critical for performance with large maps/arrays. */
+            if (vm->rt && (vm->rt->reaction_count > 0 || vm->rt->pressure_count > 0)) {
                 for (int fi = 0; fi < vm->frame_count; fi++) {
                     RegCallFrame *sf = &vm->frames[fi];
                     if (!sf->chunk || !sf->chunk->local_names) continue;
@@ -3094,7 +3098,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Initialize registers to nil (bounded by max_reg) */
         int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
-        memset(new_regs, 0, mr * sizeof(LatValue));
+        for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
         /* Copy arguments: R[0] = reserved, R[1..n] = args */
         new_regs[0] = value_unit();  /* Reserved slot */
@@ -3444,7 +3448,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     LatValue *new_regs = &vm->reg_stack[new_base];
                     vm->reg_stack_top += REGVM_REG_MAX;
                     int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
-                    memset(new_regs, 0, mr * sizeof(LatValue));
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
                     /* Slot 0 = reserved, slots 1+ = args (no self for map closures) */
                     new_regs[0] = value_unit();
@@ -3492,7 +3496,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     LatValue *new_regs = &vm->reg_stack[new_base];
                     vm->reg_stack_top += REGVM_REG_MAX;
                     int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
-                    memset(new_regs, 0, mr * sizeof(LatValue));
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
                     /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
                     new_regs[0] = value_unit();
@@ -3535,7 +3539,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 LatValue *new_regs = &vm->reg_stack[new_base];
                 vm->reg_stack_top += REGVM_REG_MAX;
                 int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
-                memset(new_regs, 0, mr * sizeof(LatValue));
+                for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
                 /* ITEM_IMPL compiles self at slot 0, other params at slot 1+ */
                 new_regs[0] = rvm_clone(&R[obj_reg]);  /* self */
@@ -5025,7 +5029,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
                         int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
-                        memset(new_regs, 0, mr * sizeof(LatValue));
+                        for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
                         /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
                         new_regs[0] = value_unit();
@@ -5097,7 +5101,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
                         int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
-                        memset(new_regs, 0, mr * sizeof(LatValue));
+                        for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
                         new_regs[0] = value_unit();
                         for (int ai = 0; ai < argc; ai++)
                             new_regs[1 + ai] = rvm_clone(&R[args_base + ai]);
@@ -5402,8 +5406,8 @@ RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
     frame->caller_result_reg = 0;
     vm->reg_stack_top += REGVM_REG_MAX;
 
-    /* Zero the new register window */
-    memset(frame->regs, 0, frame->reg_count * sizeof(LatValue));
+    /* Initialize registers to nil (not zero — VAL_INT=0, so memset would create VAL_INT(0)) */
+    for (int i = 0; i < (int)frame->reg_count; i++) frame->regs[i] = value_nil();
 
     return regvm_dispatch(vm, base_frame, result);
 }
