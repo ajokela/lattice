@@ -149,7 +149,10 @@ static uint8_t alloc_reg(void) {
         return 0;
     }
     uint8_t r = rc->next_reg++;
-    if (r >= rc->max_reg) rc->max_reg = r + 1;
+    if (r >= rc->max_reg) {
+        rc->max_reg = r + 1;
+        if (rc->chunk) rc->chunk->max_reg = rc->max_reg;
+    }
     return r;
 }
 
@@ -758,6 +761,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 /* Build a RegChunk for |x| { f(g(x)) } */
                 RegChunk *fn_chunk = regchunk_new();
                 fn_chunk->name = strdup("<compose>");
+                fn_chunk->max_reg = 5; /* uses R[0]..R[4] */
                 /* Constants: none needed (all via upvalues/registers) */
                 /* Registers: 0=reserved, 1=x (param), 2=temp */
                 /* Upvalue 0 = f, Upvalue 1 = g */
@@ -800,6 +804,9 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 /* Upvalue 1: g from local g_reg (is_local=1) */
                 emit(REG_ENCODE_ABC(0, 1, g_reg, 0), line);
 
+                /* Close upvalues before freeing registers — prevents aliasing */
+                emit_ABC(ROP_CLOSEUPVALUE, g_reg, 0, 0, line);
+                emit_ABC(ROP_CLOSEUPVALUE, f_reg, 0, 0, line);
                 free_reg(g_reg);
                 free_reg(f_reg);
                 break;
@@ -2070,6 +2077,48 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
     }
 }
 
+/* Write back a modified value through a chain of nested EXPR_INDEX nodes.
+ * `node` is the EXPR_INDEX that produced `modified_reg` (via GETINDEX).
+ * This emits SETINDEX to propagate the change back to the root variable. */
+static void emit_index_writeback(Expr *node, uint8_t modified_reg, int line) {
+    if (node->tag != EXPR_INDEX) return;
+    Expr *parent = node->as.index.object;
+
+    if (parent->tag == EXPR_IDENT) {
+        /* Base case: parent is a variable — write modified_reg back into parent[index] */
+        const char *name = parent->as.str_val;
+        int local = resolve_local(rc, name);
+        uint8_t idx_reg = alloc_reg();
+        compile_expr(node->as.index.index, idx_reg, line);
+        if (local >= 0) {
+            emit_ABC(ROP_SETINDEX_LOCAL, local_reg(local), idx_reg, modified_reg, line);
+        } else {
+            uint8_t parent_reg = alloc_reg();
+            compile_expr(parent, parent_reg, line);
+            emit_ABC(ROP_SETINDEX, parent_reg, idx_reg, modified_reg, line);
+            int uv = resolve_upvalue(rc, name);
+            if (uv >= 0) {
+                emit_ABC(ROP_SETUPVALUE, parent_reg, (uint8_t)uv, 0, line);
+            } else {
+                uint16_t nki = add_constant(value_string(name));
+                emit_ABx(ROP_SETGLOBAL, parent_reg, nki, line);
+            }
+            free_reg(parent_reg);
+        }
+        free_reg(idx_reg);
+    } else if (parent->tag == EXPR_INDEX) {
+        /* Recursive case: parent is itself an index — set, then recurse */
+        uint8_t parent_reg = alloc_reg();
+        compile_expr(parent, parent_reg, line);
+        uint8_t idx_reg = alloc_reg();
+        compile_expr(node->as.index.index, idx_reg, line);
+        emit_ABC(ROP_SETINDEX, parent_reg, idx_reg, modified_reg, line);
+        free_reg(idx_reg);
+        emit_index_writeback(parent, parent_reg, line);
+        free_reg(parent_reg);
+    }
+}
+
 /* ── Statement compilation ── */
 
 static void compile_stmt(const Stmt *s) {
@@ -2213,6 +2262,10 @@ static void compile_stmt(const Stmt *s) {
                     uint16_t nki = add_constant(value_string(name));
                     emit_ABx(ROP_SETGLOBAL, obj_reg, nki, line);
                 }
+                free_reg(obj_reg);
+            } else if (!obj_is_local && target->as.index.object->tag == EXPR_INDEX) {
+                /* Nested indexing (e.g. arr[i][j] = val): write modified obj back */
+                emit_index_writeback(target->as.index.object, obj_reg, line);
                 free_reg(obj_reg);
             }
             free_reg(idx_reg);

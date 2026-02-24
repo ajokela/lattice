@@ -1,4 +1,4 @@
-// Benchmark: matrix multiplication (nested arrays, heavy computation)
+// Benchmark: matrix multiplication (nested arrays, 30x30)
 fn mat_new(rows: Int, cols: Int) -> [[Int]] {
     flux m = []
     flux r = 0
@@ -39,7 +39,6 @@ fn mat_mul(a: [[Int]], b: [[Int]]) -> [[Int]] {
 }
 
 fn main() {
-    // Build 50x50 matrices
     let n = 30
     flux a = mat_new(n, n)
     flux b = mat_new(n, n)

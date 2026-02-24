@@ -1,12 +1,12 @@
 #!/bin/bash
-# Performance comparison: tree-walker vs bytecode VM
+# Performance comparison: Tree-Walker vs Stack VM vs Register VM
 # Runs each benchmark 3 times and reports median time
 
 set -e
 
 CLAT="./clat"
 BENCH_DIR="bench"
-RUNS=3
+RUNS=5
 
 # Colors
 BOLD='\033[1m'
@@ -18,19 +18,24 @@ DIM='\033[2m'
 NC='\033[0m'
 
 benchmarks=(
-    "fib_recursive:Fibonacci (recursive, n=30)"
-    "fib_iterative:Fibonacci (iterative, 10K calls)"
-    "sieve:Sieve of Eratosthenes (n=10K)"
+    "fib_recursive:Fibonacci recursive (n=32)"
+    "fib_iterative:Fibonacci iterative (50K)"
+    "nested_loops:Nested loops (1M iters)"
+    "sieve:Sieve of Eratosthenes (20K)"
     "bubble_sort:Bubble sort (500 elements)"
-    "nested_loops:Nested loops (250K iterations)"
-    "map_operations:Map ops (2K insert + lookup)"
-    "string_concat:String concat (2K appends)"
+    "map_operations:Map ops (5K insert+look)"
+    "string_concat:String concat (50K)"
     "matrix_mul:Matrix multiply (30x30)"
+    "closures:Closures (100K create+call)"
+    "scope_spawn:Scope/spawn (500 rounds)"
+    "select_channels:Select channels (5K)"
 )
 
-# Get median of 3 values
-median3() {
-    echo "$1 $2 $3" | tr ' ' '\n' | sort -n | sed -n '2p'
+# Get median of N values
+median() {
+    local n=$#
+    local mid=$(( (n + 1) / 2 ))
+    echo "$@" | tr ' ' '\n' | sort -n | sed -n "${mid}p"
 }
 
 # Time a command, return milliseconds
@@ -43,17 +48,32 @@ time_ms() {
     echo "$elapsed"
 }
 
-printf "\n${BOLD}Lattice Performance: Tree-Walker vs Bytecode VM${NC}\n"
+# Color a speedup value relative to baseline
+color_speedup() {
+    local val="$1"
+    if (( $(echo "$val > 1.05" | bc -l 2>/dev/null) )); then
+        printf "${GREEN}%5sx${NC}" "$val"
+    elif (( $(echo "$val < 0.95" | bc -l 2>/dev/null) )); then
+        printf "${RED}%5sx${NC}" "$val"
+    else
+        printf "${YELLOW}%5sx${NC}" "$val"
+    fi
+}
+
+printf "\n${BOLD}Lattice Performance: Tree-Walker vs Stack VM vs Register VM${NC}\n"
 printf "${DIM}%s${NC}\n" "$(uname -srm), $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'unknown CPU')"
 printf "${DIM}Runs per benchmark: ${RUNS} (median reported)${NC}\n"
 printf "\n"
 
 # Header
-printf "${BOLD}%-38s %10s %10s %10s${NC}\n" "Benchmark" "Tree-Walk" "Bytecode" "Speedup"
-printf "%-38s %10s %10s %10s\n" "$(printf '%0.s─' {1..38})" "──────────" "──────────" "──────────"
+printf "${BOLD}%-34s %9s %9s %9s  %8s %8s${NC}\n" \
+    "Benchmark" "TreeWalk" "StackVM" "RegVM" "TW/SVM" "TW/RVM"
+printf "%-34s %9s %9s %9s  %8s %8s\n" \
+    "$(printf '%0.s─' {1..34})" "─────────" "─────────" "─────────" "────────" "────────"
 
 total_tw=0
-total_bc=0
+total_svm=0
+total_rvm=0
 
 for entry in "${benchmarks[@]}"; do
     name="${entry%%:*}"
@@ -61,66 +81,97 @@ for entry in "${benchmarks[@]}"; do
     file="$BENCH_DIR/${name}.lat"
 
     if [ ! -f "$file" ]; then
-        printf "${RED}%-38s MISSING${NC}\n" "$label"
+        printf "${RED}%-34s MISSING${NC}\n" "$label"
         continue
     fi
 
-    # Verify both modes produce same output
-    out_tw=$($CLAT --tree-walk "$file" 2>/dev/null)
-    out_bc=$($CLAT "$file" 2>/dev/null)
-    if [ "$out_tw" != "$out_bc" ]; then
-        printf "${RED}%-38s OUTPUT MISMATCH${NC}\n" "$label"
-        printf "${DIM}  tree-walk: %s${NC}\n" "$out_tw"
-        printf "${DIM}  bytecode:  %s${NC}\n" "$out_bc"
+    # Verify all three modes produce same output
+    out_tw=$($CLAT --tree-walk "$file" 2>/dev/null || true)
+    out_svm=$($CLAT "$file" 2>/dev/null || true)
+    out_rvm=$($CLAT --regvm "$file" 2>/dev/null || true)
+
+    if [ "$out_tw" != "$out_svm" ]; then
+        printf "${RED}%-34s OUTPUT MISMATCH (tw vs svm)${NC}\n" "$label"
+        printf "${DIM}  tree-walk: %.60s${NC}\n" "$out_tw"
+        printf "${DIM}  stack-vm:  %.60s${NC}\n" "$out_svm"
         continue
+    fi
+
+    # RegVM may not support all benchmarks; mark but still run what works
+    rvm_ok=true
+    if [ "$out_tw" != "$out_rvm" ]; then
+        rvm_ok=false
     fi
 
     # Run benchmarks
     tw_times=()
-    bc_times=()
+    svm_times=()
+    rvm_times=()
     for ((r=1; r<=RUNS; r++)); do
         tw_times+=($(time_ms "$CLAT --tree-walk '$file'"))
-        bc_times+=($(time_ms "$CLAT '$file'"))
+        svm_times+=($(time_ms "$CLAT '$file'"))
+        if $rvm_ok; then
+            rvm_times+=($(time_ms "$CLAT --regvm '$file'"))
+        fi
     done
 
-    tw_med=$(median3 "${tw_times[0]}" "${tw_times[1]}" "${tw_times[2]}")
-    bc_med=$(median3 "${bc_times[0]}" "${bc_times[1]}" "${bc_times[2]}")
+    tw_med=$(median "${tw_times[@]}")
+    svm_med=$(median "${svm_times[@]}")
 
     total_tw=$(python3 -c "print($total_tw + $tw_med)")
-    total_bc=$(python3 -c "print($total_bc + $bc_med)")
+    total_svm=$(python3 -c "print($total_svm + $svm_med)")
 
-    # Calculate speedup
-    if (( $(echo "$bc_med > 0" | bc -l) )); then
-        speedup=$(python3 -c "print(round($tw_med / $bc_med, 2))")
+    # Stack VM speedup (tree-walk / stack-vm)
+    if (( $(echo "$svm_med > 0" | bc -l) )); then
+        svm_speedup=$(python3 -c "print(round($tw_med / $svm_med, 2))")
     else
-        speedup="inf"
+        svm_speedup="inf"
     fi
 
-    # Color the speedup
-    if (( $(echo "$speedup > 1.0" | bc -l 2>/dev/null) )); then
-        color="$GREEN"
-        arrow="faster"
-    elif (( $(echo "$speedup < 1.0" | bc -l 2>/dev/null) )); then
-        color="$RED"
-        arrow="slower"
-    else
-        color="$YELLOW"
-        arrow="same"
-    fi
+    if $rvm_ok; then
+        rvm_med=$(median "${rvm_times[@]}")
+        total_rvm=$(python3 -c "print($total_rvm + $rvm_med)")
 
-    printf "%-38s %8sms %8sms  ${color}%5sx ($arrow)${NC}\n" \
-        "$label" "$tw_med" "$bc_med" "$speedup"
+        if (( $(echo "$rvm_med > 0" | bc -l) )); then
+            rvm_speedup=$(python3 -c "print(round($tw_med / $rvm_med, 2))")
+        else
+            rvm_speedup="inf"
+        fi
+
+        printf "%-34s %7sms %7sms %7sms  " "$label" "$tw_med" "$svm_med" "$rvm_med"
+        color_speedup "$svm_speedup"
+        printf "  "
+        color_speedup "$rvm_speedup"
+        printf "\n"
+    else
+        printf "%-34s %7sms %7sms ${DIM}%7s${NC}  " "$label" "$tw_med" "$svm_med" "n/a"
+        color_speedup "$svm_speedup"
+        printf "  ${DIM}  n/a${NC}\n"
+    fi
 done
 
-printf "%-38s %10s %10s %10s\n" "$(printf '%0.s─' {1..38})" "──────────" "──────────" "──────────"
+printf "%-34s %9s %9s %9s  %8s %8s\n" \
+    "$(printf '%0.s─' {1..34})" "─────────" "─────────" "─────────" "────────" "────────"
 
-# Total speedup
-if (( $(echo "$total_bc > 0" | bc -l) )); then
-    total_speedup=$(python3 -c "print(round($total_tw / $total_bc, 2))")
+# Totals
+if (( $(echo "$total_svm > 0" | bc -l) )); then
+    total_svm_su=$(python3 -c "print(round($total_tw / $total_svm, 2))")
 else
-    total_speedup="inf"
+    total_svm_su="inf"
 fi
-printf "${BOLD}%-38s %8sms %8sms  %5sx${NC}\n" \
-    "TOTAL" "$total_tw" "$total_bc" "$total_speedup"
 
-printf "\n${DIM}Speedup = tree-walk time / bytecode time (>1 means bytecode is faster)${NC}\n\n"
+if (( $(echo "$total_rvm > 0" | bc -l) )); then
+    total_rvm_su=$(python3 -c "print(round($total_tw / $total_rvm, 2))")
+else
+    total_rvm_su="—"
+fi
+
+total_tw_f=$(python3 -c "print(round($total_tw, 1))")
+total_svm_f=$(python3 -c "print(round($total_svm, 1))")
+total_rvm_f=$(python3 -c "print(round($total_rvm, 1))")
+
+printf "${BOLD}%-34s %7sms %7sms %7sms  %5sx  %5sx${NC}\n" \
+    "TOTAL" "$total_tw_f" "$total_svm_f" "$total_rvm_f" "$total_svm_su" "$total_rvm_su"
+
+printf "\n${DIM}Speedup = tree-walk time / backend time (>1x means backend is faster than tree-walk)${NC}\n"
+printf "${DIM}${GREEN}green${NC}${DIM} = faster, ${RED}red${NC}${DIM} = slower, ${YELLOW}yellow${NC}${DIM} = similar${NC}\n\n"

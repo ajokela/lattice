@@ -1,4 +1,4 @@
-// Benchmark: iterative fibonacci (tight loop, many iterations)
+// Benchmark: iterative fibonacci (tight loop, many function calls)
 fn fib(n: Int) -> Int {
     if n <= 1 { return n }
     flux a = 0
@@ -16,7 +16,7 @@ fn fib(n: Int) -> Int {
 fn main() {
     flux sum = 0
     flux i = 0
-    while i < 10000 {
+    while i < 50000 {
         sum += fib(50)
         i += 1
     }

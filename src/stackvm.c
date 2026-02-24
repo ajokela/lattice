@@ -800,6 +800,7 @@ static const char *stackvm_find_pressure(StackVM *vm, const char *name) {
 #define MHASH_keys             0x7c9979c1u
 #define MHASH_last             0x7c99f459u
 #define MHASH_len              0x0b888bc4u
+#define MHASH_length           0x0b2deac7u
 #define MHASH_map              0x0b888f83u
 #define MHASH_max              0x0b888f8bu
 #define MHASH_merge            0x0fecc3f5u
@@ -889,7 +890,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
     switch (obj->type) {
     /* Array methods */
     case VAL_ARRAY: {
-        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.array.len));
             return true;
         }
@@ -1500,7 +1501,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
 
     /* String methods */
     case VAL_STR: {
-        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             push(vm, value_int((int64_t)strlen(obj->as.str_val)));
             return true;
         }
@@ -1726,7 +1727,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
 
     /* Map methods */
     case VAL_MAP: {
-        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             push(vm, value_int((int64_t)lat_map_len(obj->as.map.map)));
             return true;
         }
@@ -1939,7 +1940,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
 
     /* Range methods */
     case VAL_RANGE: {
-        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             int64_t len = obj->as.range.end - obj->as.range.start;
             push(vm, value_int(len > 0 ? len : 0));
             return true;
@@ -1959,7 +1960,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
 
     /* Tuple methods */
     case VAL_TUPLE: {
-        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.tuple.len));
             return true;
         }
@@ -2027,7 +2028,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             value_free(&val);
             push(vm, value_unit()); return true;
         }
-        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             push(vm, value_int((int64_t)lat_map_len(obj->as.set.map))); return true;
         }
         if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
@@ -2154,7 +2155,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
 
     /* ── Buffer methods ── */
     case VAL_BUFFER: {
-        if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             push(vm, value_int((int64_t)obj->as.buffer.len));
             return true;
         }
@@ -2548,7 +2549,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 push(vm, arr);
                 return true;
             }
-            if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+            if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
                 push(vm, value_int((int64_t)lat_map_len(inner->as.map.map)));
                 return true;
             }
@@ -2603,7 +2604,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 push(vm, popped);
                 return true;
             }
-            if (mhash == MHASH_len && strcmp(method, "len") == 0 && arg_count == 0) {
+            if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
                 push(vm, value_int((int64_t)inner->as.array.len));
                 return true;
             }
@@ -2961,7 +2962,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     if (!pa) pa = ra;
                     if (!pb) pb = rb;
                     size_t la = strlen(pa), lb = strlen(pb);
-                    LatValue result = stackvm_ephemeral_concat(vm, pa, la, pb, lb);
+                    /* Direct malloc (not ephemeral) so SET_LOCAL_POP can move without promoting */
+                    char *buf = malloc(la + lb + 1);
+                    memcpy(buf, pa, la);
+                    memcpy(buf + la, pb, lb);
+                    buf[la + lb] = '\0';
+                    LatValue result = value_string_owned(buf);
                     free(ra); free(rb);
                     value_free(&a); value_free(&b);
                     push(vm, result);
@@ -3300,12 +3306,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t slot = READ_BYTE();
                 LatValue *dest = &frame->slots[slot];
                 value_free(dest);
-                *dest = value_clone_fast(stackvm_peek(vm, 0));
+                /* Move from stack instead of cloning — avoids redundant strdup */
+                vm->stack_top--;
+                *dest = *vm->stack_top;
+                if (dest->region_id == REGION_EPHEMERAL)
+                    stackvm_promote_value(dest);
                 if (vm->rt->tracking_active && frame->chunk->local_names &&
                     slot < frame->chunk->local_name_cap && frame->chunk->local_names[slot]) {
                     stackvm_record_history(vm, frame->chunk->local_names[slot], dest);
                 }
-                vm->stack_top--;
                 break;
             }
 

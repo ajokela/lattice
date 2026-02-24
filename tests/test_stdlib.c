@@ -9445,6 +9445,192 @@ static void test_builtin_full_module_access(void) {
     free(out);
 }
 
+/* ======================================================================
+ * .length() alias tests
+ * ====================================================================== */
+
+static void test_length_alias_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3].length())\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_length_alias_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello\".length())\n"
+        "}\n",
+        "5"
+    );
+}
+
+static void test_length_alias_buffer(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let b = Buffer::new(16)\n"
+        "    print(b.length())\n"
+        "}\n",
+        "16"
+    );
+}
+
+/* ======================================================================
+ * Additional crypto tests (SHA-512, HMAC-SHA256, random_bytes)
+ * ====================================================================== */
+
+static void test_sha512_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(sha512(\"\"))\n"
+        "}\n",
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+        "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+    );
+}
+
+static void test_sha512_hello(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(sha512(\"hello\"))\n"
+        "}\n",
+        "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca7"
+        "2323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043"
+    );
+}
+
+static void test_hmac_sha256_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(hmac_sha256(\"key\", \"hello\"))\n"
+        "}\n",
+        "9307b3b915efb5171ff14d8cb55fbcc798c6c0ef1456d66ded1a6aa723a58b7b"
+    );
+}
+
+static void test_random_bytes_length(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let b = random_bytes(16)\n"
+        "    print(len(b))\n"
+        "}\n",
+        "16"
+    );
+}
+
+/* ======================================================================
+ * Buffer read methods
+ * ====================================================================== */
+
+static void test_buffer_read_i8(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let b = Buffer::new(2)\n"
+        "    b.write_u8(0, 200)\n"
+        "    print(b.read_i8(0))\n"
+        "}\n",
+        "-56"
+    );
+}
+
+static void test_buffer_read_f32(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let b = Buffer::new(4)\n"
+        "    b.write_u8(0, 0)\n"
+        "    b.write_u8(1, 0)\n"
+        "    b.write_u8(2, 72)\n"
+        "    b.write_u8(3, 65)\n"
+        "    print(b.read_f32(0))\n"
+        "}\n",
+        "12.5"
+    );
+}
+
+/* ======================================================================
+ * String transform methods
+ * ====================================================================== */
+
+static void test_str_snake_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"helloWorld\".snake_case())\n"
+        "}\n",
+        "hello_world"
+    );
+}
+
+static void test_str_camel_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello_world\".camel_case())\n"
+        "}\n",
+        "helloWorld"
+    );
+}
+
+static void test_str_title_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello world\".title_case())\n"
+        "}\n",
+        "Hello World"
+    );
+}
+
+static void test_str_capitalize(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello\".capitalize())\n"
+        "}\n",
+        "Hello"
+    );
+}
+
+static void test_str_kebab_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"helloWorld\".kebab_case())\n"
+        "}\n",
+        "hello-world"
+    );
+}
+
+/* ======================================================================
+ * Date/time component tests
+ * ====================================================================== */
+
+static void test_time_year(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = time_parse(\"2024-03-15T12:00:00\", \"%Y-%m-%dT%H:%M:%S\")\n"
+        "    print(time_year(t))\n"
+        "}\n",
+        "2024"
+    );
+}
+
+static void test_time_month(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let t = time_parse(\"2024-03-15T12:00:00\", \"%Y-%m-%dT%H:%M:%S\")\n"
+        "    print(time_month(t))\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_is_leap_year(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"${is_leap_year(2024)},${is_leap_year(2023)}\")\n"
+        "}\n",
+        "true,false"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -9663,12 +9849,10 @@ void register_stdlib_tests(void) {
     register_test("test_format_error_non_string_fmt", test_format_error_non_string_fmt);
 
     /* Crypto / Base64 */
-#ifdef LATTICE_HAS_TLS
     register_test("test_sha256_empty", test_sha256_empty);
     register_test("test_sha256_hello", test_sha256_hello);
     register_test("test_md5_empty", test_md5_empty);
     register_test("test_md5_hello", test_md5_hello);
-#endif
     register_test("test_sha256_error_handling", test_sha256_error_handling);
     register_test("test_md5_error_handling", test_md5_error_handling);
     register_test("test_base64_encode_hello", test_base64_encode_hello);
@@ -10320,4 +10504,31 @@ void register_stdlib_tests(void) {
     register_test("test_builtin_crypto_base64", test_builtin_crypto_base64);
     register_test("test_builtin_legacy_sin", test_builtin_legacy_sin);
     register_test("test_builtin_full_module_access", test_builtin_full_module_access);
+
+    /* .length() alias */
+    register_test("test_length_alias_array", test_length_alias_array);
+    register_test("test_length_alias_string", test_length_alias_string);
+    register_test("test_length_alias_buffer", test_length_alias_buffer);
+
+    /* Crypto: SHA-512, HMAC-SHA256, random_bytes */
+    register_test("test_sha512_empty", test_sha512_empty);
+    register_test("test_sha512_hello", test_sha512_hello);
+    register_test("test_hmac_sha256_basic", test_hmac_sha256_basic);
+    register_test("test_random_bytes_length", test_random_bytes_length);
+
+    /* Buffer read methods */
+    register_test("test_buffer_read_i8", test_buffer_read_i8);
+    register_test("test_buffer_read_f32", test_buffer_read_f32);
+
+    /* String transforms */
+    register_test("test_str_snake_case", test_str_snake_case);
+    register_test("test_str_camel_case", test_str_camel_case);
+    register_test("test_str_title_case", test_str_title_case);
+    register_test("test_str_capitalize", test_str_capitalize);
+    register_test("test_str_kebab_case", test_str_kebab_case);
+
+    /* Date/time components */
+    register_test("test_time_year", test_time_year);
+    register_test("test_time_month", test_time_month);
+    register_test("test_is_leap_year", test_is_leap_year);
 }

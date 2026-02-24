@@ -1,4 +1,4 @@
-// Benchmark: scope/spawn concurrency overhead
+// Benchmark: scope/spawn concurrency overhead (500 rounds)
 fn work(n: Int) -> Int {
     flux sum = 0
     flux i = 0
@@ -12,7 +12,7 @@ fn work(n: Int) -> Int {
 fn main() {
     flux total = 0
     flux round = 0
-    while round < 200 {
+    while round < 500 {
         let ch1 = Channel::new()
         let ch2 = Channel::new()
 

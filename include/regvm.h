@@ -43,6 +43,7 @@ typedef struct RegChunk {
     char    **export_names;  /* Module export list (NULL = export-all) */
     size_t    export_count;
     bool      has_exports;   /* true if module uses explicit exports */
+    uint8_t   max_reg;       /* High-water register count (for bounded init/cleanup) */
 } RegChunk;
 
 RegChunk *regchunk_new(void);

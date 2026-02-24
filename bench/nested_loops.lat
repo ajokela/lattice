@@ -1,10 +1,10 @@
-// Benchmark: nested loop arithmetic (pure computation)
+// Benchmark: nested loop arithmetic (pure computation, 1M iterations)
 fn main() {
     flux total = 0
     flux i = 0
-    while i < 500 {
+    while i < 1000 {
         flux j = 0
-        while j < 500 {
+        while j < 1000 {
             total += (i * j) % 97
             j += 1
         }

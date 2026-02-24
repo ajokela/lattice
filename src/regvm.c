@@ -324,15 +324,15 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
         return rvm_error(vm, "register stack overflow");
     LatValue *new_regs = &vm->reg_stack[new_base];
     vm->reg_stack_top += REGVM_REG_MAX;
-    for (int i = 0; i < REGVM_REG_MAX; i++)
-        new_regs[i] = value_nil();
+    int mr = chunk->max_reg ? chunk->max_reg : REGVM_REG_MAX;
+    memset(new_regs, 0, mr * sizeof(LatValue));
 
     int saved_base = vm->frame_count;
     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
     new_frame->chunk = chunk;
     new_frame->ip = chunk->code;
     new_frame->regs = new_regs;
-    new_frame->reg_count = REGVM_REG_MAX;
+    new_frame->reg_count = mr;
     new_frame->upvalues = NULL;
     new_frame->upvalue_count = 0;
     new_frame->caller_result_reg = 0;
@@ -342,7 +342,7 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
     /* Clean up any frames left by HALT (which doesn't pop the frame) */
     while (vm->frame_count > saved_base) {
         RegCallFrame *f = &vm->frames[vm->frame_count - 1];
-        for (int i = 0; i < REGVM_REG_MAX; i++)
+        for (int i = 0; i < (int)f->reg_count; i++)
             value_free_inline(&f->regs[i]);
         vm->frame_count--;
         vm->reg_stack_top -= REGVM_REG_MAX;
@@ -358,7 +358,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                                 LatValue *args, int arg_count, LatValue *result) {
     (void)vm;
     if (obj->type == VAL_ARRAY) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
             *result = value_int((int64_t)obj->as.array.len);
             return true;
         }
@@ -531,7 +531,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
     }
 
     if (obj->type == VAL_STR) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
             *result = value_int((int64_t)strlen(obj->as.str_val));
             return true;
         }
@@ -546,7 +546,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
     }
 
     if (obj->type == VAL_MAP) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
             size_t count = 0;
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
                 if (obj->as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -1394,7 +1394,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Tuple methods ── */
     if (obj->type == VAL_TUPLE) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
             *result = value_int((int64_t)obj->as.tuple.len);
             return true;
         }
@@ -1402,7 +1402,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Range methods ── */
     if (obj->type == VAL_RANGE) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
             int64_t len = obj->as.range.end - obj->as.range.start;
             *result = value_int(len > 0 ? len : 0);
             return true;
@@ -1420,7 +1420,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Set methods ── */
     if (obj->type == VAL_SET) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
             *result = value_int((int64_t)lat_map_len(obj->as.set.map));
             return true;
         }
@@ -1568,7 +1568,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Buffer methods ── */
     if (obj->type == VAL_BUFFER) {
-        if (strcmp(method, "len") == 0 && arg_count == 0) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
             *result = value_int((int64_t)obj->as.buffer.len);
             return true;
         }
@@ -1873,7 +1873,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 free(entries);
                 return true;
             }
-            if (strcmp(method, "len") == 0 && arg_count == 0) {
+            if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
                 *result = value_int((int64_t)lat_map_len(ref->value.as.map.map));
                 return true;
             }
@@ -1906,7 +1906,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 else { *result = ref->value.as.array.elems[--ref->value.as.array.len]; }
                 return true;
             }
-            if (strcmp(method, "len") == 0 && arg_count == 0) {
+            if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
                 *result = value_int((int64_t)ref->value.as.array.len);
                 return true;
             }
@@ -2003,12 +2003,11 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
 
     LatValue *new_regs = &vm->reg_stack[new_base];
     vm->reg_stack_top += REGVM_REG_MAX;
-    for (int i = 0; i < REGVM_REG_MAX; i++)
-        new_regs[i] = value_nil();
+    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+    memset(new_regs, 0, mr * sizeof(LatValue));
 
     new_regs[0] = value_unit();
     for (int i = 0; i < argc; i++) {
-        value_free(&new_regs[1 + i]);
         new_regs[1 + i] = rvm_clone(&args[i]);
     }
 
@@ -2020,7 +2019,7 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
     new_frame->chunk = fn_chunk;
     new_frame->ip = fn_chunk->code;
     new_frame->regs = new_regs;
-    new_frame->reg_count = REGVM_REG_MAX;
+    new_frame->reg_count = mr;
     new_frame->upvalues = upvals;
     new_frame->upvalue_count = uv_count;
     new_frame->caller_result_reg = 0;
@@ -3093,14 +3092,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatValue *new_regs = &vm->reg_stack[new_base];
         vm->reg_stack_top += REGVM_REG_MAX;
 
-        /* Initialize new registers to nil */
-        for (int i = 0; i < REGVM_REG_MAX; i++)
-            new_regs[i] = value_nil();
+        /* Initialize registers to nil (bounded by max_reg) */
+        int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+        memset(new_regs, 0, mr * sizeof(LatValue));
 
         /* Copy arguments: R[0] = reserved, R[1..n] = args */
         new_regs[0] = value_unit();  /* Reserved slot */
         for (int i = 0; i < b; i++) {
-            value_free(&new_regs[1 + i]);
             new_regs[1 + i] = rvm_clone(&R[a + 1 + i]);
         }
 
@@ -3113,7 +3111,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         new_frame->chunk = fn_chunk;
         new_frame->ip = fn_chunk->code;
         new_frame->regs = new_regs;
-        new_frame->reg_count = REGVM_REG_MAX;
+        new_frame->reg_count = mr;
         new_frame->upvalues = upvals;
         new_frame->upvalue_count = uv_count;
         new_frame->caller_result_reg = a;  /* RETURN puts result here */
@@ -3148,8 +3146,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
-        /* Clean up current frame's registers */
-        for (int i = 0; i < REGVM_REG_MAX; i++)
+        /* Clean up current frame's registers (bounded by reg_count) */
+        for (int i = 0; i < (int)frame->reg_count; i++)
             value_free_inline(&frame->regs[i]);
 
         vm->frame_count--;
@@ -3445,13 +3443,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     size_t new_base = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base];
                     vm->reg_stack_top += REGVM_REG_MAX;
-                    for (int i = 0; i < REGVM_REG_MAX; i++)
-                        new_regs[i] = value_nil();
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    memset(new_regs, 0, mr * sizeof(LatValue));
 
                     /* Slot 0 = reserved, slots 1+ = args (no self for map closures) */
                     new_regs[0] = value_unit();
                     for (int i = 0; i < argc; i++) {
-                        value_free(&new_regs[1 + i]);
                         new_regs[1 + i] = rvm_clone(&R[args_base + i]);
                     }
 
@@ -3462,7 +3459,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     new_frame->chunk = fn_chunk;
                     new_frame->ip = fn_chunk->code;
                     new_frame->regs = new_regs;
-                    new_frame->reg_count = REGVM_REG_MAX;
+                    new_frame->reg_count = mr;
                     new_frame->upvalues = upvals;
                     new_frame->upvalue_count = uv_count;
                     new_frame->caller_result_reg = dst;
@@ -3494,14 +3491,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     size_t new_base = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base];
                     vm->reg_stack_top += REGVM_REG_MAX;
-                    for (int i = 0; i < REGVM_REG_MAX; i++)
-                        new_regs[i] = value_nil();
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    memset(new_regs, 0, mr * sizeof(LatValue));
 
                     /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
                     new_regs[0] = value_unit();
                     new_regs[1] = rvm_clone(&R[obj_reg]);  /* self = first param */
                     for (int i = 0; i < argc; i++) {
-                        value_free(&new_regs[2 + i]);
                         new_regs[2 + i] = rvm_clone(&R[args_base + i]);
                     }
 
@@ -3512,7 +3508,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     new_frame->chunk = fn_chunk;
                     new_frame->ip = fn_chunk->code;
                     new_frame->regs = new_regs;
-                    new_frame->reg_count = REGVM_REG_MAX;
+                    new_frame->reg_count = mr;
                     new_frame->upvalues = upvals;
                     new_frame->upvalue_count = uv_count;
                     new_frame->caller_result_reg = dst;
@@ -3538,13 +3534,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 size_t new_base = vm->reg_stack_top;
                 LatValue *new_regs = &vm->reg_stack[new_base];
                 vm->reg_stack_top += REGVM_REG_MAX;
-                for (int i = 0; i < REGVM_REG_MAX; i++)
-                    new_regs[i] = value_nil();
+                int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                memset(new_regs, 0, mr * sizeof(LatValue));
 
                 /* ITEM_IMPL compiles self at slot 0, other params at slot 1+ */
                 new_regs[0] = rvm_clone(&R[obj_reg]);  /* self */
                 for (int i = 0; i < argc; i++) {
-                    value_free(&new_regs[1 + i]);
                     new_regs[1 + i] = rvm_clone(&R[args_base + i]);
                 }
 
@@ -3555,7 +3550,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 new_frame->chunk = fn_chunk;
                 new_frame->ip = fn_chunk->code;
                 new_frame->regs = new_regs;
-                new_frame->reg_count = REGVM_REG_MAX;
+                new_frame->reg_count = mr;
                 new_frame->upvalues = upvals;
                 new_frame->upvalue_count = uv_count;
                 new_frame->caller_result_reg = dst;
@@ -5029,8 +5024,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         }
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
-                        for (int ri = 0; ri < REGVM_REG_MAX; ri++)
-                            new_regs[ri] = value_nil();
+                        int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                        memset(new_regs, 0, mr * sizeof(LatValue));
 
                         /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
                         new_regs[0] = value_unit();
@@ -5044,7 +5039,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         nf->chunk = fn_chunk;
                         nf->ip = fn_chunk->code;
                         nf->regs = new_regs;
-                        nf->reg_count = REGVM_REG_MAX;
+                        nf->reg_count = mr;
                         nf->caller_result_reg = dst;
 
                         ObjUpvalue **upvals = (ObjUpvalue **)closure.as.closure.captured_env;
@@ -5101,8 +5096,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                             RVM_ERROR("call stack overflow");
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
-                        for (int ri = 0; ri < REGVM_REG_MAX; ri++)
-                            new_regs[ri] = value_nil();
+                        int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                        memset(new_regs, 0, mr * sizeof(LatValue));
                         new_regs[0] = value_unit();
                         for (int ai = 0; ai < argc; ai++)
                             new_regs[1 + ai] = rvm_clone(&R[args_base + ai]);
@@ -5114,7 +5109,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         nf->chunk = fn_chunk;
                         nf->ip = fn_chunk->code;
                         nf->regs = new_regs;
-                        nf->reg_count = REGVM_REG_MAX;
+                        nf->reg_count = mr;
                         nf->upvalues = upvals;
                         nf->upvalue_count = uv_count;
                         nf->caller_result_reg = dst;
@@ -5401,14 +5396,14 @@ RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
     frame->chunk = chunk;
     frame->ip = chunk->code;
     frame->regs = &vm->reg_stack[vm->reg_stack_top];
-    frame->reg_count = REGVM_REG_MAX;
+    frame->reg_count = chunk->max_reg ? chunk->max_reg : REGVM_REG_MAX;
     frame->upvalues = NULL;
     frame->upvalue_count = 0;
     frame->caller_result_reg = 0;
     vm->reg_stack_top += REGVM_REG_MAX;
 
     /* Zero the new register window */
-    memset(frame->regs, 0, REGVM_REG_MAX * sizeof(LatValue));
+    memset(frame->regs, 0, frame->reg_count * sizeof(LatValue));
 
     return regvm_dispatch(vm, base_frame, result);
 }

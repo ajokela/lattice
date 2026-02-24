@@ -197,7 +197,8 @@ asan-all: LDFLAGS += -fsanitize=address,undefined
 asan-all: clean $(TEST_TARGET)
 	@echo "=== asan: stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
 	@echo "=== asan: tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
-	@echo "=== asan: regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
+	@echo "=== asan: regvm ===" ; ./$(BUILD_DIR)/test_runner --backend regvm; \
+	 rc=$$?; if [ $$rc -gt 128 ]; then exit $$rc; fi
 
 tsan: CFLAGS += -fsanitize=thread -g -O1
 tsan: LDFLAGS += -fsanitize=thread

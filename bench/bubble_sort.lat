@@ -1,6 +1,5 @@
-// Benchmark: bubble sort (O(n^2) comparisons and swaps)
+// Benchmark: bubble sort (O(n^2) comparisons and swaps, 500 elements)
 fn main() {
-    // Build a reverse-sorted array of 2000 elements
     flux arr = []
     flux i = 500
     while i > 0 {
@@ -8,7 +7,6 @@ fn main() {
         i -= 1
     }
 
-    // Bubble sort
     let n = arr.len()
     flux outer = 0
     while outer < n {
