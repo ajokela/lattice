@@ -1440,7 +1440,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.16"
+        "0.3.17"
     );
 }
 
@@ -5865,7 +5865,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.16"
+        "Hello, Lattice!\nVersion 0.3.17"
     );
 }
 
