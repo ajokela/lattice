@@ -19,7 +19,7 @@ typedef struct {
     TestFn fn;
 } TestEntry;
 
-#define MAX_TESTS 1024
+#define MAX_TESTS 2048
 static TestEntry all_tests[MAX_TESTS];
 static int test_count = 0;
 

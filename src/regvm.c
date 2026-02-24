@@ -179,6 +179,33 @@ void regvm_track_chunk(RegVM *vm, RegChunk *ch) {
 
 /* ── Value cloning (same fast-path as stack VM) ── */
 
+/* Primitive type check: types that have no heap data and can be bitwise-copied.
+ * VAL_INT=0, VAL_FLOAT=1, VAL_BOOL=2, so type<=VAL_BOOL covers all three.
+ * VAL_UNIT, VAL_NIL, VAL_RANGE are also primitive (no heap pointers).
+ * Safe because value_free_inline already short-circuits for these types,
+ * so region_id is irrelevant — no memory is freed. */
+#define RVM_IS_PRIMITIVE(v) ((v).type <= VAL_BOOL || (v).type == VAL_UNIT || \
+                             (v).type == VAL_NIL || (v).type == VAL_RANGE)
+
+/* Borrowed-string check: REGION_CONST and REGION_INTERNED strings can be
+ * bitwise-copied between registers without strdup.  value_free skips
+ * non-REGION_NONE values, so the register doesn't own the pointer.
+ * Clone-on-escape (globals, arrays, upvalues) still uses rvm_clone(). */
+#define RVM_IS_BORROWED_STR(v) ((v).type == VAL_STR && \
+    ((v).region_id == REGION_CONST || (v).region_id == REGION_INTERNED))
+
+/* Forward declaration for rvm_clone (used by rvm_clone_or_borrow) */
+static inline LatValue rvm_clone(const LatValue *src);
+
+/* Fast inline clone that avoids the full rvm_clone switch for common cases.
+ * Handles primitives (bitwise copy) and borrowed strings (bitwise copy).
+ * Falls through to rvm_clone() only for heap-owning types. */
+static inline LatValue rvm_clone_or_borrow(const LatValue *src) {
+    if (RVM_IS_PRIMITIVE(*src)) return *src;
+    if (RVM_IS_BORROWED_STR(*src)) return *src;
+    return rvm_clone(src);
+}
+
 static inline LatValue rvm_clone(const LatValue *src) {
     switch (src->type) {
         case VAL_INT: case VAL_FLOAT: case VAL_BOOL:
@@ -353,18 +380,130 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
     return res;
 }
 
+/* ── Pre-computed djb2 hashes for builtin method names ── */
+#define MHASH_add              0x0b885cceu
+#define MHASH_all              0x0b885ddeu
+#define MHASH_any              0x0b885e2du
+#define MHASH_bytes            0x0f30b64cu
+#define MHASH_camel_case       0xe2889d82u
+#define MHASH_capacity         0x104ec913u
+#define MHASH_capitalize       0xee09978bu
+#define MHASH_chars            0x0f392d36u
+#define MHASH_chunk            0x0f3981beu
+#define MHASH_clear            0x0f3b6d8cu
+#define MHASH_close            0x0f3b9a5bu
+#define MHASH_contains         0x42aa8264u
+#define MHASH_count            0x0f3d586eu
+#define MHASH_delete           0xf8838478u
+#define MHASH_deref            0x0f49e72bu
+#define MHASH_difference       0x52a92470u
+#define MHASH_drop             0x7c95d91au
+#define MHASH_each             0x7c961b96u
+#define MHASH_ends_with        0x9079bb6au
+#define MHASH_entries          0x6b84747fu
+#define MHASH_enum_name        0x9f13be1au
+#define MHASH_enumerate        0x9f82838bu
+#define MHASH_fill             0x7c96cb2cu
+#define MHASH_filter           0xfd7675abu
+#define MHASH_find             0x7c96cb66u
+#define MHASH_first            0x0f704b8du
+#define MHASH_flat             0x7c96d68cu
+#define MHASH_flat_map         0x022d3129u
+#define MHASH_flatten          0xb27dd5f3u
+#define MHASH_for_each         0x0f4aaefcu
+#define MHASH_get              0x0b887685u
+#define MHASH_group_by         0xdd0fdaecu
+#define MHASH_has              0x0b887a41u
+#define MHASH_index_of         0x66e4af51u
+#define MHASH_inner_type       0xdf644222u
+#define MHASH_insert           0x04d4029au
+#define MHASH_intersection     0x40c04d3cu
+#define MHASH_is_empty         0xdc1854cfu
+#define MHASH_is_subset        0x805437d6u
+#define MHASH_is_superset      0x05f3913bu
+#define MHASH_is_variant       0x443eb735u
+#define MHASH_join             0x7c9915d5u
+#define MHASH_kebab_case       0x62be3b95u
+#define MHASH_keys             0x7c9979c1u
+#define MHASH_last             0x7c99f459u
+#define MHASH_len              0x0b888bc4u
+#define MHASH_length           0x0b2deac7u
+#define MHASH_map              0x0b888f83u
+#define MHASH_max              0x0b888f8bu
+#define MHASH_merge            0x0fecc3f5u
+#define MHASH_min              0x0b889089u
+#define MHASH_pad_left         0xf3895c84u
+#define MHASH_pad_right        0x6523b4b7u
+#define MHASH_payload          0x9c4949cfu
+#define MHASH_pop              0x0b889e14u
+#define MHASH_push             0x7c9c7ae5u
+#define MHASH_push_u16         0x1aaf75a0u
+#define MHASH_push_u32         0x1aaf75deu
+#define MHASH_read_f32         0xf949d66bu
+#define MHASH_read_f64         0xf949d6d0u
+#define MHASH_read_i8          0x3ddb7381u
+#define MHASH_read_i16         0xf949e2f0u
+#define MHASH_read_i32         0xf949e32eu
+#define MHASH_read_u8          0x3ddb750du
+#define MHASH_read_u16         0xf94a15fcu
+#define MHASH_read_u32         0xf94a163au
+#define MHASH_recv             0x7c9d4d95u
+#define MHASH_reduce           0x19279c1du
+#define MHASH_remove           0x192c7473u
+#define MHASH_remove_at        0xd988a4a7u
+#define MHASH_repeat           0x192dec66u
+#define MHASH_replace          0x3eef4e01u
+#define MHASH_resize           0x192fa5b7u
+#define MHASH_reverse          0x3f5854c1u
+#define MHASH_send             0x7c9ddb4fu
+#define MHASH_set              0x0b88a991u
+#define MHASH_slice            0x105d06d5u
+#define MHASH_snake_case       0xb7f6c232u
+#define MHASH_sort             0x7c9e066du
+#define MHASH_sort_by          0xa365ac87u
+#define MHASH_split            0x105f45f1u
+#define MHASH_starts_with      0xf5ef8361u
+#define MHASH_substring        0xcc998606u
+#define MHASH_sum              0x0b88ab9au
+#define MHASH_tag              0x0b88ad41u
+#define MHASH_take             0x7c9e564au
+#define MHASH_title_case       0x4b7027c2u
+#define MHASH_to_array         0xcebde966u
+#define MHASH_to_hex           0x1e83ed8cu
+#define MHASH_to_lower         0xcf836790u
+#define MHASH_to_string        0xd09c437eu
+#define MHASH_to_upper         0xd026b2b3u
+#define MHASH_trim             0x7c9e9e61u
+#define MHASH_trim_end         0xcdcebb17u
+#define MHASH_trim_start       0x7d6a808eu
+#define MHASH_union            0x1082522eu
+#define MHASH_unique           0x20cca1bcu
+#define MHASH_values           0x22383ff5u
+#define MHASH_variant_name     0xb2b2b8bau
+#define MHASH_write_u8         0x931616bcu
+#define MHASH_write_u16        0xf5d8ed8bu
+#define MHASH_write_u32        0xf5d8edc9u
+#define MHASH_zip              0x0b88c7d8u
+
+static inline uint32_t method_hash(const char *s) {
+    uint32_t h = 5381;
+    while (*s) h = h * 33 + (unsigned char)*s++;
+    return h;
+}
+
 /* ── Invoke builtin method ── */
 /* Returns true if handled, false if not a builtin */
 
 static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                                 LatValue *args, int arg_count, LatValue *result) {
     (void)vm;
+    uint32_t mhash = method_hash(method);
     if (obj->type == VAL_ARRAY) {
-        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             *result = value_int((int64_t)obj->as.array.len);
             return true;
         }
-        if (strcmp(method, "push") == 0 && arg_count == 1) {
+        if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
             if (value_is_crystal(obj)) {
                 vm->error = strdup("cannot push to a crystal array");
                 *result = value_unit();
@@ -400,7 +539,9 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                     }
                 }
             }
-            LatValue val = rvm_clone(&args[0]);
+            /* Fast path: primitives skip rvm_clone overhead in push.
+             * Values escape into the array, but primitives have no heap data. */
+            LatValue val = rvm_clone_or_borrow(&args[0]);
             if (obj->as.array.len >= obj->as.array.cap) {
                 obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
                 obj->as.array.elems = realloc(obj->as.array.elems,
@@ -410,7 +551,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "pop") == 0 && arg_count == 0) {
+        if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
             if (value_is_crystal(obj)) {
                 vm->error = strdup("cannot pop from a crystal array");
                 *result = value_unit();
@@ -452,7 +593,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+        if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             bool found = false;
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 if (value_eq(&obj->as.array.elems[i], &args[0])) {
@@ -463,7 +604,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_bool(found);
             return true;
         }
-        if (strcmp(method, "reverse") == 0 && arg_count == 0) {
+        if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
             LatValue *elems = malloc(obj->as.array.len * sizeof(LatValue));
             for (size_t i = 0; i < obj->as.array.len; i++)
                 elems[i] = rvm_clone(&obj->as.array.elems[obj->as.array.len - 1 - i]);
@@ -471,7 +612,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "map") == 0 && arg_count == 1) {
+        if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             size_t len = obj->as.array.len;
             LatValue *elems = malloc(len * sizeof(LatValue));
@@ -484,7 +625,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "filter") == 0 && arg_count == 1) {
+        if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             size_t len = obj->as.array.len;
             size_t cap = len > 0 ? len : 1;
@@ -505,7 +646,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "join") == 0 && arg_count == 1) {
+        if (mhash == MHASH_join && strcmp(method, "join") == 0 && arg_count == 1) {
             const char *sep = (args[0].type == VAL_STR) ? args[0].as.str_val : "";
             size_t sep_len = strlen(sep);
             size_t n = obj->as.array.len;
@@ -533,11 +674,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
     }
 
     if (obj->type == VAL_STR) {
-        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             *result = value_int((int64_t)strlen(obj->as.str_val));
             return true;
         }
-        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+        if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR) {
                 *result = value_bool(strstr(obj->as.str_val, args[0].as.str_val) != NULL);
             } else {
@@ -548,7 +689,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
     }
 
     if (obj->type == VAL_MAP) {
-        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             size_t count = 0;
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
                 if (obj->as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -557,7 +698,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_int((int64_t)count);
             return true;
         }
-        if (strcmp(method, "keys") == 0 && arg_count == 0) {
+        if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
             size_t cap = obj->as.map.map->cap;
             LatValue *keys = malloc(cap * sizeof(LatValue));
             size_t count = 0;
@@ -569,7 +710,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(keys);
             return true;
         }
-        if (strcmp(method, "values") == 0 && arg_count == 0) {
+        if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
             size_t cap = obj->as.map.map->cap;
             LatValue *vals = malloc(cap * sizeof(LatValue));
             size_t count = 0;
@@ -581,7 +722,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(vals);
             return true;
         }
-        if (strcmp(method, "get") == 0 && arg_count == 1) {
+        if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR) {
                 LatValue *val = lat_map_get(obj->as.map.map, args[0].as.str_val);
                 *result = val ? rvm_clone(val) : value_nil();
@@ -590,7 +731,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "set") == 0 && arg_count == 2) {
+        if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) {
             if (args[0].type == VAL_STR) {
                 LatValue cloned = rvm_clone(&args[1]);
                 lat_map_set(obj->as.map.map, args[0].as.str_val, &cloned);
@@ -598,14 +739,14 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if ((strcmp(method, "has") == 0 || strcmp(method, "contains") == 0) && arg_count == 1) {
+        if (((mhash == MHASH_has && strcmp(method, "has") == 0) || (mhash == MHASH_contains && strcmp(method, "contains") == 0)) && arg_count == 1) {
             if (args[0].type == VAL_STR)
                 *result = value_bool(lat_map_get(obj->as.map.map, args[0].as.str_val) != NULL);
             else
                 *result = value_bool(false);
             return true;
         }
-        if (strcmp(method, "entries") == 0 && arg_count == 0) {
+        if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
             size_t cap = obj->as.map.map->cap;
             LatValue *entries = malloc(cap * sizeof(LatValue));
             size_t count = 0;
@@ -620,7 +761,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(entries);
             return true;
         }
-        if (strcmp(method, "merge") == 0 && arg_count == 1) {
+        if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1) {
             if (args[0].type == VAL_MAP) {
                 /* Mutate obj in place (like stack VM) */
                 for (size_t i = 0; i < args[0].as.map.map->cap; i++) {
@@ -632,7 +773,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "for_each") == 0 && arg_count == 1) {
+        if (mhash == MHASH_for_each && strcmp(method, "for_each") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
                 if (obj->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -647,7 +788,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "filter") == 0 && arg_count == 1) {
+        if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             LatValue filtered = value_map_new();
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
@@ -671,7 +812,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Array additional methods ── */
     if (obj->type == VAL_ARRAY) {
-        if (strcmp(method, "enumerate") == 0 && arg_count == 0) {
+        if (mhash == MHASH_enumerate && strcmp(method, "enumerate") == 0 && arg_count == 0) {
             size_t len = obj->as.array.len;
             LatValue *elems = malloc(len * sizeof(LatValue));
             for (size_t i = 0; i < len; i++) {
@@ -684,7 +825,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "reduce") == 0 && (arg_count == 1 || arg_count == 2)) {
+        if (mhash == MHASH_reduce && strcmp(method, "reduce") == 0 && (arg_count == 1 || arg_count == 2)) {
             LatValue *closure = &args[0];
             LatValue acc;
             size_t start = 0;
@@ -708,7 +849,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = acc;
             return true;
         }
-        if ((strcmp(method, "each") == 0 || strcmp(method, "for_each") == 0) && arg_count == 1) {
+        if (((mhash == MHASH_each && strcmp(method, "each") == 0) || (mhash == MHASH_for_each && strcmp(method, "for_each") == 0)) && arg_count == 1) {
             LatValue *closure = &args[0];
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 LatValue arg = rvm_clone(&obj->as.array.elems[i]);
@@ -719,7 +860,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "sort") == 0 && arg_count <= 1) {
+        if (mhash == MHASH_sort && strcmp(method, "sort") == 0 && arg_count <= 1) {
             size_t len = obj->as.array.len;
             LatValue *sorted = malloc(len * sizeof(LatValue));
             for (size_t i = 0; i < len; i++)
@@ -766,7 +907,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(sorted);
             return true;
         }
-        if (strcmp(method, "sort_by") == 0 && arg_count == 1) {
+        if (mhash == MHASH_sort_by && strcmp(method, "sort_by") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             size_t len = obj->as.array.len;
             LatValue *buf = malloc((len > 0 ? len : 1) * sizeof(LatValue));
@@ -792,7 +933,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(buf);
             return true;
         }
-        if (strcmp(method, "find") == 0 && arg_count == 1) {
+        if (mhash == MHASH_find && strcmp(method, "find") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 LatValue arg = rvm_clone(&obj->as.array.elems[i]);
@@ -805,7 +946,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "any") == 0 && arg_count == 1) {
+        if (mhash == MHASH_any && strcmp(method, "any") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 LatValue arg = rvm_clone(&obj->as.array.elems[i]);
@@ -818,7 +959,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_bool(false);
             return true;
         }
-        if (strcmp(method, "all") == 0 && arg_count == 1) {
+        if (mhash == MHASH_all && strcmp(method, "all") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 LatValue arg = rvm_clone(&obj->as.array.elems[i]);
@@ -831,7 +972,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_bool(true);
             return true;
         }
-        if (strcmp(method, "flat_map") == 0 && arg_count == 1) {
+        if (mhash == MHASH_flat_map && strcmp(method, "flat_map") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             size_t cap = obj->as.array.len * 2;
             LatValue *elems = malloc(cap * sizeof(LatValue));
@@ -855,7 +996,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "unique") == 0 && arg_count == 0) {
+        if (mhash == MHASH_unique && strcmp(method, "unique") == 0 && arg_count == 0) {
             size_t len = obj->as.array.len;
             LatValue *elems = malloc(len * sizeof(LatValue));
             size_t out = 0;
@@ -870,7 +1011,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "index_of") == 0 && arg_count == 1) {
+        if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 if (value_eq(&obj->as.array.elems[i], &args[0])) {
                     *result = value_int((int64_t)i);
@@ -880,15 +1021,15 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_int(-1);
             return true;
         }
-        if (strcmp(method, "first") == 0 && arg_count == 0) {
+        if (mhash == MHASH_first && strcmp(method, "first") == 0 && arg_count == 0) {
             *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[0]) : value_unit();
             return true;
         }
-        if (strcmp(method, "last") == 0 && arg_count == 0) {
+        if (mhash == MHASH_last && strcmp(method, "last") == 0 && arg_count == 0) {
             *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit();
             return true;
         }
-        if (strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
+        if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
             int64_t start = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             int64_t end = arg_count == 2 && args[1].type == VAL_INT ? args[1].as.int_val : (int64_t)obj->as.array.len;
             if (start < 0) start += (int64_t)obj->as.array.len;
@@ -904,7 +1045,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "take") == 0 && arg_count == 1) {
+        if (mhash == MHASH_take && strcmp(method, "take") == 0 && arg_count == 1) {
             int64_t n = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             if (n < 0) n = 0;
             if (n > (int64_t)obj->as.array.len) n = (int64_t)obj->as.array.len;
@@ -915,7 +1056,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "drop") == 0 && arg_count == 1) {
+        if (mhash == MHASH_drop && strcmp(method, "drop") == 0 && arg_count == 1) {
             int64_t n = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             if (n < 0) n = 0;
             if (n > (int64_t)obj->as.array.len) n = (int64_t)obj->as.array.len;
@@ -927,7 +1068,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "flatten") == 0 && arg_count == 0) {
+        if (mhash == MHASH_flatten && strcmp(method, "flatten") == 0 && arg_count == 0) {
             size_t cap = obj->as.array.len * 2;
             LatValue *elems = malloc(cap * sizeof(LatValue));
             size_t out = 0;
@@ -947,7 +1088,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "zip") == 0 && arg_count == 1) {
+        if (mhash == MHASH_zip && strcmp(method, "zip") == 0 && arg_count == 1) {
             if (args[0].type != VAL_ARRAY) { *result = value_array(NULL, 0); return true; }
             size_t len = obj->as.array.len < args[0].as.array.len ? obj->as.array.len : args[0].as.array.len;
             LatValue *elems = malloc(len * sizeof(LatValue));
@@ -961,7 +1102,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "sum") == 0 && arg_count == 0) {
+        if (mhash == MHASH_sum && strcmp(method, "sum") == 0 && arg_count == 0) {
             int64_t isum = 0; double fsum = 0; bool has_float = false;
             for (size_t i = 0; i < obj->as.array.len; i++) {
                 if (obj->as.array.elems[i].type == VAL_FLOAT) { has_float = true; fsum += obj->as.array.elems[i].as.float_val; }
@@ -970,7 +1111,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = has_float ? value_float(fsum) : value_int(isum);
             return true;
         }
-        if (strcmp(method, "min") == 0 && arg_count == 0) {
+        if (mhash == MHASH_min && strcmp(method, "min") == 0 && arg_count == 0) {
             if (obj->as.array.len == 0) {
                 vm->error = strdup("min() called on empty array");
                 *result = value_unit();
@@ -989,7 +1130,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = rvm_clone(&min_val);
             return true;
         }
-        if (strcmp(method, "max") == 0 && arg_count == 0) {
+        if (mhash == MHASH_max && strcmp(method, "max") == 0 && arg_count == 0) {
             if (obj->as.array.len == 0) {
                 vm->error = strdup("max() called on empty array");
                 *result = value_unit();
@@ -1008,7 +1149,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = rvm_clone(&max_val);
             return true;
         }
-        if (strcmp(method, "insert") == 0 && arg_count == 2) {
+        if (mhash == MHASH_insert && strcmp(method, "insert") == 0 && arg_count == 2) {
             if (args[0].type != VAL_INT) { *result = value_unit(); return true; }
             int64_t idx = args[0].as.int_val;
             if (idx < 0) idx += (int64_t)obj->as.array.len;
@@ -1025,7 +1166,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "remove_at") == 0 && arg_count == 1) {
+        if (mhash == MHASH_remove_at && strcmp(method, "remove_at") == 0 && arg_count == 1) {
             if (args[0].type != VAL_INT) { *result = value_nil(); return true; }
             int64_t idx = args[0].as.int_val;
             if (idx < 0) idx += (int64_t)obj->as.array.len;
@@ -1036,7 +1177,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             obj->as.array.len--;
             return true;
         }
-        if (strcmp(method, "chunk") == 0 && arg_count == 1) {
+        if (mhash == MHASH_chunk && strcmp(method, "chunk") == 0 && arg_count == 1) {
             if (args[0].type != VAL_INT || args[0].as.int_val <= 0) { *result = value_array(NULL, 0); return true; }
             int64_t sz = args[0].as.int_val;
             size_t len = obj->as.array.len;
@@ -1057,7 +1198,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "group_by") == 0 && arg_count == 1) {
+        if (mhash == MHASH_group_by && strcmp(method, "group_by") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             LatValue map = value_map_new();
             for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -1085,7 +1226,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Array additional methods ── */
     if (obj->type == VAL_ARRAY) {
-        if (strcmp(method, "flat") == 0 && arg_count == 0) {
+        if (mhash == MHASH_flat && strcmp(method, "flat") == 0 && arg_count == 0) {
             size_t cap = obj->as.array.len * 2;
             if (cap == 0) cap = 1;
             LatValue *elems = malloc(cap * sizeof(LatValue));
@@ -1106,15 +1247,15 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "first") == 0 && arg_count == 0) {
+        if (mhash == MHASH_first && strcmp(method, "first") == 0 && arg_count == 0) {
             *result = (obj->as.array.len > 0) ? rvm_clone(&obj->as.array.elems[0]) : value_unit();
             return true;
         }
-        if (strcmp(method, "last") == 0 && arg_count == 0) {
+        if (mhash == MHASH_last && strcmp(method, "last") == 0 && arg_count == 0) {
             *result = (obj->as.array.len > 0) ? rvm_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit();
             return true;
         }
-        if (strcmp(method, "min") == 0 && arg_count == 0) {
+        if (mhash == MHASH_min && strcmp(method, "min") == 0 && arg_count == 0) {
             if (obj->as.array.len == 0) { *result = value_unit(); return true; }
             LatValue best = rvm_clone(&obj->as.array.elems[0]);
             for (size_t i = 1; i < obj->as.array.len; i++) {
@@ -1132,7 +1273,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = best;
             return true;
         }
-        if (strcmp(method, "max") == 0 && arg_count == 0) {
+        if (mhash == MHASH_max && strcmp(method, "max") == 0 && arg_count == 0) {
             if (obj->as.array.len == 0) { *result = value_unit(); return true; }
             LatValue best = rvm_clone(&obj->as.array.elems[0]);
             for (size_t i = 1; i < obj->as.array.len; i++) {
@@ -1154,7 +1295,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── String additional methods ── */
     if (obj->type == VAL_STR) {
-        if (strcmp(method, "split") == 0 && arg_count == 1) {
+        if (mhash == MHASH_split && strcmp(method, "split") == 0 && arg_count == 1) {
             if (args[0].type != VAL_STR) { *result = value_array(NULL, 0); return true; }
             const char *s = obj->as.str_val;
             const char *sep = args[0].as.str_val;
@@ -1183,7 +1324,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(parts);
             return true;
         }
-        if (strcmp(method, "trim") == 0 && arg_count == 0) {
+        if (mhash == MHASH_trim && strcmp(method, "trim") == 0 && arg_count == 0) {
             const char *s = obj->as.str_val;
             while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
             const char *e = obj->as.str_val + strlen(obj->as.str_val);
@@ -1191,59 +1332,59 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_string_owned(strndup(s, (size_t)(e - s)));
             return true;
         }
-        if (strcmp(method, "trim_start") == 0 && arg_count == 0) {
+        if (mhash == MHASH_trim_start && strcmp(method, "trim_start") == 0 && arg_count == 0) {
             const char *s = obj->as.str_val;
             while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
             *result = value_string(s);
             return true;
         }
-        if (strcmp(method, "trim_end") == 0 && arg_count == 0) {
+        if (mhash == MHASH_trim_end && strcmp(method, "trim_end") == 0 && arg_count == 0) {
             size_t len = strlen(obj->as.str_val);
             const char *e = obj->as.str_val + len;
             while (e > obj->as.str_val && (*(e-1) == ' ' || *(e-1) == '\t' || *(e-1) == '\n' || *(e-1) == '\r')) e--;
             *result = value_string_owned(strndup(obj->as.str_val, (size_t)(e - obj->as.str_val)));
             return true;
         }
-        if (strcmp(method, "to_upper") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_upper && strcmp(method, "to_upper") == 0 && arg_count == 0) {
             char *s = strdup(obj->as.str_val);
             for (char *p = s; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
             *result = value_string_owned(s);
             return true;
         }
-        if (strcmp(method, "to_lower") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_lower && strcmp(method, "to_lower") == 0 && arg_count == 0) {
             char *s = strdup(obj->as.str_val);
             for (char *p = s; *p; p++) if (*p >= 'A' && *p <= 'Z') *p += 32;
             *result = value_string_owned(s);
             return true;
         }
-        if (strcmp(method, "capitalize") == 0 && arg_count == 0) {
+        if (mhash == MHASH_capitalize && strcmp(method, "capitalize") == 0 && arg_count == 0) {
             *result = value_string_owned(lat_str_capitalize(obj->as.str_val));
             return true;
         }
-        if (strcmp(method, "title_case") == 0 && arg_count == 0) {
+        if (mhash == MHASH_title_case && strcmp(method, "title_case") == 0 && arg_count == 0) {
             *result = value_string_owned(lat_str_title_case(obj->as.str_val));
             return true;
         }
-        if (strcmp(method, "snake_case") == 0 && arg_count == 0) {
+        if (mhash == MHASH_snake_case && strcmp(method, "snake_case") == 0 && arg_count == 0) {
             *result = value_string_owned(lat_str_snake_case(obj->as.str_val));
             return true;
         }
-        if (strcmp(method, "camel_case") == 0 && arg_count == 0) {
+        if (mhash == MHASH_camel_case && strcmp(method, "camel_case") == 0 && arg_count == 0) {
             *result = value_string_owned(lat_str_camel_case(obj->as.str_val));
             return true;
         }
-        if (strcmp(method, "kebab_case") == 0 && arg_count == 0) {
+        if (mhash == MHASH_kebab_case && strcmp(method, "kebab_case") == 0 && arg_count == 0) {
             *result = value_string_owned(lat_str_kebab_case(obj->as.str_val));
             return true;
         }
-        if (strcmp(method, "starts_with") == 0 && arg_count == 1) {
+        if (mhash == MHASH_starts_with && strcmp(method, "starts_with") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR)
                 *result = value_bool(strncmp(obj->as.str_val, args[0].as.str_val, strlen(args[0].as.str_val)) == 0);
             else
                 *result = value_bool(false);
             return true;
         }
-        if (strcmp(method, "ends_with") == 0 && arg_count == 1) {
+        if (mhash == MHASH_ends_with && strcmp(method, "ends_with") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR) {
                 size_t slen = strlen(obj->as.str_val);
                 size_t plen = strlen(args[0].as.str_val);
@@ -1253,7 +1394,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "replace") == 0 && arg_count == 2) {
+        if (mhash == MHASH_replace && strcmp(method, "replace") == 0 && arg_count == 2) {
             if (args[0].type != VAL_STR || args[1].type != VAL_STR) { *result = rvm_clone(obj); return true; }
             const char *s = obj->as.str_val;
             const char *from = args[0].as.str_val;
@@ -1276,7 +1417,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_string_owned(buf);
             return true;
         }
-        if (strcmp(method, "index_of") == 0 && arg_count == 1) {
+        if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR) {
                 const char *found = strstr(obj->as.str_val, args[0].as.str_val);
                 *result = found ? value_int((int64_t)(found - obj->as.str_val)) : value_int(-1);
@@ -1285,7 +1426,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "substring") == 0 && (arg_count == 1 || arg_count == 2)) {
+        if (mhash == MHASH_substring && strcmp(method, "substring") == 0 && (arg_count == 1 || arg_count == 2)) {
             size_t slen = strlen(obj->as.str_val);
             int64_t start = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             int64_t end = arg_count == 2 && args[1].type == VAL_INT ? args[1].as.int_val : (int64_t)slen;
@@ -1297,7 +1438,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_string_owned(strndup(obj->as.str_val + start, (size_t)(end - start)));
             return true;
         }
-        if (strcmp(method, "repeat") == 0 && arg_count == 1) {
+        if (mhash == MHASH_repeat && strcmp(method, "repeat") == 0 && arg_count == 1) {
             if (args[0].type != VAL_INT || args[0].as.int_val < 0) { *result = value_string(""); return true; }
             int64_t n = args[0].as.int_val;
             size_t slen = strlen(obj->as.str_val);
@@ -1308,7 +1449,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_string_owned(buf);
             return true;
         }
-        if (strcmp(method, "chars") == 0 && arg_count == 0) {
+        if (mhash == MHASH_chars && strcmp(method, "chars") == 0 && arg_count == 0) {
             size_t len = strlen(obj->as.str_val);
             LatValue *elems = malloc(len * sizeof(LatValue));
             for (size_t i = 0; i < len; i++) {
@@ -1319,7 +1460,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "bytes") == 0 && arg_count == 0) {
+        if (mhash == MHASH_bytes && strcmp(method, "bytes") == 0 && arg_count == 0) {
             size_t len = strlen(obj->as.str_val);
             LatValue *elems = malloc(len * sizeof(LatValue));
             for (size_t i = 0; i < len; i++)
@@ -1328,7 +1469,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "reverse") == 0 && arg_count == 0) {
+        if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
             size_t len = strlen(obj->as.str_val);
             char *buf = malloc(len + 1);
             for (size_t i = 0; i < len; i++) buf[i] = obj->as.str_val[len - 1 - i];
@@ -1336,7 +1477,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_string_owned(buf);
             return true;
         }
-        if (strcmp(method, "pad_left") == 0 && (arg_count == 1 || arg_count == 2)) {
+        if (mhash == MHASH_pad_left && strcmp(method, "pad_left") == 0 && (arg_count == 1 || arg_count == 2)) {
             int64_t n = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             char pad = (arg_count == 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
             size_t slen = strlen(obj->as.str_val);
@@ -1349,7 +1490,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_string_owned(buf);
             return true;
         }
-        if (strcmp(method, "pad_right") == 0 && (arg_count == 1 || arg_count == 2)) {
+        if (mhash == MHASH_pad_right && strcmp(method, "pad_right") == 0 && (arg_count == 1 || arg_count == 2)) {
             int64_t n = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             char pad = (arg_count == 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
             size_t slen = strlen(obj->as.str_val);
@@ -1365,15 +1506,15 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Enum methods ── */
     if (obj->type == VAL_ENUM) {
-        if (strcmp(method, "tag") == 0 || strcmp(method, "variant_name") == 0) {
+        if ((mhash == MHASH_tag && strcmp(method, "tag") == 0) || (mhash == MHASH_variant_name && strcmp(method, "variant_name") == 0)) {
             *result = value_string(obj->as.enm.variant_name);
             return true;
         }
-        if (strcmp(method, "enum_name") == 0) {
+        if (mhash == MHASH_enum_name && strcmp(method, "enum_name") == 0) {
             *result = value_string(obj->as.enm.enum_name);
             return true;
         }
-        if (strcmp(method, "payload") == 0) {
+        if (mhash == MHASH_payload && strcmp(method, "payload") == 0) {
             if (obj->as.enm.payload_count > 0) {
                 LatValue *elems = malloc(obj->as.enm.payload_count * sizeof(LatValue));
                 for (size_t pi = 0; pi < obj->as.enm.payload_count; pi++)
@@ -1385,7 +1526,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "is_variant") == 0 && arg_count == 1) {
+        if (mhash == MHASH_is_variant && strcmp(method, "is_variant") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR)
                 *result = value_bool(strcmp(obj->as.enm.variant_name, args[0].as.str_val) == 0);
             else
@@ -1396,7 +1537,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Tuple methods ── */
     if (obj->type == VAL_TUPLE) {
-        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             *result = value_int((int64_t)obj->as.tuple.len);
             return true;
         }
@@ -1404,12 +1545,12 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Range methods ── */
     if (obj->type == VAL_RANGE) {
-        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             int64_t len = obj->as.range.end - obj->as.range.start;
             *result = value_int(len > 0 ? len : 0);
             return true;
         }
-        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+        if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t v = args[0].as.int_val;
                 *result = value_bool(v >= obj->as.range.start && v < obj->as.range.end);
@@ -1422,18 +1563,18 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Set methods ── */
     if (obj->type == VAL_SET) {
-        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             *result = value_int((int64_t)lat_map_len(obj->as.set.map));
             return true;
         }
-        if (strcmp(method, "has") == 0 && arg_count == 1) {
+        if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
             char *key = value_display(&args[0]);
             bool found = lat_map_contains(obj->as.set.map, key);
             free(key);
             *result = value_bool(found);
             return true;
         }
-        if (strcmp(method, "add") == 0 && arg_count == 1) {
+        if (mhash == MHASH_add && strcmp(method, "add") == 0 && arg_count == 1) {
             char *key = value_display(&args[0]);
             LatValue val = rvm_clone(&args[0]);
             lat_map_set(obj->as.set.map, key, &val);
@@ -1441,14 +1582,14 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "remove") == 0 && arg_count == 1) {
+        if (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1) {
             char *key = value_display(&args[0]);
             lat_map_remove(obj->as.set.map, key);
             free(key);
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "to_array") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
             size_t len = lat_map_len(obj->as.set.map);
             LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
             size_t idx = 0;
@@ -1461,7 +1602,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "union") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+        if (mhash == MHASH_union && strcmp(method, "union") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
             LatValue result_set = value_set_new();
             for (size_t i = 0; i < obj->as.set.map->cap; i++) {
                 if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1476,7 +1617,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = result_set;
             return true;
         }
-        if (strcmp(method, "intersection") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+        if (mhash == MHASH_intersection && strcmp(method, "intersection") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
             LatValue result_set = value_set_new();
             for (size_t i = 0; i < obj->as.set.map->cap; i++) {
                 if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1488,7 +1629,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = result_set;
             return true;
         }
-        if (strcmp(method, "difference") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+        if (mhash == MHASH_difference && strcmp(method, "difference") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
             LatValue result_set = value_set_new();
             for (size_t i = 0; i < obj->as.set.map->cap; i++) {
                 if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1500,7 +1641,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = result_set;
             return true;
         }
-        if (strcmp(method, "is_subset") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+        if (mhash == MHASH_is_subset && strcmp(method, "is_subset") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
             bool is = true;
             for (size_t i = 0; i < obj->as.set.map->cap; i++) {
                 if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1511,7 +1652,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_bool(is);
             return true;
         }
-        if (strcmp(method, "is_superset") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
+        if (mhash == MHASH_is_superset && strcmp(method, "is_superset") == 0 && arg_count == 1 && args[0].type == VAL_SET) {
             bool is = true;
             for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
                 if (args[0].as.set.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1526,7 +1667,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── String additional: count, is_empty ── */
     if (obj->type == VAL_STR) {
-        if (strcmp(method, "count") == 0 && arg_count == 1) {
+        if (mhash == MHASH_count && strcmp(method, "count") == 0 && arg_count == 1) {
             int64_t cnt = 0;
             if (args[0].type == VAL_STR && args[0].as.str_val[0]) {
                 const char *p = obj->as.str_val;
@@ -1536,7 +1677,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_int(cnt);
             return true;
         }
-        if (strcmp(method, "is_empty") == 0 && arg_count == 0) {
+        if (mhash == MHASH_is_empty && strcmp(method, "is_empty") == 0 && arg_count == 0) {
             *result = value_bool(obj->as.str_val[0] == '\0');
             return true;
         }
@@ -1544,13 +1685,13 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Map additional: remove/delete ── */
     if (obj->type == VAL_MAP) {
-        if ((strcmp(method, "remove") == 0 || strcmp(method, "delete") == 0) && arg_count == 1) {
+        if (((mhash == MHASH_remove && strcmp(method, "remove") == 0) || (mhash == MHASH_delete && strcmp(method, "delete") == 0)) && arg_count == 1) {
             if (args[0].type == VAL_STR)
                 lat_map_remove(obj->as.map.map, args[0].as.str_val);
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "map") == 0 && arg_count == 1) {
+        if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
             LatValue *closure = &args[0];
             LatValue mapped = value_map_new();
             for (size_t i = 0; i < obj->as.map.map->cap; i++) {
@@ -1570,15 +1711,15 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Buffer methods ── */
     if (obj->type == VAL_BUFFER) {
-        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             *result = value_int((int64_t)obj->as.buffer.len);
             return true;
         }
-        if (strcmp(method, "capacity") == 0 && arg_count == 0) {
+        if (mhash == MHASH_capacity && strcmp(method, "capacity") == 0 && arg_count == 0) {
             *result = value_int((int64_t)obj->as.buffer.cap);
             return true;
         }
-        if (strcmp(method, "push") == 0 && arg_count == 1) {
+        if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 if (obj->as.buffer.len >= obj->as.buffer.cap) {
                     obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
@@ -1589,7 +1730,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "push_u16") == 0 && arg_count == 1) {
+        if (mhash == MHASH_push_u16 && strcmp(method, "push_u16") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 uint16_t v = (uint16_t)args[0].as.int_val;
                 while (obj->as.buffer.len + 2 > obj->as.buffer.cap) {
@@ -1602,7 +1743,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "push_u32") == 0 && arg_count == 1) {
+        if (mhash == MHASH_push_u32 && strcmp(method, "push_u32") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 uint32_t v = (uint32_t)args[0].as.int_val;
                 while (obj->as.buffer.len + 4 > obj->as.buffer.cap) {
@@ -1617,7 +1758,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "read_u8") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_u8 && strcmp(method, "read_u8") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx >= obj->as.buffer.len) {
@@ -1630,7 +1771,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "write_u8") == 0 && arg_count == 2) {
+        if (mhash == MHASH_write_u8 && strcmp(method, "write_u8") == 0 && arg_count == 2) {
             if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx >= 0 && (size_t)idx < obj->as.buffer.len)
@@ -1639,7 +1780,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "read_u16") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_u16 && strcmp(method, "read_u16") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx + 2 > obj->as.buffer.len) {
@@ -1654,7 +1795,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "write_u16") == 0 && arg_count == 2) {
+        if (mhash == MHASH_write_u16 && strcmp(method, "write_u16") == 0 && arg_count == 2) {
             if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 uint16_t v = (uint16_t)args[1].as.int_val;
@@ -1666,7 +1807,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "read_u32") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_u32 && strcmp(method, "read_u32") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) {
@@ -1683,7 +1824,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
             return true;
         }
-        if (strcmp(method, "write_u32") == 0 && arg_count == 2) {
+        if (mhash == MHASH_write_u32 && strcmp(method, "write_u32") == 0 && arg_count == 2) {
             if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 uint32_t v = (uint32_t)args[1].as.int_val;
@@ -1697,7 +1838,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "read_i8") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_i8 && strcmp(method, "read_i8") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx >= obj->as.buffer.len) { *result = value_nil(); }
@@ -1705,7 +1846,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             } else { *result = value_nil(); }
             return true;
         }
-        if (strcmp(method, "read_i16") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_i16 && strcmp(method, "read_i16") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx + 2 > obj->as.buffer.len) { *result = value_nil(); }
@@ -1713,7 +1854,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             } else { *result = value_nil(); }
             return true;
         }
-        if (strcmp(method, "read_i32") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_i32 && strcmp(method, "read_i32") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) { *result = value_nil(); }
@@ -1721,7 +1862,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             } else { *result = value_nil(); }
             return true;
         }
-        if (strcmp(method, "read_f32") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_f32 && strcmp(method, "read_f32") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) { *result = value_nil(); }
@@ -1729,7 +1870,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             } else { *result = value_nil(); }
             return true;
         }
-        if (strcmp(method, "read_f64") == 0 && arg_count == 1) {
+        if (mhash == MHASH_read_f64 && strcmp(method, "read_f64") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 if (idx < 0 || (size_t)idx + 8 > obj->as.buffer.len) { *result = value_nil(); }
@@ -1737,7 +1878,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             } else { *result = value_nil(); }
             return true;
         }
-        if (strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
+        if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
             int64_t start = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             int64_t end = arg_count == 2 && args[1].type == VAL_INT ? args[1].as.int_val : (int64_t)obj->as.buffer.len;
             if (start < 0) start = 0;
@@ -1746,18 +1887,18 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_buffer(obj->as.buffer.data + start, (size_t)(end - start));
             return true;
         }
-        if (strcmp(method, "clear") == 0 && arg_count == 0) {
+        if (mhash == MHASH_clear && strcmp(method, "clear") == 0 && arg_count == 0) {
             obj->as.buffer.len = 0;
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "fill") == 0 && arg_count == 1) {
+        if (mhash == MHASH_fill && strcmp(method, "fill") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT)
                 memset(obj->as.buffer.data, (uint8_t)args[0].as.int_val, obj->as.buffer.len);
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "resize") == 0 && arg_count == 1) {
+        if (mhash == MHASH_resize && strcmp(method, "resize") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT && args[0].as.int_val >= 0) {
                 size_t new_len = (size_t)args[0].as.int_val;
                 if (new_len > obj->as.buffer.cap) {
@@ -1771,14 +1912,14 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "to_string") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_string && strcmp(method, "to_string") == 0 && arg_count == 0) {
             char *s = malloc(obj->as.buffer.len + 1);
             memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
             s[obj->as.buffer.len] = '\0';
             *result = value_string_owned(s);
             return true;
         }
-        if (strcmp(method, "to_array") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
             LatValue *elems = malloc((obj->as.buffer.len > 0 ? obj->as.buffer.len : 1) * sizeof(LatValue));
             for (size_t i = 0; i < obj->as.buffer.len; i++)
                 elems[i] = value_int((int64_t)obj->as.buffer.data[i]);
@@ -1786,7 +1927,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             free(elems);
             return true;
         }
-        if (strcmp(method, "to_hex") == 0 && arg_count == 0) {
+        if (mhash == MHASH_to_hex && strcmp(method, "to_hex") == 0 && arg_count == 0) {
             char *hex = malloc(obj->as.buffer.len * 2 + 1);
             for (size_t i = 0; i < obj->as.buffer.len; i++)
                 snprintf(hex + i * 2, 3, "%02x", obj->as.buffer.data[i]);
@@ -1799,11 +1940,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
     /* ── Ref methods ── */
     if (obj->type == VAL_REF) {
         LatRef *ref = obj->as.ref.ref;
-        if ((strcmp(method, "get") == 0 || strcmp(method, "deref") == 0) && arg_count == 0) {
+        if (((mhash == MHASH_get && strcmp(method, "get") == 0) || (mhash == MHASH_deref && strcmp(method, "deref") == 0)) && arg_count == 0) {
             *result = value_deep_clone(&ref->value);
             return true;
         }
-        if (strcmp(method, "set") == 0 && arg_count == 1 && arg_count == 1) {
+        if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 1 && arg_count == 1) {
             if (obj->phase == VTAG_CRYSTAL) {
                 *result = value_unit();
                 return true;
@@ -1813,18 +1954,18 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "inner_type") == 0 && arg_count == 0) {
+        if (mhash == MHASH_inner_type && strcmp(method, "inner_type") == 0 && arg_count == 0) {
             *result = value_string(value_type_name(&ref->value));
             return true;
         }
         /* Proxy: delegate to inner value's methods if applicable */
         if (ref->value.type == VAL_MAP) {
-            if (strcmp(method, "get") == 0 && arg_count == 1 && args[0].type == VAL_STR) {
+            if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1 && args[0].type == VAL_STR) {
                 LatValue *val = lat_map_get(ref->value.as.map.map, args[0].as.str_val);
                 *result = val ? value_deep_clone(val) : value_nil();
                 return true;
             }
-            if (strcmp(method, "set") == 0 && arg_count == 2 && args[0].type == VAL_STR) {
+            if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2 && args[0].type == VAL_STR) {
                 if (obj->phase != VTAG_CRYSTAL) {
                     LatValue cloned = rvm_clone(&args[1]);
                     lat_map_set(ref->value.as.map.map, args[0].as.str_val, &cloned);
@@ -1832,11 +1973,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 *result = value_unit();
                 return true;
             }
-            if ((strcmp(method, "has") == 0 || strcmp(method, "contains") == 0) && arg_count == 1 && args[0].type == VAL_STR) {
+            if (((mhash == MHASH_has && strcmp(method, "has") == 0) || (mhash == MHASH_contains && strcmp(method, "contains") == 0)) && arg_count == 1 && args[0].type == VAL_STR) {
                 *result = value_bool(lat_map_get(ref->value.as.map.map, args[0].as.str_val) != NULL);
                 return true;
             }
-            if (strcmp(method, "keys") == 0 && arg_count == 0) {
+            if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *keys = malloc(cap * sizeof(LatValue));
                 size_t cnt = 0;
@@ -1848,7 +1989,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 free(keys);
                 return true;
             }
-            if (strcmp(method, "values") == 0 && arg_count == 0) {
+            if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *vals = malloc(cap * sizeof(LatValue));
                 size_t cnt = 0;
@@ -1860,7 +2001,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 free(vals);
                 return true;
             }
-            if (strcmp(method, "entries") == 0 && arg_count == 0) {
+            if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *entries = malloc(cap * sizeof(LatValue));
                 size_t cnt = 0;
@@ -1875,11 +2016,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 free(entries);
                 return true;
             }
-            if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+            if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
                 *result = value_int((int64_t)lat_map_len(ref->value.as.map.map));
                 return true;
             }
-            if (strcmp(method, "merge") == 0 && arg_count == 1 && args[0].type == VAL_MAP) {
+            if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1 && args[0].type == VAL_MAP) {
                 if (obj->phase != VTAG_CRYSTAL) {
                     for (size_t i = 0; i < args[0].as.map.map->cap; i++) {
                         if (args[0].as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1892,7 +2033,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             }
         }
         if (ref->value.type == VAL_ARRAY) {
-            if (strcmp(method, "push") == 0 && arg_count == 1) {
+            if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
                 LatValue val = rvm_clone(&args[0]);
                 if (ref->value.as.array.len >= ref->value.as.array.cap) {
                     ref->value.as.array.cap = ref->value.as.array.cap ? ref->value.as.array.cap * 2 : 4;
@@ -1903,16 +2044,16 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 *result = value_unit();
                 return true;
             }
-            if (strcmp(method, "pop") == 0 && arg_count == 0) {
+            if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
                 if (ref->value.as.array.len == 0) { *result = value_nil(); }
                 else { *result = ref->value.as.array.elems[--ref->value.as.array.len]; }
                 return true;
             }
-            if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+            if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
                 *result = value_int((int64_t)ref->value.as.array.len);
                 return true;
             }
-            if (strcmp(method, "contains") == 0 && arg_count == 1) {
+            if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
                 bool found = false;
                 for (size_t i = 0; i < ref->value.as.array.len; i++) {
                     if (value_eq(&ref->value.as.array.elems[i], &args[0])) { found = true; break; }
@@ -1925,7 +2066,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
 
     /* ── Channel methods ── */
     if (obj->type == VAL_CHANNEL) {
-        if (strcmp(method, "send") == 0 && arg_count == 1) {
+        if (mhash == MHASH_send && strcmp(method, "send") == 0 && arg_count == 1) {
             if (!value_is_crystal(&args[0]) && args[0].phase != VTAG_UNPHASED) {
                 vm->error = strdup("channel send requires crystal or unphased values");
                 *result = value_unit();
@@ -1936,13 +2077,13 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_unit();
             return true;
         }
-        if (strcmp(method, "recv") == 0 && arg_count == 0) {
+        if (mhash == MHASH_recv && strcmp(method, "recv") == 0 && arg_count == 0) {
             bool ok = false;
             *result = channel_recv(obj->as.channel.ch, &ok);
             if (!ok) *result = value_unit();
             return true;
         }
-        if (strcmp(method, "close") == 0 && arg_count == 0) {
+        if (mhash == MHASH_close && strcmp(method, "close") == 0 && arg_count == 0) {
             channel_close(obj->as.channel.ch);
             *result = value_unit();
             return true;
@@ -2010,7 +2151,7 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
 
     new_regs[0] = value_unit();
     for (int i = 0; i < argc; i++) {
-        new_regs[1 + i] = rvm_clone(&args[i]);
+        new_regs[1 + i] = rvm_clone_or_borrow(&args[i]);
     }
 
     ObjUpvalue **upvals = (ObjUpvalue **)closure->as.closure.captured_env;
@@ -2211,15 +2352,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     CASE(MOVE) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
-        /* Fast path: REGION_CONST and REGION_INTERNED strings can be
-         * shared between registers without strdup — the chunk/intern
-         * table owns the pointer, not the register. */
-        if (R[b].type == VAL_STR &&
-            (R[b].region_id == REGION_CONST || R[b].region_id == REGION_INTERNED)) {
-            reg_set(&R[a], R[b]);  /* bitwise copy, no alloc */
-        } else {
-            reg_set(&R[a], rvm_clone(&R[b]));
-        }
+        /* Fast path: primitives (int/float/bool/nil/unit/range) and borrowed
+         * strings (REGION_CONST/INTERNED) can be bitwise-copied between registers.
+         * Primitives have no heap data; borrowed strings are owned by the
+         * constant pool or intern table.  rvm_clone_or_borrow handles both. */
+        reg_set(&R[a], rvm_clone_or_borrow(&R[b]));
         /* Record history for tracked variables */
         {
             if (vm->rt->tracking_active &&
@@ -2235,10 +2372,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint16_t bx = REG_GET_Bx(instr);
         LatValue kv = frame->chunk->constants[bx];
-        /* String constants: borrow pointer from constant pool (REGION_CONST)
+        /* Fast path: primitives (int/float/bool/etc) are bitwise-copied directly.
+         * String constants: borrow pointer from constant pool (REGION_CONST)
          * instead of strdup.  value_free skips REGION_CONST (pool owns it);
          * rvm_clone will strdup if the value escapes to globals/arrays. */
-        if (kv.type == VAL_STR) {
+        if (RVM_IS_PRIMITIVE(kv)) {
+            reg_set(&R[a], kv);
+        } else if (kv.type == VAL_STR) {
             kv.region_id = REGION_CONST;
             reg_set(&R[a], kv);
         } else {
@@ -2580,7 +2720,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatValue val;
         if (!env_get(vm->env, name, &val))
             RVM_ERROR("undefined variable '%s'", name);
-        reg_set(&R[a], rvm_clone(&val));
+        /* env_get already returns a value_deep_clone'd copy — no need to
+         * clone again.  Directly assign the owned value to the register. */
+        reg_set(&R[a], val);
         DISPATCH();
     }
 
@@ -2658,7 +2800,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             bool found = false;
             for (size_t i = 0; i < R[b].as.strct.field_count; i++) {
                 if (strcmp(R[b].as.strct.field_names[i], field_name) == 0) {
-                    reg_set(&R[a], rvm_clone(&R[b].as.strct.field_values[i]));
+                    /* Fast path: primitive/borrowed fields avoid rvm_clone overhead */
+                    reg_set(&R[a], rvm_clone_or_borrow(&R[b].as.strct.field_values[i]));
                     found = true;
                     break;
                 }
@@ -2669,14 +2812,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[b].type == VAL_MAP) {
             LatValue *val = lat_map_get(R[b].as.map.map, field_name);
             if (val)
-                reg_set(&R[a], rvm_clone(val));
+                reg_set(&R[a], rvm_clone_or_borrow(val));
             else
                 reg_set(&R[a], value_nil());
         } else if (R[b].type == VAL_TUPLE) {
             char *endp;
             long idx = strtol(field_name, &endp, 10);
             if (*endp == '\0' && idx >= 0 && (size_t)idx < R[b].as.tuple.len)
-                reg_set(&R[a], rvm_clone(&R[b].as.tuple.elems[idx]));
+                reg_set(&R[a], rvm_clone_or_borrow(&R[b].as.tuple.elems[idx]));
             else
                 RVM_ERROR("tuple has no field '%s'", field_name);
         } else if (R[b].type == VAL_ENUM) {
@@ -2801,13 +2944,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (idx < 0 || (size_t)idx >= R[b].as.array.len)
                 RVM_ERROR("array index %lld out of bounds (len %zu)",
                     (long long)R[c].as.int_val, R[b].as.array.len);
-            reg_set(&R[a], rvm_clone(&R[b].as.array.elems[idx]));
+            /* Fast path: primitive elements (int/float/bool/nil/unit/range)
+             * are bitwise-copied without rvm_clone.  No heap data to manage.
+             * This is the hot path for sieve/bubble_sort array reads. */
+            reg_set(&R[a], rvm_clone_or_borrow(&R[b].as.array.elems[idx]));
         } else if (R[b].type == VAL_MAP) {
             if (R[c].type != VAL_STR)
                 RVM_ERROR("map key must be a string");
             LatValue *val = lat_map_get(R[b].as.map.map, R[c].as.str_val);
             if (val)
-                reg_set(&R[a], rvm_clone(val));
+                reg_set(&R[a], rvm_clone_or_borrow(val));
             else
                 reg_set(&R[a], value_nil());
         } else if (R[b].type == VAL_STR) {
@@ -2882,8 +3028,15 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (idx < 0) idx += (int64_t)R[a].as.array.len;
             if (idx < 0 || (size_t)idx >= R[a].as.array.len)
                 RVM_ERROR("array index out of bounds");
-            value_free(&R[a].as.array.elems[idx]);
-            R[a].as.array.elems[idx] = rvm_clone(&R[c]);
+            /* Fast path: when both old element and new value are primitives,
+             * skip value_free (no-op for primitives) and rvm_clone (bitwise copy).
+             * This is the hot path for sieve `flags[j] = 0` and bubble_sort swaps. */
+            if (RVM_IS_PRIMITIVE(R[a].as.array.elems[idx]) && RVM_IS_PRIMITIVE(R[c])) {
+                R[a].as.array.elems[idx] = R[c];
+            } else {
+                value_free(&R[a].as.array.elems[idx]);
+                R[a].as.array.elems[idx] = rvm_clone(&R[c]);
+            }
         } else if (R[a].type == VAL_MAP) {
             if (R[b].type != VAL_STR)
                 RVM_ERROR("map key must be a string");
@@ -2924,7 +3077,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         if (frame->upvalues && b < frame->upvalue_count) {
-            reg_set(&R[a], rvm_clone(frame->upvalues[b]->location));
+            /* Fast path: primitives/borrowed strings avoid rvm_clone overhead */
+            reg_set(&R[a], rvm_clone_or_borrow(frame->upvalues[b]->location));
         }
         DISPATCH();
     }
@@ -2933,8 +3087,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         if (frame->upvalues && b < frame->upvalue_count) {
+            /* Upvalue locations must own their values (survive frame pops),
+             * so we need real clones for heap types.  Primitives are safe
+             * to bitwise-copy. */
             value_free(frame->upvalues[b]->location);
-            *frame->upvalues[b]->location = rvm_clone(&R[a]);
+            *frame->upvalues[b]->location = rvm_clone_or_borrow(&R[a]);
         }
         DISPATCH();
     }
@@ -3035,10 +3192,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     }
                 }
             }
-            /* Collect args */
+            /* Collect args — use rvm_clone_or_borrow for fast primitives.
+             * Native functions receive owned copies; value_free after call
+             * handles cleanup.  Primitives have no heap data so bitwise
+             * copy + no-op free is safe. */
             LatValue args[16];
             for (int i = 0; i < b; i++)
-                args[i] = rvm_clone(&R[a + 1 + i]);
+                args[i] = rvm_clone_or_borrow(&R[a + 1 + i]);
             LatValue ret = native(args, b);
             for (int i = 0; i < b; i++)
                 value_free(&args[i]);
@@ -3065,7 +3225,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (func->as.closure.default_values == VM_EXT_MARKER) {
             LatValue args[16];
             for (int i = 0; i < b; i++)
-                args[i] = rvm_clone(&R[a + 1 + i]);
+                args[i] = rvm_clone_or_borrow(&R[a + 1 + i]);
             LatValue ret = ext_call_native(func->as.closure.native_fn, args, (size_t)b);
             for (int i = 0; i < b; i++)
                 value_free(&args[i]);
@@ -3128,10 +3288,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
         for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
 
-        /* Copy arguments: R[0] = reserved, R[1..n] = args */
+        /* Copy arguments: R[0] = reserved, R[1..n] = args.
+         * Use rvm_clone_or_borrow for fast primitive/borrowed-string passthrough.
+         * Hot path for fib_recursive passing ints. */
         new_regs[0] = value_unit();  /* Reserved slot */
         for (int i = 0; i < b; i++) {
-            new_regs[1 + i] = rvm_clone(&R[a + 1 + i]);
+            new_regs[1 + i] = rvm_clone_or_borrow(&R[a + 1 + i]);
         }
 
         /* Set up upvalues */
@@ -3156,7 +3318,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
 
-        LatValue ret_val = (b > 0) ? rvm_clone(&R[a]) : value_unit();
+        /* Fast path: primitives can be bitwise-copied without rvm_clone.
+         * This is the hot path for fib_recursive returning ints.
+         * Borrowed strings also safe since the frame cleanup below
+         * won't free them (value_free_inline skips non-REGION_NONE). */
+        LatValue ret_val = (b > 0) ? rvm_clone_or_borrow(&R[a]) : value_unit();
         uint8_t dest_reg = frame->caller_result_reg;
 
         /* Close any open upvalues that point into this frame's registers */
@@ -3684,17 +3850,22 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             int64_t end = R[b].as.range.end;
             int64_t current_val = start + idx;
             if (current_val >= end) {
-                /* Done — set result to nil (falsy, triggers JMPFALSE) */
-                reg_set(&R[a], value_nil());
+                /* Done — range iteration produces only primitives (nil/int),
+                 * so skip reg_set overhead and assign directly. */
+                R[a].type = VAL_NIL;
+                R[a].region_id = REGION_NONE;
             } else {
-                reg_set(&R[a], value_int(current_val));
+                R[a].type = VAL_INT;
+                R[a].as.int_val = current_val;
+                R[a].region_id = REGION_NONE;
             }
         } else if (R[b].type == VAL_ARRAY) {
             int64_t idx = R[c].as.int_val;
             if ((size_t)idx >= R[b].as.array.len) {
                 reg_set(&R[a], value_nil());
             } else {
-                reg_set(&R[a], rvm_clone(&R[b].as.array.elems[idx]));
+                /* Fast path: primitive/borrowed array elements avoid rvm_clone */
+                reg_set(&R[a], rvm_clone_or_borrow(&R[b].as.array.elems[idx]));
             }
         } else {
             RVM_ERROR("cannot iterate over %s", value_type_name(&R[b]));
@@ -4965,8 +5136,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 int64_t idx = R[b].as.int_val;
                 if (idx < 0) idx += (int64_t)R[a].as.array.len;
                 if (idx >= 0 && (size_t)idx < R[a].as.array.len) {
-                    value_free(&R[a].as.array.elems[idx]);
-                    R[a].as.array.elems[idx] = rvm_clone(&R[c]);
+                    /* Fast path: primitive-to-primitive array store skips
+                     * both value_free and rvm_clone overhead. */
+                    if (RVM_IS_PRIMITIVE(R[a].as.array.elems[idx]) && RVM_IS_PRIMITIVE(R[c])) {
+                        R[a].as.array.elems[idx] = R[c];
+                    } else {
+                        value_free(&R[a].as.array.elems[idx]);
+                        R[a].as.array.elems[idx] = rvm_clone(&R[c]);
+                    }
                 }
             }
         } else if (R[a].type == VAL_MAP) {

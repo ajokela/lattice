@@ -2126,20 +2126,24 @@ fn parse_assignment() {
 }
 
 fn parse_compound_assignment_target(name: any, line: any) {
-    // For simplicity, handle single-level: obj.field = or obj[idx] =
+    // Handle single-level: obj.field = or obj[idx] =
     if peek_text() == "." {
-        emit_variable_get(name, line)
         advance()
         let field = expect("identifier", nil).text
         let op = advance().text
         if op == "=" {
+            // VM expects stack: [value, object] then SET_FIELD pops obj, pops val
             parse_expression()
+            emit_variable_get(name, line)
             let fidx = string_constant(field)
             emit_bytes(OP_SET_FIELD, fidx, line)
         } else {
-            emit_byte(OP_DUP, line)
+            // Compound assignment: obj.field += expr
+            // First, get the current field value
+            emit_variable_get(name, line)
             let fidx = string_constant(field)
             emit_bytes(OP_GET_FIELD, fidx, line)
+            // Compute new value
             parse_expression()
             match op {
                 "+=" => emit_byte(OP_ADD, line),
@@ -2148,9 +2152,13 @@ fn parse_compound_assignment_target(name: any, line: any) {
                 "/=" => emit_byte(OP_DIV, line),
                 _ => emit_byte(OP_MOD, line)
             }
+            // Stack: [new_value]. Now push object for SET_FIELD.
+            emit_variable_get(name, line)
             let fidx2 = string_constant(field)
             emit_bytes(OP_SET_FIELD, fidx2, line)
         }
+        // SET_FIELD leaves modified object on stack — write it back to variable
+        emit_variable_set(name, line)
         emit_byte(OP_POP, line)
     } else { if peek_text() == "[" {
         advance()

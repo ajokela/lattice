@@ -10899,6 +10899,1029 @@ static void test_pressure_of_after_change(void) {
     );
 }
 
+/* ======================================================================
+ * Cross-Backend Parity Tests
+ *
+ * These tests verify that all three backends (tree-walk, stack VM,
+ * register VM) produce identical results for every builtin method.
+ * The test binary runs each test on all backends in sequence, so a
+ * single ASSERT_OUTPUT here effectively checks 3-way parity.
+ * ====================================================================== */
+
+/* ── Array Higher-Order Methods ── */
+
+static void test_parity_array_map_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.map(|x| x * 2))\n"
+        "}\n",
+        "[2, 4, 6]"
+    );
+}
+
+static void test_parity_array_map_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = []\n"
+        "    print(a.map(|x| x + 1))\n"
+        "}\n",
+        "[]"
+    );
+}
+
+static void test_parity_array_map_strings(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [\"hello\", \"world\"]\n"
+        "    print(a.map(|s| s.to_upper()))\n"
+        "}\n",
+        "[HELLO, WORLD]"
+    );
+}
+
+static void test_parity_array_filter_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3, 4, 5, 6]\n"
+        "    print(a.filter(|x| x > 3))\n"
+        "}\n",
+        "[4, 5, 6]"
+    );
+}
+
+static void test_parity_array_filter_none(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.filter(|x| x > 10))\n"
+        "}\n",
+        "[]"
+    );
+}
+
+static void test_parity_array_filter_all(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.filter(|x| x > 0))\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_parity_array_reduce_sum(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3, 4]\n"
+        "    print(a.reduce(|acc, x| acc + x, 0))\n"
+        "}\n",
+        "10"
+    );
+}
+
+static void test_parity_array_reduce_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [\"a\", \"b\", \"c\"]\n"
+        "    print(a.reduce(|acc, x| acc + x, \"\"))\n"
+        "}\n",
+        "abc"
+    );
+}
+
+static void test_parity_array_reduce_product(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3, 4]\n"
+        "    print(a.reduce(|acc, x| acc * x, 1))\n"
+        "}\n",
+        "24"
+    );
+}
+
+static void test_parity_array_each_side_effect(void) {
+    /* Use for_each which is supported on all backends */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [10, 20, 30]\n"
+        "    a.for_each(|x| print(x))\n"
+        "}\n",
+        "10\n20\n30"
+    );
+}
+
+static void test_parity_array_sort_default(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [5, 2, 8, 1, 9]\n"
+        "    print(a.sort())\n"
+        "}\n",
+        "[1, 2, 5, 8, 9]"
+    );
+}
+
+static void test_parity_array_sort_strings(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [\"cherry\", \"apple\", \"banana\"]\n"
+        "    print(a.sort())\n"
+        "}\n",
+        "[apple, banana, cherry]"
+    );
+}
+
+static void test_parity_array_sort_already_sorted(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.sort())\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_parity_array_find_present(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3, 4]\n"
+        "    print(a.find(|x| x > 2))\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_parity_array_find_absent(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.find(|x| x > 10))\n"
+        "}\n",
+        "()"
+    );
+}
+
+static void test_parity_array_any_true(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.any(|x| x == 2))\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_parity_array_any_false(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.any(|x| x > 10))\n"
+        "}\n",
+        "false"
+    );
+}
+
+static void test_parity_array_all_true(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [2, 4, 6]\n"
+        "    print(a.all(|x| x > 0))\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_parity_array_all_false(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [2, 4, 5]\n"
+        "    print(a.all(|x| x % 2 == 0))\n"
+        "}\n",
+        "false"
+    );
+}
+
+static void test_parity_array_flat_map(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3]\n"
+        "    print(a.flat_map(|x| [x, x * 10]))\n"
+        "}\n",
+        "[1, 10, 2, 20, 3, 30]"
+    );
+}
+
+static void test_parity_array_sort_by(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [\"cherry\", \"ab\", \"date\"]\n"
+        "    print(a.sort_by(|a, b| a.len() - b.len()))\n"
+        "}\n",
+        "[ab, date, cherry]"
+    );
+}
+
+static void test_parity_array_group_by(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [1, 2, 3, 4, 5, 6]\n"
+        "    let g = a.group_by(|x| x % 2 == 0)\n"
+        "    print(g[\"true\"])\n"
+        "    print(g[\"false\"])\n"
+        "}\n",
+        "[2, 4, 6]\n[1, 3, 5]"
+    );
+}
+
+static void test_parity_array_for_each(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    [\"a\", \"b\", \"c\"].for_each(|x| print(x))\n"
+        "}\n",
+        "a\nb\nc"
+    );
+}
+
+/* ── Array Non-Closure Methods ── */
+
+static void test_parity_array_push_pop(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = [1, 2]\n"
+        "    a.push(3)\n"
+        "    print(a)\n"
+        "    let v = a.pop()\n"
+        "    print(v)\n"
+        "    print(a)\n"
+        "}\n",
+        "[1, 2, 3]\n3\n[1, 2]"
+    );
+}
+
+static void test_parity_array_reverse(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4].reverse())\n"
+        "}\n",
+        "[4, 3, 2, 1]"
+    );
+}
+
+static void test_parity_array_contains(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [10, 20, 30]\n"
+        "    print(a.contains(20))\n"
+        "    print(a.contains(99))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_parity_array_index_of(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [\"a\", \"b\", \"c\", \"b\"]\n"
+        "    print(a.index_of(\"b\"))\n"
+        "    print(a.index_of(\"z\"))\n"
+        "}\n",
+        "1\n-1"
+    );
+}
+
+static void test_parity_array_slice(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [10, 20, 30, 40, 50]\n"
+        "    print(a.slice(1, 4))\n"
+        "}\n",
+        "[20, 30, 40]"
+    );
+}
+
+static void test_parity_array_join(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([\"a\", \"b\", \"c\"].join(\", \"))\n"
+        "}\n",
+        "a, b, c"
+    );
+}
+
+static void test_parity_array_unique(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 2, 3, 3, 3].unique())\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_parity_array_zip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3].zip([\"a\", \"b\", \"c\"]))\n"
+        "}\n",
+        "[[1, a], [2, b], [3, c]]"
+    );
+}
+
+static void test_parity_array_chunk(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4, 5].chunk(2))\n"
+        "}\n",
+        "[[1, 2], [3, 4], [5]]"
+    );
+}
+
+static void test_parity_array_take(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4, 5].take(3))\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_parity_array_drop(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4, 5].drop(2))\n"
+        "}\n",
+        "[3, 4, 5]"
+    );
+}
+
+static void test_parity_array_flat(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([[1, 2], [3], [4, 5]].flat())\n"
+        "}\n",
+        "[1, 2, 3, 4, 5]"
+    );
+}
+
+static void test_parity_array_first_last(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [10, 20, 30]\n"
+        "    print(a.first())\n"
+        "    print(a.last())\n"
+        "}\n",
+        "10\n30"
+    );
+}
+
+static void test_parity_array_sum(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([1, 2, 3, 4].sum())\n"
+        "}\n",
+        "10"
+    );
+}
+
+static void test_parity_array_min_max(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [3, 1, 4, 1, 5]\n"
+        "    print(a.min())\n"
+        "    print(a.max())\n"
+        "}\n",
+        "1\n5"
+    );
+}
+
+static void test_parity_array_insert(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = [1, 2, 4]\n"
+        "    a.insert(2, 3)\n"
+        "    print(a)\n"
+        "}\n",
+        "[1, 2, 3, 4]"
+    );
+}
+
+static void test_parity_array_remove_at(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = [1, 2, 3, 4]\n"
+        "    let removed = a.remove_at(1)\n"
+        "    print(removed)\n"
+        "    print(a)\n"
+        "}\n",
+        "2\n[1, 3, 4]"
+    );
+}
+
+static void test_parity_array_enumerate(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print([\"a\", \"b\"].enumerate())\n"
+        "}\n",
+        "[[0, a], [1, b]]"
+    );
+}
+
+/* ── Array Method Chaining ── */
+
+static void test_parity_array_map_filter_chain(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = [1, 2, 3, 4, 5].map(|x| x * 2).filter(|x| x > 4)\n"
+        "    print(r)\n"
+        "}\n",
+        "[6, 8, 10]"
+    );
+}
+
+static void test_parity_array_filter_map_chain(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = [1, 2, 3, 4, 5, 6].filter(|x| x % 2 == 0).map(|x| x * 10)\n"
+        "    print(r)\n"
+        "}\n",
+        "[20, 40, 60]"
+    );
+}
+
+static void test_parity_array_map_reduce_chain(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = [1, 2, 3].map(|x| x * x).reduce(|a, b| a + b, 0)\n"
+        "    print(r)\n"
+        "}\n",
+        "14"
+    );
+}
+
+/* ── String Methods (Allocation-Heavy) ── */
+
+static void test_parity_str_replace(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello world\".replace(\"world\", \"there\"))\n"
+        "}\n",
+        "hello there"
+    );
+}
+
+static void test_parity_str_split(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"a,b,c\".split(\",\"))\n"
+        "}\n",
+        "[a, b, c]"
+    );
+}
+
+static void test_parity_str_split_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"\".split(\",\"))\n"
+        "}\n",
+        "[]"
+    );
+}
+
+static void test_parity_str_chars(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"abc\".chars())\n"
+        "}\n",
+        "[a, b, c]"
+    );
+}
+
+static void test_parity_str_bytes(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"ABC\".bytes())\n"
+        "}\n",
+        "[65, 66, 67]"
+    );
+}
+
+static void test_parity_str_substring(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello world\".substring(0, 5))\n"
+        "}\n",
+        "hello"
+    );
+}
+
+static void test_parity_str_index_of(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello\".index_of(\"ll\"))\n"
+        "    print(\"hello\".index_of(\"xyz\"))\n"
+        "}\n",
+        "2\n-1"
+    );
+}
+
+static void test_parity_str_repeat(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"ab\".repeat(3))\n"
+        "}\n",
+        "ababab"
+    );
+}
+
+static void test_parity_str_pad_left(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"42\".pad_left(5, \"0\"))\n"
+        "}\n",
+        "00042"
+    );
+}
+
+static void test_parity_str_pad_right(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hi\".pad_right(5, \".\"))\n"
+        "}\n",
+        "hi..."
+    );
+}
+
+static void test_parity_str_trim_start(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"  hello  \".trim_start())\n"
+        "}\n",
+        "hello  "
+    );
+}
+
+static void test_parity_str_trim_end(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"  hello  \".trim_end())\n"
+        "}\n",
+        "  hello"
+    );
+}
+
+static void test_parity_str_reverse(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"abcdef\".reverse())\n"
+        "}\n",
+        "fedcba"
+    );
+}
+
+static void test_parity_str_count(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"banana\".count(\"a\"))\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_parity_str_is_empty(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"\".is_empty())\n"
+        "    print(\"x\".is_empty())\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_parity_str_capitalize(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello world\".capitalize())\n"
+        "}\n",
+        "Hello world"
+    );
+}
+
+static void test_parity_str_title_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello world\".title_case())\n"
+        "}\n",
+        "Hello World"
+    );
+}
+
+static void test_parity_str_snake_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"helloWorld\".snake_case())\n"
+        "}\n",
+        "hello_world"
+    );
+}
+
+static void test_parity_str_camel_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello_world\".camel_case())\n"
+        "}\n",
+        "helloWorld"
+    );
+}
+
+static void test_parity_str_kebab_case(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    print(\"hello_world\".kebab_case())\n"
+        "}\n",
+        "hello-world"
+    );
+}
+
+/* ── Map Methods ── */
+
+static void test_parity_map_keys_values(void) {
+    /* Map iteration order is insertion order in Lattice */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"a\"] = 1\n"
+        "    m[\"b\"] = 2\n"
+        "    m[\"c\"] = 3\n"
+        "    print(m.len())\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_parity_map_has(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"x\"] = 10\n"
+        "    m[\"y\"] = 20\n"
+        "    print(m.has(\"x\"))\n"
+        "    print(m.has(\"z\"))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_parity_map_remove(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"a\"] = 1\n"
+        "    m[\"b\"] = 2\n"
+        "    m.remove(\"a\")\n"
+        "    print(m.len())\n"
+        "    print(m.has(\"a\"))\n"
+        "}\n",
+        "1\nfalse"
+    );
+}
+
+static void test_parity_map_merge(void) {
+    /* merge() is in-place: it mutates m1 and returns unit */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m1 = Map::new()\n"
+        "    m1[\"a\"] = 1\n"
+        "    flux m2 = Map::new()\n"
+        "    m2[\"b\"] = 2\n"
+        "    m1.merge(m2)\n"
+        "    print(m1.len())\n"
+        "    print(m1[\"a\"])\n"
+        "    print(m1[\"b\"])\n"
+        "}\n",
+        "2\n1\n2"
+    );
+}
+
+static void test_parity_map_entries(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"x\"] = 42\n"
+        "    let e = m.entries()\n"
+        "    print(e.len())\n"
+        "    print(e[0][0])\n"
+        "    print(e[0][1])\n"
+        "}\n",
+        "1\nx\n42"
+    );
+}
+
+static void test_parity_map_for_each(void) {
+    /* for_each iterates over key-value pairs */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"x\"] = 42\n"
+        "    m.for_each(|k, v| print(k + \"=\" + to_string(v)))\n"
+        "}\n",
+        "x=42"
+    );
+}
+
+static void test_parity_map_filter(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"a\"] = 1\n"
+        "    m[\"b\"] = 20\n"
+        "    m[\"c\"] = 3\n"
+        "    let f = m.filter(|k, v| v > 5)\n"
+        "    print(f.len())\n"
+        "    print(f[\"b\"])\n"
+        "}\n",
+        "1\n20"
+    );
+}
+
+/* ── Set Methods ── */
+
+static void test_parity_set_add_has_remove(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux s = Set::new()\n"
+        "    s.add(1)\n"
+        "    s.add(2)\n"
+        "    s.add(2)\n"
+        "    print(s.len())\n"
+        "    print(s.has(1))\n"
+        "    print(s.has(3))\n"
+        "    s.remove(1)\n"
+        "    print(s.len())\n"
+        "}\n",
+        "2\ntrue\nfalse\n1"
+    );
+}
+
+static void test_parity_set_union(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = Set::from([1, 2, 3])\n"
+        "    let b = Set::from([3, 4, 5])\n"
+        "    let u = a.union(b)\n"
+        "    print(u.len())\n"
+        "}\n",
+        "5"
+    );
+}
+
+static void test_parity_set_intersection(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = Set::from([1, 2, 3, 4])\n"
+        "    let b = Set::from([3, 4, 5, 6])\n"
+        "    let i = a.intersection(b)\n"
+        "    print(i.len())\n"
+        "    print(i.has(3))\n"
+        "    print(i.has(4))\n"
+        "    print(i.has(1))\n"
+        "}\n",
+        "2\ntrue\ntrue\nfalse"
+    );
+}
+
+static void test_parity_set_difference(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = Set::from([1, 2, 3, 4])\n"
+        "    let b = Set::from([3, 4, 5])\n"
+        "    let d = a.difference(b)\n"
+        "    print(d.len())\n"
+        "    print(d.has(1))\n"
+        "    print(d.has(2))\n"
+        "    print(d.has(3))\n"
+        "}\n",
+        "2\ntrue\ntrue\nfalse"
+    );
+}
+
+static void test_parity_set_subset_superset(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = Set::from([1, 2])\n"
+        "    let b = Set::from([1, 2, 3])\n"
+        "    print(a.is_subset(b))\n"
+        "    print(b.is_superset(a))\n"
+        "    print(b.is_subset(a))\n"
+        "}\n",
+        "true\ntrue\nfalse"
+    );
+}
+
+static void test_parity_set_to_array(void) {
+    /* Set::from single element to guarantee order */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = Set::from([42])\n"
+        "    let a = s.to_array()\n"
+        "    print(a.len())\n"
+        "    print(a[0])\n"
+        "}\n",
+        "1\n42"
+    );
+}
+
+/* ── Buffer Methods ── */
+
+static void test_parity_buffer_write_read_u8(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(4)\n"
+        "    b.write_u8(0, 255)\n"
+        "    b.write_u8(1, 42)\n"
+        "    print(b.read_u8(0))\n"
+        "    print(b.read_u8(1))\n"
+        "    print(b.len())\n"
+        "}\n",
+        "255\n42\n4"
+    );
+}
+
+static void test_parity_buffer_write_read_u16(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(4)\n"
+        "    b.write_u16(0, 1000)\n"
+        "    print(b.read_u16(0))\n"
+        "}\n",
+        "1000"
+    );
+}
+
+static void test_parity_buffer_write_read_u32(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(8)\n"
+        "    b.write_u32(0, 100000)\n"
+        "    print(b.read_u32(0))\n"
+        "}\n",
+        "100000"
+    );
+}
+
+static void test_parity_buffer_push(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(0)\n"
+        "    b.push(10)\n"
+        "    b.push(20)\n"
+        "    print(b.len())\n"
+        "    print(b.read_u8(0))\n"
+        "    print(b.read_u8(1))\n"
+        "}\n",
+        "2\n10\n20"
+    );
+}
+
+static void test_parity_buffer_slice(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(4)\n"
+        "    b.write_u8(0, 10)\n"
+        "    b.write_u8(1, 20)\n"
+        "    b.write_u8(2, 30)\n"
+        "    b.write_u8(3, 40)\n"
+        "    let s = b.slice(1, 3)\n"
+        "    print(s.len())\n"
+        "    print(s.read_u8(0))\n"
+        "    print(s.read_u8(1))\n"
+        "}\n",
+        "2\n20\n30"
+    );
+}
+
+static void test_parity_buffer_to_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(3)\n"
+        "    b.write_u8(0, 1)\n"
+        "    b.write_u8(1, 2)\n"
+        "    b.write_u8(2, 3)\n"
+        "    print(b.to_array())\n"
+        "}\n",
+        "[1, 2, 3]"
+    );
+}
+
+static void test_parity_buffer_clear_fill(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(3)\n"
+        "    b.fill(99)\n"
+        "    print(b.read_u8(0))\n"
+        "    print(b.read_u8(2))\n"
+        "    b.clear()\n"
+        "    print(b.len())\n"
+        "}\n",
+        "99\n99\n0"
+    );
+}
+
+static void test_parity_buffer_to_hex(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(3)\n"
+        "    b.write_u8(0, 255)\n"
+        "    b.write_u8(1, 0)\n"
+        "    b.write_u8(2, 171)\n"
+        "    print(b.to_hex())\n"
+        "}\n",
+        "ff00ab"
+    );
+}
+
+static void test_parity_buffer_read_i8(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux b = Buffer::new(2)\n"
+        "    b.write_u8(0, 200)\n"
+        "    print(b.read_i8(0))\n"
+        "}\n",
+        "-56"
+    );
+}
+
+/* ── Nested / Edge Case Parity ── */
+
+static void test_parity_nested_array_methods(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = [[3, 1], [2, 5], [4]]\n"
+        "    let flat_sorted = a.flat().sort()\n"
+        "    print(flat_sorted)\n"
+        "}\n",
+        "[1, 2, 3, 4, 5]"
+    );
+}
+
+static void test_parity_str_split_join_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"hello world foo\"\n"
+        "    let parts = s.split(\" \")\n"
+        "    let rejoined = parts.join(\" \")\n"
+        "    print(rejoined)\n"
+        "}\n",
+        "hello world foo"
+    );
+}
+
+static void test_parity_array_empty_operations(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = []\n"
+        "    print(a.len())\n"
+        "    print(a.reverse())\n"
+        "    print(a.unique())\n"
+        "    print(a.flat())\n"
+        "    print(a.sum())\n"
+        "}\n",
+        "0\n[]\n[]\n[]\n0"
+    );
+}
+
+static void test_parity_map_empty_operations(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let m = Map::new()\n"
+        "    print(m.len())\n"
+        "    print(m.keys())\n"
+        "    print(m.values())\n"
+        "    print(m.entries())\n"
+        "}\n",
+        "0\n[]\n[]\n[]"
+    );
+}
+
+static void test_parity_str_methods_chain(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"  Hello World  \"\n"
+        "    print(s.trim().to_lower())\n"
+        "}\n",
+        "hello world"
+    );
+}
+
+static void test_parity_array_map_with_index(void) {
+    /* Verify map + enumerate interaction */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = [10, 20, 30].enumerate().map(|pair| pair[0] + pair[1])\n"
+        "    print(r)\n"
+        "}\n",
+        "[10, 21, 32]"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -11936,4 +12959,112 @@ void register_stdlib_tests(void) {
     register_test("test_pressure_no_resize_allows_index_assign", test_pressure_no_resize_allows_index_assign);
     register_test("test_depressurize_then_push", test_depressurize_then_push);
     register_test("test_pressure_of_after_change", test_pressure_of_after_change);
+
+    /* Cross-backend parity: Array higher-order methods */
+    register_test("test_parity_array_map_basic", test_parity_array_map_basic);
+    register_test("test_parity_array_map_empty", test_parity_array_map_empty);
+    register_test("test_parity_array_map_strings", test_parity_array_map_strings);
+    register_test("test_parity_array_filter_basic", test_parity_array_filter_basic);
+    register_test("test_parity_array_filter_none", test_parity_array_filter_none);
+    register_test("test_parity_array_filter_all", test_parity_array_filter_all);
+    register_test("test_parity_array_reduce_sum", test_parity_array_reduce_sum);
+    register_test("test_parity_array_reduce_string", test_parity_array_reduce_string);
+    register_test("test_parity_array_reduce_product", test_parity_array_reduce_product);
+    register_test("test_parity_array_each_side_effect", test_parity_array_each_side_effect);
+    register_test("test_parity_array_sort_default", test_parity_array_sort_default);
+    register_test("test_parity_array_sort_strings", test_parity_array_sort_strings);
+    register_test("test_parity_array_sort_already_sorted", test_parity_array_sort_already_sorted);
+    register_test("test_parity_array_find_present", test_parity_array_find_present);
+    register_test("test_parity_array_find_absent", test_parity_array_find_absent);
+    register_test("test_parity_array_any_true", test_parity_array_any_true);
+    register_test("test_parity_array_any_false", test_parity_array_any_false);
+    register_test("test_parity_array_all_true", test_parity_array_all_true);
+    register_test("test_parity_array_all_false", test_parity_array_all_false);
+    register_test("test_parity_array_flat_map", test_parity_array_flat_map);
+    register_test("test_parity_array_sort_by", test_parity_array_sort_by);
+    register_test("test_parity_array_group_by", test_parity_array_group_by);
+    register_test("test_parity_array_for_each", test_parity_array_for_each);
+
+    /* Cross-backend parity: Array non-closure methods */
+    register_test("test_parity_array_push_pop", test_parity_array_push_pop);
+    register_test("test_parity_array_reverse", test_parity_array_reverse);
+    register_test("test_parity_array_contains", test_parity_array_contains);
+    register_test("test_parity_array_index_of", test_parity_array_index_of);
+    register_test("test_parity_array_slice", test_parity_array_slice);
+    register_test("test_parity_array_join", test_parity_array_join);
+    register_test("test_parity_array_unique", test_parity_array_unique);
+    register_test("test_parity_array_zip", test_parity_array_zip);
+    register_test("test_parity_array_chunk", test_parity_array_chunk);
+    register_test("test_parity_array_take", test_parity_array_take);
+    register_test("test_parity_array_drop", test_parity_array_drop);
+    register_test("test_parity_array_flat", test_parity_array_flat);
+    register_test("test_parity_array_first_last", test_parity_array_first_last);
+    register_test("test_parity_array_sum", test_parity_array_sum);
+    register_test("test_parity_array_min_max", test_parity_array_min_max);
+    register_test("test_parity_array_insert", test_parity_array_insert);
+    register_test("test_parity_array_remove_at", test_parity_array_remove_at);
+    register_test("test_parity_array_enumerate", test_parity_array_enumerate);
+
+    /* Cross-backend parity: Array method chaining */
+    register_test("test_parity_array_map_filter_chain", test_parity_array_map_filter_chain);
+    register_test("test_parity_array_filter_map_chain", test_parity_array_filter_map_chain);
+    register_test("test_parity_array_map_reduce_chain", test_parity_array_map_reduce_chain);
+
+    /* Cross-backend parity: String methods */
+    register_test("test_parity_str_replace", test_parity_str_replace);
+    register_test("test_parity_str_split", test_parity_str_split);
+    register_test("test_parity_str_split_empty", test_parity_str_split_empty);
+    register_test("test_parity_str_chars", test_parity_str_chars);
+    register_test("test_parity_str_bytes", test_parity_str_bytes);
+    register_test("test_parity_str_substring", test_parity_str_substring);
+    register_test("test_parity_str_index_of", test_parity_str_index_of);
+    register_test("test_parity_str_repeat", test_parity_str_repeat);
+    register_test("test_parity_str_pad_left", test_parity_str_pad_left);
+    register_test("test_parity_str_pad_right", test_parity_str_pad_right);
+    register_test("test_parity_str_trim_start", test_parity_str_trim_start);
+    register_test("test_parity_str_trim_end", test_parity_str_trim_end);
+    register_test("test_parity_str_reverse", test_parity_str_reverse);
+    register_test("test_parity_str_count", test_parity_str_count);
+    register_test("test_parity_str_is_empty", test_parity_str_is_empty);
+    register_test("test_parity_str_capitalize", test_parity_str_capitalize);
+    register_test("test_parity_str_title_case", test_parity_str_title_case);
+    register_test("test_parity_str_snake_case", test_parity_str_snake_case);
+    register_test("test_parity_str_camel_case", test_parity_str_camel_case);
+    register_test("test_parity_str_kebab_case", test_parity_str_kebab_case);
+
+    /* Cross-backend parity: Map methods */
+    register_test("test_parity_map_keys_values", test_parity_map_keys_values);
+    register_test("test_parity_map_has", test_parity_map_has);
+    register_test("test_parity_map_remove", test_parity_map_remove);
+    register_test("test_parity_map_merge", test_parity_map_merge);
+    register_test("test_parity_map_entries", test_parity_map_entries);
+    register_test("test_parity_map_for_each", test_parity_map_for_each);
+    register_test("test_parity_map_filter", test_parity_map_filter);
+
+    /* Cross-backend parity: Set methods */
+    register_test("test_parity_set_add_has_remove", test_parity_set_add_has_remove);
+    register_test("test_parity_set_union", test_parity_set_union);
+    register_test("test_parity_set_intersection", test_parity_set_intersection);
+    register_test("test_parity_set_difference", test_parity_set_difference);
+    register_test("test_parity_set_subset_superset", test_parity_set_subset_superset);
+    register_test("test_parity_set_to_array", test_parity_set_to_array);
+
+    /* Cross-backend parity: Buffer methods */
+    register_test("test_parity_buffer_write_read_u8", test_parity_buffer_write_read_u8);
+    register_test("test_parity_buffer_write_read_u16", test_parity_buffer_write_read_u16);
+    register_test("test_parity_buffer_write_read_u32", test_parity_buffer_write_read_u32);
+    register_test("test_parity_buffer_push", test_parity_buffer_push);
+    register_test("test_parity_buffer_slice", test_parity_buffer_slice);
+    register_test("test_parity_buffer_to_array", test_parity_buffer_to_array);
+    register_test("test_parity_buffer_clear_fill", test_parity_buffer_clear_fill);
+    register_test("test_parity_buffer_to_hex", test_parity_buffer_to_hex);
+    register_test("test_parity_buffer_read_i8", test_parity_buffer_read_i8);
+
+    /* Cross-backend parity: Nested / edge cases */
+    register_test("test_parity_nested_array_methods", test_parity_nested_array_methods);
+    register_test("test_parity_str_split_join_roundtrip", test_parity_str_split_join_roundtrip);
+    register_test("test_parity_array_empty_operations", test_parity_array_empty_operations);
+    register_test("test_parity_map_empty_operations", test_parity_map_empty_operations);
+    register_test("test_parity_str_methods_chain", test_parity_str_methods_chain);
+    register_test("test_parity_array_map_with_index", test_parity_array_map_with_index);
 }

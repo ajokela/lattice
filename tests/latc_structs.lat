@@ -1,0 +1,204 @@
+// Test: struct and enum features for the self-hosted compiler (Step 4)
+
+// ---- Struct declarations ----
+
+struct Point { x: any, y: any }
+struct Rect { origin: any, width: any, height: any }
+struct Named { name: any, value: any }
+
+// ---- Enum declarations ----
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Rgb(any, any, any)
+}
+
+enum Shape {
+    Circle(any),
+    Square(any),
+    None
+}
+
+// ---- Trait + Impl ----
+
+trait Describable {
+    fn describe(self: any)
+}
+
+impl Describable for Point {
+    fn describe(self: any) {
+        return "Point(" + to_string(self.x) + ", " + to_string(self.y) + ")"
+    }
+}
+
+impl Describable for Named {
+    fn describe(self: any) {
+        return self.name + "=" + to_string(self.value)
+    }
+}
+
+// ---- Tests ----
+
+fn test_struct_create_and_read() {
+    print("--- struct create & read ---")
+    let p = Point { x: 10, y: 20 }
+    print(p.x)
+    print(p.y)
+
+    let r = Rect { origin: p, width: 100, height: 50 }
+    print(r.width)
+    print(r.height)
+    // Nested field read
+    print(r.origin.x)
+    print(r.origin.y)
+}
+
+fn test_struct_field_write() {
+    print("--- struct field write ---")
+    flux p = Point { x: 1, y: 2 }
+    print(p.x)
+    p.x = 99
+    print(p.x)
+    p.y = 88
+    print(p.y)
+
+    // Compound assignment
+    p.x += 1
+    print(p.x)
+    p.y -= 8
+    print(p.y)
+    p.x *= 2
+    print(p.x)
+}
+
+fn sum_point(pt: any) {
+    return pt.x + pt.y
+}
+
+fn make_point(a: any, b: any) {
+    return Point { x: a, y: b }
+}
+
+fn test_struct_as_param() {
+    print("--- struct as param ---")
+    let p = Point { x: 3, y: 4 }
+    print(sum_point(p))
+
+    let q = make_point(100, 200)
+    print(q.x)
+    print(q.y)
+}
+
+fn test_struct_in_array() {
+    print("--- struct in array ---")
+    let points = [
+        Point { x: 1, y: 2 },
+        Point { x: 3, y: 4 },
+        Point { x: 5, y: 6 }
+    ]
+    for pt in points {
+        print(pt.x + pt.y)
+    }
+    print(len(points))
+}
+
+fn test_struct_method() {
+    print("--- struct method ---")
+    let p = Point { x: 7, y: 8 }
+    print(p.describe())
+
+    let n = Named { name: "count", value: 42 }
+    print(n.describe())
+}
+
+fn test_struct_destructure() {
+    print("--- struct destructure ---")
+    let p = Point { x: 55, y: 66 }
+    let { x, y } = p
+    print(x)
+    print(y)
+}
+
+fn test_struct_equality() {
+    print("--- struct equality ---")
+    let a = Point { x: 1, y: 2 }
+    let b = Point { x: 1, y: 2 }
+    let c = Point { x: 3, y: 4 }
+    print(a == b)
+    print(a == c)
+    print(a != c)
+}
+
+fn test_enum_basic() {
+    print("--- enum basic ---")
+    let r = Color::Red
+    print(r)
+    let g = Color::Green
+    print(g)
+    let b = Color::Blue
+    print(b)
+}
+
+fn test_enum_with_data() {
+    print("--- enum with data ---")
+    let rgb = Color::Rgb(255, 128, 0)
+    print(rgb)
+
+    let circle = Shape::Circle(10)
+    print(circle)
+    let sq = Shape::Square(5)
+    print(sq)
+    let none = Shape::None
+    print(none)
+}
+
+fn make_color(kind: any) {
+    if kind == "red" {
+        return Color::Red
+    }
+    if kind == "custom" {
+        return Color::Rgb(1, 2, 3)
+    }
+    return Color::Blue
+}
+
+fn test_enum_in_function() {
+    print("--- enum in function ---")
+    print(make_color("red"))
+    print(make_color("custom"))
+    print(make_color("other"))
+}
+
+fn test_struct_returned_from_closure() {
+    print("--- struct from closure ---")
+    let make = |a, b| { return Point { x: a, y: b } }
+    let p = make(11, 22)
+    print(p.x)
+    print(p.y)
+}
+
+fn test_nested_struct_field_write() {
+    print("--- nested struct ---")
+    flux r = Rect { origin: Point { x: 0, y: 0 }, width: 10, height: 20 }
+    print(r.origin.x)
+    r.width = 50
+    print(r.width)
+}
+
+fn main() {
+    test_struct_create_and_read()
+    test_struct_field_write()
+    test_struct_as_param()
+    test_struct_in_array()
+    test_struct_method()
+    test_struct_destructure()
+    test_struct_equality()
+    test_enum_basic()
+    test_enum_with_data()
+    test_enum_in_function()
+    test_struct_returned_from_closure()
+    test_nested_struct_field_write()
+    print("ALL STRUCT/ENUM TESTS PASSED")
+}

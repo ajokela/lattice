@@ -12,6 +12,7 @@
 #include "latc.h"
 #include "string_ops.h"
 #include "array_ops.h"
+#include "builtin_methods.h"
 #include <stdlib.h>
 #include <limits.h>
 #include <libgen.h>
@@ -956,66 +957,29 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
-            LatValue needle = pop(vm);
-            bool found = false;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (value_eq(&obj->as.array.elems[i], &needle)) {
-                    found = true;
-                    break;
-                }
-            }
-            value_free(&needle);
-            push(vm, value_bool(found));
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_array_contains(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r);
             return true;
         }
         if (mhash == MHASH_enumerate && strcmp(method, "enumerate") == 0 && arg_count == 0) {
-            /* Build array of [index, element] pairs */
-            LatValue *pairs = malloc(obj->as.array.len * sizeof(LatValue));
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue pair_elems[2];
-                pair_elems[0] = value_int((int64_t)i);
-                pair_elems[1] = value_clone_fast(&obj->as.array.elems[i]);
-                pairs[i] = value_array(pair_elems, 2);
-            }
-            LatValue result = value_array(pairs, obj->as.array.len);
-            free(pairs);
-            push(vm, result);
+            char *err = NULL;
+            push(vm, builtin_array_enumerate(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
-            LatValue *elems = malloc(obj->as.array.len * sizeof(LatValue));
-            for (size_t i = 0; i < obj->as.array.len; i++)
-                elems[i] = value_deep_clone(&obj->as.array.elems[obj->as.array.len - 1 - i]);
-            LatValue result = value_array(elems, obj->as.array.len);
-            free(elems);
-            push(vm, result);
+            char *err = NULL;
+            push(vm, builtin_array_reverse(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_join && strcmp(method, "join") == 0 && arg_count == 1) {
-            LatValue sep = pop(vm);
-            const char *sep_str = (sep.type == VAL_STR) ? sep.as.str_val : "";
-            size_t sep_len = strlen(sep_str);
-            size_t n = obj->as.array.len;
-            char **parts = malloc(n * sizeof(char *));
-            size_t *lens = malloc(n * sizeof(size_t));
-            size_t total = 0;
-            for (size_t i = 0; i < n; i++) {
-                parts[i] = value_display(&obj->as.array.elems[i]);
-                lens[i] = strlen(parts[i]);
-                total += lens[i];
-            }
-            if (n > 1) total += sep_len * (n - 1);
-            char *buf = malloc(total + 1);
-            size_t pos = 0;
-            for (size_t i = 0; i < n; i++) {
-                if (i > 0) { memcpy(buf + pos, sep_str, sep_len); pos += sep_len; }
-                memcpy(buf + pos, parts[i], lens[i]); pos += lens[i];
-                free(parts[i]);
-            }
-            buf[pos] = '\0';
-            free(parts); free(lens);
-            value_free(&sep);
-            push(vm, value_string_owned(buf));
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_array_join(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r);
             return true;
         }
         if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
@@ -1212,67 +1176,37 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_take && strcmp(method, "take") == 0 && arg_count == 1) {
-            LatValue n_v = pop(vm);
-            int64_t n = n_v.as.int_val;
-            value_free(&n_v);
-            if (n <= 0) { push(vm, value_array(NULL, 0)); return true; }
-            size_t take_n = (size_t)n;
-            if (take_n > obj->as.array.len) take_n = obj->as.array.len;
-            LatValue *elems = malloc((take_n > 0 ? take_n : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < take_n; i++)
-                elems[i] = value_deep_clone(&obj->as.array.elems[i]);
-            LatValue r = value_array(elems, take_n); free(elems);
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_array_take(obj, args, 1, &err);
+            value_free(&args[0]);
             push(vm, r); return true;
         }
         if (mhash == MHASH_drop && strcmp(method, "drop") == 0 && arg_count == 1) {
-            LatValue n_v = pop(vm);
-            int64_t n = n_v.as.int_val;
-            value_free(&n_v);
-            size_t start = (n > 0) ? (size_t)n : 0;
-            if (start >= obj->as.array.len) { push(vm, value_array(NULL, 0)); return true; }
-            size_t cnt = obj->as.array.len - start;
-            LatValue *elems = malloc(cnt * sizeof(LatValue));
-            for (size_t i = 0; i < cnt; i++)
-                elems[i] = value_deep_clone(&obj->as.array.elems[start + i]);
-            LatValue r = value_array(elems, cnt); free(elems);
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_array_drop(obj, args, 1, &err);
+            value_free(&args[0]);
             push(vm, r); return true;
         }
         if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
-            LatValue needle = pop(vm);
-            int64_t idx = -1;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (value_eq(&obj->as.array.elems[i], &needle)) { idx = (int64_t)i; break; }
-            }
-            value_free(&needle);
-            push(vm, value_int(idx)); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_array_index_of(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_zip && strcmp(method, "zip") == 0 && arg_count == 1) {
-            LatValue other = pop(vm);
-            if (other.type != VAL_ARRAY) { value_free(&other); push(vm, value_nil()); return true; }
-            size_t n = obj->as.array.len < other.as.array.len ? obj->as.array.len : other.as.array.len;
-            LatValue *pairs = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < n; i++) {
-                LatValue pe[2];
-                pe[0] = value_deep_clone(&obj->as.array.elems[i]);
-                pe[1] = value_deep_clone(&other.as.array.elems[i]);
-                pairs[i] = value_array(pe, 2);
-            }
-            value_free(&other);
-            LatValue r = value_array(pairs, n); free(pairs);
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_array_zip(obj, args, 1, &err);
+            value_free(&args[0]);
             push(vm, r); return true;
         }
         if (mhash == MHASH_unique && strcmp(method, "unique") == 0 && arg_count == 0) {
-            size_t n = obj->as.array.len;
-            LatValue *res = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-            size_t rc = 0;
-            for (size_t i = 0; i < n; i++) {
-                bool dup = false;
-                for (size_t j = 0; j < rc; j++)
-                    if (value_eq(&obj->as.array.elems[i], &res[j])) { dup = true; break; }
-                if (!dup) res[rc++] = value_deep_clone(&obj->as.array.elems[i]);
-            }
-            LatValue r = value_array(res, rc); free(res);
-            push(vm, r); return true;
+            char *err = NULL;
+            push(vm, builtin_array_unique(obj, NULL, 0, &err));
+            return true;
         }
         if (mhash == MHASH_remove_at && strcmp(method, "remove_at") == 0 && arg_count == 1) {
             const char *pmode = stackvm_find_pressure(vm, var_name);
@@ -1296,90 +1230,39 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_chunk && strcmp(method, "chunk") == 0 && arg_count == 1) {
-            LatValue cs_v = pop(vm);
-            int64_t cs = cs_v.as.int_val;
-            value_free(&cs_v);
-            if (cs <= 0) { push(vm, value_array(NULL, 0)); return true; }
-            size_t n = obj->as.array.len;
-            size_t nc = (n > 0) ? (n + (size_t)cs - 1) / (size_t)cs : 0;
-            LatValue *chunks = malloc((nc > 0 ? nc : 1) * sizeof(LatValue));
-            for (size_t ci = 0; ci < nc; ci++) {
-                size_t s = ci * (size_t)cs, e = s + (size_t)cs;
-                if (e > n) e = n;
-                size_t cl = e - s;
-                LatValue *ce = malloc(cl * sizeof(LatValue));
-                for (size_t j = 0; j < cl; j++)
-                    ce[j] = value_deep_clone(&obj->as.array.elems[s + j]);
-                chunks[ci] = value_array(ce, cl); free(ce);
-            }
-            LatValue r = value_array(chunks, nc); free(chunks);
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_array_chunk(obj, args, 1, &err);
+            value_free(&args[0]);
             push(vm, r); return true;
         }
         if (mhash == MHASH_sum && strcmp(method, "sum") == 0 && arg_count == 0) {
-            bool has_float = false;
-            int64_t isum = 0; double fsum = 0.0;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (obj->as.array.elems[i].type == VAL_INT) {
-                    isum += obj->as.array.elems[i].as.int_val;
-                    fsum += (double)obj->as.array.elems[i].as.int_val;
-                } else if (obj->as.array.elems[i].type == VAL_FLOAT) {
-                    has_float = true;
-                    fsum += obj->as.array.elems[i].as.float_val;
-                }
-            }
-            push(vm, has_float ? value_float(fsum) : value_int(isum));
+            char *err = NULL;
+            push(vm, builtin_array_sum(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_min && strcmp(method, "min") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { vm->error = strdup("min() called on empty array"); push(vm, value_nil()); return true; }
-            bool hf = false;
-            for (size_t i = 0; i < obj->as.array.len; i++)
-                if (obj->as.array.elems[i].type == VAL_FLOAT) hf = true;
-            if (hf) {
-                double fm = (obj->as.array.elems[0].type == VAL_FLOAT)
-                    ? obj->as.array.elems[0].as.float_val : (double)obj->as.array.elems[0].as.int_val;
-                for (size_t i = 1; i < obj->as.array.len; i++) {
-                    double v = (obj->as.array.elems[i].type == VAL_FLOAT)
-                        ? obj->as.array.elems[i].as.float_val : (double)obj->as.array.elems[i].as.int_val;
-                    if (v < fm) fm = v;
-                }
-                push(vm, value_float(fm));
-            } else {
-                int64_t im = obj->as.array.elems[0].as.int_val;
-                for (size_t i = 1; i < obj->as.array.len; i++)
-                    if (obj->as.array.elems[i].as.int_val < im) im = obj->as.array.elems[i].as.int_val;
-                push(vm, value_int(im));
-            }
+            char *err = NULL;
+            LatValue r = builtin_array_min(obj, NULL, 0, &err);
+            if (err) { vm->error = err; push(vm, value_nil()); }
+            else push(vm, r);
             return true;
         }
         if (mhash == MHASH_max && strcmp(method, "max") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { vm->error = strdup("max() called on empty array"); push(vm, value_nil()); return true; }
-            bool hf = false;
-            for (size_t i = 0; i < obj->as.array.len; i++)
-                if (obj->as.array.elems[i].type == VAL_FLOAT) hf = true;
-            if (hf) {
-                double fm = (obj->as.array.elems[0].type == VAL_FLOAT)
-                    ? obj->as.array.elems[0].as.float_val : (double)obj->as.array.elems[0].as.int_val;
-                for (size_t i = 1; i < obj->as.array.len; i++) {
-                    double v = (obj->as.array.elems[i].type == VAL_FLOAT)
-                        ? obj->as.array.elems[i].as.float_val : (double)obj->as.array.elems[i].as.int_val;
-                    if (v > fm) fm = v;
-                }
-                push(vm, value_float(fm));
-            } else {
-                int64_t im = obj->as.array.elems[0].as.int_val;
-                for (size_t i = 1; i < obj->as.array.len; i++)
-                    if (obj->as.array.elems[i].as.int_val > im) im = obj->as.array.elems[i].as.int_val;
-                push(vm, value_int(im));
-            }
+            char *err = NULL;
+            LatValue r = builtin_array_max(obj, NULL, 0, &err);
+            if (err) { vm->error = err; push(vm, value_nil()); }
+            else push(vm, r);
             return true;
         }
         if (mhash == MHASH_first && strcmp(method, "first") == 0 && arg_count == 0) {
-            push(vm, obj->as.array.len > 0 ? value_deep_clone(&obj->as.array.elems[0]) : value_unit());
+            char *err = NULL;
+            push(vm, builtin_array_first(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_last && strcmp(method, "last") == 0 && arg_count == 0) {
-            push(vm, obj->as.array.len > 0 ? value_deep_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit());
+            char *err = NULL;
+            push(vm, builtin_array_last(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_flat_map && strcmp(method, "flat_map") == 0 && arg_count == 1) {
@@ -1506,63 +1389,32 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
-            LatValue needle = pop(vm);
-            if (needle.type == VAL_STR) {
-                push(vm, value_bool(strstr(obj->as.str_val, needle.as.str_val) != NULL));
-            } else {
-                push(vm, value_bool(false));
-            }
-            value_free(&needle);
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_contains(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_split && strcmp(method, "split") == 0 && arg_count == 1) {
-            LatValue delim = pop(vm);
-            if (delim.type == VAL_STR) {
-                /* Split string */
-                LatValue arr = value_array(NULL, 0);
-                char *str = strdup(obj->as.str_val);
-                char *tok = strtok(str, delim.as.str_val);
-                while (tok) {
-                    LatValue elem = value_string(tok);
-                    if (arr.as.array.len >= arr.as.array.cap) {
-                        arr.as.array.cap = arr.as.array.cap ? arr.as.array.cap * 2 : 4;
-                        arr.as.array.elems = realloc(arr.as.array.elems,
-                            arr.as.array.cap * sizeof(LatValue));
-                    }
-                    arr.as.array.elems[arr.as.array.len++] = elem;
-                    tok = strtok(NULL, delim.as.str_val);
-                }
-                free(str);
-                push(vm, arr);
-            } else {
-                push(vm, value_nil());
-            }
-            value_free(&delim);
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_split(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_trim && strcmp(method, "trim") == 0 && arg_count == 0) {
-            const char *s = obj->as.str_val;
-            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-            const char *e = s + strlen(s);
-            while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) e--;
-            char *trimmed = malloc((size_t)(e - s) + 1);
-            memcpy(trimmed, s, (size_t)(e - s));
-            trimmed[e - s] = '\0';
-            push(vm, value_string_owned(trimmed));
+            char *err = NULL;
+            push(vm, builtin_string_trim(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_to_upper && strcmp(method, "to_upper") == 0 && arg_count == 0) {
-            char *s = strdup(obj->as.str_val);
-            for (size_t i = 0; s[i]; i++)
-                if (s[i] >= 'a' && s[i] <= 'z') s[i] -= 32;
-            push(vm, value_string_owned(s));
+            char *err = NULL;
+            push(vm, builtin_string_to_upper(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_to_lower && strcmp(method, "to_lower") == 0 && arg_count == 0) {
-            char *s = strdup(obj->as.str_val);
-            for (size_t i = 0; s[i]; i++)
-                if (s[i] >= 'A' && s[i] <= 'Z') s[i] += 32;
-            push(vm, value_string_owned(s));
+            char *err = NULL;
+            push(vm, builtin_string_to_lower(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_capitalize && strcmp(method, "capitalize") == 0 && arg_count == 0) {
@@ -1586,141 +1438,100 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_starts_with && strcmp(method, "starts_with") == 0 && arg_count == 1) {
-            LatValue prefix = pop(vm);
-            if (prefix.type == VAL_STR) {
-                size_t plen = strlen(prefix.as.str_val);
-                push(vm, value_bool(strncmp(obj->as.str_val, prefix.as.str_val, plen) == 0));
-            } else {
-                push(vm, value_bool(false));
-            }
-            value_free(&prefix);
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_starts_with(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_ends_with && strcmp(method, "ends_with") == 0 && arg_count == 1) {
-            LatValue suffix = pop(vm);
-            if (suffix.type == VAL_STR) {
-                size_t slen = strlen(obj->as.str_val);
-                size_t plen = strlen(suffix.as.str_val);
-                if (plen <= slen)
-                    push(vm, value_bool(strcmp(obj->as.str_val + slen - plen, suffix.as.str_val) == 0));
-                else
-                    push(vm, value_bool(false));
-            } else {
-                push(vm, value_bool(false));
-            }
-            value_free(&suffix);
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_ends_with(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_replace && strcmp(method, "replace") == 0 && arg_count == 2) {
-            LatValue replacement = pop(vm);
-            LatValue pattern = pop(vm);
-            if (pattern.type == VAL_STR && replacement.type == VAL_STR) {
-                push(vm, value_string_owned(lat_str_replace(obj->as.str_val, pattern.as.str_val, replacement.as.str_val)));
-            } else {
-                push(vm, value_nil());
-            }
-            value_free(&pattern);
-            value_free(&replacement);
-            return true;
+            LatValue args[2];
+            args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_replace(obj, args, 2, &err);
+            value_free(&args[0]); value_free(&args[1]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
-            LatValue needle = pop(vm);
-            if (needle.type == VAL_STR)
-                push(vm, value_int(lat_str_index_of(obj->as.str_val, needle.as.str_val)));
-            else
-                push(vm, value_int(-1));
-            value_free(&needle); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_index_of(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_substring && strcmp(method, "substring") == 0 && arg_count == 2) {
-            LatValue end_v = pop(vm); LatValue start_v = pop(vm);
-            int64_t s = (start_v.type == VAL_INT) ? start_v.as.int_val : 0;
-            int64_t e = (end_v.type == VAL_INT) ? end_v.as.int_val : (int64_t)strlen(obj->as.str_val);
-            push(vm, value_string_owned(lat_str_substring(obj->as.str_val, s, e)));
-            value_free(&start_v); value_free(&end_v); return true;
+            LatValue args[2];
+            args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_substring(obj, args, 2, &err);
+            value_free(&args[0]); value_free(&args[1]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_chars && strcmp(method, "chars") == 0 && arg_count == 0) {
-            size_t slen = strlen(obj->as.str_val);
-            LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < slen; i++) {
-                char ch[2] = { obj->as.str_val[i], '\0' };
-                elems[i] = value_string(ch);
-            }
-            LatValue r = value_array(elems, slen); free(elems);
-            push(vm, r); return true;
+            char *err = NULL;
+            push(vm, builtin_string_chars(obj, NULL, 0, &err));
+            return true;
         }
         if (mhash == MHASH_bytes && strcmp(method, "bytes") == 0 && arg_count == 0) {
-            size_t slen = strlen(obj->as.str_val);
-            LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < slen; i++)
-                elems[i] = value_int((int64_t)(unsigned char)obj->as.str_val[i]);
-            LatValue r = value_array(elems, slen); free(elems);
-            push(vm, r); return true;
+            char *err = NULL;
+            push(vm, builtin_string_bytes(obj, NULL, 0, &err));
+            return true;
         }
         if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
-            push(vm, value_string_owned(lat_str_reverse(obj->as.str_val)));
+            char *err = NULL;
+            push(vm, builtin_string_reverse(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_repeat && strcmp(method, "repeat") == 0 && arg_count == 1) {
-            LatValue n_v = pop(vm);
-            size_t n = (n_v.type == VAL_INT && n_v.as.int_val > 0) ? (size_t)n_v.as.int_val : 0;
-            value_free(&n_v);
-            push(vm, value_string_owned(lat_str_repeat(obj->as.str_val, n)));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_repeat(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_trim_start && strcmp(method, "trim_start") == 0 && arg_count == 0) {
-            const char *s = obj->as.str_val;
-            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-            push(vm, value_string(s)); return true;
+            char *err = NULL;
+            push(vm, builtin_string_trim_start(obj, NULL, 0, &err));
+            return true;
         }
         if (mhash == MHASH_trim_end && strcmp(method, "trim_end") == 0 && arg_count == 0) {
-            const char *s = obj->as.str_val;
-            size_t slen = strlen(s);
-            while (slen > 0 && (s[slen-1] == ' ' || s[slen-1] == '\t' || s[slen-1] == '\n' || s[slen-1] == '\r')) slen--;
-            char *r = malloc(slen + 1);
-            memcpy(r, s, slen); r[slen] = '\0';
-            push(vm, value_string_owned(r)); return true;
+            char *err = NULL;
+            push(vm, builtin_string_trim_end(obj, NULL, 0, &err));
+            return true;
         }
         if (mhash == MHASH_pad_left && strcmp(method, "pad_left") == 0 && arg_count == 2) {
-            LatValue ch_v = pop(vm); LatValue n_v = pop(vm);
-            int64_t n = (n_v.type == VAL_INT) ? n_v.as.int_val : 0;
-            char pad = (ch_v.type == VAL_STR && ch_v.as.str_val[0]) ? ch_v.as.str_val[0] : ' ';
-            value_free(&n_v); value_free(&ch_v);
-            size_t slen = strlen(obj->as.str_val);
-            if ((int64_t)slen >= n) { push(vm, value_clone_fast(obj)); return true; }
-            size_t pad_n = (size_t)n - slen;
-            char *r = malloc((size_t)n + 1);
-            memset(r, pad, pad_n);
-            memcpy(r + pad_n, obj->as.str_val, slen);
-            r[(size_t)n] = '\0';
-            push(vm, value_string_owned(r)); return true;
+            LatValue args[2];
+            args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_pad_left(obj, args, 2, &err);
+            value_free(&args[0]); value_free(&args[1]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_pad_right && strcmp(method, "pad_right") == 0 && arg_count == 2) {
-            LatValue ch_v = pop(vm); LatValue n_v = pop(vm);
-            int64_t n = (n_v.type == VAL_INT) ? n_v.as.int_val : 0;
-            char pad = (ch_v.type == VAL_STR && ch_v.as.str_val[0]) ? ch_v.as.str_val[0] : ' ';
-            value_free(&n_v); value_free(&ch_v);
-            size_t slen = strlen(obj->as.str_val);
-            if ((int64_t)slen >= n) { push(vm, value_clone_fast(obj)); return true; }
-            size_t pad_n = (size_t)n - slen;
-            char *r = malloc((size_t)n + 1);
-            memcpy(r, obj->as.str_val, slen);
-            memset(r + slen, pad, pad_n);
-            r[(size_t)n] = '\0';
-            push(vm, value_string_owned(r)); return true;
+            LatValue args[2];
+            args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_pad_right(obj, args, 2, &err);
+            value_free(&args[0]); value_free(&args[1]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_count && strcmp(method, "count") == 0 && arg_count == 1) {
-            LatValue needle = pop(vm);
-            int64_t cnt = 0;
-            if (needle.type == VAL_STR && needle.as.str_val[0]) {
-                const char *p = obj->as.str_val;
-                size_t nlen = strlen(needle.as.str_val);
-                while ((p = strstr(p, needle.as.str_val)) != NULL) { cnt++; p += nlen; }
-            }
-            value_free(&needle);
-            push(vm, value_int(cnt)); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_string_count(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_is_empty && strcmp(method, "is_empty") == 0 && arg_count == 0) {
-            push(vm, value_bool(obj->as.str_val[0] == '\0'));
+            char *err = NULL;
+            push(vm, builtin_string_is_empty(obj, NULL, 0, &err));
             return true;
         }
     } break;
@@ -1732,46 +1543,20 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1) {
-            LatValue key = pop(vm);
-            if (key.type == VAL_STR) {
-                LatValue *found = lat_map_get(obj->as.map.map, key.as.str_val);
-                if (found)
-                    push(vm, value_deep_clone(found));
-                else
-                    push(vm, value_nil());
-            } else {
-                push(vm, value_nil());
-            }
-            value_free(&key);
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_map_get(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
-            size_t len = lat_map_len(obj->as.map.map);
-            LatValue *keys = malloc((len ? len : 1) * sizeof(LatValue));
-            size_t key_idx = 0;
-            for (size_t i = 0; i < obj->as.map.map->cap; i++) {
-                if (obj->as.map.map->entries[i].state == MAP_OCCUPIED) {
-                    keys[key_idx++] = value_string(obj->as.map.map->entries[i].key);
-                }
-            }
-            LatValue arr = value_array(keys, key_idx);
-            free(keys);
-            push(vm, arr);
+            char *err = NULL;
+            push(vm, builtin_map_keys(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
-            size_t len = lat_map_len(obj->as.map.map);
-            LatValue *vals = malloc((len ? len : 1) * sizeof(LatValue));
-            size_t val_idx = 0;
-            for (size_t i = 0; i < obj->as.map.map->cap; i++) {
-                if (obj->as.map.map->entries[i].state == MAP_OCCUPIED) {
-                    LatValue *stored = (LatValue *)obj->as.map.map->entries[i].value;
-                    vals[val_idx++] = value_deep_clone(stored);
-                }
-            }
-            LatValue arr = value_array(vals, val_idx);
-            free(vals);
-            push(vm, arr);
+            char *err = NULL;
+            push(vm, builtin_map_values(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) {
@@ -1800,58 +1585,37 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
-            LatValue key = pop(vm);
-            if (key.type == VAL_STR) {
-                push(vm, value_bool(lat_map_get(obj->as.map.map, key.as.str_val) != NULL));
-            } else {
-                push(vm, value_bool(false));
-            }
-            value_free(&key);
-            return true;
-        }
-        if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
-            LatValue key = pop(vm);
-            if (key.type == VAL_STR)
-                push(vm, value_bool(lat_map_get(obj->as.map.map, key.as.str_val) != NULL));
-            else
-                push(vm, value_bool(false));
-            value_free(&key); return true;
-        }
-        if (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1) {
-            LatValue key = pop(vm);
-            if (key.type == VAL_STR) {
-                lat_map_remove(obj->as.map.map, key.as.str_val);
-            }
-            value_free(&key);
-            push(vm, value_unit()); return true;
-        }
-        if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
-            size_t n = lat_map_len(obj->as.map.map);
-            LatValue *entries = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-            size_t ei = 0;
-            for (size_t i = 0; i < obj->as.map.map->cap; i++) {
-                if (obj->as.map.map->entries[i].state == MAP_OCCUPIED) {
-                    LatValue pe[2];
-                    pe[0] = value_string(obj->as.map.map->entries[i].key);
-                    pe[1] = value_deep_clone((LatValue *)obj->as.map.map->entries[i].value);
-                    entries[ei++] = value_array(pe, 2);
-                }
-            }
-            LatValue r = value_array(entries, ei); free(entries);
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_map_has(obj, args, 1, &err);
+            value_free(&args[0]);
             push(vm, r); return true;
         }
+        if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_map_has(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
+        }
+        if (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1) {
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_map_remove(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
+        }
+        if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
+            char *err = NULL;
+            push(vm, builtin_map_entries(obj, NULL, 0, &err));
+            return true;
+        }
         if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1) {
-            LatValue other = pop(vm);
-            if (other.type == VAL_MAP) {
-                for (size_t i = 0; i < other.as.map.map->cap; i++) {
-                    if (other.as.map.map->entries[i].state == MAP_OCCUPIED) {
-                        LatValue cloned = value_deep_clone((LatValue *)other.as.map.map->entries[i].value);
-                        lat_map_set(obj->as.map.map, other.as.map.map->entries[i].key, &cloned);
-                    }
-                }
-            }
-            value_free(&other);
-            push(vm, value_unit()); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_map_merge(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_for_each && strcmp(method, "for_each") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
@@ -1969,163 +1733,99 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
     /* Enum methods */
     case VAL_ENUM: {
         if (mhash == MHASH_tag && strcmp(method, "tag") == 0 && arg_count == 0) {
-            push(vm, value_string(obj->as.enm.variant_name));
+            char *err = NULL;
+            push(vm, builtin_enum_tag(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_payload && strcmp(method, "payload") == 0 && arg_count == 0) {
-            /* Always return an array of all payloads */
-            if (obj->as.enm.payload_count > 0) {
-                LatValue *elems = malloc(obj->as.enm.payload_count * sizeof(LatValue));
-                for (size_t pi = 0; pi < obj->as.enm.payload_count; pi++)
-                    elems[pi] = value_deep_clone(&obj->as.enm.payload[pi]);
-                push(vm, value_array(elems, obj->as.enm.payload_count));
-                free(elems);
-            } else {
-                push(vm, value_array(NULL, 0));
-            }
+            char *err = NULL;
+            push(vm, builtin_enum_payload(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_variant_name && strcmp(method, "variant_name") == 0 && arg_count == 0) {
-            push(vm, value_string(obj->as.enm.variant_name));
+            char *err = NULL;
+            push(vm, builtin_enum_tag(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_enum_name && strcmp(method, "enum_name") == 0 && arg_count == 0) {
-            push(vm, value_string(obj->as.enm.enum_name));
+            char *err = NULL;
+            push(vm, builtin_enum_enum_name(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_is_variant && strcmp(method, "is_variant") == 0 && arg_count == 1) {
-            LatValue name = pop(vm);
-            bool match = (name.type == VAL_STR && strcmp(obj->as.enm.variant_name, name.as.str_val) == 0);
-            value_free(&name);
-            push(vm, value_bool(match)); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_enum_is_variant(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
     } break;
 
     /* ── Set methods ── */
     case VAL_SET: {
         if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            char *key = value_display(&val);
-            bool found = lat_map_contains(obj->as.set.map, key);
-            free(key);
-            value_free(&val);
-            push(vm, value_bool(found)); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_has(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_add && strcmp(method, "add") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            char *key = value_display(&val);
-            LatValue clone = value_deep_clone(&val);
-            lat_map_set(obj->as.set.map, key, &clone);
-            free(key);
-            value_free(&val);
-            push(vm, value_unit()); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_add(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            char *key = value_display(&val);
-            lat_map_remove(obj->as.set.map, key);
-            free(key);
-            value_free(&val);
-            push(vm, value_unit()); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_remove(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
             push(vm, value_int((int64_t)lat_map_len(obj->as.set.map))); return true;
         }
         if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
-            size_t len = lat_map_len(obj->as.set.map);
-            LatValue *elems = malloc(len * sizeof(LatValue));
-            size_t idx = 0;
-            for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-                if (obj->as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-                    elems[idx++] = value_deep_clone(v);
-                }
-            }
-            LatValue arr = value_array(elems, len);
-            free(elems);
-            push(vm, arr); return true;
+            char *err = NULL;
+            push(vm, builtin_set_to_array(obj, NULL, 0, &err));
+            return true;
         }
         if (mhash == MHASH_union && strcmp(method, "union") == 0 && arg_count == 1) {
-            LatValue other = pop(vm);
-            LatValue result = value_set_new();
-            for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-                if (obj->as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-                    LatValue c = value_deep_clone(v);
-                    lat_map_set(result.as.set.map, obj->as.set.map->entries[i].key, &c);
-                }
-            }
-            if (other.type == VAL_SET) {
-                for (size_t i = 0; i < other.as.set.map->cap; i++) {
-                    if (other.as.set.map->entries[i].state == MAP_OCCUPIED) {
-                        LatValue *v = (LatValue *)other.as.set.map->entries[i].value;
-                        LatValue c = value_deep_clone(v);
-                        lat_map_set(result.as.set.map, other.as.set.map->entries[i].key, &c);
-                    }
-                }
-            }
-            value_free(&other);
-            push(vm, result); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_union(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_intersection && strcmp(method, "intersection") == 0 && arg_count == 1) {
-            LatValue other = pop(vm);
-            LatValue result = value_set_new();
-            if (other.type == VAL_SET) {
-                for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-                    if (obj->as.set.map->entries[i].state == MAP_OCCUPIED &&
-                        lat_map_contains(other.as.set.map, obj->as.set.map->entries[i].key)) {
-                        LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-                        LatValue c = value_deep_clone(v);
-                        lat_map_set(result.as.set.map, obj->as.set.map->entries[i].key, &c);
-                    }
-                }
-            }
-            value_free(&other);
-            push(vm, result); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_intersection(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_difference && strcmp(method, "difference") == 0 && arg_count == 1) {
-            LatValue other = pop(vm);
-            LatValue result = value_set_new();
-            if (other.type == VAL_SET) {
-                for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-                    if (obj->as.set.map->entries[i].state == MAP_OCCUPIED &&
-                        !lat_map_contains(other.as.set.map, obj->as.set.map->entries[i].key)) {
-                        LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-                        LatValue c = value_deep_clone(v);
-                        lat_map_set(result.as.set.map, obj->as.set.map->entries[i].key, &c);
-                    }
-                }
-            }
-            value_free(&other);
-            push(vm, result); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_difference(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_is_subset && strcmp(method, "is_subset") == 0 && arg_count == 1) {
-            LatValue other = pop(vm);
-            bool result = true;
-            if (other.type == VAL_SET) {
-                for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-                    if (obj->as.set.map->entries[i].state == MAP_OCCUPIED &&
-                        !lat_map_contains(other.as.set.map, obj->as.set.map->entries[i].key)) {
-                        result = false; break;
-                    }
-                }
-            } else result = false;
-            value_free(&other);
-            push(vm, value_bool(result)); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_is_subset(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
         if (mhash == MHASH_is_superset && strcmp(method, "is_superset") == 0 && arg_count == 1) {
-            LatValue other = pop(vm);
-            bool result = true;
-            if (other.type == VAL_SET) {
-                for (size_t i = 0; i < other.as.set.map->cap; i++) {
-                    if (other.as.set.map->entries[i].state == MAP_OCCUPIED &&
-                        !lat_map_contains(obj->as.set.map, other.as.set.map->entries[i].key)) {
-                        result = false; break;
-                    }
-                }
-            } else result = false;
-            value_free(&other);
-            push(vm, value_bool(result)); return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_set_is_superset(obj, args, 1, &err);
+            value_free(&args[0]);
+            push(vm, r); return true;
         }
     } break;
 
@@ -2164,264 +1864,128 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             return true;
         }
         if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            if (val.type != VAL_INT) { value_free(&val); push(vm, value_unit()); return true; }
-            if (obj->as.buffer.len >= obj->as.buffer.cap) {
-                obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
-                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
-            }
-            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(val.as.int_val & 0xFF);
-            push(vm, value_unit());
+            LatValue args[1]; args[0] = pop(vm);
+            push(vm, builtin_buffer_push(obj, args, 1, NULL));
             return true;
         }
         if (mhash == MHASH_push_u16 && strcmp(method, "push_u16") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            if (val.type != VAL_INT) { value_free(&val); push(vm, value_unit()); return true; }
-            uint16_t v = (uint16_t)(val.as.int_val & 0xFFFF);
-            while (obj->as.buffer.len + 2 > obj->as.buffer.cap) {
-                obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
-                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
-            }
-            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(v & 0xFF);
-            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
-            push(vm, value_unit());
+            LatValue args[1]; args[0] = pop(vm);
+            push(vm, builtin_buffer_push_u16(obj, args, 1, NULL));
             return true;
         }
         if (mhash == MHASH_push_u32 && strcmp(method, "push_u32") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            if (val.type != VAL_INT) { value_free(&val); push(vm, value_unit()); return true; }
-            uint32_t v = (uint32_t)(val.as.int_val & 0xFFFFFFFF);
-            while (obj->as.buffer.len + 4 > obj->as.buffer.cap) {
-                obj->as.buffer.cap = obj->as.buffer.cap ? obj->as.buffer.cap * 2 : 8;
-                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
-            }
-            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)(v & 0xFF);
-            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 8) & 0xFF);
-            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 16) & 0xFF);
-            obj->as.buffer.data[obj->as.buffer.len++] = (uint8_t)((v >> 24) & 0xFF);
-            push(vm, value_unit());
+            LatValue args[1]; args[0] = pop(vm);
+            push(vm, builtin_buffer_push_u32(obj, args, 1, NULL));
             return true;
         }
         if (mhash == MHASH_read_u8 && strcmp(method, "read_u8") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val >= obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_u8: index out of bounds");
-                push(vm, value_int(0));
-                return true;
-            }
-            push(vm, value_int(obj->as.buffer.data[idx.as.int_val]));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_u8(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_write_u8 && strcmp(method, "write_u8") == 0 && arg_count == 2) {
-            LatValue val = pop(vm);
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val >= obj->as.buffer.len) {
-                value_free(&idx); value_free(&val);
-                vm->error = strdup("Buffer.write_u8: index out of bounds");
-                push(vm, value_unit());
-                return true;
-            }
-            obj->as.buffer.data[idx.as.int_val] = (uint8_t)(val.as.int_val & 0xFF);
-            push(vm, value_unit());
-            return true;
+            LatValue args[2]; args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_write_u8(obj, args, 2, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_read_u16 && strcmp(method, "read_u16") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 2 > obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_u16: index out of bounds");
-                push(vm, value_int(0));
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            uint16_t v = (uint16_t)(obj->as.buffer.data[i] | (obj->as.buffer.data[i+1] << 8));
-            push(vm, value_int(v));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_u16(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_write_u16 && strcmp(method, "write_u16") == 0 && arg_count == 2) {
-            LatValue val = pop(vm);
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 2 > obj->as.buffer.len) {
-                value_free(&idx); value_free(&val);
-                vm->error = strdup("Buffer.write_u16: index out of bounds");
-                push(vm, value_unit());
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            uint16_t v = (uint16_t)(val.as.int_val & 0xFFFF);
-            obj->as.buffer.data[i] = (uint8_t)(v & 0xFF);
-            obj->as.buffer.data[i+1] = (uint8_t)((v >> 8) & 0xFF);
-            push(vm, value_unit());
-            return true;
+            LatValue args[2]; args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_write_u16(obj, args, 2, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_read_u32 && strcmp(method, "read_u32") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_u32: index out of bounds");
-                push(vm, value_int(0));
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            uint32_t v = (uint32_t)obj->as.buffer.data[i]
-                       | ((uint32_t)obj->as.buffer.data[i+1] << 8)
-                       | ((uint32_t)obj->as.buffer.data[i+2] << 16)
-                       | ((uint32_t)obj->as.buffer.data[i+3] << 24);
-            push(vm, value_int((int64_t)v));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_u32(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_write_u32 && strcmp(method, "write_u32") == 0 && arg_count == 2) {
-            LatValue val = pop(vm);
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
-                value_free(&idx); value_free(&val);
-                vm->error = strdup("Buffer.write_u32: index out of bounds");
-                push(vm, value_unit());
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            uint32_t v = (uint32_t)(val.as.int_val & 0xFFFFFFFF);
-            obj->as.buffer.data[i]   = (uint8_t)(v & 0xFF);
-            obj->as.buffer.data[i+1] = (uint8_t)((v >> 8) & 0xFF);
-            obj->as.buffer.data[i+2] = (uint8_t)((v >> 16) & 0xFF);
-            obj->as.buffer.data[i+3] = (uint8_t)((v >> 24) & 0xFF);
-            push(vm, value_unit());
-            return true;
+            LatValue args[2]; args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_write_u32(obj, args, 2, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_read_i8 && strcmp(method, "read_i8") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val >= obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_i8: index out of bounds");
-                push(vm, value_int(0));
-                return true;
-            }
-            push(vm, value_int((int8_t)obj->as.buffer.data[idx.as.int_val]));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_i8(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_read_i16 && strcmp(method, "read_i16") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 2 > obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_i16: index out of bounds");
-                push(vm, value_int(0));
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            int16_t v;
-            memcpy(&v, obj->as.buffer.data + i, 2);
-            push(vm, value_int(v));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_i16(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_read_i32 && strcmp(method, "read_i32") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_i32: index out of bounds");
-                push(vm, value_int(0));
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            int32_t v;
-            memcpy(&v, obj->as.buffer.data + i, 4);
-            push(vm, value_int(v));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_i32(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_read_f32 && strcmp(method, "read_f32") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_f32: index out of bounds");
-                push(vm, value_float(0.0));
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            float v;
-            memcpy(&v, obj->as.buffer.data + i, 4);
-            push(vm, value_float((double)v));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_f32(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_read_f64 && strcmp(method, "read_f64") == 0 && arg_count == 1) {
-            LatValue idx = pop(vm);
-            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 8 > obj->as.buffer.len) {
-                value_free(&idx);
-                vm->error = strdup("Buffer.read_f64: index out of bounds");
-                push(vm, value_float(0.0));
-                return true;
-            }
-            size_t i = (size_t)idx.as.int_val;
-            double v;
-            memcpy(&v, obj->as.buffer.data + i, 8);
-            push(vm, value_float(v));
-            return true;
+            LatValue args[1]; args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_read_f64(obj, args, 1, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && arg_count == 2) {
-            LatValue end_v = pop(vm);
-            LatValue start_v = pop(vm);
-            if (start_v.type != VAL_INT || end_v.type != VAL_INT) {
-                value_free(&start_v); value_free(&end_v);
-                vm->error = strdup("Buffer.slice: expected Int arguments");
-                push(vm, value_buffer(NULL, 0));
-                return true;
-            }
-            int64_t s = start_v.as.int_val, e = end_v.as.int_val;
-            if (s < 0) s = 0;
-            if (e > (int64_t)obj->as.buffer.len) e = (int64_t)obj->as.buffer.len;
-            if (s >= e) { push(vm, value_buffer(NULL, 0)); return true; }
-            push(vm, value_buffer(obj->as.buffer.data + s, (size_t)(e - s)));
-            return true;
+            LatValue args[2]; args[1] = pop(vm); args[0] = pop(vm);
+            char *err = NULL;
+            LatValue r = builtin_buffer_slice(obj, args, 2, &err);
+            if (err) vm->error = err;
+            push(vm, r); return true;
         }
         if (mhash == MHASH_clear && strcmp(method, "clear") == 0 && arg_count == 0) {
-            obj->as.buffer.len = 0;
-            push(vm, value_unit());
+            push(vm, builtin_buffer_clear(obj, NULL, 0, NULL));
             return true;
         }
         if (mhash == MHASH_fill && strcmp(method, "fill") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            uint8_t byte = (val.type == VAL_INT) ? (uint8_t)(val.as.int_val & 0xFF) : 0;
-            memset(obj->as.buffer.data, byte, obj->as.buffer.len);
-            push(vm, value_unit());
+            LatValue args[1]; args[0] = pop(vm);
+            push(vm, builtin_buffer_fill(obj, args, 1, NULL));
             return true;
         }
         if (mhash == MHASH_resize && strcmp(method, "resize") == 0 && arg_count == 1) {
-            LatValue val = pop(vm);
-            if (val.type != VAL_INT || val.as.int_val < 0) { value_free(&val); push(vm, value_unit()); return true; }
-            size_t new_len = (size_t)val.as.int_val;
-            if (new_len > obj->as.buffer.cap) {
-                obj->as.buffer.cap = new_len;
-                obj->as.buffer.data = realloc(obj->as.buffer.data, obj->as.buffer.cap);
-            }
-            if (new_len > obj->as.buffer.len)
-                memset(obj->as.buffer.data + obj->as.buffer.len, 0, new_len - obj->as.buffer.len);
-            obj->as.buffer.len = new_len;
-            push(vm, value_unit());
+            LatValue args[1]; args[0] = pop(vm);
+            push(vm, builtin_buffer_resize(obj, args, 1, NULL));
             return true;
         }
         if (mhash == MHASH_to_string && strcmp(method, "to_string") == 0 && arg_count == 0) {
-            char *s = malloc(obj->as.buffer.len + 1);
-            memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
-            s[obj->as.buffer.len] = '\0';
-            push(vm, value_string_owned(s));
+            push(vm, builtin_buffer_to_string(obj, NULL, 0, NULL));
             return true;
         }
         if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
-            size_t len = obj->as.buffer.len;
-            LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++)
-                elems[i] = value_int(obj->as.buffer.data[i]);
-            LatValue arr = value_array(elems, len);
-            free(elems);
-            push(vm, arr);
+            push(vm, builtin_buffer_to_array(obj, NULL, 0, NULL));
             return true;
         }
         if (mhash == MHASH_to_hex && strcmp(method, "to_hex") == 0 && arg_count == 0) {
-            size_t len = obj->as.buffer.len;
-            char *hex = malloc(len * 2 + 1);
-            for (size_t i = 0; i < len; i++)
-                snprintf(hex + i * 2, 3, "%02x", obj->as.buffer.data[i]);
-            hex[len * 2] = '\0';
-            push(vm, value_string_owned(hex));
+            push(vm, builtin_buffer_to_hex(obj, NULL, 0, NULL));
             return true;
         }
     } break;
