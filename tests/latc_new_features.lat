@@ -1,0 +1,170 @@
+// Test: compound index assignment, optional chaining, try-propagate, require/ensure
+
+struct Obj { name: any }
+
+// ---- Test 1: Compound Index Assignment ----
+
+fn test_compound_index_local() {
+    print("--- compound index local ---")
+    flux arr = [10, 20, 30]
+    arr[0] = 100
+    print(arr[0])    // 100
+    arr[1] += 5
+    print(arr[1])    // 25
+    arr[2] -= 10
+    print(arr[2])    // 20
+    arr[0] *= 2
+    print(arr[0])    // 200
+    arr[1] /= 5
+    print(arr[1])    // 5
+    arr[2] %= 7
+    print(arr[2])    // 6
+}
+
+fn test_compound_index_array_extra() {
+    print("--- compound index array extra ---")
+    // Test with nested function access
+    flux data = [100, 200, 300]
+    data[0] += 1
+    print(data[0])   // 101
+    data[2] -= 50
+    print(data[2])   // 250
+}
+
+// ---- Test 2: Optional Chaining ----
+
+fn test_optional_chaining_field() {
+    print("--- optional chaining field ---")
+    let val = nil
+    let result = val?.name
+    print(result)    // nil
+
+    let obj = Obj { name: "hello" }
+    let r2 = obj?.name
+    print(r2)        // hello
+}
+
+fn test_optional_chaining_index() {
+    print("--- optional chaining index ---")
+    let val = nil
+    let result = val?[0]
+    print(result)    // nil
+
+    let arr = [10, 20, 30]
+    let r2 = arr?[1]
+    print(r2)        // 20
+}
+
+fn test_optional_chaining_method() {
+    print("--- optional chaining method ---")
+    let val = nil
+    let result = val?.len()
+    print(result)    // nil
+}
+
+// ---- Test 3: Try-Propagate ----
+
+fn ok_result(v: any) {
+    flux m = Map::new()
+    m["tag"] = "ok"
+    m["value"] = v
+    return m
+}
+
+fn err_result(e: any) {
+    flux m = Map::new()
+    m["tag"] = "err"
+    m["error"] = e
+    return m
+}
+
+fn might_fail(succeed: any) {
+    if succeed {
+        return ok_result(42)
+    }
+    return err_result("something went wrong")
+}
+
+fn use_try_propagate(succeed: any) {
+    let val = might_fail(succeed)?
+    return ok_result(val + 1)
+}
+
+fn test_try_propagate() {
+    print("--- try propagate ---")
+    let good = use_try_propagate(true)
+    print(good["tag"])      // ok
+    print(good["value"])    // 43
+
+    let bad = use_try_propagate(false)
+    print(bad["tag"])       // err
+    print(bad["error"])     // something went wrong
+}
+
+// ---- Test 4: Require/Ensure Contracts ----
+
+fn positive_add(a: any, b: any)
+    require a > 0
+    require b > 0
+{
+    return a + b
+}
+
+fn test_require_pass() {
+    print("--- require pass ---")
+    let r = positive_add(3, 4)
+    print(r)    // 7
+}
+
+fn test_require_fail() {
+    print("--- require fail ---")
+    try {
+        positive_add(-1, 5)
+    } catch e {
+        print(e)  // require failed in 'positive_add': condition not met
+    }
+}
+
+fn double_positive(x: any)
+    require x > 0
+    ensure |result| { result > x }
+{
+    return x * 2
+}
+
+fn test_ensure_pass() {
+    print("--- ensure pass ---")
+    let r = double_positive(5)
+    print(r)    // 10
+}
+
+fn half_value(x: any)
+    ensure |result| { result >= x }
+{
+    return x / 2
+}
+
+fn test_ensure_fail() {
+    print("--- ensure fail ---")
+    try {
+        half_value(10)
+    } catch e {
+        print(e)  // ensure failed in 'half_value': condition not met
+    }
+}
+
+// ---- Main ----
+
+fn main() {
+    test_compound_index_local()
+    test_compound_index_array_extra()
+    test_optional_chaining_field()
+    test_optional_chaining_index()
+    test_optional_chaining_method()
+    test_try_propagate()
+    test_require_pass()
+    test_require_fail()
+    test_ensure_pass()
+    test_ensure_fail()
+    print("ALL NEW FEATURE TESTS PASSED")
+}

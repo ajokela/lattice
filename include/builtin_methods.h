@@ -21,6 +21,19 @@
  * Args are NOT freed by these functions.
  */
 
+/* ── Callback type for closure-requiring methods ──
+ *
+ * Each VM provides its own implementation that knows how to invoke a closure
+ * in its calling convention (stack-based for StackVM, register windows for RegVM).
+ *
+ *   closure:    opaque pointer to the closure value (VM-specific)
+ *   args:       array of argument values to pass to the closure
+ *   arg_count:  number of arguments
+ *   ctx:        opaque VM context (cast to StackVM* or RegVM* by the callback)
+ *   return:     the closure's return value (caller owns it)
+ */
+typedef LatValue (*BuiltinCallback)(void *closure, LatValue *args, int arg_count, void *ctx);
+
 /* ── Array methods (no closures) ── */
 
 LatValue builtin_array_contains(LatValue *obj, LatValue *args, int arg_count, char **error);
@@ -38,6 +51,21 @@ LatValue builtin_array_last(LatValue *obj, LatValue *args, int arg_count, char *
 LatValue builtin_array_take(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_array_drop(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_array_chunk(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, char **error);
+
+/* ── Array methods (with closures) ── */
+
+LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_filter(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_reduce(LatValue *obj, LatValue *init, bool has_init,
+                              void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_each(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_find(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_any(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_all(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_flat_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_sort_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_group_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 
 /* ── String methods ── */
 

@@ -257,6 +257,58 @@ static bool has_suffix(const char *str, const char *suffix) {
 }
 
 static int run_latc_file(const char *path) {
+    /* Read the raw file to inspect the magic number */
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open '%s'\n", path);
+        return 1;
+    }
+    uint8_t magic[4];
+    if (fread(magic, 1, 4, f) != 4) {
+        fprintf(stderr, "error: '%s' is too small for a bytecode header\n", path);
+        fclose(f);
+        return 1;
+    }
+    fclose(f);
+
+    /* Auto-detect format: RegVM ("RLAT") vs StackVM ("LATC") */
+    if (memcmp(magic, RLATC_MAGIC, 4) == 0) {
+        char *err = NULL;
+        RegChunk *rchunk = regchunk_load(path, &err);
+        if (!rchunk) {
+            fprintf(stderr, "error: %s\n", err);
+            free(err);
+            return 1;
+        }
+
+        value_set_heap(NULL);
+        value_set_arena(NULL);
+
+        LatRuntime rt;
+        lat_runtime_init(&rt);
+        rt.prog_argc = saved_argc;
+        rt.prog_argv = saved_argv;
+
+        RegVM rvm;
+        regvm_init(&rvm, &rt);
+
+        LatValue result;
+        RegVMResult rvm_res = regvm_run(&rvm, rchunk, &result);
+        if (rvm_res != REGVM_OK) {
+            fprintf(stderr, "regvm error: %s\n", rvm.error);
+            regvm_free(&rvm);
+            lat_runtime_free(&rt);
+            regchunk_free(rchunk);
+            return 1;
+        }
+        value_free(&result);
+        regvm_free(&rvm);
+        lat_runtime_free(&rt);
+        regchunk_free(rchunk);
+        return 0;
+    }
+
+    /* Default: StackVM format */
     char *err = NULL;
     Chunk *chunk = chunk_load(path, &err);
     if (!chunk) {
@@ -821,6 +873,7 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "compile") == 0) {
         const char *input_path = NULL;
         const char *output_path = NULL;
+        bool compile_regvm = false;
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "-o") == 0) {
                 if (i + 1 >= argc) {
@@ -828,15 +881,17 @@ int main(int argc, char **argv) {
                     return 1;
                 }
                 output_path = argv[++i];
+            } else if (strcmp(argv[i], "--regvm") == 0) {
+                compile_regvm = true;
             } else if (!input_path) {
                 input_path = argv[i];
             } else {
-                fprintf(stderr, "usage: clat compile <file.lat> [-o output.latc]\n");
+                fprintf(stderr, "usage: clat compile [--regvm] <file.lat> [-o output.latc]\n");
                 return 1;
             }
         }
         if (!input_path) {
-            fprintf(stderr, "usage: clat compile <file.lat> [-o output.latc]\n");
+            fprintf(stderr, "usage: clat compile [--regvm] <file.lat> [-o output.latc]\n");
             return 1;
         }
 
@@ -894,34 +949,68 @@ int main(int argc, char **argv) {
         value_set_heap(NULL);
         value_set_arena(NULL);
 
-        char *comp_err = NULL;
-        Chunk *chunk = stack_compile(&prog, &comp_err);
-        if (!chunk) {
-            fprintf(stderr, "compile error: %s\n", comp_err);
-            free(comp_err);
-            program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
-            lat_vec_free(&tokens);
-            free(source);
-            free(default_output);
-            return 1;
-        }
+        if (compile_regvm) {
+            /* RegVM compilation path */
+            char *comp_err = NULL;
+            RegChunk *rchunk = reg_compile(&prog, &comp_err);
+            if (!rchunk) {
+                fprintf(stderr, "regvm compile error: %s\n", comp_err);
+                free(comp_err);
+                program_free(&prog);
+                for (size_t i = 0; i < tokens.len; i++)
+                    token_free(lat_vec_get(&tokens, i));
+                lat_vec_free(&tokens);
+                free(source);
+                free(default_output);
+                return 1;
+            }
 
-        /* Save bytecode */
-        if (chunk_save(chunk, output_path) != 0) {
-            fprintf(stderr, "error: cannot write '%s'\n", output_path);
+            /* Save RegVM bytecode */
+            if (regchunk_save(rchunk, output_path) != 0) {
+                fprintf(stderr, "error: cannot write '%s'\n", output_path);
+                regchunk_free(rchunk);
+                program_free(&prog);
+                for (size_t i = 0; i < tokens.len; i++)
+                    token_free(lat_vec_get(&tokens, i));
+                lat_vec_free(&tokens);
+                free(source);
+                free(default_output);
+                return 1;
+            }
+
+            regchunk_free(rchunk);
+        } else {
+            /* StackVM compilation path (default) */
+            char *comp_err = NULL;
+            Chunk *chunk = stack_compile(&prog, &comp_err);
+            if (!chunk) {
+                fprintf(stderr, "compile error: %s\n", comp_err);
+                free(comp_err);
+                program_free(&prog);
+                for (size_t i = 0; i < tokens.len; i++)
+                    token_free(lat_vec_get(&tokens, i));
+                lat_vec_free(&tokens);
+                free(source);
+                free(default_output);
+                return 1;
+            }
+
+            /* Save StackVM bytecode */
+            if (chunk_save(chunk, output_path) != 0) {
+                fprintf(stderr, "error: cannot write '%s'\n", output_path);
+                chunk_free(chunk);
+                program_free(&prog);
+                for (size_t i = 0; i < tokens.len; i++)
+                    token_free(lat_vec_get(&tokens, i));
+                lat_vec_free(&tokens);
+                free(source);
+                free(default_output);
+                return 1;
+            }
+
             chunk_free(chunk);
-            program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
-            lat_vec_free(&tokens);
-            free(source);
-            free(default_output);
-            return 1;
         }
 
-        chunk_free(chunk);
         program_free(&prog);
         for (size_t i = 0; i < tokens.len; i++)
             token_free(lat_vec_get(&tokens, i));

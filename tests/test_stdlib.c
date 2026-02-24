@@ -1440,7 +1440,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.17"
+        "0.3.18"
     );
 }
 
@@ -5865,7 +5865,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.17"
+        "Hello, Lattice!\nVersion 0.3.18"
     );
 }
 
@@ -9787,6 +9787,237 @@ static void test_latc_file_save_load(void) {
     unlink(tmp_path);
 }
 
+/* ======================================================================
+ * RegVM Bytecode Serialization (.rlatc)
+ * ====================================================================== */
+
+/* Helper: compile source to a RegChunk, round-trip through serialize/deserialize,
+ * then run the deserialized chunk and capture stdout. */
+static char *rlatc_round_trip_capture(const char *source) {
+    /* Compile */
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        free(lex_err);
+        lat_vec_free(&tokens);
+        return strdup("LEX_ERROR");
+    }
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        free(parse_err);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++)
+            token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        return strdup("PARSE_ERROR");
+    }
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    RegChunk *rchunk = reg_compile(&prog, &comp_err);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    if (!rchunk) {
+        free(comp_err);
+        return strdup("COMPILE_ERROR");
+    }
+
+    /* Serialize → Deserialize */
+    size_t buf_len;
+    uint8_t *buf = regchunk_serialize(rchunk, &buf_len);
+    regchunk_free(rchunk);
+
+    char *deser_err = NULL;
+    RegChunk *loaded = regchunk_deserialize(buf, buf_len, &deser_err);
+    free(buf);
+    if (!loaded) {
+        size_t msglen = strlen(deser_err) + 20;
+        char *msg = malloc(msglen);
+        snprintf(msg, msglen, "DESER_ERROR:%s", deser_err);
+        free(deser_err);
+        return msg;
+    }
+
+    /* Run the deserialized chunk, capturing stdout */
+    fflush(stdout);
+    FILE *tmp = tmpfile();
+    int old_stdout = dup(fileno(stdout));
+    dup2(fileno(tmp), fileno(stdout));
+
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    RegVM rvm;
+    regvm_init(&rvm, &rt);
+    LatValue result;
+    RegVMResult rvm_res = regvm_run(&rvm, loaded, &result);
+
+    fflush(stdout);
+    dup2(old_stdout, fileno(stdout));
+    close(old_stdout);
+
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    fseek(tmp, 0, SEEK_SET);
+    char *output = malloc((size_t)len + 1);
+    size_t n = fread(output, 1, (size_t)len, tmp);
+    output[n] = '\0';
+    fclose(tmp);
+    if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
+
+    if (rvm_res != REGVM_OK) {
+        free(output);
+        size_t elen = strlen(rvm.error) + 16;
+        output = malloc(elen);
+        snprintf(output, elen, "VM_ERROR:%s", rvm.error);
+    } else {
+        value_free(&result);
+    }
+    regvm_free(&rvm);
+    lat_runtime_free(&rt);
+    regchunk_free(loaded);
+    return output;
+}
+
+static void test_rlatc_round_trip_int(void) {
+    char *out = rlatc_round_trip_capture("fn main() { print(42) }");
+    ASSERT_STR_EQ(out, "42");
+    free(out);
+}
+
+static void test_rlatc_round_trip_string(void) {
+    char *out = rlatc_round_trip_capture("fn main() { print(\"hello rlatc\") }");
+    ASSERT_STR_EQ(out, "hello rlatc");
+    free(out);
+}
+
+static void test_rlatc_round_trip_closure(void) {
+    char *out = rlatc_round_trip_capture(
+        "let add = |a, b| { a + b }\n"
+        "fn main() { print(add(2, 3)) }\n"
+    );
+    ASSERT_STR_EQ(out, "5");
+    free(out);
+}
+
+static void test_rlatc_round_trip_nested(void) {
+    char *out = rlatc_round_trip_capture(
+        "fn outer() {\n"
+        "    let inner = |x| { x * 2 }\n"
+        "    return inner(21)\n"
+        "}\n"
+        "fn main() { print(outer()) }\n"
+    );
+    ASSERT_STR_EQ(out, "42");
+    free(out);
+}
+
+static void test_rlatc_round_trip_program(void) {
+    char *out = rlatc_round_trip_capture(
+        "let fib = |n| {\n"
+        "    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n"
+        "}\n"
+        "fn main() { print(fib(10)) }\n"
+    );
+    ASSERT_STR_EQ(out, "55");
+    free(out);
+}
+
+static void test_rlatc_invalid_magic(void) {
+    uint8_t bad_data[] = { 'N', 'O', 'P', 'E', 0, 0, 0, 0 };
+    char *err = NULL;
+    RegChunk *c = regchunk_deserialize(bad_data, sizeof(bad_data), &err);
+    ASSERT(c == NULL);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "magic") != NULL || strstr(err, "not a .rlatc") != NULL);
+    free(err);
+}
+
+static void test_rlatc_truncated(void) {
+    uint8_t trunc[] = { 'R', 'L', 'A', 'T', 1, 0 };
+    char *err = NULL;
+    RegChunk *c = regchunk_deserialize(trunc, sizeof(trunc), &err);
+    ASSERT(c == NULL);
+    ASSERT(err != NULL);
+    free(err);
+}
+
+static void test_rlatc_file_save_load(void) {
+    /* Compile a program */
+    const char *source = "fn main() { print(\"regvm file round-trip\") }";
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    ASSERT(lex_err == NULL);
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    ASSERT(parse_err == NULL);
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    RegChunk *rchunk = reg_compile(&prog, &comp_err);
+    ASSERT(rchunk != NULL);
+
+    /* Save to temp file */
+    const char *tmp_path = "/tmp/test_rlatc_save_load.latc";
+    ASSERT(regchunk_save(rchunk, tmp_path) == 0);
+    regchunk_free(rchunk);
+
+    /* Load back */
+    char *load_err = NULL;
+    RegChunk *loaded = regchunk_load(tmp_path, &load_err);
+    ASSERT(loaded != NULL);
+
+    /* Run it */
+    fflush(stdout);
+    FILE *tmp = tmpfile();
+    int old_stdout = dup(fileno(stdout));
+    dup2(fileno(tmp), fileno(stdout));
+
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    RegVM rvm;
+    regvm_init(&rvm, &rt);
+    LatValue result;
+    RegVMResult rvm_res = regvm_run(&rvm, loaded, &result);
+
+    fflush(stdout);
+    dup2(old_stdout, fileno(stdout));
+    close(old_stdout);
+
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    fseek(tmp, 0, SEEK_SET);
+    char *output = malloc((size_t)len + 1);
+    size_t n = fread(output, 1, (size_t)len, tmp);
+    output[n] = '\0';
+    fclose(tmp);
+    if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
+
+    ASSERT(rvm_res == REGVM_OK);
+    ASSERT_STR_EQ(output, "regvm file round-trip");
+
+    free(output);
+    value_free(&result);
+    regvm_free(&rvm);
+    lat_runtime_free(&rt);
+    regchunk_free(loaded);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    unlink(tmp_path);
+}
+
 /* ── Built-in stdlib module tests ── */
 
 static void test_builtin_math_sin(void) {
@@ -11922,6 +12153,567 @@ static void test_parity_array_map_with_index(void) {
     );
 }
 
+/* ======================================================================
+ * Cross-Backend Parity: Core Language Features
+ *
+ * Ported from tests/regvm_parity.sh — arithmetic, comparison, bitwise,
+ * variables, control flow, functions, closures, enums, exceptions,
+ * defer, destructuring, phases, and other fundamentals.
+ * ====================================================================== */
+
+/* ── Arithmetic ── */
+
+static void test_parity_int_add(void) {
+    ASSERT_OUTPUT("print(1 + 2)", "3");
+}
+static void test_parity_int_sub(void) {
+    ASSERT_OUTPUT("print(10 - 3)", "7");
+}
+static void test_parity_int_mul(void) {
+    ASSERT_OUTPUT("print(4 * 5)", "20");
+}
+static void test_parity_int_div(void) {
+    ASSERT_OUTPUT("print(15 / 3)", "5");
+}
+static void test_parity_int_mod(void) {
+    ASSERT_OUTPUT("print(17 % 5)", "2");
+}
+static void test_parity_int_neg(void) {
+    ASSERT_OUTPUT("print(-42)", "-42");
+}
+static void test_parity_int_precedence(void) {
+    ASSERT_OUTPUT("print(2 + 3 * 4)", "14");
+}
+static void test_parity_int_parens(void) {
+    ASSERT_OUTPUT("print((2 + 3) * 4)", "20");
+}
+static void test_parity_float_add(void) {
+    ASSERT_OUTPUT("print(3.14 + 1.0)", "4.14");
+}
+static void test_parity_float_div(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r = 10.0 / 3.0\n"
+        "    print(r)\n"
+        "}\n",
+        "3.33333"
+    );
+}
+
+/* ── Comparison ── */
+
+static void test_parity_cmp_lt(void) {
+    ASSERT_OUTPUT("print(1 < 2)", "true");
+}
+static void test_parity_cmp_gt(void) {
+    ASSERT_OUTPUT("print(2 > 1)", "true");
+}
+static void test_parity_cmp_lteq(void) {
+    ASSERT_OUTPUT("print(1 <= 1)", "true");
+}
+static void test_parity_cmp_gteq(void) {
+    ASSERT_OUTPUT("print(1 >= 2)", "false");
+}
+static void test_parity_cmp_eq(void) {
+    ASSERT_OUTPUT("print(1 == 1)", "true");
+}
+static void test_parity_cmp_neq(void) {
+    ASSERT_OUTPUT("print(1 != 2)", "true");
+}
+static void test_parity_logic_and(void) {
+    ASSERT_OUTPUT("print(true && false)", "false");
+}
+static void test_parity_logic_or(void) {
+    ASSERT_OUTPUT("print(true || false)", "true");
+}
+static void test_parity_logic_not(void) {
+    ASSERT_OUTPUT("print(!true)", "false");
+}
+
+/* ── Bitwise ── */
+
+static void test_parity_bit_and(void) {
+    ASSERT_OUTPUT("print(5 & 3)", "1");
+}
+static void test_parity_bit_or(void) {
+    ASSERT_OUTPUT("print(5 | 3)", "7");
+}
+static void test_parity_bit_xor(void) {
+    ASSERT_OUTPUT("print(5 ^ 3)", "6");
+}
+static void test_parity_bit_not(void) {
+    ASSERT_OUTPUT("print(~0)", "-1");
+}
+static void test_parity_bit_lshift(void) {
+    ASSERT_OUTPUT("print(1 << 4)", "16");
+}
+static void test_parity_bit_rshift(void) {
+    ASSERT_OUTPUT("print(16 >> 2)", "4");
+}
+
+/* ── String basics ── */
+
+static void test_parity_str_concat_basic(void) {
+    ASSERT_OUTPUT("print(\"hello\" + \" \" + \"world\")", "hello world");
+}
+static void test_parity_str_len_basic(void) {
+    ASSERT_OUTPUT("print(\"abc\".len())", "3");
+}
+static void test_parity_str_upper(void) {
+    ASSERT_OUTPUT("print(\"hello\".to_upper())", "HELLO");
+}
+static void test_parity_str_lower(void) {
+    ASSERT_OUTPUT("print(\"HELLO\".to_lower())", "hello");
+}
+static void test_parity_str_trim_basic(void) {
+    ASSERT_OUTPUT("print(\"  trim  \".trim())", "trim");
+}
+static void test_parity_str_contains_basic(void) {
+    ASSERT_OUTPUT("print(\"hello\".contains(\"ell\"))", "true");
+}
+static void test_parity_str_starts_with(void) {
+    ASSERT_OUTPUT("print(\"hello\".starts_with(\"hel\"))", "true");
+}
+static void test_parity_str_ends_with(void) {
+    ASSERT_OUTPUT("print(\"hello\".ends_with(\"llo\"))", "true");
+}
+static void test_parity_str_interpolation(void) {
+    ASSERT_OUTPUT(
+        "let x = 42\n"
+        "print(\"val = ${x}\")",
+        "val = 42"
+    );
+}
+static void test_parity_str_interp_expr(void) {
+    ASSERT_OUTPUT("print(\"1 + 2 = ${1 + 2}\")", "1 + 2 = 3");
+}
+
+/* ── Variables ── */
+
+static void test_parity_let_var(void) {
+    ASSERT_OUTPUT(
+        "let x = 42\n"
+        "print(x)",
+        "42"
+    );
+}
+static void test_parity_flux_var(void) {
+    ASSERT_OUTPUT(
+        "flux y = 10\n"
+        "y = 20\n"
+        "print(y)",
+        "20"
+    );
+}
+
+/* ── Structs ── */
+
+static void test_parity_struct_basic(void) {
+    ASSERT_OUTPUT(
+        "struct Point { x: int, y: int }\n"
+        "let p = Point { x: 10, y: 20 }\n"
+        "print(p.x)\n"
+        "print(p.y)",
+        "10\n20"
+    );
+}
+static void test_parity_struct_method(void) {
+    ASSERT_OUTPUT(
+        "struct Counter { value: int, inc: any }\n"
+        "let c = Counter { value: 0, inc: |self| { self.value + 1 } }\n"
+        "print(c.inc())",
+        "1"
+    );
+}
+
+/* ── Functions ── */
+
+static void test_parity_fn_basic(void) {
+    ASSERT_OUTPUT(
+        "fn add(a: any, b: any) { return a + b }\n"
+        "print(add(3, 4))",
+        "7"
+    );
+}
+static void test_parity_fn_string(void) {
+    ASSERT_OUTPUT(
+        "fn greet(name: any) { return \"Hello, \" + name + \"!\" }\n"
+        "print(greet(\"World\"))",
+        "Hello, World!"
+    );
+}
+static void test_parity_fn_recursive(void) {
+    ASSERT_OUTPUT(
+        "fn factorial(n: any) {\n"
+        "    if n <= 1 { return 1 }\n"
+        "    return n * factorial(n - 1)\n"
+        "}\n"
+        "print(factorial(10))",
+        "3628800"
+    );
+}
+
+/* ── Closures ── */
+
+static void test_parity_closure_capture(void) {
+    ASSERT_OUTPUT(
+        "fn make_adder(n: any) {\n"
+        "    return |x| { x + n }\n"
+        "}\n"
+        "let add5 = make_adder(5)\n"
+        "print(add5(10))",
+        "15"
+    );
+}
+static void test_parity_closure_higher_order(void) {
+    ASSERT_OUTPUT(
+        "fn apply(f: any, val: any) { return f(val) }\n"
+        "print(apply(|x| { x * 3 }, 7))",
+        "21"
+    );
+}
+
+/* ── Control flow ── */
+
+static void test_parity_if_true(void) {
+    ASSERT_OUTPUT("print(if true { \"yes\" } else { \"no\" })", "yes");
+}
+static void test_parity_if_false(void) {
+    ASSERT_OUTPUT("print(if false { \"yes\" } else { \"no\" })", "no");
+}
+static void test_parity_match_basic(void) {
+    ASSERT_OUTPUT(
+        "let x = \"A\"\n"
+        "let r = match x {\n"
+        "    \"A\" => \"first\",\n"
+        "    \"B\" => \"second\",\n"
+        "    _ => \"other\",\n"
+        "}\n"
+        "print(r)",
+        "first"
+    );
+}
+
+/* ── Loops ── */
+
+static void test_parity_while_loop(void) {
+    ASSERT_OUTPUT(
+        "flux i = 0\n"
+        "flux sum = 0\n"
+        "while i < 5 {\n"
+        "    sum = sum + i\n"
+        "    i = i + 1\n"
+        "}\n"
+        "print(sum)",
+        "10"
+    );
+}
+static void test_parity_for_loop(void) {
+    ASSERT_OUTPUT(
+        "flux sum = 0\n"
+        "for n in [10, 20, 30] {\n"
+        "    sum = sum + n\n"
+        "}\n"
+        "print(sum)",
+        "60"
+    );
+}
+static void test_parity_for_strings(void) {
+    ASSERT_OUTPUT(
+        "for s in [\"a\", \"b\", \"c\"] {\n"
+        "    print(s)\n"
+        "}",
+        "a\nb\nc"
+    );
+}
+static void test_parity_loop_break(void) {
+    ASSERT_OUTPUT(
+        "flux c = 0\n"
+        "loop {\n"
+        "    if c >= 3 { break }\n"
+        "    c = c + 1\n"
+        "}\n"
+        "print(c)",
+        "3"
+    );
+}
+static void test_parity_for_range(void) {
+    ASSERT_OUTPUT(
+        "flux sum = 0\n"
+        "for n in 1..5 {\n"
+        "    sum = sum + n\n"
+        "}\n"
+        "print(sum)",
+        "10"
+    );
+}
+static void test_parity_nested_for(void) {
+    ASSERT_OUTPUT(
+        "flux result = []\n"
+        "for i in [1, 2, 3] {\n"
+        "    for j in [10, 20] {\n"
+        "        result.push(i * j)\n"
+        "    }\n"
+        "}\n"
+        "print(result)",
+        "[10, 20, 20, 40, 30, 60]"
+    );
+}
+
+/* ── Enums ── */
+
+static void test_parity_enum_basic(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "let c = Color::Red\n"
+        "print(c)",
+        "Color::Red"
+    );
+}
+static void test_parity_enum_tag(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "print(Color::Red.tag())",
+        "Red"
+    );
+}
+static void test_parity_enum_name(void) {
+    ASSERT_OUTPUT(
+        "enum Color { Red, Green, Blue }\n"
+        "print(Color::Red.enum_name())",
+        "Color"
+    );
+}
+static void test_parity_enum_payload(void) {
+    ASSERT_OUTPUT(
+        "enum Shape { Circle(r) }\n"
+        "let s = Shape::Circle(5.0)\n"
+        "print(s.tag())\n"
+        "print(s.payload())",
+        "Circle\n[5]"
+    );
+}
+
+/* ── Exception handling ── */
+
+static void test_parity_try_catch(void) {
+    ASSERT_OUTPUT(
+        "let r = try {\n"
+        "    let x = 10 / 0\n"
+        "    \"ok\"\n"
+        "} catch err {\n"
+        "    \"caught\"\n"
+        "}\n"
+        "print(r)",
+        "caught"
+    );
+}
+static void test_parity_throw_catch(void) {
+    ASSERT_OUTPUT(
+        "fn boom(a: any) { return a / 0 }\n"
+        "let r = try {\n"
+        "    boom(1)\n"
+        "} catch err {\n"
+        "    \"caught error\"\n"
+        "}\n"
+        "print(r)",
+        "caught error"
+    );
+}
+
+/* ── Nil coalescing ── */
+
+static void test_parity_nil_coalesce(void) {
+    ASSERT_OUTPUT(
+        "let v = nil ?? \"default\"\n"
+        "print(v)",
+        "default"
+    );
+}
+static void test_parity_nil_coalesce_non_nil(void) {
+    ASSERT_OUTPUT(
+        "let v = 42 ?? \"default\"\n"
+        "print(v)",
+        "42"
+    );
+}
+
+/* ── Tuples ── */
+
+static void test_parity_tuple_basic(void) {
+    ASSERT_OUTPUT(
+        "let t = (1, \"hello\", true)\n"
+        "print(t)",
+        "(1, hello, true)"
+    );
+}
+static void test_parity_tuple_len(void) {
+    ASSERT_OUTPUT(
+        "let t = (1, 2, 3)\n"
+        "print(t.len())",
+        "3"
+    );
+}
+
+/* ── Defer ── */
+
+static void test_parity_defer_basic(void) {
+    ASSERT_OUTPUT(
+        "fn with_defer() {\n"
+        "    defer { print(\"deferred\") }\n"
+        "    print(\"before\")\n"
+        "}\n"
+        "with_defer()",
+        "before\ndeferred"
+    );
+}
+static void test_parity_defer_lifo(void) {
+    ASSERT_OUTPUT(
+        "fn two_defers() {\n"
+        "    defer { print(\"second\") }\n"
+        "    defer { print(\"first\") }\n"
+        "    print(\"body\")\n"
+        "}\n"
+        "two_defers()",
+        "body\nfirst\nsecond"
+    );
+}
+
+/* ── Destructuring ── */
+
+static void test_parity_destructure_array(void) {
+    ASSERT_OUTPUT(
+        "let [a, b, c] = [10, 20, 30]\n"
+        "print(a)\n"
+        "print(b)\n"
+        "print(c)",
+        "10\n20\n30"
+    );
+}
+
+/* ── Phases ── */
+
+static void test_parity_flux_phase(void) {
+    ASSERT_OUTPUT(
+        "flux x = 1\n"
+        "x = 2\n"
+        "print(x)",
+        "2"
+    );
+}
+static void test_parity_fix_phase(void) {
+    ASSERT_OUTPUT(
+        "fix x = 42\n"
+        "print(x)",
+        "42"
+    );
+}
+static void test_parity_clone_value(void) {
+    ASSERT_OUTPUT(
+        "let a = [1, 2, 3]\n"
+        "let b = clone(a)\n"
+        "print(b)",
+        "[1, 2, 3]"
+    );
+}
+
+/* ── Index assignment ── */
+
+static void test_parity_index_assign_local(void) {
+    ASSERT_OUTPUT(
+        "fn test_fn() {\n"
+        "    let a = [0, 0, 0]\n"
+        "    a[0] = 10\n"
+        "    a[1] = 20\n"
+        "    a[2] = 30\n"
+        "    print(a)\n"
+        "}\n"
+        "test_fn()",
+        "[10, 20, 30]"
+    );
+}
+static void test_parity_index_assign_global(void) {
+    ASSERT_OUTPUT(
+        "flux a = [0, 0, 0]\n"
+        "a[0] = 10\n"
+        "a[1] = 20\n"
+        "a[2] = 30\n"
+        "print(a)",
+        "[10, 20, 30]"
+    );
+}
+
+/* ── Mixed / pipeline ── */
+
+static void test_parity_complex_pipeline(void) {
+    ASSERT_OUTPUT(
+        "fn process(items: any) {\n"
+        "    return items.map(|x| { x * 2 }).filter(|x| { x > 4 })\n"
+        "}\n"
+        "print(process([1, 2, 3, 4, 5]))",
+        "[6, 8, 10]"
+    );
+}
+static void test_parity_fn_return_array(void) {
+    ASSERT_OUTPUT(
+        "fn divmod(a: any, b: any) {\n"
+        "    return [a / b, a % b]\n"
+        "}\n"
+        "let r = divmod(17, 5)\n"
+        "print(r[0])\n"
+        "print(r[1])",
+        "3\n2"
+    );
+}
+
+/* ── Global mutation ── */
+
+static void test_parity_global_push(void) {
+    ASSERT_OUTPUT(
+        "flux arr = []\n"
+        "arr.push(1)\n"
+        "arr.push(2)\n"
+        "arr.push(3)\n"
+        "print(arr)\n"
+        "print(arr.len())",
+        "[1, 2, 3]\n3"
+    );
+}
+
+/* ── Map basics ── */
+
+static void test_parity_map_basic(void) {
+    ASSERT_OUTPUT(
+        "let m = Map::new()\n"
+        "m[\"a\"] = 1\n"
+        "m[\"b\"] = 2\n"
+        "print(m[\"a\"])\n"
+        "print(m[\"b\"])",
+        "1\n2"
+    );
+}
+static void test_parity_map_len(void) {
+    ASSERT_OUTPUT(
+        "let m = Map::new()\n"
+        "m[\"x\"] = 1\n"
+        "print(m.len())",
+        "1"
+    );
+}
+
+/* ── Array literal / index ── */
+
+static void test_parity_array_literal(void) {
+    ASSERT_OUTPUT("print([1, 2, 3])", "[1, 2, 3]");
+}
+static void test_parity_array_index(void) {
+    ASSERT_OUTPUT(
+        "let a = [10, 20, 30]\n"
+        "print(a[1])",
+        "20"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -12837,6 +13629,16 @@ void register_stdlib_tests(void) {
     register_test("test_latc_truncated", test_latc_truncated);
     register_test("test_latc_file_save_load", test_latc_file_save_load);
 
+    /* RegVM bytecode serialization (.rlatc) */
+    register_test("test_rlatc_round_trip_int", test_rlatc_round_trip_int);
+    register_test("test_rlatc_round_trip_string", test_rlatc_round_trip_string);
+    register_test("test_rlatc_round_trip_closure", test_rlatc_round_trip_closure);
+    register_test("test_rlatc_round_trip_nested", test_rlatc_round_trip_nested);
+    register_test("test_rlatc_round_trip_program", test_rlatc_round_trip_program);
+    register_test("test_rlatc_invalid_magic", test_rlatc_invalid_magic);
+    register_test("test_rlatc_truncated", test_rlatc_truncated);
+    register_test("test_rlatc_file_save_load", test_rlatc_file_save_load);
+
     /* Built-in stdlib modules */
     register_test("test_builtin_math_sin", test_builtin_math_sin);
     register_test("test_builtin_math_pi", test_builtin_math_pi);
@@ -13067,4 +13869,124 @@ void register_stdlib_tests(void) {
     register_test("test_parity_map_empty_operations", test_parity_map_empty_operations);
     register_test("test_parity_str_methods_chain", test_parity_str_methods_chain);
     register_test("test_parity_array_map_with_index", test_parity_array_map_with_index);
+
+    /* Cross-backend parity: Arithmetic */
+    register_test("test_parity_int_add", test_parity_int_add);
+    register_test("test_parity_int_sub", test_parity_int_sub);
+    register_test("test_parity_int_mul", test_parity_int_mul);
+    register_test("test_parity_int_div", test_parity_int_div);
+    register_test("test_parity_int_mod", test_parity_int_mod);
+    register_test("test_parity_int_neg", test_parity_int_neg);
+    register_test("test_parity_int_precedence", test_parity_int_precedence);
+    register_test("test_parity_int_parens", test_parity_int_parens);
+    register_test("test_parity_float_add", test_parity_float_add);
+    register_test("test_parity_float_div", test_parity_float_div);
+
+    /* Cross-backend parity: Comparison */
+    register_test("test_parity_cmp_lt", test_parity_cmp_lt);
+    register_test("test_parity_cmp_gt", test_parity_cmp_gt);
+    register_test("test_parity_cmp_lteq", test_parity_cmp_lteq);
+    register_test("test_parity_cmp_gteq", test_parity_cmp_gteq);
+    register_test("test_parity_cmp_eq", test_parity_cmp_eq);
+    register_test("test_parity_cmp_neq", test_parity_cmp_neq);
+    register_test("test_parity_logic_and", test_parity_logic_and);
+    register_test("test_parity_logic_or", test_parity_logic_or);
+    register_test("test_parity_logic_not", test_parity_logic_not);
+
+    /* Cross-backend parity: Bitwise */
+    register_test("test_parity_bit_and", test_parity_bit_and);
+    register_test("test_parity_bit_or", test_parity_bit_or);
+    register_test("test_parity_bit_xor", test_parity_bit_xor);
+    register_test("test_parity_bit_not", test_parity_bit_not);
+    register_test("test_parity_bit_lshift", test_parity_bit_lshift);
+    register_test("test_parity_bit_rshift", test_parity_bit_rshift);
+
+    /* Cross-backend parity: String basics */
+    register_test("test_parity_str_concat_basic", test_parity_str_concat_basic);
+    register_test("test_parity_str_len_basic", test_parity_str_len_basic);
+    register_test("test_parity_str_upper", test_parity_str_upper);
+    register_test("test_parity_str_lower", test_parity_str_lower);
+    register_test("test_parity_str_trim_basic", test_parity_str_trim_basic);
+    register_test("test_parity_str_contains_basic", test_parity_str_contains_basic);
+    register_test("test_parity_str_starts_with", test_parity_str_starts_with);
+    register_test("test_parity_str_ends_with", test_parity_str_ends_with);
+    register_test("test_parity_str_interpolation", test_parity_str_interpolation);
+    register_test("test_parity_str_interp_expr", test_parity_str_interp_expr);
+
+    /* Cross-backend parity: Variables */
+    register_test("test_parity_let_var", test_parity_let_var);
+    register_test("test_parity_flux_var", test_parity_flux_var);
+
+    /* Cross-backend parity: Structs */
+    register_test("test_parity_struct_basic", test_parity_struct_basic);
+    register_test("test_parity_struct_method", test_parity_struct_method);
+
+    /* Cross-backend parity: Functions */
+    register_test("test_parity_fn_basic", test_parity_fn_basic);
+    register_test("test_parity_fn_string", test_parity_fn_string);
+    register_test("test_parity_fn_recursive", test_parity_fn_recursive);
+
+    /* Cross-backend parity: Closures */
+    register_test("test_parity_closure_capture", test_parity_closure_capture);
+    register_test("test_parity_closure_higher_order", test_parity_closure_higher_order);
+
+    /* Cross-backend parity: Control flow */
+    register_test("test_parity_if_true", test_parity_if_true);
+    register_test("test_parity_if_false", test_parity_if_false);
+    register_test("test_parity_match_basic", test_parity_match_basic);
+
+    /* Cross-backend parity: Loops */
+    register_test("test_parity_while_loop", test_parity_while_loop);
+    register_test("test_parity_for_loop", test_parity_for_loop);
+    register_test("test_parity_for_strings", test_parity_for_strings);
+    register_test("test_parity_loop_break", test_parity_loop_break);
+    register_test("test_parity_for_range", test_parity_for_range);
+    register_test("test_parity_nested_for", test_parity_nested_for);
+
+    /* Cross-backend parity: Enums */
+    register_test("test_parity_enum_basic", test_parity_enum_basic);
+    register_test("test_parity_enum_tag", test_parity_enum_tag);
+    register_test("test_parity_enum_name", test_parity_enum_name);
+    register_test("test_parity_enum_payload", test_parity_enum_payload);
+
+    /* Cross-backend parity: Exception handling */
+    register_test("test_parity_try_catch", test_parity_try_catch);
+    register_test("test_parity_throw_catch", test_parity_throw_catch);
+
+    /* Cross-backend parity: Nil coalescing */
+    register_test("test_parity_nil_coalesce", test_parity_nil_coalesce);
+    register_test("test_parity_nil_coalesce_non_nil", test_parity_nil_coalesce_non_nil);
+
+    /* Cross-backend parity: Tuples */
+    register_test("test_parity_tuple_basic", test_parity_tuple_basic);
+    register_test("test_parity_tuple_len", test_parity_tuple_len);
+
+    /* Cross-backend parity: Defer */
+    register_test("test_parity_defer_basic", test_parity_defer_basic);
+    register_test("test_parity_defer_lifo", test_parity_defer_lifo);
+
+    /* Cross-backend parity: Destructuring */
+    register_test("test_parity_destructure_array", test_parity_destructure_array);
+
+    /* Cross-backend parity: Phases */
+    register_test("test_parity_flux_phase", test_parity_flux_phase);
+    register_test("test_parity_fix_phase", test_parity_fix_phase);
+    register_test("test_parity_clone_value", test_parity_clone_value);
+
+    /* Cross-backend parity: Index assignment */
+    register_test("test_parity_index_assign_local", test_parity_index_assign_local);
+    register_test("test_parity_index_assign_global", test_parity_index_assign_global);
+
+    /* Cross-backend parity: Mixed / pipeline */
+    register_test("test_parity_complex_pipeline", test_parity_complex_pipeline);
+    register_test("test_parity_fn_return_array", test_parity_fn_return_array);
+    register_test("test_parity_global_push", test_parity_global_push);
+
+    /* Cross-backend parity: Map basics */
+    register_test("test_parity_map_basic", test_parity_map_basic);
+    register_test("test_parity_map_len", test_parity_map_len);
+
+    /* Cross-backend parity: Array literal / index */
+    register_test("test_parity_array_literal", test_parity_array_literal);
+    register_test("test_parity_array_index", test_parity_array_index);
 }

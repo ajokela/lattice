@@ -242,6 +242,232 @@ LatValue builtin_array_chunk(LatValue *obj, LatValue *args, int arg_count, char 
     return r;
 }
 
+LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)args; (void)arg_count; (void)error;
+    size_t n = obj->as.array.len;
+    /* First pass: count total elements */
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (obj->as.array.elems[i].type == VAL_ARRAY)
+            total += obj->as.array.elems[i].as.array.len;
+        else
+            total += 1;
+    }
+    if (total == 0) return value_array(NULL, 0);
+    LatValue *buf = malloc(total * sizeof(LatValue));
+    size_t pos = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (obj->as.array.elems[i].type == VAL_ARRAY) {
+            LatValue *inner = obj->as.array.elems[i].as.array.elems;
+            size_t inner_len = obj->as.array.elems[i].as.array.len;
+            for (size_t j = 0; j < inner_len; j++)
+                buf[pos++] = value_deep_clone(&inner[j]);
+        } else {
+            buf[pos++] = value_deep_clone(&obj->as.array.elems[i]);
+        }
+    }
+    LatValue result = value_array(buf, pos);
+    free(buf);
+    return result;
+}
+
+/* ========================================================================
+ * Array methods (with closures)
+ *
+ * These take a BuiltinCallback + opaque closure/ctx so both VMs can share
+ * the iteration logic while each providing their own closure invocation.
+ * ======================================================================== */
+
+LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    size_t len = obj->as.array.len;
+    LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+    for (size_t i = 0; i < len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        elems[i] = cb(closure, &arg, 1, ctx);
+        value_free(&arg);
+    }
+    LatValue result = value_array(elems, len);
+    free(elems);
+    return result;
+}
+
+LatValue builtin_array_filter(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    size_t len = obj->as.array.len;
+    size_t cap = len > 0 ? len : 1;
+    LatValue *elems = malloc(cap * sizeof(LatValue));
+    size_t out_len = 0;
+    for (size_t i = 0; i < len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue pred = cb(closure, &arg, 1, ctx);
+        bool keep = (pred.type == VAL_BOOL && pred.as.bool_val);
+        value_free(&pred);
+        if (keep) {
+            elems[out_len++] = arg;
+        } else {
+            value_free(&arg);
+        }
+    }
+    LatValue result = value_array(elems, out_len);
+    free(elems);
+    return result;
+}
+
+LatValue builtin_array_reduce(LatValue *obj, LatValue *init, bool has_init,
+                              void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    LatValue acc;
+    size_t start = 0;
+    if (has_init) {
+        acc = value_deep_clone(init);
+    } else if (obj->as.array.len > 0) {
+        acc = value_deep_clone(&obj->as.array.elems[0]);
+        start = 1;
+    } else {
+        return value_nil();
+    }
+    for (size_t i = start; i < obj->as.array.len; i++) {
+        LatValue elem = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue args[2] = { acc, elem };
+        acc = cb(closure, args, 2, ctx);
+        value_free(&args[0]);
+        value_free(&args[1]);
+    }
+    return acc;
+}
+
+LatValue builtin_array_each(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    for (size_t i = 0; i < obj->as.array.len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue r = cb(closure, &arg, 1, ctx);
+        value_free(&arg);
+        value_free(&r);
+    }
+    return value_unit();
+}
+
+LatValue builtin_array_find(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    for (size_t i = 0; i < obj->as.array.len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue pred = cb(closure, &arg, 1, ctx);
+        bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
+        value_free(&arg);
+        value_free(&pred);
+        if (match)
+            return value_deep_clone(&obj->as.array.elems[i]);
+    }
+    return value_unit();
+}
+
+LatValue builtin_array_any(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    for (size_t i = 0; i < obj->as.array.len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue pred = cb(closure, &arg, 1, ctx);
+        bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
+        value_free(&arg);
+        value_free(&pred);
+        if (match) return value_bool(true);
+    }
+    return value_bool(false);
+}
+
+LatValue builtin_array_all(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    for (size_t i = 0; i < obj->as.array.len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue pred = cb(closure, &arg, 1, ctx);
+        bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
+        value_free(&arg);
+        value_free(&pred);
+        if (!match) return value_bool(false);
+    }
+    return value_bool(true);
+}
+
+LatValue builtin_array_flat_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    size_t n = obj->as.array.len;
+    size_t cap = n * 2;
+    if (cap == 0) cap = 1;
+    LatValue *buf = malloc(cap * sizeof(LatValue));
+    size_t out = 0;
+    for (size_t i = 0; i < n; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue mapped = cb(closure, &arg, 1, ctx);
+        value_free(&arg);
+        if (mapped.type == VAL_ARRAY) {
+            for (size_t j = 0; j < mapped.as.array.len; j++) {
+                if (out >= cap) { cap *= 2; buf = realloc(buf, cap * sizeof(LatValue)); }
+                buf[out++] = value_deep_clone(&mapped.as.array.elems[j]);
+            }
+            value_free(&mapped);
+        } else {
+            if (out >= cap) { cap *= 2; buf = realloc(buf, cap * sizeof(LatValue)); }
+            buf[out++] = mapped;
+        }
+    }
+    LatValue result = value_array(buf, out);
+    free(buf);
+    return result;
+}
+
+LatValue builtin_array_sort_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    size_t n = obj->as.array.len;
+    LatValue *buf = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+    for (size_t i = 0; i < n; i++)
+        buf[i] = value_deep_clone(&obj->as.array.elems[i]);
+    /* Insertion sort using comparator: closure(a, b) < 0 means a < b */
+    for (size_t i = 1; i < n; i++) {
+        LatValue key = buf[i];
+        size_t j = i;
+        while (j > 0) {
+            LatValue ca[2];
+            ca[0] = value_deep_clone(&key);
+            ca[1] = value_deep_clone(&buf[j - 1]);
+            LatValue cmp = cb(closure, ca, 2, ctx);
+            value_free(&ca[0]); value_free(&ca[1]);
+            if (cmp.type != VAL_INT || cmp.as.int_val >= 0) { value_free(&cmp); break; }
+            value_free(&cmp);
+            buf[j] = buf[j - 1]; j--;
+        }
+        buf[j] = key;
+    }
+    LatValue result = value_array(buf, n);
+    free(buf);
+    return result;
+}
+
+LatValue builtin_array_group_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    LatValue grp = value_map_new();
+    for (size_t i = 0; i < obj->as.array.len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue key_v = cb(closure, &arg, 1, ctx);
+        value_free(&arg);
+        char *gk = value_display(&key_v);
+        value_free(&key_v);
+        LatValue *existing = lat_map_get(grp.as.map.map, gk);
+        if (existing && existing->type == VAL_ARRAY) {
+            if (existing->as.array.len >= existing->as.array.cap) {
+                existing->as.array.cap = existing->as.array.cap ? existing->as.array.cap * 2 : 4;
+                existing->as.array.elems = realloc(existing->as.array.elems, existing->as.array.cap * sizeof(LatValue));
+            }
+            existing->as.array.elems[existing->as.array.len++] = value_deep_clone(&obj->as.array.elems[i]);
+        } else {
+            LatValue cl = value_deep_clone(&obj->as.array.elems[i]);
+            LatValue na = value_array(&cl, 1);
+            lat_map_set(grp.as.map.map, gk, &na);
+        }
+        free(gk);
+    }
+    return grp;
+}
+
 /* ========================================================================
  * String methods
  * ======================================================================== */

@@ -262,12 +262,20 @@ flux known_enums = []
 // String constant deduplication (per-chunk intern map)
 flux string_intern_map = Map::new()
 
+// Contract tracking (require/ensure)
+// ensure_slots stores local variable slots where ensure closures are saved
+flux ensure_slots = []
+flux ensure_messages = []
+flux ensure_count = 0
+flux current_func_name = ""
+
 // Compiler stack for save/restore during function compilation
 // Each entry is an array: [code, c_lines, constants, local_names,
 //   local_name_arr, local_depth_arr, local_captured_arr, local_count,
 //   scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
 //   func_type, break_jumps, break_count, loop_start_pos, loop_depth,
-//   loop_break_local_count, loop_continue_local_count, string_intern_map]
+//   loop_break_local_count, loop_continue_local_count, string_intern_map,
+//   ensure_slots, ensure_messages, ensure_count, current_func_name]
 flux compiler_stack = []
 
 fn save_compiler() {
@@ -277,7 +285,8 @@ fn save_compiler() {
         local_name_arr, local_depth_arr, local_captured_arr, local_count,
         scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
         func_type, break_jumps, break_count, loop_start_pos, loop_depth,
-        loop_break_local_count, loop_continue_local_count, string_intern_map
+        loop_break_local_count, loop_continue_local_count, string_intern_map,
+        ensure_slots, ensure_messages, ensure_count, current_func_name
     ]
     compiler_stack.push(state)
 }
@@ -304,6 +313,10 @@ fn restore_compiler() {
     loop_break_local_count = state[17]
     loop_continue_local_count = state[18]
     string_intern_map = state[19]
+    ensure_slots = state[20]
+    ensure_messages = state[21]
+    ensure_count = state[22]
+    current_func_name = state[23]
 }
 
 // Snapshot the current chunk into an array for serialization
@@ -612,6 +625,35 @@ fn emit_variable_set(name: any, line: any) {
 }
 
 // ============================================================================
+// Section 7b: Ensure contract emission
+// ============================================================================
+
+// Emit ensure checks before a return. Expects return value on TOS.
+// Leaves it on TOS unchanged.
+fn emit_ensure_checks(line: any) {
+    if ensure_count == 0 { return }
+    flux i = 0
+    while i < ensure_count {
+        let slot = ensure_slots[i]
+        let msg = ensure_messages[i]
+        // Stack: [..., return_val]
+        emit_byte(OP_DUP, line)              // [..., ret, ret_copy]
+        emit_bytes(OP_GET_LOCAL, slot, line)  // [..., ret, ret_copy, closure]
+        emit_byte(OP_SWAP, line)             // [..., ret, closure, ret_copy]
+        emit_bytes(OP_CALL, 1, line)         // [..., ret, result]
+        let ok_jump = emit_jump(OP_JUMP_IF_TRUE, line)
+        emit_byte(OP_POP, line)              // pop false
+        emit_byte(OP_POP, line)              // pop return value
+        let full_msg = "ensure failed in '" + current_func_name + "': " + msg
+        emit_constant(make_string_const(full_msg), line)
+        emit_byte(OP_THROW, line)
+        patch_jump(ok_jump)
+        emit_byte(OP_POP, line)              // pop true
+        i = i + 1
+    }
+}
+
+// ============================================================================
 // Section 8: Expression parsing — precedence climbing
 // ============================================================================
 
@@ -829,64 +871,121 @@ fn parse_postfix() {
             }
             expect(nil, ")")
             emit_bytes(OP_CALL, arg_count, line)
-        } else { if pt == "[" {
+        } else { if pt == "[" || pt == "?[" {
+            let optional = pt == "?["
             advance()
+            flux end_jump = 0
+            if optional {
+                // If TOS is nil, short-circuit to nil
+                let skip = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+                end_jump = emit_jump(OP_JUMP, line)
+                patch_jump(skip)
+            }
             parse_expression()
             expect(nil, "]")
             emit_byte(OP_INDEX, line)
-        } else { if pt == "." {
+            if optional {
+                patch_jump(end_jump)
+            }
+        } else { if pt == "." || pt == "?." {
+            let optional = pt == "?."
             let receiver_code_pos = len(code)
             advance()
             let field_name = expect("identifier", nil).text
             if peek_type() == "(" {
-                // Check if receiver was a simple local or global load
-                let is_local_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_LOCAL
-                let is_global_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_GLOBAL && !(receiver_code_pos >= 3 && code[receiver_code_pos - 3] == OP_GET_GLOBAL_16)
-                let receiver_slot = 0
-                if is_local_recv || is_global_recv {
-                    receiver_slot = code[receiver_code_pos - 1]
-                    // Remove the GET_LOCAL/GET_GLOBAL we already emitted
-                    code.pop()
-                    code.pop()
-                    c_lines.pop()
-                    c_lines.pop()
-                }
+                // Method call
+                if !optional {
+                    // Check if receiver was a simple local or global load
+                    let is_local_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_LOCAL
+                    let is_global_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_GLOBAL && !(receiver_code_pos >= 3 && code[receiver_code_pos - 3] == OP_GET_GLOBAL_16)
+                    let receiver_slot = 0
+                    if is_local_recv || is_global_recv {
+                        receiver_slot = code[receiver_code_pos - 1]
+                        // Remove the GET_LOCAL/GET_GLOBAL we already emitted
+                        code.pop()
+                        code.pop()
+                        c_lines.pop()
+                        c_lines.pop()
+                    }
 
-                advance()
-                flux arg_count = 0
-                if peek_type() != ")" {
-                    parse_expression()
-                    arg_count = arg_count + 1
-                    while peek_type() == "," {
-                        advance()
+                    advance()
+                    flux arg_count = 0
+                    if peek_type() != ")" {
                         parse_expression()
                         arg_count = arg_count + 1
+                        while peek_type() == "," {
+                            advance()
+                            parse_expression()
+                            arg_count = arg_count + 1
+                        }
                     }
-                }
-                expect(nil, ")")
-                let name_idx = string_constant(field_name)
-                if is_local_recv {
-                    emit_byte(OP_INVOKE_LOCAL, line)
-                    emit_byte(receiver_slot, line)
-                    emit_byte(name_idx, line)
-                    emit_byte(arg_count, line)
-                } else { if is_global_recv {
-                    emit_byte(OP_INVOKE_GLOBAL, line)
-                    emit_byte(receiver_slot, line)
-                    emit_byte(name_idx, line)
-                    emit_byte(arg_count, line)
+                    expect(nil, ")")
+                    let name_idx = string_constant(field_name)
+                    if is_local_recv {
+                        emit_byte(OP_INVOKE_LOCAL, line)
+                        emit_byte(receiver_slot, line)
+                        emit_byte(name_idx, line)
+                        emit_byte(arg_count, line)
+                    } else { if is_global_recv {
+                        emit_byte(OP_INVOKE_GLOBAL, line)
+                        emit_byte(receiver_slot, line)
+                        emit_byte(name_idx, line)
+                        emit_byte(arg_count, line)
+                    } else {
+                        emit_byte(OP_INVOKE, line)
+                        emit_byte(name_idx, line)
+                        emit_byte(arg_count, line)
+                    } }
                 } else {
+                    // Optional method call: obj?.method(args)
+                    // TOS = object. Check if nil.
+                    let skip = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+                    // Is nil — push nil as result, skip method call
+                    emit_byte(OP_POP, line)
+                    emit_byte(OP_NIL, line)
+                    let end_jump = emit_jump(OP_JUMP, line)
+                    patch_jump(skip)
+                    // Not nil — proceed with method call
+                    advance()
+                    flux arg_count = 0
+                    if peek_type() != ")" {
+                        parse_expression()
+                        arg_count = arg_count + 1
+                        while peek_type() == "," {
+                            advance()
+                            parse_expression()
+                            arg_count = arg_count + 1
+                        }
+                    }
+                    expect(nil, ")")
+                    let name_idx = string_constant(field_name)
                     emit_byte(OP_INVOKE, line)
                     emit_byte(name_idx, line)
                     emit_byte(arg_count, line)
-                } }
+                    patch_jump(end_jump)
+                }
             } else {
-                let name_idx = string_constant(field_name)
-                emit_bytes(OP_GET_FIELD, name_idx, line)
+                // Field access
+                if optional {
+                    // Optional field access: obj?.field
+                    let skip = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+                    let end_jump = emit_jump(OP_JUMP, line)
+                    patch_jump(skip)
+                    let name_idx = string_constant(field_name)
+                    emit_bytes(OP_GET_FIELD, name_idx, line)
+                    patch_jump(end_jump)
+                } else {
+                    let name_idx = string_constant(field_name)
+                    emit_bytes(OP_GET_FIELD, name_idx, line)
+                }
             }
+        } else { if pt == "?" {
+            // Try-propagate: expr? — unwrap ok or return err
+            advance()
+            emit_byte(OP_TRY_UNWRAP, line)
         } else {
             break
-        } } }
+        } } } }
     }
 }
 
@@ -1789,6 +1888,98 @@ fn parse_fn_declaration() {
         expect("identifier", nil)
     }
 
+    // Collect require/ensure contract token positions.
+    // require/ensure are contextual identifiers appearing before '{'.
+    // Strategy: save the position of each contract's condition expression start,
+    // then scan forward (skipping balanced brackets) to find the body '{'.
+    // Later, backtrack to compile each contract.
+    flux contract_starts = []
+    flux contract_is_ensure_arr = []
+    flux contract_msg_arr = []
+    let contracts_begin_pos = pos
+    // Scan forward to find the body '{' — track balanced brackets
+    flux scan_depth = 0
+    while peek() != nil {
+        let ct = peek_text()
+        if ct == "(" || ct == "[" { scan_depth = scan_depth + 1 }
+        if ct == ")" || ct == "]" { scan_depth = scan_depth - 1 }
+        if ct == "|" && scan_depth == 0 {
+            // Skip closure: |...| { ... }
+            advance()
+            while peek() != nil && peek_text() != "|" { advance() }
+            if peek_text() == "|" { advance() }
+            if peek_text() == "{" {
+                advance()
+                flux cd = 1
+                while cd > 0 && peek() != nil {
+                    if peek_text() == "{" { cd = cd + 1 }
+                    if peek_text() == "}" { cd = cd - 1 }
+                    if cd > 0 { advance() }
+                }
+                if peek_text() == "}" { advance() }
+            }
+        } else { if ct == "{" && scan_depth == 0 {
+            break
+        } else {
+            advance()
+        } }
+    }
+    let body_brace_pos = pos
+    // Now backtrack and identify each contract clause
+    pos = contracts_begin_pos
+    while peek_type() == "identifier" && (peek_text() == "require" || peek_text() == "ensure") {
+        let is_ens = peek_text() == "ensure"
+        advance()  // consume "require"/"ensure"
+        contract_is_ensure_arr.push(is_ens)
+        contract_starts.push(pos)  // save position of condition expression
+        // Skip to next require/ensure or body '{' by scanning with balanced brackets
+        flux skip_depth = 0
+        while pos < body_brace_pos && peek() != nil {
+            let st = peek_text()
+            if st == "(" || st == "[" { skip_depth = skip_depth + 1 }
+            if st == ")" || st == "]" { skip_depth = skip_depth - 1 }
+            if st == "|" && skip_depth == 0 {
+                // Closure — skip |...| { ... }
+                advance()
+                while peek() != nil && peek_text() != "|" { advance() }
+                if peek_text() == "|" { advance() }
+                if peek_text() == "{" {
+                    advance()
+                    flux cd2 = 1
+                    while cd2 > 0 && peek() != nil {
+                        if peek_text() == "{" { cd2 = cd2 + 1 }
+                        if peek_text() == "}" { cd2 = cd2 - 1 }
+                        if cd2 > 0 { advance() }
+                    }
+                    if peek_text() == "}" { advance() }
+                }
+                break
+            }
+            if skip_depth == 0 {
+                if st == "require" || st == "ensure" {
+                    break
+                }
+                if st == "," {
+                    advance()
+                    if peek_type() == "string" {
+                        let msg = advance().text
+                        contract_msg_arr.push(msg)
+                    } else {
+                        contract_msg_arr.push("condition not met")
+                    }
+                    break
+                }
+            }
+            advance()
+        }
+        if len(contract_msg_arr) < len(contract_starts) {
+            contract_msg_arr.push("condition not met")
+        }
+    }
+    // pos should now be at body_brace_pos
+    pos = body_brace_pos
+    let contract_count = len(contract_starts)
+
     let param_count = len(param_names_arr)
 
     save_compiler()
@@ -1811,6 +2002,10 @@ fn parse_fn_declaration() {
     loop_start_pos = 0
     loop_depth = 0
     string_intern_map = Map::new()
+    ensure_slots = []
+    ensure_messages = []
+    ensure_count = 0
+    current_func_name = name
 
     // Reserve slot 0 for the function itself (VM convention)
     add_local("")
@@ -1819,6 +2014,34 @@ fn parse_fn_declaration() {
     for i in 0..param_count {
         add_local(param_names_arr[i])
     }
+
+    // Now compile contracts by backtracking to their saved positions
+    let body_start_pos = pos  // save where the '{' is
+    flux ci = 0
+    while ci < contract_count {
+        pos = contract_starts[ci]
+        if contract_is_ensure_arr[ci] {
+            // Ensure: compile the closure expression and store in a hidden local
+            parse_expression()
+            add_local("")  // hidden local for ensure closure
+            let slot = local_count - 1
+            ensure_slots.push(slot)
+            ensure_messages.push(contract_msg_arr[ci])
+            ensure_count = ensure_count + 1
+        } else {
+            // Require: compile condition, check, throw if false
+            parse_expression()
+            let ok_jump = emit_jump(OP_JUMP_IF_TRUE, line)
+            emit_byte(OP_POP, line)
+            let full_msg = "require failed in '" + name + "': " + contract_msg_arr[ci]
+            emit_constant(make_string_const(full_msg), line)
+            emit_byte(OP_THROW, line)
+            patch_jump(ok_jump)
+            emit_byte(OP_POP, line)  // pop true
+        }
+        ci = ci + 1
+    }
+    pos = body_start_pos  // restore to where '{' is
 
     expect(nil, "{")
     while peek_text() != "}" {
@@ -1830,6 +2053,7 @@ fn parse_fn_declaration() {
     expect(nil, "}")
 
     emit_byte(OP_UNIT, line)
+    emit_ensure_checks(line)
     emit_byte(OP_DEFER_RUN, line)
     emit_byte(0, line)  // scope_depth 0 = run all defers
     emit_byte(OP_RETURN, line)
@@ -1884,6 +2108,7 @@ fn parse_return() {
     } else {
         parse_expression()
     }
+    emit_ensure_checks(line)
     emit_byte(OP_DEFER_RUN, line)
     emit_byte(0, line)  // scope_depth 0 = run all defers
     emit_byte(OP_RETURN, line)
@@ -2176,7 +2401,23 @@ fn parse_compound_assignment_target(name: any, line: any) {
                 emit_byte(OP_SWAP, line)
                 emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
             } else {
-                compiler_error("compound index assignment not yet supported", line)
+                // Compound assignment: arr[i] += expr
+                // Stack so far: [index]. Get current value first.
+                emit_byte(OP_DUP, line)          // [index, index]
+                emit_bytes(OP_GET_LOCAL, slot, line) // [index, index, arr]
+                emit_byte(OP_SWAP, line)          // [index, arr, index]
+                emit_byte(OP_INDEX, line)         // [index, current_val]
+                parse_expression()                // [index, current_val, rhs]
+                match op {
+                    "+=" => emit_byte(OP_ADD, line),
+                    "-=" => emit_byte(OP_SUB, line),
+                    "*=" => emit_byte(OP_MUL, line),
+                    "/=" => emit_byte(OP_DIV, line),
+                    _ => emit_byte(OP_MOD, line)
+                }
+                // Stack: [index, new_val]. Need [new_val, index].
+                emit_byte(OP_SWAP, line)
+                emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
             }
         } else {
             // Non-local: use OP_SET_INDEX
@@ -2195,7 +2436,25 @@ fn parse_compound_assignment_target(name: any, line: any) {
                 // Stack: [value, object, index]. Correct!
                 emit_byte(OP_SET_INDEX, line)
             } else {
-                compiler_error("compound index assignment not yet supported", line)
+                // Compound assignment: map[key] += expr (non-local)
+                // Stack so far: [index]. Get current value first.
+                emit_byte(OP_DUP, line)              // [index, index]
+                emit_variable_get(name, line)         // [index, index, obj]
+                emit_byte(OP_SWAP, line)              // [index, obj, index]
+                emit_byte(OP_INDEX, line)             // [index, current_val]
+                parse_expression()                    // [index, current_val, rhs]
+                match op {
+                    "+=" => emit_byte(OP_ADD, line),
+                    "-=" => emit_byte(OP_SUB, line),
+                    "*=" => emit_byte(OP_MUL, line),
+                    "/=" => emit_byte(OP_DIV, line),
+                    _ => emit_byte(OP_MOD, line)
+                }
+                // Stack: [index, new_val]. Need [new_val, obj, index].
+                emit_byte(OP_SWAP, line)              // [new_val, index]
+                emit_variable_get(name, line)         // [new_val, index, obj]
+                emit_byte(OP_SWAP, line)              // [new_val, obj, index]
+                emit_byte(OP_SET_INDEX, line)
             }
             emit_byte(OP_POP, line)
         }
@@ -2444,6 +2703,86 @@ fn parse_impl_block() {
             expect("identifier", nil)
         }
 
+        // Parse require/ensure contracts for impl methods (same approach as fn)
+        flux m_contract_starts = []
+        flux m_contract_is_ensure_arr = []
+        flux m_contract_msg_arr = []
+        let m_contracts_begin_pos = pos
+        flux m_scan_depth = 0
+        while peek() != nil {
+            let mct = peek_text()
+            if mct == "(" || mct == "[" { m_scan_depth = m_scan_depth + 1 }
+            if mct == ")" || mct == "]" { m_scan_depth = m_scan_depth - 1 }
+            if mct == "|" && m_scan_depth == 0 {
+                advance()
+                while peek() != nil && peek_text() != "|" { advance() }
+                if peek_text() == "|" { advance() }
+                if peek_text() == "{" {
+                    advance()
+                    flux mcd = 1
+                    while mcd > 0 && peek() != nil {
+                        if peek_text() == "{" { mcd = mcd + 1 }
+                        if peek_text() == "}" { mcd = mcd - 1 }
+                        if mcd > 0 { advance() }
+                    }
+                    if peek_text() == "}" { advance() }
+                }
+            } else { if mct == "{" && m_scan_depth == 0 {
+                break
+            } else {
+                advance()
+            } }
+        }
+        let m_body_brace_pos = pos
+        pos = m_contracts_begin_pos
+        while peek_type() == "identifier" && (peek_text() == "require" || peek_text() == "ensure") {
+            let m_is_ens = peek_text() == "ensure"
+            advance()
+            m_contract_is_ensure_arr.push(m_is_ens)
+            m_contract_starts.push(pos)
+            flux m_skip_depth = 0
+            while pos < m_body_brace_pos && peek() != nil {
+                let mst = peek_text()
+                if mst == "(" || mst == "[" { m_skip_depth = m_skip_depth + 1 }
+                if mst == ")" || mst == "]" { m_skip_depth = m_skip_depth - 1 }
+                if mst == "|" && m_skip_depth == 0 {
+                    advance()
+                    while peek() != nil && peek_text() != "|" { advance() }
+                    if peek_text() == "|" { advance() }
+                    if peek_text() == "{" {
+                        advance()
+                        flux mcd2 = 1
+                        while mcd2 > 0 && peek() != nil {
+                            if peek_text() == "{" { mcd2 = mcd2 + 1 }
+                            if peek_text() == "}" { mcd2 = mcd2 - 1 }
+                            if mcd2 > 0 { advance() }
+                        }
+                        if peek_text() == "}" { advance() }
+                    }
+                    break
+                }
+                if m_skip_depth == 0 {
+                    if mst == "require" || mst == "ensure" { break }
+                    if mst == "," {
+                        advance()
+                        if peek_type() == "string" {
+                            let mmsg = advance().text
+                            m_contract_msg_arr.push(mmsg)
+                        } else {
+                            m_contract_msg_arr.push("condition not met")
+                        }
+                        break
+                    }
+                }
+                advance()
+            }
+            if len(m_contract_msg_arr) < len(m_contract_starts) {
+                m_contract_msg_arr.push("condition not met")
+            }
+        }
+        pos = m_body_brace_pos
+        let m_contract_count = len(m_contract_starts)
+
         let param_count = len(param_names_arr)
 
         // If first param is "self", it occupies slot 0 (the reserved slot)
@@ -2474,6 +2813,10 @@ fn parse_impl_block() {
         loop_start_pos = 0
         loop_depth = 0
         string_intern_map = Map::new()
+        ensure_slots = []
+        ensure_messages = []
+        ensure_count = 0
+        current_func_name = full_name
 
         if first_param == 1 {
             // self occupies slot 0
@@ -2487,6 +2830,32 @@ fn parse_impl_block() {
             add_local(param_names_arr[i])
         }
 
+        // Compile contracts by backtracking
+        let m_body_start_pos = pos
+        flux mci = 0
+        while mci < m_contract_count {
+            pos = m_contract_starts[mci]
+            if m_contract_is_ensure_arr[mci] {
+                parse_expression()
+                add_local("")
+                let m_slot = local_count - 1
+                ensure_slots.push(m_slot)
+                ensure_messages.push(m_contract_msg_arr[mci])
+                ensure_count = ensure_count + 1
+            } else {
+                parse_expression()
+                let m_ok_jump = emit_jump(OP_JUMP_IF_TRUE, line)
+                emit_byte(OP_POP, line)
+                let m_full_msg = "require failed in '" + full_name + "': " + m_contract_msg_arr[mci]
+                emit_constant(make_string_const(m_full_msg), line)
+                emit_byte(OP_THROW, line)
+                patch_jump(m_ok_jump)
+                emit_byte(OP_POP, line)
+            }
+            mci = mci + 1
+        }
+        pos = m_body_start_pos
+
         expect(nil, "{")
         while peek_text() != "}" {
             if peek() == nil {
@@ -2497,6 +2866,7 @@ fn parse_impl_block() {
         expect(nil, "}")
 
         emit_byte(OP_UNIT, line)
+        emit_ensure_checks(line)
         emit_byte(OP_DEFER_RUN, line)
         emit_byte(0, line)
         emit_byte(OP_RETURN, line)

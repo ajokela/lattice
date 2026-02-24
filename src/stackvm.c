@@ -367,6 +367,11 @@ static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *a
     return result;
 }
 
+/* BuiltinCallback adapter for stackvm: closure is a LatValue*, ctx is a StackVM* */
+static LatValue stackvm_builtin_callback(void *closure, LatValue *args, int arg_count, void *ctx) {
+    return stackvm_call_closure((StackVM *)ctx, (LatValue *)closure, args, arg_count);
+}
+
 static bool stackvm_find_local_value(StackVM *vm, const char *name, LatValue *out) {
     if (vm->frame_count == 0) return false;
     StackCallFrame *frame = &vm->frames[vm->frame_count - 1];
@@ -786,6 +791,7 @@ static const char *stackvm_find_pressure(StackVM *vm, const char *name) {
 #define MHASH_first            0x0f704b8du
 #define MHASH_flat             0x7c96d68cu
 #define MHASH_flat_map         0x022d3129u
+#define MHASH_flatten          0xb27dd5f3u
 #define MHASH_for_each         0x0f4aaefcu
 #define MHASH_get              0x0b887685u
 #define MHASH_group_by         0xdd0fdaecu
@@ -984,38 +990,16 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
         }
         if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            size_t len = obj->as.array.len;
-            LatValue *elems = malloc(len * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                elems[i] = stackvm_call_closure(vm, &closure, &arg, 1);
-                value_free(&arg);
-            }
-            LatValue result = value_array(elems, len);
-            free(elems);
+            char *err = NULL;
+            LatValue result = builtin_array_map(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
             push(vm, result);
             return true;
         }
         if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            size_t len = obj->as.array.len;
-            size_t cap = len > 0 ? len : 1;
-            LatValue *elems = malloc(cap * sizeof(LatValue));
-            size_t out_len = 0;
-            for (size_t i = 0; i < len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue pred = stackvm_call_closure(vm, &closure, &arg, 1);
-                bool keep = (pred.type == VAL_BOOL && pred.as.bool_val);
-                value_free(&pred);
-                if (keep) {
-                    elems[out_len++] = arg;
-                } else {
-                    value_free(&arg);
-                }
-            }
-            LatValue result = value_array(elems, out_len);
-            free(elems);
+            char *err = NULL;
+            LatValue result = builtin_array_filter(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
             push(vm, result);
             return true;
@@ -1023,27 +1007,17 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
         if (mhash == MHASH_reduce && strcmp(method, "reduce") == 0 && arg_count == 2) {
             LatValue acc = pop(vm);       /* second arg: initial value (TOS) */
             LatValue closure = pop(vm);   /* first arg: closure */
-            size_t len = obj->as.array.len;
-            for (size_t i = 0; i < len; i++) {
-                LatValue elem = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue args[2] = { acc, elem };
-                acc = stackvm_call_closure(vm, &closure, args, 2);
-                value_free(&args[0]);
-                value_free(&args[1]);
-            }
+            char *err = NULL;
+            LatValue result = builtin_array_reduce(obj, &acc, true, &closure, stackvm_builtin_callback, vm, &err);
+            value_free(&acc);
             value_free(&closure);
-            push(vm, acc);
+            push(vm, result);
             return true;
         }
         if (mhash == MHASH_each && strcmp(method, "each") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            size_t len = obj->as.array.len;
-            for (size_t i = 0; i < len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue r = stackvm_call_closure(vm, &closure, &arg, 1);
-                value_free(&arg);
-                value_free(&r);
-            }
+            char *err = NULL;
+            builtin_array_each(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
             push(vm, value_nil());
             return true;
@@ -1113,57 +1087,43 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
         }
         if (mhash == MHASH_for_each && strcmp(method, "for_each") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            size_t len = obj->as.array.len;
-            for (size_t i = 0; i < len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue r = stackvm_call_closure(vm, &closure, &arg, 1);
-                value_free(&arg); value_free(&r);
-            }
+            char *err = NULL;
+            builtin_array_each(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
             push(vm, value_unit());
             return true;
         }
         if (mhash == MHASH_find && strcmp(method, "find") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue pred = stackvm_call_closure(vm, &closure, &arg, 1);
-                bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
-                value_free(&arg); value_free(&pred);
-                if (match) {
-                    value_free(&closure);
-                    push(vm, value_clone_fast(&obj->as.array.elems[i]));
-                    return true;
-                }
-            }
+            char *err = NULL;
+            LatValue result = builtin_array_find(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
-            push(vm, value_unit());
+            push(vm, result);
             return true;
         }
         if (mhash == MHASH_any && strcmp(method, "any") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue pred = stackvm_call_closure(vm, &closure, &arg, 1);
-                bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
-                value_free(&arg); value_free(&pred);
-                if (match) { value_free(&closure); push(vm, value_bool(true)); return true; }
-            }
-            value_free(&closure); push(vm, value_bool(false)); return true;
+            char *err = NULL;
+            LatValue result = builtin_array_any(obj, &closure, stackvm_builtin_callback, vm, &err);
+            value_free(&closure);
+            push(vm, result);
+            return true;
         }
         if (mhash == MHASH_all && strcmp(method, "all") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue pred = stackvm_call_closure(vm, &closure, &arg, 1);
-                bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
-                value_free(&arg); value_free(&pred);
-                if (!match) { value_free(&closure); push(vm, value_bool(false)); return true; }
-            }
-            value_free(&closure); push(vm, value_bool(true)); return true;
+            char *err = NULL;
+            LatValue result = builtin_array_all(obj, &closure, stackvm_builtin_callback, vm, &err);
+            value_free(&closure);
+            push(vm, result);
+            return true;
         }
         if (mhash == MHASH_flat && strcmp(method, "flat") == 0 && arg_count == 0) {
             push(vm, array_flat(obj));
+            return true;
+        }
+        if (mhash == MHASH_flatten && strcmp(method, "flatten") == 0 && arg_count == 0) {
+            char *err = NULL;
+            push(vm, builtin_array_flatten(obj, NULL, 0, &err));
             return true;
         }
         if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && arg_count == 2) {
@@ -1267,86 +1227,24 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
         }
         if (mhash == MHASH_flat_map && strcmp(method, "flat_map") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            size_t n = obj->as.array.len;
-            LatValue *mapped = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < n; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                mapped[i] = stackvm_call_closure(vm, &closure, &arg, 1);
-                value_free(&arg);
-            }
-            size_t total = 0;
-            for (size_t i = 0; i < n; i++)
-                total += (mapped[i].type == VAL_ARRAY) ? mapped[i].as.array.len : 1;
-            LatValue *buf = malloc((total > 0 ? total : 1) * sizeof(LatValue));
-            size_t pos = 0;
-            for (size_t i = 0; i < n; i++) {
-                if (mapped[i].type == VAL_ARRAY) {
-                    for (size_t j = 0; j < mapped[i].as.array.len; j++)
-                        buf[pos++] = mapped[i].as.array.elems[j];
-                    mapped[i].as.array.len = 0; /* prevent double-free of moved elements */
-                } else {
-                    buf[pos++] = mapped[i];
-                    mapped[i].type = VAL_NIL; /* prevent double-free */
-                }
-            }
-            for (size_t i = 0; i < n; i++) value_free(&mapped[i]);
-            free(mapped);
+            char *err = NULL;
+            LatValue result = builtin_array_flat_map(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
-            LatValue r = value_array(buf, pos); free(buf);
-            push(vm, r); return true;
+            push(vm, result); return true;
         }
         if (mhash == MHASH_sort_by && strcmp(method, "sort_by") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            size_t n = obj->as.array.len;
-            LatValue *buf = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < n; i++)
-                buf[i] = value_deep_clone(&obj->as.array.elems[i]);
-            for (size_t i = 1; i < n; i++) {
-                LatValue key = buf[i];
-                size_t j = i;
-                while (j > 0) {
-                    LatValue ca[2];
-                    ca[0] = value_clone_fast(&key);
-                    ca[1] = value_clone_fast(&buf[j - 1]);
-                    LatValue cmp = stackvm_call_closure(vm, &closure, ca, 2);
-                    value_free(&ca[0]); value_free(&ca[1]);
-                    if (cmp.type != VAL_INT || cmp.as.int_val >= 0) { value_free(&cmp); break; }
-                    value_free(&cmp);
-                    buf[j] = buf[j - 1]; j--;
-                }
-                buf[j] = key;
-            }
+            char *err = NULL;
+            LatValue result = builtin_array_sort_by(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
-            LatValue r = value_array(buf, n); free(buf);
-            push(vm, r); return true;
+            push(vm, result); return true;
         }
         if (mhash == MHASH_group_by && strcmp(method, "group_by") == 0 && arg_count == 1) {
             LatValue closure = pop(vm);
-            LatValue grp = value_map_new();
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-                LatValue key_v = stackvm_call_closure(vm, &closure, &arg, 1);
-                value_free(&arg);
-                char *gk = value_display(&key_v);
-                value_free(&key_v);
-                LatValue *existing = lat_map_get(grp.as.map.map, gk);
-                if (existing) {
-                    size_t ol = existing->as.array.len;
-                    LatValue *ne = malloc((ol + 1) * sizeof(LatValue));
-                    for (size_t j = 0; j < ol; j++)
-                        ne[j] = value_deep_clone(&existing->as.array.elems[j]);
-                    ne[ol] = value_deep_clone(&obj->as.array.elems[i]);
-                    LatValue na = value_array(ne, ol + 1); free(ne);
-                    lat_map_set(grp.as.map.map, gk, &na);
-                } else {
-                    LatValue cl = value_deep_clone(&obj->as.array.elems[i]);
-                    LatValue na = value_array(&cl, 1);
-                    lat_map_set(grp.as.map.map, gk, &na);
-                }
-                free(gk);
-            }
+            char *err = NULL;
+            LatValue result = builtin_array_group_by(obj, &closure, stackvm_builtin_callback, vm, &err);
             value_free(&closure);
-            push(vm, grp); return true;
+            push(vm, result); return true;
         }
         if (mhash == MHASH_insert && strcmp(method, "insert") == 0 && arg_count == 2) {
             const char *pmode = stackvm_find_pressure(vm, var_name);

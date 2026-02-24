@@ -12,6 +12,7 @@
 #include "ext.h"
 #include "memory.h"
 #include "string_ops.h"
+#include "builtin_methods.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -344,6 +345,11 @@ static inline void reg_set(LatValue *r, LatValue val) {
 static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result);
 static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args, int argc);
 
+/* BuiltinCallback adapter for regvm: closure is a LatValue*, ctx is a RegVM* */
+static LatValue regvm_builtin_callback(void *closure, LatValue *args, int arg_count, void *ctx) {
+    return regvm_call_closure((RegVM *)ctx, (LatValue *)closure, args, arg_count);
+}
+
 /* Run a sub-chunk within the current VM (pushes a new frame, doesn't reset state) */
 static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
     if (vm->frame_count >= REGVM_FRAMES_MAX)
@@ -594,81 +600,28 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
-            bool found = false;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (value_eq(&obj->as.array.elems[i], &args[0])) {
-                    found = true;
-                    break;
-                }
-            }
-            *result = value_bool(found);
+            char *err = NULL;
+            *result = builtin_array_contains(obj, args, 1, &err);
             return true;
         }
         if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
-            LatValue *elems = malloc(obj->as.array.len * sizeof(LatValue));
-            for (size_t i = 0; i < obj->as.array.len; i++)
-                elems[i] = rvm_clone(&obj->as.array.elems[obj->as.array.len - 1 - i]);
-            *result = value_array(elems, obj->as.array.len);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_reverse(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            size_t len = obj->as.array.len;
-            LatValue *elems = malloc(len * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                elems[i] = regvm_call_closure(vm, closure, &arg, 1);
-                value_free(&arg);
-            }
-            *result = value_array(elems, len);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_map(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            size_t len = obj->as.array.len;
-            size_t cap = len > 0 ? len : 1;
-            LatValue *elems = malloc(cap * sizeof(LatValue));
-            size_t out_len = 0;
-            for (size_t i = 0; i < len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                LatValue pred = regvm_call_closure(vm, closure, &arg, 1);
-                bool keep = (pred.type == VAL_BOOL && pred.as.bool_val);
-                value_free(&pred);
-                if (keep) {
-                    elems[out_len++] = arg;
-                } else {
-                    value_free(&arg);
-                }
-            }
-            *result = value_array(elems, out_len);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_filter(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_join && strcmp(method, "join") == 0 && arg_count == 1) {
-            const char *sep = (args[0].type == VAL_STR) ? args[0].as.str_val : "";
-            size_t sep_len = strlen(sep);
-            size_t n = obj->as.array.len;
-            char **parts = malloc(n * sizeof(char *));
-            size_t *lens = malloc(n * sizeof(size_t));
-            size_t total = 0;
-            for (size_t i = 0; i < n; i++) {
-                parts[i] = value_display(&obj->as.array.elems[i]);
-                lens[i] = strlen(parts[i]);
-                total += lens[i];
-            }
-            if (n > 1) total += sep_len * (n - 1);
-            char *buf = malloc(total + 1);
-            size_t pos = 0;
-            for (size_t i = 0; i < n; i++) {
-                if (i > 0) { memcpy(buf + pos, sep, sep_len); pos += sep_len; }
-                memcpy(buf + pos, parts[i], lens[i]); pos += lens[i];
-                free(parts[i]);
-            }
-            buf[pos] = '\0';
-            free(parts); free(lens);
-            *result = value_string_owned(buf);
+            char *err = NULL;
+            *result = builtin_array_join(obj, args, 1, &err);
             return true;
         }
     }
@@ -813,51 +766,20 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
     /* ── Array additional methods ── */
     if (obj->type == VAL_ARRAY) {
         if (mhash == MHASH_enumerate && strcmp(method, "enumerate") == 0 && arg_count == 0) {
-            size_t len = obj->as.array.len;
-            LatValue *elems = malloc(len * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++) {
-                LatValue pair[2];
-                pair[0] = value_int((int64_t)i);
-                pair[1] = rvm_clone(&obj->as.array.elems[i]);
-                elems[i] = value_array(pair, 2);
-            }
-            *result = value_array(elems, len);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_enumerate(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_reduce && strcmp(method, "reduce") == 0 && (arg_count == 1 || arg_count == 2)) {
-            LatValue *closure = &args[0];
-            LatValue acc;
-            size_t start = 0;
-            if (arg_count == 2) {
-                acc = rvm_clone(&args[1]);
-            } else if (obj->as.array.len > 0) {
-                acc = rvm_clone(&obj->as.array.elems[0]);
-                start = 1;
-            } else {
-                *result = value_nil();
-                return true;
-            }
-            for (size_t i = start; i < obj->as.array.len; i++) {
-                LatValue cb_args[2];
-                cb_args[0] = acc;
-                cb_args[1] = rvm_clone(&obj->as.array.elems[i]);
-                acc = regvm_call_closure(vm, closure, cb_args, 2);
-                value_free(&cb_args[0]);
-                value_free(&cb_args[1]);
-            }
-            *result = acc;
+            char *err = NULL;
+            bool has_init = (arg_count == 2);
+            *result = builtin_array_reduce(obj, has_init ? &args[1] : NULL, has_init,
+                                           &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (((mhash == MHASH_each && strcmp(method, "each") == 0) || (mhash == MHASH_for_each && strcmp(method, "for_each") == 0)) && arg_count == 1) {
-            LatValue *closure = &args[0];
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                LatValue ret = regvm_call_closure(vm, closure, &arg, 1);
-                value_free(&arg);
-                value_free(&ret);
-            }
-            *result = value_unit();
+            char *err = NULL;
+            *result = builtin_array_each(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_sort && strcmp(method, "sort") == 0 && arg_count <= 1) {
@@ -908,125 +830,48 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (mhash == MHASH_sort_by && strcmp(method, "sort_by") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            size_t len = obj->as.array.len;
-            LatValue *buf = malloc((len > 0 ? len : 1) * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++)
-                buf[i] = rvm_clone(&obj->as.array.elems[i]);
-            /* Insertion sort using comparator: closure(a, b) < 0 means a < b */
-            for (size_t i = 1; i < len; i++) {
-                LatValue key = buf[i];
-                size_t j = i;
-                while (j > 0) {
-                    LatValue ca[2];
-                    ca[0] = rvm_clone(&key);
-                    ca[1] = rvm_clone(&buf[j - 1]);
-                    LatValue cmp = regvm_call_closure(vm, closure, ca, 2);
-                    value_free(&ca[0]); value_free(&ca[1]);
-                    if (cmp.type != VAL_INT || cmp.as.int_val >= 0) { value_free(&cmp); break; }
-                    value_free(&cmp);
-                    buf[j] = buf[j - 1]; j--;
-                }
-                buf[j] = key;
-            }
-            *result = value_array(buf, len);
-            free(buf);
+            char *err = NULL;
+            *result = builtin_array_sort_by(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_find && strcmp(method, "find") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                LatValue pred = regvm_call_closure(vm, closure, &arg, 1);
-                bool found = pred.type == VAL_BOOL && pred.as.bool_val;
-                value_free(&pred);
-                if (found) { *result = arg; return true; }
-                value_free(&arg);
-            }
-            *result = value_unit();
+            char *err = NULL;
+            *result = builtin_array_find(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_any && strcmp(method, "any") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                LatValue pred = regvm_call_closure(vm, closure, &arg, 1);
-                bool yes = pred.type == VAL_BOOL && pred.as.bool_val;
-                value_free(&pred);
-                value_free(&arg);
-                if (yes) { *result = value_bool(true); return true; }
-            }
-            *result = value_bool(false);
+            char *err = NULL;
+            *result = builtin_array_any(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_all && strcmp(method, "all") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                LatValue pred = regvm_call_closure(vm, closure, &arg, 1);
-                bool yes = pred.type == VAL_BOOL && pred.as.bool_val;
-                value_free(&pred);
-                value_free(&arg);
-                if (!yes) { *result = value_bool(false); return true; }
-            }
-            *result = value_bool(true);
+            char *err = NULL;
+            *result = builtin_array_all(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_flat_map && strcmp(method, "flat_map") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            size_t cap = obj->as.array.len * 2;
-            LatValue *elems = malloc(cap * sizeof(LatValue));
-            size_t out = 0;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                LatValue mapped = regvm_call_closure(vm, closure, &arg, 1);
-                value_free(&arg);
-                if (mapped.type == VAL_ARRAY) {
-                    for (size_t j = 0; j < mapped.as.array.len; j++) {
-                        if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
-                        elems[out++] = rvm_clone(&mapped.as.array.elems[j]);
-                    }
-                    value_free(&mapped);
-                } else {
-                    if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
-                    elems[out++] = mapped;
-                }
-            }
-            *result = value_array(elems, out);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_flat_map(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_unique && strcmp(method, "unique") == 0 && arg_count == 0) {
-            size_t len = obj->as.array.len;
-            LatValue *elems = malloc(len * sizeof(LatValue));
-            size_t out = 0;
-            for (size_t i = 0; i < len; i++) {
-                bool dup = false;
-                for (size_t j = 0; j < out; j++) {
-                    if (value_eq(&obj->as.array.elems[i], &elems[j])) { dup = true; break; }
-                }
-                if (!dup) elems[out++] = rvm_clone(&obj->as.array.elems[i]);
-            }
-            *result = value_array(elems, out);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_unique(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (value_eq(&obj->as.array.elems[i], &args[0])) {
-                    *result = value_int((int64_t)i);
-                    return true;
-                }
-            }
-            *result = value_int(-1);
+            char *err = NULL;
+            *result = builtin_array_index_of(obj, args, 1, &err);
             return true;
         }
         if (mhash == MHASH_first && strcmp(method, "first") == 0 && arg_count == 0) {
-            *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[0]) : value_unit();
+            char *err = NULL;
+            *result = builtin_array_first(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_last && strcmp(method, "last") == 0 && arg_count == 0) {
-            *result = obj->as.array.len > 0 ? rvm_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit();
+            char *err = NULL;
+            *result = builtin_array_last(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
@@ -1069,84 +914,30 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (mhash == MHASH_flatten && strcmp(method, "flatten") == 0 && arg_count == 0) {
-            size_t cap = obj->as.array.len * 2;
-            LatValue *elems = malloc(cap * sizeof(LatValue));
-            size_t out = 0;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (obj->as.array.elems[i].type == VAL_ARRAY) {
-                    LatValue *inner = &obj->as.array.elems[i];
-                    for (size_t j = 0; j < inner->as.array.len; j++) {
-                        if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
-                        elems[out++] = rvm_clone(&inner->as.array.elems[j]);
-                    }
-                } else {
-                    if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
-                    elems[out++] = rvm_clone(&obj->as.array.elems[i]);
-                }
-            }
-            *result = value_array(elems, out);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_flatten(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_zip && strcmp(method, "zip") == 0 && arg_count == 1) {
-            if (args[0].type != VAL_ARRAY) { *result = value_array(NULL, 0); return true; }
-            size_t len = obj->as.array.len < args[0].as.array.len ? obj->as.array.len : args[0].as.array.len;
-            LatValue *elems = malloc(len * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++) {
-                LatValue pair[2];
-                pair[0] = rvm_clone(&obj->as.array.elems[i]);
-                pair[1] = rvm_clone(&args[0].as.array.elems[i]);
-                elems[i] = value_array(pair, 2);
-            }
-            *result = value_array(elems, len);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_zip(obj, args, 1, &err);
             return true;
         }
         if (mhash == MHASH_sum && strcmp(method, "sum") == 0 && arg_count == 0) {
-            int64_t isum = 0; double fsum = 0; bool has_float = false;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                if (obj->as.array.elems[i].type == VAL_FLOAT) { has_float = true; fsum += obj->as.array.elems[i].as.float_val; }
-                else if (obj->as.array.elems[i].type == VAL_INT) { isum += obj->as.array.elems[i].as.int_val; fsum += (double)obj->as.array.elems[i].as.int_val; }
-            }
-            *result = has_float ? value_float(fsum) : value_int(isum);
+            char *err = NULL;
+            *result = builtin_array_sum(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_min && strcmp(method, "min") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) {
-                vm->error = strdup("min() called on empty array");
-                *result = value_unit();
-                return true;
-            }
-            LatValue min_val = obj->as.array.elems[0];
-            for (size_t i = 1; i < obj->as.array.len; i++) {
-                if (obj->as.array.elems[i].type == VAL_INT && min_val.type == VAL_INT) {
-                    if (obj->as.array.elems[i].as.int_val < min_val.as.int_val) min_val = obj->as.array.elems[i];
-                } else if (obj->as.array.elems[i].type == VAL_FLOAT || min_val.type == VAL_FLOAT) {
-                    double a = obj->as.array.elems[i].type == VAL_FLOAT ? obj->as.array.elems[i].as.float_val : (double)obj->as.array.elems[i].as.int_val;
-                    double b = min_val.type == VAL_FLOAT ? min_val.as.float_val : (double)min_val.as.int_val;
-                    if (a < b) min_val = obj->as.array.elems[i];
-                }
-            }
-            *result = rvm_clone(&min_val);
+            char *err = NULL;
+            *result = builtin_array_min(obj, NULL, 0, &err);
+            if (err) { vm->error = err; }
             return true;
         }
         if (mhash == MHASH_max && strcmp(method, "max") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) {
-                vm->error = strdup("max() called on empty array");
-                *result = value_unit();
-                return true;
-            }
-            LatValue max_val = obj->as.array.elems[0];
-            for (size_t i = 1; i < obj->as.array.len; i++) {
-                if (obj->as.array.elems[i].type == VAL_INT && max_val.type == VAL_INT) {
-                    if (obj->as.array.elems[i].as.int_val > max_val.as.int_val) max_val = obj->as.array.elems[i];
-                } else if (obj->as.array.elems[i].type == VAL_FLOAT || max_val.type == VAL_FLOAT) {
-                    double a = obj->as.array.elems[i].type == VAL_FLOAT ? obj->as.array.elems[i].as.float_val : (double)obj->as.array.elems[i].as.int_val;
-                    double b = max_val.type == VAL_FLOAT ? max_val.as.float_val : (double)max_val.as.int_val;
-                    if (a > b) max_val = obj->as.array.elems[i];
-                }
-            }
-            *result = rvm_clone(&max_val);
+            char *err = NULL;
+            *result = builtin_array_max(obj, NULL, 0, &err);
+            if (err) { vm->error = err; }
             return true;
         }
         if (mhash == MHASH_insert && strcmp(method, "insert") == 0 && arg_count == 2) {
@@ -1178,48 +969,13 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (mhash == MHASH_chunk && strcmp(method, "chunk") == 0 && arg_count == 1) {
-            if (args[0].type != VAL_INT || args[0].as.int_val <= 0) { *result = value_array(NULL, 0); return true; }
-            int64_t sz = args[0].as.int_val;
-            size_t len = obj->as.array.len;
-            size_t chunks = (len + (size_t)sz - 1) / (size_t)sz;
-            LatValue *elems = malloc(chunks * sizeof(LatValue));
-            for (size_t i = 0; i < chunks; i++) {
-                size_t start = i * (size_t)sz;
-                size_t end = start + (size_t)sz;
-                if (end > len) end = len;
-                size_t count = end - start;
-                LatValue *chunk_elems = malloc(count * sizeof(LatValue));
-                for (size_t j = 0; j < count; j++)
-                    chunk_elems[j] = rvm_clone(&obj->as.array.elems[start + j]);
-                elems[i] = value_array(chunk_elems, count);
-                free(chunk_elems);
-            }
-            *result = value_array(elems, chunks);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_chunk(obj, args, 1, &err);
             return true;
         }
         if (mhash == MHASH_group_by && strcmp(method, "group_by") == 0 && arg_count == 1) {
-            LatValue *closure = &args[0];
-            LatValue map = value_map_new();
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue arg = rvm_clone(&obj->as.array.elems[i]);
-                LatValue key = regvm_call_closure(vm, closure, &arg, 1);
-                char *key_str = value_display(&key);
-                LatValue *existing = lat_map_get(map.as.map.map, key_str);
-                if (existing && existing->type == VAL_ARRAY) {
-                    if (existing->as.array.len >= existing->as.array.cap) {
-                        existing->as.array.cap = existing->as.array.cap ? existing->as.array.cap * 2 : 4;
-                        existing->as.array.elems = realloc(existing->as.array.elems, existing->as.array.cap * sizeof(LatValue));
-                    }
-                    existing->as.array.elems[existing->as.array.len++] = arg;
-                } else {
-                    LatValue arr = value_array(&arg, 1);
-                    lat_map_set(map.as.map.map, key_str, &arr);
-                }
-                value_free(&key);
-                free(key_str);
-            }
-            *result = map;
+            char *err = NULL;
+            *result = builtin_array_group_by(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
     }
@@ -1227,68 +983,30 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
     /* ── Array additional methods ── */
     if (obj->type == VAL_ARRAY) {
         if (mhash == MHASH_flat && strcmp(method, "flat") == 0 && arg_count == 0) {
-            size_t cap = obj->as.array.len * 2;
-            if (cap == 0) cap = 1;
-            LatValue *elems = malloc(cap * sizeof(LatValue));
-            size_t out = 0;
-            for (size_t i = 0; i < obj->as.array.len; i++) {
-                LatValue *el = &obj->as.array.elems[i];
-                if (el->type == VAL_ARRAY) {
-                    for (size_t j = 0; j < el->as.array.len; j++) {
-                        if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
-                        elems[out++] = rvm_clone(&el->as.array.elems[j]);
-                    }
-                } else {
-                    if (out >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(LatValue)); }
-                    elems[out++] = rvm_clone(el);
-                }
-            }
-            *result = value_array(elems, out);
-            free(elems);
+            char *err = NULL;
+            *result = builtin_array_flatten(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_first && strcmp(method, "first") == 0 && arg_count == 0) {
-            *result = (obj->as.array.len > 0) ? rvm_clone(&obj->as.array.elems[0]) : value_unit();
+            char *err = NULL;
+            *result = builtin_array_first(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_last && strcmp(method, "last") == 0 && arg_count == 0) {
-            *result = (obj->as.array.len > 0) ? rvm_clone(&obj->as.array.elems[obj->as.array.len - 1]) : value_unit();
+            char *err = NULL;
+            *result = builtin_array_last(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_min && strcmp(method, "min") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { *result = value_unit(); return true; }
-            LatValue best = rvm_clone(&obj->as.array.elems[0]);
-            for (size_t i = 1; i < obj->as.array.len; i++) {
-                LatValue *el = &obj->as.array.elems[i];
-                bool less = false;
-                if (el->type == VAL_INT && best.type == VAL_INT)
-                    less = el->as.int_val < best.as.int_val;
-                else if (el->type == VAL_FLOAT || best.type == VAL_FLOAT) {
-                    double a = el->type == VAL_FLOAT ? el->as.float_val : (double)el->as.int_val;
-                    double b = best.type == VAL_FLOAT ? best.as.float_val : (double)best.as.int_val;
-                    less = a < b;
-                }
-                if (less) { value_free(&best); best = rvm_clone(el); }
-            }
-            *result = best;
+            char *err = NULL;
+            *result = builtin_array_min(obj, NULL, 0, &err);
+            if (err) { vm->error = err; }
             return true;
         }
         if (mhash == MHASH_max && strcmp(method, "max") == 0 && arg_count == 0) {
-            if (obj->as.array.len == 0) { *result = value_unit(); return true; }
-            LatValue best = rvm_clone(&obj->as.array.elems[0]);
-            for (size_t i = 1; i < obj->as.array.len; i++) {
-                LatValue *el = &obj->as.array.elems[i];
-                bool greater = false;
-                if (el->type == VAL_INT && best.type == VAL_INT)
-                    greater = el->as.int_val > best.as.int_val;
-                else if (el->type == VAL_FLOAT || best.type == VAL_FLOAT) {
-                    double a = el->type == VAL_FLOAT ? el->as.float_val : (double)el->as.int_val;
-                    double b = best.type == VAL_FLOAT ? best.as.float_val : (double)best.as.int_val;
-                    greater = a > b;
-                }
-                if (greater) { value_free(&best); best = rvm_clone(el); }
-            }
-            *result = best;
+            char *err = NULL;
+            *result = builtin_array_max(obj, NULL, 0, &err);
+            if (err) { vm->error = err; }
             return true;
         }
     }
@@ -2309,12 +2027,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_DEC_REG]      = &&L_DEC_REG,
         [ROP_SETINDEX_LOCAL] = &&L_SETINDEX_LOCAL,
         [ROP_INVOKE_GLOBAL] = &&L_INVOKE_GLOBAL,
+        [ROP_INVOKE_LOCAL] = &&L_INVOKE_LOCAL,
         /* Phase query */
         [ROP_IS_CRYSTAL]   = &&L_IS_CRYSTAL,
         /* Type checking */
         [ROP_CHECK_TYPE]   = &&L_CHECK_TYPE,
         [ROP_FREEZE_FIELD] = &&L_FREEZE_FIELD,
         [ROP_THAW_FIELD]   = &&L_THAW_FIELD,
+        [ROP_FREEZE_EXCEPT] = &&L_FREEZE_EXCEPT,
         /* Require */
         [ROP_REQUIRE]      = &&L_REQUIRE,
         /* Misc */
@@ -5348,6 +5068,192 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         DISPATCH();
     }
 
+    CASE(INVOKE_LOCAL) {
+        /* Two-instruction sequence:
+         *   INVOKE_LOCAL dst, local_reg, argc
+         *   data:        method_ki, args_base, 0
+         * Mutates R[local_reg] in-place (for push/pop/etc). */
+        uint8_t dst = REG_GET_A(instr);
+        uint8_t loc_reg = REG_GET_B(instr);
+        uint8_t argc = REG_GET_C(instr);
+
+        RegInstr data = *frame->ip++;
+        uint8_t method_ki = REG_GET_A(data);
+        uint8_t args_base = REG_GET_B(data);
+
+        const char *method_name = frame->chunk->constants[method_ki].as.str_val;
+
+        /* Try builtin — mutates R[loc_reg] in-place */
+        LatValue invoke_result;
+        LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
+        if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result)) {
+            if (vm->error)
+                return REGVM_RUNTIME_ERROR;
+            reg_set(&R[dst], invoke_result);
+            DISPATCH();
+        }
+
+        /* Check for callable closure field in map */
+        if (R[loc_reg].type == VAL_MAP) {
+            LatValue *field = lat_map_get(R[loc_reg].as.map.map, method_name);
+            if (field && field->type == VAL_CLOSURE) {
+                /* Native C function in map */
+                if (field->as.closure.default_values == VM_NATIVE_MARKER) {
+                    VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = native(call_args, argc);
+                    if (vm->rt->error) {
+                        vm->error = vm->rt->error;
+                        vm->rt->error = NULL;
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                /* Extension native function in map */
+                if (field->as.closure.default_values == VM_EXT_MARKER) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = ext_call_native(field->as.closure.native_fn,
+                                                   call_args, (size_t)argc);
+                    if (ret.type == VAL_STR && ret.as.str_val &&
+                        strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                        vm->error = strdup(ret.as.str_val + 11);
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                /* RegChunk closure in map */
+                RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                if (fn_chunk && fn_chunk->magic == REGCHUNK_MAGIC) {
+                    if (vm->frame_count >= REGVM_FRAMES_MAX)
+                        RVM_ERROR("call stack overflow");
+
+                    size_t new_base = vm->reg_stack_top;
+                    LatValue *new_regs = &vm->reg_stack[new_base];
+                    vm->reg_stack_top += REGVM_REG_MAX;
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+
+                    /* Slot 0 = reserved, slots 1+ = args (no self for map closures) */
+                    new_regs[0] = value_unit();
+                    for (int i = 0; i < argc; i++) {
+                        new_regs[1 + i] = rvm_clone(&R[args_base + i]);
+                    }
+
+                    ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+
+                    RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->chunk = fn_chunk;
+                    new_frame->ip = fn_chunk->code;
+                    new_frame->regs = new_regs;
+                    new_frame->reg_count = mr;
+                    new_frame->upvalues = upvals;
+                    new_frame->upvalue_count = uv_count;
+                    new_frame->caller_result_reg = dst;
+                    frame = new_frame;
+                    R = new_regs;
+                    DISPATCH();
+                }
+                /* Stack-VM closure in map — use regvm bridge */
+                if (field->as.closure.native_fn) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = regvm_call_closure(vm, field, call_args, argc);
+                    if (vm->error) return REGVM_RUNTIME_ERROR;
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+            }
+        }
+
+        /* Check for callable closure field in struct */
+        if (R[loc_reg].type == VAL_STRUCT) {
+            for (size_t fi = 0; fi < R[loc_reg].as.strct.field_count; fi++) {
+                if (strcmp(R[loc_reg].as.strct.field_names[fi], method_name) != 0) continue;
+                LatValue *field = &R[loc_reg].as.strct.field_values[fi];
+                if (field->type == VAL_CLOSURE && field->as.closure.native_fn) {
+                    RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                    if (vm->frame_count >= REGVM_FRAMES_MAX)
+                        RVM_ERROR("call stack overflow");
+
+                    size_t new_base_s = vm->reg_stack_top;
+                    LatValue *new_regs = &vm->reg_stack[new_base_s];
+                    vm->reg_stack_top += REGVM_REG_MAX;
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+
+                    /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
+                    new_regs[0] = value_unit();
+                    new_regs[1] = rvm_clone(&R[loc_reg]);  /* self = first param */
+                    for (int i = 0; i < argc; i++) {
+                        new_regs[2 + i] = rvm_clone(&R[args_base + i]);
+                    }
+
+                    ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+
+                    RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->chunk = fn_chunk;
+                    new_frame->ip = fn_chunk->code;
+                    new_frame->regs = new_regs;
+                    new_frame->reg_count = mr;
+                    new_frame->upvalues = upvals;
+                    new_frame->upvalue_count = uv_count;
+                    new_frame->caller_result_reg = dst;
+                    frame = new_frame;
+                    R = new_regs;
+                    DISPATCH();
+                }
+            }
+        }
+
+        /* Check for impl method (TypeName::method) */
+        if (R[loc_reg].type == VAL_STRUCT) {
+            char key[256];
+            snprintf(key, sizeof(key), "%s::%s", R[loc_reg].as.strct.name, method_name);
+            LatValue impl_fn;
+            if (env_get(vm->env, key, &impl_fn) && impl_fn.type == VAL_CLOSURE) {
+                RegChunk *fn_chunk = (RegChunk *)impl_fn.as.closure.native_fn;
+                if (fn_chunk) {
+                    if (vm->frame_count >= REGVM_FRAMES_MAX)
+                        RVM_ERROR("call stack overflow");
+
+                    size_t new_base_i = vm->reg_stack_top;
+                    LatValue *new_regs = &vm->reg_stack[new_base_i];
+                    vm->reg_stack_top += REGVM_REG_MAX;
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+
+                    /* ITEM_IMPL compiles self at slot 0, other params at slot 1+ */
+                    new_regs[0] = rvm_clone(&R[loc_reg]);  /* self */
+                    for (int i = 0; i < argc; i++) {
+                        new_regs[1 + i] = rvm_clone(&R[args_base + i]);
+                    }
+
+                    ObjUpvalue **upvals = (ObjUpvalue **)impl_fn.as.closure.captured_env;
+                    size_t uv_count = impl_fn.region_id != (size_t)-1 ? impl_fn.region_id : 0;
+
+                    RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->chunk = fn_chunk;
+                    new_frame->ip = fn_chunk->code;
+                    new_frame->regs = new_regs;
+                    new_frame->reg_count = mr;
+                    new_frame->upvalues = upvals;
+                    new_frame->upvalue_count = uv_count;
+                    new_frame->caller_result_reg = dst;
+                    frame = new_frame;
+                    R = new_regs;
+                    DISPATCH();
+                }
+            }
+        }
+
+        RVM_ERROR("no method '%s' on %s", method_name, value_type_name(&R[loc_reg]));
+    }
+
     CASE(IS_CRYSTAL) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
@@ -5477,6 +5383,111 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
             PhaseTag phase = VTAG_FLUID;
             lat_map_set(R[a].as.map.key_phases, field_name, &phase);
+        }
+        DISPATCH();
+    }
+
+    CASE(FREEZE_EXCEPT) {
+        /* Two-instruction sequence:
+         *   FREEZE_EXCEPT name_ki, loc_type, slot
+         *   data:         except_base, except_count, 0
+         * Freezes all fields of a struct/map EXCEPT the named fields. */
+        uint8_t name_ki = REG_GET_A(instr);
+        uint8_t loc_type = REG_GET_B(instr);
+        uint8_t slot = REG_GET_C(instr);
+
+        RegInstr data = *frame->ip++;
+        uint8_t except_base = REG_GET_A(data);
+        uint8_t except_count = REG_GET_B(data);
+
+        const char *var_name = frame->chunk->constants[name_ki].as.str_val;
+
+        /* Get a working copy of the variable value */
+        LatValue val;
+        switch (loc_type) {
+            case 0: val = value_deep_clone(&R[slot]); break;
+            case 1:
+                if (frame->upvalues && slot < frame->upvalue_count && frame->upvalues[slot])
+                    val = value_deep_clone(frame->upvalues[slot]->location);
+                else val = value_nil();
+                break;
+            default: {
+                LatValue tmp;
+                if (!env_get(vm->env, var_name, &tmp)) tmp = value_nil();
+                val = tmp;
+                break;
+            }
+        }
+
+        /* Collect except field names from registers */
+        if (val.type == VAL_STRUCT) {
+            if (!val.as.strct.field_phases) {
+                val.as.strct.field_phases = calloc(val.as.strct.field_count, sizeof(PhaseTag));
+                for (size_t fi = 0; fi < val.as.strct.field_count; fi++)
+                    val.as.strct.field_phases[fi] = val.phase;
+            }
+            for (size_t fi = 0; fi < val.as.strct.field_count; fi++) {
+                bool exempted = false;
+                for (uint8_t j = 0; j < except_count; j++) {
+                    if (R[except_base + j].type == VAL_STR &&
+                        strcmp(val.as.strct.field_names[fi], R[except_base + j].as.str_val) == 0) {
+                        exempted = true; break;
+                    }
+                }
+                if (!exempted) {
+                    val.as.strct.field_values[fi] = value_freeze(val.as.strct.field_values[fi]);
+                    val.as.strct.field_phases[fi] = VTAG_CRYSTAL;
+                } else {
+                    val.as.strct.field_phases[fi] = VTAG_FLUID;
+                }
+            }
+        } else if (val.type == VAL_MAP) {
+            if (!val.as.map.key_phases) {
+                val.as.map.key_phases = calloc(1, sizeof(LatMap));
+                *val.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
+            }
+            for (size_t bi = 0; bi < val.as.map.map->cap; bi++) {
+                if (val.as.map.map->entries[bi].state != MAP_OCCUPIED) continue;
+                const char *key = val.as.map.map->entries[bi].key;
+                bool exempted = false;
+                for (uint8_t j = 0; j < except_count; j++) {
+                    if (R[except_base + j].type == VAL_STR &&
+                        strcmp(key, R[except_base + j].as.str_val) == 0) {
+                        exempted = true; break;
+                    }
+                }
+                PhaseTag phase;
+                if (!exempted) {
+                    LatValue *vp = (LatValue *)val.as.map.map->entries[bi].value;
+                    *vp = value_freeze(*vp);
+                    phase = VTAG_CRYSTAL;
+                } else {
+                    phase = VTAG_FLUID;
+                }
+                lat_map_set(val.as.map.key_phases, key, &phase);
+            }
+        }
+
+        /* Write back */
+        switch (loc_type) {
+            case 0: {
+                value_free(&R[slot]);
+                R[slot] = val;
+                break;
+            }
+            case 1: {
+                if (frame->upvalues && slot < frame->upvalue_count && frame->upvalues[slot]) {
+                    value_free(frame->upvalues[slot]->location);
+                    *frame->upvalues[slot]->location = val;
+                } else {
+                    value_free(&val);
+                }
+                break;
+            }
+            default: {
+                env_set(vm->env, var_name, val);
+                break;
+            }
         }
         DISPATCH();
     }

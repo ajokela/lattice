@@ -1121,55 +1121,33 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
         /* Freeze-except: freeze(x) except ["field1", ...] */
         if (e->as.freeze.except_count > 0 && e->as.freeze.expr->tag == EXPR_IDENT) {
-            /* Compile except field names into temporary registers */
-            uint8_t *field_regs = malloc(e->as.freeze.except_count * sizeof(uint8_t));
+            /* Compile except field names into contiguous temporary registers */
+            uint8_t except_base = alloc_reg();
             for (size_t i = 0; i < e->as.freeze.except_count; i++) {
-                field_regs[i] = alloc_reg();
-                compile_expr(e->as.freeze.except_fields[i], field_regs[i], line);
+                uint8_t ereg = (i == 0) ? except_base : alloc_reg();
+                compile_expr(e->as.freeze.except_fields[i], ereg, line);
             }
-            /* Freeze the variable */
+            /* Emit ROP_FREEZE_EXCEPT two-instruction sequence:
+             *   FREEZE_EXCEPT name_ki, loc_type, slot
+             *   data:         except_base, except_count, 0 */
             const char *name = e->as.freeze.expr->as.str_val;
             uint16_t name_ki = add_constant(value_string(name));
             int slot = resolve_local(rc, name);
+            uint8_t loc_type, slot_val;
             if (slot >= 0) {
-                emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 0, local_reg(slot), line);
+                loc_type = 0; slot_val = local_reg(slot);
             } else {
                 int uv = resolve_upvalue(rc, name);
-                if (uv >= 0) {
-                    emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 1, (uint8_t)uv, line);
-                } else {
-                    emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 2, 0, line);
-                }
+                if (uv >= 0) { loc_type = 1; slot_val = (uint8_t)uv; }
+                else { loc_type = 2; slot_val = 0; }
             }
-            /* Thaw back the excepted fields using THAW_FIELD opcode */
-            /* Read the frozen variable into a working register */
-            uint8_t var_reg = alloc_reg();
-            if (slot >= 0) {
-                emit_ABC(ROP_MOVE, var_reg, local_reg(slot), 0, line);
-            } else {
-                int uv2 = resolve_upvalue(rc, name);
-                if (uv2 >= 0) emit_ABC(ROP_GETUPVALUE, var_reg, (uint8_t)uv2, 0, line);
-                else emit_ABx(ROP_GETGLOBAL, var_reg, name_ki, line);
-            }
-            for (size_t i = 0; i < e->as.freeze.except_count; i++) {
-                /* Get the field name as a constant (except_fields are typically string literals) */
-                Expr *fe = e->as.freeze.except_fields[i];
-                if (fe->tag == EXPR_STRING_LIT) {
-                    uint8_t fk = (uint8_t)add_constant(value_string(fe->as.str_val));
-                    emit_ABC(ROP_THAW_FIELD, var_reg, fk, 0, line);
-                }
-                free_reg(field_regs[i]);
-            }
-            /* Write back the modified variable */
-            if (slot >= 0) {
-                emit_ABC(ROP_MOVE, local_reg(slot), var_reg, 0, line);
-            } else {
-                int uv3 = resolve_upvalue(rc, name);
-                if (uv3 >= 0) emit_ABC(ROP_SETUPVALUE, var_reg, (uint8_t)uv3, 0, line);
-                else emit_ABx(ROP_SETGLOBAL, var_reg, name_ki, line);
-            }
-            free_reg(var_reg);
-            free(field_regs);
+            emit_ABC(ROP_FREEZE_EXCEPT, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+            emit_ABC(ROP_MOVE, except_base, (uint8_t)e->as.freeze.except_count, 0, line);
+            /* Free except field registers */
+            if (e->as.freeze.except_count == 0)
+                free_reg(except_base);
+            else
+                free_regs_to(except_base);
             break;
         }
 
@@ -1386,23 +1364,48 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             break;
         }
 
-        /* Local or expression object: two-instruction INVOKE sequence:
+        /* Check if the object is a local variable — use INVOKE_LOCAL for
+         * direct in-place mutation (push/pop/etc) on the local register. */
+        if (e->as.method_call.object->tag == EXPR_IDENT) {
+            int local = resolve_local(rc, e->as.method_call.object->as.str_val);
+            if (local >= 0) {
+                /* INVOKE_LOCAL two-instruction sequence:
+                 *   INVOKE_LOCAL dst, local_reg, argc
+                 *   data:        method_ki, args_base, 0
+                 * VM mutates R[local_reg] in-place. */
+                uint8_t args_base = alloc_reg();
+                for (size_t i = 0; i < e->as.method_call.arg_count; i++) {
+                    uint8_t arg_reg = (i == 0) ? args_base : alloc_reg();
+                    compile_expr(e->as.method_call.args[i], arg_reg, line);
+                }
+
+                uint16_t method_ki = add_constant(value_string(e->as.method_call.method));
+
+                emit_ABC(ROP_INVOKE_LOCAL, dst, local_reg(local),
+                         (uint8_t)e->as.method_call.arg_count, line);
+                emit_ABC(ROP_MOVE, (uint8_t)(method_ki & 0xFF), args_base, 0, line);
+
+                if (e->as.method_call.arg_count == 0)
+                    free_reg(args_base);
+                else
+                    free_regs_to(args_base);
+                if (opt_skip) patch_jmp(opt_skip);
+                break;
+            }
+        }
+
+        /* Upvalue or expression object: two-instruction INVOKE sequence:
          *   INVOKE dst, method_ki, argc
          *   data:  obj_reg, args_base, 0
-         * For local variables, obj_reg IS the local's register (mutation persists). */
+         * Object is compiled into a temp register; mutation goes to that temp. */
         uint8_t obj_reg;
         bool obj_allocated = false;
 
         if (e->as.method_call.object->tag == EXPR_IDENT) {
-            int local = resolve_local(rc, e->as.method_call.object->as.str_val);
-            if (local >= 0) {
-                obj_reg = local_reg(local);
-            } else {
-                /* Upvalue — compile expression to temp reg */
-                obj_reg = alloc_reg();
-                obj_allocated = true;
-                compile_expr(e->as.method_call.object, obj_reg, line);
-            }
+            /* Upvalue — compile expression to temp reg */
+            obj_reg = alloc_reg();
+            obj_allocated = true;
+            compile_expr(e->as.method_call.object, obj_reg, line);
         } else {
             obj_reg = alloc_reg();
             obj_allocated = true;

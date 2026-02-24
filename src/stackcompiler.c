@@ -2347,12 +2347,19 @@ static void compile_function_body(FunctionType type, const char *name,
         emit_byte(OP_POP, line); /* pop the true */
     }
 
-    /* Compile body statements */
-    for (size_t i = 0; i < body_count; i++)
-        compile_stmt_reset(body[i]);
-
-    /* Implicit unit return */
-    emit_byte(OP_UNIT, line);
+    /* Compile body statements.
+     * If the last statement is a bare expression, use its value as the
+     * implicit return value instead of Unit. */
+    if (body_count > 0 && body[body_count - 1]->tag == STMT_EXPR) {
+        for (size_t i = 0; i + 1 < body_count; i++)
+            compile_stmt_reset(body[i]);
+        compile_expr(body[body_count - 1]->as.expr, line);
+        emit_byte(OP_RESET_EPHEMERAL, line);
+    } else {
+        for (size_t i = 0; i < body_count; i++)
+            compile_stmt_reset(body[i]);
+        emit_byte(OP_UNIT, line);
+    }
     emit_return_type_check(line);
     emit_ensure_checks(line);
     emit_byte(OP_DEFER_RUN, line);

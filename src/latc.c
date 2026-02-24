@@ -524,7 +524,7 @@ static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
     for (size_t i = 0; i < c->lines_len; i++)
         bb_write_u32_le(bb, (uint32_t)c->lines[i]);
 
-    /* Constants — same tagging as stack VM */
+    /* Constants — same tagging as stack VM, plus upvalue count for closures */
     bb_write_u32_le(bb, (uint32_t)c->const_len);
     for (size_t i = 0; i < c->const_len; i++) {
         const LatValue *v = &c->constants[i];
@@ -560,6 +560,8 @@ static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
                     bb_write_u8(bb, TAG_CLOSURE);
                     bb_write_u32_le(bb, (uint32_t)v->as.closure.param_count);
                     bb_write_u8(bb, v->as.closure.has_variadic ? 1 : 0);
+                    /* RegVM stores upvalue count in region_id */
+                    bb_write_u32_le(bb, (uint32_t)v->region_id);
                     serialize_regchunk(bb, (const RegChunk *)v->as.closure.native_fn);
                 } else {
                     bb_write_u8(bb, TAG_NIL);
@@ -583,6 +585,9 @@ static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
             bb_write_u8(bb, 0);
         }
     }
+
+    /* max_reg (high-water register count for bounded init/cleanup) */
+    bb_write_u8(bb, c->max_reg);
 }
 
 static RegChunk *deserialize_regchunk(ByteReader *br, char **err) {
@@ -675,15 +680,18 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err) {
             case TAG_CLOSURE: {
                 uint32_t param_count;
                 uint8_t has_variadic;
+                uint32_t upvalue_count;
                 if (!br_read_u32_le(br, &param_count)) { *err = strdup("truncated closure"); regchunk_free(c); return NULL; }
                 if (!br_read_u8(br, &has_variadic)) { *err = strdup("truncated closure"); regchunk_free(c); return NULL; }
+                /* RegVM stores upvalue count in region_id */
+                if (!br_read_u32_le(br, &upvalue_count)) { *err = strdup("truncated closure upvalue count"); regchunk_free(c); return NULL; }
                 RegChunk *sub = deserialize_regchunk(br, err);
                 if (!sub) { regchunk_free(c); return NULL; }
                 LatValue fn_val;
                 memset(&fn_val, 0, sizeof(fn_val));
                 fn_val.type = VAL_CLOSURE;
                 fn_val.phase = VTAG_UNPHASED;
-                fn_val.region_id = (size_t)-1;
+                fn_val.region_id = (size_t)upvalue_count;
                 fn_val.as.closure.param_names = NULL;
                 fn_val.as.closure.param_count = (size_t)param_count;
                 fn_val.as.closure.body = NULL;
@@ -724,6 +732,15 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err) {
             free(name);
         }
     }
+
+    /* max_reg (high-water register count) */
+    uint8_t max_reg;
+    if (!br_read_u8(br, &max_reg)) {
+        *err = strdup("truncated: missing max_reg");
+        regchunk_free(c);
+        return NULL;
+    }
+    c->max_reg = max_reg;
 
     return c;
 }
