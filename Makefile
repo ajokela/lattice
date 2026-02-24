@@ -209,7 +209,8 @@ coverage: LDFLAGS += -fprofile-instr-generate
 coverage: clean $(TEST_TARGET)
 	LLVM_PROFILE_FILE=$(BUILD_DIR)/stackvm.profraw ./$(BUILD_DIR)/test_runner
 	LLVM_PROFILE_FILE=$(BUILD_DIR)/treewalk.profraw ./$(BUILD_DIR)/test_runner --backend tree-walk
-	llvm-profdata merge -sparse $(BUILD_DIR)/stackvm.profraw $(BUILD_DIR)/treewalk.profraw -o $(BUILD_DIR)/default.profdata
+	LLVM_PROFILE_FILE=$(BUILD_DIR)/regvm.profraw ./$(BUILD_DIR)/test_runner --backend regvm
+	llvm-profdata merge -sparse $(BUILD_DIR)/stackvm.profraw $(BUILD_DIR)/treewalk.profraw $(BUILD_DIR)/regvm.profraw -o $(BUILD_DIR)/default.profdata
 	llvm-cov report ./$(BUILD_DIR)/test_runner -instr-profile=$(BUILD_DIR)/default.profdata $(LIB_SRCS)
 	llvm-cov show ./$(BUILD_DIR)/test_runner -instr-profile=$(BUILD_DIR)/default.profdata \
 		-format=html -output-dir=$(BUILD_DIR)/coverage $(LIB_SRCS)
