@@ -1206,6 +1206,45 @@ static LatValue native_base64_decode(LatValue *args, int ac) {
     return value_string_owned(r);
 }
 
+static LatValue native_sha512(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("sha512: expected (str: Str)");
+        return value_nil();
+    }
+    char *err = NULL;
+    char *r = crypto_sha512(args[0].as.str_val, strlen(args[0].as.str_val), &err);
+    if (err) { current_rt->error = err; return value_nil(); }
+    return value_string_owned(r);
+}
+static LatValue native_hmac_sha256(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_rt->error = strdup("hmac_sha256: expected (key: Str, data: Str)");
+        return value_nil();
+    }
+    char *err = NULL;
+    char *r = crypto_hmac_sha256(args[0].as.str_val, strlen(args[0].as.str_val),
+                                  args[1].as.str_val, strlen(args[1].as.str_val), &err);
+    if (err) { current_rt->error = err; return value_nil(); }
+    return value_string_owned(r);
+}
+static LatValue native_random_bytes(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("random_bytes: expected (n: Int)");
+        return value_nil();
+    }
+    int64_t n = args[0].as.int_val;
+    if (n < 0 || n > 1048576) {
+        current_rt->error = strdup("random_bytes: n must be 0..1048576");
+        return value_nil();
+    }
+    char *err = NULL;
+    uint8_t *buf = crypto_random_bytes((size_t)n, &err);
+    if (err) { current_rt->error = err; return value_nil(); }
+    LatValue result = value_buffer(buf, (size_t)n);
+    free(buf);
+    return result;
+}
+
 /* ── Regex natives ── */
 
 static LatValue native_regex_match(LatValue *args, int ac) {
@@ -1270,6 +1309,42 @@ static LatValue native_time_parse(LatValue *args, int ac) {
     int64_t r = datetime_parse(args[0].as.str_val, args[1].as.str_val, &err);
     if (err) { current_rt->error = err; return value_nil(); }
     return value_int(r);
+}
+static LatValue native_time_year(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_year: expected (timestamp: Int)"); return value_nil(); }
+    return value_int(datetime_year(args[0].as.int_val));
+}
+static LatValue native_time_month(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_month: expected (timestamp: Int)"); return value_nil(); }
+    return value_int(datetime_month(args[0].as.int_val));
+}
+static LatValue native_time_day(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_day: expected (timestamp: Int)"); return value_nil(); }
+    return value_int(datetime_day(args[0].as.int_val));
+}
+static LatValue native_time_hour(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_hour: expected (timestamp: Int)"); return value_nil(); }
+    return value_int(datetime_hour(args[0].as.int_val));
+}
+static LatValue native_time_minute(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_minute: expected (timestamp: Int)"); return value_nil(); }
+    return value_int(datetime_minute(args[0].as.int_val));
+}
+static LatValue native_time_second(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_second: expected (timestamp: Int)"); return value_nil(); }
+    return value_int(datetime_second(args[0].as.int_val));
+}
+static LatValue native_time_weekday(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_weekday: expected (timestamp: Int)"); return value_nil(); }
+    return value_int(datetime_weekday(args[0].as.int_val));
+}
+static LatValue native_time_add(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { current_rt->error = strdup("time_add: expected (timestamp: Int, delta_ms: Int)"); return value_nil(); }
+    return value_int(datetime_add(args[0].as.int_val, args[1].as.int_val));
+}
+static LatValue native_is_leap_year(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("is_leap_year: expected (year: Int)"); return value_nil(); }
+    return value_bool(datetime_is_leap_year((int)args[0].as.int_val));
 }
 
 /* ── Environment natives ── */
@@ -2252,6 +2327,9 @@ static LatValue build_crypto_module(void) {
     mod_set_native(&m, "md5", native_md5);
     mod_set_native(&m, "base64_encode", native_base64_encode);
     mod_set_native(&m, "base64_decode", native_base64_decode);
+    mod_set_native(&m, "sha512", native_sha512);
+    mod_set_native(&m, "hmac_sha256", native_hmac_sha256);
+    mod_set_native(&m, "random_bytes", native_random_bytes);
     mod_set_native(&m, "url_encode", native_url_encode);
     mod_set_native(&m, "url_decode", native_url_decode);
     return m;
@@ -2308,6 +2386,15 @@ static LatValue build_time_module(void) {
     mod_set_native(&m, "sleep", native_sleep);
     mod_set_native(&m, "format", native_time_format);
     mod_set_native(&m, "parse", native_time_parse);
+    mod_set_native(&m, "year", native_time_year);
+    mod_set_native(&m, "month", native_time_month);
+    mod_set_native(&m, "day", native_time_day);
+    mod_set_native(&m, "hour", native_time_hour);
+    mod_set_native(&m, "minute", native_time_minute);
+    mod_set_native(&m, "second", native_time_second);
+    mod_set_native(&m, "weekday", native_time_weekday);
+    mod_set_native(&m, "add", native_time_add);
+    mod_set_native(&m, "is_leap_year", native_is_leap_year);
     return m;
 }
 
@@ -2531,6 +2618,9 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "md5", native_md5, 1);
     rt_register_native(rt, "base64_encode", native_base64_encode, 1);
     rt_register_native(rt, "base64_decode", native_base64_decode, 1);
+    rt_register_native(rt, "sha512", native_sha512, 1);
+    rt_register_native(rt, "hmac_sha256", native_hmac_sha256, 2);
+    rt_register_native(rt, "random_bytes", native_random_bytes, 1);
 
     /* Regex */
     rt_register_native(rt, "regex_match", native_regex_match, 2);
@@ -2542,6 +2632,15 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "sleep", native_sleep, 1);
     rt_register_native(rt, "time_format", native_time_format, 2);
     rt_register_native(rt, "time_parse", native_time_parse, 2);
+    rt_register_native(rt, "time_year", native_time_year, 1);
+    rt_register_native(rt, "time_month", native_time_month, 1);
+    rt_register_native(rt, "time_day", native_time_day, 1);
+    rt_register_native(rt, "time_hour", native_time_hour, 1);
+    rt_register_native(rt, "time_minute", native_time_minute, 1);
+    rt_register_native(rt, "time_second", native_time_second, 1);
+    rt_register_native(rt, "time_weekday", native_time_weekday, 1);
+    rt_register_native(rt, "time_add", native_time_add, 2);
+    rt_register_native(rt, "is_leap_year", native_is_leap_year, 1);
 
     /* Environment */
     rt_register_native(rt, "env", native_env, 1);

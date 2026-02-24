@@ -46,3 +46,28 @@ int64_t datetime_parse(const char *str, const char *fmt, char **err) {
 
     return (int64_t)secs * 1000;
 }
+
+/* ── Component extraction ── */
+
+static struct tm epoch_to_tm(int64_t epoch_ms) {
+    time_t secs = (time_t)(epoch_ms / 1000);
+    struct tm tm;
+    localtime_r(&secs, &tm);
+    return tm;
+}
+
+int datetime_year(int64_t epoch_ms)    { return epoch_to_tm(epoch_ms).tm_year + 1900; }
+int datetime_month(int64_t epoch_ms)   { return epoch_to_tm(epoch_ms).tm_mon + 1; }
+int datetime_day(int64_t epoch_ms)     { return epoch_to_tm(epoch_ms).tm_mday; }
+int datetime_hour(int64_t epoch_ms)    { return epoch_to_tm(epoch_ms).tm_hour; }
+int datetime_minute(int64_t epoch_ms)  { return epoch_to_tm(epoch_ms).tm_min; }
+int datetime_second(int64_t epoch_ms)  { return epoch_to_tm(epoch_ms).tm_sec; }
+int datetime_weekday(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_wday; }
+
+int64_t datetime_add(int64_t epoch_ms, int64_t delta_ms) {
+    return epoch_ms + delta_ms;
+}
+
+bool datetime_is_leap_year(int year) {
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}

@@ -1,5 +1,6 @@
 #include "eval.h"
 #include "lattice.h"
+#include "intern.h"
 #include "string_ops.h"
 #include "format_ops.h"
 #include "builtins.h"
@@ -208,10 +209,7 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
             if (v->as.strct.name) fluid_mark(fh, v->as.strct.name);
             if (v->as.strct.field_names) {
                 fluid_mark(fh, v->as.strct.field_names);
-                for (size_t i = 0; i < v->as.strct.field_count; i++) {
-                    if (v->as.strct.field_names[i])
-                        fluid_mark(fh, v->as.strct.field_names[i]);
-                }
+                /* field_names[i] are interned — not in fluid heap, skip marking */
             }
             if (v->as.strct.field_values) {
                 fluid_mark(fh, v->as.strct.field_values);
@@ -651,7 +649,7 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
             return NULL;
         }
         for (size_t i = 0; i < parent->as.strct.field_count; i++) {
-            if (strcmp(parent->as.strct.field_names[i], expr->as.field_access.field) == 0) {
+            if (parent->as.strct.field_names[i] == intern(expr->as.field_access.field)) {
                 return &parent->as.strct.field_values[i];
             }
         }
@@ -4767,6 +4765,53 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(result));
                 }
 
+                /// @builtin sha512(s: String) -> String
+                /// @category Crypto
+                /// Compute the SHA-512 hash of a string, returned as hex.
+                /// @example sha512("hello")  // "9b71d224..."
+                if (strcmp(fn_name, "sha512") == 0) {
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("sha512() expects (String)")); }
+                    char *cerr = NULL;
+                    char *result = crypto_sha512(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (cerr) return eval_err(cerr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                /// @builtin hmac_sha256(key: String, data: String) -> String
+                /// @category Crypto
+                /// Compute the HMAC-SHA256 of data with key, returned as hex.
+                /// @example hmac_sha256("secret", "hello")  // "88aab3ed..."
+                if (strcmp(fn_name, "hmac_sha256") == 0) {
+                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("hmac_sha256() expects (String key, String data)")); }
+                    char *cerr = NULL;
+                    char *result = crypto_hmac_sha256(args[0].as.str_val, strlen(args[0].as.str_val),
+                                                      args[1].as.str_val, strlen(args[1].as.str_val), &cerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (cerr) return eval_err(cerr);
+                    return eval_ok(value_string_owned(result));
+                }
+
+                /// @builtin random_bytes(n: Int) -> Buffer
+                /// @category Crypto
+                /// Generate n cryptographically secure random bytes.
+                /// @example random_bytes(16).length()  // 16
+                if (strcmp(fn_name, "random_bytes") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("random_bytes() expects (Int n)")); }
+                    int64_t n = args[0].as.int_val;
+                    if (n < 0 || n > 1048576) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("random_bytes(): n must be 0..1048576")); }
+                    char *cerr = NULL;
+                    uint8_t *buf = crypto_random_bytes((size_t)n, &cerr);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (cerr) return eval_err(cerr);
+                    LatValue result = value_buffer(buf, (size_t)n);
+                    free(buf);
+                    return eval_ok(result);
+                }
+
                 /* ── Date/time formatting builtins ── */
 
                 /// @builtin time_format(epoch_ms: Int, fmt: String) -> String
@@ -4795,6 +4840,90 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(args);
                     if (terr) return eval_err(terr);
                     return eval_ok(value_int(result));
+                }
+
+                /// @builtin time_year(epoch_ms: Int) -> Int
+                /// @category Date & Time
+                /// Extract the year from a timestamp.
+                /// @example time_year(0)  // 1970
+                if (strcmp(fn_name, "time_year") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_year() expects (Int epoch_ms)")); }
+                    int r = datetime_year(args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin time_month(epoch_ms: Int) -> Int
+                /// @category Date & Time
+                /// Extract the month (1-12) from a timestamp.
+                if (strcmp(fn_name, "time_month") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_month() expects (Int epoch_ms)")); }
+                    int r = datetime_month(args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin time_day(epoch_ms: Int) -> Int
+                /// @category Date & Time
+                /// Extract the day of month (1-31) from a timestamp.
+                if (strcmp(fn_name, "time_day") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_day() expects (Int epoch_ms)")); }
+                    int r = datetime_day(args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin time_hour(epoch_ms: Int) -> Int
+                /// @category Date & Time
+                /// Extract the hour (0-23) from a timestamp.
+                if (strcmp(fn_name, "time_hour") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_hour() expects (Int epoch_ms)")); }
+                    int r = datetime_hour(args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin time_minute(epoch_ms: Int) -> Int
+                /// @category Date & Time
+                /// Extract the minute (0-59) from a timestamp.
+                if (strcmp(fn_name, "time_minute") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_minute() expects (Int epoch_ms)")); }
+                    int r = datetime_minute(args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin time_second(epoch_ms: Int) -> Int
+                /// @category Date & Time
+                /// Extract the second (0-59) from a timestamp.
+                if (strcmp(fn_name, "time_second") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_second() expects (Int epoch_ms)")); }
+                    int r = datetime_second(args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin time_weekday(epoch_ms: Int) -> Int
+                /// @category Date & Time
+                /// Extract the day of week (0=Sunday, 6=Saturday) from a timestamp.
+                if (strcmp(fn_name, "time_weekday") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_weekday() expects (Int epoch_ms)")); }
+                    int r = datetime_weekday(args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin time_add(epoch_ms: Int, delta_ms: Int) -> Int
+                /// @category Date & Time
+                /// Add milliseconds to a timestamp.
+                if (strcmp(fn_name, "time_add") == 0) {
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_add() expects (Int epoch_ms, Int delta_ms)")); }
+                    int64_t r = datetime_add(args[0].as.int_val, args[1].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_int(r));
+                }
+                /// @builtin is_leap_year(year: Int) -> Bool
+                /// @category Date & Time
+                /// Check if a year is a leap year.
+                /// @example is_leap_year(2024)  // true
+                if (strcmp(fn_name, "is_leap_year") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_leap_year() expects (Int year)")); }
+                    bool r = datetime_is_leap_year((int)args[0].as.int_val);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                    return eval_ok(value_bool(r));
                 }
 
                 /* ── Assertion builtin ── */
@@ -5658,7 +5787,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 return eval_err(err);
             }
             for (size_t i = 0; i < objr.value.as.strct.field_count; i++) {
-                if (strcmp(objr.value.as.strct.field_names[i], expr->as.field_access.field) == 0) {
+                if (objr.value.as.strct.field_names[i] == intern(expr->as.field_access.field)) {
                     LatValue result = value_deep_clone(&objr.value.as.strct.field_values[i]);
                     value_free(&objr.value);
                     return eval_ok(result);
@@ -5901,7 +6030,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < st.as.strct.field_count; i++) {
                         /* Find matching decl field */
                         for (size_t j = 0; j < sd->field_count; j++) {
-                            if (strcmp(st.as.strct.field_names[i], sd->fields[j].name) == 0) {
+                            if (st.as.strct.field_names[i] == intern(sd->fields[j].name)) {
                                 if (sd->fields[j].ty.phase == PHASE_CRYSTAL) {
                                     st.as.strct.field_values[i] = value_freeze(st.as.strct.field_values[i]);
                                     st.as.strct.field_phases[i] = VTAG_CRYSTAL;
@@ -5941,7 +6070,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 const char *fname = expr->as.freeze.expr->as.field_access.field;
                 size_t fi = (size_t)-1;
                 for (size_t i = 0; i < parent->as.strct.field_count; i++) {
-                    if (strcmp(parent->as.strct.field_names[i], fname) == 0) { fi = i; break; }
+                    if (parent->as.strct.field_names[i] == intern(fname)) { fi = i; break; }
                 }
                 if (fi == (size_t)-1) {
                     char *err = NULL;
@@ -6127,7 +6256,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         for (size_t i = 0; i < val.as.strct.field_count; i++) {
                             bool exempted = false;
                             for (size_t j = 0; j < expr->as.freeze.except_count; j++) {
-                                if (strcmp(val.as.strct.field_names[i], except_names[j]) == 0) {
+                                if (val.as.strct.field_names[i] == intern(except_names[j])) {
                                     exempted = true; break;
                                 }
                             }
@@ -7517,7 +7646,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 if (parent && parent->type == VAL_STRUCT && parent->as.strct.field_phases) {
                     const char *fname = stmt->as.assign.target->as.field_access.field;
                     for (size_t fi = 0; fi < parent->as.strct.field_count; fi++) {
-                        if (strcmp(parent->as.strct.field_names[fi], fname) == 0) {
+                        if (parent->as.strct.field_names[fi] == intern(fname)) {
                             if (parent->as.strct.field_phases[fi] == VTAG_CRYSTAL) {
                                 char *err = NULL;
                                 (void)asprintf(&err, "cannot assign to frozen field '%s'", fname);
@@ -7804,7 +7933,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
                     if (vr.value.type == VAL_STRUCT) {
                         for (size_t j = 0; j < vr.value.as.strct.field_count; j++) {
-                            if (strcmp(vr.value.as.strct.field_names[j], fname) == 0) {
+                            if (vr.value.as.strct.field_names[j] == intern(fname)) {
                                 elem = value_deep_clone(&vr.value.as.strct.field_values[j]);
                                 found = true;
                                 break;
@@ -8203,6 +8332,59 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// @example buf.write_u32(0, 0x12345678)
         if (strcmp(method, "write_u32") == 0) {
             return eval_ok(value_unit());
+        }
+        /// @method Buffer.read_i8(idx: Int) -> Int
+        /// @category Buffer Methods
+        /// Read a signed 8-bit integer at the given index.
+        if (strcmp(method, "read_i8") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_i8() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i >= obj.as.buffer.len) return eval_err(strdup("Buffer.read_i8: index out of bounds"));
+            return eval_ok(value_int((int8_t)obj.as.buffer.data[i]));
+        }
+        /// @method Buffer.read_i16(idx: Int) -> Int
+        /// @category Buffer Methods
+        /// Read a signed 16-bit integer (little-endian) at the given index.
+        if (strcmp(method, "read_i16") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_i16() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 2 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_i16: index out of bounds"));
+            int16_t v;
+            memcpy(&v, obj.as.buffer.data + i, 2);
+            return eval_ok(value_int(v));
+        }
+        /// @method Buffer.read_i32(idx: Int) -> Int
+        /// @category Buffer Methods
+        /// Read a signed 32-bit integer (little-endian) at the given index.
+        if (strcmp(method, "read_i32") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_i32() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 4 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_i32: index out of bounds"));
+            int32_t v;
+            memcpy(&v, obj.as.buffer.data + i, 4);
+            return eval_ok(value_int(v));
+        }
+        /// @method Buffer.read_f32(idx: Int) -> Float
+        /// @category Buffer Methods
+        /// Read a 32-bit float (little-endian) at the given index.
+        if (strcmp(method, "read_f32") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_f32() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 4 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_f32: index out of bounds"));
+            float v;
+            memcpy(&v, obj.as.buffer.data + i, 4);
+            return eval_ok(value_float((double)v));
+        }
+        /// @method Buffer.read_f64(idx: Int) -> Float
+        /// @category Buffer Methods
+        /// Read a 64-bit double (little-endian) at the given index.
+        if (strcmp(method, "read_f64") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT) return eval_err(strdup("Buffer.read_f64() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 8 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_f64: index out of bounds"));
+            double v;
+            memcpy(&v, obj.as.buffer.data + i, 8);
+            return eval_ok(value_float(v));
         }
         /// @method Buffer.slice(start: Int, end: Int) -> Buffer
         /// @category Buffer Methods
@@ -9313,6 +9495,41 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "to_lower") == 0) {
             return eval_ok(value_string_owned(lat_str_to_lower(obj.as.str_val)));
         }
+        /// @method String.capitalize() -> String
+        /// @category String Methods
+        /// Capitalize the first letter, lowercase the rest.
+        /// @example "hello world".capitalize()  // "Hello world"
+        if (strcmp(method, "capitalize") == 0) {
+            return eval_ok(value_string_owned(lat_str_capitalize(obj.as.str_val)));
+        }
+        /// @method String.title_case() -> String
+        /// @category String Methods
+        /// Capitalize the first letter of each word.
+        /// @example "hello world".title_case()  // "Hello World"
+        if (strcmp(method, "title_case") == 0) {
+            return eval_ok(value_string_owned(lat_str_title_case(obj.as.str_val)));
+        }
+        /// @method String.snake_case() -> String
+        /// @category String Methods
+        /// Convert to snake_case.
+        /// @example "helloWorld".snake_case()  // "hello_world"
+        if (strcmp(method, "snake_case") == 0) {
+            return eval_ok(value_string_owned(lat_str_snake_case(obj.as.str_val)));
+        }
+        /// @method String.camel_case() -> String
+        /// @category String Methods
+        /// Convert to camelCase.
+        /// @example "hello_world".camel_case()  // "helloWorld"
+        if (strcmp(method, "camel_case") == 0) {
+            return eval_ok(value_string_owned(lat_str_camel_case(obj.as.str_val)));
+        }
+        /// @method String.kebab_case() -> String
+        /// @category String Methods
+        /// Convert to kebab-case.
+        /// @example "helloWorld".kebab_case()  // "hello-world"
+        if (strcmp(method, "kebab_case") == 0) {
+            return eval_ok(value_string_owned(lat_str_kebab_case(obj.as.str_val)));
+        }
         /// @method String.replace(old: String, new: String) -> String
         /// @category String Methods
         /// Replace all occurrences of a substring.
@@ -9512,7 +9729,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (arg_count != 1) return eval_err(strdup(".get() expects exactly 1 argument"));
         if (args[0].type != VAL_STR) return eval_err(strdup(".get() key must be a string"));
         for (size_t i = 0; i < obj.as.strct.field_count; i++) {
-            if (strcmp(obj.as.strct.field_names[i], args[0].as.str_val) == 0) {
+            if (obj.as.strct.field_names[i] == intern(args[0].as.str_val)) {
                 return eval_ok(value_deep_clone(&obj.as.strct.field_values[i]));
             }
         }
@@ -9524,7 +9741,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     /* ── Callable struct fields: obj.method(args) where field is a closure ── */
     if (obj.type == VAL_STRUCT) {
         for (size_t i = 0; i < obj.as.strct.field_count; i++) {
-            if (strcmp(obj.as.strct.field_names[i], method) == 0 &&
+            if (obj.as.strct.field_names[i] == intern(method) &&
                 obj.as.strct.field_values[i].type == VAL_CLOSURE) {
                 LatValue *cl = &obj.as.strct.field_values[i];
                 /* Prepend self (the struct) as the first argument */
@@ -9642,7 +9859,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
     } else if (obj.type == VAL_STRUCT) {
         for (size_t i = 0; i < obj.as.strct.field_count; i++) {
-            if (strcmp(obj.as.strct.field_names[i], method) == 0 &&
+            if (obj.as.strct.field_names[i] == intern(method) &&
                 obj.as.strct.field_values[i].type == VAL_CLOSURE) {
                 LatValue *field = &obj.as.strct.field_values[i];
                 LatValue *cloned_args = malloc(arg_count * sizeof(LatValue));
@@ -10227,7 +10444,7 @@ char *eval_repr(Evaluator *ev, const LatValue *v) {
     if (v->type == VAL_STRUCT) {
         /* Look for a "repr" closure field */
         for (size_t i = 0; i < v->as.strct.field_count; i++) {
-            if (strcmp(v->as.strct.field_names[i], "repr") == 0 &&
+            if (v->as.strct.field_names[i] == intern("repr") &&
                 v->as.strct.field_values[i].type == VAL_CLOSURE) {
                 const LatValue *cl = &v->as.strct.field_values[i];
                 LatValue self_arg = value_deep_clone(v);

@@ -177,6 +177,8 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             return v;
         }
         case VAL_STR: {
+            if (src->region_id == REGION_INTERNED)
+                return *src;
             LatValue v = *src;
             v.as.str_val = strdup(src->as.str_val);
             v.region_id = REGION_NONE;
@@ -217,7 +219,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             v.as.strct.field_names = malloc(fc * sizeof(char *));
             v.as.strct.field_values = malloc(fc * sizeof(LatValue));
             for (size_t i = 0; i < fc; i++) {
-                v.as.strct.field_names[i] = strdup(src->as.strct.field_names[i]);
+                v.as.strct.field_names[i] = src->as.strct.field_names[i]; /* interned, shared */
                 v.as.strct.field_values[i] = value_clone_fast(&src->as.strct.field_values[i]);
             }
             if (src->as.strct.field_phases) {
@@ -849,6 +851,16 @@ static const char *stackvm_find_pressure(StackVM *vm, const char *name) {
 #define MHASH_write_u16        0xf5d8ed8bu
 #define MHASH_read_u32         0xf94a163au
 #define MHASH_write_u32        0xf5d8edc9u
+#define MHASH_capitalize       0xee09978bu
+#define MHASH_title_case       0x4b7027c2u
+#define MHASH_snake_case       0xb7f6c232u
+#define MHASH_camel_case       0xe2889d82u
+#define MHASH_kebab_case       0x62be3b95u
+#define MHASH_read_i8          0x3ddb7381u
+#define MHASH_read_i16         0xf949e2f0u
+#define MHASH_read_i32         0xf949e32eu
+#define MHASH_read_f32         0xf949d66bu
+#define MHASH_read_f64         0xf949d6d0u
 #define MHASH_clear            0x0f3b6d8cu
 #define MHASH_fill             0x7c96cb2cu
 #define MHASH_resize           0x192fa5b7u
@@ -1552,6 +1564,26 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             push(vm, value_string_owned(s));
             return true;
         }
+        if (mhash == MHASH_capitalize && strcmp(method, "capitalize") == 0 && arg_count == 0) {
+            push(vm, value_string_owned(lat_str_capitalize(obj->as.str_val)));
+            return true;
+        }
+        if (mhash == MHASH_title_case && strcmp(method, "title_case") == 0 && arg_count == 0) {
+            push(vm, value_string_owned(lat_str_title_case(obj->as.str_val)));
+            return true;
+        }
+        if (mhash == MHASH_snake_case && strcmp(method, "snake_case") == 0 && arg_count == 0) {
+            push(vm, value_string_owned(lat_str_snake_case(obj->as.str_val)));
+            return true;
+        }
+        if (mhash == MHASH_camel_case && strcmp(method, "camel_case") == 0 && arg_count == 0) {
+            push(vm, value_string_owned(lat_str_camel_case(obj->as.str_val)));
+            return true;
+        }
+        if (mhash == MHASH_kebab_case && strcmp(method, "kebab_case") == 0 && arg_count == 0) {
+            push(vm, value_string_owned(lat_str_kebab_case(obj->as.str_val)));
+            return true;
+        }
         if (mhash == MHASH_starts_with && strcmp(method, "starts_with") == 0 && arg_count == 1) {
             LatValue prefix = pop(vm);
             if (prefix.type == VAL_STR) {
@@ -1880,7 +1912,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             if (key.type == VAL_STR) {
                 bool found = false;
                 for (size_t i = 0; i < obj->as.strct.field_count; i++) {
-                    if (strcmp(obj->as.strct.field_names[i], key.as.str_val) == 0) {
+                    if (obj->as.strct.field_names[i] == intern(key.as.str_val)) {
                         push(vm, value_deep_clone(&obj->as.strct.field_values[i]));
                         found = true; break;
                     }
@@ -1893,7 +1925,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
         }
         /* Struct field that is callable */
         for (size_t i = 0; i < obj->as.strct.field_count; i++) {
-            if (strcmp(obj->as.strct.field_names[i], method) == 0) {
+            if (obj->as.strct.field_names[i] == intern(method)) {
                 LatValue *field_val = &obj->as.strct.field_values[i];
                 if (field_val->type == VAL_CLOSURE && field_val->as.closure.native_fn) {
                     /* It's a compiled function - invoke it */
@@ -2254,6 +2286,73 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             obj->as.buffer.data[i+2] = (uint8_t)((v >> 16) & 0xFF);
             obj->as.buffer.data[i+3] = (uint8_t)((v >> 24) & 0xFF);
             push(vm, value_unit());
+            return true;
+        }
+        if (mhash == MHASH_read_i8 && strcmp(method, "read_i8") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val >= obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_i8: index out of bounds");
+                push(vm, value_int(0));
+                return true;
+            }
+            push(vm, value_int((int8_t)obj->as.buffer.data[idx.as.int_val]));
+            return true;
+        }
+        if (mhash == MHASH_read_i16 && strcmp(method, "read_i16") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 2 > obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_i16: index out of bounds");
+                push(vm, value_int(0));
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            int16_t v;
+            memcpy(&v, obj->as.buffer.data + i, 2);
+            push(vm, value_int(v));
+            return true;
+        }
+        if (mhash == MHASH_read_i32 && strcmp(method, "read_i32") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_i32: index out of bounds");
+                push(vm, value_int(0));
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            int32_t v;
+            memcpy(&v, obj->as.buffer.data + i, 4);
+            push(vm, value_int(v));
+            return true;
+        }
+        if (mhash == MHASH_read_f32 && strcmp(method, "read_f32") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 4 > obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_f32: index out of bounds");
+                push(vm, value_float(0.0));
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            float v;
+            memcpy(&v, obj->as.buffer.data + i, 4);
+            push(vm, value_float((double)v));
+            return true;
+        }
+        if (mhash == MHASH_read_f64 && strcmp(method, "read_f64") == 0 && arg_count == 1) {
+            LatValue idx = pop(vm);
+            if (idx.type != VAL_INT || idx.as.int_val < 0 || (size_t)idx.as.int_val + 8 > obj->as.buffer.len) {
+                value_free(&idx);
+                vm->error = strdup("Buffer.read_f64: index out of bounds");
+                push(vm, value_float(0.0));
+                return true;
+            }
+            size_t i = (size_t)idx.as.int_val;
+            double v;
+            memcpy(&v, obj->as.buffer.data + i, 8);
+            push(vm, value_float(v));
             return true;
         }
         if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && arg_count == 2) {
@@ -4143,12 +4242,13 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             case OP_GET_FIELD: {
                 uint8_t name_idx = READ_BYTE();
                 const char *field_name = frame->chunk->constants[name_idx].as.str_val;
+                const char *interned_name = intern(field_name);
                 LatValue obj = pop(vm);
 
                 if (obj.type == VAL_STRUCT) {
                     bool found = false;
                     for (size_t i = 0; i < obj.as.strct.field_count; i++) {
-                        if (strcmp(obj.as.strct.field_names[i], field_name) == 0) {
+                        if (obj.as.strct.field_names[i] == interned_name) {
                             /* Steal the value from the dying struct */
                             LatValue stolen = obj.as.strct.field_values[i];
                             obj.as.strct.field_values[i] = (LatValue){.type = VAL_NIL};
@@ -4220,6 +4320,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             case OP_SET_FIELD: {
                 uint8_t name_idx = READ_BYTE();
                 const char *field_name = frame->chunk->constants[name_idx].as.str_val;
+                const char *interned_fname = intern(field_name);
                 LatValue obj = pop(vm);
                 LatValue val = pop(vm);
                 stackvm_promote_value(&val);
@@ -4236,7 +4337,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     bool field_frozen = false;
                     if (obj.as.strct.field_phases) {
                         for (size_t i = 0; i < obj.as.strct.field_count; i++) {
-                            if (strcmp(obj.as.strct.field_names[i], field_name) == 0) {
+                            if (obj.as.strct.field_names[i] == interned_fname) {
                                 if (obj.as.strct.field_phases[i] == VTAG_CRYSTAL)
                                     field_frozen = true;
                                 break;
@@ -4249,7 +4350,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     }
                     bool found = false;
                     for (size_t i = 0; i < obj.as.strct.field_count; i++) {
-                        if (strcmp(obj.as.strct.field_names[i], field_name) == 0) {
+                        if (obj.as.strct.field_names[i] == interned_fname) {
                             value_free(&obj.as.strct.field_values[i]);
                             obj.as.strct.field_values[i] = val;
                             found = true;
@@ -4355,9 +4456,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
                     /* Check if struct has a callable closure field */
                     if (obj->type == VAL_STRUCT) {
+                        const char *imethod = intern(method_name);
                         bool handled = false;
                         for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
-                            if (strcmp(obj->as.strct.field_names[fi], method_name) != 0)
+                            if (obj->as.strct.field_names[fi] != imethod)
                                 continue;
                             LatValue *field = &obj->as.strct.field_values[fi];
                             if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
@@ -4538,9 +4640,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
                 /* Check if struct has a callable closure field */
                 if (obj->type == VAL_STRUCT) {
+                    const char *imethod2 = intern(method_name);
                     bool handled = false;
                     for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
-                        if (strcmp(obj->as.strct.field_names[fi], method_name) != 0)
+                        if (obj->as.strct.field_names[fi] != imethod2)
                             continue;
                         LatValue *field = &obj->as.strct.field_values[fi];
                         if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
@@ -4754,9 +4857,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 }
 
                 if (obj->type == VAL_STRUCT) {
+                    const char *imethod3 = intern(method_name);
                     bool handled = false;
                     for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
-                        if (strcmp(obj->as.strct.field_names[fi], method_name) != 0)
+                        if (obj->as.strct.field_names[fi] != imethod3)
                             continue;
                         LatValue *field = &obj->as.strct.field_values[fi];
                         if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
@@ -5500,7 +5604,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     for (size_t i = 0; i < val.as.strct.field_count; i++) {
                         bool exempted = false;
                         for (uint8_t j = 0; j < except_count; j++) {
-                            if (strcmp(val.as.strct.field_names[i], except_names[j]) == 0) {
+                            if (val.as.strct.field_names[i] == intern(except_names[j])) {
                                 exempted = true; break;
                             }
                         }
@@ -5578,7 +5682,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     const char *fname = field_name.as.str_val;
                     size_t fi = (size_t)-1;
                     for (size_t i = 0; i < parent.as.strct.field_count; i++) {
-                        if (strcmp(parent.as.strct.field_names[i], fname) == 0) { fi = i; break; }
+                        if (parent.as.strct.field_names[i] == intern(fname)) { fi = i; break; }
                     }
                     if (fi == (size_t)-1) {
                         value_free(&parent); value_free(&field_name);

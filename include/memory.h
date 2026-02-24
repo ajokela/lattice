@@ -117,7 +117,7 @@ void           region_manager_free(RegionManager *rm);
 Epoch          region_advance_epoch(RegionManager *rm);
 Epoch          region_current_epoch(const RegionManager *rm);
 CrystalRegion *region_create(RegionManager *rm);
-size_t         region_collect(RegionManager *rm, const RegionId *reachable, size_t reachable_count);
+size_t         region_collect(RegionManager *rm, RegionId *reachable, size_t reachable_count);
 size_t         region_count(const RegionManager *rm);
 size_t         region_total_allocs(const RegionManager *rm);
 size_t         region_live_data_bytes(const RegionManager *rm);

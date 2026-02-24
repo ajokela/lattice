@@ -43,4 +43,11 @@ char *lat_str_repeat(const char *s, size_t count);
 /* Reverse string. Returns new string. */
 char *lat_str_reverse(const char *s);
 
+/* Case transforms. All return new malloc'd string. */
+char *lat_str_capitalize(const char *s);
+char *lat_str_title_case(const char *s);
+char *lat_str_snake_case(const char *s);
+char *lat_str_camel_case(const char *s);
+char *lat_str_kebab_case(const char *s);
+
 #endif /* STRING_OPS_H */

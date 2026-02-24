@@ -2,6 +2,7 @@
 #define DATETIME_OPS_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /* Format a Unix timestamp (milliseconds) using strftime-style format string.
  * Returns heap-allocated formatted string. Sets *err on failure.
@@ -16,5 +17,16 @@ char *datetime_format(int64_t epoch_ms, const char *fmt, char **err);
 /* Parse a date/time string using strftime-style format string.
  * Returns milliseconds since epoch. Sets *err on failure. */
 int64_t datetime_parse(const char *str, const char *fmt, char **err);
+
+/* Component extraction from epoch milliseconds */
+int datetime_year(int64_t epoch_ms);
+int datetime_month(int64_t epoch_ms);
+int datetime_day(int64_t epoch_ms);
+int datetime_hour(int64_t epoch_ms);
+int datetime_minute(int64_t epoch_ms);
+int datetime_second(int64_t epoch_ms);
+int datetime_weekday(int64_t epoch_ms);    /* 0=Sunday, 6=Saturday */
+int64_t datetime_add(int64_t epoch_ms, int64_t delta_ms);
+bool datetime_is_leap_year(int year);
 
 #endif

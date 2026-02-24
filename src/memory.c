@@ -287,18 +287,31 @@ CrystalRegion *region_create(RegionManager *rm) {
     return r;
 }
 
-size_t region_collect(RegionManager *rm, const RegionId *reachable, size_t reachable_count) {
+static int regionid_cmp(const void *a, const void *b) {
+    RegionId ra = *(const RegionId *)a;
+    RegionId rb = *(const RegionId *)b;
+    return (ra > rb) - (ra < rb);
+}
+
+static bool regionid_bsearch(const RegionId *sorted, size_t count, RegionId target) {
+    size_t lo = 0, hi = count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (sorted[mid] < target) lo = mid + 1;
+        else if (sorted[mid] > target) hi = mid;
+        else return true;
+    }
+    return false;
+}
+
+size_t region_collect(RegionManager *rm, RegionId *reachable, size_t reachable_count) {
+    if (reachable_count > 1)
+        qsort(reachable, reachable_count, sizeof(RegionId), regionid_cmp);
+
     size_t freed = 0;
     size_t i = 0;
     while (i < rm->count) {
-        bool is_reachable = false;
-        for (size_t j = 0; j < reachable_count; j++) {
-            if (rm->regions[i]->id == reachable[j]) {
-                is_reachable = true;
-                break;
-            }
-        }
-        if (!is_reachable) {
+        if (!regionid_bsearch(reachable, reachable_count, rm->regions[i]->id)) {
             crystal_region_free(rm->regions[i]);
             rm->regions[i] = rm->regions[rm->count - 1];
             rm->count--;

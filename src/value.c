@@ -2,6 +2,7 @@
 #include "env.h"
 #include "memory.h"
 #include "channel.h"
+#include "intern.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -94,6 +95,12 @@ LatValue value_string_owned(char *s) {
     return val;
 }
 
+LatValue value_string_interned(const char *s) {
+    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_INTERNED };
+    val.as.str_val = (char *)intern(s);
+    return val;
+}
+
 LatValue value_array(LatValue *elems, size_t len) {
     LatValue val = { .type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     size_t cap = len < 4 ? 4 : len;
@@ -111,7 +118,7 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
     val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
     val.as.strct.field_phases = NULL;  /* lazy-allocated on first field freeze */
     for (size_t i = 0; i < count; i++) {
-        val.as.strct.field_names[i] = lat_strdup(field_names[i]);
+        val.as.strct.field_names[i] = (char *)intern(field_names[i]);
         val.as.strct.field_values[i] = field_values[i];
     }
     val.as.strct.field_count = count;
@@ -125,7 +132,7 @@ LatValue value_struct_vm(const char *name, const char **field_names, LatValue *f
     val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
     val.as.strct.field_phases = NULL;
     for (size_t i = 0; i < count; i++) {
-        val.as.strct.field_names[i] = lat_strdup(field_names[i]);
+        val.as.strct.field_names[i] = (char *)intern(field_names[i]);
         val.as.strct.field_values[i] = field_values[i];
     }
     val.as.strct.field_count = count;
@@ -265,7 +272,14 @@ LatValue value_deep_clone(const LatValue *v) {
         case VAL_INT:   out.as.int_val = v->as.int_val; break;
         case VAL_FLOAT: out.as.float_val = v->as.float_val; break;
         case VAL_BOOL:  out.as.bool_val = v->as.bool_val; break;
-        case VAL_STR:   out.as.str_val = lat_strdup(v->as.str_val); break;
+        case VAL_STR:
+            if (v->region_id == REGION_INTERNED) {
+                out.as.str_val = v->as.str_val;
+                out.region_id = REGION_INTERNED;
+            } else {
+                out.as.str_val = lat_strdup(v->as.str_val);
+            }
+            break;
         case VAL_ARRAY: {
             size_t len = v->as.array.len;
             size_t cap = v->as.array.cap;
@@ -283,7 +297,7 @@ LatValue value_deep_clone(const LatValue *v) {
             out.as.strct.field_names = lat_alloc(fc * sizeof(char *));
             out.as.strct.field_values = lat_alloc(fc * sizeof(LatValue));
             for (size_t i = 0; i < fc; i++) {
-                out.as.strct.field_names[i] = lat_strdup(v->as.strct.field_names[i]);
+                out.as.strct.field_names[i] = (char *)intern(v->as.strct.field_names[i]);
                 out.as.strct.field_values[i] = value_deep_clone(&v->as.strct.field_values[i]);
             }
             out.as.strct.field_count = fc;
@@ -822,7 +836,9 @@ bool value_eq(const LatValue *a, const LatValue *b) {
         case VAL_INT:   return a->as.int_val == b->as.int_val;
         case VAL_FLOAT: return a->as.float_val == b->as.float_val;
         case VAL_BOOL:  return a->as.bool_val == b->as.bool_val;
-        case VAL_STR:   return strcmp(a->as.str_val, b->as.str_val) == 0;
+        case VAL_STR:
+            if (a->as.str_val == b->as.str_val) return true;
+            return strcmp(a->as.str_val, b->as.str_val) == 0;
         case VAL_UNIT:  return true;
         case VAL_NIL:   return true;
         case VAL_RANGE: return a->as.range.start == b->as.range.start &&
@@ -916,7 +932,7 @@ void value_free(LatValue *v) {
         case VAL_STRUCT:
             val_dealloc(v, v->as.strct.name);
             for (size_t i = 0; i < v->as.strct.field_count; i++) {
-                val_dealloc(v, v->as.strct.field_names[i]);
+                /* field_names[i] are interned — owned by intern table, not freed here */
                 value_free(&v->as.strct.field_values[i]);
             }
             val_dealloc(v, v->as.strct.field_names);

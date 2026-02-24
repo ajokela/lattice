@@ -291,3 +291,106 @@ char *lat_str_reverse(const char *s) {
     }
     return result;
 }
+
+/* ── Case transforms ── */
+
+char *lat_str_capitalize(const char *s) {
+    s = safe_str(s);
+    size_t len = strlen(s);
+    char *r = malloc(len + 1);
+    if (len > 0) r[0] = (char)toupper((unsigned char)s[0]);
+    for (size_t i = 1; i < len; i++) r[i] = (char)tolower((unsigned char)s[i]);
+    r[len] = '\0';
+    return r;
+}
+
+char *lat_str_title_case(const char *s) {
+    s = safe_str(s);
+    size_t len = strlen(s);
+    char *r = malloc(len + 1);
+    bool word_start = true;
+    for (size_t i = 0; i < len; i++) {
+        if (isspace((unsigned char)s[i]) || s[i] == '_' || s[i] == '-') {
+            r[i] = s[i];
+            word_start = true;
+        } else if (word_start) {
+            r[i] = (char)toupper((unsigned char)s[i]);
+            word_start = false;
+        } else {
+            r[i] = (char)tolower((unsigned char)s[i]);
+        }
+    }
+    r[len] = '\0';
+    return r;
+}
+
+static bool is_case_boundary(char prev, char cur) {
+    if (islower((unsigned char)prev) && isupper((unsigned char)cur)) return true;
+    if (prev == ' ' || prev == '-' || prev == '_') return true;
+    return false;
+}
+
+char *lat_str_snake_case(const char *s) {
+    s = safe_str(s);
+    size_t len = strlen(s);
+    size_t cap = len * 2 + 1;
+    char *r = malloc(cap);
+    size_t pos = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c == ' ' || c == '-' || c == '_') {
+            if (pos > 0 && r[pos - 1] != '_') r[pos++] = '_';
+        } else if (i > 0 && is_case_boundary(s[i - 1], c) && s[i - 1] != ' ' && s[i - 1] != '-' && s[i - 1] != '_') {
+            if (pos > 0 && r[pos - 1] != '_') r[pos++] = '_';
+            r[pos++] = (char)tolower((unsigned char)c);
+        } else {
+            r[pos++] = (char)tolower((unsigned char)c);
+        }
+    }
+    r[pos] = '\0';
+    return r;
+}
+
+char *lat_str_camel_case(const char *s) {
+    s = safe_str(s);
+    size_t len = strlen(s);
+    char *r = malloc(len + 1);
+    size_t pos = 0;
+    bool upper_next = false;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c == ' ' || c == '-' || c == '_') {
+            upper_next = true;
+        } else if (upper_next) {
+            r[pos++] = (char)toupper((unsigned char)c);
+            upper_next = false;
+        } else if (pos == 0) {
+            r[pos++] = (char)tolower((unsigned char)c);
+        } else {
+            r[pos++] = c;
+        }
+    }
+    r[pos] = '\0';
+    return r;
+}
+
+char *lat_str_kebab_case(const char *s) {
+    s = safe_str(s);
+    size_t len = strlen(s);
+    size_t cap = len * 2 + 1;
+    char *r = malloc(cap);
+    size_t pos = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c == ' ' || c == '-' || c == '_') {
+            if (pos > 0 && r[pos - 1] != '-') r[pos++] = '-';
+        } else if (i > 0 && is_case_boundary(s[i - 1], c) && s[i - 1] != ' ' && s[i - 1] != '-' && s[i - 1] != '_') {
+            if (pos > 0 && r[pos - 1] != '-') r[pos++] = '-';
+            r[pos++] = (char)tolower((unsigned char)c);
+        } else {
+            r[pos++] = (char)tolower((unsigned char)c);
+        }
+    }
+    r[pos] = '\0';
+    return r;
+}

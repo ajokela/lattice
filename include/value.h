@@ -37,6 +37,7 @@ struct LatValue {
     size_t    region_id;  /* Crystal region ID ((size_t)-1 = not in a region) */
 #define REGION_NONE       ((size_t)-1)  /* normal malloc (not in any arena) */
 #define REGION_EPHEMERAL  ((size_t)-2)  /* in ephemeral bump arena */
+#define REGION_INTERNED   ((size_t)-3)  /* interned string — never cloned or freed */
     union {
         int64_t int_val;
         double  float_val;
@@ -110,6 +111,7 @@ LatValue value_float(double v);
 LatValue value_bool(bool v);
 LatValue value_string(const char *s);
 LatValue value_string_owned(char *s);
+LatValue value_string_interned(const char *s);
 LatValue value_array(LatValue *elems, size_t len);
 LatValue value_struct(const char *name, char **field_names, LatValue *field_values, size_t count);
 /* VM-optimized: borrows field names from const pool (single strdup, not double) */

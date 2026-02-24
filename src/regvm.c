@@ -11,6 +11,7 @@
 #include "builtins.h"
 #include "ext.h"
 #include "memory.h"
+#include "string_ops.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1213,6 +1214,26 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             *result = value_string_owned(s);
             return true;
         }
+        if (strcmp(method, "capitalize") == 0 && arg_count == 0) {
+            *result = value_string_owned(lat_str_capitalize(obj->as.str_val));
+            return true;
+        }
+        if (strcmp(method, "title_case") == 0 && arg_count == 0) {
+            *result = value_string_owned(lat_str_title_case(obj->as.str_val));
+            return true;
+        }
+        if (strcmp(method, "snake_case") == 0 && arg_count == 0) {
+            *result = value_string_owned(lat_str_snake_case(obj->as.str_val));
+            return true;
+        }
+        if (strcmp(method, "camel_case") == 0 && arg_count == 0) {
+            *result = value_string_owned(lat_str_camel_case(obj->as.str_val));
+            return true;
+        }
+        if (strcmp(method, "kebab_case") == 0 && arg_count == 0) {
+            *result = value_string_owned(lat_str_kebab_case(obj->as.str_val));
+            return true;
+        }
         if (strcmp(method, "starts_with") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR)
                 *result = value_bool(strncmp(obj->as.str_val, args[0].as.str_val, strlen(args[0].as.str_val)) == 0);
@@ -1672,6 +1693,46 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                 }
             }
             *result = value_unit();
+            return true;
+        }
+        if (strcmp(method, "read_i8") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx >= obj->as.buffer.len) { *result = value_nil(); }
+                else { *result = value_int((int8_t)obj->as.buffer.data[idx]); }
+            } else { *result = value_nil(); }
+            return true;
+        }
+        if (strcmp(method, "read_i16") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx + 2 > obj->as.buffer.len) { *result = value_nil(); }
+                else { int16_t v; memcpy(&v, obj->as.buffer.data + idx, 2); *result = value_int(v); }
+            } else { *result = value_nil(); }
+            return true;
+        }
+        if (strcmp(method, "read_i32") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) { *result = value_nil(); }
+                else { int32_t v; memcpy(&v, obj->as.buffer.data + idx, 4); *result = value_int(v); }
+            } else { *result = value_nil(); }
+            return true;
+        }
+        if (strcmp(method, "read_f32") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) { *result = value_nil(); }
+                else { float v; memcpy(&v, obj->as.buffer.data + idx, 4); *result = value_float((double)v); }
+            } else { *result = value_nil(); }
+            return true;
+        }
+        if (strcmp(method, "read_f64") == 0 && arg_count == 1) {
+            if (args[0].type == VAL_INT) {
+                int64_t idx = args[0].as.int_val;
+                if (idx < 0 || (size_t)idx + 8 > obj->as.buffer.len) { *result = value_nil(); }
+                else { double v; memcpy(&v, obj->as.buffer.data + idx, 8); *result = value_float(v); }
+            } else { *result = value_nil(); }
             return true;
         }
         if (strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
