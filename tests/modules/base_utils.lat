@@ -1,0 +1,9 @@
+export fn double(x: Int) -> Int {
+    return x * 2
+}
+
+export fn triple(x: Int) -> Int {
+    return x * 3
+}
+
+export let BASE_CONST = 100

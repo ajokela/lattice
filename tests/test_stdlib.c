@@ -1440,7 +1440,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.15"
+        "0.3.16"
     );
 }
 
@@ -5865,7 +5865,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.15"
+        "Hello, Lattice!\nVersion 0.3.16"
     );
 }
 
@@ -6368,6 +6368,370 @@ static void test_export_struct(void) {
     );
 }
 
+/* ── Transitive imports (module imports another module) ── */
+
+static void test_import_transitive(void) {
+    /* mid_layer.lat imports base_utils.lat internally.
+     * quadruple(x) = double(double(x)), add_base(x) = x + BASE_CONST (100). */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/mid_layer\" as mid\n"
+        "fn main() {\n"
+        "    print(mid.quadruple(5))\n"
+        "    print(mid.add_base(50))\n"
+        "    print(mid.MID_CONST)\n"
+        "}\n",
+        "20\n150\n200"
+    );
+}
+
+static void test_import_transitive_selective(void) {
+    /* Selective import from a module that itself uses transitive imports */
+    ASSERT_OUTPUT(
+        "import { quadruple, add_base } from \"tests/modules/mid_layer\"\n"
+        "fn main() {\n"
+        "    print(quadruple(3))\n"
+        "    print(add_base(10))\n"
+        "}\n",
+        "12\n110"
+    );
+}
+
+/* ── Import with alias edge cases ── */
+
+static void test_import_alias_multiple_modules(void) {
+    /* Import two different modules with different aliases */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as math\n"
+        "import \"tests/modules/base_utils\" as base\n"
+        "fn main() {\n"
+        "    print(math.add(1, 2))\n"
+        "    print(base.double(5))\n"
+        "}\n",
+        "3\n10"
+    );
+}
+
+static void test_import_alias_same_module_twice(void) {
+    /* Same module imported under two different aliases (should use cache) */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as a\n"
+        "import \"tests/modules/math_utils\" as b\n"
+        "fn main() {\n"
+        "    print(a.add(10, 20))\n"
+        "    print(b.sub(10, 3))\n"
+        "}\n",
+        "30\n7"
+    );
+}
+
+static void test_import_alias_and_selective_different_modules(void) {
+    /* Mix alias import and selective import from different modules */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as math\n"
+        "import { double } from \"tests/modules/base_utils\"\n"
+        "fn main() {\n"
+        "    print(math.add(1, 2))\n"
+        "    print(double(7))\n"
+        "}\n",
+        "3\n14"
+    );
+}
+
+/* ── Re-export: module A exports something it imported from module B ── */
+
+static void test_import_reexport_function(void) {
+    /* reexporter.lat imports double from base_utils and wraps it */
+    ASSERT_OUTPUT(
+        "import { double_it } from \"tests/modules/reexporter\"\n"
+        "fn main() {\n"
+        "    print(double_it(7))\n"
+        "}\n",
+        "14"
+    );
+}
+
+static void test_import_reexport_variable(void) {
+    /* reexporter.lat re-exports BASE_CONST from base_utils as REEXPORTED_CONST */
+    ASSERT_OUTPUT(
+        "import { REEXPORTED_CONST } from \"tests/modules/reexporter\"\n"
+        "fn main() {\n"
+        "    print(REEXPORTED_CONST)\n"
+        "}\n",
+        "100"
+    );
+}
+
+static void test_import_reexport_via_alias(void) {
+    /* Access re-exported members through alias */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/reexporter\" as r\n"
+        "fn main() {\n"
+        "    print(r.double_it(9))\n"
+        "    print(r.REEXPORTED_CONST)\n"
+        "}\n",
+        "18\n100"
+    );
+}
+
+/* ── Selective import from module with many exports ── */
+
+static void test_import_selective_subset(void) {
+    /* Import only a few functions from a module with many exports */
+    ASSERT_OUTPUT(
+        "import { alpha, gamma, VAL_TWO } from \"tests/modules/many_exports\"\n"
+        "fn main() {\n"
+        "    print(alpha())\n"
+        "    print(gamma())\n"
+        "    print(VAL_TWO)\n"
+        "}\n",
+        "a\nc\n2"
+    );
+}
+
+static void test_import_selective_single(void) {
+    /* Import just one function from a module with many exports */
+    ASSERT_OUTPUT(
+        "import { epsilon } from \"tests/modules/many_exports\"\n"
+        "fn main() {\n"
+        "    print(epsilon())\n"
+        "}\n",
+        "e"
+    );
+}
+
+static void test_import_selective_only_variables(void) {
+    /* Import only variables, no functions */
+    ASSERT_OUTPUT(
+        "import { VAL_ONE, VAL_THREE } from \"tests/modules/many_exports\"\n"
+        "fn main() {\n"
+        "    print(VAL_ONE)\n"
+        "    print(VAL_THREE)\n"
+        "}\n",
+        "1\n3"
+    );
+}
+
+/* ── Module that exports structs with methods (closure fields) ── */
+
+static void test_import_struct_with_method(void) {
+    /* Vec2 has a length closure field. make_vec2 creates instances. */
+    ASSERT_OUTPUT(
+        "import { make_vec2 } from \"tests/modules/export_struct_methods\"\n"
+        "fn main() {\n"
+        "    let v = make_vec2(3, 4)\n"
+        "    print(v.x)\n"
+        "    print(v.y)\n"
+        "    print(v.length())\n"
+        "}\n",
+        "3\n4\n25"
+    );
+}
+
+static void test_import_struct_method_with_operations(void) {
+    /* vec2_add combines two Vec2 structs */
+    ASSERT_OUTPUT(
+        "import { make_vec2, vec2_add } from \"tests/modules/export_struct_methods\"\n"
+        "fn main() {\n"
+        "    let a = make_vec2(1, 2)\n"
+        "    let b = make_vec2(3, 4)\n"
+        "    let c = vec2_add(a, b)\n"
+        "    print(c.x)\n"
+        "    print(c.y)\n"
+        "    print(c.length())\n"
+        "}\n",
+        "4\n6\n52"
+    );
+}
+
+static void test_import_struct_via_alias(void) {
+    /* Access struct factory via alias */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/export_struct_methods\" as vec\n"
+        "fn main() {\n"
+        "    let v = vec.make_vec2(5, 12)\n"
+        "    print(v.x)\n"
+        "    print(v.y)\n"
+        "}\n",
+        "5\n12"
+    );
+}
+
+/* ── Module that exports enums (via factory functions) ── */
+
+static void test_import_enum_via_factory(void) {
+    /* Use factory functions to create enum values from imported module */
+    ASSERT_OUTPUT(
+        "import { make_red, make_green, color_name } from \"tests/modules/export_enum\"\n"
+        "fn main() {\n"
+        "    let r = make_red()\n"
+        "    print(color_name(r))\n"
+        "    let g = make_green()\n"
+        "    print(color_name(g))\n"
+        "}\n",
+        "red\ngreen"
+    );
+}
+
+static void test_import_enum_equality_from_module(void) {
+    /* Enum values from module can be compared for equality */
+    ASSERT_OUTPUT(
+        "import { make_red, make_green, colors_equal } from \"tests/modules/export_enum\"\n"
+        "fn main() {\n"
+        "    let r1 = make_red()\n"
+        "    let r2 = make_red()\n"
+        "    let g = make_green()\n"
+        "    print(colors_equal(r1, r2))\n"
+        "    print(colors_equal(r1, g))\n"
+        "}\n",
+        "true\nfalse"
+    );
+}
+
+static void test_import_enum_tuple_variant_from_module(void) {
+    /* Enum tuple variants created by module factory */
+    ASSERT_OUTPUT(
+        "import { make_circle } from \"tests/modules/export_enum\"\n"
+        "fn main() {\n"
+        "    let c = make_circle(5)\n"
+        "    print(c)\n"
+        "}\n",
+        "Shape::Circle(5)"
+    );
+}
+
+static void test_import_enum_via_alias(void) {
+    /* Access enum factories via alias */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/export_enum\" as e\n"
+        "fn main() {\n"
+        "    let r = e.make_red()\n"
+        "    print(e.color_name(r))\n"
+        "}\n",
+        "red"
+    );
+}
+
+/* ── Import error edge cases ── */
+
+static void test_import_selective_missing_from_many(void) {
+    /* Importing a nonexistent name from a module with many exports */
+    ASSERT_OUTPUT(
+        "import { alpha, nonexistent } from \"tests/modules/many_exports\"\n"
+        "fn main() {\n"
+        "    print(alpha())\n"
+        "}\n",
+        "EVAL_ERROR:module 'tests/modules/many_exports' does not export 'nonexistent'"
+    );
+}
+
+static void test_import_hidden_function(void) {
+    /* Trying to selectively import a non-exported function */
+    ASSERT_OUTPUT(
+        "import { private_helper } from \"tests/modules/mixed_exports\"\n"
+        "fn main() {\n"
+        "    print(private_helper())\n"
+        "}\n",
+        "EVAL_ERROR:module 'tests/modules/mixed_exports' does not export 'private_helper'"
+    );
+}
+
+static void test_import_hidden_variable(void) {
+    /* Trying to selectively import a non-exported variable */
+    ASSERT_OUTPUT(
+        "import { internal_state } from \"tests/modules/mixed_exports\"\n"
+        "fn main() {\n"
+        "    print(internal_state)\n"
+        "}\n",
+        "EVAL_ERROR:module 'tests/modules/mixed_exports' does not export 'internal_state'"
+    );
+}
+
+static void test_import_hidden_via_alias(void) {
+    /* Non-exported names should not be visible via alias.
+     * VM backends return nil, tree-walk throws error — both indicate hidden. */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/many_exports\" as m\n"
+        "fn main() {\n"
+        "    try {\n"
+        "        let v = m.internal_only\n"
+        "        print(v == nil)\n"
+        "    } catch e {\n"
+        "        print(true)\n"
+        "    }\n"
+        "}\n",
+        "true"
+    );
+}
+
+/* ── Module with no export keyword (legacy: everything exported) ── */
+
+static void test_no_export_all_functions_visible(void) {
+    /* math_utils.lat has no export keywords → all functions exported */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as m\n"
+        "fn main() {\n"
+        "    print(m.add(100, 200))\n"
+        "    print(m.sub(50, 25))\n"
+        "}\n",
+        "300\n25"
+    );
+}
+
+static void test_no_export_variable_visible(void) {
+    /* Legacy module: variables are also exported */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/math_utils\" as m\n"
+        "fn main() {\n"
+        "    print(m.PI)\n"
+        "}\n",
+        "3.14159"
+    );
+}
+
+/* ── Module with both functions and variables exported ── */
+
+static void test_mixed_exports_via_alias(void) {
+    /* Access both exported functions and variables via alias */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/mixed_exports\" as m\n"
+        "fn main() {\n"
+        "    print(m.VERSION)\n"
+        "    print(m.MAX_SIZE)\n"
+        "    print(m.greet(\"Alice\"))\n"
+        "    print(m.compute(2, 3))\n"
+        "}\n",
+        "1.0.0\n256\nHi, Alice\n262"
+    );
+}
+
+static void test_mixed_exports_selective(void) {
+    /* Selectively import a mix of functions and variables */
+    ASSERT_OUTPUT(
+        "import { VERSION, compute } from \"tests/modules/mixed_exports\"\n"
+        "fn main() {\n"
+        "    print(VERSION)\n"
+        "    print(compute(3, 4))\n"
+        "}\n",
+        "1.0.0\n268"
+    );
+}
+
+static void test_mixed_exports_hidden_not_in_alias(void) {
+    /* Private members should not appear when using alias */
+    ASSERT_OUTPUT(
+        "import \"tests/modules/mixed_exports\" as m\n"
+        "fn main() {\n"
+        "    try {\n"
+        "        let v = m.private_helper\n"
+        "        print(v == nil)\n"
+        "    } catch e {\n"
+        "        print(true)\n"
+        "    }\n"
+        "}\n",
+        "true"
+    );
+}
+
 /* ── repr() builtin ── */
 
 static void test_repr_int(void) {
@@ -6468,6 +6832,106 @@ static void test_require_ext_no_args(void) {
         "}\n",
         "EVAL_ERROR:"
     );
+}
+
+static void test_require_ext_empty_string(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(\"\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_path_traversal(void) {
+    /* Path separator in name should be rejected */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(\"../etc/passwd\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_backslash_path(void) {
+    /* Backslash path separator should also be rejected */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(\"..\\\\evil\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_too_many_args(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(\"foo\", \"bar\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_bool_arg(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(true)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_nil_arg(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(nil)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_array_arg(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext([1, 2, 3])\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_double_load(void) {
+    /* Loading the same missing extension twice should give consistent errors.
+     * Both attempts should produce the same error message, verifying that
+     * failed loads are not cached as successes. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let r1 = try { require_ext(\"nonexistent_double_xyz\") } catch e { e }\n"
+        "    let r2 = try { require_ext(\"nonexistent_double_xyz\") } catch e { e }\n"
+        "    print(r1 == r2)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_require_ext_not_a_dylib(void) {
+    /* A file that exists but is not a valid shared library */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ext = require_ext(\"not_a_real_extension_abc\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_require_ext_error_message_contains_name(void) {
+    /* Error message should include the extension name for debugging */
+    char *out = run_capture(
+        "fn main() {\n"
+        "    let ext = require_ext(\"my_missing_ext_42\")\n"
+        "}\n"
+    );
+    ASSERT(strstr(out, "my_missing_ext_42") != NULL);
+    free(out);
 }
 
 /* ======================================================================
@@ -9805,6 +10269,631 @@ static void test_panic_message(void) {
     );
 }
 
+/* ======================================================================
+ * Phase System Extended Tests
+ * ====================================================================== */
+
+/* ── 1. Crystallization contracts: freeze(x) where |v| { ... } ── */
+
+static void test_freeze_contract_passes(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 42\n"
+        "    freeze(x) where |v| { if v < 0 { panic(\"must be non-negative\") } }\n"
+        "    print(phase_of(x))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_freeze_contract_rejects(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = -5\n"
+        "    freeze(x) where |v| { if v < 0 { panic(\"must be non-negative\") } }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_freeze_contract_with_string(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux name = \"Alice\"\n"
+        "    freeze(name) where |v| { if v.len() == 0 { panic(\"empty\") } }\n"
+        "    print(name)\n"
+        "}\n",
+        "Alice"
+    );
+}
+
+static void test_freeze_contract_rejects_empty_string(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux name = \"\"\n"
+        "    freeze(name) where |v| { if v.len() == 0 { panic(\"cannot be empty\") } }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_freeze_contract_with_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux items = [1, 2, 3]\n"
+        "    freeze(items) where |v| { if v.len() < 1 { panic(\"need items\") } }\n"
+        "    print(items.len())\n"
+        "}\n",
+        "3"
+    );
+}
+
+static void test_freeze_contract_checks_array_content(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux items = []\n"
+        "    freeze(items) where |v| { if v.len() < 1 { panic(\"need at least one item\") } }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_freeze_contract_error_message_propagated(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 0\n"
+        "    freeze(x) where |v| { panic(\"custom rejection\") }\n"
+        "}\n",
+        "EVAL_ERROR:freeze contract failed:"
+    );
+}
+
+/* ── 2. Phase reactions chaining ── */
+
+static void test_react_ordering_preserved(void) {
+    /* Multiple reactions should fire in registration order */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    react(x, |phase, val| { print(\"A\") })\n"
+        "    react(x, |phase, val| { print(\"B\") })\n"
+        "    react(x, |phase, val| { print(\"C\") })\n"
+        "    freeze(x)\n"
+        "}\n",
+        "A\nB\nC"
+    );
+}
+
+static void test_react_freeze_and_thaw_sequence(void) {
+    /* Reaction fires on both freeze and thaw */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 5\n"
+        "    react(x, |phase, val| { print(phase + \":\" + to_string(val)) })\n"
+        "    freeze(x)\n"
+        "    thaw(x)\n"
+        "    freeze(x)\n"
+        "}\n",
+        "crystal:5\nfluid:5\ncrystal:5"
+    );
+}
+
+static void test_react_on_bond_cascade(void) {
+    /* Reactions on bonded variable fire during cascade */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    flux c = 3\n"
+        "    bond(a, b)\n"
+        "    bond(b, c)\n"
+        "    react(b, |phase, val| { print(\"b:\" + phase) })\n"
+        "    react(c, |phase, val| { print(\"c:\" + phase) })\n"
+        "    freeze(a)\n"
+        "}\n",
+        "b:crystal\nc:crystal"
+    );
+}
+
+static void test_react_value_changes_between_events(void) {
+    /* Reaction sees current value at each event */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    react(x, |phase, val| { print(to_string(val)) })\n"
+        "    freeze(x)\n"
+        "    thaw(x)\n"
+        "}\n",
+        "10\n10"
+    );
+}
+
+static void test_react_anneal_reaction_fires(void) {
+    /* Anneal triggers reaction with updated value */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 100\n"
+        "    freeze(x)\n"
+        "    react(x, |phase, val| { print(\"reacted:\" + to_string(val)) })\n"
+        "    anneal(x) |v| { v * 2 }\n"
+        "}\n",
+        "reacted:200"
+    );
+}
+
+/* ── 3. Bond strategies ── */
+
+static void test_bond_mirror_cascades_freeze(void) {
+    /* Mirror (default) cascades freeze to all deps */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    flux c = 3\n"
+        "    bond(a, b, c)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(a))\n"
+        "    print(phase_of(b))\n"
+        "    print(phase_of(c))\n"
+        "}\n",
+        "crystal\ncrystal\ncrystal"
+    );
+}
+
+static void test_bond_inverse_thaws_frozen_dep(void) {
+    /* Inverse: freezing target thaws a frozen dep */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    freeze(b)\n"
+        "    bond(a, b, \"inverse\")\n"
+        "    freeze(a)\n"
+        "    print(phase_of(a))\n"
+        "    print(phase_of(b))\n"
+        "}\n",
+        "crystal\nfluid"
+    );
+}
+
+static void test_bond_inverse_skips_fluid_dep(void) {
+    /* Inverse: if dep is already fluid, nothing happens (no error) */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b, \"inverse\")\n"
+        "    freeze(a)\n"
+        "    print(phase_of(b))\n"
+        "}\n",
+        "fluid"
+    );
+}
+
+static void test_bond_gate_blocks_freeze_when_dep_fluid(void) {
+    /* Gate: cannot freeze target if dep is not crystal */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    flux guard = 20\n"
+        "    bond(x, guard, \"gate\")\n"
+        "    freeze(x)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_bond_gate_allows_when_dep_crystal(void) {
+    /* Gate: freeze allowed when dep is already crystal */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 10\n"
+        "    flux guard = 20\n"
+        "    bond(x, guard, \"gate\")\n"
+        "    freeze(guard)\n"
+        "    freeze(x)\n"
+        "    print(phase_of(x))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_bond_transitive_three_levels(void) {
+    /* a->b->c->d: freezing a should cascade through all */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    flux c = 3\n"
+        "    flux d = 4\n"
+        "    bond(a, b)\n"
+        "    bond(b, c)\n"
+        "    bond(c, d)\n"
+        "    freeze(a)\n"
+        "    print(phase_of(d))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_bond_mirror_with_reaction(void) {
+    /* Bond cascade + reaction: reaction fires on cascaded dep */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux a = 1\n"
+        "    flux b = 2\n"
+        "    bond(a, b)\n"
+        "    react(a, |phase, val| { print(\"a:\" + phase) })\n"
+        "    react(b, |phase, val| { print(\"b:\" + phase) })\n"
+        "    freeze(a)\n"
+        "}\n",
+        "b:crystal\na:crystal"
+    );
+}
+
+/* ── 4. Seed/grow ── */
+
+static void test_seed_grow_contract_validates(void) {
+    /* grow() validates seed contract and freezes */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux port = 8080\n"
+        "    seed(port, |v| { v > 0 && v < 65536 })\n"
+        "    grow(\"port\")\n"
+        "    print(phase_of(port))\n"
+        "    print(port)\n"
+        "}\n",
+        "crystal\n8080"
+    );
+}
+
+static void test_seed_grow_fails_on_invalid(void) {
+    /* grow() fails when seed contract returns false */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux port = -1\n"
+        "    seed(port, |v| { v > 0 })\n"
+        "    grow(\"port\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_seed_multiple_contracts(void) {
+    /* Multiple seeds on same variable: all must pass */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = 50\n"
+        "    seed(x, |v| { v > 0 })\n"
+        "    seed(x, |v| { v < 100 })\n"
+        "    grow(\"x\")\n"
+        "    print(phase_of(x))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_seed_multiple_one_fails(void) {
+    /* Multiple seeds: if any fails, grow errors */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = 200\n"
+        "    seed(x, |v| { v > 0 })\n"
+        "    seed(x, |v| { v < 100 })\n"
+        "    grow(\"x\")\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_unseed_removes_contract(void) {
+    /* unseed() removes the contract so freeze proceeds without checking */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = -5\n"
+        "    seed(x, |v| { v > 0 })\n"
+        "    unseed(x)\n"
+        "    freeze(x)\n"
+        "    print(phase_of(x))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_seed_validates_on_direct_freeze(void) {
+    /* Seed contracts are also checked on freeze() (not just grow()) */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux x = -1\n"
+        "    seed(x, |v| { v > 0 })\n"
+        "    freeze(x)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_seed_with_map_contract(void) {
+    /* Seed contract validates map contents */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux cfg = Map::new()\n"
+        "    cfg[\"port\"] = 3000\n"
+        "    seed(cfg, |v| { v[\"port\"] > 0 })\n"
+        "    grow(\"cfg\")\n"
+        "    print(phase_of(cfg))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+/* ── 5. Alloy structs ── */
+
+static void test_alloy_fix_field_is_crystal_on_creation(void) {
+    /* fix fields are automatically crystal phase upon struct construction */
+    ASSERT_OUTPUT(
+        "struct Cfg {\n"
+        "    name: fix String,\n"
+        "    count: flux Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let c = Cfg { name: \"test\", count: 0 }\n"
+        "    print(c.name)\n"
+        "    c.count = 10\n"
+        "    print(c.count)\n"
+        "}\n",
+        "test\n10"
+    );
+}
+
+static void test_alloy_fix_field_rejects_different_value(void) {
+    /* Attempting to set a fix field to any value should error */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "struct Config {\n"
+        "    host: fix String,\n"
+        "    retries: flux Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let cfg = Config { host: \"localhost\", retries: 0 }\n"
+        "    cfg.host = \"remotehost\"\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_alloy_multiple_fix_fields(void) {
+    /* All fix fields should reject mutation */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "struct Server {\n"
+        "    host: fix String,\n"
+        "    port: fix Int,\n"
+        "    retries: flux Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let s = Server { host: \"localhost\", port: 8080, retries: 0 }\n"
+        "    s.port = 9090\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_alloy_multiple_flux_fields(void) {
+    /* All flux fields should accept mutation */
+    ASSERT_OUTPUT(
+        "struct Counter {\n"
+        "    label: fix String,\n"
+        "    count: flux Int,\n"
+        "    max: flux Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let c = Counter { label: \"hits\", count: 0, max: 100 }\n"
+        "    c.count = 42\n"
+        "    c.max = 200\n"
+        "    print(c.count)\n"
+        "    print(c.max)\n"
+        "}\n",
+        "42\n200"
+    );
+}
+
+static void test_alloy_read_fix_field(void) {
+    /* Reading fix field should always work */
+    ASSERT_OUTPUT(
+        "struct Immutable {\n"
+        "    value: fix Int,\n"
+        "}\n"
+        "fn main() {\n"
+        "    let x = Immutable { value: 99 }\n"
+        "    print(x.value)\n"
+        "    print(x.value + 1)\n"
+        "}\n",
+        "99\n100"
+    );
+}
+
+/* ── 6. Sublimation ── */
+
+static void test_sublimate_array_index_assign_blocked(void) {
+    /* Sublimated array blocks index assignment */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux items = [1, 2, 3]\n"
+        "    sublimate(items)\n"
+        "    items[0] = 99\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_sublimate_allows_read(void) {
+    /* Sublimated collection still allows reading */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux items = [10, 20, 30]\n"
+        "    sublimate(items)\n"
+        "    print(items[0])\n"
+        "    print(items.len())\n"
+        "}\n",
+        "10\n3"
+    );
+}
+
+static void test_sublimate_map_allows_read(void) {
+    /* Sublimated map still allows reading existing keys */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"key\"] = \"value\"\n"
+        "    sublimate(m)\n"
+        "    print(m[\"key\"])\n"
+        "}\n",
+        "value"
+    );
+}
+
+static void test_sublimate_struct_field_blocked(void) {
+    /* Sublimated struct blocks field assignment */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "struct Point { x: Int, y: Int }\n"
+        "fn main() {\n"
+        "    flux p = Point { x: 1, y: 2 }\n"
+        "    sublimate(p)\n"
+        "    p.x = 10\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_sublimate_thaw_then_push(void) {
+    /* Thawing a sublimated collection restores mutability */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux items = [1, 2]\n"
+        "    sublimate(items)\n"
+        "    thaw(items)\n"
+        "    items.push(3)\n"
+        "    print(items.len())\n"
+        "    print(items[2])\n"
+        "}\n",
+        "3\n3"
+    );
+}
+
+static void test_sublimate_fires_reaction(void) {
+    /* Sublimate fires a reaction with "sublimated" phase name */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux x = [1, 2]\n"
+        "    react(x, |phase, val| { print(phase) })\n"
+        "    sublimate(x)\n"
+        "}\n",
+        "sublimated"
+    );
+}
+
+/* ── 7. Phase pressure ── */
+
+static void test_pressure_no_grow_blocks_insert(void) {
+    /* no_grow should also block insert */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_grow\")\n"
+        "    data.insert(0, 99)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_pressure_no_grow_allows_pop(void) {
+    /* no_grow should allow shrink operations (pop) */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_grow\")\n"
+        "    data.pop()\n"
+        "    print(data.len())\n"
+        "}\n",
+        "2"
+    );
+}
+
+static void test_pressure_no_shrink_allows_push(void) {
+    /* no_shrink should allow grow operations (push) */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_shrink\")\n"
+        "    data.push(4)\n"
+        "    print(data.len())\n"
+        "}\n",
+        "4"
+    );
+}
+
+static void test_pressure_no_shrink_blocks_remove_at(void) {
+    /* no_shrink should block remove_at */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_shrink\")\n"
+        "    data.remove_at(0)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_pressure_no_resize_blocks_pop(void) {
+    /* no_resize should block pop as well */
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_resize\")\n"
+        "    data.pop()\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+static void test_pressure_no_resize_allows_index_assign(void) {
+    /* no_resize should allow in-place index assignment */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_resize\")\n"
+        "    data[1] = 99\n"
+        "    print(data[1])\n"
+        "}\n",
+        "99"
+    );
+}
+
+static void test_depressurize_then_push(void) {
+    /* depressurize() removes pressure constraint */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2]\n"
+        "    pressurize(data, \"no_resize\")\n"
+        "    depressurize(data)\n"
+        "    data.push(3)\n"
+        "    data.pop()\n"
+        "    print(data.len())\n"
+        "}\n",
+        "2"
+    );
+}
+
+static void test_pressure_of_after_change(void) {
+    /* pressure_of reflects the current pressure mode */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_shrink\")\n"
+        "    print(pressure_of(\"data\"))\n"
+        "}\n",
+        "no_shrink"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -10395,6 +11484,51 @@ void register_stdlib_tests(void) {
     register_test("test_no_export_keyword_legacy", test_no_export_keyword_legacy);
     register_test("test_export_struct", test_export_struct);
 
+    /* Transitive imports */
+    register_test("test_import_transitive", test_import_transitive);
+    register_test("test_import_transitive_selective", test_import_transitive_selective);
+
+    /* Import alias edge cases */
+    register_test("test_import_alias_multiple_modules", test_import_alias_multiple_modules);
+    register_test("test_import_alias_same_module_twice", test_import_alias_same_module_twice);
+    register_test("test_import_alias_and_selective_different_modules", test_import_alias_and_selective_different_modules);
+
+    /* Re-export */
+    register_test("test_import_reexport_function", test_import_reexport_function);
+    register_test("test_import_reexport_variable", test_import_reexport_variable);
+    register_test("test_import_reexport_via_alias", test_import_reexport_via_alias);
+
+    /* Selective import from module with many exports */
+    register_test("test_import_selective_subset", test_import_selective_subset);
+    register_test("test_import_selective_single", test_import_selective_single);
+    register_test("test_import_selective_only_variables", test_import_selective_only_variables);
+
+    /* Struct exports with methods */
+    register_test("test_import_struct_with_method", test_import_struct_with_method);
+    register_test("test_import_struct_method_with_operations", test_import_struct_method_with_operations);
+    register_test("test_import_struct_via_alias", test_import_struct_via_alias);
+
+    /* Enum exports (via factory functions) */
+    register_test("test_import_enum_via_factory", test_import_enum_via_factory);
+    register_test("test_import_enum_equality_from_module", test_import_enum_equality_from_module);
+    register_test("test_import_enum_tuple_variant_from_module", test_import_enum_tuple_variant_from_module);
+    register_test("test_import_enum_via_alias", test_import_enum_via_alias);
+
+    /* Import error edge cases */
+    register_test("test_import_selective_missing_from_many", test_import_selective_missing_from_many);
+    register_test("test_import_hidden_function", test_import_hidden_function);
+    register_test("test_import_hidden_variable", test_import_hidden_variable);
+    register_test("test_import_hidden_via_alias", test_import_hidden_via_alias);
+
+    /* No export keyword (legacy behavior) */
+    register_test("test_no_export_all_functions_visible", test_no_export_all_functions_visible);
+    register_test("test_no_export_variable_visible", test_no_export_variable_visible);
+
+    /* Mixed functions and variables exported */
+    register_test("test_mixed_exports_via_alias", test_mixed_exports_via_alias);
+    register_test("test_mixed_exports_selective", test_mixed_exports_selective);
+    register_test("test_mixed_exports_hidden_not_in_alias", test_mixed_exports_hidden_not_in_alias);
+
     /* repr() builtin */
     register_test("test_repr_int", test_repr_int);
     register_test("test_repr_string", test_repr_string);
@@ -10409,6 +11543,16 @@ void register_stdlib_tests(void) {
     register_test("test_require_ext_missing", test_require_ext_missing);
     register_test("test_require_ext_wrong_type", test_require_ext_wrong_type);
     register_test("test_require_ext_no_args", test_require_ext_no_args);
+    register_test("test_require_ext_empty_string", test_require_ext_empty_string);
+    register_test("test_require_ext_path_traversal", test_require_ext_path_traversal);
+    register_test("test_require_ext_backslash_path", test_require_ext_backslash_path);
+    register_test("test_require_ext_too_many_args", test_require_ext_too_many_args);
+    register_test("test_require_ext_bool_arg", test_require_ext_bool_arg);
+    register_test("test_require_ext_nil_arg", test_require_ext_nil_arg);
+    register_test("test_require_ext_array_arg", test_require_ext_array_arg);
+    register_test("test_require_ext_double_load", test_require_ext_double_load);
+    register_test("test_require_ext_not_a_dylib", test_require_ext_not_a_dylib);
+    register_test("test_require_ext_error_message_contains_name", test_require_ext_error_message_contains_name);
 
     /* SQLite extension */
     register_test("test_sqlite_open_close", test_sqlite_open_close);
@@ -10733,4 +11877,58 @@ void register_stdlib_tests(void) {
 
     /* panic() */
     register_test("test_panic_message", test_panic_message);
+
+    /* Phase system extended tests */
+    /* Crystallization contracts */
+    register_test("test_freeze_contract_passes", test_freeze_contract_passes);
+    register_test("test_freeze_contract_rejects", test_freeze_contract_rejects);
+    register_test("test_freeze_contract_with_string", test_freeze_contract_with_string);
+    register_test("test_freeze_contract_rejects_empty_string", test_freeze_contract_rejects_empty_string);
+    register_test("test_freeze_contract_with_array", test_freeze_contract_with_array);
+    register_test("test_freeze_contract_checks_array_content", test_freeze_contract_checks_array_content);
+    register_test("test_freeze_contract_error_message_propagated", test_freeze_contract_error_message_propagated);
+    /* Phase reactions chaining */
+    register_test("test_react_ordering_preserved", test_react_ordering_preserved);
+    register_test("test_react_freeze_and_thaw_sequence", test_react_freeze_and_thaw_sequence);
+    register_test("test_react_on_bond_cascade", test_react_on_bond_cascade);
+    register_test("test_react_value_changes_between_events", test_react_value_changes_between_events);
+    register_test("test_react_anneal_reaction_fires", test_react_anneal_reaction_fires);
+    /* Bond strategies */
+    register_test("test_bond_mirror_cascades_freeze", test_bond_mirror_cascades_freeze);
+    register_test("test_bond_inverse_thaws_frozen_dep", test_bond_inverse_thaws_frozen_dep);
+    register_test("test_bond_inverse_skips_fluid_dep", test_bond_inverse_skips_fluid_dep);
+    register_test("test_bond_gate_blocks_freeze_when_dep_fluid", test_bond_gate_blocks_freeze_when_dep_fluid);
+    register_test("test_bond_gate_allows_when_dep_crystal", test_bond_gate_allows_when_dep_crystal);
+    register_test("test_bond_transitive_three_levels", test_bond_transitive_three_levels);
+    register_test("test_bond_mirror_with_reaction", test_bond_mirror_with_reaction);
+    /* Seed/grow */
+    register_test("test_seed_grow_contract_validates", test_seed_grow_contract_validates);
+    register_test("test_seed_grow_fails_on_invalid", test_seed_grow_fails_on_invalid);
+    register_test("test_seed_multiple_contracts", test_seed_multiple_contracts);
+    register_test("test_seed_multiple_one_fails", test_seed_multiple_one_fails);
+    register_test("test_unseed_removes_contract", test_unseed_removes_contract);
+    register_test("test_seed_validates_on_direct_freeze", test_seed_validates_on_direct_freeze);
+    register_test("test_seed_with_map_contract", test_seed_with_map_contract);
+    /* Alloy structs */
+    register_test("test_alloy_fix_field_is_crystal_on_creation", test_alloy_fix_field_is_crystal_on_creation);
+    register_test("test_alloy_fix_field_rejects_different_value", test_alloy_fix_field_rejects_different_value);
+    register_test("test_alloy_multiple_fix_fields", test_alloy_multiple_fix_fields);
+    register_test("test_alloy_multiple_flux_fields", test_alloy_multiple_flux_fields);
+    register_test("test_alloy_read_fix_field", test_alloy_read_fix_field);
+    /* Sublimation */
+    register_test("test_sublimate_array_index_assign_blocked", test_sublimate_array_index_assign_blocked);
+    register_test("test_sublimate_allows_read", test_sublimate_allows_read);
+    register_test("test_sublimate_map_allows_read", test_sublimate_map_allows_read);
+    register_test("test_sublimate_struct_field_blocked", test_sublimate_struct_field_blocked);
+    register_test("test_sublimate_thaw_then_push", test_sublimate_thaw_then_push);
+    register_test("test_sublimate_fires_reaction", test_sublimate_fires_reaction);
+    /* Phase pressure */
+    register_test("test_pressure_no_grow_blocks_insert", test_pressure_no_grow_blocks_insert);
+    register_test("test_pressure_no_grow_allows_pop", test_pressure_no_grow_allows_pop);
+    register_test("test_pressure_no_shrink_allows_push", test_pressure_no_shrink_allows_push);
+    register_test("test_pressure_no_shrink_blocks_remove_at", test_pressure_no_shrink_blocks_remove_at);
+    register_test("test_pressure_no_resize_blocks_pop", test_pressure_no_resize_blocks_pop);
+    register_test("test_pressure_no_resize_allows_index_assign", test_pressure_no_resize_allows_index_assign);
+    register_test("test_depressurize_then_push", test_depressurize_then_push);
+    register_test("test_pressure_of_after_change", test_pressure_of_after_change);
 }

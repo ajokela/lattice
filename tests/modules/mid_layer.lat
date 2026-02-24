@@ -1,0 +1,11 @@
+import { double, BASE_CONST } from "tests/modules/base_utils"
+
+export fn quadruple(x: Int) -> Int {
+    return double(double(x))
+}
+
+export fn add_base(x: Int) -> Int {
+    return x + BASE_CONST
+}
+
+export let MID_CONST = 200

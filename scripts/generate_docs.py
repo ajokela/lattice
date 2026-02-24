@@ -46,6 +46,7 @@ SECTION_GROUPS = OrderedDict([
         "Array Methods",
         "Map Methods",
         "Set Methods",
+        "Buffer Methods",
         "Channel Methods",
     ]),
 ])

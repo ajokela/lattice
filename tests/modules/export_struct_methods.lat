@@ -1,0 +1,17 @@
+export struct Vec2 {
+    x: Number,
+    y: Number,
+    length: Fn
+}
+
+export fn make_vec2(x: Number, y: Number) -> Vec2 {
+    return Vec2 {
+        x: x,
+        y: y,
+        length: |self| self.x * self.x + self.y * self.y
+    }
+}
+
+export fn vec2_add(a: Vec2, b: Vec2) -> Vec2 {
+    return make_vec2(a.x + b.x, a.y + b.y)
+}

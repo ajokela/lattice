@@ -1,0 +1,25 @@
+export enum Color { Red, Green, Blue }
+
+export enum Shape { Circle(Number), Rect(Number, Number) }
+
+export fn color_name(c: Color) -> String {
+    if c == Color::Red { return "red" }
+    if c == Color::Green { return "green" }
+    return "blue"
+}
+
+export fn make_red() -> Color {
+    return Color::Red
+}
+
+export fn make_green() -> Color {
+    return Color::Green
+}
+
+export fn make_circle(r: Number) -> Shape {
+    return Shape::Circle(r)
+}
+
+export fn colors_equal(a: Color, b: Color) -> Bool {
+    return a == b
+}

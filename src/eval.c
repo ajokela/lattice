@@ -4855,6 +4855,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @builtin time_month(epoch_ms: Int) -> Int
                 /// @category Date & Time
                 /// Extract the month (1-12) from a timestamp.
+                /// @example time_month(0)  // 1
                 if (strcmp(fn_name, "time_month") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_month() expects (Int epoch_ms)")); }
                     int r = datetime_month(args[0].as.int_val);
@@ -4864,6 +4865,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @builtin time_day(epoch_ms: Int) -> Int
                 /// @category Date & Time
                 /// Extract the day of month (1-31) from a timestamp.
+                /// @example time_day(0)  // 1
                 if (strcmp(fn_name, "time_day") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_day() expects (Int epoch_ms)")); }
                     int r = datetime_day(args[0].as.int_val);
@@ -4873,6 +4875,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @builtin time_hour(epoch_ms: Int) -> Int
                 /// @category Date & Time
                 /// Extract the hour (0-23) from a timestamp.
+                /// @example time_hour(0)  // 0
                 if (strcmp(fn_name, "time_hour") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_hour() expects (Int epoch_ms)")); }
                     int r = datetime_hour(args[0].as.int_val);
@@ -4882,6 +4885,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @builtin time_minute(epoch_ms: Int) -> Int
                 /// @category Date & Time
                 /// Extract the minute (0-59) from a timestamp.
+                /// @example time_minute(0)  // 0
                 if (strcmp(fn_name, "time_minute") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_minute() expects (Int epoch_ms)")); }
                     int r = datetime_minute(args[0].as.int_val);
@@ -4891,6 +4895,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @builtin time_second(epoch_ms: Int) -> Int
                 /// @category Date & Time
                 /// Extract the second (0-59) from a timestamp.
+                /// @example time_second(0)  // 0
                 if (strcmp(fn_name, "time_second") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_second() expects (Int epoch_ms)")); }
                     int r = datetime_second(args[0].as.int_val);
@@ -4900,6 +4905,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @builtin time_weekday(epoch_ms: Int) -> Int
                 /// @category Date & Time
                 /// Extract the day of week (0=Sunday, 6=Saturday) from a timestamp.
+                /// @example time_weekday(0)  // 4
                 if (strcmp(fn_name, "time_weekday") == 0) {
                     if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_weekday() expects (Int epoch_ms)")); }
                     int r = datetime_weekday(args[0].as.int_val);
@@ -4909,6 +4915,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @builtin time_add(epoch_ms: Int, delta_ms: Int) -> Int
                 /// @category Date & Time
                 /// Add milliseconds to a timestamp.
+                /// @example time_add(0, 86400000)  // 86400000
                 if (strcmp(fn_name, "time_add") == 0) {
                     if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_add() expects (Int epoch_ms, Int delta_ms)")); }
                     int64_t r = datetime_add(args[0].as.int_val, args[1].as.int_val);
@@ -8111,8 +8118,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         /// @method Set.len() -> Int
         /// @category Set Methods
-        /// Return the number of elements in the set.
-        /// @example s.len()
+        /// Return the number of elements in the set. Also available as .length().
+        /// @example s.len()  // 3
         if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) {
             if (arg_count != 0) return eval_err(strdup(".len() takes no arguments"));
             return eval_ok(value_int((int64_t)lat_map_len(obj.as.set.map)));
@@ -8240,8 +8247,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     if (obj.type == VAL_BUFFER) {
         /// @method Buffer.len() -> Int
         /// @category Buffer Methods
-        /// Return the number of bytes in the buffer.
-        /// @example buf.len()
+        /// Return the number of bytes in the buffer. Also available as .length().
+        /// @example buf.len()  // 16
         if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) {
             if (arg_count != 0) return eval_err(strdup(".len() takes no arguments"));
             return eval_ok(value_int((int64_t)obj.as.buffer.len));
@@ -8485,8 +8492,9 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     /// @method String.len() -> Int
     /// @method Map.len() -> Int
     /// @category Array Methods
-    /// Return the number of elements or characters.
+    /// Return the number of elements or characters. Also available as .length().
     /// @example [1, 2, 3].len()  // 3
+    /// @example "hello".length()  // 5
     if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) {
         if (obj.type == VAL_ARRAY) return eval_ok(value_int((int64_t)obj.as.array.len));
         if (obj.type == VAL_STR) return eval_ok(value_int((int64_t)strlen(obj.as.str_val)));
@@ -9321,7 +9329,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         /// @method Map.len() -> Int
         /// @category Map Methods
-        /// Return the number of key-value pairs in the map.
+        /// Return the number of key-value pairs in the map. Also available as .length().
         /// @example m.len()  // 2
         if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) {
             return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));

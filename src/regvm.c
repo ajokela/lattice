@@ -2211,7 +2211,15 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     CASE(MOVE) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
-        reg_set(&R[a], rvm_clone(&R[b]));
+        /* Fast path: REGION_CONST and REGION_INTERNED strings can be
+         * shared between registers without strdup — the chunk/intern
+         * table owns the pointer, not the register. */
+        if (R[b].type == VAL_STR &&
+            (R[b].region_id == REGION_CONST || R[b].region_id == REGION_INTERNED)) {
+            reg_set(&R[a], R[b]);  /* bitwise copy, no alloc */
+        } else {
+            reg_set(&R[a], rvm_clone(&R[b]));
+        }
         /* Record history for tracked variables */
         {
             if (vm->rt->tracking_active &&
@@ -2226,7 +2234,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     CASE(LOADK) {
         uint8_t a = REG_GET_A(instr);
         uint16_t bx = REG_GET_Bx(instr);
-        reg_set(&R[a], rvm_clone(&frame->chunk->constants[bx]));
+        LatValue kv = frame->chunk->constants[bx];
+        /* String constants: borrow pointer from constant pool (REGION_CONST)
+         * instead of strdup.  value_free skips REGION_CONST (pool owns it);
+         * rvm_clone will strdup if the value escapes to globals/arrays. */
+        if (kv.type == VAL_STR) {
+            kv.region_id = REGION_CONST;
+            reg_set(&R[a], kv);
+        } else {
+            reg_set(&R[a], rvm_clone(&kv));
+        }
         /* Record history for tracked variables */
         {
             if (vm->rt->tracking_active &&
@@ -2304,14 +2321,22 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[b].type == VAL_STR && R[c].type == VAL_STR) {
             size_t lb = strlen(R[b].as.str_val);
             size_t lc = strlen(R[c].as.str_val);
-            /* Direct malloc (not ephemeral) — avoids unbounded arena growth and
-             * allows move semantics in register assignment without promotion */
-            char *buf = malloc(lb + lc + 1);
-            memcpy(buf, R[b].as.str_val, lb);
-            memcpy(buf + lb, R[c].as.str_val, lc);
-            buf[lb + lc] = '\0';
-            LatValue v = value_string_owned(buf);
-            reg_set(&R[a], v);
+            /* Optimization: when dest == left operand (s = s + x pattern) and
+             * the left string is a plain malloc'd buffer, realloc in-place to
+             * avoid copying the entire left side + an extra free. */
+            if (a == b && R[b].region_id == REGION_NONE && b != c) {
+                char *buf = realloc(R[b].as.str_val, lb + lc + 1);
+                memcpy(buf + lb, R[c].as.str_val, lc);
+                buf[lb + lc] = '\0';
+                R[a].as.str_val = buf;  /* update in-place (realloc may move) */
+            } else {
+                char *buf = malloc(lb + lc + 1);
+                memcpy(buf, R[b].as.str_val, lb);
+                memcpy(buf + lb, R[c].as.str_val, lc);
+                buf[lb + lc] = '\0';
+                LatValue v = value_string_owned(buf);
+                reg_set(&R[a], v);
+            }
         } else {
             RVM_ERROR("cannot add %s and %s",
                 value_type_name(&R[b]), value_type_name(&R[c]));
@@ -2418,14 +2443,17 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         uint8_t c = REG_GET_C(instr);
-        char *ls = value_display(&R[b]);
-        char *rs = value_display(&R[c]);
-        size_t ll = strlen(ls), rl = strlen(rs);
+        /* Fast path: skip value_display when operands are already strings */
+        char *ls = (R[b].type == VAL_STR) ? NULL : value_display(&R[b]);
+        char *rs = (R[c].type == VAL_STR) ? NULL : value_display(&R[c]);
+        const char *lp = ls ? ls : R[b].as.str_val;
+        const char *rp = rs ? rs : R[c].as.str_val;
+        size_t ll = strlen(lp), rl = strlen(rp);
         char *buf = bump_alloc(vm->ephemeral, ll + rl + 1);
-        memcpy(buf, ls, ll);
-        memcpy(buf + ll, rs, rl);
+        memcpy(buf, lp, ll);
+        memcpy(buf + ll, rp, rl);
         buf[ll + rl] = '\0';
-        free(ls); free(rs);
+        free(ls); free(rs);  /* NULL-safe: free(NULL) is a no-op */
         LatValue v = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_EPHEMERAL };
         v.as.str_val = buf;
         reg_set(&R[a], v);

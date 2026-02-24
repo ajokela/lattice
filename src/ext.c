@@ -76,7 +76,7 @@ LatExtValue *lat_ext_nil(void) {
 }
 
 LatExtValue *lat_ext_array(LatExtValue **elems, size_t len) {
-    LatValue *vals = malloc(len * sizeof(LatValue));
+    LatValue *vals = len > 0 ? malloc(len * sizeof(LatValue)) : NULL;
     for (size_t i = 0; i < len; i++) {
         vals[i] = value_deep_clone(&elems[i]->val);
     }
@@ -183,8 +183,8 @@ LatValue ext_call_native(void *fn_ptr, LatValue *args, size_t argc) {
     LatExtFn fn = (LatExtFn)fn_ptr;
 
     /* Wrap args as LatExtValue pointers (stack-allocated wrappers) */
-    LatExtValue *ext_args_storage = malloc(argc * sizeof(LatExtValue));
-    LatExtValue **ext_args = malloc(argc * sizeof(LatExtValue *));
+    LatExtValue *ext_args_storage = argc > 0 ? malloc(argc * sizeof(LatExtValue)) : NULL;
+    LatExtValue **ext_args = argc > 0 ? malloc(argc * sizeof(LatExtValue *)) : NULL;
     for (size_t i = 0; i < argc; i++) {
         ext_args_storage[i].val = args[i];
         ext_args[i] = &ext_args_storage[i];
@@ -207,6 +207,18 @@ LatValue ext_call_native(void *fn_ptr, LatValue *args, size_t argc) {
 
 LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     (void)ev;  /* for future use (e.g., passing evaluator context) */
+
+    /* Validate extension name */
+    if (!name || name[0] == '\0') {
+        (void)asprintf(err, "require_ext: extension name cannot be empty");
+        return value_nil();
+    }
+
+    /* Reject names containing path separators to prevent path traversal */
+    if (strchr(name, '/') || strchr(name, '\\')) {
+        (void)asprintf(err, "require_ext: extension name '%s' cannot contain path separators", name);
+        return value_nil();
+    }
 
     /* Determine library suffix */
 #ifdef __APPLE__

@@ -1,0 +1,7 @@
+import { double, BASE_CONST } from "tests/modules/base_utils"
+
+export fn double_it(x: Int) -> Int {
+    return double(x)
+}
+
+export let REEXPORTED_CONST = BASE_CONST

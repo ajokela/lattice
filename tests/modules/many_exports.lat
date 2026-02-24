@@ -1,0 +1,10 @@
+export fn alpha() -> String { return "a" }
+export fn beta() -> String { return "b" }
+export fn gamma() -> String { return "c" }
+export fn delta() -> String { return "d" }
+export fn epsilon() -> String { return "e" }
+export let VAL_ONE = 1
+export let VAL_TWO = 2
+export let VAL_THREE = 3
+fn internal_only() -> String { return "hidden" }
+let private_val = 999

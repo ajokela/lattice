@@ -38,6 +38,7 @@ struct LatValue {
 #define REGION_NONE       ((size_t)-1)  /* normal malloc (not in any arena) */
 #define REGION_EPHEMERAL  ((size_t)-2)  /* in ephemeral bump arena */
 #define REGION_INTERNED   ((size_t)-3)  /* interned string — never cloned or freed */
+#define REGION_CONST      ((size_t)-4)  /* constant pool string — borrowed, not freed */
     union {
         int64_t int_val;
         double  float_val;
