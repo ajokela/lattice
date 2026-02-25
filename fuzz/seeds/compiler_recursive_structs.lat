@@ -1,0 +1,65 @@
+// Compiler edge case: recursive struct patterns and deeply nested construction
+
+struct Pair { fst: any, snd: any }
+
+fn nest(depth: Int, value: Int) {
+    if depth <= 0 {
+        return Pair { fst: value, snd: nil }
+    }
+    return Pair { fst: depth, snd: nest(depth - 1, value) }
+}
+
+fn unnest(p: any) -> Int {
+    if p.snd == nil {
+        return p.fst
+    }
+    return p.fst + unnest(p.snd)
+}
+
+fn make_tree(depth: Int) {
+    if depth <= 0 {
+        return Pair { fst: 1, snd: nil }
+    }
+    return Pair {
+        fst: make_tree(depth - 1),
+        snd: make_tree(depth - 1)
+    }
+}
+
+fn count_nodes(t: any) -> Int {
+    if t == nil { return 0 }
+    if t.fst == nil && t.snd == nil { return 1 }
+    flux count = 1
+    // Check if fst is a Pair by trying to access .fst
+    try {
+        count += count_nodes(t.fst)
+    } catch e {
+        count += 1
+    }
+    try {
+        count += count_nodes(t.snd)
+    } catch e {
+        // leaf or nil
+    }
+    return count
+}
+
+fn main() {
+    // Deep nesting
+    let deep = nest(20, 42)
+    print("unnest sum: " + to_string(unnest(deep)))
+
+    // Wide construction
+    let manual = Pair {
+        fst: Pair {
+            fst: Pair { fst: 1, snd: 2 },
+            snd: Pair { fst: 3, snd: 4 }
+        },
+        snd: Pair {
+            fst: Pair { fst: 5, snd: 6 },
+            snd: Pair { fst: 7, snd: 8 }
+        }
+    }
+    print("manual.fst.fst.fst: " + to_string(manual.fst.fst.fst))
+    print("manual.snd.snd.snd: " + to_string(manual.snd.snd.snd))
+}

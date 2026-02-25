@@ -1,0 +1,20 @@
+// Parser edge case: unusual whitespace and line endings
+fn main() {
+    let		a		=		1
+    let b =    2
+    let c=3
+    let d = 4
+    let e = a +
+        b +
+        c +
+        d
+    let f = [
+        1,
+        2,
+        3,
+    ]
+    let g = a+b+c+d
+    let h = a  +  b  +  c  +  d
+    print(to_string(e))
+    print(to_string(g))
+}

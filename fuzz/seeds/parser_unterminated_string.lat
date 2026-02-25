@@ -1,0 +1,3 @@
+// Parser edge case: unterminated string literal
+fn main() {
+    let x = "this string never ends

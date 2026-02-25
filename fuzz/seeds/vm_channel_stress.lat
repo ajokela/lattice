@@ -1,0 +1,49 @@
+// VM edge case: rapid channel send/receive operations
+fn main() {
+    // Basic channel operations in a loop
+    let ch = Channel::new()
+
+    // Send many values rapidly
+    for i in 0..100 {
+        ch.send(freeze(i))
+    }
+
+    // Receive them all back
+    flux total = 0
+    for i in 0..100 {
+        let v = ch.recv()
+        total += v
+    }
+    print("sum of 0..100: " + to_string(total))
+
+    // Channel with select
+    let ch1 = Channel::new()
+    let ch2 = Channel::new()
+    ch1.send(freeze("from_ch1"))
+    ch2.send(freeze("from_ch2"))
+
+    let r1 = select {
+        v from ch1 => { "got ch1: " + to_string(v) }
+        v from ch2 => { "got ch2: " + to_string(v) }
+        default => { "nothing" }
+    }
+    print(r1)
+
+    // Close and check
+    ch1.close()
+    let r2 = select {
+        v from ch1 => { "unexpected: " + to_string(v) }
+        v from ch2 => { "got ch2: " + to_string(v) }
+        default => { "default after close" }
+    }
+    print(r2)
+
+    // Many channels created and closed
+    for i in 0..50 {
+        let tmp = Channel::new()
+        tmp.send(freeze(i))
+        let v = tmp.recv()
+        tmp.close()
+    }
+    print("channel stress done")
+}

@@ -1,0 +1,21 @@
+// Parser edge case: unusual operator combinations and precedence
+fn main() {
+    let a = -1
+    let b = --1
+    let c = !true
+    let d = !!true
+    let e = !false
+    let f = 1 + -2
+    let g = -1 + -2
+    let h = 1 * -1
+    let i = -1 * -1
+    let j = 1 + 2 * 3 + 4
+    let k = (1 + 2) * (3 + 4)
+    let l = 1 > 2 || 3 < 4
+    let m = true && false || true && true
+    let n = 1 == 1 && 2 != 3
+    let o = 10 % 3
+    let p = 10 / 3
+    let q = 2 ** 10
+    print(to_string(a) + " " + to_string(j) + " " + to_string(k))
+}

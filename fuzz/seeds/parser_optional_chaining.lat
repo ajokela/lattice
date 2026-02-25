@@ -1,0 +1,42 @@
+// Parser edge case: optional chaining and nil propagation
+
+struct Config {
+    db: any,
+    cache: any
+}
+
+struct DbConfig {
+    host: String,
+    port: Int
+}
+
+fn get_config(has_db: Bool) {
+    if has_db {
+        return Config {
+            db: DbConfig { host: "localhost", port: 5432 },
+            cache: nil
+        }
+    }
+    return Config { db: nil, cache: nil }
+}
+
+fn main() {
+    let c1 = get_config(true)
+    let c2 = get_config(false)
+
+    // Optional chaining on present value
+    let host1 = c1.db?.host
+    print("host1: " + to_string(host1))
+
+    // Optional chaining on nil
+    let host2 = c2.db?.host
+    print("host2: " + to_string(host2))
+
+    // Chained optional access
+    let port = c1.db?.port
+    print("port: " + to_string(port))
+
+    // Nil cache
+    let cache_val = c1.cache?.size
+    print("cache: " + to_string(cache_val))
+}

@@ -1,0 +1,52 @@
+// VM edge case: scope/spawn concurrency constructs
+fn main() {
+    // Basic scope block
+    let result = scope {
+        let x = 42
+        x
+    }
+    print("scope result: " + to_string(result))
+
+    // Scope with spawn
+    let ch = Channel::new()
+    scope {
+        spawn {
+            ch.send(freeze(10))
+        }
+        spawn {
+            ch.send(freeze(20))
+        }
+        let a = ch.recv()
+        let b = ch.recv()
+        print("spawned: " + to_string(a + b))
+    }
+
+    // Multiple spawns with channel coordination
+    let ch2 = Channel::new()
+    scope {
+        spawn {
+            for i in 0..5 {
+                ch2.send(freeze(i))
+            }
+        }
+        flux total = 0
+        for i in 0..5 {
+            let v = ch2.recv()
+            total += v
+        }
+        print("spawn total: " + to_string(total))
+    }
+
+    // Select with multiple channels
+    let c1 = Channel::new()
+    let c2 = Channel::new()
+    let c3 = Channel::new()
+    c2.send(freeze("winner"))
+    let picked = select {
+        v from c1 => { "c1: " + to_string(v) }
+        v from c2 => { "c2: " + to_string(v) }
+        v from c3 => { "c3: " + to_string(v) }
+        default => { "none" }
+    }
+    print(picked)
+}

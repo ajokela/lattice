@@ -1,0 +1,53 @@
+// Compiler edge case: closures that capture and mutate upvalues
+fn make_counter(start: Int) {
+    flux count = start
+    let inc = || {
+        count += 1
+        return count
+    }
+    let dec = || {
+        count -= 1
+        return count
+    }
+    let get = || {
+        return count
+    }
+    return [inc, dec, get]
+}
+
+fn make_nested_counter() {
+    flux outer = 0
+    let make_inner = || {
+        flux inner = 0
+        let bump = || {
+            outer += 1
+            inner += 1
+            return outer * 1000 + inner
+        }
+        return bump
+    }
+    let a = make_inner()
+    let b = make_inner()
+    return [a, b]
+}
+
+fn main() {
+    let fns = make_counter(0)
+    let inc = fns[0]
+    let dec = fns[1]
+    let get = fns[2]
+
+    print(to_string(inc()))
+    print(to_string(inc()))
+    print(to_string(inc()))
+    print(to_string(dec()))
+    print(to_string(get()))
+
+    let pair = make_nested_counter()
+    let a = pair[0]
+    let b = pair[1]
+    print(to_string(a()))
+    print(to_string(a()))
+    print(to_string(b()))
+    print(to_string(b()))
+}

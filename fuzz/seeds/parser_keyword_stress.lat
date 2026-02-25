@@ -1,0 +1,43 @@
+// Parser edge case: keywords in various positions, near-valid programs
+
+fn main() {
+    // All value literals
+    let a = true
+    let b = false
+    let c = nil
+    let d = 0
+    let e = -1
+    let f = 3.14
+    let g = "string"
+    let h = []
+    let i = [1, 2, 3]
+
+    // If/else chains
+    if true {
+        print("a")
+    } else if false {
+        print("b")
+    } else if true {
+        print("c")
+    } else {
+        print("d")
+    }
+
+    // While with break/continue
+    flux n = 0
+    while true {
+        n += 1
+        if n == 3 { continue }
+        if n >= 5 { break }
+    }
+    print(to_string(n))
+
+    // For with break
+    for x in 0..100 {
+        if x > 5 { break }
+    }
+
+    // Return in various positions
+    let result = if true { 1 } else { 2 }
+    print(to_string(result))
+}

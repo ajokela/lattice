@@ -1,0 +1,37 @@
+// Compiler edge case: very long chains of method calls
+fn main() {
+    let data = []
+    for i in 0..100 {
+        data.push(i)
+    }
+
+    // Long map/filter chain
+    let result = data
+        .map(|x| x * 2)
+        .filter(|x| x % 3 == 0)
+        .map(|x| x + 1)
+        .filter(|x| x > 10)
+        .map(|x| x * x)
+        .filter(|x| x < 10000)
+        .map(|x| x - 1)
+        .filter(|x| x % 2 == 0)
+        .map(|x| x / 2)
+        .filter(|x| x > 0)
+        .map(|x| x + 100)
+        .filter(|x| x < 5000)
+        .map(|x| x * 3)
+        .filter(|x| x % 5 == 0)
+        .map(|x| x - 50)
+
+    print(to_string(result.len()))
+
+    // Long string method chain
+    let s = "  Hello World  "
+    let t = s.trim().to_lower().replace("hello", "hi").replace("world", "earth")
+    print(t)
+
+    // Chained array operations
+    let nums = [5, 3, 1, 4, 2]
+    let sorted = nums.sort().reverse()
+    print(to_string(sorted))
+}

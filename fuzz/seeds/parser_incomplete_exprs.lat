@@ -1,0 +1,3 @@
+// Parser edge case: incomplete / truncated expressions
+fn main() {
+    let x = 1 +

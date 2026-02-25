@@ -1,0 +1,17 @@
+// Parser edge case: string interpolation edge cases
+fn main() {
+    let x = 42
+    let y = "hello"
+    let a = "${x}"
+    let b = "${x + 1}"
+    let c = "start ${x} middle ${y} end"
+    let d = "${x}${y}${x}"
+    let e = "${"nested ${x}"}"
+    let f = "empty: ${""}"
+    let g = "expr: ${1 + 2 + 3}"
+    let h = "${to_string(x)}"
+    print(a)
+    print(b)
+    print(c)
+    print(d)
+}

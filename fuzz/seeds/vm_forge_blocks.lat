@@ -1,0 +1,45 @@
+// VM edge case: forge blocks for controlled mutation
+fn main() {
+    // Basic forge producing a frozen value
+    fix config = forge {
+        flux m = Map::new()
+        m.set("host", "localhost")
+        m.set("port", "8080")
+        freeze(m)
+    }
+    print("host: " + config.get("host"))
+    print("phase: " + phase_of(config))
+
+    // Forge with array
+    fix frozen_list = forge {
+        flux arr = []
+        for i in 0..10 {
+            arr.push(i * i)
+        }
+        freeze(arr)
+    }
+    print("frozen_list len: " + to_string(frozen_list.len()))
+    print("frozen_list[5]: " + to_string(frozen_list[5]))
+
+    // Nested forge
+    fix outer = forge {
+        fix inner = forge {
+            flux a = [1, 2, 3]
+            freeze(a)
+        }
+        freeze(inner)
+    }
+    print("outer[0]: " + to_string(outer[0]))
+
+    // Forge in a loop
+    flux results = []
+    for i in 0..20 {
+        fix val = forge {
+            flux x = i * 10
+            freeze(x)
+        }
+        results.push(val)
+    }
+    print("results len: " + to_string(results.len()))
+    print("results[10]: " + to_string(results[10]))
+}

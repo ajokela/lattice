@@ -1,0 +1,41 @@
+// Compiler edge case: deeply nested control flow
+fn main() {
+    flux result = 0
+    for i in 0..10 {
+        if i % 2 == 0 {
+            for j in 0..10 {
+                if j % 3 == 0 {
+                    while result < i * 10 + j {
+                        result += 1
+                        if result % 7 == 0 {
+                            break
+                        }
+                    }
+                    if result > 50 {
+                        for k in 0..5 {
+                            if k == 3 {
+                                continue
+                            }
+                            match k {
+                                0 => { result += 1 },
+                                1 => { result += 2 },
+                                2 => { result += 3 },
+                                _ => { result += 4 }
+                            }
+                        }
+                    }
+                } else {
+                    if j > 5 {
+                        break
+                    }
+                }
+            }
+        } else {
+            if i > 7 {
+                break
+            }
+            result += i
+        }
+    }
+    print(to_string(result))
+}

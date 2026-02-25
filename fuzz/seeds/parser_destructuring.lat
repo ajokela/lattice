@@ -1,0 +1,28 @@
+// Parser edge case: various destructuring patterns
+
+struct Point { x: Int, y: Int }
+struct Named { name: String, value: Int }
+
+fn main() {
+    // Struct destructuring
+    let p = Point { x: 10, y: 20 }
+    let { x, y } = p
+    print("x=" + to_string(x) + " y=" + to_string(y))
+
+    // Named struct destructuring
+    let n = Named { name: "test", value: 42 }
+    let { name, value } = n
+    print("name=" + name + " value=" + to_string(value))
+
+    // Array indexing patterns
+    let arr = [1, 2, 3, 4, 5]
+    let first = arr[0]
+    let last = arr[arr.len() - 1]
+    print("first=" + to_string(first) + " last=" + to_string(last))
+
+    // Nested access
+    let pairs = [[1, 2], [3, 4], [5, 6]]
+    for pair in pairs {
+        print(to_string(pair[0]) + "," + to_string(pair[1]))
+    }
+}

@@ -1,0 +1,31 @@
+// VM edge case: deep recursion to test stack overflow handling
+fn recurse(n: Int) -> Int {
+    if n <= 0 {
+        return 0
+    }
+    return 1 + recurse(n - 1)
+}
+
+fn mutual_a(n: Int) -> Int {
+    if n <= 0 { return 0 }
+    return mutual_b(n - 1)
+}
+
+fn mutual_b(n: Int) -> Int {
+    if n <= 0 { return 0 }
+    return 1 + mutual_a(n - 1)
+}
+
+fn main() {
+    // Moderate depth that should succeed
+    let r1 = recurse(100)
+    print("recurse(100) = " + to_string(r1))
+
+    // Mutual recursion
+    let r2 = mutual_a(50)
+    print("mutual_a(50) = " + to_string(r2))
+
+    // Deep but bounded
+    let r3 = recurse(500)
+    print("recurse(500) = " + to_string(r3))
+}
