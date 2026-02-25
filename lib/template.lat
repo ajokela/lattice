@@ -1,5 +1,5 @@
 // Lattice Template Engine Library
-// A Mustache/Handlebars-inspired template engine written in pure Lattice.
+// A Jinja2/Mustache-inspired template engine written in pure Lattice.
 //
 // Usage:
 //   import "lib/template" as tmpl
@@ -11,10 +11,16 @@
 // Features:
 //   - Variable interpolation: {{var}}, {{obj.nested.key}}
 //   - Raw (unescaped) output: {{{var}}}
-//   - Conditionals: {{#if var}}...{{else}}...{{/if}}
-//   - Negated conditionals: {{#unless var}}...{{else}}...{{/unless}}
-//   - Loops: {{#each items}}...{{/each}} with {{@index}} support
-//   - Comments: {{! this is ignored }}
+//   - Filters: {{var | upper}}, {{var | lower}}, {{var | trim}},
+//              {{var | escape_html}}, {{var | default("fallback")}}
+//   - Mustache conditionals: {{#if var}}...{{else}}...{{/if}}
+//   - Mustache negated: {{#unless var}}...{{else}}...{{/unless}}
+//   - Mustache loops: {{#each items}}...{{/each}} with {{@index}} support
+//   - Jinja2 loops: {% for item in list %}...{% endfor %}
+//   - Jinja2 conditionals: {% if cond %}...{% elif cond %}...{% else %}...{% endif %}
+//   - Includes: {% include "partial.html" %}
+//   - Template inheritance: {% extends "base.html" %} / {% block name %}...{% endblock %}
+//   - Comments: {{! this is ignored }}, {# this too #}
 //   - HTML escaping by default for {{var}}, raw for {{{var}}}
 
 // ---------------------------------------------------------------------------
@@ -22,9 +28,7 @@
 // ---------------------------------------------------------------------------
 
 /// Escape HTML special characters in a string.
-/// Replaces &, <, >, and " with their HTML entity equivalents.
 fn escape_html(str: String) -> String {
-    // Order matters: & must be replaced first to avoid double-escaping
     flux result = str.replace("&", "&amp;")
     result = result.replace("<", "&lt;")
     result = result.replace(">", "&gt;")
@@ -37,10 +41,7 @@ fn escape_html(str: String) -> String {
 // ---------------------------------------------------------------------------
 
 /// Determine if a value is "truthy" for template conditionals.
-/// Falsy values: nil, false, 0, 0.0, and empty string.
-/// Everything else (including non-empty strings, non-zero numbers,
-/// arrays, maps, etc.) is truthy.
-fn _is_truthy(val: String) -> Bool {
+fn _is_truthy(val: Any) -> Bool {
     if val == nil { return false }
     let t = typeof(val)
     if t == "Bool" {
@@ -63,14 +64,11 @@ fn _is_truthy(val: String) -> Bool {
 // ---------------------------------------------------------------------------
 
 /// Resolve a dotted variable path against a data Map.
-/// For example, "user.address.city" will walk data["user"]["address"]["city"].
-/// Returns nil if any key along the path is missing.
-fn _resolve(path: String, data: Map) -> String {
+fn _resolve(path: String, data: Map) -> Any {
     let parts = path.split(".")
     flux current = data
     flux i = 0
     let last = parts.len() - 1
-    // Walk through intermediate keys
     while i < last {
         let key = parts[i].trim()
         if current.has(key) {
@@ -80,7 +78,6 @@ fn _resolve(path: String, data: Map) -> String {
         }
         i = i + 1
     }
-    // Get the final value
     let final_key = parts[last].trim()
     if current.has(final_key) {
         return current.get(final_key)
@@ -88,13 +85,30 @@ fn _resolve(path: String, data: Map) -> String {
     return nil
 }
 
-/// Resolve a variable, returning the raw value (not stringified).
-/// Handles @index as a special variable for loop contexts.
-fn _resolve_var(path: String, data: Map) -> String {
+/// Resolve a variable, handling special loop variables.
+fn _resolve_var(path: String, data: Map) -> Any {
     if path == "@index" {
-        if data.has("@index") {
-            return data.get("@index")
-        }
+        if data.has("@index") { return data.get("@index") }
+        return nil
+    }
+    if path == "@first" {
+        if data.has("@first") { return data.get("@first") }
+        return nil
+    }
+    if path == "@last" {
+        if data.has("@last") { return data.get("@last") }
+        return nil
+    }
+    if path == "loop.index" {
+        if data.has("@index") { return data.get("@index") }
+        return nil
+    }
+    if path == "loop.first" {
+        if data.has("@first") { return data.get("@first") }
+        return nil
+    }
+    if path == "loop.last" {
+        if data.has("@last") { return data.get("@last") }
         return nil
     }
     return _resolve(path, data)
@@ -105,16 +119,509 @@ fn _resolve_var(path: String, data: Map) -> String {
 // ---------------------------------------------------------------------------
 
 /// Find the index of a substring starting from a given position.
-/// Returns -1 if not found.
 fn _index_from(text: String, needle: String, start: Int) -> Int {
     let text_len = text.len()
-    let needle_len = needle.len()
     if start >= text_len { return -1 }
-    // Search in the substring from start onwards
     let sub = text.substring(start, text_len)
     let idx = sub.index_of(needle)
     if idx == -1 { return -1 }
     return start + idx
+}
+
+/// Strip surrounding quotes (single or double) from a string.
+fn _strip_quotes(s: String) -> String {
+    if s.len() < 2 { return s }
+    let first = s.substring(0, 1)
+    let last = s.substring(s.len() - 1, s.len())
+    if first == "\"" {
+        if last == "\"" { return s.substring(1, s.len() - 1) }
+    }
+    if first == "'" {
+        if last == "'" { return s.substring(1, s.len() - 1) }
+    }
+    return s
+}
+
+/// Make a text segment.
+fn _text_seg(value: String) -> Map {
+    let seg = Map::new()
+    seg.set("type", "text")
+    seg.set("value", value)
+    return seg
+}
+
+/// Make a parse result with segments, pos, and stopped_at.
+fn _mk_result(segments: Array, pos: Int, tag: String) -> Map {
+    let result = Map::new()
+    result.set("segments", segments)
+    result.set("pos", pos)
+    result.set("stopped_at", tag)
+    return result
+}
+
+/// Check if any stop tag matches at the given position.
+fn _check_stop_tags(template: String, pos: Int, stop_tags: Array) -> String {
+    for tag in stop_tags {
+        if _index_from(template, tag, pos) == pos {
+            return tag
+        }
+    }
+    return ""
+}
+
+/// Determine the earliest tag opener and its kind.
+fn _find_next_tag(template: String, pos: Int) -> Map {
+    let next_mustache = _index_from(template, "{{", pos)
+    let next_jinja = _index_from(template, "{%", pos)
+    let next_comment = _index_from(template, "{#", pos)
+
+    flux best_pos = -1
+    flux best_kind = "none"
+
+    if next_mustache != -1 {
+        best_pos = next_mustache
+        best_kind = "mustache"
+    }
+    if next_jinja != -1 {
+        if best_pos == -1 {
+            best_pos = next_jinja
+            best_kind = "jinja"
+        } else {
+            if next_jinja < best_pos {
+                best_pos = next_jinja
+                best_kind = "jinja"
+            }
+        }
+    }
+    if next_comment != -1 {
+        if best_pos == -1 {
+            best_pos = next_comment
+            best_kind = "jinja_comment"
+        } else {
+            if next_comment < best_pos {
+                best_pos = next_comment
+                best_kind = "jinja_comment"
+            }
+        }
+    }
+
+    let result = Map::new()
+    result.set("pos", best_pos)
+    result.set("kind", best_kind)
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// Filter Engine
+// ---------------------------------------------------------------------------
+
+/// Parse a filter expression into a filter Map.
+fn _parse_filter(filter_str: String) -> Map {
+    let f = filter_str.trim()
+    let result = Map::new()
+    let paren_idx = f.index_of("(")
+    if paren_idx == -1 {
+        result.set("name", f)
+        return result
+    }
+    let name = f.substring(0, paren_idx).trim()
+    let close_paren = _index_from(f, ")", paren_idx + 1)
+    if close_paren == -1 {
+        result.set("name", f)
+        return result
+    }
+    let raw_arg = f.substring(paren_idx + 1, close_paren).trim()
+    let arg = _strip_quotes(raw_arg)
+    result.set("name", name)
+    result.set("arg", arg)
+    return result
+}
+
+/// Apply a single filter to a value.
+fn _apply_filter(value: Any, filter_map: Map) -> Any {
+    let name = filter_map.get("name")
+
+    if name == "upper" { return to_string(value).to_upper() }
+    if name == "lower" { return to_string(value).to_lower() }
+    if name == "trim" { return to_string(value).trim() }
+    if name == "escape_html" { return escape_html(to_string(value)) }
+    if name == "capitalize" {
+        let s = to_string(value)
+        if s.len() == 0 { return s }
+        return s.substring(0, 1).to_upper() + s.substring(1, s.len()).to_lower()
+    }
+    if name == "title" {
+        let s = to_string(value)
+        let words = s.split(" ")
+        flux r = ""
+        flux first = true
+        for word in words {
+            if !first { r = r + " " }
+            if word.len() > 0 {
+                r = r + word.substring(0, 1).to_upper() + word.substring(1, word.len()).to_lower()
+            }
+            first = false
+        }
+        return r
+    }
+    if name == "length" { return len(value) }
+    if name == "string" { return to_string(value) }
+    if name == "reverse" {
+        let s = to_string(value)
+        flux rev = ""
+        flux i = s.len() - 1
+        while i >= 0 {
+            rev = rev + s.substring(i, i + 1)
+            i = i - 1
+        }
+        return rev
+    }
+    if name == "default" {
+        if value == nil {
+            if filter_map.has("arg") { return filter_map.get("arg") }
+            return ""
+        }
+        if to_string(value) == "" {
+            if filter_map.has("arg") { return filter_map.get("arg") }
+            return ""
+        }
+        return value
+    }
+    if name == "truncate" {
+        let s = to_string(value)
+        flux max_len = 80
+        if filter_map.has("arg") { max_len = to_int(filter_map.get("arg")) }
+        if s.len() <= max_len { return s }
+        return s.substring(0, max_len) + "..."
+    }
+    if name == "replace" {
+        if filter_map.has("arg") {
+            let arg = filter_map.get("arg")
+            let comma_idx = arg.index_of(",")
+            if comma_idx != -1 {
+                let old_str = arg.substring(0, comma_idx).trim()
+                let new_str = arg.substring(comma_idx + 1, arg.len()).trim()
+                return to_string(value).replace(old_str, new_str)
+            }
+        }
+        return value
+    }
+    if name == "join" {
+        if typeof(value) == "Array" {
+            flux sep = ", "
+            if filter_map.has("arg") { sep = filter_map.get("arg") }
+            flux r = ""
+            flux first = true
+            for item in value {
+                if !first { r = r + sep }
+                r = r + to_string(item)
+                first = false
+            }
+            return r
+        }
+        return to_string(value)
+    }
+    return value
+}
+
+/// Split on pipe characters, respecting parenthesized groups.
+fn _split_on_pipe(expr: String) -> Array {
+    flux parts = []
+    flux current = ""
+    flux depth = 0
+    flux i = 0
+    let elen = expr.len()
+    while i < elen {
+        let ch = expr.substring(i, i + 1)
+        if ch == "(" {
+            depth = depth + 1
+            current = current + ch
+        } else {
+            if ch == ")" {
+                depth = depth - 1
+                current = current + ch
+            } else {
+                if ch == "|" {
+                    if depth == 0 {
+                        parts.push(current)
+                        current = ""
+                    } else {
+                        current = current + ch
+                    }
+                } else {
+                    current = current + ch
+                }
+            }
+        }
+        i = i + 1
+    }
+    parts.push(current)
+    return parts
+}
+
+/// Parse a variable expression with optional filter chain.
+fn _parse_var_with_filters(expr: String) -> Map {
+    let parts = _split_on_pipe(expr)
+    let result = Map::new()
+    result.set("path", parts[0].trim())
+    flux filters = []
+    flux i = 1
+    while i < parts.len() {
+        filters.push(_parse_filter(parts[i]))
+        i = i + 1
+    }
+    result.set("filters", filters)
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// Jinja2 Tag Parsers
+// Each returns a Map with "seg" (the segment Map) and "pos" (new position).
+// ---------------------------------------------------------------------------
+
+/// Parse a {% for item in list %} block.
+fn _parse_jinja_for(template: String, inner: String, pos: Int) -> Map {
+    let for_expr = inner.substring(4, inner.len()).trim()
+    let in_idx = for_expr.index_of(" in ")
+    let result = Map::new()
+    if in_idx == -1 {
+        result.set("seg", _text_seg(""))
+        result.set("pos", pos)
+        return result
+    }
+    let var_name = for_expr.substring(0, in_idx).trim()
+    let list_path = for_expr.substring(in_idx + 4, for_expr.len()).trim()
+    let body_result = _parse(template, pos, ["{% endfor %}"])
+    let after_pos = body_result.get("pos") + 12
+    let seg = Map::new()
+    seg.set("type", "for")
+    seg.set("var_name", var_name)
+    seg.set("path", list_path)
+    seg.set("body", body_result.get("segments"))
+    result.set("seg", seg)
+    result.set("pos", after_pos)
+    return result
+}
+
+/// Parse a {% if condition %} block with elif/else chains.
+fn _parse_jinja_if(template: String, inner: String, pos: Int, tpl_len: Int) -> Map {
+    let cond_path = inner.substring(3, inner.len()).trim()
+    flux branches = []
+    flux else_body = []
+
+    let body_result = _parse(template, pos, ["{% elif ", "{% else %}", "{% endif %}"])
+    flux body_pos = body_result.get("pos")
+    flux stopped = body_result.get("stopped_at")
+
+    let branch = Map::new()
+    branch.set("condition", cond_path)
+    branch.set("body", body_result.get("segments"))
+    branches.push(branch)
+
+    flux final_pos = pos
+    flux done = false
+    while !done {
+        if stopped == "{% endif %}" {
+            final_pos = body_pos + 11
+            done = true
+        }
+        if !done {
+            if stopped == "{% else %}" {
+                let else_result = _parse(template, body_pos + 10, ["{% endif %}"])
+                else_body = else_result.get("segments")
+                final_pos = else_result.get("pos") + 11
+                done = true
+            }
+        }
+        if !done {
+            if stopped == "{% elif " {
+                let elif_close = _index_from(template, "%}", body_pos + 8)
+                if elif_close == -1 {
+                    done = true
+                    final_pos = tpl_len
+                } else {
+                    let elif_cond = template.substring(body_pos + 8, elif_close).trim()
+                    let elif_result = _parse(template, elif_close + 2, ["{% elif ", "{% else %}", "{% endif %}"])
+                    body_pos = elif_result.get("pos")
+                    stopped = elif_result.get("stopped_at")
+                    let eb = Map::new()
+                    eb.set("condition", elif_cond)
+                    eb.set("body", elif_result.get("segments"))
+                    branches.push(eb)
+                }
+            } else {
+                done = true
+                final_pos = tpl_len
+            }
+        }
+    }
+
+    let seg = Map::new()
+    seg.set("type", "jinja_if")
+    seg.set("branches", branches)
+    seg.set("else_body", else_body)
+    let result = Map::new()
+    result.set("seg", seg)
+    result.set("pos", final_pos)
+    return result
+}
+
+/// Parse a {% block name %} tag.
+fn _parse_jinja_block(template: String, inner: String, pos: Int) -> Map {
+    let block_name = inner.substring(6, inner.len()).trim()
+    let body_result = _parse(template, pos, ["{% endblock %}"])
+    let after_pos = body_result.get("pos") + 14
+    let seg = Map::new()
+    seg.set("type", "block")
+    seg.set("name", block_name)
+    seg.set("body", body_result.get("segments"))
+    let result = Map::new()
+    result.set("seg", seg)
+    result.set("pos", after_pos)
+    return result
+}
+
+/// Process a {% ... %} Jinja2 tag.
+fn _parse_jinja_tag(template: String, inner: String, pos: Int, tpl_len: Int) -> Map {
+    if inner.starts_with("for ") {
+        return _parse_jinja_for(template, inner, pos)
+    }
+    if inner.starts_with("if ") {
+        return _parse_jinja_if(template, inner, pos, tpl_len)
+    }
+    if inner.starts_with("include ") {
+        let file_path = inner.substring(8, inner.len()).trim()
+        let seg = Map::new()
+        seg.set("type", "include")
+        seg.set("path", _strip_quotes(file_path))
+        let result = Map::new()
+        result.set("seg", seg)
+        result.set("pos", pos)
+        return result
+    }
+    if inner.starts_with("extends ") {
+        let file_path = inner.substring(8, inner.len()).trim()
+        let seg = Map::new()
+        seg.set("type", "extends")
+        seg.set("path", _strip_quotes(file_path))
+        let result = Map::new()
+        result.set("seg", seg)
+        result.set("pos", pos)
+        return result
+    }
+    if inner.starts_with("block ") {
+        return _parse_jinja_block(template, inner, pos)
+    }
+    // Unknown tag; skip
+    let seg = Map::new()
+    seg.set("type", "comment")
+    let result = Map::new()
+    result.set("seg", seg)
+    result.set("pos", pos)
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// Mustache Tag Parsers
+// Each returns a Map with "seg" and "pos".
+// ---------------------------------------------------------------------------
+
+/// Parse a {{#if var}} block.
+fn _parse_mustache_if(template: String, inner: String, pos: Int) -> Map {
+    let var_path = inner.substring(4, inner.len()).trim()
+    let body_result = _parse(template, pos, ["{{else}}", "{{/if}}"])
+    let body_stopped = body_result.get("stopped_at")
+    flux else_segments = []
+    flux after_pos = body_result.get("pos")
+    if body_stopped == "{{else}}" {
+        after_pos = after_pos + 8
+        let else_result = _parse(template, after_pos, ["{{/if}}"])
+        else_segments = else_result.get("segments")
+        after_pos = else_result.get("pos") + 7
+    } else {
+        after_pos = after_pos + 7
+    }
+    let seg = Map::new()
+    seg.set("type", "if")
+    seg.set("path", var_path)
+    seg.set("body", body_result.get("segments"))
+    seg.set("else_body", else_segments)
+    let result = Map::new()
+    result.set("seg", seg)
+    result.set("pos", after_pos)
+    return result
+}
+
+/// Parse a {{#unless var}} block.
+fn _parse_mustache_unless(template: String, inner: String, pos: Int) -> Map {
+    let var_path = inner.substring(8, inner.len()).trim()
+    let body_result = _parse(template, pos, ["{{else}}", "{{/unless}}"])
+    let body_stopped = body_result.get("stopped_at")
+    flux else_segments = []
+    flux after_pos = body_result.get("pos")
+    if body_stopped == "{{else}}" {
+        after_pos = after_pos + 8
+        let else_result = _parse(template, after_pos, ["{{/unless}}"])
+        else_segments = else_result.get("segments")
+        after_pos = else_result.get("pos") + 11
+    } else {
+        after_pos = after_pos + 11
+    }
+    let seg = Map::new()
+    seg.set("type", "unless")
+    seg.set("path", var_path)
+    seg.set("body", body_result.get("segments"))
+    seg.set("else_body", else_segments)
+    let result = Map::new()
+    result.set("seg", seg)
+    result.set("pos", after_pos)
+    return result
+}
+
+/// Parse a {{#each items}} block.
+fn _parse_mustache_each(template: String, inner: String, pos: Int) -> Map {
+    let var_path = inner.substring(6, inner.len()).trim()
+    let body_result = _parse(template, pos, ["{{/each}}"])
+    let after_pos = body_result.get("pos") + 9
+    let seg = Map::new()
+    seg.set("type", "each")
+    seg.set("path", var_path)
+    seg.set("body", body_result.get("segments"))
+    let result = Map::new()
+    result.set("seg", seg)
+    result.set("pos", after_pos)
+    return result
+}
+
+/// Process a {{ ... }} mustache tag inner content.
+fn _parse_mustache_inner(template: String, inner: String, pos: Int) -> Map {
+    if inner.starts_with("!") {
+        let seg = Map::new()
+        seg.set("type", "comment")
+        let result = Map::new()
+        result.set("seg", seg)
+        result.set("pos", pos)
+        return result
+    }
+    if inner.starts_with("#if ") {
+        return _parse_mustache_if(template, inner, pos)
+    }
+    if inner.starts_with("#unless ") {
+        return _parse_mustache_unless(template, inner, pos)
+    }
+    if inner.starts_with("#each ") {
+        return _parse_mustache_each(template, inner, pos)
+    }
+    // Plain variable with optional filters
+    let parsed_var = _parse_var_with_filters(inner)
+    let seg = Map::new()
+    seg.set("type", "var")
+    seg.set("path", parsed_var.get("path"))
+    seg.set("filters", parsed_var.get("filters"))
+    let result = Map::new()
+    result.set("seg", seg)
+    result.set("pos", pos)
+    return result
 }
 
 // ---------------------------------------------------------------------------
@@ -122,223 +629,109 @@ fn _index_from(text: String, needle: String, start: Int) -> Int {
 // ---------------------------------------------------------------------------
 
 /// Parse a template string into an array of segment Maps.
-/// Each segment has a "type" key and relevant data fields.
-///
-/// Segment types:
-///   - text:    { type: "text", value: "literal text" }
-///   - var:     { type: "var", path: "name" }
-///   - raw_var: { type: "raw_var", path: "name" }
-///   - if:      { type: "if", path: "var", body: [...], else_body: [...] }
-///   - unless:  { type: "unless", path: "var", body: [...], else_body: [...] }
-///   - each:    { type: "each", path: "var", body: [...] }
-///   - comment: { type: "comment" }
 fn _parse(template: String, start: Int, stop_tags: Array) -> Map {
     let tpl_len = template.len()
     flux pos = start
     flux segments = []
 
     while pos < tpl_len {
-        // Check for stop tags (closing block tags like {{/if}}, {{/each}}, {{else}})
-        for tag in stop_tags {
-            if _index_from(template, tag, pos) == pos {
-                // We've hit a stop tag; return what we have so far
-                let result = Map::new()
-                result.set("segments", segments)
-                result.set("pos", pos)
-                result.set("stopped_at", tag)
-                return result
-            }
+        // Check for stop tags at current position
+        let stopped_tag = _check_stop_tags(template, pos, stop_tags)
+        if stopped_tag != "" {
+            return _mk_result(segments, pos, stopped_tag)
         }
 
-        // Look for the next tag opening: {{ or {{{
-        let next_open = _index_from(template, "{{", pos)
+        // Find the next tag opener
+        let tag_info = _find_next_tag(template, pos)
+        let next_open = tag_info.get("pos")
+        let tag_kind = tag_info.get("kind")
 
+        // No more tags: consume rest as text
         if next_open == -1 {
-            // No more tags; rest is literal text
             if pos < tpl_len {
-                let seg = Map::new()
-                seg.set("type", "text")
-                seg.set("value", template.substring(pos, tpl_len))
-                segments.push(seg)
+                segments.push(_text_seg(template.substring(pos, tpl_len)))
             }
             pos = tpl_len
         } else {
-            // Before processing the tag, check if any stop tag starts here.
-            // This handles cases where the next {{ is actually a closing block
-            // tag like {{/if}} or {{/each}}.
-            for tag in stop_tags {
-                if _index_from(template, tag, next_open) == next_open {
-                    // Capture any literal text before the stop tag
-                    if next_open > pos {
-                        let seg = Map::new()
-                        seg.set("type", "text")
-                        seg.set("value", template.substring(pos, next_open))
-                        segments.push(seg)
-                    }
-                    let result = Map::new()
-                    result.set("segments", segments)
-                    result.set("pos", next_open)
-                    result.set("stopped_at", tag)
-                    return result
+            // Check if a stop tag starts at next_open
+            let stop_at_open = _check_stop_tags(template, next_open, stop_tags)
+            if stop_at_open != "" {
+                if next_open > pos {
+                    segments.push(_text_seg(template.substring(pos, next_open)))
                 }
+                return _mk_result(segments, next_open, stop_at_open)
             }
 
-            // Capture any literal text before the tag
+            // Capture literal text before tag
             if next_open > pos {
-                let seg = Map::new()
-                seg.set("type", "text")
-                seg.set("value", template.substring(pos, next_open))
-                segments.push(seg)
+                segments.push(_text_seg(template.substring(pos, next_open)))
             }
 
-            // Check for triple-mustache (raw variable): {{{...}}}
-            flux is_triple = false
-            if next_open + 2 < tpl_len {
-                if template.substring(next_open + 2, next_open + 3) == "{" {
-                    is_triple = true
-                }
-            }
-
-            if is_triple {
-                // Raw variable: {{{path}}}
-                let close = _index_from(template, "}}}", next_open + 3)
+            // Dispatch to tag-specific parsers
+            if tag_kind == "jinja_comment" {
+                let close = _index_from(template, "#}", next_open + 2)
                 if close == -1 {
-                    // Malformed tag; treat rest as text
-                    let seg = Map::new()
-                    seg.set("type", "text")
-                    seg.set("value", template.substring(next_open, tpl_len))
-                    segments.push(seg)
+                    segments.push(_text_seg(template.substring(next_open, tpl_len)))
                     pos = tpl_len
                 } else {
-                    let path = template.substring(next_open + 3, close).trim()
                     let seg = Map::new()
-                    seg.set("type", "raw_var")
-                    seg.set("path", path)
+                    seg.set("type", "comment")
                     segments.push(seg)
-                    pos = close + 3
+                    pos = close + 2
                 }
-            } else {
-                // Standard double-mustache: {{...}}
-                let close = _index_from(template, "}}", next_open + 2)
+            }
+            if tag_kind == "jinja" {
+                let close = _index_from(template, "%}", next_open + 2)
                 if close == -1 {
-                    // Malformed tag; treat rest as text
-                    let seg = Map::new()
-                    seg.set("type", "text")
-                    seg.set("value", template.substring(next_open, tpl_len))
-                    segments.push(seg)
+                    segments.push(_text_seg(template.substring(next_open, tpl_len)))
                     pos = tpl_len
                 } else {
                     let inner = template.substring(next_open + 2, close).trim()
-                    pos = close + 2
-
-                    if inner.starts_with("!") {
-                        // Comment tag: {{! ... }}
-                        let seg = Map::new()
-                        seg.set("type", "comment")
-                        segments.push(seg)
-
+                    let tag_result = _parse_jinja_tag(template, inner, close + 2, tpl_len)
+                    segments.push(tag_result.get("seg"))
+                    pos = tag_result.get("pos")
+                }
+            }
+            if tag_kind == "mustache" {
+                // Check for triple-mustache: {{{...}}}
+                flux is_triple = false
+                if next_open + 2 < tpl_len {
+                    if template.substring(next_open + 2, next_open + 3) == "{" {
+                        is_triple = true
+                    }
+                }
+                if is_triple {
+                    let close = _index_from(template, "}}}", next_open + 3)
+                    if close == -1 {
+                        segments.push(_text_seg(template.substring(next_open, tpl_len)))
+                        pos = tpl_len
                     } else {
-                        if inner.starts_with("#if ") {
-                            // Conditional block: {{#if var}}...{{else}}...{{/if}}
-                            let var_path = inner.substring(4, inner.len()).trim()
-                            // Parse the body until {{else}} or {{/if}}
-                            let body_result = _parse(template, pos, ["{{else}}", "{{/if}}"])
-                            let body_segments = body_result.get("segments")
-                            let body_pos = body_result.get("pos")
-                            let body_stopped = body_result.get("stopped_at")
-
-                            flux else_segments = []
-                            flux after_pos = body_pos
-
-                            if body_stopped == "{{else}}" {
-                                // Skip past {{else}} and parse else body until {{/if}}
-                                after_pos = body_pos + 8
-                                let else_result = _parse(template, after_pos, ["{{/if}}"])
-                                else_segments = else_result.get("segments")
-                                after_pos = else_result.get("pos")
-                                // Skip past {{/if}}
-                                after_pos = after_pos + 7
-                            } else {
-                                // Stopped at {{/if}}, skip past it
-                                after_pos = body_pos + 7
-                            }
-
-                            let seg = Map::new()
-                            seg.set("type", "if")
-                            seg.set("path", var_path)
-                            seg.set("body", body_segments)
-                            seg.set("else_body", else_segments)
-                            segments.push(seg)
-                            pos = after_pos
-
-                        } else {
-                            if inner.starts_with("#unless ") {
-                                // Negated conditional: {{#unless var}}...{{else}}...{{/unless}}
-                                let var_path = inner.substring(8, inner.len()).trim()
-                                let body_result = _parse(template, pos, ["{{else}}", "{{/unless}}"])
-                                let body_segments = body_result.get("segments")
-                                let body_pos = body_result.get("pos")
-                                let body_stopped = body_result.get("stopped_at")
-
-                                flux else_segments = []
-                                flux after_pos = body_pos
-
-                                if body_stopped == "{{else}}" {
-                                    after_pos = body_pos + 8
-                                    let else_result = _parse(template, after_pos, ["{{/unless}}"])
-                                    else_segments = else_result.get("segments")
-                                    after_pos = else_result.get("pos")
-                                    after_pos = after_pos + 11
-                                } else {
-                                    // Stopped at {{/unless}}
-                                    after_pos = body_pos + 11
-                                }
-
-                                let seg = Map::new()
-                                seg.set("type", "unless")
-                                seg.set("path", var_path)
-                                seg.set("body", body_segments)
-                                seg.set("else_body", else_segments)
-                                segments.push(seg)
-                                pos = after_pos
-
-                            } else {
-                                if inner.starts_with("#each ") {
-                                    // Loop block: {{#each items}}...{{/each}}
-                                    let var_path = inner.substring(6, inner.len()).trim()
-                                    let body_result = _parse(template, pos, ["{{/each}}"])
-                                    let body_segments = body_result.get("segments")
-                                    let body_pos = body_result.get("pos")
-                                    // Skip past {{/each}}
-                                    let after_pos = body_pos + 9
-
-                                    let seg = Map::new()
-                                    seg.set("type", "each")
-                                    seg.set("path", var_path)
-                                    seg.set("body", body_segments)
-                                    segments.push(seg)
-                                    pos = after_pos
-
-                                } else {
-                                    // Plain variable: {{name}} or {{user.name}}
-                                    let seg = Map::new()
-                                    seg.set("type", "var")
-                                    seg.set("path", inner)
-                                    segments.push(seg)
-                                }
-                            }
-                        }
+                        let raw_inner = template.substring(next_open + 3, close).trim()
+                        let parsed_var = _parse_var_with_filters(raw_inner)
+                        let seg = Map::new()
+                        seg.set("type", "raw_var")
+                        seg.set("path", parsed_var.get("path"))
+                        seg.set("filters", parsed_var.get("filters"))
+                        segments.push(seg)
+                        pos = close + 3
+                    }
+                } else {
+                    let close = _index_from(template, "}}", next_open + 2)
+                    if close == -1 {
+                        segments.push(_text_seg(template.substring(next_open, tpl_len)))
+                        pos = tpl_len
+                    } else {
+                        let inner = template.substring(next_open + 2, close).trim()
+                        let tag_result = _parse_mustache_inner(template, inner, close + 2)
+                        segments.push(tag_result.get("seg"))
+                        pos = tag_result.get("pos")
                     }
                 }
             }
         }
     }
 
-    let result = Map::new()
-    result.set("segments", segments)
-    result.set("pos", pos)
-    result.set("stopped_at", "")
-    return result
+    return _mk_result(segments, pos, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +739,6 @@ fn _parse(template: String, start: Int, stop_tags: Array) -> Map {
 // ---------------------------------------------------------------------------
 
 /// Compile a template string into a compiled template Map.
-/// The returned Map has a "segments" key containing an array of parsed segments.
 fn compile(template_string: String) -> Map {
     let parse_result = _parse(template_string, 0, [])
     let compiled = Map::new()
@@ -355,119 +747,252 @@ fn compile(template_string: String) -> Map {
 }
 
 // ---------------------------------------------------------------------------
+// Block Collection (for template inheritance)
+// ---------------------------------------------------------------------------
+
+/// Walk a segment tree and collect all {% block name %} definitions.
+fn _collect_blocks(segments: Array) -> Map {
+    let blocks = Map::new()
+    for seg in segments {
+        if seg.get("type") == "block" {
+            blocks.set(seg.get("name"), seg.get("body"))
+        }
+    }
+    return blocks
+}
+
+// ---------------------------------------------------------------------------
+// Render Helpers
+// ---------------------------------------------------------------------------
+
+/// Apply filter chain to a value.
+fn _apply_filters(val: Any, seg: Map) -> Any {
+    flux filtered = val
+    if seg.has("filters") {
+        let filters = seg.get("filters")
+        for f in filters {
+            filtered = _apply_filter(filtered, f)
+        }
+    }
+    return filtered
+}
+
+/// Build a loop context Map from parent data, item, and index.
+fn _build_loop_ctx(data: Map, item: Any, idx: Int, item_count: Int) -> Map {
+    flux ctx = Map::new()
+    let parent_keys = data.keys()
+    for pk in parent_keys {
+        ctx.set(pk, data.get(pk))
+    }
+    if typeof(item) == "Map" {
+        let item_keys = item.keys()
+        for ik in item_keys {
+            ctx.set(ik, item.get(ik))
+        }
+    } else {
+        ctx.set("this", item)
+    }
+    ctx.set("@index", idx)
+    ctx.set("@first", idx == 0)
+    ctx.set("@last", idx == item_count - 1)
+    return ctx
+}
+
+/// Render a "var" segment (HTML-escaped).
+fn _render_var(seg: Map, data: Map) -> String {
+    let val = _resolve_var(seg.get("path"), data)
+    let filtered = _apply_filters(val, seg)
+    if filtered != nil { return escape_html(to_string(filtered)) }
+    return ""
+}
+
+/// Render a "raw_var" segment (no escaping).
+fn _render_raw_var(seg: Map, data: Map) -> String {
+    let val = _resolve_var(seg.get("path"), data)
+    let filtered = _apply_filters(val, seg)
+    if filtered != nil { return to_string(filtered) }
+    return ""
+}
+
+/// Render an "if" (mustache-style) segment.
+fn _render_if(seg: Map, data: Map, blocks_map: Map) -> String {
+    let val = _resolve_var(seg.get("path"), data)
+    if _is_truthy(val) {
+        return _render_segments(seg.get("body"), data, blocks_map)
+    }
+    let else_body = seg.get("else_body")
+    if else_body.len() > 0 {
+        return _render_segments(else_body, data, blocks_map)
+    }
+    return ""
+}
+
+/// Render an "unless" segment.
+fn _render_unless(seg: Map, data: Map, blocks_map: Map) -> String {
+    let val = _resolve_var(seg.get("path"), data)
+    if !_is_truthy(val) {
+        return _render_segments(seg.get("body"), data, blocks_map)
+    }
+    let else_body = seg.get("else_body")
+    if else_body.len() > 0 {
+        return _render_segments(else_body, data, blocks_map)
+    }
+    return ""
+}
+
+/// Render an "each" (mustache-style loop) segment.
+fn _render_each(seg: Map, data: Map, blocks_map: Map) -> String {
+    let val = _resolve_var(seg.get("path"), data)
+    if val == nil { return "" }
+    let items = val
+    let item_count = len(items)
+    flux out = ""
+    flux idx = 0
+    for item in items {
+        let ctx = _build_loop_ctx(data, item, idx, item_count)
+        out = out + _render_segments(seg.get("body"), ctx, blocks_map)
+        idx = idx + 1
+    }
+    return out
+}
+
+/// Render a "for" (Jinja2-style loop) segment.
+fn _render_for(seg: Map, data: Map, blocks_map: Map) -> String {
+    let var_name = seg.get("var_name")
+    let val = _resolve_var(seg.get("path"), data)
+    if val == nil { return "" }
+    let items = val
+    let item_count = len(items)
+    flux out = ""
+    flux idx = 0
+    for item in items {
+        let ctx = _build_loop_ctx(data, item, idx, item_count)
+        ctx.set(var_name, item)
+        let loop_var = Map::new()
+        loop_var.set("index", idx)
+        loop_var.set("index0", idx)
+        loop_var.set("index1", idx + 1)
+        loop_var.set("first", idx == 0)
+        loop_var.set("last", idx == item_count - 1)
+        loop_var.set("length", item_count)
+        ctx.set("loop", loop_var)
+        out = out + _render_segments(seg.get("body"), ctx, blocks_map)
+        idx = idx + 1
+    }
+    return out
+}
+
+/// Render a "jinja_if" segment (with elif support).
+fn _render_jinja_if(seg: Map, data: Map, blocks_map: Map) -> String {
+    let branches = seg.get("branches")
+    flux matched = false
+    flux out = ""
+    for branch in branches {
+        if !matched {
+            let cond = branch.get("condition")
+            let val = _resolve_var(cond, data)
+            if _is_truthy(val) {
+                out = _render_segments(branch.get("body"), data, blocks_map)
+                matched = true
+            }
+        }
+    }
+    if !matched {
+        let else_body = seg.get("else_body")
+        if else_body.len() > 0 {
+            out = _render_segments(else_body, data, blocks_map)
+        }
+    }
+    return out
+}
+
+/// Render a "block" segment.
+fn _render_block(seg: Map, data: Map, blocks_map: Map) -> String {
+    let block_name = seg.get("name")
+    if blocks_map != nil {
+        if blocks_map.has(block_name) {
+            return _render_segments(blocks_map.get(block_name), data, blocks_map)
+        }
+    }
+    return _render_segments(seg.get("body"), data, blocks_map)
+}
+
+/// Render an "include" segment.
+fn _render_include(seg: Map, data: Map, blocks_map: Map) -> String {
+    let include_path = seg.get("path")
+    flux contents = ""
+    flux read_ok = false
+    flux read_err = ""
+    let try_result = try {
+        read_file(include_path)
+    } catch e {
+        read_err = to_string(e)
+        nil
+    }
+    if try_result == nil {
+        return "<!-- include error: ${read_err} -->"
+    }
+    contents = try_result
+    let compiled = compile(contents)
+    return _render_segments(compiled.get("segments"), data, blocks_map)
+}
+
+/// Render an "extends" segment.
+fn _render_extends(seg: Map, segments: Array, data: Map, blocks_map: Map) -> String {
+    let parent_contents = read_file(seg.get("path"))
+    let parent_compiled = compile(parent_contents)
+    let child_blocks = _collect_blocks(segments)
+    let merged = Map::new()
+    if blocks_map != nil {
+        let ek = blocks_map.keys()
+        for k in ek { merged.set(k, blocks_map.get(k)) }
+    }
+    let ck = child_blocks.keys()
+    for k in ck { merged.set(k, child_blocks.get(k)) }
+    return _render_segments(parent_compiled.get("segments"), data, merged)
+}
+
+/// Render a single segment.
+fn _render_one(seg: Map, segments: Array, data: Map, blocks_map: Map) -> String {
+    let seg_type = seg.get("type")
+    if seg_type == "text" { return seg.get("value") }
+    if seg_type == "comment" { return "" }
+    if seg_type == "var" { return _render_var(seg, data) }
+    if seg_type == "raw_var" { return _render_raw_var(seg, data) }
+    if seg_type == "if" { return _render_if(seg, data, blocks_map) }
+    if seg_type == "unless" { return _render_unless(seg, data, blocks_map) }
+    if seg_type == "each" { return _render_each(seg, data, blocks_map) }
+    if seg_type == "for" { return _render_for(seg, data, blocks_map) }
+    if seg_type == "jinja_if" { return _render_jinja_if(seg, data, blocks_map) }
+    if seg_type == "block" { return _render_block(seg, data, blocks_map) }
+    if seg_type == "include" { return _render_include(seg, data, blocks_map) }
+    return ""
+}
+
+// ---------------------------------------------------------------------------
 // Renderer
 // ---------------------------------------------------------------------------
 
 /// Render an array of segments against a data Map, producing an output string.
-fn _render_segments(segments: Array, data: Map) -> String {
-    flux output = ""
-
+fn _render_segments(segments: Array, data: Map, blocks_map: Map) -> String {
+    // Check for extends first (template inheritance takes over rendering)
     for seg in segments {
-        let seg_type = seg.get("type")
-
-        if seg_type == "text" {
-            // Literal text: append directly
-            output = output + seg.get("value")
-
-        } else {
-            if seg_type == "comment" {
-                // Comments produce no output
-
-            } else {
-                if seg_type == "var" {
-                    // Escaped variable interpolation
-                    let val = _resolve_var(seg.get("path"), data)
-                    if val != nil {
-                        output = output + escape_html(to_string(val))
-                    }
-
-                } else {
-                    if seg_type == "raw_var" {
-                        // Raw (unescaped) variable interpolation
-                        let val = _resolve_var(seg.get("path"), data)
-                        if val != nil {
-                            output = output + to_string(val)
-                        }
-
-                    } else {
-                        if seg_type == "if" {
-                            // Conditional block
-                            let val = _resolve_var(seg.get("path"), data)
-                            if _is_truthy(val) {
-                                output = output + _render_segments(seg.get("body"), data)
-                            } else {
-                                let else_body = seg.get("else_body")
-                                if else_body.len() > 0 {
-                                    output = output + _render_segments(else_body, data)
-                                }
-                            }
-
-                        } else {
-                            if seg_type == "unless" {
-                                // Negated conditional block
-                                let val = _resolve_var(seg.get("path"), data)
-                                if !_is_truthy(val) {
-                                    output = output + _render_segments(seg.get("body"), data)
-                                } else {
-                                    let else_body = seg.get("else_body")
-                                    if else_body.len() > 0 {
-                                        output = output + _render_segments(else_body, data)
-                                    }
-                                }
-
-                            } else {
-                                if seg_type == "each" {
-                                    // Loop block: iterate over an array
-                                    let val = _resolve_var(seg.get("path"), data)
-                                    if val != nil {
-                                        let items = val
-                                        flux idx = 0
-                                        for item in items {
-                                            // Build a context Map for each iteration.
-                                            // If the item is a Map, merge its keys into
-                                            // the context so inner variables resolve
-                                            // directly (e.g., {{name}} inside #each).
-                                            flux ctx = Map::new()
-
-                                            // Copy parent data keys for access to outer scope
-                                            let parent_keys = data.keys()
-                                            for pk in parent_keys {
-                                                ctx.set(pk, data.get(pk))
-                                            }
-
-                                            // If item is a Map, overlay its keys
-                                            if typeof(item) == "Map" {
-                                                let item_keys = item.keys()
-                                                for ik in item_keys {
-                                                    ctx.set(ik, item.get(ik))
-                                                }
-                                            } else {
-                                                // For non-Map items, expose as "this"
-                                                ctx.set("this", item)
-                                            }
-
-                                            // Set the special @index variable
-                                            ctx.set("@index", idx)
-
-                                            output = output + _render_segments(seg.get("body"), ctx)
-                                            idx = idx + 1
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if seg.get("type") == "extends" {
+            return _render_extends(seg, segments, data, blocks_map)
         }
     }
 
+    flux output = ""
+    for seg in segments {
+        output = output + _render_one(seg, segments, data, blocks_map)
+    }
     return output
 }
 
 /// Render a compiled template with the given data Map, producing a string.
 fn render(compiled: Map, data: Map) -> String {
-    return _render_segments(compiled.get("segments"), data)
+    let blocks = Map::new()
+    return _render_segments(compiled.get("segments"), data, blocks)
 }
 
 // ---------------------------------------------------------------------------
