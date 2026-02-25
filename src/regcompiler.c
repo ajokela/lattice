@@ -1215,6 +1215,9 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 2, 0, line);
                 }
             }
+            /* FREEZE_VAR writes back to the variable but dst still holds the
+               stale (unfrozen) copy — freeze it so the expression result is correct. */
+            emit_ABC(ROP_FREEZE, dst, dst, 0, line);
         } else if (e->as.freeze.expr->tag == EXPR_FIELD_ACCESS) {
             /* Partial freeze: freeze(s.field) */
             Expr *parent = e->as.freeze.expr->as.field_access.object;
@@ -1302,6 +1305,9 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     emit_ABC(ROP_THAW_VAR, (uint8_t)(name_ki & 0xFF), 2, 0, line);
                 }
             }
+            /* THAW_VAR writes back to the variable but dst still holds the
+               stale (frozen) copy — thaw it so the expression result is correct. */
+            emit_ABC(ROP_THAW, dst, dst, 0, line);
         } else {
             emit_ABC(ROP_THAW, dst, dst, 0, line);
         }

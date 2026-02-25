@@ -270,6 +270,33 @@ TEST(eval_arithmetic_division) {
     );
 }
 
+TEST(eval_numeric_underscores) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    assert(1_000_000 == 1000000)\n"
+        "    assert(1_000 + 2_000 == 3000)\n"
+        "    assert(1_2_3_4 == 1234)\n"
+        "    assert(3.14_159 == 3.14159)\n"
+        "    assert(1_000.5 == 1000.5)\n"
+        "}\n"
+    );
+}
+
+TEST(eval_hex_literals) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    assert(0xFF == 255)\n"
+        "    assert(0x0 == 0)\n"
+        "    assert(0x10 == 16)\n"
+        "    assert(0xDEAD == 57005)\n"
+        "    assert(0xDEAD_BEEF == 3735928559)\n"
+        "    assert(0XAB == 171)\n"
+        "    assert(0x10 + 0x20 == 48)\n"
+        "    assert(0xFF + 1 == 256)\n"
+        "}\n"
+    );
+}
+
 /* ── Test: Variable Bindings ── */
 
 TEST(eval_variable_binding) {

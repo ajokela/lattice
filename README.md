@@ -47,8 +47,8 @@ flux copy = clone(data)     // independent deep copy
 
 | Type | Description |
 |------|-------------|
-| `Int` | 64-bit signed integer |
-| `Float` | 64-bit double-precision float |
+| `Int` | 64-bit signed integer (`42`, `0xFF`, `1_000_000`) |
+| `Float` | 64-bit double-precision float (`3.14`, `1_000.5`) |
 | `Bool` | `true` or `false` |
 | `String` | Immutable UTF-8 string |
 | `Array` | Ordered, growable collection (`[1, 2, 3]`) |
@@ -62,6 +62,18 @@ flux copy = clone(data)     // independent deep copy
 | `Tuple` | Fixed-size immutable sequence (`(1, "hello", true)`) |
 | `Nil` | Explicit null value (`nil`) |
 | `Unit` | Absence of a meaningful value (result of statements) |
+
+### Number Literals
+
+Integer and float literals support underscores between digits for readability. Integer literals may also be written in hexadecimal with a `0x` prefix:
+
+```lattice
+let million = 1_000_000       // underscore separators
+let color = 0xFF              // hexadecimal (255)
+let mask = 0xDEAD_BEEF        // hex with underscores
+let pi = 3.14_159             // float with underscores
+let plain = 42                // regular integer
+```
 
 ### Functions
 

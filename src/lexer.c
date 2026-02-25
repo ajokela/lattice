@@ -162,30 +162,52 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
 
     /* String literals are handled by lex_string_or_interp() via lex_one() */
 
-    /* Number literal */
+    /* Number literal (underscores allowed between digits for readability) */
     if (isdigit((unsigned char)ch)) {
         size_t start = lex->pos;
         bool is_float = false;
-        while (lex->pos < lex->len && isdigit((unsigned char)lex_peek(lex))) {
-            lex_advance(lex);
-        }
-        if (lex_peek(lex) == '.' && isdigit((unsigned char)lex_peek_ahead(lex, 1))) {
-            is_float = true;
-            lex_advance(lex); /* '.' */
-            while (lex->pos < lex->len && isdigit((unsigned char)lex_peek(lex))) {
+        bool is_hex = false;
+
+        /* Check for 0x / 0X hex prefix */
+        if (ch == '0' && lex->pos + 1 < lex->len &&
+            (lex_peek_ahead(lex, 1) == 'x' || lex_peek_ahead(lex, 1) == 'X')) {
+            is_hex = true;
+            lex_advance(lex); /* consume '0' */
+            lex_advance(lex); /* consume 'x' */
+            while (lex->pos < lex->len &&
+                   (isxdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
                 lex_advance(lex);
             }
+        } else {
+            while (lex->pos < lex->len &&
+                   (isdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
+                lex_advance(lex);
+            }
+            if (lex_peek(lex) == '.' && isdigit((unsigned char)lex_peek_ahead(lex, 1))) {
+                is_float = true;
+                lex_advance(lex); /* '.' */
+                while (lex->pos < lex->len &&
+                       (isdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
+                    lex_advance(lex);
+                }
+            }
         }
-        size_t num_len = lex->pos - start;
-        char *num_str = malloc(num_len + 1);
-        memcpy(num_str, lex->source + start, num_len);
-        num_str[num_len] = '\0';
+
+        /* Copy source span, stripping underscores (and 0x prefix for hex) */
+        size_t span_len = lex->pos - start;
+        char *num_str = malloc(span_len + 1);
+        size_t j = 0;
+        for (size_t i = 0; i < span_len; i++) {
+            char c = lex->source[start + i];
+            if (c != '_') num_str[j++] = c;
+        }
+        num_str[j] = '\0';
         if (is_float) {
             double val = strtod(num_str, NULL);
             free(num_str);
             *out = token_float(val, line, col);
         } else {
-            int64_t val = strtoll(num_str, NULL, 10);
+            int64_t val = strtoll(num_str, NULL, is_hex ? 16 : 10);
             free(num_str);
             *out = token_int(val, line, col);
         }
