@@ -13,6 +13,7 @@
 #include "string_ops.h"
 #include "array_ops.h"
 #include "builtin_methods.h"
+#include "package.h"
 #include <stdlib.h>
 #include <limits.h>
 #include <libgen.h>
@@ -6015,10 +6016,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
 
+                /* Try lat_modules/ resolution for bare module names */
+                char *pkg_resolved = pkg_resolve_module(raw_path, vm->rt->script_dir);
+
                 /* Resolve file path: append .lat if not present */
                 size_t plen = strlen(raw_path);
                 char *file_path;
-                if (plen >= 4 && strcmp(raw_path + plen - 4, ".lat") == 0) {
+                if (pkg_resolved) {
+                    file_path = pkg_resolved; /* already absolute */
+                } else if (plen >= 4 && strcmp(raw_path + plen - 4, ".lat") == 0) {
                     file_path = strdup(raw_path);
                 } else {
                     file_path = malloc(plen + 5);
@@ -6028,13 +6034,19 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
                 /* Resolve to absolute path */
                 char resolved[PATH_MAX];
-                if (!realpath(file_path, resolved)) {
+                if (pkg_resolved) {
+                    /* pkg_resolve_module already returned an absolute path */
+                    strncpy(resolved, file_path, PATH_MAX - 1);
+                    resolved[PATH_MAX - 1] = '\0';
+                    free(file_path);
+                } else if (!realpath(file_path, resolved)) {
                     char errbuf[512];
                     snprintf(errbuf, sizeof(errbuf), "import: cannot find '%s'", file_path);
                     free(file_path);
                     VM_ERROR("%s", errbuf); break;
+                } else {
+                    free(file_path);
                 }
-                free(file_path);
 
                 /* Check module cache */
                 LatValue *cached = lat_map_get(&vm->module_cache, resolved);

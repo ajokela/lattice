@@ -8,6 +8,7 @@
 #include "latc.h"
 #include "regvm.h"
 #include "runtime.h"
+#include "package.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1048,6 +1049,35 @@ int main(int argc, char **argv) {
             return 1;
         }
         return run_test_file(test_path);
+    }
+
+    /* Check for 'init' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "init") == 0) {
+        return pkg_cmd_init();
+    }
+
+    /* Check for 'install' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "install") == 0) {
+        return pkg_cmd_install();
+    }
+
+    /* Check for 'add' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "add") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "usage: clat add <package> [version]\n");
+            return 1;
+        }
+        const char *pkg_version = (argc >= 4) ? argv[3] : NULL;
+        return pkg_cmd_add(argv[2], pkg_version);
+    }
+
+    /* Check for 'remove' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "remove") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "usage: clat remove <package>\n");
+            return 1;
+        }
+        return pkg_cmd_remove(argv[2]);
     }
 
     for (int i = 1; i < argc; i++) {
