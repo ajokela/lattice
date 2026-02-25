@@ -5,6 +5,6 @@ fn fib(n: Int) -> Int {
 }
 
 fn main() {
-    let result = fib(32)
+    let result = fib(30)
     print(to_string(result))
 }

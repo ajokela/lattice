@@ -18,17 +18,17 @@ DIM='\033[2m'
 NC='\033[0m'
 
 benchmarks=(
-    "fib_recursive:Fibonacci recursive (n=32)"
-    "fib_iterative:Fibonacci iterative (50K)"
-    "nested_loops:Nested loops (1M iters)"
-    "sieve:Sieve of Eratosthenes (20K)"
+    "fib_recursive:Fibonacci recursive (n=30)"
+    "fib_iterative:Fibonacci iterative (10K)"
+    "nested_loops:Nested loops (250K iters)"
+    "sieve:Sieve of Eratosthenes (10K)"
     "bubble_sort:Bubble sort (500 elements)"
-    "map_operations:Map ops (5K insert+look)"
-    "string_concat:String concat (50K)"
+    "map_operations:Map ops (2K insert+look)"
+    "string_concat:String concat (2K appends)"
     "matrix_mul:Matrix multiply (30x30)"
-    "closures:Closures (100K create+call)"
-    "scope_spawn:Scope/spawn (500 rounds)"
-    "select_channels:Select channels (5K)"
+    "closures:Closures (1K create+call)"
+    "scope_spawn:Scope/spawn (200 rounds)"
+    "select_channels:Select channels (500)"
 )
 
 # Get median of N values

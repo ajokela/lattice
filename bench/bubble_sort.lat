@@ -1,4 +1,4 @@
-// Benchmark: bubble sort (O(n^2) comparisons and swaps, 500 elements)
+// Benchmark: bubble sort (O(n^2) comparisons and swaps)
 fn main() {
     flux arr = []
     flux i = 500

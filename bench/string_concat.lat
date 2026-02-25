@@ -1,8 +1,8 @@
-// Benchmark: string concatenation (50K appends)
+// Benchmark: string concatenation and manipulation
 fn main() {
     flux s = ""
     flux i = 0
-    while i < 50000 {
+    while i < 2000 {
         s += "a"
         i += 1
     }

@@ -1,4 +1,4 @@
-// Benchmark: Sieve of Eratosthenes (array-heavy, n=20K)
+// Benchmark: Sieve of Eratosthenes (array-heavy, index access)
 fn sieve(limit: Int) -> Int {
     flux flags = []
     flux i = 0
@@ -35,6 +35,6 @@ fn sieve(limit: Int) -> Int {
 }
 
 fn main() {
-    let count = sieve(20000)
+    let count = sieve(10000)
     print(to_string(count))
 }

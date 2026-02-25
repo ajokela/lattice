@@ -1,8 +1,8 @@
-// Benchmark: select channel multiplexing (5000 rounds)
+// Benchmark: select channel multiplexing
 fn main() {
     flux total = 0
     flux round = 0
-    while round < 5000 {
+    while round < 500 {
         let ch1 = Channel::new()
         let ch2 = Channel::new()
         let out = Channel::new()
