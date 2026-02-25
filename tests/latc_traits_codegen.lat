@@ -1,0 +1,245 @@
+// Test: trait/impl codegen in self-hosted compiler
+// Tests trait declarations, impl blocks, method dispatch, and edge cases
+
+struct Point { x: any, y: any }
+struct Circle { cx: any, cy: any, radius: any }
+struct Counter { value: any }
+
+// ---- Trait declarations ----
+
+trait Displayable {
+    fn display(self: any) -> any
+}
+
+trait HasArea {
+    fn area(self: any) -> any
+}
+
+trait Resettable {
+    fn reset(self: any) -> any
+}
+
+// ---- Multiple traits on same type ----
+
+impl Displayable for Point {
+    fn display(self: any) -> any {
+        return "Point(" + to_string(self.x) + ", " + to_string(self.y) + ")"
+    }
+}
+
+impl HasArea for Point {
+    fn area(self: any) -> any {
+        return self.x * self.y
+    }
+}
+
+// ---- Trait on different type ----
+
+impl Displayable for Circle {
+    fn display(self: any) -> any {
+        return "Circle(r=" + to_string(self.radius) + ")"
+    }
+}
+
+impl HasArea for Circle {
+    fn area(self: any) -> any {
+        return 3.14159 * self.radius * self.radius
+    }
+}
+
+// ---- Method with multiple params ----
+
+impl Resettable for Counter {
+    fn reset(self: any) -> any {
+        return Counter { value: 0 }
+    }
+}
+
+// ---- Helper function using trait methods ----
+
+fn describe(thing: any) {
+    return thing.display()
+}
+
+fn get_area(shape: any) {
+    return shape.area()
+}
+
+// ---- Tests ----
+
+fn test_basic_trait_methods() {
+    print("--- basic trait methods ---")
+    let p = Point { x: 3, y: 4 }
+    let d = p.display()
+    print(d)
+    assert(d == "Point(3, 4)", "display method should work")
+
+    let a = p.area()
+    print(a)
+    assert(a == 12, "area method should work")
+}
+
+fn test_multiple_traits_same_type() {
+    print("--- multiple traits on same type ---")
+    let p = Point { x: 5, y: 10 }
+    assert(p.display() == "Point(5, 10)", "display on point")
+    assert(p.area() == 50, "area on point")
+    print("ok")
+}
+
+fn test_same_trait_different_types() {
+    print("--- same trait on different types ---")
+    let p = Point { x: 6, y: 7 }
+    let c = Circle { cx: 0, cy: 0, radius: 5 }
+
+    let pd = p.display()
+    let cd = c.display()
+    print(pd)
+    print(cd)
+    assert(pd == "Point(6, 7)", "point display")
+    assert(cd == "Circle(r=5)", "circle display")
+}
+
+fn test_trait_method_with_different_values() {
+    print("--- trait methods with different values ---")
+    let c1 = Circle { cx: 0, cy: 0, radius: 1 }
+    let c2 = Circle { cx: 0, cy: 0, radius: 10 }
+    let a1 = c1.area()
+    let a2 = c2.area()
+    print(a1)
+    print(a2)
+    // 3.14159 * 1 = 3.14159
+    // 3.14159 * 100 = 314.159
+    assert(a1 > 3.14 && a1 < 3.15, "unit circle area")
+    assert(a2 > 314 && a2 < 315, "radius 10 circle area")
+}
+
+fn test_trait_method_passed_to_fn() {
+    print("--- trait method via function ---")
+    let p = Point { x: 1, y: 2 }
+    let c = Circle { cx: 0, cy: 0, radius: 3 }
+    let dp = describe(p)
+    let dc = describe(c)
+    print(dp)
+    print(dc)
+    assert(dp == "Point(1, 2)", "describe point")
+    assert(dc == "Circle(r=3)", "describe circle")
+}
+
+fn test_trait_returning_struct() {
+    print("--- trait method returning struct ---")
+    let c = Counter { value: 42 }
+    print(c.value)
+    let c2 = c.reset()
+    print(c2.value)
+    assert(c2.value == 0, "reset should return counter with value 0")
+}
+
+fn test_trait_method_in_loop() {
+    print("--- trait methods in loop ---")
+    let points = [
+        Point { x: 1, y: 1 },
+        Point { x: 2, y: 3 },
+        Point { x: 4, y: 5 }
+    ]
+    flux total_area = 0
+    for p in points {
+        total_area = total_area + p.area()
+    }
+    print(total_area)
+    assert(total_area == 1 + 6 + 20, "sum of areas")
+}
+
+fn test_trait_method_chaining() {
+    print("--- trait method chain ---")
+    // Reset then check
+    let c = Counter { value: 100 }
+    let result = c.reset().value
+    assert(result == 0, "chained reset value")
+    print("ok")
+}
+
+// ---- Trait with extra parameters ----
+
+struct Vec2 { x: any, y: any }
+
+trait Scalable {
+    fn scale(self: any, factor: any) -> any
+}
+
+trait Combinable {
+    fn combine(self: any, other: any) -> any
+}
+
+impl Scalable for Vec2 {
+    fn scale(self: any, factor: any) -> any {
+        return Vec2 { x: self.x * factor, y: self.y * factor }
+    }
+}
+
+impl Combinable for Vec2 {
+    fn combine(self: any, other: any) -> any {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+fn test_trait_extra_params() {
+    print("--- trait with extra params ---")
+    let v = Vec2 { x: 3, y: 4 }
+    let scaled = v.scale(2)
+    print(scaled.x)
+    print(scaled.y)
+    assert(scaled.x == 6, "scaled x")
+    assert(scaled.y == 8, "scaled y")
+
+    let v2 = Vec2 { x: 10, y: 20 }
+    let combined = v.combine(v2)
+    print(combined.x)
+    print(combined.y)
+    assert(combined.x == 13, "combined x")
+    assert(combined.y == 24, "combined y")
+}
+
+// ---- Trait on enum ----
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Rgb(any, any, any)
+}
+
+trait Named {
+    fn name(self: any) -> any
+}
+
+impl Named for Color {
+    fn name(self: any) -> any {
+        return "a color"
+    }
+}
+
+fn test_trait_on_enum() {
+    print("--- trait on enum ---")
+    let r = Color::Red
+    print(r.name())
+    assert(r.name() == "a color", "enum trait method")
+
+    let g = Color::Green
+    assert(g.name() == "a color", "enum trait on Green")
+    print("ok")
+}
+
+fn main() {
+    test_basic_trait_methods()
+    test_multiple_traits_same_type()
+    test_same_trait_different_types()
+    test_trait_method_with_different_values()
+    test_trait_method_passed_to_fn()
+    test_trait_returning_struct()
+    test_trait_method_in_loop()
+    test_trait_method_chaining()
+    test_trait_extra_params()
+    test_trait_on_enum()
+    print("ALL TRAIT/IMPL CODEGEN TESTS PASSED")
+}

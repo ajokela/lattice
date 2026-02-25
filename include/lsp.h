@@ -39,10 +39,43 @@ typedef struct {
     char *name;
     char *signature;
     char *doc;
+    char *owner_type;   /* for methods: "Array", "String", "Map", etc. */
     LspSymbolKind kind;
     int line;   /* 0-based, for user-defined symbols */
     int col;
 } LspSymbol;
+
+/* ── Struct field info (for completion) ── */
+
+typedef struct {
+    char *name;
+    char *type_name;    /* nullable — type annotation if present */
+} LspFieldInfo;
+
+/* ── Enum variant info (for completion) ── */
+
+typedef struct {
+    char *name;
+    char *params;       /* nullable — e.g. "(Int, String)" for tuple variants */
+} LspVariantInfo;
+
+/* ── Struct definition (for completion) ── */
+
+typedef struct {
+    char *name;
+    LspFieldInfo *fields;
+    size_t field_count;
+    int line;
+} LspStructDef;
+
+/* ── Enum definition (for completion) ── */
+
+typedef struct {
+    char *name;
+    LspVariantInfo *variants;
+    size_t variant_count;
+    int line;
+} LspEnumDef;
 
 /* ── Document ── */
 
@@ -55,6 +88,11 @@ typedef struct {
     size_t diag_count;
     LspSymbol *symbols;
     size_t symbol_count;
+    /* Struct/enum definitions for completion */
+    LspStructDef *struct_defs;
+    size_t struct_def_count;
+    LspEnumDef *enum_defs;
+    size_t enum_def_count;
 } LspDocument;
 
 /* ── Symbol Index (builtins + methods) ── */

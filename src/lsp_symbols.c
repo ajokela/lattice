@@ -13,13 +13,15 @@ static void idx_add_builtin(LspSymbolIndex *idx, const char *name,
     s->name = strdup(name);
     s->signature = strdup(sig);
     s->doc = strdup(doc);
+    s->owner_type = NULL;
     s->kind = LSP_SYM_FUNCTION;
     s->line = -1;
     s->col = -1;
 }
 
 static void idx_add_method(LspSymbolIndex *idx, const char *name,
-                           const char *sig, const char *doc) {
+                           const char *sig, const char *doc,
+                           const char *owner_type) {
     if (idx->method_count >= idx->method_cap) {
         idx->method_cap = idx->method_cap ? idx->method_cap * 2 : 64;
         idx->methods = realloc(idx->methods, idx->method_cap * sizeof(LspSymbol));
@@ -28,20 +30,40 @@ static void idx_add_method(LspSymbolIndex *idx, const char *name,
     s->name = strdup(name);
     s->signature = strdup(sig);
     s->doc = strdup(doc);
+    s->owner_type = owner_type ? strdup(owner_type) : NULL;
     s->kind = LSP_SYM_METHOD;
     s->line = -1;
     s->col = -1;
 }
 
-/* Extract name from signature: "name(args) -> Type" → "name" */
+/* Extract name from signature: "name(args) -> Type" → "name"
+ * For method sigs like "Array.contains(val)" → "contains" */
 static char *extract_name(const char *sig) {
     const char *paren = strchr(sig, '(');
     if (!paren) return strdup(sig);
-    size_t len = (size_t)(paren - sig);
+    const char *start = sig;
+    /* Skip past "Type." prefix if present */
+    const char *dot = memchr(sig, '.', (size_t)(paren - sig));
+    if (dot) start = dot + 1;
+    size_t len = (size_t)(paren - start);
     char *name = malloc(len + 1);
-    memcpy(name, sig, len);
+    memcpy(name, start, len);
     name[len] = '\0';
     return name;
+}
+
+/* Extract the owner type from a method signature: "Array.contains(...)" → "Array"
+ * Returns NULL for builtins without a dot prefix. */
+static char *extract_owner_type(const char *sig) {
+    const char *paren = strchr(sig, '(');
+    if (!paren) return NULL;
+    const char *dot = memchr(sig, '.', (size_t)(paren - sig));
+    if (!dot) return NULL;
+    size_t len = (size_t)(dot - sig);
+    char *type = malloc(len + 1);
+    memcpy(type, sig, len);
+    type[len] = '\0';
+    return type;
 }
 
 /* Scan a single source file for /// @builtin and /// @method doc comments */
@@ -103,10 +125,13 @@ static void scan_file(LspSymbolIndex *idx, const char *path) {
 
         char *name = extract_name(sig);
 
-        if (is_builtin)
+        if (is_builtin) {
             idx_add_builtin(idx, name, sig, doc);
-        else
-            idx_add_method(idx, name, sig, doc);
+        } else {
+            char *owner = extract_owner_type(sig);
+            idx_add_method(idx, name, sig, doc, owner);
+            free(owner);
+        }
 
         free(name);
     }
@@ -131,12 +156,14 @@ void lsp_symbol_index_free(LspSymbolIndex *idx) {
         free(idx->builtins[i].name);
         free(idx->builtins[i].signature);
         free(idx->builtins[i].doc);
+        free(idx->builtins[i].owner_type);
     }
     free(idx->builtins);
     for (size_t i = 0; i < idx->method_count; i++) {
         free(idx->methods[i].name);
         free(idx->methods[i].signature);
         free(idx->methods[i].doc);
+        free(idx->methods[i].owner_type);
     }
     free(idx->methods);
     free(idx);

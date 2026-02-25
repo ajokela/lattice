@@ -3220,19 +3220,47 @@ fn parse_import() {
 fn parse_trait_declaration() {
     let line = current_line()
     advance()  // consume 'trait'
-    expect("identifier", nil)  // trait name
+    let trait_name = expect("identifier", nil).text
     expect(nil, "{")
-    // Skip trait body (method signatures)
-    flux depth = 1
-    while depth > 0 {
+
+    // Parse method signatures and collect method names
+    flux method_names = []
+    while peek_text() != "}" {
         if peek() == nil {
             compiler_error("unexpected end of input in trait declaration", line)
         }
-        let t = advance()
-        if t.text == "{" { depth = depth + 1 }
-        if t.text == "}" { depth = depth - 1 }
+        // Each entry should be: fn name(params...) [-> RetType]
+        if peek_text() == "fn" {
+            advance()  // consume 'fn'
+            let mname = expect("identifier", nil).text
+            method_names.push(mname)
+            // Skip the rest of the signature (params, return type)
+            // Use brace/paren depth tracking
+            flux sig_depth = 0
+            while peek() != nil {
+                let st = peek_text()
+                if st == "(" || st == "{" { sig_depth = sig_depth + 1 }
+                if st == ")" || st == "}" { sig_depth = sig_depth - 1 }
+                if sig_depth < 0 { break }
+                advance()
+                if sig_depth == 0 && (st == ")" || st == "}") { break }
+            }
+        } else {
+            // Skip unexpected tokens
+            advance()
+        }
     }
-    // Traits are metadata only — no bytecode emitted
+    expect(nil, "}")
+
+    // Emit trait metadata: __trait_<Name> = array of required method name strings
+    let method_count = len(method_names)
+    for i in 0..method_count {
+        emit_constant(make_string_const(method_names[i]), line)
+    }
+    emit_bytes(OP_BUILD_ARRAY, method_count, line)
+    let meta_name = "__trait_" + trait_name
+    let idx = string_constant(meta_name)
+    emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
 }
 
 fn parse_impl_block() {
@@ -3489,6 +3517,13 @@ fn parse_impl_block() {
         }
     }
     expect(nil, "}")
+
+    // Emit impl metadata: __impl_<TypeName>_<TraitName> = true
+    // This registers that TypeName implements TraitName
+    emit_byte(OP_TRUE, line)
+    let impl_meta = "__impl_" + type_name + "_" + trait_name
+    let impl_idx = string_constant(impl_meta)
+    emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, impl_idx, line)
 }
 
 // ============================================================================

@@ -2,6 +2,7 @@
 #define CHUNK_H
 
 #include "value.h"
+#include "inline_cache.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,6 +28,7 @@ typedef struct {
     char    **export_names;   /* Module export list (NULL = export-all) */
     size_t    export_count;
     bool      has_exports;    /* true if module uses explicit exports */
+    PICTable  pic;            /* Polymorphic inline cache for method dispatch */
 } Chunk;
 
 Chunk *chunk_new(void);

@@ -152,8 +152,9 @@ static void handle_initialize(LspServer *srv, int id) {
     cJSON *compOpts = cJSON_CreateObject();
     cJSON *triggers = cJSON_CreateArray();
     cJSON_AddItemToArray(triggers, cJSON_CreateString("."));
+    cJSON_AddItemToArray(triggers, cJSON_CreateString(":"));
     cJSON_AddItemToObject(compOpts, "triggerCharacters", triggers);
-    cJSON_AddItemToObject(caps, "completionProvider", compOpts);
+    cJSON_AddItemToObject(compOpts, "completionProvider", compOpts);
 
     /* Hover */
     cJSON_AddBoolToObject(caps, "hoverProvider", 1);
@@ -258,11 +259,469 @@ static void handle_did_close(LspServer *srv, cJSON *params) {
 
 /* ── Handler: textDocument/completion ── */
 
+/* Navigate to the start of a given 0-based line in text.
+ * Returns pointer to the start of that line, or end of text. */
+static const char *goto_line(const char *text, int target_line) {
+    const char *p = text;
+    int line = 0;
+    while (line < target_line && *p) {
+        if (*p == '\n') line++;
+        p++;
+    }
+    return p;
+}
+
+/* Extract the identifier immediately before a given column on a line.
+ * Returns a malloc'd string, or NULL. */
+static char *extract_preceding_ident(const char *line_start, int col) {
+    const char *end = line_start + col;
+    const char *start = end;
+    while (start > line_start && is_ident_char(start[-1]))
+        start--;
+    if (start >= end) return NULL;
+    size_t len = (size_t)(end - start);
+    char *id = malloc(len + 1);
+    memcpy(id, start, len);
+    id[len] = '\0';
+    return id;
+}
+
+/* Check if cursor is immediately after '.' (dot access).
+ * If so, extract the identifier before the dot and return it (malloc'd).
+ * Returns NULL if not a dot context. */
+static char *detect_dot_access(const char *text, int line, int col) {
+    const char *line_start = goto_line(text, line);
+    if (col < 1) return NULL;
+    /* Walk to col position */
+    const char *line_end = line_start;
+    while (*line_end && *line_end != '\n') line_end++;
+    int eff_col = col < (int)(line_end - line_start) ? col : (int)(line_end - line_start);
+    if (eff_col < 1) return NULL;
+    char ch = line_start[eff_col - 1];
+    if (ch != '.') return NULL;
+    /* Extract the identifier before the dot */
+    return extract_preceding_ident(line_start, eff_col - 1);
+}
+
+/* Check if cursor is immediately after '::' (path separator).
+ * If so, extract the identifier before '::' and return it (malloc'd).
+ * Returns NULL if not a '::' context. */
+static char *detect_path_access(const char *text, int line, int col) {
+    const char *line_start = goto_line(text, line);
+    if (col < 2) return NULL;
+    const char *line_end = line_start;
+    while (*line_end && *line_end != '\n') line_end++;
+    int eff_col = col < (int)(line_end - line_start) ? col : (int)(line_end - line_start);
+    if (eff_col < 2) return NULL;
+    if (line_start[eff_col - 1] != ':' || line_start[eff_col - 2] != ':')
+        return NULL;
+    return extract_preceding_ident(line_start, eff_col - 2);
+}
+
+/* Infer the type of a variable by scanning the document text for its declaration.
+ * Looks for patterns like:
+ *   - let/flux/fix name: Type = ...
+ *   - let/flux/fix name = "..."    -> String
+ *   - let/flux/fix name = [...]    -> Array
+ *   - let/flux/fix name = Map::new() -> Map
+ *   - let/flux/fix name = Buffer::new(...) -> Buffer
+ *   - let/flux/fix name = Set::new() -> Set
+ *   - let/flux/fix name = Channel::new() -> Channel
+ *   - let/flux/fix name = Ref::new(...) -> Ref
+ *   - let/flux/fix name = StructName { ... } -> StructName
+ *   - fn params with type annotations
+ * Returns a malloc'd type string, or NULL. */
+static char *infer_variable_type(const char *text, const char *var_name,
+                                  int use_line, const LspDocument *doc) {
+    /* Strategy: scan backwards from use_line for declarations of var_name */
+    const char *p = text;
+    int cur_line = 0;
+    const char *best_match = NULL;
+    int best_line = -1;
+
+    while (*p) {
+        const char *line_start = p;
+        /* Find end of line */
+        while (*p && *p != '\n') p++;
+
+        if (cur_line <= use_line) {
+            /* Look for "let/flux/fix <name>" pattern */
+            const char *scan = line_start;
+            while (scan < p && (*scan == ' ' || *scan == '\t')) scan++;
+
+            bool is_decl = false;
+            const char *after_kw = NULL;
+            if (strncmp(scan, "let ", 4) == 0) { is_decl = true; after_kw = scan + 4; }
+            else if (strncmp(scan, "flux ", 5) == 0) { is_decl = true; after_kw = scan + 5; }
+            else if (strncmp(scan, "fix ", 4) == 0) { is_decl = true; after_kw = scan + 4; }
+
+            if (is_decl && after_kw) {
+                while (after_kw < p && (*after_kw == ' ' || *after_kw == '\t')) after_kw++;
+                size_t vlen = strlen(var_name);
+                if (strncmp(after_kw, var_name, vlen) == 0) {
+                    char ch = after_kw[vlen];
+                    if (ch == ' ' || ch == ':' || ch == '=' || ch == '\t' ||
+                        ch == '\n' || ch == '\r' || ch == '\0') {
+                        best_match = after_kw + vlen;
+                        best_line = cur_line;
+                    }
+                }
+            }
+
+            /* Also check function parameters: fn name(... var_name: Type ...) */
+            if (strncmp(scan, "fn ", 3) == 0) {
+                const char *paren = strchr(scan, '(');
+                if (paren && paren < p) {
+                    const char *close = strchr(paren, ')');
+                    if (!close || close > p) close = p;
+                    /* Search for var_name within parens */
+                    const char *search = paren + 1;
+                    size_t vlen = strlen(var_name);
+                    while (search < close) {
+                        while (search < close && (*search == ' ' || *search == ','))
+                            search++;
+                        if (search + vlen <= close &&
+                            strncmp(search, var_name, vlen) == 0) {
+                            char nc = search[vlen];
+                            if (nc == ':' || nc == ' ' || nc == ',' || nc == ')') {
+                                const char *colon = search + vlen;
+                                while (colon < close && *colon == ' ') colon++;
+                                if (*colon == ':') {
+                                    colon++;
+                                    while (colon < close && *colon == ' ') colon++;
+                                    const char *tstart = colon;
+                                    while (colon < close && *colon != ',' && *colon != ')' &&
+                                           *colon != ' ')
+                                        colon++;
+                                    if (colon > tstart) {
+                                        size_t tlen = (size_t)(colon - tstart);
+                                        char *type = malloc(tlen + 1);
+                                        memcpy(type, tstart, tlen);
+                                        type[tlen] = '\0';
+                                        return type;
+                                    }
+                                }
+                            }
+                        }
+                        /* Skip to next param */
+                        while (search < close && *search != ',') search++;
+                        if (search < close) search++;
+                    }
+                }
+            }
+
+            /* Check for-in loop: for var_name in arr_expr */
+            if (strncmp(scan, "for ", 4) == 0) {
+                const char *after_for = scan + 4;
+                while (after_for < p && (*after_for == ' ' || *after_for == '\t'))
+                    after_for++;
+                size_t vlen = strlen(var_name);
+                if (strncmp(after_for, var_name, vlen) == 0) {
+                    char nc = after_for[vlen];
+                    if (nc == ' ' || nc == '\t') {
+                        /* for-in loop variable - can't easily infer element type */
+                    }
+                }
+            }
+        }
+
+        if (*p == '\n') p++;
+        cur_line++;
+    }
+
+    if (!best_match) return NULL;
+
+    /* Now parse what comes after "var_name" in the declaration */
+    const char *q = best_match;
+    /* Skip whitespace */
+    while (*q == ' ' || *q == '\t') q++;
+
+    /* Check for type annotation: "name: Type" */
+    if (*q == ':') {
+        q++;
+        while (*q == ' ' || *q == '\t') q++;
+        const char *type_start = q;
+        while (*q && *q != '=' && *q != ' ' && *q != '\t' && *q != '\n' && *q != '\r')
+            q++;
+        if (q > type_start) {
+            size_t tlen = (size_t)(q - type_start);
+            char *type = malloc(tlen + 1);
+            memcpy(type, type_start, tlen);
+            type[tlen] = '\0';
+            return type;
+        }
+    }
+
+    /* Check for initializer: "name = expr" */
+    if (*q == '=') {
+        q++;
+        while (*q == ' ' || *q == '\t') q++;
+
+        /* String literal */
+        if (*q == '"' || *q == '\'') return strdup("String");
+
+        /* Array literal */
+        if (*q == '[') return strdup("Array");
+
+        /* Numeric literal */
+        if (*q >= '0' && *q <= '9') {
+            /* Check for float */
+            const char *num = q;
+            while (*num && ((*num >= '0' && *num <= '9') || *num == '.' || *num == '_'))
+                num++;
+            const char *dot = strchr(q, '.');
+            if (dot && dot < num) return strdup("Float");
+            return strdup("Int");
+        }
+
+        /* Boolean literal */
+        if (strncmp(q, "true", 4) == 0 || strncmp(q, "false", 5) == 0)
+            return strdup("Bool");
+
+        /* Type::new() constructors */
+        if (strncmp(q, "Map::new", 8) == 0) return strdup("Map");
+        if (strncmp(q, "Set::new", 8) == 0 || strncmp(q, "Set::from", 9) == 0)
+            return strdup("Set");
+        if (strncmp(q, "Buffer::new", 11) == 0 ||
+            strncmp(q, "Buffer::from", 12) == 0)
+            return strdup("Buffer");
+        if (strncmp(q, "Channel::new", 12) == 0) return strdup("Channel");
+        if (strncmp(q, "Ref::new", 8) == 0) return strdup("Ref");
+
+        /* Struct constructor: StructName { ... } or StructName::new(...) */
+        if (*q >= 'A' && *q <= 'Z') {
+            const char *id_start = q;
+            while (*q && is_ident_char(*q)) q++;
+            size_t id_len = (size_t)(q - id_start);
+            /* Skip whitespace */
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '{' || (*q == ':' && *(q+1) == ':')) {
+                /* Check if this is a known struct name */
+                char *name = malloc(id_len + 1);
+                memcpy(name, id_start, id_len);
+                name[id_len] = '\0';
+                if (doc) {
+                    for (size_t i = 0; i < doc->struct_def_count; i++) {
+                        if (strcmp(doc->struct_defs[i].name, name) == 0)
+                            return name;  /* confirmed struct type */
+                    }
+                }
+                /* Could also be an enum variant assignment, but return the type anyway */
+                return name;
+            }
+        }
+    }
+
+    (void)best_line;
+    return NULL;
+}
+
+/* Add method completions for a given owner type */
+static void add_method_completions(cJSON *items, const LspSymbolIndex *idx,
+                                    const char *type_name) {
+    if (!idx) return;
+    for (size_t i = 0; i < idx->method_count; i++) {
+        if (idx->methods[i].owner_type &&
+            strcmp(idx->methods[i].owner_type, type_name) == 0) {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "label", idx->methods[i].name);
+            cJSON_AddNumberToObject(item, "kind", 2);  /* Method */
+            if (idx->methods[i].signature)
+                cJSON_AddStringToObject(item, "detail", idx->methods[i].signature);
+            if (idx->methods[i].doc) {
+                cJSON *doc_obj = cJSON_CreateObject();
+                cJSON_AddStringToObject(doc_obj, "kind", "markdown");
+                cJSON_AddStringToObject(doc_obj, "value", idx->methods[i].doc);
+                cJSON_AddItemToObject(item, "documentation", doc_obj);
+            }
+            cJSON_AddItemToArray(items, item);
+        }
+    }
+}
+
+/* Add struct field completions */
+static void add_struct_field_completions(cJSON *items, const LspDocument *doc,
+                                          const char *struct_name) {
+    for (size_t i = 0; i < doc->struct_def_count; i++) {
+        if (strcmp(doc->struct_defs[i].name, struct_name) == 0) {
+            for (size_t j = 0; j < doc->struct_defs[i].field_count; j++) {
+                LspFieldInfo *f = &doc->struct_defs[i].fields[j];
+                cJSON *item = cJSON_CreateObject();
+                cJSON_AddStringToObject(item, "label", f->name);
+                cJSON_AddNumberToObject(item, "kind", 5);  /* Field */
+                if (f->type_name)
+                    cJSON_AddStringToObject(item, "detail", f->type_name);
+                cJSON_AddItemToArray(items, item);
+            }
+            break;
+        }
+    }
+}
+
+/* Add enum variant completions */
+static void add_enum_variant_completions(cJSON *items, const LspDocument *doc,
+                                          const char *enum_name) {
+    for (size_t i = 0; i < doc->enum_def_count; i++) {
+        if (strcmp(doc->enum_defs[i].name, enum_name) == 0) {
+            for (size_t j = 0; j < doc->enum_defs[i].variant_count; j++) {
+                LspVariantInfo *v = &doc->enum_defs[i].variants[j];
+                cJSON *item = cJSON_CreateObject();
+                cJSON_AddStringToObject(item, "label", v->name);
+                cJSON_AddNumberToObject(item, "kind", 20);  /* EnumMember */
+                if (v->params) {
+                    char detail[256];
+                    snprintf(detail, sizeof(detail), "%s::%s%s",
+                             enum_name, v->name, v->params);
+                    cJSON_AddStringToObject(item, "detail", detail);
+                } else {
+                    char detail[256];
+                    snprintf(detail, sizeof(detail), "%s::%s", enum_name, v->name);
+                    cJSON_AddStringToObject(item, "detail", detail);
+                }
+                cJSON_AddItemToArray(items, item);
+            }
+            break;
+        }
+    }
+}
+
+/* Check if a name corresponds to a known enum in the document */
+static bool is_enum_name(const LspDocument *doc, const char *name) {
+    for (size_t i = 0; i < doc->enum_def_count; i++) {
+        if (strcmp(doc->enum_defs[i].name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Check if a name corresponds to a known struct in the document */
+static bool is_struct_name(const LspDocument *doc, const char *name) {
+    for (size_t i = 0; i < doc->struct_def_count; i++) {
+        if (strcmp(doc->struct_defs[i].name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
 static void handle_completion(LspServer *srv, cJSON *params, int id) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    cJSON *pos = cJSON_GetObjectItem(params, "position");
     const char *uri = td ? cJSON_GetObjectItem(td, "uri")->valuestring : NULL;
 
+    int line = 0, col = 0;
+    if (pos) {
+        line = cJSON_GetObjectItem(pos, "line")->valueint;
+        col = cJSON_GetObjectItem(pos, "character")->valueint;
+    }
+
+    LspDocument *doc = uri ? find_document(srv, uri) : NULL;
     cJSON *items = cJSON_CreateArray();
+
+    /* ── Check for dot-access completion (obj.) ── */
+    if (doc && doc->text) {
+        char *dot_obj = detect_dot_access(doc->text, line, col);
+        if (dot_obj) {
+            /* Try to infer the type of the object before the dot */
+            char *type = infer_variable_type(doc->text, dot_obj, line, doc);
+
+            if (type) {
+                /* Check if this is a struct type -> suggest fields */
+                if (is_struct_name(doc, type)) {
+                    add_struct_field_completions(items, doc, type);
+                }
+                /* Always add methods for the inferred type */
+                add_method_completions(items, srv->index, type);
+                free(type);
+            } else {
+                /* Could not infer type — check if the name itself is a builtin type
+                 * by looking at the first character (capitalized = could be type) */
+                if (dot_obj[0] >= 'A' && dot_obj[0] <= 'Z') {
+                    /* Might be a struct variable with capital name */
+                    if (is_struct_name(doc, dot_obj)) {
+                        add_struct_field_completions(items, doc, dot_obj);
+                    }
+                }
+                /* Fall back: suggest all methods */
+                if (srv->index) {
+                    for (size_t i = 0; i < srv->index->method_count; i++) {
+                        cJSON *item = cJSON_CreateObject();
+                        cJSON_AddStringToObject(item, "label",
+                            srv->index->methods[i].name);
+                        cJSON_AddNumberToObject(item, "kind", 2);  /* Method */
+                        if (srv->index->methods[i].signature)
+                            cJSON_AddStringToObject(item, "detail",
+                                srv->index->methods[i].signature);
+                        if (srv->index->methods[i].doc) {
+                            cJSON *doc_obj = cJSON_CreateObject();
+                            cJSON_AddStringToObject(doc_obj, "kind", "markdown");
+                            cJSON_AddStringToObject(doc_obj, "value",
+                                srv->index->methods[i].doc);
+                            cJSON_AddItemToObject(item, "documentation", doc_obj);
+                        }
+                        cJSON_AddItemToArray(items, item);
+                    }
+                }
+            }
+            free(dot_obj);
+
+            cJSON *resp = lsp_make_response(id, items);
+            lsp_write_response(resp, stdout);
+            cJSON_Delete(resp);
+            return;
+        }
+
+        /* ── Check for path-access completion (Name::) ── */
+        char *path_obj = detect_path_access(doc->text, line, col);
+        if (path_obj) {
+            /* Check if this is an enum name */
+            if (is_enum_name(doc, path_obj)) {
+                add_enum_variant_completions(items, doc, path_obj);
+            }
+            /* Also check builtin constructors: Map::, Set::, Buffer::, etc. */
+            if (srv->index) {
+                for (size_t i = 0; i < srv->index->builtin_count; i++) {
+                    /* Check if signature starts with "Name::" */
+                    const char *sig = srv->index->builtins[i].signature;
+                    if (sig) {
+                        size_t plen = strlen(path_obj);
+                        if (strncmp(sig, path_obj, plen) == 0 &&
+                            sig[plen] == ':' && sig[plen + 1] == ':') {
+                            /* Extract the method name after :: */
+                            const char *method_start = sig + plen + 2;
+                            const char *paren = strchr(method_start, '(');
+                            size_t mlen = paren ? (size_t)(paren - method_start)
+                                                : strlen(method_start);
+                            char *mname = malloc(mlen + 1);
+                            memcpy(mname, method_start, mlen);
+                            mname[mlen] = '\0';
+
+                            cJSON *item = cJSON_CreateObject();
+                            cJSON_AddStringToObject(item, "label", mname);
+                            cJSON_AddNumberToObject(item, "kind", 3); /* Function */
+                            cJSON_AddStringToObject(item, "detail", sig);
+                            if (srv->index->builtins[i].doc) {
+                                cJSON *doc_obj = cJSON_CreateObject();
+                                cJSON_AddStringToObject(doc_obj, "kind", "markdown");
+                                cJSON_AddStringToObject(doc_obj, "value",
+                                    srv->index->builtins[i].doc);
+                                cJSON_AddItemToObject(item, "documentation", doc_obj);
+                            }
+                            cJSON_AddItemToArray(items, item);
+                            free(mname);
+                        }
+                    }
+                }
+            }
+            free(path_obj);
+
+            cJSON *resp = lsp_make_response(id, items);
+            lsp_write_response(resp, stdout);
+            cJSON_Delete(resp);
+            return;
+        }
+    }
+
+    /* ── Default completion: keywords + builtins + document symbols ── */
 
     /* Keywords */
     for (int i = 0; lattice_keywords[i]; i++) {
@@ -280,25 +739,28 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
             cJSON_AddNumberToObject(item, "kind", 3);  /* Function */
             if (srv->index->builtins[i].signature)
                 cJSON_AddStringToObject(item, "detail", srv->index->builtins[i].signature);
+            if (srv->index->builtins[i].doc) {
+                cJSON *doc_obj = cJSON_CreateObject();
+                cJSON_AddStringToObject(doc_obj, "kind", "markdown");
+                cJSON_AddStringToObject(doc_obj, "value", srv->index->builtins[i].doc);
+                cJSON_AddItemToObject(item, "documentation", doc_obj);
+            }
             cJSON_AddItemToArray(items, item);
         }
     }
 
     /* User-defined symbols from current document */
-    if (uri) {
-        LspDocument *doc = find_document(srv, uri);
-        if (doc) {
-            for (size_t i = 0; i < doc->symbol_count; i++) {
-                cJSON *item = cJSON_CreateObject();
-                cJSON_AddStringToObject(item, "label", doc->symbols[i].name);
-                cJSON_AddNumberToObject(item, "kind",
-                    doc->symbols[i].kind == LSP_SYM_FUNCTION ? 3 :
-                    doc->symbols[i].kind == LSP_SYM_STRUCT   ? 22 :
-                    doc->symbols[i].kind == LSP_SYM_ENUM     ? 13 : 6);
-                if (doc->symbols[i].signature)
-                    cJSON_AddStringToObject(item, "detail", doc->symbols[i].signature);
-                cJSON_AddItemToArray(items, item);
-            }
+    if (doc) {
+        for (size_t i = 0; i < doc->symbol_count; i++) {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "label", doc->symbols[i].name);
+            cJSON_AddNumberToObject(item, "kind",
+                doc->symbols[i].kind == LSP_SYM_FUNCTION ? 3 :
+                doc->symbols[i].kind == LSP_SYM_STRUCT   ? 22 :
+                doc->symbols[i].kind == LSP_SYM_ENUM     ? 13 : 6);
+            if (doc->symbols[i].signature)
+                cJSON_AddStringToObject(item, "detail", doc->symbols[i].signature);
+            cJSON_AddItemToArray(items, item);
         }
     }
 

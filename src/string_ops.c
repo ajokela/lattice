@@ -417,6 +417,78 @@ const char *lat_find_similar(const char *name, const char **candidates, int max_
     return best;
 }
 
+/* ── Built-in type names for "did you mean?" suggestions ── */
+
+static const char *builtin_type_names[] = {
+    "Int", "Float", "String", "Bool", "Array", "Map", "Set", "Buffer",
+    "Channel", "Nil", "Any", "Fn", "Tuple", "Ref", "Enum", "Struct",
+    "Range", "Number", "Closure",
+    NULL
+};
+
+bool lat_is_known_type(const char *name) {
+    if (!name) return false;
+    for (int i = 0; builtin_type_names[i]; i++) {
+        if (strcmp(name, builtin_type_names[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+const char *lat_find_similar_type(const char *name,
+                                  const char **struct_names,
+                                  const char **enum_names) {
+    if (!name) return NULL;
+    const char *best = NULL;
+    int best_dist = 3; /* max_distance + 1 */
+
+    /* Search built-in types */
+    for (int i = 0; builtin_type_names[i]; i++) {
+        int d = lat_levenshtein(name, builtin_type_names[i]);
+        if (d > 0 && d < best_dist) {
+            best_dist = d;
+            best = builtin_type_names[i];
+        }
+    }
+    /* Search user-defined struct names */
+    if (struct_names) {
+        for (int i = 0; struct_names[i]; i++) {
+            int d = lat_levenshtein(name, struct_names[i]);
+            if (d > 0 && d < best_dist) {
+                best_dist = d;
+                best = struct_names[i];
+            }
+        }
+    }
+    /* Search user-defined enum names */
+    if (enum_names) {
+        for (int i = 0; enum_names[i]; i++) {
+            int d = lat_levenshtein(name, enum_names[i]);
+            if (d > 0 && d < best_dist) {
+                best_dist = d;
+                best = enum_names[i];
+            }
+        }
+    }
+    return best;
+}
+
+/* ── Keyword list for "did you mean?" suggestions ── */
+
+static const char *lattice_keywords[] = {
+    "fn", "let", "flux", "fix", "if", "else", "while", "for", "in",
+    "return", "break", "continue", "struct", "enum", "trait", "impl",
+    "match", "scope", "spawn", "select", "defer", "try", "catch",
+    "throw", "import", "true", "false", "nil", "freeze", "thaw",
+    "sublimate", "phase_of", "typeof", "print", "loop", "clone",
+    "anneal", "forge", "test", "from", "as", "crystallize", "export",
+    NULL
+};
+
+const char *lat_find_similar_keyword(const char *name) {
+    return lat_find_similar(name, lattice_keywords, 2);
+}
+
 char *lat_str_kebab_case(const char *s) {
     s = safe_str(s);
     size_t len = strlen(s);

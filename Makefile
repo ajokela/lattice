@@ -188,7 +188,7 @@ test-all-backends: $(TEST_TARGET)
 	@echo "=== tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
 	@echo "=== regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
 
-LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features
+LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_traits latc_traits_codegen
 
 test-latc: $(TARGET)
 	@PASS=0; FAIL=0; \

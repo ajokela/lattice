@@ -1347,6 +1347,465 @@ static LatValue native_is_leap_year(LatValue *args, int ac) {
     return value_bool(datetime_is_leap_year((int)args[0].as.int_val));
 }
 
+/* ── Duration helpers ── */
+
+static LatValue make_duration_map(int64_t total_ms) {
+    int64_t ms = total_ms % 1000; if (ms < 0) ms = -ms;
+    int64_t rem = total_ms / 1000;
+    int64_t s = rem % 60; if (s < 0) s = -s;
+    rem /= 60;
+    int64_t m = rem % 60; if (m < 0) m = -m;
+    int64_t h = rem / 60;
+
+    LatValue map = value_map_new();
+    LatValue vh = value_int(h);
+    LatValue vm_ = value_int(m);
+    LatValue vs = value_int(s);
+    LatValue vms = value_int(ms);
+    LatValue vtot = value_int(total_ms);
+    lat_map_set(map.as.map.map, "hours", &vh);
+    lat_map_set(map.as.map.map, "minutes", &vm_);
+    lat_map_set(map.as.map.map, "seconds", &vs);
+    lat_map_set(map.as.map.map, "millis", &vms);
+    lat_map_set(map.as.map.map, "total_ms", &vtot);
+    return map;
+}
+
+/// @builtin duration(hours: Int, minutes: Int, seconds: Int, millis: Int) -> Map
+/// @category Date & Time
+/// Create a Duration map with hours, minutes, seconds, millis fields.
+/// @example duration(2, 30, 15, 0)  // {hours: 2, minutes: 30, seconds: 15, millis: 0, total_ms: 9015000}
+static LatValue native_duration(LatValue *args, int ac) {
+    if (ac != 4 || args[0].type != VAL_INT || args[1].type != VAL_INT ||
+        args[2].type != VAL_INT || args[3].type != VAL_INT) {
+        current_rt->error = strdup("duration: expected (hours: Int, minutes: Int, seconds: Int, millis: Int)");
+        return value_nil();
+    }
+    int64_t total = args[0].as.int_val * 3600000 + args[1].as.int_val * 60000 +
+                    args[2].as.int_val * 1000    + args[3].as.int_val;
+    return make_duration_map(total);
+}
+
+/// @builtin duration_from_seconds(s: Int) -> Map
+/// @category Date & Time
+/// Create a Duration from total seconds.
+/// @example duration_from_seconds(3661)  // {hours: 1, minutes: 1, seconds: 1, ...}
+static LatValue native_duration_from_seconds(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("duration_from_seconds: expected (seconds: Int)");
+        return value_nil();
+    }
+    return make_duration_map(args[0].as.int_val * 1000);
+}
+
+/// @builtin duration_from_millis(ms: Int) -> Map
+/// @category Date & Time
+/// Create a Duration from total milliseconds.
+/// @example duration_from_millis(5000)  // {hours: 0, minutes: 0, seconds: 5, ...}
+static LatValue native_duration_from_millis(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("duration_from_millis: expected (millis: Int)");
+        return value_nil();
+    }
+    return make_duration_map(args[0].as.int_val);
+}
+
+static int64_t duration_map_to_ms(LatValue *d) {
+    if (d->type != VAL_MAP) return 0;
+    LatValue *tot = lat_map_get(d->as.map.map, "total_ms");
+    if (tot && tot->type == VAL_INT) return tot->as.int_val;
+    return 0;
+}
+
+/// @builtin duration_add(d1: Map, d2: Map) -> Map
+/// @category Date & Time
+/// Add two Duration maps.
+static LatValue native_duration_add(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) {
+        current_rt->error = strdup("duration_add: expected (d1: Map, d2: Map)");
+        return value_nil();
+    }
+    int64_t t = duration_map_to_ms(&args[0]) + duration_map_to_ms(&args[1]);
+    return make_duration_map(t);
+}
+
+/// @builtin duration_sub(d1: Map, d2: Map) -> Map
+/// @category Date & Time
+/// Subtract Duration d2 from d1.
+static LatValue native_duration_sub(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) {
+        current_rt->error = strdup("duration_sub: expected (d1: Map, d2: Map)");
+        return value_nil();
+    }
+    int64_t t = duration_map_to_ms(&args[0]) - duration_map_to_ms(&args[1]);
+    return make_duration_map(t);
+}
+
+/// @builtin duration_to_string(d: Map) -> String
+/// @category Date & Time
+/// Format a Duration map as a human-readable string like "2h 30m 15s".
+/// @example duration_to_string(duration(2, 30, 15, 0))  // "2h 30m 15s"
+static LatValue native_duration_to_string(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("duration_to_string: expected (d: Map)");
+        return value_nil();
+    }
+    int64_t total = duration_map_to_ms(&args[0]);
+    int64_t ms = total % 1000; if (ms < 0) ms = -ms;
+    int64_t rem = total / 1000;
+    int64_t s = rem % 60; if (s < 0) s = -s;
+    rem /= 60;
+    int64_t m = rem % 60; if (m < 0) m = -m;
+    int64_t h = rem / 60;
+
+    char buf[128];
+    if (ms > 0) {
+        snprintf(buf, sizeof(buf), "%lldh %lldm %llds %lldms",
+                 (long long)h, (long long)m, (long long)s, (long long)ms);
+    } else {
+        snprintf(buf, sizeof(buf), "%lldh %lldm %llds",
+                 (long long)h, (long long)m, (long long)s);
+    }
+    return value_string(buf);
+}
+
+/// @builtin duration_hours(d: Map) -> Int
+/// @category Date & Time
+/// Extract the hours component from a Duration.
+static LatValue native_duration_hours(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("duration_hours: expected (d: Map)");
+        return value_nil();
+    }
+    LatValue *v = lat_map_get(args[0].as.map.map, "hours");
+    return (v && v->type == VAL_INT) ? value_int(v->as.int_val) : value_int(0);
+}
+
+/// @builtin duration_minutes(d: Map) -> Int
+/// @category Date & Time
+/// Extract the minutes component from a Duration.
+static LatValue native_duration_minutes(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("duration_minutes: expected (d: Map)");
+        return value_nil();
+    }
+    LatValue *v = lat_map_get(args[0].as.map.map, "minutes");
+    return (v && v->type == VAL_INT) ? value_int(v->as.int_val) : value_int(0);
+}
+
+/// @builtin duration_seconds(d: Map) -> Int
+/// @category Date & Time
+/// Extract the seconds component from a Duration.
+static LatValue native_duration_seconds(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("duration_seconds: expected (d: Map)");
+        return value_nil();
+    }
+    LatValue *v = lat_map_get(args[0].as.map.map, "seconds");
+    return (v && v->type == VAL_INT) ? value_int(v->as.int_val) : value_int(0);
+}
+
+/// @builtin duration_millis(d: Map) -> Int
+/// @category Date & Time
+/// Extract the millis component from a Duration.
+static LatValue native_duration_millis(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("duration_millis: expected (d: Map)");
+        return value_nil();
+    }
+    LatValue *v = lat_map_get(args[0].as.map.map, "millis");
+    return (v && v->type == VAL_INT) ? value_int(v->as.int_val) : value_int(0);
+}
+
+/* ── DateTime map helpers ── */
+
+static LatValue make_datetime_map(int year, int month, int day,
+                                  int hour, int minute, int second,
+                                  int tz_offset_sec) {
+    LatValue map = value_map_new();
+    LatValue vy = value_int(year);
+    LatValue vmo = value_int(month);
+    LatValue vd = value_int(day);
+    LatValue vh = value_int(hour);
+    LatValue vmi = value_int(minute);
+    LatValue vs = value_int(second);
+    LatValue vtz = value_int(tz_offset_sec);
+    lat_map_set(map.as.map.map, "year", &vy);
+    lat_map_set(map.as.map.map, "month", &vmo);
+    lat_map_set(map.as.map.map, "day", &vd);
+    lat_map_set(map.as.map.map, "hour", &vh);
+    lat_map_set(map.as.map.map, "minute", &vmi);
+    lat_map_set(map.as.map.map, "second", &vs);
+    lat_map_set(map.as.map.map, "tz_offset", &vtz);
+    return map;
+}
+
+static bool datetime_map_extract(LatValue *dt, int *year, int *month, int *day,
+                                 int *hour, int *minute, int *second, int *tz_offset) {
+    if (dt->type != VAL_MAP) return false;
+    LatValue *vy = lat_map_get(dt->as.map.map, "year");
+    LatValue *vmo = lat_map_get(dt->as.map.map, "month");
+    LatValue *vd = lat_map_get(dt->as.map.map, "day");
+    LatValue *vh = lat_map_get(dt->as.map.map, "hour");
+    LatValue *vmi = lat_map_get(dt->as.map.map, "minute");
+    LatValue *vs = lat_map_get(dt->as.map.map, "second");
+    LatValue *vtz = lat_map_get(dt->as.map.map, "tz_offset");
+    if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT ||
+        !vd || vd->type != VAL_INT) return false;
+    *year   = (int)vy->as.int_val;
+    *month  = (int)vmo->as.int_val;
+    *day    = (int)vd->as.int_val;
+    *hour   = (vh && vh->type == VAL_INT) ? (int)vh->as.int_val : 0;
+    *minute = (vmi && vmi->type == VAL_INT) ? (int)vmi->as.int_val : 0;
+    *second = (vs && vs->type == VAL_INT) ? (int)vs->as.int_val : 0;
+    *tz_offset = (vtz && vtz->type == VAL_INT) ? (int)vtz->as.int_val : 0;
+    return true;
+}
+
+/// @builtin datetime_now() -> Map
+/// @category Date & Time
+/// Returns a DateTime map with current local time components.
+/// @example datetime_now()  // {year: 2026, month: 2, day: 24, hour: 10, ...}
+static LatValue native_datetime_now(LatValue *args, int ac) {
+    (void)args;
+    if (ac != 0) { current_rt->error = strdup("datetime_now: expects no arguments"); return value_nil(); }
+    time_t now = time(NULL);
+    struct tm local;
+    localtime_r(&now, &local);
+    int tz_off = datetime_tz_offset_seconds();
+    return make_datetime_map(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+                             local.tm_hour, local.tm_min, local.tm_sec, tz_off);
+}
+
+/// @builtin datetime_from_epoch(epoch_seconds: Int) -> Map
+/// @category Date & Time
+/// Create a DateTime map from epoch seconds (UTC).
+/// @example datetime_from_epoch(0)  // {year: 1970, month: 1, day: 1, hour: 0, ...}
+static LatValue native_datetime_from_epoch(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("datetime_from_epoch: expected (epoch_seconds: Int)");
+        return value_nil();
+    }
+    int y, mo, d, h, mi, s;
+    datetime_to_utc_components(args[0].as.int_val, &y, &mo, &d, &h, &mi, &s);
+    return make_datetime_map(y, mo, d, h, mi, s, 0);
+}
+
+/// @builtin datetime_to_epoch(dt: Map) -> Int
+/// @category Date & Time
+/// Convert a DateTime map to epoch seconds.
+static LatValue native_datetime_to_epoch(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("datetime_to_epoch: expected (dt: Map)");
+        return value_nil();
+    }
+    int y, mo, d, h, mi, s, tz;
+    if (!datetime_map_extract(&args[0], &y, &mo, &d, &h, &mi, &s, &tz)) {
+        current_rt->error = strdup("datetime_to_epoch: invalid DateTime map");
+        return value_nil();
+    }
+    int64_t epoch = datetime_from_components(y, mo, d, h, mi, s, tz);
+    return value_int(epoch);
+}
+
+/// @builtin datetime_from_iso(str: String) -> Map
+/// @category Date & Time
+/// Parse an ISO 8601 string into a DateTime map.
+/// @example datetime_from_iso("2026-02-24T10:30:00Z")
+static LatValue native_datetime_from_iso(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("datetime_from_iso: expected (str: String)");
+        return value_nil();
+    }
+    char *err = NULL;
+    int64_t epoch = datetime_parse_iso(args[0].as.str_val, &err);
+    if (err) { current_rt->error = err; return value_nil(); }
+    int y, mo, d, h, mi, s;
+    datetime_to_utc_components(epoch, &y, &mo, &d, &h, &mi, &s);
+    return make_datetime_map(y, mo, d, h, mi, s, 0);
+}
+
+/// @builtin datetime_to_iso(dt: Map) -> String
+/// @category Date & Time
+/// Format a DateTime map as an ISO 8601 string.
+/// @example datetime_to_iso(datetime_from_epoch(0))  // "1970-01-01T00:00:00Z"
+static LatValue native_datetime_to_iso(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("datetime_to_iso: expected (dt: Map)");
+        return value_nil();
+    }
+    int y, mo, d, h, mi, s, tz;
+    if (!datetime_map_extract(&args[0], &y, &mo, &d, &h, &mi, &s, &tz)) {
+        current_rt->error = strdup("datetime_to_iso: invalid DateTime map");
+        return value_nil();
+    }
+    int64_t epoch = datetime_from_components(y, mo, d, h, mi, s, tz);
+    char *iso = datetime_to_iso(epoch);
+    return value_string_owned(iso);
+}
+
+/// @builtin datetime_add_duration(dt: Map, dur: Map) -> Map
+/// @category Date & Time
+/// Add a Duration to a DateTime, returning a new DateTime.
+static LatValue native_datetime_add_duration(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) {
+        current_rt->error = strdup("datetime_add_duration: expected (dt: Map, dur: Map)");
+        return value_nil();
+    }
+    int y, mo, d, h, mi, s, tz;
+    if (!datetime_map_extract(&args[0], &y, &mo, &d, &h, &mi, &s, &tz)) {
+        current_rt->error = strdup("datetime_add_duration: invalid DateTime map");
+        return value_nil();
+    }
+    int64_t epoch = datetime_from_components(y, mo, d, h, mi, s, tz);
+    int64_t dur_ms = duration_map_to_ms(&args[1]);
+    epoch += dur_ms / 1000;
+
+    /* Convert back, preserving original tz_offset */
+    int64_t utc_epoch = epoch + (int64_t)tz;
+    int ny, nmo, nd, nh, nmi, ns;
+    datetime_to_utc_components(utc_epoch, &ny, &nmo, &nd, &nh, &nmi, &ns);
+    return make_datetime_map(ny, nmo, nd, nh, nmi, ns, tz);
+}
+
+/// @builtin datetime_sub(dt1: Map, dt2: Map) -> Map
+/// @category Date & Time
+/// Subtract two DateTimes, returning a Duration.
+static LatValue native_datetime_sub(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) {
+        current_rt->error = strdup("datetime_sub: expected (dt1: Map, dt2: Map)");
+        return value_nil();
+    }
+    int y1, mo1, d1, h1, mi1, s1, tz1;
+    int y2, mo2, d2, h2, mi2, s2, tz2;
+    if (!datetime_map_extract(&args[0], &y1, &mo1, &d1, &h1, &mi1, &s1, &tz1) ||
+        !datetime_map_extract(&args[1], &y2, &mo2, &d2, &h2, &mi2, &s2, &tz2)) {
+        current_rt->error = strdup("datetime_sub: invalid DateTime map");
+        return value_nil();
+    }
+    int64_t e1 = datetime_from_components(y1, mo1, d1, h1, mi1, s1, tz1);
+    int64_t e2 = datetime_from_components(y2, mo2, d2, h2, mi2, s2, tz2);
+    return make_duration_map((e1 - e2) * 1000);
+}
+
+/// @builtin datetime_format(dt: Map, fmt: String) -> String
+/// @category Date & Time
+/// Format a DateTime map using strftime-style format.
+/// @example datetime_format(datetime_from_epoch(0), "%Y-%m-%d")  // "1970-01-01"
+static LatValue native_datetime_fmt(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_MAP || args[1].type != VAL_STR) {
+        current_rt->error = strdup("datetime_format: expected (dt: Map, fmt: String)");
+        return value_nil();
+    }
+    int y, mo, d, h, mi, s, tz;
+    if (!datetime_map_extract(&args[0], &y, &mo, &d, &h, &mi, &s, &tz)) {
+        current_rt->error = strdup("datetime_format: invalid DateTime map");
+        return value_nil();
+    }
+    int64_t epoch = datetime_from_components(y, mo, d, h, mi, s, tz);
+    /* Use epoch_ms interface (multiply by 1000) with gmtime-based formatting */
+    struct tm tm;
+    time_t t = (time_t)epoch;
+    gmtime_r(&t, &tm);
+    char buf[512];
+    size_t n = strftime(buf, sizeof(buf), args[1].as.str_val, &tm);
+    if (n == 0) {
+        current_rt->error = strdup("datetime_format: format produced empty string or exceeded buffer");
+        return value_nil();
+    }
+    return value_string(buf);
+}
+
+/// @builtin datetime_to_utc(dt: Map) -> Map
+/// @category Date & Time
+/// Convert a DateTime to UTC (tz_offset becomes 0).
+static LatValue native_datetime_to_utc(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("datetime_to_utc: expected (dt: Map)");
+        return value_nil();
+    }
+    int y, mo, d, h, mi, s, tz;
+    if (!datetime_map_extract(&args[0], &y, &mo, &d, &h, &mi, &s, &tz)) {
+        current_rt->error = strdup("datetime_to_utc: invalid DateTime map");
+        return value_nil();
+    }
+    int64_t epoch = datetime_from_components(y, mo, d, h, mi, s, tz);
+    int ny, nmo, nd, nh, nmi, ns;
+    datetime_to_utc_components(epoch, &ny, &nmo, &nd, &nh, &nmi, &ns);
+    return make_datetime_map(ny, nmo, nd, nh, nmi, ns, 0);
+}
+
+/// @builtin datetime_to_local(dt: Map) -> Map
+/// @category Date & Time
+/// Convert a DateTime to the local timezone.
+static LatValue native_datetime_to_local(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_MAP) {
+        current_rt->error = strdup("datetime_to_local: expected (dt: Map)");
+        return value_nil();
+    }
+    int y, mo, d, h, mi, s, tz;
+    if (!datetime_map_extract(&args[0], &y, &mo, &d, &h, &mi, &s, &tz)) {
+        current_rt->error = strdup("datetime_to_local: invalid DateTime map");
+        return value_nil();
+    }
+    int64_t epoch = datetime_from_components(y, mo, d, h, mi, s, tz);
+    time_t t = (time_t)epoch;
+    struct tm local;
+    localtime_r(&t, &local);
+    int local_tz = datetime_tz_offset_seconds();
+    return make_datetime_map(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+                             local.tm_hour, local.tm_min, local.tm_sec, local_tz);
+}
+
+/// @builtin timezone_offset() -> Int
+/// @category Date & Time
+/// Returns the current local timezone offset from UTC in seconds.
+static LatValue native_timezone_offset(LatValue *args, int ac) {
+    (void)args;
+    if (ac != 0) { current_rt->error = strdup("timezone_offset: expects no arguments"); return value_nil(); }
+    return value_int(datetime_tz_offset_seconds());
+}
+
+/// @builtin days_in_month(year: Int, month: Int) -> Int
+/// @category Date & Time
+/// Returns the number of days in the given month of the given year.
+/// @example days_in_month(2024, 2)  // 29
+static LatValue native_days_in_month(LatValue *args, int ac) {
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) {
+        current_rt->error = strdup("days_in_month: expected (year: Int, month: Int)");
+        return value_nil();
+    }
+    int r = datetime_days_in_month((int)args[0].as.int_val, (int)args[1].as.int_val);
+    if (r < 0) { current_rt->error = strdup("days_in_month: month must be 1-12"); return value_nil(); }
+    return value_int(r);
+}
+
+/// @builtin day_of_week(year: Int, month: Int, day: Int) -> Int
+/// @category Date & Time
+/// Returns the day of week (0=Sunday, 6=Saturday).
+/// @example day_of_week(2026, 2, 24)  // 2 (Tuesday)
+static LatValue native_day_of_week(LatValue *args, int ac) {
+    if (ac != 3 || args[0].type != VAL_INT || args[1].type != VAL_INT || args[2].type != VAL_INT) {
+        current_rt->error = strdup("day_of_week: expected (year: Int, month: Int, day: Int)");
+        return value_nil();
+    }
+    return value_int(datetime_day_of_week((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val));
+}
+
+/// @builtin day_of_year(year: Int, month: Int, day: Int) -> Int
+/// @category Date & Time
+/// Returns the day of year (1-366).
+/// @example day_of_year(2026, 2, 24)  // 55
+static LatValue native_day_of_year(LatValue *args, int ac) {
+    if (ac != 3 || args[0].type != VAL_INT || args[1].type != VAL_INT || args[2].type != VAL_INT) {
+        current_rt->error = strdup("day_of_year: expected (year: Int, month: Int, day: Int)");
+        return value_nil();
+    }
+    int r = datetime_day_of_year((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
+    if (r < 0) { current_rt->error = strdup("day_of_year: month must be 1-12"); return value_nil(); }
+    return value_int(r);
+}
+
 /* ── Environment natives ── */
 
 static LatValue native_env(LatValue *args, int ac) {
@@ -2395,6 +2854,33 @@ static LatValue build_time_module(void) {
     mod_set_native(&m, "weekday", native_time_weekday);
     mod_set_native(&m, "add", native_time_add);
     mod_set_native(&m, "is_leap_year", native_is_leap_year);
+    /* Duration */
+    mod_set_native(&m, "duration", native_duration);
+    mod_set_native(&m, "duration_from_seconds", native_duration_from_seconds);
+    mod_set_native(&m, "duration_from_millis", native_duration_from_millis);
+    mod_set_native(&m, "duration_add", native_duration_add);
+    mod_set_native(&m, "duration_sub", native_duration_sub);
+    mod_set_native(&m, "duration_to_string", native_duration_to_string);
+    mod_set_native(&m, "duration_hours", native_duration_hours);
+    mod_set_native(&m, "duration_minutes", native_duration_minutes);
+    mod_set_native(&m, "duration_seconds", native_duration_seconds);
+    mod_set_native(&m, "duration_millis", native_duration_millis);
+    /* DateTime */
+    mod_set_native(&m, "datetime_now", native_datetime_now);
+    mod_set_native(&m, "datetime_from_epoch", native_datetime_from_epoch);
+    mod_set_native(&m, "datetime_to_epoch", native_datetime_to_epoch);
+    mod_set_native(&m, "datetime_from_iso", native_datetime_from_iso);
+    mod_set_native(&m, "datetime_to_iso", native_datetime_to_iso);
+    mod_set_native(&m, "datetime_add_duration", native_datetime_add_duration);
+    mod_set_native(&m, "datetime_sub", native_datetime_sub);
+    mod_set_native(&m, "datetime_format", native_datetime_fmt);
+    mod_set_native(&m, "datetime_to_utc", native_datetime_to_utc);
+    mod_set_native(&m, "datetime_to_local", native_datetime_to_local);
+    mod_set_native(&m, "timezone_offset", native_timezone_offset);
+    /* Calendar */
+    mod_set_native(&m, "days_in_month", native_days_in_month);
+    mod_set_native(&m, "day_of_week", native_day_of_week);
+    mod_set_native(&m, "day_of_year", native_day_of_year);
     return m;
 }
 
@@ -2641,6 +3127,36 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "time_weekday", native_time_weekday, 1);
     rt_register_native(rt, "time_add", native_time_add, 2);
     rt_register_native(rt, "is_leap_year", native_is_leap_year, 1);
+
+    /* Duration */
+    rt_register_native(rt, "duration", native_duration, 4);
+    rt_register_native(rt, "duration_from_seconds", native_duration_from_seconds, 1);
+    rt_register_native(rt, "duration_from_millis", native_duration_from_millis, 1);
+    rt_register_native(rt, "duration_add", native_duration_add, 2);
+    rt_register_native(rt, "duration_sub", native_duration_sub, 2);
+    rt_register_native(rt, "duration_to_string", native_duration_to_string, 1);
+    rt_register_native(rt, "duration_hours", native_duration_hours, 1);
+    rt_register_native(rt, "duration_minutes", native_duration_minutes, 1);
+    rt_register_native(rt, "duration_seconds", native_duration_seconds, 1);
+    rt_register_native(rt, "duration_millis", native_duration_millis, 1);
+
+    /* DateTime */
+    rt_register_native(rt, "datetime_now", native_datetime_now, 0);
+    rt_register_native(rt, "datetime_from_epoch", native_datetime_from_epoch, 1);
+    rt_register_native(rt, "datetime_to_epoch", native_datetime_to_epoch, 1);
+    rt_register_native(rt, "datetime_from_iso", native_datetime_from_iso, 1);
+    rt_register_native(rt, "datetime_to_iso", native_datetime_to_iso, 1);
+    rt_register_native(rt, "datetime_add_duration", native_datetime_add_duration, 2);
+    rt_register_native(rt, "datetime_sub", native_datetime_sub, 2);
+    rt_register_native(rt, "datetime_format", native_datetime_fmt, 2);
+    rt_register_native(rt, "datetime_to_utc", native_datetime_to_utc, 1);
+    rt_register_native(rt, "datetime_to_local", native_datetime_to_local, 1);
+    rt_register_native(rt, "timezone_offset", native_timezone_offset, 0);
+
+    /* Calendar */
+    rt_register_native(rt, "days_in_month", native_days_in_month, 2);
+    rt_register_native(rt, "day_of_week", native_day_of_week, 3);
+    rt_register_native(rt, "day_of_year", native_day_of_year, 3);
 
     /* Environment */
     rt_register_native(rt, "env", native_env, 1);

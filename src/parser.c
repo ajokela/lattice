@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "string_ops.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -57,6 +58,18 @@ static bool expect(Parser *p, TokenType expected, char **err) {
     if (peek_type(p) == expected) {
         advance(p);
         return true;
+    }
+    /* If we got an identifier and expected a keyword, suggest the keyword */
+    if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val) {
+        const char *expected_name = token_type_name(expected);
+        int d = lat_levenshtein(peek(p)->as.str_val, expected_name);
+        if (d > 0 && d <= 2) {
+            *err = parser_error_fmt(p, "expected '%s', got '%s' (did you mean '%s'?)",
+                                    expected_name,
+                                    peek(p)->as.str_val,
+                                    expected_name);
+            return false;
+        }
     }
     *err = parser_error_fmt(p, "expected '%s', got '%s'",
                             token_type_name(expected),
@@ -1320,6 +1333,15 @@ static Expr *parse_primary(Parser *p, char **err) {
         return expr_ident(name);
     }
 
+    /* If the unexpected token is an identifier close to a keyword, suggest it */
+    if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val) {
+        const char *ksug = lat_find_similar_keyword(peek(p)->as.str_val);
+        if (ksug) {
+            *err = parser_error_fmt(p, "unexpected identifier '%s' in expression (did you mean '%s'?)",
+                                    peek(p)->as.str_val, ksug);
+            return NULL;
+        }
+    }
     *err = parser_error_fmt(p, "unexpected token '%s' in expression",
                             token_type_name(peek_type(p)));
     return NULL;

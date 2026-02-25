@@ -13,6 +13,7 @@
 #include "memory.h"
 #include "string_ops.h"
 #include "builtin_methods.h"
+#include "intern.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -26,6 +27,10 @@
 #define VM_NATIVE_MARKER ((struct Expr **)(uintptr_t)0x1)
 /* Extension function marker — same sentinel as stack VM */
 #define VM_EXT_MARKER    ((struct Expr **)(uintptr_t)0x2)
+
+/* String interning threshold: strings <= this length are interned after
+ * concatenation or when loaded from the constant pool. */
+#define INTERN_THRESHOLD 64
 
 /* ── RegChunk implementation ── */
 
@@ -74,6 +79,7 @@ void regchunk_free(RegChunk *c) {
             free(c->export_names[i]);
         free(c->export_names);
     }
+    pic_table_free(&c->pic);
     free(c);
 }
 
@@ -349,6 +355,10 @@ static inline LatValue rvm_clone(const LatValue *src) {
             LatValue v = *src;
             if (src->region_id == REGION_INTERNED)
                 return v;  /* interned strings are never freed — no need to strdup */
+            /* Try interning short strings on escape (e.g. ephemeral → global).
+             * Avoids strdup and enables pointer-equality comparisons. */
+            if (strlen(src->as.str_val) <= INTERN_THRESHOLD)
+                return value_string_interned(src->as.str_val);
             v.as.str_val = strdup(src->as.str_val);
             v.region_id = REGION_NONE;
             return v;
@@ -625,6 +635,157 @@ static inline uint32_t method_hash(const char *s) {
     uint32_t h = 5381;
     while (*s) h = h * 33 + (unsigned char)*s++;
     return h;
+}
+
+/* Resolve the PIC handler ID for a given (type, method_hash) pair.
+ * Returns 0 if no builtin matches, or a PIC_xxx handler ID. */
+static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
+    switch (type_tag) {
+    case VAL_ARRAY:
+        if (mhash == MHASH_len)        return PIC_ARRAY_LEN;
+        if (mhash == MHASH_length)     return PIC_ARRAY_LENGTH;
+        if (mhash == MHASH_push)       return PIC_ARRAY_PUSH;
+        if (mhash == MHASH_pop)        return PIC_ARRAY_POP;
+        if (mhash == MHASH_contains)   return PIC_ARRAY_CONTAINS;
+        if (mhash == MHASH_reverse)    return PIC_ARRAY_REVERSE;
+        if (mhash == MHASH_join)       return PIC_ARRAY_JOIN;
+        if (mhash == MHASH_slice)      return PIC_ARRAY_SLICE;
+        if (mhash == MHASH_take)       return PIC_ARRAY_TAKE;
+        if (mhash == MHASH_drop)       return PIC_ARRAY_DROP;
+        if (mhash == MHASH_unique)     return PIC_ARRAY_UNIQUE;
+        if (mhash == MHASH_first)      return PIC_ARRAY_FIRST;
+        if (mhash == MHASH_last)       return PIC_ARRAY_LAST;
+        if (mhash == MHASH_sum)        return PIC_ARRAY_SUM;
+        if (mhash == MHASH_min)        return PIC_ARRAY_MIN;
+        if (mhash == MHASH_max)        return PIC_ARRAY_MAX;
+        if (mhash == MHASH_enumerate)  return PIC_ARRAY_ENUMERATE;
+        if (mhash == MHASH_index_of)   return PIC_ARRAY_INDEX_OF;
+        if (mhash == MHASH_zip)        return PIC_ARRAY_ZIP;
+        if (mhash == MHASH_chunk)      return PIC_ARRAY_CHUNK;
+        if (mhash == MHASH_flatten)    return PIC_ARRAY_FLATTEN;
+        if (mhash == MHASH_flat)       return PIC_ARRAY_FLAT;
+        if (mhash == MHASH_remove_at)  return PIC_ARRAY_REMOVE_AT;
+        if (mhash == MHASH_insert)     return PIC_ARRAY_INSERT;
+        if (mhash == MHASH_map)        return PIC_ARRAY_MAP;
+        if (mhash == MHASH_filter)     return PIC_ARRAY_FILTER;
+        if (mhash == MHASH_reduce)     return PIC_ARRAY_REDUCE;
+        if (mhash == MHASH_each)       return PIC_ARRAY_EACH;
+        if (mhash == MHASH_sort)       return PIC_ARRAY_SORT;
+        if (mhash == MHASH_find)       return PIC_ARRAY_FIND;
+        if (mhash == MHASH_any)        return PIC_ARRAY_ANY;
+        if (mhash == MHASH_all)        return PIC_ARRAY_ALL;
+        if (mhash == MHASH_for_each)   return PIC_ARRAY_FOR_EACH;
+        if (mhash == MHASH_flat_map)   return PIC_ARRAY_FLAT_MAP;
+        if (mhash == MHASH_sort_by)    return PIC_ARRAY_SORT_BY;
+        if (mhash == MHASH_group_by)   return PIC_ARRAY_GROUP_BY;
+        break;
+    case VAL_STR:
+        if (mhash == MHASH_len)        return PIC_STRING_LEN;
+        if (mhash == MHASH_length)     return PIC_STRING_LENGTH;
+        if (mhash == MHASH_split)      return PIC_STRING_SPLIT;
+        if (mhash == MHASH_trim)       return PIC_STRING_TRIM;
+        if (mhash == MHASH_to_upper)   return PIC_STRING_TO_UPPER;
+        if (mhash == MHASH_to_lower)   return PIC_STRING_TO_LOWER;
+        if (mhash == MHASH_starts_with) return PIC_STRING_STARTS_WITH;
+        if (mhash == MHASH_ends_with)  return PIC_STRING_ENDS_WITH;
+        if (mhash == MHASH_replace)    return PIC_STRING_REPLACE;
+        if (mhash == MHASH_contains)   return PIC_STRING_CONTAINS;
+        if (mhash == MHASH_chars)      return PIC_STRING_CHARS;
+        if (mhash == MHASH_bytes)      return PIC_STRING_BYTES;
+        if (mhash == MHASH_reverse)    return PIC_STRING_REVERSE;
+        if (mhash == MHASH_repeat)     return PIC_STRING_REPEAT;
+        if (mhash == MHASH_pad_left)   return PIC_STRING_PAD_LEFT;
+        if (mhash == MHASH_pad_right)  return PIC_STRING_PAD_RIGHT;
+        if (mhash == MHASH_count)      return PIC_STRING_COUNT;
+        if (mhash == MHASH_is_empty)   return PIC_STRING_IS_EMPTY;
+        if (mhash == MHASH_index_of)   return PIC_STRING_INDEX_OF;
+        if (mhash == MHASH_substring)  return PIC_STRING_SUBSTRING;
+        if (mhash == MHASH_trim_start) return PIC_STRING_TRIM_START;
+        if (mhash == MHASH_trim_end)   return PIC_STRING_TRIM_END;
+        if (mhash == MHASH_capitalize) return PIC_STRING_CAPITALIZE;
+        if (mhash == MHASH_title_case) return PIC_STRING_TITLE_CASE;
+        if (mhash == MHASH_snake_case) return PIC_STRING_SNAKE_CASE;
+        if (mhash == MHASH_camel_case) return PIC_STRING_CAMEL_CASE;
+        if (mhash == MHASH_kebab_case) return PIC_STRING_KEBAB_CASE;
+        break;
+    case VAL_MAP:
+        if (mhash == MHASH_len)        return PIC_MAP_LEN;
+        if (mhash == MHASH_length)     return PIC_MAP_LENGTH;
+        if (mhash == MHASH_keys)       return PIC_MAP_KEYS;
+        if (mhash == MHASH_values)     return PIC_MAP_VALUES;
+        if (mhash == MHASH_entries)    return PIC_MAP_ENTRIES;
+        if (mhash == MHASH_get)        return PIC_MAP_GET;
+        if (mhash == MHASH_has)        return PIC_MAP_HAS;
+        if (mhash == MHASH_remove)     return PIC_MAP_REMOVE;
+        if (mhash == MHASH_merge)      return PIC_MAP_MERGE;
+        if (mhash == MHASH_set)        return PIC_MAP_SET;
+        if (mhash == MHASH_contains)   return PIC_MAP_CONTAINS;
+        break;
+    case VAL_SET:
+        if (mhash == MHASH_has)        return PIC_SET_HAS;
+        if (mhash == MHASH_add)        return PIC_SET_ADD;
+        if (mhash == MHASH_remove)     return PIC_SET_REMOVE;
+        if (mhash == MHASH_len)        return PIC_SET_LEN;
+        if (mhash == MHASH_length)     return PIC_SET_LENGTH;
+        if (mhash == MHASH_to_array)   return PIC_SET_TO_ARRAY;
+        if (mhash == MHASH_union)      return PIC_SET_UNION;
+        if (mhash == MHASH_intersection) return PIC_SET_INTERSECTION;
+        if (mhash == MHASH_difference) return PIC_SET_DIFFERENCE;
+        if (mhash == MHASH_is_subset)  return PIC_SET_IS_SUBSET;
+        if (mhash == MHASH_is_superset) return PIC_SET_IS_SUPERSET;
+        if (mhash == MHASH_contains)   return PIC_SET_CONTAINS;
+        break;
+    case VAL_ENUM:
+        if (mhash == MHASH_tag)        return PIC_ENUM_TAG;
+        if (mhash == MHASH_payload)    return PIC_ENUM_PAYLOAD;
+        if (mhash == MHASH_variant_name) return PIC_ENUM_VARIANT_NAME;
+        if (mhash == MHASH_enum_name)  return PIC_ENUM_NAME;
+        if (mhash == MHASH_is_variant) return PIC_ENUM_IS_VARIANT;
+        break;
+    case VAL_CHANNEL:
+        if (mhash == MHASH_send)       return PIC_CHANNEL_SEND;
+        if (mhash == MHASH_recv)       return PIC_CHANNEL_RECV;
+        if (mhash == MHASH_close)      return PIC_CHANNEL_CLOSE;
+        break;
+    case VAL_BUFFER:
+        if (mhash == MHASH_len)        return PIC_BUFFER_LEN;
+        if (mhash == MHASH_length)     return PIC_BUFFER_LENGTH;
+        if (mhash == MHASH_push)       return PIC_BUFFER_PUSH;
+        if (mhash == MHASH_capacity)   return PIC_BUFFER_CAPACITY;
+        if (mhash == MHASH_push_u16)   return PIC_BUFFER_PUSH_U16;
+        if (mhash == MHASH_push_u32)   return PIC_BUFFER_PUSH_U32;
+        if (mhash == MHASH_read_u8)    return PIC_BUFFER_READ_U8;
+        if (mhash == MHASH_write_u8)   return PIC_BUFFER_WRITE_U8;
+        if (mhash == MHASH_read_u16)   return PIC_BUFFER_READ_U16;
+        if (mhash == MHASH_write_u16)  return PIC_BUFFER_WRITE_U16;
+        if (mhash == MHASH_read_u32)   return PIC_BUFFER_READ_U32;
+        if (mhash == MHASH_write_u32)  return PIC_BUFFER_WRITE_U32;
+        if (mhash == MHASH_slice)      return PIC_BUFFER_SLICE;
+        if (mhash == MHASH_clear)      return PIC_BUFFER_CLEAR;
+        if (mhash == MHASH_fill)       return PIC_BUFFER_FILL;
+        if (mhash == MHASH_resize)     return PIC_BUFFER_RESIZE;
+        if (mhash == MHASH_to_string)  return PIC_BUFFER_TO_STRING;
+        if (mhash == MHASH_to_array)   return PIC_BUFFER_TO_ARRAY;
+        if (mhash == MHASH_to_hex)     return PIC_BUFFER_TO_HEX;
+        if (mhash == MHASH_read_i8)    return PIC_BUFFER_READ_I8;
+        if (mhash == MHASH_read_i16)   return PIC_BUFFER_READ_I16;
+        if (mhash == MHASH_read_i32)   return PIC_BUFFER_READ_I32;
+        if (mhash == MHASH_read_f32)   return PIC_BUFFER_READ_F32;
+        if (mhash == MHASH_read_f64)   return PIC_BUFFER_READ_F64;
+        break;
+    case VAL_RANGE:
+        if (mhash == MHASH_len)        return PIC_RANGE_CONTAINS;
+        if (mhash == MHASH_length)     return PIC_RANGE_CONTAINS;
+        if (mhash == MHASH_contains)   return PIC_RANGE_CONTAINS;
+        if (mhash == MHASH_to_array)   return PIC_RANGE_TO_ARRAY;
+        break;
+    case VAL_REF:
+        if (mhash == MHASH_deref)      return PIC_REF_DEREF;
+        return 0;  /* Ref proxies inner type, don't cache NOT_BUILTIN */
+    default:
+        break;
+    }
+    return 0;
 }
 
 /* ── Invoke builtin method ── */
@@ -2223,14 +2384,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint16_t bx = REG_GET_Bx(instr);
         LatValue kv = frame->chunk->constants[bx];
         /* Fast path: primitives (int/float/bool/etc) are bitwise-copied directly.
-         * String constants: borrow pointer from constant pool (REGION_CONST)
-         * instead of strdup.  value_free skips REGION_CONST (pool owns it);
-         * rvm_clone will strdup if the value escapes to globals/arrays. */
+         * String constants: intern the string for pointer-equality comparisons
+         * and zero-cost clones (REGION_INTERNED is never freed or strdup'd).
+         * rvm_clone already skips strdup for REGION_INTERNED. */
         if (RVM_IS_PRIMITIVE(kv)) {
             reg_set(&R[a], kv);
         } else if (kv.type == VAL_STR) {
-            kv.region_id = REGION_CONST;
-            reg_set(&R[a], kv);
+            reg_set(&R[a], value_string_interned(kv.as.str_val));
         } else {
             reg_set(&R[a], rvm_clone(&kv));
         }
@@ -2311,20 +2471,35 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[b].type == VAL_STR && R[c].type == VAL_STR) {
             size_t lb = strlen(R[b].as.str_val);
             size_t lc = strlen(R[c].as.str_val);
+            size_t total = lb + lc;
             /* Optimization: when dest == left operand (s = s + x pattern) and
              * the left string is a plain malloc'd buffer, realloc in-place to
              * avoid copying the entire left side + an extra free. */
             if (a == b && R[b].region_id == REGION_NONE && b != c) {
-                char *buf = realloc(R[b].as.str_val, lb + lc + 1);
+                char *buf = realloc(R[b].as.str_val, total + 1);
                 memcpy(buf + lb, R[c].as.str_val, lc);
-                buf[lb + lc] = '\0';
+                buf[total] = '\0';
                 R[a].as.str_val = buf;  /* update in-place (realloc may move) */
+                /* Intern short results for pointer-equality comparisons */
+                if (total <= INTERN_THRESHOLD) {
+                    const char *interned = intern(buf);
+                    free(R[a].as.str_val);
+                    R[a].as.str_val = (char *)interned;
+                    R[a].region_id = REGION_INTERNED;
+                }
             } else {
-                char *buf = malloc(lb + lc + 1);
+                char *buf = malloc(total + 1);
                 memcpy(buf, R[b].as.str_val, lb);
                 memcpy(buf + lb, R[c].as.str_val, lc);
-                buf[lb + lc] = '\0';
+                buf[total] = '\0';
                 LatValue v = value_string_owned(buf);
+                /* Intern short concat results */
+                if (total <= INTERN_THRESHOLD) {
+                    const char *interned = intern(buf);
+                    free(v.as.str_val);
+                    v.as.str_val = (char *)interned;
+                    v.region_id = REGION_INTERNED;
+                }
                 reg_set(&R[a], v);
             }
         } else {
@@ -5105,6 +5280,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
          *   INVOKE_GLOBAL dst, name_ki, argc
          *   data:         method_ki, args_base, 0
          * Mutates the global value in-place (for push/pop/etc). */
+        size_t _rgpic_off = (size_t)(frame->ip - frame->chunk->code - 1);
         uint8_t dst = REG_GET_A(instr);
         uint8_t name_ki = REG_GET_B(instr);
         uint8_t argc = REG_GET_C(instr);
@@ -5125,15 +5301,41 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             DISPATCH();
         }
 
+        /* ── PIC fast path ── */
+        uint8_t _rgobj_type = (uint8_t)obj_ref->type;
+        uint32_t _rgmhash = method_hash(method_name);
+        PICSlot *_rgpic = pic_slot_for(&frame->chunk->pic, _rgpic_off);
+        uint16_t _rgpic_id = _rgpic ? pic_lookup(_rgpic, _rgobj_type, _rgmhash) : 0;
+        if (_rgpic_id == PIC_NOT_BUILTIN)
+            goto rvm_invoke_global_not_builtin;
+
         /* Try builtin — mutates obj_ref in-place */
+        {
         LatValue invoke_result;
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
         if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result)) {
             if (vm->error)
                 return REGVM_RUNTIME_ERROR;
+            /* Cache builtin hit */
+            if (!_rgpic) {
+                pic_table_ensure(&frame->chunk->pic);
+                _rgpic = pic_slot_for(&frame->chunk->pic, _rgpic_off);
+            }
+            if (_rgpic && _rgpic_id == 0) {
+                uint16_t _rid = rvm_pic_resolve(_rgobj_type, _rgmhash);
+                if (_rid) pic_update(_rgpic, _rgobj_type, _rgmhash, _rid);
+            }
             reg_set(&R[dst], invoke_result);
             DISPATCH();
         }
+        }
+        /* Cache as NOT_BUILTIN */
+        if (!_rgpic) {
+            pic_table_ensure(&frame->chunk->pic);
+            _rgpic = pic_slot_for(&frame->chunk->pic, _rgpic_off);
+        }
+        if (_rgpic) pic_update(_rgpic, _rgobj_type, _rgmhash, PIC_NOT_BUILTIN);
+        rvm_invoke_global_not_builtin:
 
         /* Check for callable closure field in struct */
         if (obj_ref->type == VAL_STRUCT) {
@@ -5280,6 +5482,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
          *   INVOKE_LOCAL dst, local_reg, argc
          *   data:        method_ki, args_base, 0
          * Mutates R[local_reg] in-place (for push/pop/etc). */
+        size_t _rpic_off = (size_t)(frame->ip - frame->chunk->code - 1);
         uint8_t dst = REG_GET_A(instr);
         uint8_t loc_reg = REG_GET_B(instr);
         uint8_t argc = REG_GET_C(instr);
@@ -5290,15 +5493,41 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         const char *method_name = frame->chunk->constants[method_ki].as.str_val;
 
+        /* ── PIC fast path ── */
+        uint8_t _robj_type = (uint8_t)R[loc_reg].type;
+        uint32_t _rmhash = method_hash(method_name);
+        PICSlot *_rpic = pic_slot_for(&frame->chunk->pic, _rpic_off);
+        uint16_t _rpic_id = _rpic ? pic_lookup(_rpic, _robj_type, _rmhash) : 0;
+        if (_rpic_id == PIC_NOT_BUILTIN)
+            goto rvm_invoke_local_not_builtin;
+
         /* Try builtin — mutates R[loc_reg] in-place */
+        {
         LatValue invoke_result;
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
         if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result)) {
             if (vm->error)
                 return REGVM_RUNTIME_ERROR;
+            /* Cache builtin hit */
+            if (!_rpic) {
+                pic_table_ensure(&frame->chunk->pic);
+                _rpic = pic_slot_for(&frame->chunk->pic, _rpic_off);
+            }
+            if (_rpic && _rpic_id == 0) {
+                uint16_t _rid = rvm_pic_resolve(_robj_type, _rmhash);
+                if (_rid) pic_update(_rpic, _robj_type, _rmhash, _rid);
+            }
             reg_set(&R[dst], invoke_result);
             DISPATCH();
         }
+        }
+        /* Cache as NOT_BUILTIN */
+        if (!_rpic) {
+            pic_table_ensure(&frame->chunk->pic);
+            _rpic = pic_slot_for(&frame->chunk->pic, _rpic_off);
+        }
+        if (_rpic) pic_update(_rpic, _robj_type, _rmhash, PIC_NOT_BUILTIN);
+        rvm_invoke_local_not_builtin:
 
         /* Check for callable closure field in map */
         if (R[loc_reg].type == VAL_MAP) {
@@ -5531,12 +5760,24 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 display = "Fn";
             else
                 display = value_type_name(&R[a]);
+            /* Only suggest if the type name is NOT a known built-in */
+            const char *tsug = lat_is_known_type(expected) ? NULL : lat_find_similar_type(expected, NULL, NULL);
             if (err_word != 0xFFFFFFFF) {
-                /* Custom error format with %s placeholder for actual type */
                 const char *fmt = frame->chunk->constants[err_word].as.str_val;
-                RVM_ERROR(fmt, display);
+                if (tsug) {
+                    char *base = NULL;
+                    (void)asprintf(&base, fmt, display);
+                    RVM_ERROR("%s (did you mean '%s'?)", base, tsug);
+                    free(base);
+                } else {
+                    RVM_ERROR(fmt, display);
+                }
             } else {
-                RVM_ERROR("return type expects %s, got %s", expected, display);
+                if (tsug) {
+                    RVM_ERROR("return type expects %s, got %s (did you mean '%s'?)", expected, display, tsug);
+                } else {
+                    RVM_ERROR("return type expects %s, got %s", expected, display);
+                }
             }
         }
         DISPATCH();

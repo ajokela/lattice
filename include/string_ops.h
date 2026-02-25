@@ -61,4 +61,18 @@ int lat_levenshtein(const char *a, const char *b);
  * match within max_distance. Returns NULL if no match found. */
 const char *lat_find_similar(const char *name, const char **candidates, int max_distance);
 
+/* Check if a type name is a known built-in type (Int, Float, String, etc.) */
+bool lat_is_known_type(const char *name);
+
+/* Search built-in type names (Int, Float, String, ...) for a close match.
+ * Also accepts optional NULL-terminated arrays of user-defined struct and
+ * enum names. Returns the best match within edit distance 2, or NULL. */
+const char *lat_find_similar_type(const char *name,
+                                  const char **struct_names,
+                                  const char **enum_names);
+
+/* Search Lattice keyword list for a close match to the given identifier.
+ * Returns the best match within edit distance 2, or NULL. */
+const char *lat_find_similar_keyword(const char *name);
+
 #endif /* STRING_OPS_H */

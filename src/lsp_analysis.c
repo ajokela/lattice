@@ -91,7 +91,7 @@ static void find_decl_position(const char *text, const char *keyword,
     }
 }
 
-/* Extract symbols from parsed AST */
+/* Extract symbols and struct/enum definitions from parsed AST */
 static void extract_symbols(LspDocument *doc, const Program *prog) {
     int last_line = 0;  /* Track search position to handle duplicate names */
 
@@ -125,22 +125,88 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 break;
             }
             case ITEM_STRUCT: {
-                sym.name = strdup(item->as.struct_decl.name);
+                const StructDecl *sd = &item->as.struct_decl;
+                sym.name = strdup(sd->name);
                 sym.kind = LSP_SYM_STRUCT;
-                sym.signature = malloc(strlen(item->as.struct_decl.name) + 16);
-                sprintf(sym.signature, "struct %s", item->as.struct_decl.name);
-                find_decl_position(doc->text, "struct", item->as.struct_decl.name,
+                sym.signature = malloc(strlen(sd->name) + 16);
+                sprintf(sym.signature, "struct %s", sd->name);
+                find_decl_position(doc->text, "struct", sd->name,
                                    last_line, &sym.line, &sym.col);
+
+                /* Extract struct field info for completion */
+                LspStructDef sdef;
+                sdef.name = strdup(sd->name);
+                sdef.line = sym.line;
+                sdef.field_count = sd->field_count;
+                sdef.fields = NULL;
+                if (sd->field_count > 0) {
+                    sdef.fields = malloc(sd->field_count * sizeof(LspFieldInfo));
+                    for (size_t j = 0; j < sd->field_count; j++) {
+                        sdef.fields[j].name = strdup(sd->fields[j].name);
+                        sdef.fields[j].type_name =
+                            sd->fields[j].ty.name ? strdup(sd->fields[j].ty.name) : NULL;
+                    }
+                }
+                doc->struct_def_count++;
+                doc->struct_defs = realloc(doc->struct_defs,
+                    doc->struct_def_count * sizeof(LspStructDef));
+                doc->struct_defs[doc->struct_def_count - 1] = sdef;
+
                 found = true;
                 break;
             }
             case ITEM_ENUM: {
-                sym.name = strdup(item->as.enum_decl.name);
+                const EnumDecl *ed = &item->as.enum_decl;
+                sym.name = strdup(ed->name);
                 sym.kind = LSP_SYM_ENUM;
-                sym.signature = malloc(strlen(item->as.enum_decl.name) + 16);
-                sprintf(sym.signature, "enum %s", item->as.enum_decl.name);
-                find_decl_position(doc->text, "enum", item->as.enum_decl.name,
+                sym.signature = malloc(strlen(ed->name) + 16);
+                sprintf(sym.signature, "enum %s", ed->name);
+                find_decl_position(doc->text, "enum", ed->name,
                                    last_line, &sym.line, &sym.col);
+
+                /* Extract enum variant info for completion */
+                LspEnumDef edef;
+                edef.name = strdup(ed->name);
+                edef.line = sym.line;
+                edef.variant_count = ed->variant_count;
+                edef.variants = NULL;
+                if (ed->variant_count > 0) {
+                    edef.variants = malloc(ed->variant_count * sizeof(LspVariantInfo));
+                    for (size_t j = 0; j < ed->variant_count; j++) {
+                        edef.variants[j].name = strdup(ed->variants[j].name);
+                        /* Build param string for tuple variants */
+                        if (ed->variants[j].param_count > 0) {
+                            size_t plen = 3; /* "()\0" */
+                            for (size_t k = 0; k < ed->variants[j].param_count; k++) {
+                                if (ed->variants[j].param_types[k].name)
+                                    plen += strlen(ed->variants[j].param_types[k].name) + 2;
+                                else
+                                    plen += 5; /* "Any, " */
+                            }
+                            char *params = malloc(plen);
+                            char *pp = params;
+                            *pp++ = '(';
+                            for (size_t k = 0; k < ed->variants[j].param_count; k++) {
+                                if (k > 0) { *pp++ = ','; *pp++ = ' '; }
+                                const char *tn = ed->variants[j].param_types[k].name;
+                                if (!tn) tn = "Any";
+                                size_t tlen = strlen(tn);
+                                memcpy(pp, tn, tlen);
+                                pp += tlen;
+                            }
+                            *pp++ = ')';
+                            *pp = '\0';
+                            edef.variants[j].params = params;
+                        } else {
+                            edef.variants[j].params = NULL;
+                        }
+                    }
+                }
+                doc->enum_def_count++;
+                doc->enum_defs = realloc(doc->enum_defs,
+                    doc->enum_def_count * sizeof(LspEnumDef));
+                doc->enum_defs[doc->enum_def_count - 1] = edef;
+
                 found = true;
                 break;
             }
@@ -150,6 +216,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
 
         if (found) {
             last_line = sym.line;
+            sym.owner_type = NULL;
             doc->symbol_count++;
             doc->symbols = realloc(doc->symbols, doc->symbol_count * sizeof(LspSymbol));
             doc->symbols[doc->symbol_count - 1] = sym;
@@ -162,6 +229,32 @@ static void free_tokens(LatVec *tokens) {
     for (size_t i = 0; i < tokens->len; i++)
         token_free(lat_vec_get(tokens, i));
     lat_vec_free(tokens);
+}
+
+/* Free struct def info */
+static void free_struct_defs(LspStructDef *defs, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        free(defs[i].name);
+        for (size_t j = 0; j < defs[i].field_count; j++) {
+            free(defs[i].fields[j].name);
+            free(defs[i].fields[j].type_name);
+        }
+        free(defs[i].fields);
+    }
+    free(defs);
+}
+
+/* Free enum def info */
+static void free_enum_defs(LspEnumDef *defs, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        free(defs[i].name);
+        for (size_t j = 0; j < defs[i].variant_count; j++) {
+            free(defs[i].variants[j].name);
+            free(defs[i].variants[j].params);
+        }
+        free(defs[i].variants);
+    }
+    free(defs);
 }
 
 /* Analyze a document: lex, parse, extract diagnostics and symbols */
@@ -177,10 +270,19 @@ void lsp_analyze_document(LspDocument *doc) {
         free(doc->symbols[i].name);
         free(doc->symbols[i].signature);
         free(doc->symbols[i].doc);
+        free(doc->symbols[i].owner_type);
     }
     free(doc->symbols);
     doc->symbols = NULL;
     doc->symbol_count = 0;
+
+    free_struct_defs(doc->struct_defs, doc->struct_def_count);
+    doc->struct_defs = NULL;
+    doc->struct_def_count = 0;
+
+    free_enum_defs(doc->enum_defs, doc->enum_def_count);
+    doc->enum_defs = NULL;
+    doc->enum_def_count = 0;
 
     if (!doc->text) return;
 
@@ -231,7 +333,10 @@ void lsp_document_free(LspDocument *doc) {
         free(doc->symbols[i].name);
         free(doc->symbols[i].signature);
         free(doc->symbols[i].doc);
+        free(doc->symbols[i].owner_type);
     }
     free(doc->symbols);
+    free_struct_defs(doc->struct_defs, doc->struct_def_count);
+    free_enum_defs(doc->enum_defs, doc->enum_def_count);
     free(doc);
 }

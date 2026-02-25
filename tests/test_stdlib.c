@@ -74,6 +74,9 @@ static char *run_capture(const char *source) {
     char *parse_err = NULL;
     Program prog = parser_parse(&parser, &parse_err);
     if (parse_err) {
+        size_t pe_len = strlen("PARSE_ERROR:") + strlen(parse_err) + 1;
+        char *pe_out = malloc(pe_len);
+        snprintf(pe_out, pe_len, "PARSE_ERROR:%s", parse_err);
         free(parse_err);
         program_free(&prog);
         for (size_t i = 0; i < tokens.len; i++)
@@ -83,7 +86,7 @@ static char *run_capture(const char *source) {
         dup2(old_stdout, fileno(stdout));
         close(old_stdout);
         fclose(tmp);
-        return strdup("PARSE_ERROR");
+        return pe_out;
     }
 
     /* Run via selected backend */
@@ -1440,7 +1443,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.20"
+        "0.3.21"
     );
 }
 
@@ -5865,7 +5868,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.20"
+        "Hello, Lattice!\nVersion 0.3.21"
     );
 }
 
@@ -13465,6 +13468,548 @@ static void test_try_catch_conditional_error(void) {
     );
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * LAT-22: Polymorphic inline cache (PIC) tests — exercise method dispatch
+ * caching through repeated and polymorphic method calls.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* Test: chain multiple array methods (exercises monomorphic PIC for Array type) */
+static void test_pic_method_chain_array(void) {
+    ASSERT_OUTPUT(
+        "let a = [5, 3, 1, 4, 2]\n"
+        "let r = a.reverse().take(3).join(\", \")\n"
+        "print(r)",
+        "2, 4, 1"
+    );
+}
+
+/* Test: chain multiple string methods (exercises monomorphic PIC for String type) */
+static void test_pic_method_chain_string(void) {
+    ASSERT_OUTPUT(
+        "let s = \"  Hello World  \"\n"
+        "let r = s.trim().to_lower().replace(\"world\", \"lattice\")\n"
+        "print(r)",
+        "hello lattice"
+    );
+}
+
+/* Test: call the same method in a loop (PIC should cache after first iteration) */
+static void test_pic_loop_same_method(void) {
+    ASSERT_OUTPUT(
+        "let items = [[1,2], [3,4,5], [6]]\n"
+        "flux result = []\n"
+        "for item in items {\n"
+        "    result.push(item.len())\n"
+        "}\n"
+        "print(result)",
+        "[2, 3, 1]"
+    );
+}
+
+/* Test: .len() on different types in the same code path (polymorphic PIC) */
+static void test_pic_polymorphic_len(void) {
+    ASSERT_OUTPUT(
+        "fn get_len(x: any) -> Int {\n"
+        "    return x.len()\n"
+        "}\n"
+        "print(get_len([1, 2, 3]))\n"
+        "print(get_len(\"hello\"))\n"
+        "print(get_len([1, 2, 3, 4]))\n"
+        "print(get_len(\"hi\"))",
+        "3\n5\n4\n2"
+    );
+}
+
+/* Test: struct field access + callable struct field (PIC caches NOT_BUILTIN) */
+static void test_pic_struct_method_fallthrough(void) {
+    ASSERT_OUTPUT(
+        "struct Greeter { name: String, greet: Fn }\n"
+        "let g = Greeter { name: \"World\", greet: |self| { \"Hello, \" + self.name } }\n"
+        "print(g.greet())",
+        "Hello, World"
+    );
+}
+
+/* Test: global array push in a loop (exercises INVOKE_GLOBAL PIC) */
+static void test_pic_global_push_loop(void) {
+    ASSERT_OUTPUT(
+        "flux arr = []\n"
+        "for i in 0..5 {\n"
+        "    arr.push(i * i)\n"
+        "}\n"
+        "print(arr)",
+        "[0, 1, 4, 9, 16]"
+    );
+}
+
+/* Test: mixed method chain across map/array/string (full polymorphic exercise) */
+static void test_pic_mixed_chain(void) {
+    ASSERT_OUTPUT(
+        "let words = [\"hello\", \"world\", \"foo\"]\n"
+        "let result = words.map(|w| { w.to_upper() }).join(\" \")\n"
+        "print(result)\n"
+        "print(words.contains(\"foo\"))\n"
+        "print(\"hello world\".contains(\"world\"))",
+        "HELLO WORLD FOO\ntrue\ntrue"
+    );
+}
+
+/* ── LAT-27: Duration/DateTime/Calendar/Timezone tests ── */
+
+static void test_duration_create(void) {
+    ASSERT_OUTPUT(
+        "let d = duration(2, 30, 15, 0)\n"
+        "print(d[\"hours\"])\n"
+        "print(d[\"minutes\"])\n"
+        "print(d[\"seconds\"])\n"
+        "print(d[\"millis\"])\n",
+        "2\n30\n15\n0"
+    );
+}
+
+static void test_duration_from_seconds(void) {
+    ASSERT_OUTPUT(
+        "let d = duration_from_seconds(3661)\n"
+        "print(d[\"hours\"])\n"
+        "print(d[\"minutes\"])\n"
+        "print(d[\"seconds\"])\n",
+        "1\n1\n1"
+    );
+}
+
+static void test_duration_from_millis(void) {
+    ASSERT_OUTPUT(
+        "let d = duration_from_millis(5500)\n"
+        "print(d[\"hours\"])\n"
+        "print(d[\"seconds\"])\n"
+        "print(d[\"millis\"])\n",
+        "0\n5\n500"
+    );
+}
+
+static void test_duration_add(void) {
+    ASSERT_OUTPUT(
+        "let d1 = duration(1, 0, 0, 0)\n"
+        "let d2 = duration(0, 30, 0, 0)\n"
+        "let d3 = duration_add(d1, d2)\n"
+        "print(d3[\"hours\"])\n"
+        "print(d3[\"minutes\"])\n",
+        "1\n30"
+    );
+}
+
+static void test_duration_sub(void) {
+    ASSERT_OUTPUT(
+        "let d1 = duration(2, 0, 0, 0)\n"
+        "let d2 = duration(0, 30, 0, 0)\n"
+        "let d3 = duration_sub(d1, d2)\n"
+        "print(d3[\"hours\"])\n"
+        "print(d3[\"minutes\"])\n",
+        "1\n30"
+    );
+}
+
+static void test_duration_to_string(void) {
+    ASSERT_OUTPUT(
+        "let d = duration(2, 30, 15, 0)\n"
+        "print(duration_to_string(d))\n",
+        "2h 30m 15s"
+    );
+}
+
+static void test_duration_to_string_with_millis(void) {
+    ASSERT_OUTPUT(
+        "let d = duration(0, 0, 5, 500)\n"
+        "print(duration_to_string(d))\n",
+        "0h 0m 5s 500ms"
+    );
+}
+
+static void test_duration_field_accessors(void) {
+    ASSERT_OUTPUT(
+        "let d = duration(3, 45, 12, 100)\n"
+        "print(duration_hours(d))\n"
+        "print(duration_minutes(d))\n"
+        "print(duration_seconds(d))\n"
+        "print(duration_millis(d))\n",
+        "3\n45\n12\n100"
+    );
+}
+
+static void test_datetime_from_epoch(void) {
+    ASSERT_OUTPUT(
+        "let dt = datetime_from_epoch(0)\n"
+        "print(dt[\"year\"])\n"
+        "print(dt[\"month\"])\n"
+        "print(dt[\"day\"])\n"
+        "print(dt[\"hour\"])\n"
+        "print(dt[\"tz_offset\"])\n",
+        "1970\n1\n1\n0\n0"
+    );
+}
+
+static void test_datetime_to_epoch(void) {
+    ASSERT_OUTPUT(
+        "let dt = datetime_from_epoch(1000000)\n"
+        "let ep = datetime_to_epoch(dt)\n"
+        "print(ep)\n",
+        "1000000"
+    );
+}
+
+static void test_datetime_from_iso(void) {
+    ASSERT_OUTPUT(
+        "let dt = datetime_from_iso(\"2026-02-24T10:30:00Z\")\n"
+        "print(dt[\"year\"])\n"
+        "print(dt[\"month\"])\n"
+        "print(dt[\"day\"])\n"
+        "print(dt[\"hour\"])\n"
+        "print(dt[\"minute\"])\n",
+        "2026\n2\n24\n10\n30"
+    );
+}
+
+static void test_datetime_to_iso(void) {
+    ASSERT_OUTPUT(
+        "let dt = datetime_from_epoch(0)\n"
+        "print(datetime_to_iso(dt))\n",
+        "1970-01-01T00:00:00Z"
+    );
+}
+
+static void test_datetime_iso_roundtrip(void) {
+    ASSERT_OUTPUT(
+        "let iso = \"2026-06-15T08:45:30Z\"\n"
+        "let dt = datetime_from_iso(iso)\n"
+        "let back = datetime_to_iso(dt)\n"
+        "print(back)\n",
+        "2026-06-15T08:45:30Z"
+    );
+}
+
+static void test_datetime_add_duration(void) {
+    ASSERT_OUTPUT(
+        "let dt = datetime_from_epoch(0)\n"
+        "let dur = duration(1, 30, 0, 0)\n"
+        "let dt2 = datetime_add_duration(dt, dur)\n"
+        "print(dt2[\"hour\"])\n"
+        "print(dt2[\"minute\"])\n",
+        "1\n30"
+    );
+}
+
+static void test_datetime_sub(void) {
+    ASSERT_OUTPUT(
+        "let dt1 = datetime_from_iso(\"2026-02-24T12:00:00Z\")\n"
+        "let dt2 = datetime_from_iso(\"2026-02-24T10:00:00Z\")\n"
+        "let dur = datetime_sub(dt1, dt2)\n"
+        "print(dur[\"hours\"])\n"
+        "print(dur[\"minutes\"])\n",
+        "2\n0"
+    );
+}
+
+static void test_datetime_format_map(void) {
+    ASSERT_OUTPUT(
+        "let dt = datetime_from_iso(\"2026-02-24T10:30:00Z\")\n"
+        "print(datetime_format(dt, \"%Y-%m-%d\"))\n",
+        "2026-02-24"
+    );
+}
+
+static void test_datetime_to_utc(void) {
+    ASSERT_OUTPUT(
+        "let dt = datetime_from_epoch(0)\n"
+        "let utc = datetime_to_utc(dt)\n"
+        "print(utc[\"year\"])\n"
+        "print(utc[\"tz_offset\"])\n",
+        "1970\n0"
+    );
+}
+
+static void test_days_in_month(void) {
+    ASSERT_OUTPUT(
+        "print(days_in_month(2024, 2))\n"
+        "print(days_in_month(2025, 2))\n"
+        "print(days_in_month(2026, 1))\n"
+        "print(days_in_month(2026, 4))\n",
+        "29\n28\n31\n30"
+    );
+}
+
+static void test_day_of_week(void) {
+    /* 2026-02-24 is a Tuesday = 2 */
+    ASSERT_OUTPUT(
+        "print(day_of_week(2026, 2, 24))\n",
+        "2"
+    );
+}
+
+static void test_day_of_year(void) {
+    /* Jan 1 = 1, Feb 24 in non-leap = 31+24 = 55 */
+    ASSERT_OUTPUT(
+        "print(day_of_year(2026, 1, 1))\n"
+        "print(day_of_year(2026, 2, 24))\n",
+        "1\n55"
+    );
+}
+
+static void test_timezone_offset(void) {
+    /* Just verify it returns an integer and doesn't crash */
+    ASSERT_OUTPUT(
+        "let tz = timezone_offset()\n"
+        "print(typeof(tz))\n",
+        "Int"
+    );
+}
+
+static void test_is_leap_year_extended(void) {
+    ASSERT_OUTPUT(
+        "print(is_leap_year(2024))\n"
+        "print(is_leap_year(2025))\n"
+        "print(is_leap_year(2000))\n"
+        "print(is_leap_year(1900))\n",
+        "true\nfalse\ntrue\nfalse"
+    );
+}
+
+/* ======================================================================
+ * LAT-25: String interning in bytecode VMs
+ * ====================================================================== */
+
+static void test_intern_string_equality(void) {
+    /* String constants loaded from the constant pool should be interned,
+     * enabling fast pointer-equality checks. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = \"hello\"\n"
+        "    let b = \"hello\"\n"
+        "    print(a == b)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_intern_concat_short(void) {
+    /* Short string concat results (<= 64 bytes) should be interned. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = \"hello\" + \" \" + \"world\"\n"
+        "    let b = \"hello world\"\n"
+        "    print(a == b)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_intern_interpolation(void) {
+    /* String interpolation (OP_CONCAT) results should work correctly. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let name = \"lattice\"\n"
+        "    let msg = \"hello ${name}\"\n"
+        "    print(msg)\n"
+        "}\n",
+        "hello lattice"
+    );
+}
+
+static void test_intern_concat_loop(void) {
+    /* Repeated concat in a loop should produce correct results. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux s = \"\"\n"
+        "    flux i = 0\n"
+        "    while i < 10 {\n"
+        "        s = s + to_string(i)\n"
+        "        i += 1\n"
+        "    }\n"
+        "    print(s)\n"
+        "}\n",
+        "0123456789"
+    );
+}
+
+static void test_intern_equality_after_concat(void) {
+    /* Two strings built by different concat paths should still be equal. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = \"foo\" + \"bar\"\n"
+        "    let b = \"fo\" + \"obar\"\n"
+        "    print(a == b)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_intern_not_equal(void) {
+    /* Interned strings with different content should not be equal. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let a = \"hello\"\n"
+        "    let b = \"world\"\n"
+        "    print(a != b)\n"
+        "}\n",
+        "true"
+    );
+}
+
+static void test_intern_string_methods(void) {
+    /* String methods should work correctly on interned strings. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let s = \"Hello World\"\n"
+        "    print(s.len())\n"
+        "    print(s.to_upper())\n"
+        "    print(s.to_lower())\n"
+        "    print(s.contains(\"World\"))\n"
+        "}\n",
+        "11\nHELLO WORLD\nhello world\ntrue"
+    );
+}
+
+static void test_intern_map_string_keys(void) {
+    /* Interned strings should work correctly as map keys. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"key\"] = 42\n"
+        "    let k = \"key\"\n"
+        "    print(m[k])\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_intern_long_string_not_interned(void) {
+    /* Long strings (> 64 bytes) should still work correctly even though
+     * they won't be interned. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let long_str = \"abcdefghijklmnopqrstuvwxyz\" + \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\" + \"01234567890123456789\"\n"
+        "    print(long_str.len())\n"
+        "    let same = \"abcdefghijklmnopqrstuvwxyz\" + \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\" + \"01234567890123456789\"\n"
+        "    print(long_str == same)\n"
+        "}\n",
+        "72\ntrue"
+    );
+}
+
+static void test_intern_heavy_string_ops(void) {
+    /* Heavy string operations: build many strings, compare them,
+     * exercise both interned and non-interned paths. */
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux results = []\n"
+        "    flux i = 0\n"
+        "    while i < 50 {\n"
+        "        let s = \"item_\" + to_string(i)\n"
+        "        results.push(s)\n"
+        "        i += 1\n"
+        "    }\n"
+        "    print(results.len())\n"
+        "    print(results[0])\n"
+        "    print(results[49])\n"
+        "    // Verify equality with freshly built string\n"
+        "    print(results[25] == \"item_25\")\n"
+        "}\n",
+        "50\nitem_0\nitem_49\ntrue"
+    );
+}
+
+/* ======================================================================
+ * LAT-26: Type, enum variant, and keyword "did you mean?" suggestions
+ * ====================================================================== */
+
+/* Test: typo in type annotation suggests correct type name */
+static void test_err_type_suggestion(void) {
+    char *out = run_capture(
+        "fn foo(x: Intx) { print(x) }\n"
+        "fn main() { foo(5) }"
+    );
+    ASSERT(strstr(out, "did you mean 'Int'?") != NULL);
+    free(out);
+}
+
+/* Test: typo in return type annotation suggests correct type */
+static void test_err_return_type_suggestion(void) {
+    char *out = run_capture(
+        "fn foo(x: Int) -> Strig {\n"
+        "    return \"hello\"\n"
+        "}\n"
+        "fn main() { foo(5) }"
+    );
+    ASSERT(strstr(out, "did you mean 'String'?") != NULL);
+    free(out);
+}
+
+/* Test: valid type with wrong value gives no type name suggestion */
+static void test_err_type_no_false_suggestion(void) {
+    char *out = run_capture(
+        "fn foo(x: Int) { print(x) }\n"
+        "fn main() { foo(\"hello\") }"
+    );
+    ASSERT(strstr(out, "expects type Int, got String") != NULL);
+    /* Should NOT suggest a different type name since "Int" is valid */
+    ASSERT(strstr(out, "did you mean") == NULL);
+    free(out);
+}
+
+/* Test: unknown enum variant suggests correct variant */
+static void test_err_enum_variant_suggestion(void) {
+    if (test_backend != BACKEND_TREE_WALK) return; /* enum variant validation only in tree-walker */
+    char *out = run_capture(
+        "enum Color { Red, Green, Blue }\n"
+        "fn main() { let c = Color::Gren; print(c) }"
+    );
+    ASSERT(strstr(out, "did you mean 'Green'?") != NULL);
+    free(out);
+}
+
+/* Test: unknown enum variant with no close match gives plain error */
+static void test_err_enum_variant_no_suggestion(void) {
+    if (test_backend != BACKEND_TREE_WALK) return; /* enum variant validation only in tree-walker */
+    char *out = run_capture(
+        "enum Color { Red, Green, Blue }\n"
+        "fn main() { let c = Color::Xyz; print(c) }"
+    );
+    ASSERT(strstr(out, "has no variant 'Xyz'") != NULL);
+    ASSERT(strstr(out, "did you mean") == NULL);
+    free(out);
+}
+
+/* Test: keyword suggestion in parser when expecting 'fn' but getting close typo */
+static void test_err_keyword_suggestion(void) {
+    char *out = run_capture(
+        "trait Greeter { fnn greet() }\n"
+        "fn main() { print(42) }"
+    );
+    ASSERT(strstr(out, "PARSE_ERROR:") != NULL);
+    ASSERT(strstr(out, "did you mean 'fn'?") != NULL);
+    free(out);
+}
+
+/* Test: keyword far from any known keyword gives no suggestion */
+static void test_err_keyword_no_suggestion(void) {
+    char *out = run_capture(
+        "trait Greeter { xyzmethod greet() }\n"
+        "fn main() { print(42) }"
+    );
+    ASSERT(strstr(out, "PARSE_ERROR:") != NULL);
+    ASSERT(strstr(out, "did you mean") == NULL);
+    free(out);
+}
+
+/* Test: type suggestion with Boool -> Bool */
+static void test_err_type_suggestion_bool(void) {
+    char *out = run_capture(
+        "fn check(x: Boool) { print(x) }\n"
+        "fn main() { check(true) }"
+    );
+    ASSERT(strstr(out, "did you mean 'Bool'?") != NULL);
+    free(out);
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -14793,4 +15338,59 @@ void register_stdlib_tests(void) {
     register_test("test_defer_with_error", test_defer_with_error);
     register_test("test_error_multi_frame", test_error_multi_frame);
     register_test("test_try_catch_conditional_error", test_try_catch_conditional_error);
+
+    /* LAT-22: PIC / method dispatch tests */
+    register_test("test_pic_method_chain_array", test_pic_method_chain_array);
+    register_test("test_pic_method_chain_string", test_pic_method_chain_string);
+    register_test("test_pic_loop_same_method", test_pic_loop_same_method);
+    register_test("test_pic_polymorphic_len", test_pic_polymorphic_len);
+    register_test("test_pic_struct_method_fallthrough", test_pic_struct_method_fallthrough);
+    register_test("test_pic_global_push_loop", test_pic_global_push_loop);
+    register_test("test_pic_mixed_chain", test_pic_mixed_chain);
+
+    /* LAT-27: Duration/DateTime/Calendar/Timezone */
+    register_test("test_duration_create", test_duration_create);
+    register_test("test_duration_from_seconds", test_duration_from_seconds);
+    register_test("test_duration_from_millis", test_duration_from_millis);
+    register_test("test_duration_add", test_duration_add);
+    register_test("test_duration_sub", test_duration_sub);
+    register_test("test_duration_to_string", test_duration_to_string);
+    register_test("test_duration_to_string_with_millis", test_duration_to_string_with_millis);
+    register_test("test_duration_field_accessors", test_duration_field_accessors);
+    register_test("test_datetime_from_epoch", test_datetime_from_epoch);
+    register_test("test_datetime_to_epoch", test_datetime_to_epoch);
+    register_test("test_datetime_from_iso", test_datetime_from_iso);
+    register_test("test_datetime_to_iso", test_datetime_to_iso);
+    register_test("test_datetime_iso_roundtrip", test_datetime_iso_roundtrip);
+    register_test("test_datetime_add_duration", test_datetime_add_duration);
+    register_test("test_datetime_sub", test_datetime_sub);
+    register_test("test_datetime_format_map", test_datetime_format_map);
+    register_test("test_datetime_to_utc", test_datetime_to_utc);
+    register_test("test_days_in_month", test_days_in_month);
+    register_test("test_day_of_week", test_day_of_week);
+    register_test("test_day_of_year", test_day_of_year);
+    register_test("test_timezone_offset", test_timezone_offset);
+    register_test("test_is_leap_year_extended", test_is_leap_year_extended);
+
+    /* LAT-25: String interning in bytecode VMs */
+    register_test("test_intern_string_equality", test_intern_string_equality);
+    register_test("test_intern_concat_short", test_intern_concat_short);
+    register_test("test_intern_interpolation", test_intern_interpolation);
+    register_test("test_intern_concat_loop", test_intern_concat_loop);
+    register_test("test_intern_equality_after_concat", test_intern_equality_after_concat);
+    register_test("test_intern_not_equal", test_intern_not_equal);
+    register_test("test_intern_string_methods", test_intern_string_methods);
+    register_test("test_intern_map_string_keys", test_intern_map_string_keys);
+    register_test("test_intern_long_string_not_interned", test_intern_long_string_not_interned);
+    register_test("test_intern_heavy_string_ops", test_intern_heavy_string_ops);
+    /* LAT-26: Type, enum variant, and keyword suggestions */
+    register_test("test_err_type_suggestion", test_err_type_suggestion);
+    register_test("test_err_return_type_suggestion", test_err_return_type_suggestion);
+    register_test("test_err_type_no_false_suggestion", test_err_type_no_false_suggestion);
+    register_test("test_err_enum_variant_suggestion", test_err_enum_variant_suggestion);
+    register_test("test_err_enum_variant_no_suggestion", test_err_enum_variant_no_suggestion);
+    register_test("test_err_keyword_suggestion", test_err_keyword_suggestion);
+    register_test("test_err_keyword_no_suggestion", test_err_keyword_no_suggestion);
+    register_test("test_err_type_suggestion_bool", test_err_type_suggestion_bool);
+
 }

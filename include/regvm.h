@@ -44,6 +44,7 @@ typedef struct RegChunk {
     size_t    export_count;
     bool      has_exports;   /* true if module uses explicit exports */
     uint8_t   max_reg;       /* High-water register count (for bounded init/cleanup) */
+    PICTable  pic;           /* Polymorphic inline cache for method dispatch */
 } RegChunk;
 
 RegChunk *regchunk_new(void);

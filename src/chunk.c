@@ -56,6 +56,7 @@ void chunk_free(Chunk *c) {
             free(c->export_names[i]);
         free(c->export_names);
     }
+    pic_table_free(&c->pic);
     free(c);
 }
 
