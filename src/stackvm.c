@@ -6067,7 +6067,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatVec mod_toks = lexer_tokenize(&mod_lex, &lex_err);
                 free(source);
                 if (lex_err) {
-                    char errmsg[1024];
+                    char errmsg[2048];
                     snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, lex_err);
                     free(lex_err);
                     lat_vec_free(&mod_toks);
@@ -6079,7 +6079,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 char *parse_err = NULL;
                 Program mod_prog = parser_parse(&mod_parser, &parse_err);
                 if (parse_err) {
-                    char errmsg[1024];
+                    char errmsg[2048];
                     snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, parse_err);
                     free(parse_err);
                     program_free(&mod_prog);
@@ -6100,7 +6100,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 lat_vec_free(&mod_toks);
 
                 if (!mod_chunk) {
-                    char errmsg[1024];
+                    char errmsg[2048];
                     snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved,
                              comp_err ? comp_err : "compile error");
                     free(comp_err);

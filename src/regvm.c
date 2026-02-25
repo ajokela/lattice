@@ -4767,7 +4767,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatVec mod_toks = lexer_tokenize(&mod_lex, &lex_err);
         free(source);
         if (lex_err) {
-            char errmsg[1024];
+            char errmsg[2048];
             snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, lex_err);
             free(lex_err);
             lat_vec_free(&mod_toks);
@@ -4779,7 +4779,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         char *parse_err = NULL;
         Program mod_prog = parser_parse(&mod_parser, &parse_err);
         if (parse_err) {
-            char errmsg[1024];
+            char errmsg[2048];
             snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, parse_err);
             free(parse_err);
             program_free(&mod_prog);
@@ -4800,7 +4800,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         lat_vec_free(&mod_toks);
 
         if (!mod_chunk) {
-            char errmsg[1024];
+            char errmsg[2048];
             snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved,
                      comp_err ? comp_err : "compile error");
             free(comp_err);
@@ -4917,7 +4917,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatVec req_toks = lexer_tokenize(&req_lex, &lex_err);
         free(source);
         if (lex_err) {
-            char errmsg[1024];
+            char errmsg[2048];
             snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved, lex_err);
             free(lex_err);
             lat_vec_free(&req_toks);
@@ -4929,7 +4929,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         char *parse_err = NULL;
         Program req_prog = parser_parse(&req_parser, &parse_err);
         if (parse_err) {
-            char errmsg[1024];
+            char errmsg[2048];
             snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved, parse_err);
             free(parse_err);
             program_free(&req_prog);
@@ -4950,7 +4950,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         lat_vec_free(&req_toks);
 
         if (!req_chunk) {
-            char errmsg[1024];
+            char errmsg[2048];
             snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved,
                      comp_err ? comp_err : "compile error");
             free(comp_err);
