@@ -210,6 +210,79 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 found = true;
                 break;
             }
+            case ITEM_STMT: {
+                const Stmt *stmt = item->as.stmt;
+                if (stmt && stmt->tag == STMT_BINDING && stmt->as.binding.name) {
+                    sym.name = strdup(stmt->as.binding.name);
+                    sym.kind = LSP_SYM_VARIABLE;
+
+                    /* Build signature with phase and optional type */
+                    const char *phase_kw = "let";
+                    if (stmt->as.binding.phase == PHASE_FLUID) phase_kw = "flux";
+                    else if (stmt->as.binding.phase == PHASE_CRYSTAL) phase_kw = "fix";
+
+                    size_t siglen = strlen(phase_kw) + strlen(stmt->as.binding.name) + 32;
+                    if (stmt->as.binding.ty && stmt->as.binding.ty->name)
+                        siglen += strlen(stmt->as.binding.ty->name);
+                    sym.signature = malloc(siglen);
+
+                    if (stmt->as.binding.ty && stmt->as.binding.ty->name)
+                        sprintf(sym.signature, "%s %s: %s",
+                                phase_kw, stmt->as.binding.name,
+                                stmt->as.binding.ty->name);
+                    else
+                        sprintf(sym.signature, "%s %s", phase_kw, stmt->as.binding.name);
+
+                    /* Use the AST line number (1-based) converted to 0-based */
+                    sym.line = stmt->line > 0 ? stmt->line - 1 : 0;
+                    /* Find exact column for the name */
+                    find_decl_position(doc->text, phase_kw, stmt->as.binding.name,
+                                       sym.line, &sym.line, &sym.col);
+                    found = true;
+                }
+                break;
+            }
+            case ITEM_TRAIT: {
+                const TraitDecl *td = &item->as.trait_decl;
+                sym.name = strdup(td->name);
+                sym.kind = LSP_SYM_STRUCT;  /* Use Struct kind — closest LSP match */
+                size_t siglen = strlen(td->name) + 32;
+                for (size_t j = 0; j < td->method_count; j++)
+                    siglen += strlen(td->methods[j].name) + 8;
+                sym.signature = malloc(siglen);
+                char *p = sym.signature;
+                p += sprintf(p, "trait %s {", td->name);
+                for (size_t j = 0; j < td->method_count; j++) {
+                    if (j > 0) p += sprintf(p, ",");
+                    p += sprintf(p, " %s()", td->methods[j].name);
+                }
+                sprintf(p, " }");
+                find_decl_position(doc->text, "trait", td->name,
+                                   last_line, &sym.line, &sym.col);
+                found = true;
+                break;
+            }
+            case ITEM_IMPL: {
+                const ImplBlock *ib = &item->as.impl_block;
+                /* Build name like "impl Trait for Type" */
+                size_t nlen = 16;
+                if (ib->trait_name) nlen += strlen(ib->trait_name);
+                if (ib->type_name) nlen += strlen(ib->type_name);
+                sym.name = malloc(nlen);
+                if (ib->trait_name && ib->type_name)
+                    sprintf(sym.name, "%s for %s", ib->trait_name, ib->type_name);
+                else if (ib->type_name)
+                    sprintf(sym.name, "%s", ib->type_name);
+                else
+                    sprintf(sym.name, "impl");
+                sym.kind = LSP_SYM_METHOD;
+                sym.signature = malloc(strlen(sym.name) + 8);
+                sprintf(sym.signature, "impl %s", sym.name);
+                find_decl_position(doc->text, "impl", ib->trait_name ? ib->trait_name : ib->type_name,
+                                   last_line, &sym.line, &sym.col);
+                found = true;
+                break;
+            }
             default:
                 break;
         }

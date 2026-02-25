@@ -154,7 +154,7 @@ static void handle_initialize(LspServer *srv, int id) {
     cJSON_AddItemToArray(triggers, cJSON_CreateString("."));
     cJSON_AddItemToArray(triggers, cJSON_CreateString(":"));
     cJSON_AddItemToObject(compOpts, "triggerCharacters", triggers);
-    cJSON_AddItemToObject(compOpts, "completionProvider", compOpts);
+    cJSON_AddItemToObject(caps, "completionProvider", compOpts);
 
     /* Hover */
     cJSON_AddBoolToObject(caps, "hoverProvider", 1);
@@ -836,31 +836,94 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
     memcpy(word, word_start, word_len);
     word[word_len] = '\0';
 
-    /* Search builtins */
     const char *hover_text = NULL;
-    if (srv->index) {
+    char *hover_buf = NULL;  /* dynamically built hover, freed at end */
+
+    /* Priority 1: Document symbols (user-defined names take precedence) */
+    if (doc) {
+        for (size_t i = 0; i < doc->symbol_count; i++) {
+            if (strcmp(doc->symbols[i].name, word) == 0) {
+                if (doc->symbols[i].kind == LSP_SYM_VARIABLE) {
+                    /* For variables, try to include inferred type */
+                    char *type = doc->text ?
+                        infer_variable_type(doc->text, word, line, doc) : NULL;
+                    const char *sig = doc->symbols[i].signature;
+                    if (type) {
+                        size_t blen = (sig ? strlen(sig) : 0) + strlen(type) + 48;
+                        hover_buf = malloc(blen);
+                        snprintf(hover_buf, blen, "```lattice\n%s%s%s\n```",
+                                 sig ? sig : word,
+                                 /* Append type only if sig doesn't already have it */
+                                 (sig && strchr(sig, ':')) ? "" : ": ",
+                                 (sig && strchr(sig, ':')) ? "" : type);
+                        hover_text = hover_buf;
+                        free(type);
+                    } else {
+                        /* No inferred type — show signature as code block */
+                        if (sig) {
+                            size_t blen = strlen(sig) + 24;
+                            hover_buf = malloc(blen);
+                            snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                            hover_text = hover_buf;
+                        }
+                    }
+                } else {
+                    /* Functions, structs, enums, traits: show signature as code block */
+                    const char *sig = doc->symbols[i].signature;
+                    if (sig) {
+                        size_t blen = strlen(sig) + 24;
+                        hover_buf = malloc(blen);
+                        snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                        hover_text = hover_buf;
+                    }
+                    if (doc->symbols[i].doc)
+                        hover_text = doc->symbols[i].doc;
+                }
+                break;
+            }
+        }
+    }
+
+    /* Priority 2: Builtin functions */
+    if (!hover_text && srv->index) {
         for (size_t i = 0; i < srv->index->builtin_count; i++) {
             if (strcmp(srv->index->builtins[i].name, word) == 0) {
                 hover_text = srv->index->builtins[i].doc;
                 break;
             }
         }
-        /* Search methods */
-        if (!hover_text) {
-            for (size_t i = 0; i < srv->index->method_count; i++) {
-                if (strcmp(srv->index->methods[i].name, word) == 0) {
-                    hover_text = srv->index->methods[i].doc;
-                    break;
-                }
+    }
+
+    /* Priority 3: Methods (only if not found as a document symbol) */
+    if (!hover_text && srv->index) {
+        for (size_t i = 0; i < srv->index->method_count; i++) {
+            if (strcmp(srv->index->methods[i].name, word) == 0) {
+                hover_text = srv->index->methods[i].doc;
+                break;
             }
         }
     }
 
-    /* Search document symbols */
-    if (!hover_text && doc) {
-        for (size_t i = 0; i < doc->symbol_count; i++) {
-            if (strcmp(doc->symbols[i].name, word) == 0) {
-                hover_text = doc->symbols[i].signature;
+    /* Priority 4: Try to infer type for identifiers not in symbol table */
+    if (!hover_text && doc && doc->text) {
+        char *type = infer_variable_type(doc->text, word, line, doc);
+        if (type) {
+            size_t blen = strlen(word) + strlen(type) + 32;
+            hover_buf = malloc(blen);
+            snprintf(hover_buf, blen, "```lattice\n%s: %s\n```", word, type);
+            hover_text = hover_buf;
+            free(type);
+        }
+    }
+
+    /* Priority 5: Keyword documentation */
+    if (!hover_text) {
+        for (int i = 0; lattice_keywords[i]; i++) {
+            if (strcmp(lattice_keywords[i], word) == 0) {
+                size_t blen = strlen(word) + 32;
+                hover_buf = malloc(blen);
+                snprintf(hover_buf, blen, "*keyword* `%s`", word);
+                hover_text = hover_buf;
                 break;
             }
         }
@@ -882,6 +945,7 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
         lsp_write_response(resp, stdout);
         cJSON_Delete(resp);
     }
+    free(hover_buf);
 }
 
 /* ── Handler: textDocument/definition ── */
@@ -949,20 +1013,115 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
     memcpy(word, ws, wlen);
     word[wlen] = '\0';
 
-    /* Search document symbols */
+    /* Search document symbols (fn, struct, enum, trait, impl, variables) */
     for (size_t i = 0; i < doc->symbol_count; i++) {
         if (strcmp(doc->symbols[i].name, word) == 0 && doc->symbols[i].line >= 0) {
             cJSON *result = cJSON_CreateObject();
             cJSON_AddStringToObject(result, "uri", uri);
             cJSON *range = cJSON_CreateObject();
-            cJSON *start = cJSON_CreateObject();
-            cJSON_AddNumberToObject(start, "line", doc->symbols[i].line);
-            cJSON_AddNumberToObject(start, "character", doc->symbols[i].col);
-            cJSON_AddItemToObject(range, "start", start);
-            cJSON *end = cJSON_CreateObject();
-            cJSON_AddNumberToObject(end, "line", doc->symbols[i].line);
-            cJSON_AddNumberToObject(end, "character", doc->symbols[i].col);
-            cJSON_AddItemToObject(range, "end", end);
+            cJSON *start_pos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(start_pos, "line", doc->symbols[i].line);
+            cJSON_AddNumberToObject(start_pos, "character", doc->symbols[i].col);
+            cJSON_AddItemToObject(range, "start", start_pos);
+            cJSON *end_pos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(end_pos, "line", doc->symbols[i].line);
+            cJSON_AddNumberToObject(end_pos, "character",
+                doc->symbols[i].col + (int)strlen(doc->symbols[i].name));
+            cJSON_AddItemToObject(range, "end", end_pos);
+            cJSON_AddItemToObject(result, "range", range);
+
+            free(word);
+            cJSON *resp = lsp_make_response(id, result);
+            lsp_write_response(resp, stdout);
+            cJSON_Delete(resp);
+            return;
+        }
+    }
+
+    /* Fallback: scan document text for variable declarations (let/flux/fix/for)
+     * that the symbol extractor may have missed (e.g., locals inside functions) */
+    if (doc->text) {
+        const char *text = doc->text;
+        const char *tp = text;
+        int def_line = -1, def_col = -1;
+        int scan_line = 0;
+        size_t wlen2 = strlen(word);
+
+        while (*tp) {
+            const char *ls = tp;
+            /* Skip leading whitespace */
+            while (*tp == ' ' || *tp == '\t') tp++;
+
+            /* Check for let/flux/fix/for keywords */
+            const char *kw = NULL;
+            size_t kw_len = 0;
+            if (strncmp(tp, "let ", 4) == 0) { kw = tp; kw_len = 4; }
+            else if (strncmp(tp, "flux ", 5) == 0) { kw = tp; kw_len = 5; }
+            else if (strncmp(tp, "fix ", 4) == 0) { kw = tp; kw_len = 4; }
+            else if (strncmp(tp, "for ", 4) == 0) { kw = tp; kw_len = 4; }
+
+            if (kw) {
+                const char *after = kw + kw_len;
+                while (*after == ' ' || *after == '\t') after++;
+                if (strncmp(after, word, wlen2) == 0) {
+                    char nc = after[wlen2];
+                    if (nc == ' ' || nc == ':' || nc == '=' || nc == '\t' ||
+                        nc == '\n' || nc == '\r' || nc == '\0' || nc == ',') {
+                        /* Found a declaration — only use if before the cursor */
+                        if (scan_line <= line) {
+                            def_line = scan_line;
+                            def_col = (int)(after - ls);
+                        }
+                    }
+                }
+            }
+
+            /* Check function parameters: fn name(... word ...) */
+            if (strncmp(tp, "fn ", 3) == 0) {
+                const char *paren = tp;
+                while (*paren && *paren != '(' && *paren != '\n') paren++;
+                if (*paren == '(') {
+                    const char *close = paren;
+                    while (*close && *close != ')' && *close != '\n') close++;
+                    /* Search for word as a parameter name */
+                    const char *search = paren + 1;
+                    while (search < close) {
+                        while (search < close && (*search == ' ' || *search == ','))
+                            search++;
+                        if ((size_t)(close - search) >= wlen2 &&
+                            strncmp(search, word, wlen2) == 0) {
+                            char nc = search[wlen2];
+                            if (nc == ':' || nc == ' ' || nc == ',' || nc == ')') {
+                                if (scan_line <= line) {
+                                    def_line = scan_line;
+                                    def_col = (int)(search - ls);
+                                }
+                                break;
+                            }
+                        }
+                        while (search < close && *search != ',') search++;
+                        if (search < close) search++;
+                    }
+                }
+            }
+
+            /* Advance to next line */
+            while (*tp && *tp != '\n') tp++;
+            if (*tp == '\n') { tp++; scan_line++; }
+        }
+
+        if (def_line >= 0) {
+            cJSON *result = cJSON_CreateObject();
+            cJSON_AddStringToObject(result, "uri", uri);
+            cJSON *range = cJSON_CreateObject();
+            cJSON *start_pos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(start_pos, "line", def_line);
+            cJSON_AddNumberToObject(start_pos, "character", def_col);
+            cJSON_AddItemToObject(range, "start", start_pos);
+            cJSON *end_pos = cJSON_CreateObject();
+            cJSON_AddNumberToObject(end_pos, "line", def_line);
+            cJSON_AddNumberToObject(end_pos, "character", def_col + (int)wlen2);
+            cJSON_AddItemToObject(range, "end", end_pos);
             cJSON_AddItemToObject(result, "range", range);
 
             free(word);
