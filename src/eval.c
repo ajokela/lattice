@@ -2726,12 +2726,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         found = (realpath(script_rel, resolved) != NULL);
                     }
                     if (!found) {
-                        char errbuf[512];
-                        snprintf(errbuf, sizeof(errbuf), "require: cannot find '%s'", file_path);
+                        char *err = NULL;
+                        (void)asprintf(&err, "require: cannot find '%s'", file_path);
                         free(file_path);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
-                        return eval_err(strdup(errbuf));
+                        return eval_err(err);
                     }
                     free(file_path);
                     /* Skip if already required */
@@ -2746,11 +2746,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     /* Read the file */
                     char *source = builtin_read_file(resolved);
                     if (!source) {
-                        char errbuf[512];
-                        snprintf(errbuf, sizeof(errbuf), "require: cannot read '%s'", resolved);
+                        char *err = NULL;
+                        (void)asprintf(&err, "require: cannot read '%s'", resolved);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
-                        return eval_err(strdup(errbuf));
+                        return eval_err(err);
                     }
                     /* Lex */
                     Lexer req_lex = lexer_new(source);
@@ -2758,27 +2758,27 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatVec req_toks = lexer_tokenize(&req_lex, &req_lex_err);
                     free(source);
                     if (req_lex_err) {
-                        char errbuf[1024];
-                        snprintf(errbuf, sizeof(errbuf), "require '%s': %s", resolved, req_lex_err);
+                        char *err = NULL;
+                        (void)asprintf(&err, "require '%s': %s", resolved, req_lex_err);
                         free(req_lex_err);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
-                        return eval_err(strdup(errbuf));
+                        return eval_err(err);
                     }
                     /* Parse */
                     Parser req_parser = parser_new(&req_toks);
                     char *req_parse_err = NULL;
                     Program req_prog = parser_parse(&req_parser, &req_parse_err);
                     if (req_parse_err) {
-                        char errbuf[1024];
-                        snprintf(errbuf, sizeof(errbuf), "require '%s': %s", resolved, req_parse_err);
+                        char *err = NULL;
+                        (void)asprintf(&err, "require '%s': %s", resolved, req_parse_err);
                         free(req_parse_err);
                         program_free(&req_prog);
                         for (size_t j = 0; j < req_toks.len; j++) token_free(lat_vec_get(&req_toks, j));
                         lat_vec_free(&req_toks);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
-                        return eval_err(strdup(errbuf));
+                        return eval_err(err);
                     }
                     /* Register functions, structs, traits, impls */
                     for (size_t j = 0; j < req_prog.item_count; j++) {
@@ -7898,10 +7898,10 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
         found = (realpath(script_rel, resolved) != NULL);
     }
     if (!found) {
-        char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf), "import: cannot find '%s'", file_path);
+        char *err = NULL;
+        (void)asprintf(&err, "import: cannot find '%s'", file_path);
         free(file_path);
-        return eval_err(strdup(errbuf));
+        return eval_err(err);
     }
     free(file_path);
 
@@ -7913,9 +7913,9 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
 
     /* Check for circular imports */
     if (lat_map_get(&ev->required_files, resolved)) {
-        char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf), "import: circular dependency on '%s'", resolved);
-        return eval_err(strdup(errbuf));
+        char *err = NULL;
+        (void)asprintf(&err, "import: circular dependency on '%s'", resolved);
+        return eval_err(err);
     }
 
     /* Mark as loading */
@@ -7925,9 +7925,9 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     /* Read the file */
     char *source = builtin_read_file(resolved);
     if (!source) {
-        char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf), "import: cannot read '%s'", resolved);
-        return eval_err(strdup(errbuf));
+        char *err = NULL;
+        (void)asprintf(&err, "import: cannot read '%s'", resolved);
+        return eval_err(err);
     }
 
     /* Lex */
@@ -7936,10 +7936,10 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     LatVec mod_toks = lexer_tokenize(&mod_lex, &mod_lex_err);
     free(source);
     if (mod_lex_err) {
-        char errbuf[1024];
-        snprintf(errbuf, sizeof(errbuf), "import '%s': %s", resolved, mod_lex_err);
+        char *err = NULL;
+        (void)asprintf(&err, "import '%s': %s", resolved, mod_lex_err);
         free(mod_lex_err);
-        return eval_err(strdup(errbuf));
+        return eval_err(err);
     }
 
     /* Parse */
@@ -7947,13 +7947,13 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     char *mod_parse_err = NULL;
     Program mod_prog = parser_parse(&mod_parser, &mod_parse_err);
     if (mod_parse_err) {
-        char errbuf[1024];
-        snprintf(errbuf, sizeof(errbuf), "import '%s': %s", resolved, mod_parse_err);
+        char *err = NULL;
+        (void)asprintf(&err, "import '%s': %s", resolved, mod_parse_err);
         free(mod_parse_err);
         program_free(&mod_prog);
         for (size_t j = 0; j < mod_toks.len; j++) token_free(lat_vec_get(&mod_toks, j));
         lat_vec_free(&mod_toks);
-        return eval_err(strdup(errbuf));
+        return eval_err(err);
     }
 
     /* Register functions, structs, enums, traits, impls globally */
