@@ -1,0 +1,483 @@
+// Test suite for stdlib data structure libraries (batch 2).
+// Exercises lru_cache, bloom_filter, and persistent_vector
+// with assertions to verify correct behavior.
+//
+// Run: ./clat tests/test_stdlib_libs2.lat
+
+import "lib/test" as t
+import "lib/lru_cache" as LRU
+import "lib/bloom_filter" as Bloom
+import "lib/persistent_vector" as PVec
+
+fn main() {
+    t.run([
+        // ----------------------------------------------------------------
+        // LRU Cache tests
+        // ----------------------------------------------------------------
+        t.describe("LRU Cache", |_| {
+            return [
+                t.it("new cache is empty", |_| {
+                    let c = LRU.new(5)
+                    let sz = c.get("size")
+                    let cap = c.get("capacity")
+                    let keys = c.get("keys")
+                    t.assert_eq(sz(nil), 0)
+                    t.assert_eq(cap(nil), 5)
+                    t.assert_eq(keys(nil).len(), 0)
+                }),
+
+                t.it("put and get basic operations", |_| {
+                    let c = LRU.new(5)
+                    let put = c.get("put")
+                    let get = c.get("get")
+                    let sz = c.get("size")
+                    put("a", 1)
+                    put("b", 2)
+                    put("c", 3)
+                    t.assert_eq(get("a"), 1)
+                    t.assert_eq(get("b"), 2)
+                    t.assert_eq(get("c"), 3)
+                    t.assert_eq(sz(nil), 3)
+                }),
+
+                t.it("get returns nil for missing key", |_| {
+                    let c = LRU.new(5)
+                    let get = c.get("get")
+                    t.assert_nil(get("missing"))
+                }),
+
+                t.it("put updates existing key", |_| {
+                    let c = LRU.new(5)
+                    let put = c.get("put")
+                    let get = c.get("get")
+                    let sz = c.get("size")
+                    put("a", 1)
+                    put("a", 100)
+                    t.assert_eq(get("a"), 100)
+                    t.assert_eq(sz(nil), 1)
+                }),
+
+                t.it("evicts LRU when at capacity", |_| {
+                    let c = LRU.new(3)
+                    let put = c.get("put")
+                    let get = c.get("get")
+                    let has = c.get("has")
+                    let sz = c.get("size")
+                    put("a", 1)
+                    put("b", 2)
+                    put("c", 3)
+                    // Cache full. Adding "d" should evict "a" (LRU).
+                    put("d", 4)
+                    t.assert_eq(sz(nil), 3)
+                    t.assert_false(has("a"))
+                    t.assert_nil(get("a"))
+                    t.assert_eq(get("d"), 4)
+                }),
+
+                t.it("get promotes entry to MRU, changes eviction order", |_| {
+                    let c = LRU.new(3)
+                    let put = c.get("put")
+                    let get = c.get("get")
+                    let has = c.get("has")
+                    put("a", 1)
+                    put("b", 2)
+                    put("c", 3)
+                    // Touch "a" to make it MRU
+                    get("a")
+                    // Now LRU order: b, c, a. Adding d should evict b.
+                    put("d", 4)
+                    t.assert_false(has("b"))
+                    t.assert_true(has("a"))
+                    t.assert_true(has("c"))
+                    t.assert_true(has("d"))
+                }),
+
+                t.it("keys returns MRU-to-LRU order", |_| {
+                    let c = LRU.new(5)
+                    let put = c.get("put")
+                    let keys = c.get("keys")
+                    put("a", 1)
+                    put("b", 2)
+                    put("c", 3)
+                    let k = keys(nil)
+                    // Most recently added = MRU
+                    t.assert_eq(k[0], "c")
+                    t.assert_eq(k[1], "b")
+                    t.assert_eq(k[2], "a")
+                }),
+
+                t.it("remove works", |_| {
+                    let c = LRU.new(5)
+                    let put = c.get("put")
+                    let remove = c.get("remove")
+                    let has = c.get("has")
+                    let sz = c.get("size")
+                    put("a", 1)
+                    put("b", 2)
+                    put("c", 3)
+                    let val = remove("b")
+                    t.assert_eq(val, 2)
+                    t.assert_false(has("b"))
+                    t.assert_eq(sz(nil), 2)
+                }),
+
+                t.it("remove returns nil for missing key", |_| {
+                    let c = LRU.new(5)
+                    let remove = c.get("remove")
+                    t.assert_nil(remove("missing"))
+                }),
+
+                t.it("clear empties the cache", |_| {
+                    let c = LRU.new(5)
+                    let put = c.get("put")
+                    let clear = c.get("clear")
+                    let sz = c.get("size")
+                    let keys = c.get("keys")
+                    put("a", 1)
+                    put("b", 2)
+                    clear(nil)
+                    t.assert_eq(sz(nil), 0)
+                    t.assert_eq(keys(nil).len(), 0)
+                }),
+
+                t.it("works after clear and refill", |_| {
+                    let c = LRU.new(2)
+                    let put = c.get("put")
+                    let get = c.get("get")
+                    let clear = c.get("clear")
+                    let sz = c.get("size")
+                    put("a", 1)
+                    put("b", 2)
+                    clear(nil)
+                    put("c", 3)
+                    put("d", 4)
+                    t.assert_eq(sz(nil), 2)
+                    t.assert_eq(get("c"), 3)
+                    t.assert_eq(get("d"), 4)
+                }),
+
+                t.it("multiple evictions work correctly", |_| {
+                    let c = LRU.new(2)
+                    let put = c.get("put")
+                    let get = c.get("get")
+                    let has = c.get("has")
+                    put("a", 1)
+                    put("b", 2)
+                    put("c", 3)  // evicts a
+                    put("d", 4)  // evicts b
+                    put("e", 5)  // evicts c
+                    t.assert_false(has("a"))
+                    t.assert_false(has("b"))
+                    t.assert_false(has("c"))
+                    t.assert_true(has("d"))
+                    t.assert_true(has("e"))
+                    t.assert_eq(get("d"), 4)
+                    t.assert_eq(get("e"), 5)
+                }),
+
+                t.it("values returns MRU-to-LRU order", |_| {
+                    let c = LRU.new(5)
+                    let put = c.get("put")
+                    let values = c.get("values")
+                    put("a", 10)
+                    put("b", 20)
+                    put("c", 30)
+                    let v = values(nil)
+                    t.assert_eq(v[0], 30)
+                    t.assert_eq(v[1], 20)
+                    t.assert_eq(v[2], 10)
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Bloom Filter tests
+        // ----------------------------------------------------------------
+        t.describe("Bloom Filter", |_| {
+            return [
+                t.it("new filter is empty", |_| {
+                    let bf = Bloom.new(100, 0.01)
+                    let count = bf.get("count")
+                    t.assert_eq(count(nil), 0)
+                }),
+
+                t.it("added items are detected", |_| {
+                    let bf = Bloom.new(100, 0.01)
+                    let add = bf.get("add")
+                    let contains = bf.get("contains")
+                    add("hello")
+                    add("world")
+                    add("lattice")
+                    t.assert_true(contains("hello"))
+                    t.assert_true(contains("world"))
+                    t.assert_true(contains("lattice"))
+                }),
+
+                t.it("non-added items usually not detected", |_| {
+                    let bf = Bloom.new(1000, 0.001)
+                    let add = bf.get("add")
+                    let contains = bf.get("contains")
+                    // Add specific items
+                    add("alpha")
+                    add("beta")
+                    add("gamma")
+                    // These should almost certainly not be found
+                    // (false positive rate is 0.1%)
+                    flux false_pos = 0
+                    flux i = 0
+                    while i < 10 {
+                        let item = "test_item_" + to_string(i)
+                        if contains(item) {
+                            false_pos = false_pos + 1
+                        }
+                        i = i + 1
+                    }
+                    // With 0.1% FP rate and 10 checks, extremely unlikely
+                    // to get more than 2 false positives
+                    t.assert_lt(false_pos, 3)
+                }),
+
+                t.it("count tracks additions", |_| {
+                    let bf = Bloom.new(100, 0.01)
+                    let add = bf.get("add")
+                    let count = bf.get("count")
+                    add("a")
+                    add("b")
+                    add("c")
+                    t.assert_eq(count(nil), 3)
+                }),
+
+                t.it("bit_count and hash_count are positive", |_| {
+                    let bf = Bloom.new(100, 0.01)
+                    let bits = bf.get("bit_count")
+                    let hashes = bf.get("hash_count")
+                    t.assert_gt(bits(nil), 0)
+                    t.assert_gt(hashes(nil), 1)
+                }),
+
+                t.it("fill_ratio increases with additions", |_| {
+                    let bf = Bloom.new(100, 0.01)
+                    let add = bf.get("add")
+                    let fill = bf.get("fill_ratio")
+                    let before = fill(nil)
+                    flux i = 0
+                    while i < 20 {
+                        add("item_" + to_string(i))
+                        i = i + 1
+                    }
+                    let after = fill(nil)
+                    t.assert_gt(after, before)
+                }),
+
+                t.it("clear resets the filter", |_| {
+                    let bf = Bloom.new(100, 0.01)
+                    let add = bf.get("add")
+                    let contains = bf.get("contains")
+                    let count = bf.get("count")
+                    let clear = bf.get("clear")
+                    add("test")
+                    t.assert_true(contains("test"))
+                    clear(nil)
+                    t.assert_eq(count(nil), 0)
+                    t.assert_false(contains("test"))
+                }),
+
+                t.it("works with numeric items", |_| {
+                    let bf = Bloom.new(100, 0.01)
+                    let add = bf.get("add")
+                    let contains = bf.get("contains")
+                    add(42)
+                    add(100)
+                    add(999)
+                    t.assert_true(contains(42))
+                    t.assert_true(contains(100))
+                    t.assert_true(contains(999))
+                }),
+
+                t.it("no false negatives with many items", |_| {
+                    let bf = Bloom.new(200, 0.01)
+                    let add = bf.get("add")
+                    let contains = bf.get("contains")
+                    // Add items 0..49
+                    flux i = 0
+                    while i < 50 {
+                        add(i)
+                        i = i + 1
+                    }
+                    // All added items must be found (no false negatives)
+                    flux j = 0
+                    while j < 50 {
+                        t.assert_true(contains(j))
+                        j = j + 1
+                    }
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Persistent Vector tests
+        // ----------------------------------------------------------------
+        t.describe("Persistent Vector", |_| {
+            return [
+                t.it("empty vector has length 0", |_| {
+                    let v = PVec.empty()
+                    t.assert_eq(PVec.size(v), 0)
+                    t.assert_true(PVec.is_empty(v))
+                }),
+
+                t.it("push increases length", |_| {
+                    let v0 = PVec.empty()
+                    let v1 = PVec.push(v0, 10)
+                    let v2 = PVec.push(v1, 20)
+                    t.assert_eq(PVec.size(v0), 0)
+                    t.assert_eq(PVec.size(v1), 1)
+                    t.assert_eq(PVec.size(v2), 2)
+                }),
+
+                t.it("get retrieves correct values", |_| {
+                    let v = PVec.push(PVec.push(PVec.push(PVec.empty(), 10), 20), 30)
+                    t.assert_eq(PVec.get(v, 0), 10)
+                    t.assert_eq(PVec.get(v, 1), 20)
+                    t.assert_eq(PVec.get(v, 2), 30)
+                }),
+
+                t.it("get returns nil for out of bounds", |_| {
+                    let v = PVec.push(PVec.empty(), 10)
+                    t.assert_nil(PVec.get(v, -1))
+                    t.assert_nil(PVec.get(v, 1))
+                    t.assert_nil(PVec.get(v, 100))
+                }),
+
+                t.it("push does not modify original", |_| {
+                    let v1 = PVec.push(PVec.empty(), 10)
+                    let v2 = PVec.push(v1, 20)
+                    // v1 should still have only one element
+                    t.assert_eq(PVec.size(v1), 1)
+                    t.assert_eq(PVec.get(v1, 0), 10)
+                    t.assert_nil(PVec.get(v1, 1))
+                    // v2 has two
+                    t.assert_eq(PVec.size(v2), 2)
+                }),
+
+                t.it("set returns new vector with updated value", |_| {
+                    let v1 = PVec.push(PVec.push(PVec.push(PVec.empty(), 10), 20), 30)
+                    let v2 = PVec.set(v1, 1, 99)
+                    // v2 has the update
+                    t.assert_eq(PVec.get(v2, 1), 99)
+                    // v1 is unchanged
+                    t.assert_eq(PVec.get(v1, 1), 20)
+                }),
+
+                t.it("to_array converts correctly", |_| {
+                    let v = PVec.push(PVec.push(PVec.push(PVec.empty(), 1), 2), 3)
+                    let arr = PVec.to_array(v)
+                    t.assert_eq(arr.len(), 3)
+                    t.assert_eq(arr[0], 1)
+                    t.assert_eq(arr[1], 2)
+                    t.assert_eq(arr[2], 3)
+                }),
+
+                t.it("from_array round-trips", |_| {
+                    let original = [5, 10, 15, 20, 25]
+                    let v = PVec.from_array(original)
+                    t.assert_eq(PVec.size(v), 5)
+                    let arr = PVec.to_array(v)
+                    t.assert_eq(arr[0], 5)
+                    t.assert_eq(arr[1], 10)
+                    t.assert_eq(arr[4], 25)
+                }),
+
+                t.it("pop removes last element", |_| {
+                    let v = PVec.from_array([10, 20, 30])
+                    let v2 = PVec.pop(v)
+                    t.assert_eq(PVec.size(v2), 2)
+                    t.assert_eq(PVec.get(v2, 0), 10)
+                    t.assert_eq(PVec.get(v2, 1), 20)
+                    // Original unchanged
+                    t.assert_eq(PVec.size(v), 3)
+                }),
+
+                t.it("pop from empty throws", |_| {
+                    let v = PVec.empty()
+                    t.assert_throws(|_| { PVec.pop(v) })
+                }),
+
+                t.it("filter works", |_| {
+                    let v = PVec.from_array([1, 2, 3, 4, 5, 6])
+                    let evens = PVec.filter(v, |x| { return x % 2 == 0 })
+                    let arr = PVec.to_array(evens)
+                    t.assert_eq(arr.len(), 3)
+                    t.assert_eq(arr[0], 2)
+                    t.assert_eq(arr[1], 4)
+                    t.assert_eq(arr[2], 6)
+                }),
+
+                t.it("map_vec works", |_| {
+                    let v = PVec.from_array([1, 2, 3])
+                    let doubled = PVec.map_vec(v, |x| { return x * 2 })
+                    let arr = PVec.to_array(doubled)
+                    t.assert_eq(arr[0], 2)
+                    t.assert_eq(arr[1], 4)
+                    t.assert_eq(arr[2], 6)
+                }),
+
+                t.it("fold computes sum", |_| {
+                    let v = PVec.from_array([1, 2, 3, 4, 5])
+                    let total = PVec.fold(v, 0, |acc, x| { return acc + x })
+                    t.assert_eq(total, 15)
+                }),
+
+                t.it("concat joins two vectors", |_| {
+                    let a = PVec.from_array([1, 2])
+                    let b = PVec.from_array([3, 4])
+                    let joined = PVec.concat(a, b)
+                    let arr = PVec.to_array(joined)
+                    t.assert_eq(arr.len(), 4)
+                    t.assert_eq(arr[0], 1)
+                    t.assert_eq(arr[3], 4)
+                }),
+
+                t.it("slice extracts subrange", |_| {
+                    let v = PVec.from_array([10, 20, 30, 40, 50])
+                    let sl = PVec.slice(v, 1, 4)
+                    let arr = PVec.to_array(sl)
+                    t.assert_eq(arr.len(), 3)
+                    t.assert_eq(arr[0], 20)
+                    t.assert_eq(arr[1], 30)
+                    t.assert_eq(arr[2], 40)
+                }),
+
+                t.it("handles tree growth beyond branching factor", |_| {
+                    flux v = PVec.empty()
+                    flux i = 0
+                    while i < 20 {
+                        v = PVec.push(v, i)
+                        i = i + 1
+                    }
+                    t.assert_eq(PVec.size(v), 20)
+                    // Verify every element
+                    flux j = 0
+                    while j < 20 {
+                        t.assert_eq(PVec.get(v, j), j)
+                        j = j + 1
+                    }
+                }),
+
+                t.it("set on large vector preserves other elements", |_| {
+                    flux v = PVec.empty()
+                    flux i = 0
+                    while i < 16 {
+                        v = PVec.push(v, i * 10)
+                        i = i + 1
+                    }
+                    let v2 = PVec.set(v, 7, 999)
+                    t.assert_eq(PVec.get(v2, 7), 999)
+                    t.assert_eq(PVec.get(v, 7), 70)  // original unchanged
+                    // Check neighbors are intact
+                    t.assert_eq(PVec.get(v2, 6), 60)
+                    t.assert_eq(PVec.get(v2, 8), 80)
+                })
+            ]
+        })
+    ])
+}
