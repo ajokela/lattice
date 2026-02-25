@@ -98,7 +98,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/regopcode.c \
        $(SRC_DIR)/regcompiler.c \
        $(SRC_DIR)/regvm.c \
-       $(SRC_DIR)/builtin_methods.c
+       $(SRC_DIR)/builtin_methods.c \
+       $(SRC_DIR)/package.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))

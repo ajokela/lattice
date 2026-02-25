@@ -27,6 +27,7 @@
 #include "channel.h"
 #include "ext.h"
 #include "runtime.h"
+#include "package.h"
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -7918,10 +7919,15 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
         return eval_ok(builtin_mod);
     }
 
+    /* Try lat_modules/ resolution for bare module names */
+    char *pkg_resolved = pkg_resolve_module(raw_path, ev->script_dir);
+
     /* Resolve file path: append .lat if not present */
     size_t plen = strlen(raw_path);
     char *file_path;
-    if (plen >= 4 && strcmp(raw_path + plen - 4, ".lat") == 0) {
+    if (pkg_resolved) {
+        file_path = pkg_resolved; /* already absolute */
+    } else if (plen >= 4 && strcmp(raw_path + plen - 4, ".lat") == 0) {
         file_path = strdup(raw_path);
     } else {
         file_path = malloc(plen + 5);
@@ -7931,19 +7937,27 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
 
     /* Resolve to an absolute path */
     char resolved[PATH_MAX];
-    bool found = (realpath(file_path, resolved) != NULL);
-    if (!found && ev->script_dir && file_path[0] != '/') {
-        char script_rel[PATH_MAX];
-        snprintf(script_rel, sizeof(script_rel), "%s/%s", ev->script_dir, file_path);
-        found = (realpath(script_rel, resolved) != NULL);
-    }
-    if (!found) {
-        char *err = NULL;
-        (void)asprintf(&err, "import: cannot find '%s'", file_path);
+    bool found;
+    if (pkg_resolved) {
+        strncpy(resolved, file_path, PATH_MAX - 1);
+        resolved[PATH_MAX - 1] = '\0';
         free(file_path);
-        return eval_err(err);
+        found = true;
+    } else {
+        found = (realpath(file_path, resolved) != NULL);
+        if (!found && ev->script_dir && file_path[0] != '/') {
+            char script_rel[PATH_MAX];
+            snprintf(script_rel, sizeof(script_rel), "%s/%s", ev->script_dir, file_path);
+            found = (realpath(script_rel, resolved) != NULL);
+        }
+        if (!found) {
+            char *err = NULL;
+            (void)asprintf(&err, "import: cannot find '%s'", file_path);
+            free(file_path);
+            return eval_err(err);
+        }
+        free(file_path);
     }
-    free(file_path);
 
     /* Check module cache */
     LatValue *cached = (LatValue *)lat_map_get(&ev->module_cache, resolved);
