@@ -39,8 +39,62 @@ static LspDiagnostic parse_error(const char *err_msg) {
     return d;
 }
 
+/* Find the 0-based line and column of a keyword+name pattern in the text.
+ * Searches for "<keyword> <name>" and returns the position of <name>.
+ * search_from is 0-based line to start searching from (avoids earlier matches). */
+static void find_decl_position(const char *text, const char *keyword,
+                               const char *name, int search_from,
+                               int *out_line, int *out_col) {
+    *out_line = 0;
+    *out_col = 0;
+
+    size_t kw_len = strlen(keyword);
+    size_t name_len = strlen(name);
+    const char *p = text;
+    int line = 0;
+
+    /* Advance to search_from line */
+    while (line < search_from && *p) {
+        if (*p == '\n') line++;
+        p++;
+    }
+
+    while (*p) {
+        const char *line_start = p;
+        /* Look for keyword at current position (allowing leading whitespace) */
+        const char *kw = strstr(p, keyword);
+        if (!kw) break;
+
+        /* Count lines to this point */
+        while (p < kw) {
+            if (*p == '\n') { line++; line_start = p + 1; }
+            p++;
+        }
+
+        /* Check that keyword is followed by space then the name */
+        const char *after_kw = kw + kw_len;
+        if (*after_kw == ' ' || *after_kw == '\t') {
+            after_kw++;
+            while (*after_kw == ' ' || *after_kw == '\t') after_kw++;
+            if (strncmp(after_kw, name, name_len) == 0) {
+                char ch_after = after_kw[name_len];
+                if (ch_after == '(' || ch_after == ' ' || ch_after == '\t' ||
+                    ch_after == '{' || ch_after == '\n' || ch_after == '\r' ||
+                    ch_after == '\0' || ch_after == ':') {
+                    *out_line = line;
+                    *out_col = (int)(after_kw - line_start);
+                    return;
+                }
+            }
+        }
+        p = kw + 1;
+    }
+}
+
 /* Extract symbols from parsed AST */
 static void extract_symbols(LspDocument *doc, const Program *prog) {
+    int last_line = 0;  /* Track search position to handle duplicate names */
+
     for (size_t i = 0; i < prog->item_count; i++) {
         const Item *item = &prog->items[i];
         LspSymbol sym = {0};
@@ -65,6 +119,8 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                         p += sprintf(p, ": %s", fn->params[j].ty.name);
                 }
                 sprintf(p, ")");
+                find_decl_position(doc->text, "fn", fn->name, last_line,
+                                   &sym.line, &sym.col);
                 found = true;
                 break;
             }
@@ -73,6 +129,8 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.kind = LSP_SYM_STRUCT;
                 sym.signature = malloc(strlen(item->as.struct_decl.name) + 16);
                 sprintf(sym.signature, "struct %s", item->as.struct_decl.name);
+                find_decl_position(doc->text, "struct", item->as.struct_decl.name,
+                                   last_line, &sym.line, &sym.col);
                 found = true;
                 break;
             }
@@ -81,6 +139,8 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.kind = LSP_SYM_ENUM;
                 sym.signature = malloc(strlen(item->as.enum_decl.name) + 16);
                 sprintf(sym.signature, "enum %s", item->as.enum_decl.name);
+                find_decl_position(doc->text, "enum", item->as.enum_decl.name,
+                                   last_line, &sym.line, &sym.col);
                 found = true;
                 break;
             }
@@ -89,6 +149,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
         }
 
         if (found) {
+            last_line = sym.line;
             doc->symbol_count++;
             doc->symbols = realloc(doc->symbols, doc->symbol_count * sizeof(LspSymbol));
             doc->symbols[doc->symbol_count - 1] = sym;

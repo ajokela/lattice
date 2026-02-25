@@ -44,11 +44,10 @@ static char *extract_name(const char *sig) {
     return name;
 }
 
-LspSymbolIndex *lsp_symbol_index_new(const char *eval_path) {
-    LspSymbolIndex *idx = calloc(1, sizeof(LspSymbolIndex));
-
-    FILE *f = fopen(eval_path, "r");
-    if (!f) return idx;
+/* Scan a single source file for /// @builtin and /// @method doc comments */
+static void scan_file(LspSymbolIndex *idx, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
 
     char line[2048];
     char sig[512];
@@ -113,7 +112,17 @@ LspSymbolIndex *lsp_symbol_index_new(const char *eval_path) {
     }
 
     fclose(f);
+}
+
+LspSymbolIndex *lsp_symbol_index_new(const char *eval_path) {
+    LspSymbolIndex *idx = calloc(1, sizeof(LspSymbolIndex));
+    scan_file(idx, eval_path);
     return idx;
+}
+
+void lsp_symbol_index_add_file(LspSymbolIndex *idx, const char *path) {
+    if (!idx || !path) return;
+    scan_file(idx, path);
 }
 
 void lsp_symbol_index_free(LspSymbolIndex *idx) {

@@ -137,6 +137,8 @@ typedef enum {
     OP_SET_GLOBAL_16,  /* env_set(constants[BE16 operand], TOS) */
     OP_DEFINE_GLOBAL_16, /* env_define(constants[BE16 operand], TOS), pop TOS */
     OP_CLOSURE_16,     /* Create closure from function constant (BE16 index) */
+    OP_INVOKE_LOCAL_16,  /* Like INVOKE_LOCAL but method name constant is BE16 index */
+    OP_INVOKE_GLOBAL_16, /* Like INVOKE_GLOBAL but name and method constant are BE16 indices */
 
     /* Ephemeral arena */
     OP_RESET_EPHEMERAL, /* Reset ephemeral bump arena at statement boundaries */

@@ -52,6 +52,20 @@ int main(int argc, char **argv) {
     char *eval_path = find_eval_path();
     if (eval_path) {
         srv->index = lsp_symbol_index_new(eval_path);
+
+        /* Also scan builtin_methods.c for method docs */
+        size_t eval_len = strlen(eval_path);
+        /* eval_path ends with "src/eval.c", replace with "src/builtin_methods.c" */
+        char *methods_path = malloc(eval_len + 16);
+        /* Find last '/' before eval.c */
+        char *last_slash = strrchr(eval_path, '/');
+        if (last_slash) {
+            size_t dir_len = (size_t)(last_slash - eval_path);
+            memcpy(methods_path, eval_path, dir_len);
+            sprintf(methods_path + dir_len, "/builtin_methods.c");
+            lsp_symbol_index_add_file(srv->index, methods_path);
+        }
+        free(methods_path);
         free(eval_path);
     }
 

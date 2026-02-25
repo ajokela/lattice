@@ -8,6 +8,10 @@
  * Array methods (no closures)
  * ======================================================================== */
 
+/// @method Array.contains(val: Any) -> Bool
+/// @category Array Methods
+/// Check whether the array contains an element equal to val.
+/// @example [1, 2, 3].contains(2)  // true
 LatValue builtin_array_contains(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count; (void)error;
     bool found = false;
@@ -20,6 +24,10 @@ LatValue builtin_array_contains(LatValue *obj, LatValue *args, int arg_count, ch
     return value_bool(found);
 }
 
+/// @method Array.enumerate() -> Array
+/// @category Array Methods
+/// Return an array of [index, value] pairs.
+/// @example ["a", "b"].enumerate()  // [[0, "a"], [1, "b"]]
 LatValue builtin_array_enumerate(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     size_t len = obj->as.array.len;
@@ -35,6 +43,10 @@ LatValue builtin_array_enumerate(LatValue *obj, LatValue *args, int arg_count, c
     return result;
 }
 
+/// @method Array.reverse() -> Array
+/// @category Array Methods
+/// Return a new array with elements in reverse order.
+/// @example [1, 2, 3].reverse()  // [3, 2, 1]
 LatValue builtin_array_reverse(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     size_t len = obj->as.array.len;
@@ -46,6 +58,10 @@ LatValue builtin_array_reverse(LatValue *obj, LatValue *args, int arg_count, cha
     return result;
 }
 
+/// @method Array.join(sep: String) -> String
+/// @category Array Methods
+/// Join all elements into a string separated by sep.
+/// @example [1, 2, 3].join(", ")  // "1, 2, 3"
 LatValue builtin_array_join(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count; (void)error;
     const char *sep_str = (args[0].type == VAL_STR) ? args[0].as.str_val : "";
@@ -72,6 +88,10 @@ LatValue builtin_array_join(LatValue *obj, LatValue *args, int arg_count, char *
     return value_string_owned(buf);
 }
 
+/// @method Array.unique() -> Array
+/// @category Array Methods
+/// Return a new array with duplicate elements removed.
+/// @example [1, 2, 2, 3].unique()  // [1, 2, 3]
 LatValue builtin_array_unique(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     size_t n = obj->as.array.len;
@@ -88,6 +108,10 @@ LatValue builtin_array_unique(LatValue *obj, LatValue *args, int arg_count, char
     return r;
 }
 
+/// @method Array.index_of(val: Any) -> Int
+/// @category Array Methods
+/// Return the index of the first occurrence of val, or -1 if not found.
+/// @example [10, 20, 30].index_of(20)  // 1
 LatValue builtin_array_index_of(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count; (void)error;
     for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -97,6 +121,10 @@ LatValue builtin_array_index_of(LatValue *obj, LatValue *args, int arg_count, ch
     return value_int(-1);
 }
 
+/// @method Array.zip(other: Array) -> Array
+/// @category Array Methods
+/// Pair elements from two arrays into an array of [a, b] pairs.
+/// @example [1, 2].zip(["a", "b"])  // [[1, "a"], [2, "b"]]
 LatValue builtin_array_zip(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count; (void)error;
     if (args[0].type != VAL_ARRAY)
@@ -115,6 +143,10 @@ LatValue builtin_array_zip(LatValue *obj, LatValue *args, int arg_count, char **
     return r;
 }
 
+/// @method Array.sum() -> Int|Float
+/// @category Array Methods
+/// Return the sum of all numeric elements in the array.
+/// @example [1, 2, 3].sum()  // 6
 LatValue builtin_array_sum(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     bool has_float = false;
@@ -132,6 +164,10 @@ LatValue builtin_array_sum(LatValue *obj, LatValue *args, int arg_count, char **
     return has_float ? value_float(fsum) : value_int(isum);
 }
 
+/// @method Array.min() -> Int|Float
+/// @category Array Methods
+/// Return the smallest numeric element in the array.
+/// @example [3, 1, 2].min()  // 1
 LatValue builtin_array_min(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count;
     if (obj->as.array.len == 0) {
@@ -154,6 +190,10 @@ LatValue builtin_array_min(LatValue *obj, LatValue *args, int arg_count, char **
     return value_deep_clone(&best);
 }
 
+/// @method Array.max() -> Int|Float
+/// @category Array Methods
+/// Return the largest numeric element in the array.
+/// @example [3, 1, 2].max()  // 3
 LatValue builtin_array_max(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count;
     if (obj->as.array.len == 0) {
@@ -176,6 +216,10 @@ LatValue builtin_array_max(LatValue *obj, LatValue *args, int arg_count, char **
     return value_deep_clone(&best);
 }
 
+/// @method Array.first() -> Any|Unit
+/// @category Array Methods
+/// Return the first element, or unit if the array is empty.
+/// @example [10, 20].first()  // 10
 LatValue builtin_array_first(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     return obj->as.array.len > 0
@@ -183,6 +227,10 @@ LatValue builtin_array_first(LatValue *obj, LatValue *args, int arg_count, char 
          : value_unit();
 }
 
+/// @method Array.last() -> Any|Unit
+/// @category Array Methods
+/// Return the last element, or unit if the array is empty.
+/// @example [10, 20].last()  // 20
 LatValue builtin_array_last(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     return obj->as.array.len > 0
@@ -190,6 +238,10 @@ LatValue builtin_array_last(LatValue *obj, LatValue *args, int arg_count, char *
          : value_unit();
 }
 
+/// @method Array.take(n: Int) -> Array
+/// @category Array Methods
+/// Return a new array with the first n elements.
+/// @example [1, 2, 3, 4].take(2)  // [1, 2]
 LatValue builtin_array_take(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count; (void)error;
     int64_t n = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
@@ -204,6 +256,10 @@ LatValue builtin_array_take(LatValue *obj, LatValue *args, int arg_count, char *
     return r;
 }
 
+/// @method Array.drop(n: Int) -> Array
+/// @category Array Methods
+/// Return a new array with the first n elements removed.
+/// @example [1, 2, 3, 4].drop(2)  // [3, 4]
 LatValue builtin_array_drop(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count; (void)error;
     int64_t n = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
@@ -219,6 +275,10 @@ LatValue builtin_array_drop(LatValue *obj, LatValue *args, int arg_count, char *
     return r;
 }
 
+/// @method Array.chunk(size: Int) -> Array
+/// @category Array Methods
+/// Split the array into sub-arrays of the given size.
+/// @example [1, 2, 3, 4, 5].chunk(2)  // [[1, 2], [3, 4], [5]]
 LatValue builtin_array_chunk(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count; (void)error;
     if (args[0].type != VAL_INT || args[0].as.int_val <= 0)
@@ -242,6 +302,10 @@ LatValue builtin_array_chunk(LatValue *obj, LatValue *args, int arg_count, char 
     return r;
 }
 
+/// @method Array.flatten() -> Array
+/// @category Array Methods
+/// Flatten one level of nested arrays into a single array.
+/// @example [[1, 2], [3]].flatten()  // [1, 2, 3]
 LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     size_t n = obj->as.array.len;
@@ -278,6 +342,10 @@ LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, cha
  * the iteration logic while each providing their own closure invocation.
  * ======================================================================== */
 
+/// @method Array.map(fn: Closure) -> Array
+/// @category Array Methods
+/// Apply fn to each element and return a new array of results.
+/// @example [1, 2, 3].map(|x| x * 2)  // [2, 4, 6]
 LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     size_t len = obj->as.array.len;
@@ -292,6 +360,10 @@ LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, voi
     return result;
 }
 
+/// @method Array.filter(fn: Closure) -> Array
+/// @category Array Methods
+/// Return a new array containing only elements for which fn returns true.
+/// @example [1, 2, 3, 4].filter(|x| x > 2)  // [3, 4]
 LatValue builtin_array_filter(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     size_t len = obj->as.array.len;
@@ -314,6 +386,10 @@ LatValue builtin_array_filter(LatValue *obj, void *closure, BuiltinCallback cb, 
     return result;
 }
 
+/// @method Array.reduce(fn: Closure, init: Any) -> Any
+/// @category Array Methods
+/// Reduce the array to a single value by applying fn(accumulator, element) from left to right.
+/// @example [1, 2, 3].reduce(|a, b| a + b, 0)  // 6
 LatValue builtin_array_reduce(LatValue *obj, LatValue *init, bool has_init,
                               void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
@@ -337,6 +413,10 @@ LatValue builtin_array_reduce(LatValue *obj, LatValue *init, bool has_init,
     return acc;
 }
 
+/// @method Array.each(fn: Closure) -> Unit
+/// @category Array Methods
+/// Call fn for each element in the array (side-effects only, returns unit).
+/// @example [1, 2, 3].each(|x| print(x))
 LatValue builtin_array_each(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -348,6 +428,10 @@ LatValue builtin_array_each(LatValue *obj, void *closure, BuiltinCallback cb, vo
     return value_unit();
 }
 
+/// @method Array.find(fn: Closure) -> Any|Unit
+/// @category Array Methods
+/// Return the first element for which fn returns true, or unit if none match.
+/// @example [1, 2, 3].find(|x| x > 1)  // 2
 LatValue builtin_array_find(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -362,6 +446,10 @@ LatValue builtin_array_find(LatValue *obj, void *closure, BuiltinCallback cb, vo
     return value_unit();
 }
 
+/// @method Array.any(fn: Closure) -> Bool
+/// @category Array Methods
+/// Return true if fn returns true for at least one element.
+/// @example [1, 2, 3].any(|x| x > 2)  // true
 LatValue builtin_array_any(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -375,6 +463,10 @@ LatValue builtin_array_any(LatValue *obj, void *closure, BuiltinCallback cb, voi
     return value_bool(false);
 }
 
+/// @method Array.all(fn: Closure) -> Bool
+/// @category Array Methods
+/// Return true if fn returns true for every element.
+/// @example [2, 4, 6].all(|x| x % 2 == 0)  // true
 LatValue builtin_array_all(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     for (size_t i = 0; i < obj->as.array.len; i++) {
@@ -388,6 +480,10 @@ LatValue builtin_array_all(LatValue *obj, void *closure, BuiltinCallback cb, voi
     return value_bool(true);
 }
 
+/// @method Array.flat_map(fn: Closure) -> Array
+/// @category Array Methods
+/// Map each element with fn, then flatten one level. Equivalent to map then flatten.
+/// @example [1, 2].flat_map(|x| [x, x * 10])  // [1, 10, 2, 20]
 LatValue builtin_array_flat_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     size_t n = obj->as.array.len;
@@ -415,6 +511,10 @@ LatValue builtin_array_flat_map(LatValue *obj, void *closure, BuiltinCallback cb
     return result;
 }
 
+/// @method Array.sort_by(cmp: Closure) -> Array
+/// @category Array Methods
+/// Return a new array sorted using the comparator closure. cmp(a, b) should return negative if a < b.
+/// @example [3, 1, 2].sort_by(|a, b| a - b)  // [1, 2, 3]
 LatValue builtin_array_sort_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     size_t n = obj->as.array.len;
@@ -442,6 +542,10 @@ LatValue builtin_array_sort_by(LatValue *obj, void *closure, BuiltinCallback cb,
     return result;
 }
 
+/// @method Array.group_by(fn: Closure) -> Map
+/// @category Array Methods
+/// Group elements into a map keyed by the result of fn applied to each element.
+/// @example [1, 2, 3, 4].group_by(|x| x % 2)  // {"1": [1, 3], "0": [2, 4]}
 LatValue builtin_array_group_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
     (void)error;
     LatValue grp = value_map_new();

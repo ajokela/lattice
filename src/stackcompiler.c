@@ -755,10 +755,18 @@ static void compile_expr(const Expr *e, int line) {
                     for (size_t i = 0; i < e->as.method_call.arg_count; i++)
                         compile_expr(e->as.method_call.args[i], line);
                     size_t idx = chunk_add_constant(current_chunk(), value_string(e->as.method_call.method));
-                    emit_byte(OP_INVOKE_LOCAL, line);
-                    emit_byte((uint8_t)slot, line);
-                    emit_byte((uint8_t)idx, line);
-                    emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    if (idx > 255) {
+                        emit_byte(OP_INVOKE_LOCAL_16, line);
+                        emit_byte((uint8_t)slot, line);
+                        emit_byte((uint8_t)((idx >> 8) & 0xff), line);
+                        emit_byte((uint8_t)(idx & 0xff), line);
+                        emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    } else {
+                        emit_byte(OP_INVOKE_LOCAL, line);
+                        emit_byte((uint8_t)slot, line);
+                        emit_byte((uint8_t)idx, line);
+                        emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    }
                     if (opt) patch_jump(end_jump);
                     break;
                 }
@@ -784,10 +792,19 @@ static void compile_expr(const Expr *e, int line) {
                         value_string(e->as.method_call.object->as.str_val));
                     size_t method_idx = chunk_add_constant(current_chunk(),
                         value_string(e->as.method_call.method));
-                    emit_byte(OP_INVOKE_GLOBAL, line);
-                    emit_byte((uint8_t)name_idx, line);
-                    emit_byte((uint8_t)method_idx, line);
-                    emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    if (name_idx > 255 || method_idx > 255) {
+                        emit_byte(OP_INVOKE_GLOBAL_16, line);
+                        emit_byte((uint8_t)((name_idx >> 8) & 0xff), line);
+                        emit_byte((uint8_t)(name_idx & 0xff), line);
+                        emit_byte((uint8_t)((method_idx >> 8) & 0xff), line);
+                        emit_byte((uint8_t)(method_idx & 0xff), line);
+                        emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    } else {
+                        emit_byte(OP_INVOKE_GLOBAL, line);
+                        emit_byte((uint8_t)name_idx, line);
+                        emit_byte((uint8_t)method_idx, line);
+                        emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    }
                     if (opt) patch_jump(end_jump);
                     break;
                 }

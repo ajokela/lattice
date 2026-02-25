@@ -124,15 +124,17 @@ let OP_GET_GLOBAL_16  = 94
 let OP_SET_GLOBAL_16  = 95
 let OP_DEFINE_GLOBAL_16 = 96
 let OP_CLOSURE_16     = 97
+let OP_INVOKE_LOCAL_16  = 98
+let OP_INVOKE_GLOBAL_16 = 99
 
-let OP_RESET_EPHEMERAL = 98
-let OP_SET_LOCAL_POP  = 99
-let OP_CHECK_TYPE     = 100
-let OP_CHECK_RETURN_TYPE = 101
-let OP_IS_CRYSTAL     = 102
-let OP_FREEZE_EXCEPT  = 103
-let OP_FREEZE_FIELD   = 104
-let OP_HALT           = 105
+let OP_RESET_EPHEMERAL = 100
+let OP_SET_LOCAL_POP  = 101
+let OP_CHECK_TYPE     = 102
+let OP_CHECK_RETURN_TYPE = 103
+let OP_IS_CRYSTAL     = 104
+let OP_FREEZE_EXCEPT  = 105
+let OP_FREEZE_FIELD   = 106
+let OP_HALT           = 107
 
 // .latc constant tags
 let TAG_INT     = 0
@@ -624,6 +626,23 @@ fn emit_variable_set(name: any, line: any) {
     emit_wide_op(OP_SET_GLOBAL, OP_SET_GLOBAL_16, idx, line)
 }
 
+fn emit_variable_set_pop(name: any, line: any) {
+    let slot = resolve_local(name)
+    if slot >= 0 {
+        emit_bytes(OP_SET_LOCAL_POP, slot, line)
+        return
+    }
+    let up = resolve_upvalue(name)
+    if up >= 0 {
+        emit_bytes(OP_SET_UPVALUE, up, line)
+        emit_byte(OP_POP, line)
+        return
+    }
+    let idx = string_constant(name)
+    emit_wide_op(OP_SET_GLOBAL, OP_SET_GLOBAL_16, idx, line)
+    emit_byte(OP_POP, line)
+}
+
 // ============================================================================
 // Section 7b: Ensure contract emission
 // ============================================================================
@@ -922,15 +941,32 @@ fn parse_postfix() {
                     expect(nil, ")")
                     let name_idx = string_constant(field_name)
                     if is_local_recv {
-                        emit_byte(OP_INVOKE_LOCAL, line)
-                        emit_byte(receiver_slot, line)
-                        emit_byte(name_idx, line)
-                        emit_byte(arg_count, line)
+                        if name_idx > 255 {
+                            emit_byte(OP_INVOKE_LOCAL_16, line)
+                            emit_byte(receiver_slot, line)
+                            emit_byte(name_idx / 256, line)
+                            emit_byte(name_idx % 256, line)
+                            emit_byte(arg_count, line)
+                        } else {
+                            emit_byte(OP_INVOKE_LOCAL, line)
+                            emit_byte(receiver_slot, line)
+                            emit_byte(name_idx, line)
+                            emit_byte(arg_count, line)
+                        }
                     } else { if is_global_recv {
-                        emit_byte(OP_INVOKE_GLOBAL, line)
-                        emit_byte(receiver_slot, line)
-                        emit_byte(name_idx, line)
-                        emit_byte(arg_count, line)
+                        if receiver_slot > 255 || name_idx > 255 {
+                            emit_byte(OP_INVOKE_GLOBAL_16, line)
+                            emit_byte(receiver_slot / 256, line)
+                            emit_byte(receiver_slot % 256, line)
+                            emit_byte(name_idx / 256, line)
+                            emit_byte(name_idx % 256, line)
+                            emit_byte(arg_count, line)
+                        } else {
+                            emit_byte(OP_INVOKE_GLOBAL, line)
+                            emit_byte(receiver_slot, line)
+                            emit_byte(name_idx, line)
+                            emit_byte(arg_count, line)
+                        }
                     } else {
                         emit_byte(OP_INVOKE, line)
                         emit_byte(name_idx, line)
@@ -1093,6 +1129,18 @@ fn parse_primary() {
     // match expression
     if t.type == "match" {
         parse_match_expression()
+        return
+    }
+
+    // scope expression
+    if t.type == "scope" {
+        parse_scope()
+        return
+    }
+
+    // select expression
+    if t.type == "identifier" && t.text == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+        parse_select()
         return
     }
 
@@ -1576,6 +1624,379 @@ fn parse_closure_literal() {
 }
 
 // ============================================================================
+// Section 8b: Sub-chunk compilation helpers
+// ============================================================================
+
+// Initialize a fresh, detached compiler state for sub-chunk compilation.
+// Call save_compiler() first, then this. This also detaches from the
+// compiler_stack so that resolve_upvalue won't find enclosing locals
+// (sub-chunks should reference outer variables as globals, not upvalues).
+// Returns the saved compiler_stack so it can be restored after.
+fn init_sub_compiler() {
+    let saved_stack = compiler_stack
+    compiler_stack = []
+    code = []
+    c_lines = []
+    constants = []
+    local_names = []
+    local_name_arr = []
+    local_depth_arr = []
+    local_captured_arr = []
+    local_count = 0
+    scope_depth = 0
+    upvalue_index_arr = []
+    upvalue_islocal_arr = []
+    upvalue_count = 0
+    func_type = "script"
+    break_jumps = []
+    break_count = 0
+    loop_start_pos = 0
+    loop_depth = 0
+    string_intern_map = Map::new()
+    ensure_slots = []
+    ensure_messages = []
+    ensure_count = 0
+    current_func_name = ""
+    return saved_stack
+}
+
+// Compile a single expression as a sub-chunk. Returns constant index.
+fn compile_sub_expr_chunk(line: any) {
+    save_compiler()
+    let saved_stack = init_sub_compiler()
+
+    parse_expression()
+    emit_byte(OP_RETURN, line)
+
+    let snap = snapshot_chunk()
+    compiler_stack = saved_stack
+    restore_compiler()
+
+    let fn_const = make_closure_const(0, false, snap)
+    return add_constant(fn_const)
+}
+
+// ============================================================================
+// Section 8c: Scope / Select parsing
+// ============================================================================
+
+fn parse_scope() {
+    let line = current_line()
+    advance()  // consume 'scope'
+    expect(nil, "{")
+
+    // We need to collect spawn bodies and sync (non-spawn) bodies.
+    // Strategy: parse the body, tracking which items are spawn blocks.
+    // Each spawn block and the collected sync statements become sub-chunks.
+    flux spawn_indices = []
+    flux sync_positions = []
+    flux items = []  // array of [is_spawn, start_pos, end_pos]
+
+    // First pass: scan the scope body to identify spawn blocks and non-spawn statements.
+    // We'll use a token-scanning approach to find spawn { ... } blocks.
+    flux body_start = pos
+    flux brace_depth = 0
+    while peek_text() != "}" || brace_depth > 0 {
+        if peek() == nil {
+            compiler_error("unexpected end of input in scope body", line)
+        }
+        let ct = peek_text()
+        if ct == "{" { brace_depth = brace_depth + 1 }
+        if ct == "}" { brace_depth = brace_depth - 1 }
+        advance()
+    }
+    let body_end = pos
+
+    // Reset to body_start and compile each item
+    pos = body_start
+
+    flux spawn_count = 0
+    flux sync_stmt_start_positions = []
+
+    // Second approach: directly compile, categorizing as we go.
+    // When we see 'spawn' token followed by '{', compile it as a spawn sub-chunk.
+    // Otherwise, remember non-spawn statement positions for the sync chunk.
+    // Since the sub-chunk compilation uses save/restore which resets parsing state,
+    // we need a different approach: scan first, then compile.
+
+    // Approach: Two-pass within the scope body.
+    // Pass 1: identify spawn boundaries and non-spawn statement boundaries.
+    // This is complex without AST. Instead, let's use a simpler approach:
+    // compile all spawn bodies as sub-chunks, collect non-spawn as sync sub-chunk.
+
+    // Simplest approach matching C compiler:
+    // - Scan the body once, identifying spawn blocks (spawn { ... }) and non-spawn items
+    // - For each spawn block: save pos, compile as sub-chunk
+    // - For sync body: collect non-spawn stmts, compile as one sub-chunk
+
+    // Token scanning to identify spans:
+    flux spans = []  // [type, start_pos, end_pos] where type = "spawn" or "stmt"
+    while pos < body_end {
+        if peek_type() == "spawn" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+            let sp_start = pos
+            advance()  // consume 'spawn'
+            advance()  // consume '{'
+            flux depth = 1
+            while depth > 0 && peek() != nil {
+                if peek_text() == "{" { depth = depth + 1 }
+                if peek_text() == "}" { depth = depth - 1 }
+                if depth > 0 { advance() }
+            }
+            advance()  // consume closing '}'
+            spans.push(["spawn", sp_start, pos])
+        } else {
+            // Non-spawn statement: scan to end of statement
+            let stmt_start = pos
+            // Scan one statement/expression to find its end
+            // Use brace-depth tracking for blocks
+            flux stmt_depth = 0
+            flux found_end = false
+            while !found_end && pos < body_end {
+                let st = peek_text()
+                if st == "{" { stmt_depth = stmt_depth + 1 }
+                if st == "}" {
+                    if stmt_depth == 0 {
+                        found_end = true
+                    } else {
+                        stmt_depth = stmt_depth - 1
+                        advance()
+                    }
+                } else {
+                    advance()
+                    // If we're at depth 0 and the next token starts a new statement
+                    // or is a spawn keyword, we've finished this statement
+                    if stmt_depth == 0 && pos < body_end {
+                        let nt = peek()
+                        if nt != nil {
+                            if nt.type == "spawn" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+                                found_end = true
+                            }
+                        }
+                    }
+                }
+            }
+            if pos > stmt_start {
+                spans.push(["stmt", stmt_start, pos])
+            }
+        }
+    }
+
+    // Reset to body start for compilation
+    pos = body_start
+
+    // Count spawns and sync spans
+    flux spawn_span_count = 0
+    flux sync_span_count = 0
+    for si in 0..len(spans) {
+        if spans[si][0] == "spawn" {
+            spawn_span_count = spawn_span_count + 1
+        } else {
+            sync_span_count = sync_span_count + 1
+        }
+    }
+
+    // Compile sync body: all non-spawn statements as one sub-chunk
+    let sync_idx = 255  // 0xFF = no sync body
+    if sync_span_count > 0 {
+        save_compiler()
+        let saved_stack_sync = init_sub_compiler()
+
+        // Compile each non-spawn span by jumping pos to it
+        // Track whether the last item compiled was an expression
+        flux last_was_expr = false
+        for si in 0..len(spans) {
+            if spans[si][0] == "stmt" {
+                pos = spans[si][1]
+                while pos < spans[si][2] {
+                    if last_was_expr {
+                        emit_byte(OP_POP, line)
+                    }
+                    last_was_expr = false
+                    if is_statement_start() {
+                        parse_statement()
+                    } else {
+                        parse_expression()
+                        last_was_expr = true
+                    }
+                    emit_byte(OP_RESET_EPHEMERAL, line)
+                }
+            }
+        }
+        if !last_was_expr {
+            emit_byte(OP_UNIT, line)
+        }
+        emit_byte(OP_RETURN, line)
+
+        let sync_snap = snapshot_chunk()
+        compiler_stack = saved_stack_sync
+        restore_compiler()
+        sync_idx = add_constant(make_closure_const(0, false, sync_snap))
+    }
+
+    // Compile each spawn body as a sub-chunk
+    for si in 0..len(spans) {
+        if spans[si][0] == "spawn" {
+            save_compiler()
+            let saved_stack_spawn = init_sub_compiler()
+
+            pos = spans[si][1]
+            advance()  // skip 'spawn'
+            advance()  // skip '{'
+            while peek_text() != "}" {
+                if peek() == nil {
+                    compiler_error("unexpected end of input in spawn body", line)
+                }
+                parse_statement_or_expression()
+            }
+            advance()  // skip '}'
+            emit_byte(OP_UNIT, line)
+            emit_byte(OP_RETURN, line)
+
+            let spawn_snap = snapshot_chunk()
+            compiler_stack = saved_stack_spawn
+            restore_compiler()
+            spawn_indices.push(add_constant(make_closure_const(0, false, spawn_snap)))
+        }
+    }
+
+    // Restore position past the scope body
+    pos = body_end
+    expect(nil, "}")
+
+    // Emit OP_SCOPE: spawn_count, sync_idx, [spawn_idx...]
+    emit_byte(OP_SCOPE, line)
+    emit_byte(len(spawn_indices), line)
+    emit_byte(sync_idx, line)
+    for si in 0..len(spawn_indices) {
+        emit_byte(spawn_indices[si], line)
+    }
+}
+
+fn parse_select() {
+    let line = current_line()
+    advance()  // consume 'select'
+    expect(nil, "{")
+
+    flux arm_count = 0
+    flux arm_data = []  // array of [flags, chan_idx, body_idx, binding_idx]
+
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in select body", line)
+        }
+
+        // Check for 'default' arm
+        if peek_type() == "identifier" && peek_text() == "default" {
+            advance()  // consume 'default'
+            expect(nil, "=>")
+            expect(nil, "{")
+
+            // Compile body as sub-chunk
+            save_compiler()
+            let ss_default = init_sub_compiler()
+            while peek_text() != "}" {
+                if peek() == nil {
+                    compiler_error("unexpected end of input in select default body", line)
+                }
+                parse_statement_or_expression()
+            }
+            emit_byte(OP_UNIT, line)
+            emit_byte(OP_RETURN, line)
+            let body_snap = snapshot_chunk()
+            compiler_stack = ss_default
+            restore_compiler()
+            let body_idx = add_constant(make_closure_const(0, false, body_snap))
+
+            expect(nil, "}")
+            // Optional comma
+            if peek_text() == "," { advance() }
+
+            arm_data.push([1, 255, body_idx, 255])  // flags=0x01 (default), chan=0xFF, binding=0xFF
+            arm_count = arm_count + 1
+        } else { if peek_type() == "identifier" && peek_text() == "timeout" {
+            advance()  // consume 'timeout'
+            expect(nil, "(")
+
+            // Compile timeout expression as sub-chunk
+            let to_idx = compile_sub_expr_chunk(line)
+
+            expect(nil, ")")
+            expect(nil, "=>")
+            expect(nil, "{")
+
+            // Compile body as sub-chunk
+            save_compiler()
+            let ss_timeout = init_sub_compiler()
+            while peek_text() != "}" {
+                if peek() == nil {
+                    compiler_error("unexpected end of input in select timeout body", line)
+                }
+                parse_statement_or_expression()
+            }
+            emit_byte(OP_UNIT, line)
+            emit_byte(OP_RETURN, line)
+            let body_snap = snapshot_chunk()
+            compiler_stack = ss_timeout
+            restore_compiler()
+            let body_idx = add_constant(make_closure_const(0, false, body_snap))
+
+            expect(nil, "}")
+            if peek_text() == "," { advance() }
+
+            arm_data.push([2, to_idx, body_idx, 255])  // flags=0x02 (timeout)
+            arm_count = arm_count + 1
+        } else {
+            // Normal arm: binding from channel_expr => { body }
+            let binding = expect("identifier", nil).text
+            expect("from", nil)
+
+            // Compile channel expression as sub-chunk
+            let chan_idx = compile_sub_expr_chunk(line)
+
+            expect(nil, "=>")
+            expect(nil, "{")
+
+            // Compile body as sub-chunk
+            save_compiler()
+            let ss_arm = init_sub_compiler()
+            while peek_text() != "}" {
+                if peek() == nil {
+                    compiler_error("unexpected end of input in select arm body", line)
+                }
+                parse_statement_or_expression()
+            }
+            emit_byte(OP_UNIT, line)
+            emit_byte(OP_RETURN, line)
+            let body_snap = snapshot_chunk()
+            compiler_stack = ss_arm
+            restore_compiler()
+            let body_idx = add_constant(make_closure_const(0, false, body_snap))
+
+            expect(nil, "}")
+            if peek_text() == "," { advance() }
+
+            // Binding name as string constant
+            let binding_idx = string_constant(binding)
+            arm_data.push([4, chan_idx, body_idx, binding_idx])  // flags=0x04 (has binding)
+            arm_count = arm_count + 1
+        } }
+    }
+
+    expect(nil, "}")
+
+    // Emit OP_SELECT: arm_count, [flags, chan_idx, body_idx, binding_idx] * arm_count
+    emit_byte(OP_SELECT, line)
+    emit_byte(arm_count, line)
+    for ai in 0..arm_count {
+        let arm = arm_data[ai]
+        emit_byte(arm[0], line)  // flags
+        emit_byte(arm[1], line)  // chan_idx
+        emit_byte(arm[2], line)  // body_idx
+        emit_byte(arm[3], line)  // binding_idx
+    }
+}
+
+// ============================================================================
 // Section 9: Statement parsing
 // ============================================================================
 
@@ -1600,7 +2021,11 @@ fn is_statement_start() {
     if txt == "import" { return true }
     if txt == "impl" { return true }
     if txt == "trait" { return true }
+    if t.type == "scope" { return true }
     if t.type == "identifier" {
+        if txt == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+            return true
+        }
         if pos + 1 < len(tokens) {
             let next = tokens[pos + 1]
             if next.text == "=" { return true }
@@ -1709,7 +2134,18 @@ fn parse_statement() {
         return
     }
 
+    if t.type == "scope" {
+        parse_scope()
+        emit_byte(OP_POP, line)
+        return
+    }
+
     if t.type == "identifier" {
+        if txt == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+            parse_select()
+            emit_byte(OP_POP, line)
+            return
+        }
         parse_assignment()
         return
     }
@@ -2333,8 +2769,7 @@ fn parse_assignment() {
 
     if op == "=" {
         parse_expression()
-        emit_variable_set(name, line)
-        emit_byte(OP_POP, line)
+        emit_variable_set_pop(name, line)
     } else {
         emit_variable_get(name, line)
         parse_expression()
@@ -2345,8 +2780,7 @@ fn parse_assignment() {
             "/=" => emit_byte(OP_DIV, line),
             _ => emit_byte(OP_MOD, line)
         }
-        emit_variable_set(name, line)
-        emit_byte(OP_POP, line)
+        emit_variable_set_pop(name, line)
     }
 }
 
@@ -2383,8 +2817,7 @@ fn parse_compound_assignment_target(name: any, line: any) {
             emit_bytes(OP_SET_FIELD, fidx2, line)
         }
         // SET_FIELD leaves modified object on stack — write it back to variable
-        emit_variable_set(name, line)
-        emit_byte(OP_POP, line)
+        emit_variable_set_pop(name, line)
     } else { if peek_text() == "[" {
         advance()
         let slot = resolve_local(name)

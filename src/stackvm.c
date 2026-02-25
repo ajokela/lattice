@@ -2323,6 +2323,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_SET_GLOBAL_16] = &&lbl_OP_SET_GLOBAL_16,
         [OP_DEFINE_GLOBAL_16] = &&lbl_OP_DEFINE_GLOBAL_16,
         [OP_CLOSURE_16] = &&lbl_OP_CLOSURE_16,
+        [OP_INVOKE_LOCAL_16] = &&lbl_OP_INVOKE_LOCAL_16,
+        [OP_INVOKE_GLOBAL_16] = &&lbl_OP_INVOKE_GLOBAL_16,
         [OP_RESET_EPHEMERAL] = &&lbl_OP_RESET_EPHEMERAL,
         [OP_SET_LOCAL_POP] = &&lbl_OP_SET_LOCAL_POP,
         [OP_CHECK_TYPE] = &&lbl_OP_CHECK_TYPE,
@@ -4401,6 +4403,384 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                         stackvm_promote_frame_ephemerals(vm, frame);
                         /* Replace obj with self clone, shift args */
+                        LatValue self_copy = value_deep_clone(obj);
+                        value_free(obj);
+                        *obj = self_copy;
+                        StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                        new_frame->chunk = fn_chunk;
+                        new_frame->ip = fn_chunk->code;
+                        new_frame->slots = obj;
+                        new_frame->upvalues = NULL;
+                        new_frame->upvalue_count = 0;
+                        frame = new_frame;
+                    } else {
+                        for (int i = 0; i < arg_count; i++) {
+                            LatValue v = pop(vm);
+                            value_free(&v);
+                        }
+                        LatValue obj_popped = pop(vm);
+                        value_free(&obj_popped);
+                        push(vm, value_nil());
+                    }
+                }
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_INVOKE_LOCAL_16:
+#endif
+            case OP_INVOKE_LOCAL_16: {
+                uint8_t slot = READ_BYTE();
+                uint16_t method_idx = READ_U16();
+                uint8_t arg_count = READ_BYTE();
+                const char *method_name = frame->chunk->constants[method_idx].as.str_val;
+                LatValue *obj = &frame->slots[slot]; /* Direct pointer to local */
+
+                const char *local_var_name = (frame->chunk->local_names && slot < frame->chunk->local_name_cap)
+                    ? frame->chunk->local_names[slot] : NULL;
+                if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, local_var_name)) {
+                    if (vm->error) {
+                        StackVMResult r = stackvm_handle_native_error(vm, &frame);
+                        if (r != STACKVM_OK) return r;
+                        break;
+                    }
+                    break;
+                }
+
+                if (obj->type == VAL_MAP) {
+                    LatValue *field = lat_map_get(obj->as.map.map, method_name);
+                    if (field && field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                        field->as.closure.default_values != VM_NATIVE_MARKER) {
+                        Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        int arity = (int)field->as.closure.param_count;
+                        int adjusted = stackvm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
+                        if (adjusted < 0) {
+                            char *err = vm->error; vm->error = NULL;
+                            VM_ERROR("%s", err); free(err); break;
+                        }
+                        arg_count = (uint8_t)adjusted;
+                        ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                            VM_ERROR("stack overflow (too many nested calls)"); break;
+                        }
+                        stackvm_promote_frame_ephemerals(vm, frame);
+                        LatValue closure_copy = value_deep_clone(field);
+                        LatValue *arg_base = vm->stack_top - arg_count;
+                        push(vm, value_nil());
+                        for (int si = arg_count - 1; si >= 0; si--)
+                            arg_base[si + 1] = arg_base[si];
+                        arg_base[0] = closure_copy;
+                        StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                        new_frame->chunk = fn_chunk;
+                        new_frame->ip = fn_chunk->code;
+                        new_frame->slots = arg_base;
+                        new_frame->upvalues = upvals;
+                        new_frame->upvalue_count = uv_count;
+                        frame = new_frame;
+                        break;
+                    }
+                    if (field && field->type == VAL_CLOSURE &&
+                        field->as.closure.default_values == VM_NATIVE_MARKER) {
+                        VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                        LatValue *args = (arg_count <= 16) ? vm->fast_args
+                                       : malloc(arg_count * sizeof(LatValue));
+                        for (int i = arg_count - 1; i >= 0; i--)
+                            args[i] = pop(vm);
+                        LatValue ret = native(args, arg_count);
+                    if (vm->rt->error) { vm->error = vm->rt->error; vm->rt->error = NULL; }
+                        for (int i = 0; i < arg_count; i++)
+                            value_free(&args[i]);
+                        if (arg_count > 16) free(args);
+                        if (vm->error) {
+                            value_free(&ret);
+                            char *err = vm->error; vm->error = NULL;
+                            VM_ERROR("%s", err); free(err); break;
+                        }
+                        push(vm, ret);
+                        break;
+                    }
+                }
+
+                if (obj->type == VAL_STRUCT) {
+                    const char *imethod2 = intern(method_name);
+                    bool handled = false;
+                    for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
+                        if (obj->as.strct.field_names[fi] != imethod2)
+                            continue;
+                        LatValue *field = &obj->as.strct.field_values[fi];
+                        if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                            field->as.closure.default_values != VM_NATIVE_MARKER) {
+                            Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                            ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                            size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                            if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                                VM_ERROR("stack overflow (too many nested calls)"); break;
+                            }
+                            stackvm_promote_frame_ephemerals(vm, frame);
+                            LatValue self_copy = value_deep_clone(obj);
+                            LatValue closure_copy = value_deep_clone(field);
+                            LatValue *arg_base = vm->stack_top - arg_count;
+                            push(vm, value_nil()); push(vm, value_nil());
+                            for (int si = arg_count - 1; si >= 0; si--)
+                                arg_base[si + 2] = arg_base[si];
+                            arg_base[0] = closure_copy;
+                            arg_base[1] = self_copy;
+                            StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                            new_frame->chunk = fn_chunk;
+                            new_frame->ip = fn_chunk->code;
+                            new_frame->slots = arg_base;
+                            new_frame->upvalues = upvals;
+                            new_frame->upvalue_count = uv_count;
+                            frame = new_frame;
+                            handled = true;
+                            break;
+                        }
+                        if (field->type == VAL_CLOSURE &&
+                            field->as.closure.default_values == VM_NATIVE_MARKER) {
+                            VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                            LatValue self_copy = value_deep_clone(obj);
+                            int total_args = arg_count + 1;
+                            LatValue *args = malloc(total_args * sizeof(LatValue));
+                            args[0] = self_copy;
+                            for (int ai = arg_count - 1; ai >= 0; ai--)
+                                args[ai + 1] = pop(vm);
+                            LatValue ret = native(args, total_args);
+                            for (int ai = 0; ai < total_args; ai++)
+                                value_free(&args[ai]);
+                            free(args);
+                            push(vm, ret);
+                            handled = true;
+                            break;
+                        }
+                        break;
+                    }
+                    if (handled) break;
+                }
+
+                {
+                    const char *type_name = (obj->type == VAL_STRUCT) ? obj->as.strct.name :
+                                            (obj->type == VAL_ENUM)   ? obj->as.enm.enum_name :
+                                            value_type_name(obj);
+                    char key[256];
+                    snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
+                    LatValue *method_ref = env_get_ref(vm->env, key);
+                    if (method_ref &&
+                        method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
+                        Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                            VM_ERROR("stack overflow (too many nested calls)"); break;
+                        }
+                        stackvm_promote_frame_ephemerals(vm, frame);
+                        LatValue *arg_base = vm->stack_top - arg_count;
+                        push(vm, value_nil());
+                        for (int i = arg_count; i > 0; i--)
+                            vm->stack_top[-1 - (arg_count - i)] = arg_base[i - 1];
+                        *arg_base = value_deep_clone(obj);
+                        StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                        new_frame->chunk = fn_chunk;
+                        new_frame->ip = fn_chunk->code;
+                        new_frame->slots = arg_base;
+                        new_frame->upvalues = NULL;
+                        new_frame->upvalue_count = 0;
+                        frame = new_frame;
+                    } else {
+                        for (int i = 0; i < arg_count; i++) {
+                            LatValue v = pop(vm);
+                            value_free(&v);
+                        }
+                        push(vm, value_nil());
+                    }
+                }
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_INVOKE_GLOBAL_16:
+#endif
+            case OP_INVOKE_GLOBAL_16: {
+                uint16_t name_idx = READ_U16();
+                uint16_t method_idx = READ_U16();
+                uint8_t arg_count = READ_BYTE();
+                const char *global_name = frame->chunk->constants[name_idx].as.str_val;
+                const char *method_name = frame->chunk->constants[method_idx].as.str_val;
+
+                /* Fast path: simple builtins (no closures) can mutate in place */
+                uint32_t mhash_g = method_hash(method_name);
+                if (stackvm_invoke_builtin_is_simple(mhash_g)) {
+                    LatValue *ref = env_get_ref(vm->env, global_name);
+                    if (!ref) {
+                        VM_ERROR("undefined variable '%s'", global_name); break;
+                    }
+                    if (stackvm_invoke_builtin(vm, ref, method_name, arg_count, global_name)) {
+                        if (vm->error) {
+                            StackVMResult r = stackvm_handle_native_error(vm, &frame);
+                            if (r != STACKVM_OK) return r;
+                            break;
+                        }
+                        if (vm->rt->tracking_active) {
+                            stackvm_record_history(vm, global_name, ref);
+                        }
+                        break;
+                    }
+                }
+
+                /* Slow path: closure-invoking builtins or non-builtin dispatch */
+                LatValue obj_val;
+                if (!env_get(vm->env, global_name, &obj_val)) {
+                    VM_ERROR("undefined variable '%s'", global_name); break;
+                }
+
+                if (stackvm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name)) {
+                    if (vm->error) {
+                        value_free(&obj_val);
+                        StackVMResult r = stackvm_handle_native_error(vm, &frame);
+                        if (r != STACKVM_OK) return r;
+                        break;
+                    }
+                    env_set(vm->env, global_name, obj_val);
+                    if (vm->rt->tracking_active) {
+                        LatValue cur;
+                        if (env_get(vm->env, global_name, &cur)) {
+                            stackvm_record_history(vm, global_name, &cur);
+                            value_free(&cur);
+                        }
+                    }
+                    break;
+                }
+
+                /* Not a builtin — insert object below args on stack and
+                 * dispatch like OP_INVOKE (struct closures, impl methods, etc.) */
+                push(vm, value_nil()); /* make room */
+                LatValue *base = vm->stack_top - arg_count - 1;
+                memmove(base + 1, base, arg_count * sizeof(LatValue));
+                *base = obj_val;
+                LatValue *obj = base;
+
+                if (obj->type == VAL_MAP) {
+                    LatValue *field = lat_map_get(obj->as.map.map, method_name);
+                    if (field && field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                        field->as.closure.default_values != VM_NATIVE_MARKER) {
+                        Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        int arity = (int)field->as.closure.param_count;
+                        int adjusted = stackvm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
+                        if (adjusted < 0) {
+                            char *err = vm->error; vm->error = NULL;
+                            value_free(&obj_val);
+                            VM_ERROR("%s", err); free(err); break;
+                        }
+                        arg_count = (uint8_t)adjusted;
+                        obj = vm->stack_top - arg_count - 1;
+                        ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                            VM_ERROR("stack overflow (too many nested calls)"); break;
+                        }
+                        stackvm_promote_frame_ephemerals(vm, frame);
+                        LatValue closure_copy = value_deep_clone(field);
+                        value_free(obj);
+                        *obj = closure_copy;
+                        StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                        new_frame->chunk = fn_chunk;
+                        new_frame->ip = fn_chunk->code;
+                        new_frame->slots = obj;
+                        new_frame->upvalues = upvals;
+                        new_frame->upvalue_count = uv_count;
+                        frame = new_frame;
+                        break;
+                    }
+                    if (field && field->type == VAL_CLOSURE &&
+                        field->as.closure.default_values == VM_NATIVE_MARKER) {
+                        VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                        LatValue *args = (arg_count <= 16) ? vm->fast_args
+                                       : malloc(arg_count * sizeof(LatValue));
+                        for (int i = arg_count - 1; i >= 0; i--)
+                            args[i] = pop(vm);
+                        LatValue obj_popped = pop(vm);
+                        LatValue ret = native(args, arg_count);
+                    if (vm->rt->error) { vm->error = vm->rt->error; vm->rt->error = NULL; }
+                        for (int i = 0; i < arg_count; i++)
+                            value_free(&args[i]);
+                        if (arg_count > 16) free(args);
+                        value_free(&obj_popped);
+                        push(vm, ret);
+                        break;
+                    }
+                }
+
+                if (obj->type == VAL_STRUCT) {
+                    const char *imethod3 = intern(method_name);
+                    bool handled = false;
+                    for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
+                        if (obj->as.strct.field_names[fi] != imethod3)
+                            continue;
+                        LatValue *field = &obj->as.strct.field_values[fi];
+                        if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                            field->as.closure.default_values != VM_NATIVE_MARKER) {
+                            Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                            ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                            size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                            if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                                VM_ERROR("stack overflow (too many nested calls)"); break;
+                            }
+                            stackvm_promote_frame_ephemerals(vm, frame);
+                            LatValue self_copy = value_deep_clone(obj);
+                            LatValue closure_copy = value_deep_clone(field);
+                            push(vm, value_nil());
+                            for (int si = arg_count; si >= 1; si--)
+                                obj[si + 1] = obj[si];
+                            obj[1] = self_copy;
+                            value_free(obj);
+                            *obj = closure_copy;
+                            StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                            new_frame->chunk = fn_chunk;
+                            new_frame->ip = fn_chunk->code;
+                            new_frame->slots = obj;
+                            new_frame->upvalues = upvals;
+                            new_frame->upvalue_count = uv_count;
+                            frame = new_frame;
+                            handled = true;
+                            break;
+                        }
+                        if (field->type == VAL_CLOSURE &&
+                            field->as.closure.default_values == VM_NATIVE_MARKER) {
+                            VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                            LatValue self_copy = value_deep_clone(obj);
+                            int total_args = arg_count + 1;
+                            LatValue *args = malloc(total_args * sizeof(LatValue));
+                            args[0] = self_copy;
+                            for (int ai = arg_count - 1; ai >= 0; ai--)
+                                args[ai + 1] = pop(vm);
+                            LatValue obj_popped = pop(vm);
+                            LatValue ret = native(args, total_args);
+                            for (int ai = 0; ai < total_args; ai++)
+                                value_free(&args[ai]);
+                            free(args);
+                            value_free(&obj_popped);
+                            push(vm, ret);
+                            handled = true;
+                            break;
+                        }
+                        break;
+                    }
+                    if (handled) break;
+                }
+
+                /* Try compiled method via "TypeName::method" global */
+                {
+                    const char *type_name = (obj->type == VAL_STRUCT) ? obj->as.strct.name :
+                                            (obj->type == VAL_ENUM)   ? obj->as.enm.enum_name :
+                                            value_type_name(obj);
+                    char key[256];
+                    snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
+                    LatValue *method_ref = env_get_ref(vm->env, key);
+                    if (method_ref &&
+                        method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
+                        Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                            VM_ERROR("stack overflow (too many nested calls)"); break;
+                        }
+                        stackvm_promote_frame_ephemerals(vm, frame);
                         LatValue self_copy = value_deep_clone(obj);
                         value_free(obj);
                         *obj = self_copy;

@@ -117,6 +117,9 @@ static void handle_initialize(LspServer *srv, int id) {
     /* Definition */
     cJSON_AddBoolToObject(caps, "definitionProvider", 1);
 
+    /* Document symbols (outline / breadcrumbs) */
+    cJSON_AddBoolToObject(caps, "documentSymbolProvider", 1);
+
     cJSON_AddItemToObject(result, "capabilities", caps);
 
     /* Server info */
@@ -322,6 +325,15 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
                 break;
             }
         }
+        /* Search methods */
+        if (!hover_text) {
+            for (size_t i = 0; i < srv->index->method_count; i++) {
+                if (strcmp(srv->index->methods[i].name, word) == 0) {
+                    hover_text = srv->index->methods[i].doc;
+                    break;
+                }
+            }
+        }
     }
 
     /* Search document symbols */
@@ -447,6 +459,79 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
     cJSON_Delete(resp);
 }
 
+/* ── Handler: textDocument/documentSymbol ── */
+
+static int lsp_symbol_kind(LspSymbolKind kind) {
+    switch (kind) {
+        case LSP_SYM_FUNCTION: return 12;  /* Function */
+        case LSP_SYM_STRUCT:   return 23;  /* Struct */
+        case LSP_SYM_ENUM:     return 10;  /* Enum */
+        case LSP_SYM_VARIABLE: return 13;  /* Variable */
+        case LSP_SYM_METHOD:   return 6;   /* Method */
+        default:               return 13;  /* Variable as fallback */
+    }
+}
+
+static void handle_document_symbol(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    if (!td) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    LspDocument *doc = find_document(srv, uri);
+
+    cJSON *symbols = cJSON_CreateArray();
+
+    if (doc) {
+        for (size_t i = 0; i < doc->symbol_count; i++) {
+            LspSymbol *s = &doc->symbols[i];
+            cJSON *sym = cJSON_CreateObject();
+
+            cJSON_AddStringToObject(sym, "name", s->name);
+            cJSON_AddNumberToObject(sym, "kind", lsp_symbol_kind(s->kind));
+
+            /* range: full extent of the symbol (use line/col as start) */
+            cJSON *range = cJSON_CreateObject();
+            cJSON *start = cJSON_CreateObject();
+            cJSON_AddNumberToObject(start, "line", s->line >= 0 ? s->line : 0);
+            cJSON_AddNumberToObject(start, "character", s->col >= 0 ? s->col : 0);
+            cJSON *end = cJSON_CreateObject();
+            cJSON_AddNumberToObject(end, "line", s->line >= 0 ? s->line : 0);
+            cJSON_AddNumberToObject(end, "character",
+                (s->col >= 0 ? s->col : 0) + (int)strlen(s->name));
+            cJSON_AddItemToObject(range, "start", start);
+            cJSON_AddItemToObject(range, "end", end);
+            cJSON_AddItemToObject(sym, "range", range);
+
+            /* selectionRange: just the name */
+            cJSON *sel_range = cJSON_CreateObject();
+            cJSON *sel_start = cJSON_CreateObject();
+            cJSON_AddNumberToObject(sel_start, "line", s->line >= 0 ? s->line : 0);
+            cJSON_AddNumberToObject(sel_start, "character", s->col >= 0 ? s->col : 0);
+            cJSON *sel_end = cJSON_CreateObject();
+            cJSON_AddNumberToObject(sel_end, "line", s->line >= 0 ? s->line : 0);
+            cJSON_AddNumberToObject(sel_end, "character",
+                (s->col >= 0 ? s->col : 0) + (int)strlen(s->name));
+            cJSON_AddItemToObject(sel_range, "start", sel_start);
+            cJSON_AddItemToObject(sel_range, "end", sel_end);
+            cJSON_AddItemToObject(sym, "selectionRange", sel_range);
+
+            if (s->signature)
+                cJSON_AddStringToObject(sym, "detail", s->signature);
+
+            cJSON_AddItemToArray(symbols, sym);
+        }
+    }
+
+    cJSON *resp = lsp_make_response(id, symbols);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
 /* ── Server lifecycle ── */
 
 LspServer *lsp_server_new(void) {
@@ -498,6 +583,8 @@ void lsp_server_run(LspServer *srv) {
             handle_hover(srv, params_node, id);
         } else if (strcmp(method, "textDocument/definition") == 0) {
             handle_definition(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
+            handle_document_symbol(srv, params_node, id);
         } else if (strcmp(method, "shutdown") == 0) {
             cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
             lsp_write_response(resp, stdout);

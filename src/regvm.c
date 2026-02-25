@@ -178,6 +178,136 @@ void regvm_track_chunk(RegVM *vm, RegChunk *ch) {
     vm->fn_chunks[vm->fn_chunk_count++] = ch;
 }
 
+/* ── Threaded spawn support ── */
+
+#ifndef __EMSCRIPTEN__
+
+typedef struct {
+    RegChunk   *chunk;       /* compiled spawn body (parent owns) */
+    RegVM      *child_vm;    /* independent RegVM for thread */
+    char       *error;       /* NULL on success */
+    pthread_t   thread;
+} RegVMSpawnTask;
+
+/* Create an independent RegVM clone for running a spawn in its own thread. */
+static RegVM *regvm_clone_for_thread(RegVM *parent) {
+    /* Create a child runtime with cloned env + fresh caches */
+    LatRuntime *child_rt = calloc(1, sizeof(LatRuntime));
+    child_rt->env = env_clone(parent->rt->env);
+    child_rt->struct_meta = parent->rt->struct_meta; /* shared read-only */
+    child_rt->script_dir = parent->rt->script_dir ? strdup(parent->rt->script_dir) : NULL;
+    child_rt->prog_argc = parent->rt->prog_argc;
+    child_rt->prog_argv = parent->rt->prog_argv;
+    child_rt->module_cache = lat_map_new(sizeof(LatValue));
+    child_rt->required_files = lat_map_new(sizeof(bool));
+    child_rt->loaded_extensions = lat_map_new(sizeof(LatValue));
+
+    RegVM *child = calloc(1, sizeof(RegVM));
+    child->rt = child_rt;
+    child->env = child_rt->env;
+    child->struct_meta = child_rt->struct_meta;
+    child->error = NULL;
+    child->open_upvalues = NULL;
+    child->handler_count = 0;
+    child->defer_count = 0;
+    child->fn_chunks = NULL;
+    child->fn_chunk_count = 0;
+    child->fn_chunk_cap = 0;
+    child->module_cache = NULL;
+    child->ephemeral = bump_arena_new();
+    child->frame_count = 0;
+    child->reg_stack_top = 0;
+    /* Initialize register stack to nil */
+    for (size_t i = 0; i < REGVM_REG_MAX * REGVM_FRAMES_MAX; i++)
+        child->reg_stack[i] = value_nil();
+    return child;
+}
+
+/* Free a child RegVM created by regvm_clone_for_thread. */
+static void regvm_free_child(RegVM *child) {
+    /* Free register values */
+    for (size_t i = 0; i < child->reg_stack_top; i++)
+        value_free_inline(&child->reg_stack[i]);
+    /* Free open upvalues */
+    ObjUpvalue *uv = child->open_upvalues;
+    while (uv) {
+        ObjUpvalue *next = uv->next;
+        value_free(&uv->closed);
+        free(uv);
+        uv = next;
+    }
+    free(child->error);
+    /* Free child-owned fn_chunks */
+    for (size_t i = 0; i < child->fn_chunk_count; i++)
+        regchunk_free(child->fn_chunks[i]);
+    free(child->fn_chunks);
+    /* Free per-VM module cache */
+    if (child->module_cache) {
+        for (size_t i = 0; i < child->module_cache->cap; i++) {
+            if (child->module_cache->entries[i].state == MAP_OCCUPIED) {
+                LatValue *v = (LatValue *)child->module_cache->entries[i].value;
+                value_free(v);
+            }
+        }
+        lat_map_free(child->module_cache);
+        free(child->module_cache);
+    }
+    if (child->ephemeral) {
+        bump_arena_free(child->ephemeral);
+    }
+    /* Free child runtime (env + caches) */
+    LatRuntime *crt = child->rt;
+    if (crt) {
+        if (crt->env) env_free(crt->env);
+        lat_map_free(&crt->module_cache);
+        lat_map_free(&crt->required_files);
+        lat_map_free(&crt->loaded_extensions);
+        free(crt->script_dir);
+        free(crt);
+    }
+    free(child);
+}
+
+/* Export current frame's live locals into child's env as globals,
+ * so re-compiled sub-chunks can access them via OP_GET_GLOBAL. */
+static void regvm_export_locals_to_env(RegVM *parent, RegVM *child) {
+    for (int fi = 0; fi < parent->frame_count; fi++) {
+        RegCallFrame *f = &parent->frames[fi];
+        if (!f->chunk) continue;
+        for (size_t sl = 0; sl < f->chunk->local_name_cap; sl++) {
+            if (f->chunk->local_names[sl])
+                env_define(child->env, f->chunk->local_names[sl],
+                           value_deep_clone(&f->regs[sl]));
+        }
+    }
+}
+
+/* Thread function: runs a RegVM sub-chunk in its own thread. */
+static void *regvm_spawn_thread_fn(void *arg) {
+    RegVMSpawnTask *task = arg;
+    lat_runtime_set_current(task->child_vm->rt);
+    task->child_vm->rt->active_vm = task->child_vm;
+
+    /* Set up thread-local heap */
+    DualHeap *heap = dual_heap_new();
+    value_set_heap(heap);
+    value_set_arena(NULL);
+
+    LatValue result;
+    RegVMResult r = regvm_run(task->child_vm, task->chunk, &result);
+    if (r != REGVM_OK) {
+        task->error = task->child_vm->error;
+        task->child_vm->error = NULL;
+    } else {
+        value_free(&result);
+    }
+
+    dual_heap_free(heap);
+    return NULL;
+}
+
+#endif /* __EMSCRIPTEN__ */
+
 /* ── Value cloning (same fast-path as stack VM) ── */
 
 /* Primitive type check: types that have no heap data and can be bitwise-copied.
@@ -4606,6 +4736,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (i + 2 < spawn_count) spawn_indices[i + 2] = REG_GET_C(sp);
         }
 
+#ifdef __EMSCRIPTEN__
+        /* WASM: no pthreads — run spawns sequentially */
+        (void)sync_idx;
+        reg_set(&R[dst_reg], value_unit());
+#else
         /* Export locals to env for sub-chunk access */
         env_push_scope(vm->env);
         for (int fi2 = 0; fi2 < vm->frame_count; fi2++) {
@@ -4618,42 +4753,101 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
-        /* Run sync body — its return value becomes the scope result */
-        LatValue scope_result = value_unit();
-        if (sync_idx != 0xFF) {
-            RegChunk *sync_body = (RegChunk *)frame->chunk->constants[sync_idx].as.closure.native_fn;
-            if (sync_body) {
-                RegVMResult sr = regvm_run_sub(vm, sync_body, &scope_result);
-                /* Restore frame/R pointers */
-                frame = &vm->frames[vm->frame_count - 1];
-                R = frame->regs;
-                if (sr != REGVM_OK) {
-                    env_pop_scope(vm->env);
-                    RVM_ERROR("%s", vm->error ? vm->error : "scope error");
+        if (spawn_count == 0) {
+            /* No spawns — run sync body only */
+            if (sync_idx != 0xFF) {
+                RegChunk *sync_body = (RegChunk *)frame->chunk->constants[sync_idx].as.closure.native_fn;
+                LatValue scope_result = value_unit();
+                if (sync_body) {
+                    RegVMResult sr = regvm_run_sub(vm, sync_body, &scope_result);
+                    frame = &vm->frames[vm->frame_count - 1];
+                    R = frame->regs;
+                    if (sr != REGVM_OK) {
+                        env_pop_scope(vm->env);
+                        RVM_ERROR("%s", vm->error ? vm->error : "scope error");
+                    }
+                }
+                env_pop_scope(vm->env);
+                reg_set(&R[dst_reg], scope_result);
+            } else {
+                env_pop_scope(vm->env);
+                reg_set(&R[dst_reg], value_unit());
+            }
+        } else {
+            /* Has spawns — run concurrently with pthreads */
+            char *first_error = NULL;
+
+            /* Run sync body first (non-spawn statements) */
+            if (sync_idx != 0xFF) {
+                RegChunk *sync_body = (RegChunk *)frame->chunk->constants[sync_idx].as.closure.native_fn;
+                if (sync_body) {
+                    LatValue ns_result;
+                    RegVMResult nsr = regvm_run_sub(vm, sync_body, &ns_result);
+                    frame = &vm->frames[vm->frame_count - 1];
+                    R = frame->regs;
+                    if (nsr != REGVM_OK) {
+                        first_error = vm->error ? strdup(vm->error) : strdup("scope stmt error");
+                        free(vm->error);
+                        vm->error = NULL;
+                    } else {
+                        value_free(&ns_result);
+                    }
                 }
             }
-        }
 
-        /* Run spawns synchronously (threading TBD) */
-        for (uint8_t i = 0; i < spawn_count; i++) {
-            RegChunk *sp_chunk = (RegChunk *)frame->chunk->constants[spawn_indices[i]].as.closure.native_fn;
-            if (sp_chunk) {
-                LatValue sp_result;
-                RegVMResult sr = regvm_run_sub(vm, sp_chunk, &sp_result);
-                /* Restore frame/R pointers */
-                frame = &vm->frames[vm->frame_count - 1];
-                R = frame->regs;
-                value_free(&sp_result);
-                if (sr != REGVM_OK) {
-                    value_free(&scope_result);
-                    env_pop_scope(vm->env);
-                    RVM_ERROR("%s", vm->error ? vm->error : "spawn error");
-                }
+            /* Create child VMs for each spawn */
+            RegVMSpawnTask *tasks = calloc(spawn_count, sizeof(RegVMSpawnTask));
+            for (uint8_t i = 0; i < spawn_count && !first_error; i++) {
+                RegChunk *sp_chunk = (RegChunk *)frame->chunk->constants[spawn_indices[i]].as.closure.native_fn;
+                tasks[i].chunk = sp_chunk;
+                tasks[i].child_vm = regvm_clone_for_thread(vm);
+                regvm_export_locals_to_env(vm, tasks[i].child_vm);
+                tasks[i].error = NULL;
             }
-        }
 
-        env_pop_scope(vm->env);
-        reg_set(&R[dst_reg], scope_result);
+            /* Launch all spawn threads */
+            for (uint8_t i = 0; i < spawn_count; i++) {
+                if (!tasks[i].child_vm) continue;
+                pthread_create(&tasks[i].thread, NULL, regvm_spawn_thread_fn, &tasks[i]);
+            }
+
+            /* Join all threads */
+            for (uint8_t i = 0; i < spawn_count; i++) {
+                if (!tasks[i].child_vm) continue;
+                pthread_join(tasks[i].thread, NULL);
+            }
+
+            /* Restore parent TLS state */
+            lat_runtime_set_current(vm->rt);
+            vm->rt->active_vm = vm;
+
+            /* Collect first error from child threads */
+            for (uint8_t i = 0; i < spawn_count; i++) {
+                if (tasks[i].error && !first_error) {
+                    first_error = tasks[i].error;
+                } else if (tasks[i].error) {
+                    free(tasks[i].error);
+                }
+                if (tasks[i].child_vm)
+                    regvm_free_child(tasks[i].child_vm);
+            }
+
+            env_pop_scope(vm->env);
+            free(tasks);
+
+            if (first_error) {
+                /* rvm_handle_error copies the message via vasprintf, so we can
+                 * free first_error afterward. Free old vm->error first. */
+                free(vm->error);
+                vm->error = NULL;
+                RegVMResult _serr = rvm_handle_error(vm, &frame, &R, "%s", first_error);
+                free(first_error);
+                if (_serr != REGVM_OK) return _serr;
+                DISPATCH();
+            }
+            reg_set(&R[dst_reg], value_unit());
+        }
+#endif
         DISPATCH();
     }
 

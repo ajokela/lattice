@@ -5,3 +5,5 @@ lattice-lang.org
 tinycomputers.io
 crash-*
 fuzz/corpus/
+scripts/jira_*.py
+.env

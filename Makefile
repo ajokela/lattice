@@ -146,7 +146,7 @@ FUZZ_SRC    = $(FUZZ_DIR)/fuzz_eval.c
 FUZZ_OBJ    = $(BUILD_DIR)/fuzz/fuzz_eval.o
 FUZZ_TARGET = $(BUILD_DIR)/fuzz_eval
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends asan asan-all tsan coverage analyze fuzz fuzz-seed wasm bench bench-stress ext-pg ext-sqlite lsp deploy-coverage
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze fuzz fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -187,6 +187,49 @@ test-all-backends: $(TEST_TARGET)
 	@echo "=== stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
 	@echo "=== tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
 	@echo "=== regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
+
+LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features
+
+test-latc: $(TARGET)
+	@PASS=0; FAIL=0; \
+	for name in $(LATC_TESTS); do \
+		printf "%-30s" "$$name..."; \
+		LATC_OUT=$$(./$(TARGET) compiler/latc.lat tests/$$name.lat /tmp/$$name.latc 2>&1); \
+		if [ $$? -ne 0 ]; then \
+			echo "FAIL (compile)"; \
+			echo "  $$LATC_OUT"; \
+			FAIL=$$((FAIL + 1)); \
+			continue; \
+		fi; \
+		./$(TARGET) /tmp/$$name.latc > /tmp/$$name.compiled.out 2>&1; \
+		if [ $$? -ne 0 ]; then \
+			echo "FAIL (run .latc)"; \
+			cat /tmp/$$name.compiled.out; \
+			FAIL=$$((FAIL + 1)); \
+			rm -f /tmp/$$name.latc /tmp/$$name.compiled.out; \
+			continue; \
+		fi; \
+		./$(TARGET) tests/$$name.lat > /tmp/$$name.direct.out 2>&1; \
+		if [ $$? -ne 0 ]; then \
+			echo "FAIL (run .lat)"; \
+			cat /tmp/$$name.direct.out; \
+			FAIL=$$((FAIL + 1)); \
+			rm -f /tmp/$$name.latc /tmp/$$name.compiled.out /tmp/$$name.direct.out; \
+			continue; \
+		fi; \
+		if diff /tmp/$$name.compiled.out /tmp/$$name.direct.out > /tmp/$$name.diff 2>&1; then \
+			echo "PASS"; \
+			PASS=$$((PASS + 1)); \
+		else \
+			echo "FAIL (output mismatch)"; \
+			head -10 /tmp/$$name.diff; \
+			FAIL=$$((FAIL + 1)); \
+		fi; \
+		rm -f /tmp/$$name.latc /tmp/$$name.compiled.out /tmp/$$name.direct.out /tmp/$$name.diff; \
+	done; \
+	echo ""; \
+	echo "Results: $$PASS passed, $$FAIL failed"; \
+	if [ $$FAIL -gt 0 ]; then exit 1; fi
 
 asan: CFLAGS += -fsanitize=address,undefined -g -O1
 asan: LDFLAGS += -fsanitize=address,undefined
@@ -284,6 +327,9 @@ wasm:
 
 bench: $(TARGET)
 	@for f in benchmarks/*.lat; do echo "--- $$f ---"; ./clat --stats "$$f"; done
+
+bench-regvm: $(TARGET)
+	@for f in benchmarks/*.lat; do echo "--- $$f (regvm) ---"; ./clat --regvm --stats "$$f"; done
 
 bench-stress: $(TARGET)
 	@for f in benchmarks/*.lat; do echo "--- $$f ---"; ./clat --gc-stress --stats "$$f"; done

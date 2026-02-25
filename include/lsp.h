@@ -102,6 +102,7 @@ void lsp_document_free(LspDocument *doc);
 /* ── Symbol index ── */
 
 LspSymbolIndex *lsp_symbol_index_new(const char *eval_path);
+void lsp_symbol_index_add_file(LspSymbolIndex *idx, const char *path);
 void lsp_symbol_index_free(LspSymbolIndex *idx);
 
 /* ── Utilities ── */

@@ -293,6 +293,38 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
             fprintf(stderr, "' (%d args)\n", argc);
             return offset + 4;
         }
+        case OP_INVOKE_LOCAL_16: {
+            uint8_t slot = c->code[offset + 1];
+            uint16_t method_idx = (uint16_t)(c->code[offset + 2] << 8) | c->code[offset + 3];
+            uint8_t argc = c->code[offset + 4];
+            fprintf(stderr, "%-20s slot=%d '", "OP_INVOKE_LOCAL_16", slot);
+            if (method_idx < c->const_len) {
+                char *repr = value_repr(&c->constants[method_idx]);
+                fprintf(stderr, "%s", repr);
+                free(repr);
+            }
+            fprintf(stderr, "' (%d args)\n", argc);
+            return offset + 5;
+        }
+        case OP_INVOKE_GLOBAL_16: {
+            uint16_t name_idx = (uint16_t)(c->code[offset + 1] << 8) | c->code[offset + 2];
+            uint16_t method_idx = (uint16_t)(c->code[offset + 3] << 8) | c->code[offset + 4];
+            uint8_t argc = c->code[offset + 5];
+            fprintf(stderr, "%-20s '", "OP_INVOKE_GLOBAL_16");
+            if (name_idx < c->const_len) {
+                char *repr = value_repr(&c->constants[name_idx]);
+                fprintf(stderr, "%s", repr);
+                free(repr);
+            }
+            fprintf(stderr, "'.'");
+            if (method_idx < c->const_len) {
+                char *repr = value_repr(&c->constants[method_idx]);
+                fprintf(stderr, "%s", repr);
+                free(repr);
+            }
+            fprintf(stderr, "' (%d args)\n", argc);
+            return offset + 6;
+        }
         case OP_SET_INDEX_LOCAL: return byte_instruction("OP_SET_INDEX_LOCAL", c, offset);
         case OP_PUSH_EXCEPTION_HANDLER: return jump_instruction("OP_PUSH_EXCEPTION_HANDLER", 1, c, offset);
         case OP_POP_EXCEPTION_HANDLER: return simple_instruction("OP_POP_EXCEPTION_HANDLER", offset);
