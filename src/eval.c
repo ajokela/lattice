@@ -4886,7 +4886,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Extract the year from a timestamp.
                 /// @example time_year(0)  // 1970
                 if (strcmp(fn_name, "time_year") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_year() expects (Int epoch_ms)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_year() expects (Int epoch_ms)")); }
                     int r = datetime_year(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4896,7 +4896,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Extract the month (1-12) from a timestamp.
                 /// @example time_month(0)  // 1
                 if (strcmp(fn_name, "time_month") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_month() expects (Int epoch_ms)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_month() expects (Int epoch_ms)")); }
                     int r = datetime_month(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4906,7 +4906,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Extract the day of month (1-31) from a timestamp.
                 /// @example time_day(0)  // 1
                 if (strcmp(fn_name, "time_day") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_day() expects (Int epoch_ms)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_day() expects (Int epoch_ms)")); }
                     int r = datetime_day(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4916,7 +4916,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Extract the hour (0-23) from a timestamp.
                 /// @example time_hour(0)  // 0
                 if (strcmp(fn_name, "time_hour") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_hour() expects (Int epoch_ms)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_hour() expects (Int epoch_ms)")); }
                     int r = datetime_hour(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4926,7 +4926,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Extract the minute (0-59) from a timestamp.
                 /// @example time_minute(0)  // 0
                 if (strcmp(fn_name, "time_minute") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_minute() expects (Int epoch_ms)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_minute() expects (Int epoch_ms)")); }
                     int r = datetime_minute(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4936,7 +4936,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Extract the second (0-59) from a timestamp.
                 /// @example time_second(0)  // 0
                 if (strcmp(fn_name, "time_second") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_second() expects (Int epoch_ms)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_second() expects (Int epoch_ms)")); }
                     int r = datetime_second(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4946,7 +4946,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Extract the day of week (0=Sunday, 6=Saturday) from a timestamp.
                 /// @example time_weekday(0)  // 4
                 if (strcmp(fn_name, "time_weekday") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_weekday() expects (Int epoch_ms)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_weekday() expects (Int epoch_ms)")); }
                     int r = datetime_weekday(args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4956,7 +4956,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Add milliseconds to a timestamp.
                 /// @example time_add(0, 86400000)  // 86400000
                 if (strcmp(fn_name, "time_add") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("time_add() expects (Int epoch_ms, Int delta_ms)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("time_add() expects (Int epoch_ms, Int delta_ms)")); }
                     int64_t r = datetime_add(args[0].as.int_val, args[1].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -4966,7 +4966,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Check if a year is a leap year.
                 /// @example is_leap_year(2024)  // true
                 if (strcmp(fn_name, "is_leap_year") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("is_leap_year() expects (Int year)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("is_leap_year() expects (Int year)")); }
                     bool r = datetime_is_leap_year((int)args[0].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_bool(r));
@@ -4977,7 +4977,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Number of days in the given month of the given year.
                 /// @example days_in_month(2024, 2)  // 29
                 if (strcmp(fn_name, "days_in_month") == 0) {
-                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("days_in_month() expects (Int year, Int month)")); }
+                    if (argc != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("days_in_month() expects (Int year, Int month)")); }
                     int r = datetime_days_in_month((int)args[0].as.int_val, (int)args[1].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (r < 0) return eval_err(strdup("days_in_month: month must be 1-12"));
@@ -4989,7 +4989,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Day of week (0=Sunday, 6=Saturday).
                 /// @example day_of_week(2026, 2, 24)  // 2
                 if (strcmp(fn_name, "day_of_week") == 0) {
-                    if (argc != 3 || args[0].type != VAL_INT || args[1].type != VAL_INT || args[2].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("day_of_week() expects (Int year, Int month, Int day)")); }
+                    if (argc != 3 || args[0].type != VAL_INT || args[1].type != VAL_INT || args[2].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("day_of_week() expects (Int year, Int month, Int day)")); }
                     int r = datetime_day_of_week((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     return eval_ok(value_int(r));
@@ -5000,7 +5000,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// Day of year (1-366).
                 /// @example day_of_year(2026, 2, 24)  // 55
                 if (strcmp(fn_name, "day_of_year") == 0) {
-                    if (argc != 3 || args[0].type != VAL_INT || args[1].type != VAL_INT || args[2].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("day_of_year() expects (Int year, Int month, Int day)")); }
+                    if (argc != 3 || args[0].type != VAL_INT || args[1].type != VAL_INT || args[2].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("day_of_year() expects (Int year, Int month, Int day)")); }
                     int r = datetime_day_of_year((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (r < 0) return eval_err(strdup("day_of_year: month must be 1-12"));
@@ -5011,7 +5011,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Current local timezone offset from UTC in seconds.
                 if (strcmp(fn_name, "timezone_offset") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("timezone_offset() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("timezone_offset() expects no arguments")); }
                     free(args);
                     return eval_ok(value_int(datetime_tz_offset_seconds()));
                 }
@@ -5022,7 +5022,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (strcmp(fn_name, "duration") == 0) {
                     if (argc != 4 || args[0].type != VAL_INT || args[1].type != VAL_INT ||
                         args[2].type != VAL_INT || args[3].type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("duration() expects (Int hours, Int minutes, Int seconds, Int millis)"));
                     }
                     int64_t total = args[0].as.int_val * 3600000 + args[1].as.int_val * 60000 +
@@ -5048,7 +5048,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Create a Duration from total seconds.
                 if (strcmp(fn_name, "duration_from_seconds") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_from_seconds() expects (Int seconds)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_from_seconds() expects (Int seconds)")); }
                     int64_t total = args[0].as.int_val * 1000;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     int64_t ms = total % 1000; if (ms < 0) ms = -ms;
@@ -5070,7 +5070,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Create a Duration from total milliseconds.
                 if (strcmp(fn_name, "duration_from_millis") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_from_millis() expects (Int millis)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_from_millis() expects (Int millis)")); }
                     int64_t total = args[0].as.int_val;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     int64_t ms = total % 1000; if (ms < 0) ms = -ms;
@@ -5092,7 +5092,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Add two Duration maps.
                 if (strcmp(fn_name, "duration_add") == 0) {
-                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_add() expects (Map d1, Map d2)")); }
+                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_add() expects (Map d1, Map d2)")); }
                     LatValue *t1 = lat_map_get(args[0].as.map.map, "total_ms");
                     LatValue *t2 = lat_map_get(args[1].as.map.map, "total_ms");
                     int64_t total = ((t1 && t1->type == VAL_INT) ? t1->as.int_val : 0) +
@@ -5117,7 +5117,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Subtract Duration d2 from d1.
                 if (strcmp(fn_name, "duration_sub") == 0) {
-                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_sub() expects (Map d1, Map d2)")); }
+                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_sub() expects (Map d1, Map d2)")); }
                     LatValue *t1 = lat_map_get(args[0].as.map.map, "total_ms");
                     LatValue *t2 = lat_map_get(args[1].as.map.map, "total_ms");
                     int64_t total = ((t1 && t1->type == VAL_INT) ? t1->as.int_val : 0) -
@@ -5142,7 +5142,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Format a Duration as "2h 30m 15s".
                 if (strcmp(fn_name, "duration_to_string") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_to_string() expects (Map duration)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_to_string() expects (Map duration)")); }
                     LatValue *tot = lat_map_get(args[0].as.map.map, "total_ms");
                     int64_t total = (tot && tot->type == VAL_INT) ? tot->as.int_val : 0;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
@@ -5167,7 +5167,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Extract hours from a Duration.
                 if (strcmp(fn_name, "duration_hours") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_hours() expects (Map duration)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_hours() expects (Map duration)")); }
                     LatValue *v = lat_map_get(args[0].as.map.map, "hours");
                     int64_t r = (v && v->type == VAL_INT) ? v->as.int_val : 0;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
@@ -5177,7 +5177,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Extract minutes from a Duration.
                 if (strcmp(fn_name, "duration_minutes") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_minutes() expects (Map duration)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_minutes() expects (Map duration)")); }
                     LatValue *v = lat_map_get(args[0].as.map.map, "minutes");
                     int64_t r = (v && v->type == VAL_INT) ? v->as.int_val : 0;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
@@ -5187,7 +5187,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Extract seconds from a Duration.
                 if (strcmp(fn_name, "duration_seconds") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_seconds() expects (Map duration)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_seconds() expects (Map duration)")); }
                     LatValue *v = lat_map_get(args[0].as.map.map, "seconds");
                     int64_t r = (v && v->type == VAL_INT) ? v->as.int_val : 0;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
@@ -5197,7 +5197,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Extract millis from a Duration.
                 if (strcmp(fn_name, "duration_millis") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("duration_millis() expects (Map duration)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("duration_millis() expects (Map duration)")); }
                     LatValue *v = lat_map_get(args[0].as.map.map, "millis");
                     int64_t r = (v && v->type == VAL_INT) ? v->as.int_val : 0;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
@@ -5208,7 +5208,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Returns DateTime map with current local time.
                 if (strcmp(fn_name, "datetime_now") == 0) {
-                    if (argc != 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_now() expects no arguments")); }
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_now() expects no arguments")); }
                     free(args);
                     time_t now = time(NULL);
                     struct tm local;
@@ -5229,7 +5229,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Create DateTime from epoch seconds (UTC).
                 if (strcmp(fn_name, "datetime_from_epoch") == 0) {
-                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_from_epoch() expects (Int epoch_seconds)")); }
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_from_epoch() expects (Int epoch_seconds)")); }
                     int64_t epoch = args[0].as.int_val;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     int y, mo, d, h, mi, s;
@@ -5249,7 +5249,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Convert DateTime map to epoch seconds.
                 if (strcmp(fn_name, "datetime_to_epoch") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_to_epoch() expects (Map dt)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_to_epoch() expects (Map dt)")); }
                     LatValue *vy = lat_map_get(args[0].as.map.map, "year");
                     LatValue *vmo = lat_map_get(args[0].as.map.map, "month");
                     LatValue *vd = lat_map_get(args[0].as.map.map, "day");
@@ -5258,7 +5258,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *vs = lat_map_get(args[0].as.map.map, "second");
                     LatValue *vtz = lat_map_get(args[0].as.map.map, "tz_offset");
                     if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT || !vd || vd->type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("datetime_to_epoch: invalid DateTime map"));
                     }
                     int64_t epoch = datetime_from_components(
@@ -5275,7 +5275,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Parse ISO 8601 string into DateTime map.
                 if (strcmp(fn_name, "datetime_from_iso") == 0) {
-                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_from_iso() expects (String iso)")); }
+                    if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_from_iso() expects (String iso)")); }
                     char *err = NULL;
                     int64_t epoch = datetime_parse_iso(args[0].as.str_val, &err);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
@@ -5297,7 +5297,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Format DateTime map as ISO 8601 string.
                 if (strcmp(fn_name, "datetime_to_iso") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_to_iso() expects (Map dt)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_to_iso() expects (Map dt)")); }
                     LatValue *vy = lat_map_get(args[0].as.map.map, "year");
                     LatValue *vmo = lat_map_get(args[0].as.map.map, "month");
                     LatValue *vd = lat_map_get(args[0].as.map.map, "day");
@@ -5306,7 +5306,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *vs = lat_map_get(args[0].as.map.map, "second");
                     LatValue *vtz = lat_map_get(args[0].as.map.map, "tz_offset");
                     if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT || !vd || vd->type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("datetime_to_iso: invalid DateTime map"));
                     }
                     int64_t epoch = datetime_from_components(
@@ -5324,7 +5324,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Add Duration to DateTime.
                 if (strcmp(fn_name, "datetime_add_duration") == 0) {
-                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_add_duration() expects (Map dt, Map dur)")); }
+                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_add_duration() expects (Map dt, Map dur)")); }
                     LatValue *vy = lat_map_get(args[0].as.map.map, "year");
                     LatValue *vmo = lat_map_get(args[0].as.map.map, "month");
                     LatValue *vd = lat_map_get(args[0].as.map.map, "day");
@@ -5333,7 +5333,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *vs = lat_map_get(args[0].as.map.map, "second");
                     LatValue *vtz = lat_map_get(args[0].as.map.map, "tz_offset");
                     if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT || !vd || vd->type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("datetime_add_duration: invalid DateTime map"));
                     }
                     int tz = (vtz && vtz->type == VAL_INT) ? (int)vtz->as.int_val : 0;
@@ -5364,7 +5364,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Subtract two DateTimes, returning a Duration.
                 if (strcmp(fn_name, "datetime_sub") == 0) {
-                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_sub() expects (Map dt1, Map dt2)")); }
+                    if (argc != 2 || args[0].type != VAL_MAP || args[1].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_sub() expects (Map dt1, Map dt2)")); }
                     LatValue *vy1 = lat_map_get(args[0].as.map.map, "year");
                     LatValue *vmo1 = lat_map_get(args[0].as.map.map, "month");
                     LatValue *vd1 = lat_map_get(args[0].as.map.map, "day");
@@ -5381,7 +5381,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *vtz2 = lat_map_get(args[1].as.map.map, "tz_offset");
                     if (!vy1 || vy1->type != VAL_INT || !vmo1 || vmo1->type != VAL_INT || !vd1 || vd1->type != VAL_INT ||
                         !vy2 || vy2->type != VAL_INT || !vmo2 || vmo2->type != VAL_INT || !vd2 || vd2->type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("datetime_sub: invalid DateTime map"));
                     }
                     int64_t e1 = datetime_from_components(
@@ -5417,7 +5417,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Format DateTime using strftime-style format.
                 if (strcmp(fn_name, "datetime_format") == 0 && argc == 2 && args[0].type == VAL_MAP) {
-                    if (args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_format() expects (Map dt, String fmt)")); }
+                    if (args[1].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_format() expects (Map dt, String fmt)")); }
                     LatValue *vy = lat_map_get(args[0].as.map.map, "year");
                     LatValue *vmo = lat_map_get(args[0].as.map.map, "month");
                     LatValue *vd = lat_map_get(args[0].as.map.map, "day");
@@ -5426,7 +5426,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *vs = lat_map_get(args[0].as.map.map, "second");
                     LatValue *vtz = lat_map_get(args[0].as.map.map, "tz_offset");
                     if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT || !vd || vd->type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("datetime_format: invalid DateTime map"));
                     }
                     int64_t epoch = datetime_from_components(
@@ -5449,7 +5449,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Convert DateTime to UTC.
                 if (strcmp(fn_name, "datetime_to_utc") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_to_utc() expects (Map dt)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_to_utc() expects (Map dt)")); }
                     LatValue *vy = lat_map_get(args[0].as.map.map, "year");
                     LatValue *vmo = lat_map_get(args[0].as.map.map, "month");
                     LatValue *vd = lat_map_get(args[0].as.map.map, "day");
@@ -5458,7 +5458,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *vs = lat_map_get(args[0].as.map.map, "second");
                     LatValue *vtz = lat_map_get(args[0].as.map.map, "tz_offset");
                     if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT || !vd || vd->type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("datetime_to_utc: invalid DateTime map"));
                     }
                     int64_t epoch = datetime_from_components(
@@ -5485,7 +5485,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /// @category Date & Time
                 /// Convert DateTime to local timezone.
                 if (strcmp(fn_name, "datetime_to_local") == 0) {
-                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("datetime_to_local() expects (Map dt)")); }
+                    if (argc != 1 || args[0].type != VAL_MAP) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("datetime_to_local() expects (Map dt)")); }
                     LatValue *vy = lat_map_get(args[0].as.map.map, "year");
                     LatValue *vmo = lat_map_get(args[0].as.map.map, "month");
                     LatValue *vd = lat_map_get(args[0].as.map.map, "day");
@@ -5494,7 +5494,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *vs = lat_map_get(args[0].as.map.map, "second");
                     LatValue *vtz = lat_map_get(args[0].as.map.map, "tz_offset");
                     if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT || !vd || vd->type != VAL_INT) {
-                        for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args);
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(strdup("datetime_to_local: invalid DateTime map"));
                     }
                     int64_t epoch = datetime_from_components(
