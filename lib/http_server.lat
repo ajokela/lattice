@@ -1,22 +1,41 @@
 // Lattice HTTP Server Library
 // A pure-Lattice HTTP router and server built on top of the built-in TCP networking.
+// Includes middleware pipeline, cookie handling, CORS, compression awareness,
+// and streaming response support.
 //
 // Usage:
 //   import "lib/http_server" as http
 //
 //   let app = http.new()
 //
-//   app.get("/", |req| {
+//   // Add middleware (runs in order for every request)
+//   app.use(http.logger())
+//   app.use(http.cors())
+//
+//   app.get("/", |req, res| {
 //       return http.response(200, "Hello, World!")
 //   })
 //
-//   app.get("/json", |req| {
+//   app.get("/json", |req, res| {
 //       return http.json(200, {"message": "OK"})
 //   })
 //
-//   app.post("/items", |req| {
+//   app.post("/items", |req, res| {
 //       let body = req.get("body")
 //       return http.response(201, "Created")
+//   })
+//
+//   // Cookie handling
+//   app.get("/profile", |req, res| {
+//       let cookies = req.get("cookies")
+//       let session = if cookies.has("session") { cookies.get("session") } else { "none" }
+//       let r = http.json(200, {"session": session})
+//       return http.set_cookie(r, "visited", "true", http.cookie_opts())
+//   })
+//
+//   // Streaming response
+//   app.get("/stream", |req, res| {
+//       return http.stream(200, ["chunk1\n", "chunk2\n", "chunk3\n"])
 //   })
 //
 //   app.listen(8080)
@@ -31,23 +50,27 @@ fn response(status: Int, body: String) -> Map {
     let res = Map::new()
     res.set("status", status)
     res.set("body", body)
+    res.set("streaming", false)
     let headers = Map::new()
     headers.set("Content-Type", "text/plain")
     res.set("headers", headers)
+    res.set("_cookies", [])
     return res
 }
 
 // Build a JSON HTTP response Map.
 // The data argument is serialized via json_stringify and the Content-Type is
 // set to application/json.
-fn json(status: Int, data) -> Map {
+fn json(status: Int, data: Any) -> Map {
     let body = json_stringify(data)
     let res = Map::new()
     res.set("status", status)
     res.set("body", body)
+    res.set("streaming", false)
     let headers = Map::new()
     headers.set("Content-Type", "application/json")
     res.set("headers", headers)
+    res.set("_cookies", [])
     return res
 }
 
@@ -56,10 +79,374 @@ fn html(status: Int, body: String) -> Map {
     let res = Map::new()
     res.set("status", status)
     res.set("body", body)
+    res.set("streaming", false)
     let headers = Map::new()
     headers.set("Content-Type", "text/html")
     res.set("headers", headers)
+    res.set("_cookies", [])
     return res
+}
+
+// Build a redirect response.
+fn redirect(url: String, status: Int = 302) -> Map {
+    let res = Map::new()
+    res.set("status", status)
+    res.set("body", "")
+    res.set("streaming", false)
+    let headers = Map::new()
+    headers.set("Content-Type", "text/plain")
+    headers.set("Location", url)
+    res.set("headers", headers)
+    res.set("_cookies", [])
+    return res
+}
+
+// Build a streaming response with chunked transfer encoding.
+// chunks is an Array of Strings that will be sent sequentially.
+fn stream(status: Int, chunks: Array) -> Map {
+    let res = Map::new()
+    res.set("status", status)
+    res.set("body", "")
+    res.set("streaming", true)
+    res.set("chunks", chunks)
+    let headers = Map::new()
+    headers.set("Content-Type", "text/plain")
+    headers.set("Transfer-Encoding", "chunked")
+    res.set("headers", headers)
+    res.set("_cookies", [])
+    return res
+}
+
+// Build a Server-Sent Events (SSE) streaming response.
+// events is an Array of Maps, each with optional "event", "data", "id" keys.
+fn sse_stream(events: Array) -> Map {
+    let res = Map::new()
+    res.set("status", 200)
+    res.set("body", "")
+    res.set("streaming", true)
+    // Convert events to chunked SSE format
+    flux chunks = []
+    for evt in events {
+        flux chunk = ""
+        if typeof(evt) == "Map" {
+            if evt.has("event") {
+                chunk = chunk + "event: " + evt.get("event") + "\n"
+            }
+            if evt.has("id") {
+                chunk = chunk + "id: " + to_string(evt.get("id")) + "\n"
+            }
+            if evt.has("data") {
+                chunk = chunk + "data: " + to_string(evt.get("data")) + "\n"
+            }
+        } else {
+            chunk = "data: " + to_string(evt) + "\n"
+        }
+        chunk = chunk + "\n"
+        chunks.push(chunk)
+    }
+    res.set("chunks", chunks)
+    let headers = Map::new()
+    headers.set("Content-Type", "text/event-stream")
+    headers.set("Cache-Control", "no-cache")
+    headers.set("Transfer-Encoding", "chunked")
+    res.set("headers", headers)
+    res.set("_cookies", [])
+    return res
+}
+
+// ---------------------------------------------------------------------------
+// Cookie Helpers
+// ---------------------------------------------------------------------------
+
+// Create a cookie options Map with sensible defaults.
+// Callers can override keys: "path", "max_age", "http_only", "secure",
+// "same_site", "domain", "expires".
+fn cookie_opts() -> Map {
+    let opts = Map::new()
+    opts.set("path", "/")
+    opts.set("http_only", true)
+    opts.set("secure", false)
+    opts.set("same_site", "Lax")
+    return opts
+}
+
+// Parse a Cookie header value into a Map of name -> value pairs.
+// Cookie header format: "name1=value1; name2=value2; ..."
+fn parse_cookies(cookie_header: String) -> Map {
+    let cookies = Map::new()
+    if len(cookie_header) == 0 {
+        return cookies
+    }
+    let pairs = cookie_header.split(";")
+    for pair in pairs {
+        let trimmed = pair.trim()
+        if len(trimmed) > 0 {
+            let eq = trimmed.index_of("=")
+            if eq > 0 {
+                let name = trimmed.substring(0, eq).trim()
+                let value = trimmed.substring(eq + 1, len(trimmed)).trim()
+                cookies.set(name, value)
+            }
+        }
+    }
+    return cookies
+}
+
+// Format a Set-Cookie header value from name, value, and options.
+fn _format_set_cookie(name: String, value: String, opts: Map) -> String {
+    flux cookie = name + "=" + value
+    if opts.has("path") {
+        cookie = cookie + "; Path=" + opts.get("path")
+    }
+    if opts.has("domain") {
+        cookie = cookie + "; Domain=" + opts.get("domain")
+    }
+    if opts.has("max_age") {
+        cookie = cookie + "; Max-Age=" + to_string(opts.get("max_age"))
+    }
+    if opts.has("expires") {
+        cookie = cookie + "; Expires=" + opts.get("expires")
+    }
+    if opts.has("http_only") {
+        if opts.get("http_only") == true {
+            cookie = cookie + "; HttpOnly"
+        }
+    }
+    if opts.has("secure") {
+        if opts.get("secure") == true {
+            cookie = cookie + "; Secure"
+        }
+    }
+    if opts.has("same_site") {
+        cookie = cookie + "; SameSite=" + opts.get("same_site")
+    }
+    return cookie
+}
+
+// Add a Set-Cookie header to a response. Returns the modified response Map.
+// Because Maps are pass-by-value, the caller must use the return value.
+fn set_cookie(res: Map, name: String, value: String, opts: Map) -> Map {
+    let cookie_str = _format_set_cookie(name, value, opts)
+    flux cookies = res.get("_cookies")
+    cookies.push(cookie_str)
+    res.set("_cookies", cookies)
+    return res
+}
+
+// Add a cookie-clearing Set-Cookie header (Max-Age=0) to a response.
+fn clear_cookie(res: Map, name: String, opts: Map) -> Map {
+    flux clear_opts = Map::new()
+    // Copy opts
+    let keys = opts.keys()
+    for k in keys {
+        clear_opts.set(k, opts.get(k))
+    }
+    clear_opts.set("max_age", 0)
+    return set_cookie(res, name, "", clear_opts)
+}
+
+// ---------------------------------------------------------------------------
+// Compression Helpers
+// ---------------------------------------------------------------------------
+
+// Check if the client accepts gzip encoding by inspecting Accept-Encoding header.
+fn accepts_gzip(req: Map) -> Bool {
+    let headers = req.get("headers")
+    if headers.has("Accept-Encoding") {
+        let accept = headers.get("Accept-Encoding")
+        return accept.contains("gzip")
+    }
+    return false
+}
+
+// Check if the client accepts deflate encoding.
+fn accepts_deflate(req: Map) -> Bool {
+    let headers = req.get("headers")
+    if headers.has("Accept-Encoding") {
+        let accept = headers.get("Accept-Encoding")
+        return accept.contains("deflate")
+    }
+    return false
+}
+
+// Check if the client accepts brotli encoding.
+fn accepts_brotli(req: Map) -> Bool {
+    let headers = req.get("headers")
+    if headers.has("Accept-Encoding") {
+        let accept = headers.get("Accept-Encoding")
+        return accept.contains("br")
+    }
+    return false
+}
+
+// Mark a response with Content-Encoding: gzip (for pre-compressed bodies).
+// Note: Lattice does not have native gzip compression, so this is for
+// responses where the body has already been compressed externally.
+fn set_encoding(res: Map, encoding: String) -> Map {
+    let headers = res.get("headers")
+    headers.set("Content-Encoding", encoding)
+    headers.set("Vary", "Accept-Encoding")
+    res.set("headers", headers)
+    return res
+}
+
+// ---------------------------------------------------------------------------
+// Middleware: Compression awareness
+// ---------------------------------------------------------------------------
+
+// Returns a middleware that sets Vary: Accept-Encoding on all responses
+// and adds Content-Encoding metadata when the client supports compression.
+// For pre-compressed response bodies, the handler should use set_encoding().
+fn compression() -> Fn {
+    return |req, res, next| {
+        let result = next(req, res)
+        if result != nil {
+            let headers = result.get("headers")
+            // Always set Vary so proxies cache correctly
+            if !headers.has("Vary") {
+                headers.set("Vary", "Accept-Encoding")
+            }
+            result.set("headers", headers)
+        }
+        return result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Middleware: CORS
+// ---------------------------------------------------------------------------
+
+// Create a CORS configuration options Map with defaults.
+// Callers can override: "origin", "methods", "headers", "credentials",
+// "max_age", "expose_headers".
+fn cors_opts() -> Map {
+    let opts = Map::new()
+    opts.set("origin", "*")
+    opts.set("methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+    opts.set("headers", "Content-Type, Authorization, X-Requested-With")
+    opts.set("credentials", false)
+    opts.set("max_age", 86400)
+    return opts
+}
+
+// Create a CORS middleware. Handles preflight OPTIONS requests automatically
+// and sets appropriate CORS headers on all responses.
+// Pass a cors_opts() Map to customize, or call with no arguments for defaults.
+fn cors(opts: Any = nil) -> Fn {
+    flux cfg = opts
+    if cfg == nil {
+        cfg = cors_opts()
+    }
+    let origin = if cfg.has("origin") { cfg.get("origin") } else { "*" }
+    let methods = if cfg.has("methods") { cfg.get("methods") } else { "GET, POST, PUT, DELETE, OPTIONS, PATCH" }
+    let allowed_headers = if cfg.has("headers") { cfg.get("headers") } else { "Content-Type, Authorization, X-Requested-With" }
+    let credentials = if cfg.has("credentials") { cfg.get("credentials") } else { false }
+    let max_age = if cfg.has("max_age") { to_string(cfg.get("max_age")) } else { "86400" }
+
+    return |req, res, next| {
+        let method = req.get("method")
+
+        // Handle preflight OPTIONS request
+        if method == "OPTIONS" {
+            let preflight = response(204, "")
+            let headers = preflight.get("headers")
+            headers.set("Access-Control-Allow-Origin", origin)
+            headers.set("Access-Control-Allow-Methods", methods)
+            headers.set("Access-Control-Allow-Headers", allowed_headers)
+            headers.set("Access-Control-Max-Age", max_age)
+            if credentials {
+                headers.set("Access-Control-Allow-Credentials", "true")
+            }
+            preflight.set("headers", headers)
+            return preflight
+        }
+
+        // Normal request: run the rest of the pipeline, then add CORS headers
+        let result = next(req, res)
+        if result != nil {
+            let headers = result.get("headers")
+            headers.set("Access-Control-Allow-Origin", origin)
+            if credentials {
+                headers.set("Access-Control-Allow-Credentials", "true")
+            }
+            if cfg.has("expose_headers") {
+                headers.set("Access-Control-Expose-Headers", cfg.get("expose_headers"))
+            }
+            result.set("headers", headers)
+        }
+        return result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Middleware: Request Logger
+// ---------------------------------------------------------------------------
+
+// Create a logging middleware that prints method, path, status, and timing.
+fn logger() -> Fn {
+    return |req, res, next| {
+        let start = time()
+        let method = req.get("method")
+        let path = req.get("path")
+
+        let result = next(req, res)
+
+        let elapsed = time() - start
+        flux status_str = "???"
+        if result != nil {
+            status_str = to_string(result.get("status"))
+        }
+        print(method + " " + path + " " + status_str + " " + to_string(elapsed) + "ms")
+        return result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Middleware: Body Parser (JSON)
+// ---------------------------------------------------------------------------
+
+// Create a middleware that auto-parses JSON request bodies.
+// Sets req "parsed_body" to the parsed data when Content-Type is application/json.
+fn body_parser() -> Fn {
+    return |req, res, next| {
+        let headers = req.get("headers")
+        flux content_type = ""
+        if headers.has("Content-Type") {
+            content_type = headers.get("Content-Type")
+        }
+        if content_type.contains("application/json") {
+            let body = req.get("body")
+            if len(body) > 0 {
+                let parsed = try {
+                    json_parse(body)
+                } catch _e {
+                    nil
+                }
+                req.set("parsed_body", parsed)
+            }
+        }
+        return next(req, res)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Middleware: Security Headers
+// ---------------------------------------------------------------------------
+
+// Create a middleware that adds common security headers.
+fn security_headers() -> Fn {
+    return |req, res, next| {
+        let result = next(req, res)
+        if result != nil {
+            let headers = result.get("headers")
+            headers.set("X-Content-Type-Options", "nosniff")
+            headers.set("X-Frame-Options", "DENY")
+            headers.set("X-XSS-Protection", "1; mode=block")
+            headers.set("Referrer-Policy", "strict-origin-when-cross-origin")
+            result.set("headers", headers)
+        }
+        return result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +468,7 @@ fn _status_reason(code: Int) -> String {
     if code == 405 { return "Method Not Allowed" }
     if code == 409 { return "Conflict" }
     if code == 422 { return "Unprocessable Entity" }
+    if code == 429 { return "Too Many Requests" }
     if code == 500 { return "Internal Server Error" }
     if code == 502 { return "Bad Gateway" }
     if code == 503 { return "Service Unavailable" }
@@ -110,7 +498,8 @@ fn _parse_query_string(qs: String) -> Map {
 }
 
 // Parse raw HTTP request text into a request Map.
-// Returns a Map with: "method", "path", "query", "headers", "body", "raw_path".
+// Returns a Map with: "method", "path", "query", "headers", "body",
+// "raw_path", "cookies".
 fn _parse_request(raw: String) -> Map {
     let req = Map::new()
     req.set("method", "GET")
@@ -119,6 +508,7 @@ fn _parse_request(raw: String) -> Map {
     req.set("query", Map::new())
     req.set("headers", Map::new())
     req.set("body", "")
+    req.set("cookies", Map::new())
 
     if len(raw) == 0 {
         return req
@@ -175,7 +565,33 @@ fn _parse_request(raw: String) -> Map {
     req.set("headers", headers)
     req.set("body", body)
 
+    // Parse cookies from Cookie header
+    if headers.has("Cookie") {
+        req.set("cookies", parse_cookies(headers.get("Cookie")))
+    }
+
     return req
+}
+
+// Encode a single chunk for HTTP chunked transfer encoding.
+// Format: <hex-length>\r\n<data>\r\n
+fn _encode_chunk(data: String) -> String {
+    let hex_len = _int_to_hex(len(data))
+    return hex_len + "\r\n" + data + "\r\n"
+}
+
+// Convert an integer to a hex string (simple implementation for chunk sizes).
+fn _int_to_hex(n: Int) -> String {
+    if n == 0 { return "0" }
+    let hex_chars = "0123456789abcdef"
+    flux result = ""
+    flux val = n
+    while val > 0 {
+        let remainder = val % 16
+        result = hex_chars.substring(remainder, remainder + 1) + result
+        val = val / 16
+    }
+    return result
 }
 
 // Format a response Map into a raw HTTP response string ready to send.
@@ -188,11 +604,22 @@ fn _format_response(res: Map) -> String {
     // Start building the response string
     flux result = "HTTP/1.1 " + to_string(status) + " " + reason + "\r\n"
 
-    // Content-Length is always set based on the body
-    result = result + "Content-Length: " + to_string(len(body)) + "\r\n"
+    // For non-streaming responses, set Content-Length
+    let is_streaming = res.get("streaming")
+    if !is_streaming {
+        result = result + "Content-Length: " + to_string(len(body)) + "\r\n"
+    }
 
     // Connection: close so the client knows we are done
     result = result + "Connection: close\r\n"
+
+    // Append Set-Cookie headers
+    let cookies = res.get("_cookies")
+    if cookies != nil {
+        for cookie_str in cookies {
+            result = result + "Set-Cookie: " + cookie_str + "\r\n"
+        }
+    }
 
     // Append user-specified headers
     let header_keys = headers.keys()
@@ -200,8 +627,20 @@ fn _format_response(res: Map) -> String {
         result = result + key + ": " + headers.get(key) + "\r\n"
     }
 
-    // End of headers, then body
-    result = result + "\r\n" + body
+    // End of headers
+    result = result + "\r\n"
+
+    // For streaming responses, encode chunks; otherwise append body directly
+    if is_streaming {
+        let chunks = res.get("chunks")
+        for chunk in chunks {
+            result = result + _encode_chunk(chunk)
+        }
+        // Terminal chunk
+        result = result + "0\r\n\r\n"
+    } else {
+        result = result + body
+    }
     return result
 }
 
@@ -218,12 +657,33 @@ fn _method_not_allowed_response(method: String) -> Map {
 }
 
 // ---------------------------------------------------------------------------
+// Middleware Pipeline
+// ---------------------------------------------------------------------------
+
+// Execute the middleware pipeline. Middlewares are called in order; each can
+// either short-circuit by returning a response or call next(req, res) to
+// continue the chain. The final "next" invokes the route handler.
+fn _run_middleware(middlewares: Array, index: Int, req: Map, res: Map, final_handler: Fn) -> Map {
+    if index >= len(middlewares) {
+        // No more middleware; call the route handler
+        return final_handler(req, res)
+    }
+    let mw = middlewares[index]
+    let next_index = index + 1
+    // Build the next function that continues the chain
+    let next_fn = |r, s| {
+        return _run_middleware(middlewares, next_index, r, s, final_handler)
+    }
+    return mw(req, res, next_fn)
+}
+
+// ---------------------------------------------------------------------------
 // Router / Application
 // ---------------------------------------------------------------------------
 
-// Create a new HTTP application (router).
-// Returns a Map with route registration closures (.get, .post, .put, .delete)
-// and a .listen closure to start the server.
+// Create a new HTTP application (router) with middleware support.
+// Returns a Map with route registration closures (.get, .post, .put, .delete),
+// middleware registration (.use), and a .listen closure to start the server.
 fn new() -> Map {
     let app = Map::new()
 
@@ -233,7 +693,20 @@ fn new() -> Map {
     routes.set("POST", Map::new())
     routes.set("PUT", Map::new())
     routes.set("DELETE", Map::new())
+    routes.set("PATCH", Map::new())
+    routes.set("OPTIONS", Map::new())
     app.set("_routes", routes)
+
+    // Middleware stack (array of functions)
+    flux middlewares = []
+
+    // ── Middleware registration ──
+
+    // Register a middleware function.
+    // Middleware signature: |req, res, next| { ... return next(req, res) ... }
+    app.set("use", |mw| {
+        middlewares.push(mw)
+    })
 
     // ── Route registration helpers ──
 
@@ -261,6 +734,27 @@ fn new() -> Map {
         delete_routes.set(path, handler)
     })
 
+    // Register a PATCH route handler.
+    app.set("patch", |path, handler| {
+        let patch_routes = routes.get("PATCH")
+        patch_routes.set(path, handler)
+    })
+
+    // Register an OPTIONS route handler.
+    app.set("options", |path, handler| {
+        let options_routes = routes.get("OPTIONS")
+        options_routes.set(path, handler)
+    })
+
+    // Register a handler for all HTTP methods on a path.
+    app.set("all", |path, handler| {
+        let methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+        for m in methods {
+            let method_routes = routes.get(m)
+            method_routes.set(path, handler)
+        }
+    })
+
     // ── Server loop ──
 
     // Start the HTTP server on the given port. Blocks forever, accepting
@@ -283,29 +777,43 @@ fn new() -> Map {
 
                 let method = req.get("method")
                 let path = req.get("path")
-                print(method + " " + path + " from " + peer)
 
-                // Look up the handler in the route table
-                flux res = nil
-                if routes.has(method) {
-                    let method_routes = routes.get(method)
-                    if method_routes.has(path) {
-                        let handler = method_routes.get(path)
-                        res = handler(req)
+                // Build the final handler (route dispatch)
+                let route_handler = |r, s| {
+                    if routes.has(method) {
+                        let method_routes = routes.get(method)
+                        if method_routes.has(path) {
+                            let handler = method_routes.get(path)
+                            return handler(r, s)
+                        } else {
+                            return _not_found_response(path)
+                        }
                     } else {
-                        res = _not_found_response(path)
+                        return _method_not_allowed_response(method)
                     }
-                } else {
-                    res = _method_not_allowed_response(method)
                 }
 
+                // Create initial response context
+                let res_ctx = Map::new()
+                res_ctx.set("_started", false)
+
+                // Run through the middleware pipeline, then the route handler
+                flux final_res = nil
+                let mw_result = try {
+                    _run_middleware(middlewares, 0, req, res_ctx, route_handler)
+                } catch e {
+                    print("Error: " + to_string(e))
+                    response(500, "Internal Server Error")
+                }
+                final_res = mw_result
+
                 // If the handler returned nil or something unexpected, send 500
-                if res == nil {
-                    res = response(500, "Internal Server Error")
+                if final_res == nil {
+                    final_res = response(500, "Internal Server Error")
                 }
 
                 // Serialize and send the response
-                let raw_response = _format_response(res)
+                let raw_response = _format_response(final_res)
                 tcp_write(client_fd, raw_response)
             }
 

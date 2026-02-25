@@ -1,0 +1,159 @@
+// Example: HTTP Server with Middleware Pipeline
+// Demonstrates middleware, cookies, CORS, compression awareness, and streaming.
+//
+// Run: ./clat examples/http_middleware.lat
+// Test with:
+//   curl http://localhost:8080/
+//   curl http://localhost:8080/json
+//   curl http://localhost:8080/cookies
+//   curl -b "session=abc123; theme=dark" http://localhost:8080/cookies
+//   curl http://localhost:8080/stream
+//   curl http://localhost:8080/events
+//   curl -X OPTIONS http://localhost:8080/api -H "Origin: https://example.com"
+//   curl -H "Accept-Encoding: gzip" http://localhost:8080/compressed
+
+import "lib/http_server" as http
+
+fn main() {
+    let app = http.new()
+
+    // ── Middleware stack ──
+
+    // Request logging (method, path, status, timing)
+    app.use(http.logger())
+
+    // CORS support for cross-origin requests
+    let cors_config = http.cors_opts()
+    cors_config.set("origin", "*")
+    cors_config.set("credentials", false)
+    app.use(http.cors(cors_config))
+
+    // Auto-parse JSON request bodies
+    app.use(http.body_parser())
+
+    // Add security headers to all responses
+    app.use(http.security_headers())
+
+    // Compression awareness (Vary header for caching)
+    app.use(http.compression())
+
+    // ── Custom middleware: request ID ──
+    app.use(|req, res, next| {
+        // Add a simple request counter as an ID
+        req.set("request_id", to_string(time()))
+        let result = next(req, res)
+        if result != nil {
+            let headers = result.get("headers")
+            headers.set("X-Request-Id", req.get("request_id"))
+            result.set("headers", headers)
+        }
+        return result
+    })
+
+    // ── Routes ──
+
+    // Home page
+    app.get("/", |req, res| {
+        return http.html(200, "<html><body>" +
+            "<h1>Lattice HTTP Server with Middleware</h1>" +
+            "<ul>" +
+            "<li><a href='/json'>JSON endpoint</a></li>" +
+            "<li><a href='/cookies'>Cookie demo</a></li>" +
+            "<li><a href='/stream'>Streaming response</a></li>" +
+            "<li><a href='/events'>Server-Sent Events</a></li>" +
+            "<li><a href='/compressed'>Compression info</a></li>" +
+            "</ul>" +
+            "</body></html>")
+    })
+
+    // JSON API endpoint
+    app.get("/json", |req, res| {
+        let data = Map::new()
+        data.set("message", "Hello from Lattice!")
+        data.set("status", "ok")
+        data.set("timestamp", time())
+        return http.json(200, data)
+    })
+
+    // Cookie demonstration
+    app.get("/cookies", |req, res| {
+        let cookies = req.get("cookies")
+        let data = Map::new()
+        data.set("received_cookies", cookies)
+
+        // Set a response cookie
+        flux r = http.json(200, data)
+        let opts = http.cookie_opts()
+        opts.set("max_age", 3600)
+        r = http.set_cookie(r, "visited", "true", opts)
+        r = http.set_cookie(r, "server", "lattice", opts)
+        return r
+    })
+
+    // Streaming response (chunked transfer encoding)
+    app.get("/stream", |req, res| {
+        return http.stream(200, [
+            "Line 1: Starting stream...\n",
+            "Line 2: Processing data...\n",
+            "Line 3: Almost done...\n",
+            "Line 4: Stream complete!\n"
+        ])
+    })
+
+    // Server-Sent Events streaming
+    app.get("/events", |req, res| {
+        let evt1 = Map::new()
+        evt1.set("event", "connected")
+        evt1.set("data", "Welcome!")
+        evt1.set("id", 1)
+
+        let evt2 = Map::new()
+        evt2.set("event", "update")
+        evt2.set("data", "Server time: " + to_string(time()))
+        evt2.set("id", 2)
+
+        let evt3 = Map::new()
+        evt3.set("event", "done")
+        evt3.set("data", "Stream complete")
+        evt3.set("id", 3)
+
+        return http.sse_stream([evt1, evt2, evt3])
+    })
+
+    // Compression awareness demo
+    app.get("/compressed", |req, res| {
+        let data = Map::new()
+        data.set("accepts_gzip", http.accepts_gzip(req))
+        data.set("accepts_deflate", http.accepts_deflate(req))
+        data.set("accepts_brotli", http.accepts_brotli(req))
+
+        let accept_enc = req.get("headers")
+        if accept_enc.has("Accept-Encoding") {
+            data.set("accept_encoding", accept_enc.get("Accept-Encoding"))
+        } else {
+            data.set("accept_encoding", "none")
+        }
+
+        return http.json(200, data)
+    })
+
+    // POST endpoint with body parsing
+    app.post("/api/data", |req, res| {
+        let parsed = req.get("parsed_body")
+        if parsed != nil {
+            let result = Map::new()
+            result.set("received", parsed)
+            result.set("status", "accepted")
+            return http.json(201, result)
+        }
+        return http.json(400, Map::new())
+    })
+
+    // Redirect example
+    app.get("/old-page", |req, res| {
+        return http.redirect("/")
+    })
+
+    // Start the server
+    app.listen(8080)
+}
