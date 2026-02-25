@@ -132,9 +132,10 @@ let OP_SET_LOCAL_POP  = 101
 let OP_CHECK_TYPE     = 102
 let OP_CHECK_RETURN_TYPE = 103
 let OP_IS_CRYSTAL     = 104
-let OP_FREEZE_EXCEPT  = 105
-let OP_FREEZE_FIELD   = 106
-let OP_HALT           = 107
+let OP_IS_FLUID       = 105
+let OP_FREEZE_EXCEPT  = 106
+let OP_FREEZE_FIELD   = 107
+let OP_HALT           = 108
 
 // .latc constant tags
 let TAG_INT     = 0
@@ -1177,6 +1178,58 @@ fn parse_primary() {
         }
     }
 
+    // sublimate(expr) — keyword token
+    if t.type == "sublimate" {
+        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_sublimate_expr(line)
+            return
+        }
+    }
+
+    // anneal(expr) |v| { body } — keyword token
+    if t.type == "anneal" {
+        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_anneal_expr(line)
+            return
+        }
+    }
+
+    // crystallize(expr) { body } — keyword token
+    if t.type == "crystallize" {
+        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_crystallize_expr(line)
+            return
+        }
+    }
+
+    // Phase system special forms: react/unreact/bond/unbond/seed/unseed
+    if t.type == "identifier" {
+        if t.text == "react" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_react_call(line)
+            return
+        }
+        if t.text == "unreact" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_unreact_call(line)
+            return
+        }
+        if t.text == "bond" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_bond_call(line)
+            return
+        }
+        if t.text == "unbond" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_unbond_call(line)
+            return
+        }
+        if t.text == "seed" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_seed_call(line)
+            return
+        }
+        if t.text == "unseed" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+            parse_unseed_call(line)
+            return
+        }
+    }
+
     // Identifier
     if t.type == "identifier" {
         advance()
@@ -1248,15 +1301,113 @@ fn parse_primary() {
     compiler_error("unexpected token '" + t.text + "' (type: " + t.type + ")", line)
 }
 
+fn emit_var_loc(name: any, line: any) {
+    // Emit the 2-byte loc_type + slot for a variable name (used by phase opcodes)
+    let slot = resolve_local(name)
+    if slot >= 0 {
+        emit_byte(0, line)
+        emit_byte(slot, line)
+        return
+    }
+    let up = resolve_upvalue(name)
+    if up >= 0 {
+        emit_byte(1, line)
+        emit_byte(up, line)
+        return
+    }
+    emit_byte(2, line)
+    emit_byte(0, line)
+}
+
 fn parse_freeze_thaw_clone(keyword: any, line: any) {
     advance()  // consume keyword (freeze/thaw/clone)
     expect(nil, "(")
 
-    // Check if inner expression is a simple identifier
-    let is_simple_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    // Check what's inside the parens — is it a simple identifier?
+    let check_tok = peek()
+    flux is_simple_ident = false
     let ident_name = ""
-    if is_simple_ident {
-        ident_name = peek_text()
+    if check_tok != nil {
+        if check_tok.type == "identifier" {
+            if pos + 1 < len(tokens) {
+                if tokens[pos + 1].text == ")" {
+                    is_simple_ident = true
+                    ident_name = check_tok.text
+                }
+            }
+        }
+    }
+
+    // Check for freeze(obj.field) — field access inside freeze
+    flux is_field_access = false
+    flux field_parent = ""
+    flux field_name_str = ""
+    if keyword == "freeze" {
+        if !is_simple_ident {
+            if check_tok != nil {
+                if check_tok.type == "identifier" {
+                    if pos + 3 < len(tokens) {
+                        if tokens[pos + 1].text == "." {
+                            if tokens[pos + 2].type == "identifier" {
+                                if tokens[pos + 3].text == ")" {
+                                    is_field_access = true
+                                    field_parent = check_tok.text
+                                    field_name_str = tokens[pos + 2].text
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for freeze(obj[key]) — index access inside freeze
+    flux is_index_access = false
+    flux index_parent = ""
+    if keyword == "freeze" {
+        if !is_simple_ident {
+            if !is_field_access {
+                if check_tok != nil {
+                    if check_tok.type == "identifier" {
+                        if pos + 1 < len(tokens) {
+                            if tokens[pos + 1].text == "[" {
+                                is_index_access = true
+                                index_parent = check_tok.text
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if is_field_access {
+        // freeze(obj.field) -> OP_FREEZE_FIELD
+        advance()  // obj
+        advance()  // .
+        advance()  // field
+        expect(nil, ")")
+        emit_constant(make_string_const(field_name_str), line)
+        let pname_idx = string_constant(field_parent)
+        emit_byte(OP_FREEZE_FIELD, line)
+        emit_byte(pname_idx, line)
+        emit_var_loc(field_parent, line)
+        return
+    }
+
+    if is_index_access {
+        // freeze(obj[key]) -> parse obj, skip, parse key, OP_FREEZE_FIELD
+        advance()  // skip obj identifier
+        advance()  // skip '['
+        parse_expression()
+        expect(nil, "]")
+        expect(nil, ")")
+        let pname_idx = string_constant(index_parent)
+        emit_byte(OP_FREEZE_FIELD, line)
+        emit_byte(pname_idx, line)
+        emit_var_loc(index_parent, line)
+        return
     }
 
     parse_expression()
@@ -1267,40 +1418,43 @@ fn parse_freeze_thaw_clone(keyword: any, line: any) {
         return
     }
 
-    if is_simple_ident {
-        let name_idx = string_constant(ident_name)
-        let slot = resolve_local(ident_name)
-        if slot >= 0 {
-            if keyword == "freeze" {
-                emit_byte(OP_FREEZE_VAR, line)
-            } else {
-                emit_byte(OP_THAW_VAR, line)
-            }
-            emit_byte(name_idx, line)
-            emit_byte(0, line)
-            emit_byte(slot, line)
-        } else {
-            let up = resolve_upvalue(ident_name)
-            if up >= 0 {
-                if keyword == "freeze" {
-                    emit_byte(OP_FREEZE_VAR, line)
-                } else {
-                    emit_byte(OP_THAW_VAR, line)
+    // Check for freeze(x) except ["field1", "field2"]
+    if keyword == "freeze" {
+        if is_simple_ident {
+            let next_tok = peek()
+            if next_tok != nil {
+                if next_tok.type == "identifier" {
+                    if next_tok.text == "except" {
+                        advance()  // consume 'except'
+                        expect(nil, "[")
+                        flux except_count = 0
+                        while peek_text() != "]" {
+                            parse_expression()
+                            except_count = except_count + 1
+                            if peek_text() == "," { advance() }
+                        }
+                        expect(nil, "]")
+                        let name_idx = string_constant(ident_name)
+                        emit_byte(OP_FREEZE_EXCEPT, line)
+                        emit_byte(name_idx, line)
+                        emit_var_loc(ident_name, line)
+                        emit_byte(except_count, line)
+                        return
+                    }
                 }
-                emit_byte(name_idx, line)
-                emit_byte(1, line)
-                emit_byte(up, line)
-            } else {
-                if keyword == "freeze" {
-                    emit_byte(OP_FREEZE_VAR, line)
-                } else {
-                    emit_byte(OP_THAW_VAR, line)
-                }
-                emit_byte(name_idx, line)
-                emit_byte(2, line)
-                emit_byte(0, line)
             }
         }
+    }
+
+    if is_simple_ident {
+        let name_idx = string_constant(ident_name)
+        if keyword == "freeze" {
+            emit_byte(OP_FREEZE_VAR, line)
+        } else {
+            emit_byte(OP_THAW_VAR, line)
+        }
+        emit_byte(name_idx, line)
+        emit_var_loc(ident_name, line)
     } else {
         if keyword == "freeze" {
             emit_byte(OP_FREEZE, line)
@@ -1308,6 +1462,274 @@ fn parse_freeze_thaw_clone(keyword: any, line: any) {
             emit_byte(OP_THAW, line)
         }
     }
+}
+
+// ============================================================================
+// Section 8d: Phase system expression parsing
+// ============================================================================
+
+fn parse_sublimate_expr(line: any) {
+    advance()  // consume 'sublimate'
+    expect(nil, "(")
+
+    let is_simple_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    let ident_name = ""
+    if is_simple_ident {
+        ident_name = peek_text()
+    }
+
+    parse_expression()
+    expect(nil, ")")
+
+    if is_simple_ident {
+        let name_idx = string_constant(ident_name)
+        emit_byte(OP_SUBLIMATE_VAR, line)
+        emit_byte(name_idx, line)
+        emit_var_loc(ident_name, line)
+    } else {
+        emit_byte(OP_SUBLIMATE, line)
+    }
+}
+
+fn parse_anneal_expr(line: any) {
+    // anneal(target) |v| { body }
+    // Phase check: target must be crystal. Thaw, call closure, refreeze.
+    advance()  // consume 'anneal'
+    expect(nil, "(")
+
+    let is_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    let ident_name = ""
+    if is_ident {
+        ident_name = peek_text()
+    }
+
+    parse_expression()  // target value
+    expect(nil, ")")
+
+    // Phase check: target must be crystal
+    emit_byte(OP_IS_CRYSTAL, line)
+    let anneal_ok = emit_jump(OP_JUMP_IF_FALSE, line)
+    emit_byte(OP_POP, line)  // pop true
+    let anneal_past_check = emit_jump(OP_JUMP, line)
+    patch_jump(anneal_ok)
+    emit_byte(OP_POP, line)  // pop false
+    emit_constant(make_string_const("anneal requires a crystal value"), line)
+    emit_byte(OP_THROW, line)
+    patch_jump(anneal_past_check)
+
+    // Wrap in try/catch for error prefix
+    let anneal_handler = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line)
+
+    // Parse closure expression: |v| { ... }
+    parse_expression()  // closure value
+
+    // Now: stack = [closure]. Push target, thaw, call closure(thawed).
+    if is_ident {
+        emit_variable_get(ident_name, line)
+    } else {
+        // For non-ident targets, we can't re-evaluate. Just use THAW on stack.
+        // This is a limitation; non-ident anneal isn't fully supported.
+        emit_byte(OP_NIL, line)
+    }
+    emit_byte(OP_THAW, line)
+    emit_bytes(OP_CALL, 1, line)
+
+    // Refreeze the target if it's an identifier
+    if is_ident {
+        let name_idx = string_constant(ident_name)
+        emit_byte(OP_FREEZE_VAR, line)
+        emit_byte(name_idx, line)
+        emit_var_loc(ident_name, line)
+    } else {
+        emit_byte(OP_FREEZE, line)
+    }
+
+    // End of try block
+    emit_byte(OP_POP_EXCEPTION_HANDLER, line)
+    let anneal_end = emit_jump(OP_JUMP, line)
+
+    // Catch block: wrap error with "anneal failed: " prefix
+    patch_jump(anneal_handler)
+    emit_constant(make_string_const("anneal failed: "), line)
+    emit_byte(OP_SWAP, line)
+    emit_byte(OP_CONCAT, line)
+    emit_byte(OP_THROW, line)
+
+    patch_jump(anneal_end)
+}
+
+fn parse_crystallize_expr(line: any) {
+    // crystallize(target) { body }
+    // Freeze target, run body, conditionally thaw (if wasn't already crystal).
+    advance()  // consume 'crystallize'
+    expect(nil, "(")
+
+    let is_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    let ident_name = ""
+    if is_ident {
+        ident_name = peek_text()
+    }
+
+    parse_expression()  // target value
+    expect(nil, ")")
+
+    if is_ident {
+        let name_idx = string_constant(ident_name)
+        // Check if already crystal — save result as a local
+        begin_scope()
+        emit_variable_get(ident_name, line)
+        emit_byte(OP_IS_CRYSTAL, line)
+        add_local("")  // was_crystal flag
+        let flag_slot = local_count - 1
+
+        // Freeze the variable
+        emit_variable_get(ident_name, line)
+        emit_byte(OP_FREEZE_VAR, line)
+        emit_byte(name_idx, line)
+        emit_var_loc(ident_name, line)
+        emit_byte(OP_POP, line)  // discard freeze result
+
+        // Execute body
+        expect(nil, "{")
+        while peek_text() != "}" {
+            if peek() == nil {
+                compiler_error("unexpected end of input in crystallize body", line)
+            }
+            parse_statement_or_expression()
+        }
+        expect(nil, "}")
+
+        // Conditional thaw: only if was NOT already crystal
+        emit_bytes(OP_GET_LOCAL, flag_slot, line)
+        let skip_thaw = emit_jump(OP_JUMP_IF_FALSE, line)
+        // was_crystal=true -> skip thaw
+        emit_byte(OP_POP, line)
+        let past_thaw = emit_jump(OP_JUMP, line)
+        // was_crystal=false -> do thaw
+        patch_jump(skip_thaw)
+        emit_byte(OP_POP, line)
+        emit_variable_get(ident_name, line)
+        emit_byte(OP_THAW_VAR, line)
+        emit_byte(name_idx, line)
+        emit_var_loc(ident_name, line)
+        emit_byte(OP_POP, line)
+        patch_jump(past_thaw)
+        end_scope(line)
+        emit_byte(OP_UNIT, line)
+    } else {
+        // Fallback: just freeze the expression
+        emit_byte(OP_FREEZE, line)
+    }
+}
+
+fn parse_react_call(line: any) {
+    // react(var, callback) -> compile callback, OP_REACT var_name_idx
+    advance()  // consume 'react'
+    expect(nil, "(")
+    let var_name = expect("identifier", nil).text
+    expect(nil, ",")
+    parse_expression()  // callback
+    expect(nil, ")")
+    let idx = string_constant(var_name)
+    emit_bytes(OP_REACT, idx, line)
+}
+
+fn parse_unreact_call(line: any) {
+    // unreact(var) -> OP_UNREACT var_name_idx
+    advance()  // consume 'unreact'
+    expect(nil, "(")
+    let var_name = expect("identifier", nil).text
+    expect(nil, ")")
+    let idx = string_constant(var_name)
+    emit_bytes(OP_UNREACT, idx, line)
+}
+
+fn parse_bond_call(line: any) {
+    // bond(target, dep1, dep2, ..., [strategy_string])
+    advance()  // consume 'bond'
+    expect(nil, "(")
+    let target_name = expect("identifier", nil).text
+    let target_idx = string_constant(target_name)
+
+    // Collect remaining args (identifiers and optional trailing string)
+    flux dep_names = []
+    flux strategy = "freeze"
+    while peek_text() == "," {
+        advance()
+        if peek_type() == "string" {
+            // Last arg is a strategy string
+            strategy = advance().text
+        } else {
+            let dep = expect("identifier", nil).text
+            dep_names.push(dep)
+        }
+    }
+    expect(nil, ")")
+
+    // Emit one OP_BOND per dependency
+    let dep_count = len(dep_names)
+    flux i = 0
+    while i < dep_count {
+        let dep_idx = string_constant(dep_names[i])
+        emit_bytes(OP_CONSTANT, dep_idx, line)
+        let strat_idx = string_constant(strategy)
+        emit_bytes(OP_CONSTANT, strat_idx, line)
+        emit_bytes(OP_BOND, target_idx, line)
+        if i + 1 < dep_count {
+            emit_byte(OP_POP, line)
+        }
+        i = i + 1
+    }
+}
+
+fn parse_unbond_call(line: any) {
+    // unbond(target, dep1, dep2, ...)
+    advance()  // consume 'unbond'
+    expect(nil, "(")
+    let target_name = expect("identifier", nil).text
+    let target_idx = string_constant(target_name)
+
+    flux dep_names = []
+    while peek_text() == "," {
+        advance()
+        let dep = expect("identifier", nil).text
+        dep_names.push(dep)
+    }
+    expect(nil, ")")
+
+    let dep_count = len(dep_names)
+    flux i = 0
+    while i < dep_count {
+        let dep_idx = string_constant(dep_names[i])
+        emit_bytes(OP_CONSTANT, dep_idx, line)
+        emit_bytes(OP_UNBOND, target_idx, line)
+        if i + 1 < dep_count {
+            emit_byte(OP_POP, line)
+        }
+        i = i + 1
+    }
+}
+
+fn parse_seed_call(line: any) {
+    // seed(var, callback) -> compile callback, OP_SEED var_name_idx
+    advance()  // consume 'seed'
+    expect(nil, "(")
+    let var_name = expect("identifier", nil).text
+    expect(nil, ",")
+    parse_expression()  // callback
+    expect(nil, ")")
+    let idx = string_constant(var_name)
+    emit_bytes(OP_SEED, idx, line)
+}
+
+fn parse_unseed_call(line: any) {
+    // unseed(var) -> OP_UNSEED var_name_idx
+    advance()  // consume 'unseed'
+    expect(nil, "(")
+    let var_name = expect("identifier", nil).text
+    expect(nil, ")")
+    let idx = string_constant(var_name)
+    emit_bytes(OP_UNSEED, idx, line)
 }
 
 fn parse_struct_literal(name: any, line: any) {
@@ -1685,10 +2107,20 @@ fn parse_closure_literal() {
     flux param_names_arr = []
     if peek_text() != "|" {
         let p = expect("identifier", nil).text
+        // Consume optional type annotation
+        if peek_text() == ":" {
+            advance()
+            expect("identifier", nil)
+        }
         param_names_arr.push(p)
         while peek_text() == "," {
             advance()
             let p2 = expect("identifier", nil).text
+            // Consume optional type annotation
+            if peek_text() == ":" {
+                advance()
+                expect("identifier", nil)
+            }
             param_names_arr.push(p2)
         }
     }
@@ -2176,6 +2608,8 @@ fn is_statement_start() {
     if txt == "impl" { return true }
     if txt == "trait" { return true }
     if t.type == "scope" { return true }
+    // @fluid / @crystal annotations before fn/struct
+    if t.type == "@" || txt == "@" { return true }
     if t.type == "identifier" {
         if txt == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
             return true
@@ -2285,6 +2719,12 @@ fn parse_statement() {
 
     if txt == "trait" {
         parse_trait_declaration()
+        return
+    }
+
+    // @fluid / @crystal annotations: consume and apply to next declaration
+    if t.type == "@" || txt == "@" {
+        parse_annotation()
         return
     }
 
@@ -3055,6 +3495,7 @@ fn parse_struct_declaration() {
     expect(nil, "{")
 
     flux field_names_arr = []
+    flux field_phases_arr = []  // per-field phase: 0=fluid, 1=crystal, 2=unspecified
 
     while peek_text() != "}" {
         if peek() == nil {
@@ -3083,16 +3524,42 @@ fn parse_struct_declaration() {
         } else {
             let fname = expect("identifier", nil).text
             field_names_arr.push(fname)
+            flux field_phase = 2  // PHASE_UNSPECIFIED
             if peek_text() == ":" {
                 advance()
+                // Check for phase prefix: ~ (fluid), * (crystal), flux, fix
+                // Also handle composite constraints: (flux|fix), (~|*), etc.
+                if peek_text() == "~" || peek_type() == "~" {
+                    field_phase = 0  // PHASE_FLUID
+                    advance()
+                } else { if peek_text() == "*" || peek_type() == "*" {
+                    field_phase = 1  // PHASE_CRYSTAL
+                    advance()
+                } else { if peek_type() == "flux" || peek_text() == "flux" {
+                    field_phase = 0  // PHASE_FLUID
+                    advance()
+                } else { if peek_type() == "fix" || peek_text() == "fix" {
+                    field_phase = 1  // PHASE_CRYSTAL
+                    advance()
+                } else { if peek_text() == "(" {
+                    // Composite constraint: skip it (e.g., (flux|fix))
+                    advance()
+                    while peek_text() != ")" && peek() != nil {
+                        advance()
+                    }
+                    if peek_text() == ")" { advance() }
+                } } } } }
+                // Parse type name (may be [ArrayType] or plain identifier)
                 if peek_text() == "[" {
                     advance()
-                    advance()
+                    // Skip inner type
+                    if peek_text() != "]" { advance() }
                     expect(nil, "]")
-                } else {
+                } else { if peek_type() == "identifier" || peek_type() == "fn" {
                     advance()
-                }
+                } }
             }
+            field_phases_arr.push(field_phase)
             if peek_text() == "," {
                 advance()
             }
@@ -3109,6 +3576,24 @@ fn parse_struct_declaration() {
     let meta_name = "__struct_" + name
     let idx = string_constant(meta_name)
     emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line)
+
+    // Alloy: emit per-field phase metadata if any field has a phase annotation
+    flux has_phase = false
+    for i in 0..field_count {
+        if field_phases_arr[i] != 2 {
+            has_phase = true
+            break
+        }
+    }
+    if has_phase {
+        for i in 0..field_count {
+            emit_constant(make_int_const(field_phases_arr[i]), line)
+        }
+        emit_bytes(OP_BUILD_ARRAY, field_count, line)
+        let phase_meta = "__struct_phases_" + name
+        let pidx = string_constant(phase_meta)
+        emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, pidx, line)
+    }
 }
 
 fn parse_enum_declaration() {
@@ -3215,6 +3700,33 @@ fn parse_import() {
     let path = expect("string", nil).text
     let idx = string_constant(path)
     emit_bytes(OP_IMPORT, idx, line)
+}
+
+fn parse_annotation() {
+    let line = current_line()
+    advance()  // consume '@'
+    let ann_name = expect("identifier", nil).text
+    // @fluid and @crystal are the only supported annotations
+    // They apply to the next fn or struct declaration.
+    // For the self-hosted compiler, we consume the annotation and then
+    // parse the following declaration normally. The annotation itself
+    // is a static analysis hint (phase_annotation) that doesn't affect
+    // bytecode generation directly.
+    if ann_name != "fluid" && ann_name != "crystal" {
+        compiler_error("unknown annotation '@" + ann_name + "' (expected @fluid or @crystal)", line)
+    }
+    // Parse the next declaration (fn, struct, etc.)
+    let next_tok = peek()
+    if next_tok == nil {
+        compiler_error("expected declaration after @" + ann_name, line)
+    }
+    if next_tok.type == "fn" {
+        parse_fn_declaration()
+    } else { if next_tok.text == "struct" {
+        parse_struct_declaration()
+    } else {
+        compiler_error("@" + ann_name + " annotation must precede fn or struct", line)
+    } }
 }
 
 fn parse_trait_declaration() {
