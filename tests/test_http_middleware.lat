@@ -1,0 +1,611 @@
+// Test suite for HTTP server middleware system.
+// Tests middleware pipeline, cookie handling, CORS, compression awareness,
+// and streaming response support without starting an actual server.
+//
+// Run: ./clat tests/test_http_middleware.lat
+
+import "lib/test" as t
+import "lib/http_server" as http
+
+fn main() {
+    t.run([
+        // ----------------------------------------------------------------
+        // Response Helper tests
+        // ----------------------------------------------------------------
+        t.describe("Response Helpers", |_| {
+            return [
+                t.it("response() builds plain text response", |_| {
+                    let res = http.response(200, "hello")
+                    t.assert_eq(res.get("status"), 200)
+                    t.assert_eq(res.get("body"), "hello")
+                    let h = res.get("headers")
+                    t.assert_eq(h.get("Content-Type"), "text/plain")
+                    t.assert_eq(res.get("streaming"), false)
+                }),
+
+                t.it("json() builds JSON response", |_| {
+                    let data = Map::new()
+                    data.set("key", "value")
+                    let res = http.json(200, data)
+                    t.assert_eq(res.get("status"), 200)
+                    t.assert_contains(res.get("body"), "key")
+                    let h = res.get("headers")
+                    t.assert_eq(h.get("Content-Type"), "application/json")
+                }),
+
+                t.it("html() builds HTML response", |_| {
+                    let res = http.html(200, "<h1>Hi</h1>")
+                    t.assert_eq(res.get("status"), 200)
+                    t.assert_eq(res.get("body"), "<h1>Hi</h1>")
+                    let h = res.get("headers")
+                    t.assert_eq(h.get("Content-Type"), "text/html")
+                }),
+
+                t.it("redirect() builds redirect response", |_| {
+                    let res = http.redirect("/new-url")
+                    t.assert_eq(res.get("status"), 302)
+                    let h = res.get("headers")
+                    t.assert_eq(h.get("Location"), "/new-url")
+                }),
+
+                t.it("redirect() accepts custom status", |_| {
+                    let res = http.redirect("/moved", 301)
+                    t.assert_eq(res.get("status"), 301)
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Cookie tests
+        // ----------------------------------------------------------------
+        t.describe("Cookie Handling", |_| {
+            return [
+                t.it("parse_cookies() parses simple cookies", |_| {
+                    let cookies = http.parse_cookies("name=Alice; session=abc123")
+                    t.assert_eq(cookies.get("name"), "Alice")
+                    t.assert_eq(cookies.get("session"), "abc123")
+                }),
+
+                t.it("parse_cookies() handles empty string", |_| {
+                    let cookies = http.parse_cookies("")
+                    t.assert_eq(len(cookies.keys()), 0)
+                }),
+
+                t.it("parse_cookies() handles whitespace", |_| {
+                    let cookies = http.parse_cookies("  foo=bar ;  baz=qux  ")
+                    t.assert_eq(cookies.get("foo"), "bar")
+                    t.assert_eq(cookies.get("baz"), "qux")
+                }),
+
+                t.it("cookie_opts() returns defaults", |_| {
+                    let opts = http.cookie_opts()
+                    t.assert_eq(opts.get("path"), "/")
+                    t.assert_eq(opts.get("http_only"), true)
+                    t.assert_eq(opts.get("secure"), false)
+                    t.assert_eq(opts.get("same_site"), "Lax")
+                }),
+
+                t.it("set_cookie() adds cookie to response", |_| {
+                    let res = http.response(200, "ok")
+                    let opts = http.cookie_opts()
+                    let res2 = http.set_cookie(res, "session", "xyz", opts)
+                    let cookies = res2.get("_cookies")
+                    t.assert_eq(len(cookies), 1)
+                    t.assert_contains(cookies[0], "session=xyz")
+                    t.assert_contains(cookies[0], "Path=/")
+                    t.assert_contains(cookies[0], "HttpOnly")
+                    t.assert_contains(cookies[0], "SameSite=Lax")
+                }),
+
+                t.it("set_cookie() with max_age", |_| {
+                    let res = http.response(200, "ok")
+                    let opts = http.cookie_opts()
+                    opts.set("max_age", 3600)
+                    let res2 = http.set_cookie(res, "token", "abc", opts)
+                    let cookies = res2.get("_cookies")
+                    t.assert_contains(cookies[0], "Max-Age=3600")
+                }),
+
+                t.it("set_cookie() with secure flag", |_| {
+                    let res = http.response(200, "ok")
+                    let opts = http.cookie_opts()
+                    opts.set("secure", true)
+                    let res2 = http.set_cookie(res, "token", "abc", opts)
+                    let cookies = res2.get("_cookies")
+                    t.assert_contains(cookies[0], "Secure")
+                }),
+
+                t.it("set_cookie() supports multiple cookies", |_| {
+                    let res = http.response(200, "ok")
+                    let opts = http.cookie_opts()
+                    flux r = http.set_cookie(res, "a", "1", opts)
+                    r = http.set_cookie(r, "b", "2", opts)
+                    let cookies = r.get("_cookies")
+                    t.assert_eq(len(cookies), 2)
+                }),
+
+                t.it("clear_cookie() sets Max-Age=0", |_| {
+                    let res = http.response(200, "ok")
+                    let opts = http.cookie_opts()
+                    let res2 = http.clear_cookie(res, "session", opts)
+                    let cookies = res2.get("_cookies")
+                    t.assert_contains(cookies[0], "Max-Age=0")
+                    t.assert_contains(cookies[0], "session=")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Compression awareness tests
+        // ----------------------------------------------------------------
+        t.describe("Compression Awareness", |_| {
+            return [
+                t.it("accepts_gzip() detects gzip support", |_| {
+                    let req = Map::new()
+                    let headers = Map::new()
+                    headers.set("Accept-Encoding", "gzip, deflate, br")
+                    req.set("headers", headers)
+                    t.assert_true(http.accepts_gzip(req))
+                }),
+
+                t.it("accepts_gzip() returns false without header", |_| {
+                    let req = Map::new()
+                    let headers = Map::new()
+                    req.set("headers", headers)
+                    t.assert_false(http.accepts_gzip(req))
+                }),
+
+                t.it("accepts_deflate() detects deflate support", |_| {
+                    let req = Map::new()
+                    let headers = Map::new()
+                    headers.set("Accept-Encoding", "gzip, deflate")
+                    req.set("headers", headers)
+                    t.assert_true(http.accepts_deflate(req))
+                }),
+
+                t.it("accepts_brotli() detects brotli support", |_| {
+                    let req = Map::new()
+                    let headers = Map::new()
+                    headers.set("Accept-Encoding", "gzip, deflate, br")
+                    req.set("headers", headers)
+                    t.assert_true(http.accepts_brotli(req))
+                }),
+
+                t.it("accepts_brotli() returns false when not present", |_| {
+                    let req = Map::new()
+                    let headers = Map::new()
+                    headers.set("Accept-Encoding", "gzip, deflate")
+                    req.set("headers", headers)
+                    t.assert_false(http.accepts_brotli(req))
+                }),
+
+                t.it("set_encoding() adds Content-Encoding header", |_| {
+                    let res = http.response(200, "compressed data")
+                    let res2 = http.set_encoding(res, "gzip")
+                    let h = res2.get("headers")
+                    t.assert_eq(h.get("Content-Encoding"), "gzip")
+                    t.assert_eq(h.get("Vary"), "Accept-Encoding")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Streaming response tests
+        // ----------------------------------------------------------------
+        t.describe("Streaming Responses", |_| {
+            return [
+                t.it("stream() creates chunked response", |_| {
+                    let res = http.stream(200, ["hello ", "world"])
+                    t.assert_eq(res.get("status"), 200)
+                    t.assert_eq(res.get("streaming"), true)
+                    let chunks = res.get("chunks")
+                    t.assert_eq(len(chunks), 2)
+                    t.assert_eq(chunks[0], "hello ")
+                    t.assert_eq(chunks[1], "world")
+                    let h = res.get("headers")
+                    t.assert_eq(h.get("Transfer-Encoding"), "chunked")
+                }),
+
+                t.it("sse_stream() creates SSE response", |_| {
+                    let evt1 = Map::new()
+                    evt1.set("event", "update")
+                    evt1.set("data", "hello")
+                    let evt2 = Map::new()
+                    evt2.set("data", "world")
+                    evt2.set("id", 2)
+                    let res = http.sse_stream([evt1, evt2])
+                    t.assert_eq(res.get("status"), 200)
+                    t.assert_eq(res.get("streaming"), true)
+                    let h = res.get("headers")
+                    t.assert_eq(h.get("Content-Type"), "text/event-stream")
+                    t.assert_eq(h.get("Cache-Control"), "no-cache")
+                    let chunks = res.get("chunks")
+                    t.assert_eq(len(chunks), 2)
+                    t.assert_contains(chunks[0], "event: update")
+                    t.assert_contains(chunks[0], "data: hello")
+                    t.assert_contains(chunks[1], "id: 2")
+                    t.assert_contains(chunks[1], "data: world")
+                }),
+
+                t.it("sse_stream() handles plain string events", |_| {
+                    let res = http.sse_stream(["msg1", "msg2"])
+                    let chunks = res.get("chunks")
+                    t.assert_contains(chunks[0], "data: msg1")
+                    t.assert_contains(chunks[1], "data: msg2")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // CORS middleware tests
+        // ----------------------------------------------------------------
+        t.describe("CORS Middleware", |_| {
+            return [
+                t.it("cors_opts() returns defaults", |_| {
+                    let opts = http.cors_opts()
+                    t.assert_eq(opts.get("origin"), "*")
+                    t.assert_contains(opts.get("methods"), "GET")
+                    t.assert_contains(opts.get("methods"), "POST")
+                    t.assert_eq(opts.get("credentials"), false)
+                }),
+
+                t.it("cors() handles preflight OPTIONS request", |_| {
+                    let cors_mw = http.cors()
+                    let req = Map::new()
+                    req.set("method", "OPTIONS")
+                    req.set("path", "/api/data")
+                    req.set("headers", Map::new())
+                    let res = Map::new()
+
+                    let result = cors_mw(req, res, |r, s| {
+                        return http.response(200, "should not reach")
+                    })
+                    t.assert_eq(result.get("status"), 204)
+                    let h = result.get("headers")
+                    t.assert_eq(h.get("Access-Control-Allow-Origin"), "*")
+                    t.assert_contains(h.get("Access-Control-Allow-Methods"), "GET")
+                }),
+
+                t.it("cors() adds headers to normal responses", |_| {
+                    let cors_mw = http.cors()
+                    let req = Map::new()
+                    req.set("method", "GET")
+                    req.set("path", "/api/data")
+                    req.set("headers", Map::new())
+                    let res = Map::new()
+
+                    let result = cors_mw(req, res, |r, s| {
+                        return http.response(200, "data")
+                    })
+                    t.assert_eq(result.get("status"), 200)
+                    t.assert_eq(result.get("body"), "data")
+                    let h = result.get("headers")
+                    t.assert_eq(h.get("Access-Control-Allow-Origin"), "*")
+                }),
+
+                t.it("cors() respects custom origin", |_| {
+                    let opts = http.cors_opts()
+                    opts.set("origin", "https://example.com")
+                    let cors_mw = http.cors(opts)
+                    let req = Map::new()
+                    req.set("method", "GET")
+                    req.set("path", "/")
+                    req.set("headers", Map::new())
+
+                    let result = cors_mw(req, Map::new(), |r, s| {
+                        return http.response(200, "ok")
+                    })
+                    let h = result.get("headers")
+                    t.assert_eq(h.get("Access-Control-Allow-Origin"), "https://example.com")
+                }),
+
+                t.it("cors() with credentials adds header", |_| {
+                    let opts = http.cors_opts()
+                    opts.set("credentials", true)
+                    let cors_mw = http.cors(opts)
+                    let req = Map::new()
+                    req.set("method", "GET")
+                    req.set("path", "/")
+                    req.set("headers", Map::new())
+
+                    let result = cors_mw(req, Map::new(), |r, s| {
+                        return http.response(200, "ok")
+                    })
+                    let h = result.get("headers")
+                    t.assert_eq(h.get("Access-Control-Allow-Credentials"), "true")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Logger middleware tests
+        // ----------------------------------------------------------------
+        t.describe("Logger Middleware", |_| {
+            return [
+                t.it("logger() passes through response", |_| {
+                    let log_mw = http.logger()
+                    let req = Map::new()
+                    req.set("method", "GET")
+                    req.set("path", "/test")
+                    let res = Map::new()
+
+                    let result = log_mw(req, res, |r, s| {
+                        return http.response(200, "ok")
+                    })
+                    t.assert_eq(result.get("status"), 200)
+                    t.assert_eq(result.get("body"), "ok")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Body Parser middleware tests
+        // ----------------------------------------------------------------
+        t.describe("Body Parser Middleware", |_| {
+            return [
+                t.it("body_parser() parses JSON body", |_| {
+                    let bp = http.body_parser()
+                    let req = Map::new()
+                    req.set("method", "POST")
+                    req.set("path", "/api")
+                    let headers = Map::new()
+                    headers.set("Content-Type", "application/json")
+                    req.set("headers", headers)
+                    req.set("body", "{\"name\":\"Alice\"}")
+
+                    let captured_body = Ref::new(nil)
+                    let result = bp(req, Map::new(), |r, s| {
+                        captured_body.set(r.get("parsed_body"))
+                        return http.response(200, "ok")
+                    })
+                    t.assert_not_nil(captured_body.deref())
+                    t.assert_eq(captured_body.deref().get("name"), "Alice")
+                }),
+
+                t.it("body_parser() skips non-JSON content", |_| {
+                    let bp = http.body_parser()
+                    let req = Map::new()
+                    req.set("method", "POST")
+                    req.set("path", "/api")
+                    let headers = Map::new()
+                    headers.set("Content-Type", "text/plain")
+                    req.set("headers", headers)
+                    req.set("body", "just text")
+
+                    let had_parsed = Ref::new(false)
+                    let result = bp(req, Map::new(), |r, s| {
+                        had_parsed.set(r.has("parsed_body"))
+                        return http.response(200, "ok")
+                    })
+                    t.assert_false(had_parsed.deref())
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Security Headers middleware tests
+        // ----------------------------------------------------------------
+        t.describe("Security Headers Middleware", |_| {
+            return [
+                t.it("security_headers() adds all headers", |_| {
+                    let sec = http.security_headers()
+                    let req = Map::new()
+                    req.set("method", "GET")
+                    req.set("path", "/")
+                    req.set("headers", Map::new())
+
+                    let result = sec(req, Map::new(), |r, s| {
+                        return http.response(200, "ok")
+                    })
+                    let h = result.get("headers")
+                    t.assert_eq(h.get("X-Content-Type-Options"), "nosniff")
+                    t.assert_eq(h.get("X-Frame-Options"), "DENY")
+                    t.assert_eq(h.get("X-XSS-Protection"), "1; mode=block")
+                    t.assert_eq(h.get("Referrer-Policy"), "strict-origin-when-cross-origin")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Middleware pipeline tests
+        // ----------------------------------------------------------------
+        t.describe("Middleware Pipeline", |_| {
+            return [
+                t.it("middleware executes in order", |_| {
+                    let order = Ref::new([])
+
+                    let mw1 = |req, res, next| {
+                        let arr = order.deref()
+                        arr.push("mw1-before")
+                        order.set(arr)
+                        let result = next(req, res)
+                        let arr2 = order.deref()
+                        arr2.push("mw1-after")
+                        order.set(arr2)
+                        return result
+                    }
+
+                    let mw2 = |req, res, next| {
+                        let arr = order.deref()
+                        arr.push("mw2-before")
+                        order.set(arr)
+                        let result = next(req, res)
+                        let arr2 = order.deref()
+                        arr2.push("mw2-after")
+                        order.set(arr2)
+                        return result
+                    }
+
+                    let handler = |r, s| {
+                        let arr = order.deref()
+                        arr.push("handler")
+                        order.set(arr)
+                        return http.response(200, "ok")
+                    }
+
+                    let middlewares = [mw1, mw2]
+                    let req = Map::new()
+                    let res = Map::new()
+                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+
+                    let final_order = order.deref()
+                    t.assert_eq(len(final_order), 5)
+                    t.assert_eq(final_order[0], "mw1-before")
+                    t.assert_eq(final_order[1], "mw2-before")
+                    t.assert_eq(final_order[2], "handler")
+                    t.assert_eq(final_order[3], "mw2-after")
+                    t.assert_eq(final_order[4], "mw1-after")
+                }),
+
+                t.it("middleware can short-circuit the pipeline", |_| {
+                    let handler_called = Ref::new(false)
+
+                    let auth_mw = |req, res, next| {
+                        // Short-circuit: return 401 without calling next
+                        return http.response(401, "Unauthorized")
+                    }
+
+                    let handler = |r, s| {
+                        handler_called.set(true)
+                        return http.response(200, "ok")
+                    }
+
+                    let middlewares = [auth_mw]
+                    let req = Map::new()
+                    let res = Map::new()
+                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+
+                    t.assert_eq(result.get("status"), 401)
+                    t.assert_false(handler_called.deref())
+                }),
+
+                t.it("middleware can modify request", |_| {
+                    let add_user_mw = |req, res, next| {
+                        req.set("user", "admin")
+                        return next(req, res)
+                    }
+
+                    let captured_user = Ref::new("")
+                    let handler = |r, s| {
+                        captured_user.set(r.get("user"))
+                        return http.response(200, "ok")
+                    }
+
+                    let middlewares = [add_user_mw]
+                    let req = Map::new()
+                    let res = Map::new()
+                    http._run_middleware(middlewares, 0, req, res, handler)
+
+                    t.assert_eq(captured_user.deref(), "admin")
+                }),
+
+                t.it("middleware can modify response", |_| {
+                    let add_header_mw = |req, res, next| {
+                        let result = next(req, res)
+                        let h = result.get("headers")
+                        h.set("X-Custom", "middleware-added")
+                        result.set("headers", h)
+                        return result
+                    }
+
+                    let handler = |r, s| {
+                        return http.response(200, "ok")
+                    }
+
+                    let middlewares = [add_header_mw]
+                    let req = Map::new()
+                    let res = Map::new()
+                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+
+                    let h = result.get("headers")
+                    t.assert_eq(h.get("X-Custom"), "middleware-added")
+                }),
+
+                t.it("empty middleware array goes straight to handler", |_| {
+                    let handler = |r, s| {
+                        return http.response(200, "direct")
+                    }
+
+                    let middlewares = []
+                    let req = Map::new()
+                    let res = Map::new()
+                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+
+                    t.assert_eq(result.get("status"), 200)
+                    t.assert_eq(result.get("body"), "direct")
+                }),
+
+                t.it("compression middleware adds Vary header", |_| {
+                    let comp_mw = http.compression()
+                    let req = Map::new()
+                    req.set("method", "GET")
+                    req.set("path", "/")
+                    let headers = Map::new()
+                    headers.set("Accept-Encoding", "gzip")
+                    req.set("headers", headers)
+
+                    let result = comp_mw(req, Map::new(), |r, s| {
+                        return http.response(200, "data")
+                    })
+                    let h = result.get("headers")
+                    t.assert_eq(h.get("Vary"), "Accept-Encoding")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Request parsing tests (cookies in parsed requests)
+        // ----------------------------------------------------------------
+        t.describe("Request Parsing", |_| {
+            return [
+                t.it("_parse_request() parses cookies from header", |_| {
+                    let raw = "GET /test HTTP/1.1\r\nHost: localhost\r\nCookie: session=abc; theme=dark\r\n\r\n"
+                    let req = http._parse_request(raw)
+                    t.assert_eq(req.get("method"), "GET")
+                    t.assert_eq(req.get("path"), "/test")
+                    let cookies = req.get("cookies")
+                    t.assert_eq(cookies.get("session"), "abc")
+                    t.assert_eq(cookies.get("theme"), "dark")
+                }),
+
+                t.it("_parse_request() handles missing cookies", |_| {
+                    let raw = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                    let req = http._parse_request(raw)
+                    let cookies = req.get("cookies")
+                    t.assert_eq(len(cookies.keys()), 0)
+                }),
+
+                t.it("_parse_request() parses query string", |_| {
+                    let raw = "GET /search?q=hello&page=2 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                    let req = http._parse_request(raw)
+                    t.assert_eq(req.get("path"), "/search")
+                    let query = req.get("query")
+                    t.assert_eq(query.get("q"), "hello")
+                    t.assert_eq(query.get("page"), "2")
+                }),
+
+                t.it("_parse_request() parses POST body", |_| {
+                    let raw = "POST /api HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n{\"key\":\"val\"}"
+                    let req = http._parse_request(raw)
+                    t.assert_eq(req.get("method"), "POST")
+                    t.assert_eq(req.get("body"), "{\"key\":\"val\"}")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Internal helper tests
+        // ----------------------------------------------------------------
+        t.describe("Internal Helpers", |_| {
+            return [
+                t.it("_int_to_hex() converts correctly", |_| {
+                    t.assert_eq(http._int_to_hex(0), "0")
+                    t.assert_eq(http._int_to_hex(15), "f")
+                    t.assert_eq(http._int_to_hex(16), "10")
+                    t.assert_eq(http._int_to_hex(255), "ff")
+                    t.assert_eq(http._int_to_hex(256), "100")
+                })
+            ]
+        })
+    ])
+}
