@@ -37,8 +37,11 @@ void chunk_free(Chunk *c);
 /* Write a byte to the chunk, returns its offset */
 size_t chunk_write(Chunk *c, uint8_t byte, int line);
 
-/* Add a constant to the pool, returns its index */
+/* Add a constant to the pool (with deduplication), returns its index */
 size_t chunk_add_constant(Chunk *c, LatValue val);
+
+/* Add a constant without deduplication (for layout-dependent sequences) */
+size_t chunk_add_constant_nodupe(Chunk *c, LatValue val);
 
 /* Emit a 2-byte operand (big-endian) */
 void chunk_write_u16(Chunk *c, uint16_t val, int line);

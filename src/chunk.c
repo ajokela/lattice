@@ -88,6 +88,49 @@ size_t chunk_write(Chunk *c, uint8_t byte, int line) {
 }
 
 size_t chunk_add_constant(Chunk *c, LatValue val) {
+    /* Deduplicate string constants */
+    if (val.type == VAL_STR && val.as.str_val) {
+        size_t h = chunk_fnv1a(val.as.str_val);
+        for (size_t i = 0; i < c->const_len; i++) {
+            if (c->const_hashes[i] == h && c->constants[i].type == VAL_STR &&
+                c->constants[i].as.str_val &&
+                strcmp(c->constants[i].as.str_val, val.as.str_val) == 0) {
+                free(val.as.str_val);
+                return i;
+            }
+        }
+    }
+    /* Deduplicate integer constants */
+    if (val.type == VAL_INT) {
+        for (size_t i = 0; i < c->const_len; i++) {
+            if (c->constants[i].type == VAL_INT &&
+                c->constants[i].as.int_val == val.as.int_val) {
+                return i;
+            }
+        }
+    }
+    /* Deduplicate float constants */
+    if (val.type == VAL_FLOAT) {
+        for (size_t i = 0; i < c->const_len; i++) {
+            if (c->constants[i].type == VAL_FLOAT &&
+                c->constants[i].as.float_val == val.as.float_val) {
+                return i;
+            }
+        }
+    }
+    if (c->const_len >= c->const_cap) {
+        c->const_cap *= 2;
+        c->constants = realloc(c->constants, c->const_cap * sizeof(LatValue));
+        c->const_hashes = realloc(c->const_hashes, c->const_cap * sizeof(size_t));
+    }
+    size_t idx = c->const_len++;
+    c->constants[idx] = val;
+    c->const_hashes[idx] = (val.type == VAL_STR && val.as.str_val) ?
+                            chunk_fnv1a(val.as.str_val) : 0;
+    return idx;
+}
+
+size_t chunk_add_constant_nodupe(Chunk *c, LatValue val) {
     if (c->const_len >= c->const_cap) {
         c->const_cap *= 2;
         c->constants = realloc(c->constants, c->const_cap * sizeof(LatValue));

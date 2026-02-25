@@ -832,13 +832,14 @@ static void compile_expr(const Expr *e, int line) {
             /* Push field values in order */
             for (size_t i = 0; i < e->as.struct_lit.field_count; i++)
                 compile_expr(e->as.struct_lit.fields[i].value, line);
-            size_t name_idx = chunk_add_constant(current_chunk(), value_string(e->as.struct_lit.name));
+            /* Struct name + field names must be consecutive in the constant pool */
+            size_t name_idx = chunk_add_constant_nodupe(current_chunk(), value_string(e->as.struct_lit.name));
             emit_byte(OP_BUILD_STRUCT, line);
             emit_byte((uint8_t)name_idx, line);
             emit_byte((uint8_t)e->as.struct_lit.field_count, line);
-            /* Also store field names in constants for the VM to use */
+            /* Also store field names in constants for the VM to use (consecutive) */
             for (size_t i = 0; i < e->as.struct_lit.field_count; i++)
-                chunk_add_constant(current_chunk(), value_string(e->as.struct_lit.fields[i].name));
+                chunk_add_constant_nodupe(current_chunk(), value_string(e->as.struct_lit.fields[i].name));
             break;
         }
 

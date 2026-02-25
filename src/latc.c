@@ -270,7 +270,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                     chunk_free(c);
                     return NULL;
                 }
-                chunk_add_constant(c, value_int(val));
+                chunk_add_constant_nodupe(c, value_int(val));
                 break;
             }
             case TAG_FLOAT: {
@@ -280,7 +280,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                     chunk_free(c);
                     return NULL;
                 }
-                chunk_add_constant(c, value_float(val));
+                chunk_add_constant_nodupe(c, value_float(val));
                 break;
             }
             case TAG_BOOL: {
@@ -290,7 +290,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                     chunk_free(c);
                     return NULL;
                 }
-                chunk_add_constant(c, value_bool(val != 0));
+                chunk_add_constant_nodupe(c, value_bool(val != 0));
                 break;
             }
             case TAG_STR: {
@@ -308,14 +308,14 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                     return NULL;
                 }
                 s[slen] = '\0';
-                chunk_add_constant(c, value_string_owned(s));
+                chunk_add_constant_nodupe(c, value_string_owned(s));
                 break;
             }
             case TAG_NIL:
-                chunk_add_constant(c, value_nil());
+                chunk_add_constant_nodupe(c, value_nil());
                 break;
             case TAG_UNIT:
-                chunk_add_constant(c, value_unit());
+                chunk_add_constant_nodupe(c, value_unit());
                 break;
             case TAG_CLOSURE: {
                 uint32_t param_count;
@@ -347,7 +347,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                 fn_val.as.closure.default_values = NULL;
                 fn_val.as.closure.has_variadic = (has_variadic != 0);
                 fn_val.as.closure.native_fn = sub;
-                chunk_add_constant(c, fn_val);
+                chunk_add_constant_nodupe(c, fn_val);
                 break;
             }
             default: {
