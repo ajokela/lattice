@@ -1,0 +1,263 @@
+// Lattice Bloom Filter Library
+// Probabilistic data structure for set membership testing.
+// May return false positives but never false negatives.
+//
+// Uses multiple hash functions (FNV-1a variants with different seeds)
+// to map items to positions in a bit array.
+//
+// Usage:
+//   import "lib/bloom_filter" as Bloom
+//
+//   let bf = Bloom.new(1000, 0.01)   // capacity 1000, 1% false positive rate
+//   bf.add("hello")
+//   bf.add("world")
+//   print(bf.contains("hello"))      // true
+//   print(bf.contains("world"))      // true
+//   print(bf.contains("foo"))        // probably false
+//   print(bf.count())                // 2
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Internal: compute optimal number of bits for given capacity and fp rate.
+// m = -n * ln(p) / (ln(2))^2
+// We approximate: ln(p) via log(p)/log(e), ln(2) = 0.6931...
+fn _optimal_bits(n: Int, fp_rate: Any) -> Int {
+    // ln(fp_rate) = log(fp_rate) / log(e)  ... but we have log() = natural log
+    let ln_p = log(fp_rate)
+    let ln2 = 0.6931471805599453
+    let m = 0.0 - (n * ln_p) / (ln2 * ln2)
+    let result = floor(m) + 1
+    if result < 64 {
+        return 64
+    }
+    return to_int(result)
+}
+
+// Internal: compute optimal number of hash functions.
+// k = (m/n) * ln(2)
+fn _optimal_hashes(m: Int, n: Int) -> Int {
+    let ln2 = 0.6931471805599453
+    let k = (m / n) * ln2
+    let result = floor(k) + 1
+    if result < 2 {
+        return 2
+    }
+    if result > 20 {
+        return 20
+    }
+    return to_int(result)
+}
+
+// Internal: FNV-1a-inspired hash function with a seed.
+// Operates on the string representation of the item.
+// Returns a non-negative integer.
+fn _hash(item: Any, seed: Int, modulo: Int) -> Int {
+    let s = to_string(item)
+    let slen = len(s)
+    // FNV offset basis mixed with seed
+    flux h = 2166136261 + seed * 16777619
+    flux i = 0
+    while i < slen {
+        let c = ord(s.substring(i, i + 1))
+        // XOR with byte, then multiply by FNV prime (mod to keep manageable)
+        h = h * 31 + c
+        // Keep the number from growing unbounded by periodic modular reduction
+        // Use a large modulus to preserve bit diversity
+        if h > 1000000000 {
+            h = h % 1000000007
+        }
+        if h < 0 {
+            h = abs(h)
+        }
+        i = i + 1
+    }
+    // Final mixing
+    h = h + seed * 2654435761
+    if h < 0 {
+        h = abs(h)
+    }
+    return h % modulo
+}
+
+// Create a new Bloom filter.
+// Parameters:
+//   capacity  - expected number of items (Int)
+//   fp_rate   - desired false positive rate, e.g. 0.01 for 1% (Float)
+// Returns a Map of closures that share mutable state.
+fn new(capacity: Int, fp_rate: Any) -> Map {
+    assert(capacity > 0, "Bloom filter capacity must be positive")
+    assert(fp_rate > 0.0, "False positive rate must be positive")
+    assert(fp_rate < 1.0, "False positive rate must be less than 1.0")
+
+    let num_bits = _optimal_bits(capacity, fp_rate)
+    let num_hashes = _optimal_hashes(num_bits, capacity)
+
+    // Bit array: each element is 0 or 1
+    flux bits = _make_array(num_bits)
+    flux i = 0
+    while i < num_bits {
+        bits[i] = 0
+        i = i + 1
+    }
+
+    flux item_count = 0
+
+    let bf = Map::new()
+
+    // add(item) -> nil. Add an item to the filter.
+    bf.set("add", |item| {
+        flux k = 0
+        while k < num_hashes {
+            let pos = _hash(item, k * 7 + 1, num_bits)
+            bits[pos] = 1
+            k = k + 1
+        }
+        item_count = item_count + 1
+    })
+
+    // contains(item) -> Bool. Test if item might be in the set.
+    // Returns true if the item is PROBABLY in the set (may be false positive).
+    // Returns false if the item is DEFINITELY NOT in the set.
+    bf.set("contains", |item| {
+        flux k = 0
+        while k < num_hashes {
+            let pos = _hash(item, k * 7 + 1, num_bits)
+            if bits[pos] == 0 {
+                return false
+            }
+            k = k + 1
+        }
+        return true
+    })
+
+    // count() -> Int. Number of items added (not unique — counts duplicates).
+    bf.set("count", |_| {
+        return item_count
+    })
+
+    // bit_count() -> Int. Total number of bits in the filter.
+    bf.set("bit_count", |_| {
+        return num_bits
+    })
+
+    // hash_count() -> Int. Number of hash functions used.
+    bf.set("hash_count", |_| {
+        return num_hashes
+    })
+
+    // fill_ratio() -> Float. Fraction of bits set to 1.
+    bf.set("fill_ratio", |_| {
+        flux set_bits = 0
+        flux j = 0
+        while j < num_bits {
+            if bits[j] == 1 {
+                set_bits = set_bits + 1
+            }
+            j = j + 1
+        }
+        return set_bits * 1.0 / num_bits
+    })
+
+    // clear() -> nil. Reset the filter (remove all items).
+    bf.set("clear", |_| {
+        flux j = 0
+        while j < num_bits {
+            bits[j] = 0
+            j = j + 1
+        }
+        item_count = 0
+    })
+
+    return bf
+}
+
+// Demo / test
+fn main() {
+    print("=== Bloom Filter ===")
+    print("")
+
+    let bf = new(100, 0.01)
+    let add = bf.get("add")
+    let contains = bf.get("contains")
+    let count = bf.get("count")
+    let bits = bf.get("bit_count")
+    let hashes = bf.get("hash_count")
+    let fill = bf.get("fill_ratio")
+    let clear = bf.get("clear")
+
+    print("Configuration:")
+    print("  bits: " + to_string(bits(nil)))
+    print("  hash functions: " + to_string(hashes(nil)))
+    print("  items added: " + to_string(count(nil)))
+
+    // Add some items
+    add("apple")
+    add("banana")
+    add("cherry")
+    add("date")
+    add("elderberry")
+
+    print("")
+    print("After adding 5 fruits:")
+    print("  count: " + to_string(count(nil)))
+    print("  fill ratio: " + to_string(fill(nil)))
+
+    // Check membership
+    print("")
+    print("Membership checks:")
+    print("  contains(apple): " + to_string(contains("apple")))
+    print("  contains(banana): " + to_string(contains("banana")))
+    print("  contains(cherry): " + to_string(contains("cherry")))
+    print("  contains(date): " + to_string(contains("date")))
+    print("  contains(elderberry): " + to_string(contains("elderberry")))
+    print("  contains(fig): " + to_string(contains("fig")))
+    print("  contains(grape): " + to_string(contains("grape")))
+    print("  contains(kiwi): " + to_string(contains("kiwi")))
+
+    // Test with numbers
+    print("")
+    print("--- Numeric items ---")
+    let bf2 = new(50, 0.05)
+    let add2 = bf2.get("add")
+    let contains2 = bf2.get("contains")
+    let fill2 = bf2.get("fill_ratio")
+
+    flux i = 0
+    while i < 20 {
+        add2(i * 2)  // Add even numbers 0..38
+        i = i + 1
+    }
+
+    print("Added even numbers 0..38")
+    print("  fill ratio: " + to_string(fill2(nil)))
+
+    // Check some numbers
+    print("  contains(0): " + to_string(contains2(0)))
+    print("  contains(2): " + to_string(contains2(2)))
+    print("  contains(10): " + to_string(contains2(10)))
+    print("  contains(1): " + to_string(contains2(1)))
+    print("  contains(3): " + to_string(contains2(3)))
+    print("  contains(99): " + to_string(contains2(99)))
+
+    // Test clear
+    clear(nil)
+    print("")
+    print("After clear:")
+    print("  count: " + to_string(count(nil)))
+    print("  fill ratio: " + to_string(fill(nil)))
+    print("  contains(apple): " + to_string(contains("apple")))
+
+    print("")
+    print("Bloom filter demo complete.")
+}

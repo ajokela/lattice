@@ -1,0 +1,342 @@
+// Lattice LRU Cache Library
+// Bounded cache with a configurable capacity limit. When the cache is full,
+// the least recently used entry is evicted to make room for new entries.
+//
+// Uses a Map for O(1) key lookup and an array-based doubly-linked list
+// to track access order. Most recently used entries move to the front.
+//
+// Usage:
+//   import "lib/lru_cache" as LRU
+//
+//   let cache = LRU.new(3)           // capacity 3
+//   cache.put("a", 1)
+//   cache.put("b", 2)
+//   cache.put("c", 3)
+//   print(cache.get("a"))            // 1 (marks "a" as recently used)
+//   cache.put("d", 4)                // evicts "b" (least recently used)
+//   print(cache.get("b"))            // nil (was evicted)
+//   print(cache.keys())              // ["a", "c", "d"] or similar
+//   print(cache.size())              // 3
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Internal helper: grow an array by doubling.
+fn _grow(arr: Array) -> Array {
+    let old_len = arr.len()
+    let new_cap = old_len * 2
+    flux new_arr = clone(arr)
+    flux i = old_len
+    while i < new_cap {
+        flux a = clone(new_arr)
+        a.push(nil)
+        new_arr = a
+        i = i + 1
+    }
+    return new_arr
+}
+
+// Sentinel value for deleted map entries.
+// Map.remove() doesn't propagate through closures, so we mark deleted
+// entries with this value and treat them as absent.
+fix _DELETED = -999999
+
+// Create a new LRU cache with the given maximum capacity.
+// Returns a Map of closures that share mutable state.
+//
+// Internally uses a doubly-linked list (stored as arrays of prev/next indices)
+// plus a Map for O(1) key-to-index lookup.
+//
+// Sentinel nodes: index 0 = head sentinel, index 1 = tail sentinel.
+// Real entries start at index 2.
+fn new(capacity: Int) -> Map {
+    assert(capacity > 0, "LRU cache capacity must be positive")
+
+    let init_size = capacity + 4
+    // Node arrays: each index stores part of a DLL node
+    // node_keys[i]   = the key string for node i
+    // node_vals[i]   = the value for node i
+    // node_prev[i]   = index of previous node
+    // node_next[i]   = index of next node
+    flux node_keys = _make_array(init_size)
+    flux node_vals = _make_array(init_size)
+    flux node_prev = _make_array(init_size)
+    flux node_next = _make_array(init_size)
+    flux node_count = 2  // 0 = head sentinel, 1 = tail sentinel
+
+    // Initialize sentinel links: head <-> tail
+    node_next[0] = 1
+    node_prev[0] = -1
+    node_prev[1] = 0
+    node_next[1] = -1
+
+    // Map from key -> node index for O(1) lookup.
+    // Deleted entries are set to _DELETED instead of removed.
+    flux key_to_idx = Map::new()
+    flux sz = 0
+    fix cap = capacity
+
+    // Free list for recycling removed node slots
+    flux free_list = _make_array(init_size)
+    flux free_count = 0
+
+    // --- Internal helpers (as closures to share state) ---
+
+    // Check if a key is "live" in the map (exists and not deleted).
+    let _has_key = |k| {
+        if !key_to_idx.has(k) { return false }
+        return key_to_idx[k] != _DELETED
+    }
+
+    // Remove a node from its current position in the DLL.
+    let _detach = |idx| {
+        let p = node_prev[idx]
+        let n = node_next[idx]
+        node_next[p] = n
+        node_prev[n] = p
+    }
+
+    // Insert a node right after the head sentinel (making it MRU).
+    let _attach_front = |idx| {
+        let old_first = node_next[0]
+        node_next[0] = idx
+        node_prev[idx] = 0
+        node_next[idx] = old_first
+        node_prev[old_first] = idx
+    }
+
+    // Allocate a new node slot (or recycle from free list).
+    let _alloc_node = |_| {
+        if free_count > 0 {
+            free_count = free_count - 1
+            return free_list[free_count]
+        }
+        // Grow arrays if needed
+        if node_count >= node_keys.len() {
+            node_keys = _grow(node_keys)
+            node_vals = _grow(node_vals)
+            node_prev = _grow(node_prev)
+            node_next = _grow(node_next)
+            free_list = _grow(free_list)
+        }
+        let idx = node_count
+        node_count = node_count + 1
+        return idx
+    }
+
+    // Return a node slot to the free list.
+    let _free_node = |idx| {
+        node_keys[idx] = nil
+        node_vals[idx] = nil
+        node_prev[idx] = -1
+        node_next[idx] = -1
+        free_list[free_count] = idx
+        free_count = free_count + 1
+    }
+
+    let cache = Map::new()
+
+    // get(key) -> value or nil. Marks entry as recently used.
+    cache.set("get", |key| {
+        let k = to_string(key)
+        if !_has_key(k) {
+            return nil
+        }
+        let idx = key_to_idx[k]
+        // Move to front (MRU position)
+        _detach(idx)
+        _attach_front(idx)
+        return node_vals[idx]
+    })
+
+    // put(key, value) -> nil. Adds or updates entry, evicts LRU if at capacity.
+    cache.set("put", |key, value| {
+        let k = to_string(key)
+        if _has_key(k) {
+            // Update existing entry
+            let idx = key_to_idx[k]
+            node_vals[idx] = value
+            // Move to front
+            _detach(idx)
+            _attach_front(idx)
+            return nil
+        }
+        // Need to add new entry
+        if sz >= cap {
+            // Evict LRU (node just before tail sentinel)
+            let lru_idx = node_prev[1]
+            let lru_key = node_keys[lru_idx]
+            _detach(lru_idx)
+            // Mark as deleted in the map (cannot use .remove() in closures)
+            key_to_idx[lru_key] = _DELETED
+            _free_node(lru_idx)
+            sz = sz - 1
+        }
+        // Allocate and insert new node at front
+        let idx = _alloc_node(nil)
+        node_keys[idx] = k
+        node_vals[idx] = value
+        _attach_front(idx)
+        key_to_idx[k] = idx
+        sz = sz + 1
+    })
+
+    // has(key) -> Bool. Check if key exists (does NOT update access order).
+    cache.set("has", |key| {
+        return _has_key(to_string(key))
+    })
+
+    // remove(key) -> value or nil. Removes entry if it exists.
+    cache.set("remove", |key| {
+        let k = to_string(key)
+        if !_has_key(k) {
+            return nil
+        }
+        let idx = key_to_idx[k]
+        let val = node_vals[idx]
+        _detach(idx)
+        key_to_idx[k] = _DELETED
+        _free_node(idx)
+        sz = sz - 1
+        return val
+    })
+
+    // clear() -> nil. Remove all entries.
+    cache.set("clear", |_| {
+        // Reset DLL to just sentinels
+        node_next[0] = 1
+        node_prev[1] = 0
+        // Replace the key map with a fresh one
+        key_to_idx = Map::new()
+        // Reset free list — all slots from 2..node_count are now free
+        free_count = 0
+        flux i = 2
+        while i < node_count {
+            node_keys[i] = nil
+            node_vals[i] = nil
+            node_prev[i] = -1
+            node_next[i] = -1
+            free_list[free_count] = i
+            free_count = free_count + 1
+            i = i + 1
+        }
+        sz = 0
+    })
+
+    // size() -> Int. Number of entries currently in the cache.
+    cache.set("size", |_| {
+        return sz
+    })
+
+    // capacity() -> Int. Maximum number of entries.
+    cache.set("capacity", |_| {
+        return cap
+    })
+
+    // keys() -> Array. Keys in MRU-to-LRU order.
+    cache.set("keys", |_| {
+        flux result = []
+        flux cur = node_next[0]
+        while cur != 1 {
+            flux r = clone(result)
+            r.push(node_keys[cur])
+            result = r
+            cur = node_next[cur]
+        }
+        return result
+    })
+
+    // values() -> Array. Values in MRU-to-LRU order.
+    cache.set("values", |_| {
+        flux result = []
+        flux cur = node_next[0]
+        while cur != 1 {
+            flux r = clone(result)
+            r.push(node_vals[cur])
+            result = r
+            cur = node_next[cur]
+        }
+        return result
+    })
+
+    return cache
+}
+
+// Demo / test
+fn main() {
+    print("=== LRU Cache ===")
+    print("")
+
+    let cache = new(3)
+    let get = cache.get("get")
+    let put = cache.get("put")
+    let has = cache.get("has")
+    let remove = cache.get("remove")
+    let clear = cache.get("clear")
+    let sz = cache.get("size")
+    let cap = cache.get("capacity")
+    let keys = cache.get("keys")
+    let values = cache.get("values")
+
+    print("Empty cache:")
+    print("  size: " + to_string(sz(nil)))
+    print("  capacity: " + to_string(cap(nil)))
+
+    put("a", 1)
+    put("b", 2)
+    put("c", 3)
+    print("")
+    print("After adding a=1, b=2, c=3:")
+    print("  keys (MRU first): " + to_string(keys(nil)))
+    print("  values: " + to_string(values(nil)))
+    print("  size: " + to_string(sz(nil)))
+
+    // Access "a" to make it recently used
+    let val = get("a")
+    print("")
+    print("After get(a) -> " + to_string(val) + ":")
+    print("  keys: " + to_string(keys(nil)))
+
+    // Add "d" — should evict "b" (now LRU)
+    put("d", 4)
+    print("")
+    print("After put(d, 4) — should evict b:")
+    print("  keys: " + to_string(keys(nil)))
+    print("  has(b): " + to_string(has("b")))
+    print("  get(b): " + to_string(get("b")))
+    print("  get(d): " + to_string(get("d")))
+
+    // Update existing key
+    put("a", 100)
+    print("")
+    print("After put(a, 100):")
+    print("  get(a): " + to_string(get("a")))
+    print("  keys: " + to_string(keys(nil)))
+
+    // Remove
+    let removed = remove("c")
+    print("")
+    print("After remove(c) -> " + to_string(removed) + ":")
+    print("  size: " + to_string(sz(nil)))
+    print("  keys: " + to_string(keys(nil)))
+
+    // Clear
+    clear(nil)
+    print("")
+    print("After clear:")
+    print("  size: " + to_string(sz(nil)))
+    print("  keys: " + to_string(keys(nil)))
+
+    print("")
+    print("LRU Cache demo complete.")
+}

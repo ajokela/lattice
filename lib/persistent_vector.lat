@@ -1,0 +1,410 @@
+// Lattice Persistent Vector Library
+// An immutable vector with structural sharing. Every mutation operation
+// returns a NEW vector — the original is never modified.
+//
+// Leverages Lattice's phase system: returned vectors are frozen (fix),
+// making immutability explicit.
+//
+// Internally uses a branching-factor-32 trie (similar to Clojure/Scala
+// persistent vectors) for efficient O(log32 n) get/set and O(1) amortized push.
+// For simplicity, this implementation uses a flat copy-on-write array with
+// path copying for small vectors, and a chunked structure for larger ones.
+//
+// Usage:
+//   import "lib/persistent_vector" as PVec
+//
+//   let v0 = PVec.empty()
+//   let v1 = PVec.push(v0, 10)
+//   let v2 = PVec.push(v1, 20)
+//   let v3 = PVec.push(v2, 30)
+//   print(PVec.get(v3, 0))           // 10
+//   print(PVec.get(v3, 2))           // 30
+//   print(PVec.size(v3))             // 3
+//   let v4 = PVec.set(v3, 1, 99)
+//   print(PVec.get(v4, 1))           // 99
+//   print(PVec.get(v3, 1))           // 20  (original unchanged!)
+//   print(PVec.to_array(v4))         // [10, 99, 30]
+
+// Internal: branching factor for trie nodes.
+// Using 4 for manageable tree depth while demonstrating structural sharing.
+// (A production implementation would use 32.)
+fix BRANCH = 4
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Internal: create a new trie node (an array of BRANCH slots).
+fn _new_node() -> Array {
+    return _make_array(BRANCH)
+}
+
+// Internal: shallow copy a node (one level only).
+fn _copy_node(node: Array) -> Array {
+    flux new_node = _make_array(BRANCH)
+    flux i = 0
+    while i < BRANCH {
+        new_node[i] = node[i]
+        i = i + 1
+    }
+    return new_node
+}
+
+// Internal: compute the depth (number of trie levels) needed for count elements.
+// depth=0 means leaf, depth=1 means one internal level, etc.
+fn _depth_for(count: Int) -> Int {
+    if count <= BRANCH {
+        return 0
+    }
+    flux d = 0
+    flux capacity = BRANCH
+    while capacity < count {
+        capacity = capacity * BRANCH
+        d = d + 1
+    }
+    return d
+}
+
+// Internal: get a value from the trie at the given index.
+fn _trie_get(node: Any, index: Int, depth: Int) -> Any {
+    if depth == 0 {
+        return node[index]
+    }
+    flux shift = 1
+    flux d = 0
+    while d < depth {
+        shift = shift * BRANCH
+        d = d + 1
+    }
+    let child_idx = index / shift
+    let remainder = index % shift
+    return _trie_get(node[child_idx], remainder, depth - 1)
+}
+
+// Internal: set a value in the trie at the given index, returning a new trie root.
+// Path-copying: only nodes along the path are copied; siblings are shared.
+fn _trie_set(node: Any, index: Int, value: Any, depth: Int) -> Array {
+    flux new_node = _copy_node(node)
+    if depth == 0 {
+        new_node[index] = value
+        return new_node
+    }
+    flux shift = 1
+    flux d = 0
+    while d < depth {
+        shift = shift * BRANCH
+        d = d + 1
+    }
+    let child_idx = index / shift
+    let remainder = index % shift
+    let child = node[child_idx]
+    if child == nil {
+        // Allocate path down to leaf
+        new_node[child_idx] = _trie_set(_new_node(), remainder, value, depth - 1)
+    } else {
+        new_node[child_idx] = _trie_set(child, remainder, value, depth - 1)
+    }
+    return new_node
+}
+
+// Internal: compute the total capacity at a given depth.
+fn _capacity_at_depth(depth: Int) -> Int {
+    flux cap = BRANCH
+    flux d = 0
+    while d < depth {
+        cap = cap * BRANCH
+        d = d + 1
+    }
+    return cap
+}
+
+// Internal: create a vector representation as a Map.
+fn _make_vec(root: Any, count: Int, depth: Int) -> Map {
+    let v = Map::new()
+    v["_root"] = root
+    v["_count"] = count
+    v["_depth"] = depth
+    return v
+}
+
+// Create a new empty persistent vector.
+fn empty() -> Map {
+    return _make_vec(nil, 0, 0)
+}
+
+// Create a persistent vector from an array of values.
+fn from_array(arr: Array) -> Map {
+    flux v = empty()
+    flux i = 0
+    while i < arr.len() {
+        v = push(v, arr[i])
+        i = i + 1
+    }
+    return v
+}
+
+// Get the number of elements in the vector.
+fn size(vec: Map) -> Int {
+    return vec["_count"]
+}
+
+// Check if the vector is empty.
+fn is_empty(vec: Map) -> Bool {
+    return vec["_count"] == 0
+}
+
+// Get the value at the given index. Returns nil if out of bounds.
+fn get(vec: Map, index: Int) -> Any {
+    let count = vec["_count"]
+    if index < 0 { return nil }
+    if index >= count { return nil }
+    return _trie_get(vec["_root"], index, vec["_depth"])
+}
+
+// Return a new vector with the value at the given index replaced.
+// The original vector is NOT modified.
+fn set(vec: Map, index: Int, value: Any) -> Map {
+    let count = vec["_count"]
+    assert(index >= 0, "persistent_vector.set: index out of bounds")
+    assert(index < count, "persistent_vector.set: index out of bounds")
+    let new_root = _trie_set(vec["_root"], index, value, vec["_depth"])
+    return _make_vec(new_root, count, vec["_depth"])
+}
+
+// Return a new vector with the given value appended at the end.
+// The original vector is NOT modified.
+fn push(vec: Map, value: Any) -> Map {
+    let count = vec["_count"]
+    let depth = vec["_depth"]
+
+    if count == 0 {
+        // First element: create a leaf node
+        let root = _new_node()
+        root[0] = value
+        return _make_vec(root, 1, 0)
+    }
+
+    // Check if we need to grow the tree depth
+    let cap = _capacity_at_depth(depth)
+    if count >= cap {
+        // Need a new root level
+        let new_root = _new_node()
+        new_root[0] = vec["_root"]
+        let new_depth = depth + 1
+        let updated = _trie_set(new_root, count, value, new_depth)
+        return _make_vec(updated, count + 1, new_depth)
+    }
+
+    // Fits in current tree
+    let new_root = _trie_set(vec["_root"], count, value, depth)
+    return _make_vec(new_root, count + 1, depth)
+}
+
+// Return a new vector with the last element removed.
+// The original vector is NOT modified.
+fn pop(vec: Map) -> Map {
+    let count = vec["_count"]
+    assert(count > 0, "persistent_vector.pop: empty vector")
+
+    if count == 1 {
+        return empty()
+    }
+
+    let new_count = count - 1
+    let depth = vec["_depth"]
+
+    // Set the last slot to nil (clearing it)
+    let new_root = _trie_set(vec["_root"], new_count, nil, depth)
+
+    // Check if we can shrink depth
+    // If new_count fits in depth-1, the root's children 1..BRANCH-1 should all be nil
+    if depth > 0 {
+        let lower_cap = _capacity_at_depth(depth - 1)
+        if new_count <= lower_cap {
+            // Shrink: root[0] becomes the new root
+            return _make_vec(new_root[0], new_count, depth - 1)
+        }
+    }
+
+    return _make_vec(new_root, new_count, depth)
+}
+
+// Convert the persistent vector to a regular array.
+fn to_array(vec: Map) -> Array {
+    let count = vec["_count"]
+    flux result = []
+    flux i = 0
+    while i < count {
+        flux r = clone(result)
+        r.push(get(vec, i))
+        result = r
+        i = i + 1
+    }
+    return result
+}
+
+// Return a new vector with all elements for which predicate returns true.
+fn filter(vec: Map, predicate: Fn) -> Map {
+    flux result = empty()
+    let count = vec["_count"]
+    flux i = 0
+    while i < count {
+        let val = get(vec, i)
+        if predicate(val) {
+            result = push(result, val)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// Return a new vector with the function applied to each element.
+fn map_vec(vec: Map, func: Fn) -> Map {
+    flux result = empty()
+    let count = vec["_count"]
+    flux i = 0
+    while i < count {
+        let val = get(vec, i)
+        result = push(result, func(val))
+        i = i + 1
+    }
+    return result
+}
+
+// Fold/reduce over the vector from left to right.
+fn fold(vec: Map, init: Any, func: Fn) -> Any {
+    flux acc = init
+    let count = vec["_count"]
+    flux i = 0
+    while i < count {
+        acc = func(acc, get(vec, i))
+        i = i + 1
+    }
+    return acc
+}
+
+// Return a new vector that is the concatenation of two vectors.
+fn concat(a: Map, b: Map) -> Map {
+    flux result = a
+    let count_b = b["_count"]
+    flux i = 0
+    while i < count_b {
+        result = push(result, get(b, i))
+        i = i + 1
+    }
+    return result
+}
+
+// Return a new vector with elements from start (inclusive) to end (exclusive).
+fn slice(vec: Map, start: Int, end_idx: Int) -> Map {
+    let count = vec["_count"]
+    flux actual_start = start
+    flux actual_end = end_idx
+    if actual_start < 0 { actual_start = 0 }
+    if actual_end > count { actual_end = count }
+    if actual_start >= actual_end { return empty() }
+
+    flux result = empty()
+    flux i = actual_start
+    while i < actual_end {
+        result = push(result, get(vec, i))
+        i = i + 1
+    }
+    return result
+}
+
+// Demo / test
+fn main() {
+    print("=== Persistent Vector ===")
+    print("")
+
+    // Build up vectors immutably
+    let v0 = empty()
+    let v1 = push(v0, 10)
+    let v2 = push(v1, 20)
+    let v3 = push(v2, 30)
+    let v4 = push(v3, 40)
+    let v5 = push(v4, 50)
+
+    print("v0 (empty): " + to_string(to_array(v0)))
+    print("v1: " + to_string(to_array(v1)))
+    print("v2: " + to_string(to_array(v2)))
+    print("v3: " + to_string(to_array(v3)))
+    print("v4: " + to_string(to_array(v4)))
+    print("v5: " + to_string(to_array(v5)))
+    print("size(v5): " + to_string(size(v5)))
+
+    // All prior versions are still intact
+    print("")
+    print("Structural sharing — originals unchanged:")
+    print("  v3[0] = " + to_string(get(v3, 0)))
+    print("  v3[1] = " + to_string(get(v3, 1)))
+    print("  v3[2] = " + to_string(get(v3, 2)))
+
+    // set returns a new vector
+    let v3_mod = set(v3, 1, 99)
+    print("")
+    print("After set(v3, 1, 99):")
+    print("  v3_mod: " + to_string(to_array(v3_mod)))
+    print("  v3 unchanged: " + to_string(to_array(v3)))
+
+    // Pop
+    let v5_popped = pop(v5)
+    print("")
+    print("After pop(v5):")
+    print("  v5_popped: " + to_string(to_array(v5_popped)))
+    print("  v5 unchanged: " + to_string(to_array(v5)))
+
+    // from_array
+    let v_arr = from_array([100, 200, 300, 400, 500])
+    print("")
+    print("from_array([100..500]): " + to_string(to_array(v_arr)))
+
+    // map
+    let doubled = map_vec(v5, |x| { return x * 2 })
+    print("doubled: " + to_string(to_array(doubled)))
+
+    // filter
+    let big = filter(v5, |x| { return x > 25 })
+    print("filter(>25): " + to_string(to_array(big)))
+
+    // fold
+    let total = fold(v5, 0, |acc, x| { return acc + x })
+    print("sum: " + to_string(total))
+
+    // slice
+    let sl = slice(v5, 1, 4)
+    print("slice(1,4): " + to_string(to_array(sl)))
+
+    // concat
+    let joined = concat(v3, v3_mod)
+    print("concat(v3, v3_mod): " + to_string(to_array(joined)))
+
+    // Build a larger vector to test tree growth
+    print("")
+    print("--- Building larger vector ---")
+    flux big_v = empty()
+    flux i = 0
+    while i < 20 {
+        big_v = push(big_v, i)
+        i = i + 1
+    }
+    print("20-element vector: " + to_string(to_array(big_v)))
+    print("get(17): " + to_string(get(big_v, 17)))
+
+    let big_v2 = set(big_v, 10, 999)
+    print("After set(10, 999): get(10) = " + to_string(get(big_v2, 10)))
+    print("Original get(10) = " + to_string(get(big_v, 10)))
+
+    print("")
+    print("Persistent vector demo complete.")
+}
