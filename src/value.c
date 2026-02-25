@@ -95,6 +95,13 @@ LatValue value_string_owned(char *s) {
     return val;
 }
 
+LatValue value_string_owned_len(char *s, size_t len) {
+    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    val.as.str_val = s;
+    val.as.str_len = len;
+    return val;
+}
+
 LatValue value_string_interned(const char *s) {
     LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_INTERNED };
     val.as.str_val = (char *)intern(s);

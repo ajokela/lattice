@@ -43,7 +43,10 @@ struct LatValue {
         int64_t int_val;
         double  float_val;
         bool    bool_val;
-        char   *str_val;     /* heap-allocated string */
+        struct {
+            char   *str_val;     /* heap-allocated string */
+            size_t  str_len;     /* cached length; 0 = unknown (recompute via strlen) */
+        };
         struct {
             LatValue *elems;
             size_t    len;
@@ -112,6 +115,7 @@ LatValue value_float(double v);
 LatValue value_bool(bool v);
 LatValue value_string(const char *s);
 LatValue value_string_owned(char *s);
+LatValue value_string_owned_len(char *s, size_t len);  /* owned string with cached length */
 LatValue value_string_interned(const char *s);
 LatValue value_array(LatValue *elems, size_t len);
 LatValue value_struct(const char *name, char **field_names, LatValue *field_values, size_t count);

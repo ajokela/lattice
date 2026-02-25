@@ -110,6 +110,7 @@ static const char *names[] = {
     [OP_IS_FLUID]      = "OP_IS_FLUID",
     [OP_FREEZE_EXCEPT] = "OP_FREEZE_EXCEPT",
     [OP_FREEZE_FIELD]  = "OP_FREEZE_FIELD",
+    [OP_APPEND_STR_LOCAL] = "OP_APPEND_STR_LOCAL",
     [OP_HALT]          = "OP_HALT",
 };
 

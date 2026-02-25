@@ -1,0 +1,10 @@
+// Benchmark: multi-character string concatenation (50K appends of "hello")
+fn main() {
+    flux s = ""
+    flux i = 0
+    while i < 50000 {
+        s += "hello"
+        i += 1
+    }
+    print(to_string(s.len()))
+}

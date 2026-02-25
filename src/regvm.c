@@ -355,11 +355,14 @@ static inline LatValue rvm_clone(const LatValue *src) {
             LatValue v = *src;
             if (src->region_id == REGION_INTERNED)
                 return v;  /* interned strings are never freed — no need to strdup */
+            /* Use cached length when available to avoid strlen */
+            size_t slen = src->as.str_len ? src->as.str_len : strlen(src->as.str_val);
             /* Try interning short strings on escape (e.g. ephemeral → global).
              * Avoids strdup and enables pointer-equality comparisons. */
-            if (strlen(src->as.str_val) <= INTERN_THRESHOLD)
+            if (slen <= INTERN_THRESHOLD)
                 return value_string_interned(src->as.str_val);
             v.as.str_val = strdup(src->as.str_val);
+            v.as.str_len = slen;  /* preserve cached length */
             v.region_id = REGION_NONE;
             return v;
         }
@@ -2512,8 +2515,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             double rv = R[c].type == VAL_FLOAT ? R[c].as.float_val : (double)R[c].as.int_val;
             reg_set(&R[a], value_float(lv + rv));
         } else if (R[b].type == VAL_STR && R[c].type == VAL_STR) {
-            size_t lb = strlen(R[b].as.str_val);
-            size_t lc = strlen(R[c].as.str_val);
+            /* Use cached str_len when available to avoid O(n) strlen */
+            size_t lb = R[b].as.str_len ? R[b].as.str_len : strlen(R[b].as.str_val);
+            size_t lc = R[c].as.str_len ? R[c].as.str_len : strlen(R[c].as.str_val);
             size_t total = lb + lc;
             /* Optimization: when dest == left operand (s = s + x pattern) and
              * the left string is a plain malloc'd buffer, realloc in-place to
@@ -2523,12 +2527,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 memcpy(buf + lb, R[c].as.str_val, lc);
                 buf[total] = '\0';
                 R[a].as.str_val = buf;  /* update in-place (realloc may move) */
+                R[a].as.str_len = total;  /* update cached length */
                 /* Intern short results for pointer-equality comparisons */
                 if (total <= INTERN_THRESHOLD) {
                     const char *interned = intern(buf);
                     free(R[a].as.str_val);
                     R[a].as.str_val = (char *)interned;
                     R[a].region_id = REGION_INTERNED;
+                    R[a].as.str_len = total;
                 }
             } else {
                 char *buf = malloc(total + 1);
@@ -2536,12 +2542,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 memcpy(buf + lb, R[c].as.str_val, lc);
                 buf[total] = '\0';
                 LatValue v = value_string_owned(buf);
+                v.as.str_len = total;  /* cache length */
                 /* Intern short concat results */
                 if (total <= INTERN_THRESHOLD) {
                     const char *interned = intern(buf);
                     free(v.as.str_val);
                     v.as.str_val = (char *)interned;
                     v.region_id = REGION_INTERNED;
+                    v.as.str_len = total;
                 }
                 reg_set(&R[a], v);
             }
@@ -2656,7 +2664,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         char *rs = (R[c].type == VAL_STR) ? NULL : value_display(&R[c]);
         const char *lp = ls ? ls : R[b].as.str_val;
         const char *rp = rs ? rs : R[c].as.str_val;
-        size_t ll = strlen(lp), rl = strlen(rp);
+        /* Use cached length when available (only for direct string operands) */
+        size_t ll = (!ls && R[b].as.str_len) ? R[b].as.str_len : strlen(lp);
+        size_t rl = (!rs && R[c].as.str_len) ? R[c].as.str_len : strlen(rp);
         char *buf = bump_alloc(vm->ephemeral, ll + rl + 1);
         memcpy(buf, lp, ll);
         memcpy(buf + ll, rp, rl);
@@ -2664,6 +2674,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         free(ls); free(rs);  /* NULL-safe: free(NULL) is a no-op */
         LatValue v = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_EPHEMERAL };
         v.as.str_val = buf;
+        v.as.str_len = ll + rl;  /* cache result length */
         reg_set(&R[a], v);
         DISPATCH();
     }
