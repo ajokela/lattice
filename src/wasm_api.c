@@ -137,7 +137,7 @@ const char *lat_run_line(const char *source) {
         value_free(&result);
     }
 
-    chunk_free(chunk);
+    stackvm_track_chunk(g_vm, chunk);
 
     /* Keep program alive (struct/fn/enum decls are referenced by pointer) */
     store_program(prog, tokens);
@@ -275,7 +275,7 @@ const char *lat_run_line_regvm(const char *source) {
         value_free(&result);
     }
 
-    regchunk_free(chunk);
+    regvm_track_chunk(g_rvm, chunk);
     store_program(prog, tokens);
     return NULL;
 }

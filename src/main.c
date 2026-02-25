@@ -520,7 +520,7 @@ static void repl(void) {
             value_free(&result);
         }
 
-        chunk_free(chunk);
+        stackvm_track_chunk(&vm, chunk);
 
         /* Keep program and tokens alive for struct/fn/enum declarations */
         if (prog_count >= prog_cap) {

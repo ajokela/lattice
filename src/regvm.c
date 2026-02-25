@@ -403,21 +403,7 @@ static RegVMResult rvm_error(RegVM *vm, const char *fmt, ...) {
     (void)vasprintf(&msg, fmt, args);
     va_end(args);
 
-    RegCallFrame *f = &vm->frames[vm->frame_count - 1];
-    int line = 0;
-    if (f->ip > f->chunk->code) {
-        size_t offset = (size_t)(f->ip - f->chunk->code - 1);
-        if (offset < f->chunk->lines_len)
-            line = f->chunk->lines[offset];
-    }
-    if (line > 0) {
-        char *full = NULL;
-        (void)asprintf(&full, "[line %d] %s", line, msg);
-        free(msg);
-        vm->error = full;
-    } else {
-        vm->error = msg;
-    }
+    vm->error = msg;
     return REGVM_RUNTIME_ERROR;
 }
 
@@ -455,22 +441,8 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr,
         return REGVM_OK;
     }
 
-    /* Uncaught error: prepend line info */
-    RegCallFrame *f = &vm->frames[vm->frame_count - 1];
-    int line = 0;
-    if (f->ip > f->chunk->code) {
-        size_t offset = (size_t)(f->ip - f->chunk->code - 1);
-        if (offset < f->chunk->lines_len)
-            line = f->chunk->lines[offset];
-    }
-    if (line > 0) {
-        char *msg;
-        (void)asprintf(&msg, "[line %d] %s", line, inner);
-        free(inner);
-        vm->error = msg;
-    } else {
-        vm->error = inner;
-    }
+    /* Uncaught — store raw error (line info provided separately via stack trace) */
+    vm->error = inner;
     return REGVM_RUNTIME_ERROR;
 }
 
@@ -792,8 +764,8 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
 /* Returns true if handled, false if not a builtin */
 
 static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
-                                LatValue *args, int arg_count, LatValue *result) {
-    (void)vm;
+                                LatValue *args, int arg_count, LatValue *result,
+                                const char *var_name) {
     uint32_t mhash = method_hash(method);
     if (obj->type == VAL_ARRAY) {
         if (((mhash == MHASH_len && strcmp(method, "len") == 0) || (mhash == MHASH_length && strcmp(method, "length") == 0)) && arg_count == 0) {
@@ -802,7 +774,10 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         }
         if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
             if (value_is_crystal(obj)) {
-                vm->error = strdup("cannot push to a crystal array");
+                if (var_name)
+                    (void)asprintf(&vm->error, "cannot push to crystal array '%s' (use thaw(%s) to make it mutable)", var_name, var_name);
+                else
+                    vm->error = strdup("cannot push to a crystal array");
                 *result = value_unit();
                 return true;
             }
@@ -850,7 +825,10 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         }
         if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
             if (value_is_crystal(obj)) {
-                vm->error = strdup("cannot pop from a crystal array");
+                if (var_name)
+                    (void)asprintf(&vm->error, "cannot pop from crystal array '%s' (use thaw(%s) to make it mutable)", var_name, var_name);
+                else
+                    vm->error = strdup("cannot pop from a crystal array");
                 *result = value_unit();
                 return true;
             }
@@ -1232,6 +1210,38 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (mhash == MHASH_insert && strcmp(method, "insert") == 0 && arg_count == 2) {
+            if (value_is_crystal(obj)) {
+                vm->error = strdup("cannot insert into a crystal array");
+                *result = value_unit();
+                return true;
+            }
+            if (obj->phase == VTAG_SUBLIMATED) {
+                vm->error = strdup("cannot insert into a sublimated array");
+                *result = value_unit();
+                return true;
+            }
+            /* Check pressure constraints */
+            if (vm->rt && vm->rt->pressure_count > 0) {
+                RegCallFrame *cf = &vm->frames[vm->frame_count - 1];
+                if (cf->chunk && cf->chunk->local_names) {
+                    for (size_t r = 0; r < cf->chunk->local_name_cap; r++) {
+                        if (&cf->regs[r] == obj && cf->chunk->local_names[r] && cf->chunk->local_names[r][0]) {
+                            for (size_t pi = 0; pi < vm->rt->pressure_count; pi++) {
+                                if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
+                                    const char *mode = vm->rt->pressures[pi].mode;
+                                    if (strcmp(mode, "no_grow") == 0 || strcmp(mode, "no_resize") == 0) {
+                                        (void)asprintf(&vm->error, "pressurized (%s): cannot insert into '%s'",
+                                                       mode, cf->chunk->local_names[r]);
+                                        *result = value_unit();
+                                        return true;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             if (args[0].type != VAL_INT) { *result = value_unit(); return true; }
             int64_t idx = args[0].as.int_val;
             if (idx < 0) idx += (int64_t)obj->as.array.len;
@@ -1249,6 +1259,38 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             return true;
         }
         if (mhash == MHASH_remove_at && strcmp(method, "remove_at") == 0 && arg_count == 1) {
+            if (value_is_crystal(obj)) {
+                vm->error = strdup("cannot remove from a crystal array");
+                *result = value_unit();
+                return true;
+            }
+            if (obj->phase == VTAG_SUBLIMATED) {
+                vm->error = strdup("cannot remove from a sublimated array");
+                *result = value_unit();
+                return true;
+            }
+            /* Check pressure constraints */
+            if (vm->rt && vm->rt->pressure_count > 0) {
+                RegCallFrame *cf = &vm->frames[vm->frame_count - 1];
+                if (cf->chunk && cf->chunk->local_names) {
+                    for (size_t r = 0; r < cf->chunk->local_name_cap; r++) {
+                        if (&cf->regs[r] == obj && cf->chunk->local_names[r] && cf->chunk->local_names[r][0]) {
+                            for (size_t pi = 0; pi < vm->rt->pressure_count; pi++) {
+                                if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
+                                    const char *mode = vm->rt->pressures[pi].mode;
+                                    if (strcmp(mode, "no_shrink") == 0 || strcmp(mode, "no_resize") == 0) {
+                                        (void)asprintf(&vm->error, "pressurized (%s): cannot remove from '%s'",
+                                                       mode, cf->chunk->local_names[r]);
+                                        *result = value_unit();
+                                        return true;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             if (args[0].type != VAL_INT) { *result = value_nil(); return true; }
             int64_t idx = args[0].as.int_val;
             if (idx < 0) idx += (int64_t)obj->as.array.len;
@@ -2884,10 +2926,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         const char *field_name = frame->chunk->constants[b].as.str_val;
 
         /* Phase checks */
-        if (R[a].phase == VTAG_CRYSTAL) {
+        if (R[a].phase == VTAG_CRYSTAL || R[a].phase == VTAG_SUBLIMATED) {
             /* Check per-field phases for structs with partial freeze (freeze except) */
             bool blocked = true;
-            if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases) {
+            if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases &&
+                R[a].phase == VTAG_CRYSTAL) {
                 for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
                     if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
                         if (R[a].as.strct.field_phases[i] != VTAG_CRYSTAL) blocked = false;
@@ -2895,8 +2938,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     }
                 }
             }
-            if (blocked)
-                RVM_ERROR("cannot set field '%s' on a frozen value", field_name);
+            if (blocked) {
+                const char *phase_name = R[a].phase == VTAG_CRYSTAL ? "frozen" : "sublimated";
+                RVM_ERROR("cannot set field '%s' on a %s value", field_name, phase_name);
+            }
         }
         /* Also check per-field phases (alloy types) even on non-frozen structs */
         if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases &&
@@ -3043,8 +3088,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (blocked)
                 RVM_ERROR("cannot modify a frozen value");
         }
-        if (R[a].phase == VTAG_SUBLIMATED && R[a].type == VAL_MAP)
-            RVM_ERROR("cannot add keys to a sublimated map");
+        if (R[a].phase == VTAG_SUBLIMATED)
+            RVM_ERROR("cannot modify a sublimated value");
         /* Per-key phase check for non-frozen maps */
         if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
             PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
@@ -3623,7 +3668,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Try builtin */
         LatValue invoke_result;
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
-        if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result)) {
+        if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL)) {
             if (vm->error)
                 return REGVM_RUNTIME_ERROR;
             /* Object was mutated in-place at R[obj_reg]; result goes to R[dst] */
@@ -5055,6 +5100,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             sel_arms[i].binding_idx = REG_GET_A(d2);
         }
 
+#ifdef __EMSCRIPTEN__
+        reg_set(&R[dst_reg], value_nil());
+        DISPATCH();
+#else
         /* Export locals to env for sub-chunk visibility */
         env_push_scope(vm->env);
         for (int fi2 = 0; fi2 < vm->frame_count; fi2++) {
@@ -5067,10 +5116,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
-        /* Find default arm */
+        /* Find default and timeout arms */
         int default_arm = -1;
+        int timeout_arm = -1;
         for (uint8_t i = 0; i < arm_count; i++) {
-            if (sel_arms[i].flags & 0x01) { default_arm = (int)i; break; }
+            if (sel_arms[i].flags & 0x01) default_arm = (int)i;
+            if (sel_arms[i].flags & 0x02) timeout_arm = (int)i;
         }
 
         /* Evaluate channel expressions */
@@ -5095,62 +5146,202 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             value_free(&ch_val);
         }
 
-        /* Try non-blocking recv on each channel arm */
+        /* Evaluate timeout if present */
+        long timeout_ms = -1;
+        if (timeout_arm >= 0) {
+            RegChunk *to_chunk = (RegChunk *)frame->chunk->constants[sel_arms[timeout_arm].chan_idx].as.closure.native_fn;
+            LatValue to_val;
+            RegVMResult tr = regvm_run_sub(vm, to_chunk, &to_val);
+            frame = &vm->frames[vm->frame_count - 1];
+            R = frame->regs;
+            if (tr != REGVM_OK || to_val.type != VAL_INT) {
+                value_free(&to_val);
+                for (uint8_t i = 0; i < arm_count; i++)
+                    if (channels[i]) channel_release(channels[i]);
+                free(channels);
+                env_pop_scope(vm->env);
+                RVM_ERROR("select timeout must be an integer (milliseconds)");
+            }
+            timeout_ms = (long)to_val.as.int_val;
+            value_free(&to_val);
+        }
+
+        /* Build shuffled index array for fairness */
+        size_t ch_arm_count = 0;
+        size_t *sel_indices = malloc(arm_count * sizeof(size_t));
+        for (uint8_t i = 0; i < arm_count; i++) {
+            if (!(sel_arms[i].flags & 0x03))
+                sel_indices[ch_arm_count++] = i;
+        }
+        for (size_t si = ch_arm_count; si > 1; si--) {
+            size_t sj = (size_t)rand() % si;
+            size_t tmp = sel_indices[si-1];
+            sel_indices[si-1] = sel_indices[sj];
+            sel_indices[sj] = tmp;
+        }
+
+        /* Set up waiter for blocking */
+        pthread_mutex_t sel_mutex = PTHREAD_MUTEX_INITIALIZER;
+        pthread_cond_t  sel_cond  = PTHREAD_COND_INITIALIZER;
+        LatSelectWaiter sel_waiter = {
+            .mutex = &sel_mutex,
+            .cond  = &sel_cond,
+            .next  = NULL,
+        };
+
         LatValue select_result = value_unit();
         bool select_found = false;
-        for (uint8_t i = 0; i < arm_count; i++) {
-            if (sel_arms[i].flags & 0x03) continue;
-            LatValue recv_val;
-            bool closed = false;
-            if (channel_try_recv(channels[i], &recv_val, &closed)) {
-                /* Got a value — bind in env, run body */
-                env_push_scope(vm->env);
-                if (sel_arms[i].flags & 0x04) {
-                    const char *binding = frame->chunk->constants[sel_arms[i].binding_idx].as.str_val;
-                    if (binding)
-                        env_define(vm->env, binding, recv_val);
-                    else
+        bool select_error = false;
+
+        /* Compute deadline for timeout */
+        struct timespec sel_deadline;
+        if (timeout_ms >= 0) {
+            clock_gettime(CLOCK_REALTIME, &sel_deadline);
+            sel_deadline.tv_sec  += timeout_ms / 1000;
+            sel_deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+            if (sel_deadline.tv_nsec >= 1000000000L) {
+                sel_deadline.tv_sec++;
+                sel_deadline.tv_nsec -= 1000000000L;
+            }
+        }
+
+        for (;;) {
+            /* Try non-blocking recv on each channel arm (shuffled order) */
+            bool all_closed = true;
+            for (size_t sk = 0; sk < ch_arm_count; sk++) {
+                size_t si2 = sel_indices[sk];
+                LatChannel *ch = channels[si2];
+                LatValue recv_val;
+                bool closed = false;
+                if (channel_try_recv(ch, &recv_val, &closed)) {
+                    /* Got a value — bind in env, run body */
+                    env_push_scope(vm->env);
+                    if (sel_arms[si2].flags & 0x04) {
+                        const char *binding = frame->chunk->constants[sel_arms[si2].binding_idx].as.str_val;
+                        if (binding)
+                            env_define(vm->env, binding, recv_val);
+                        else
+                            value_free(&recv_val);
+                    } else {
                         value_free(&recv_val);
-                } else {
-                    value_free(&recv_val);
+                    }
+                    RegChunk *body_chunk = (RegChunk *)frame->chunk->constants[sel_arms[si2].body_idx].as.closure.native_fn;
+                    LatValue arm_result;
+                    RegVMResult ar = regvm_run_sub(vm, body_chunk, &arm_result);
+                    frame = &vm->frames[vm->frame_count - 1];
+                    R = frame->regs;
+                    env_pop_scope(vm->env);
+                    if (ar == REGVM_OK) {
+                        value_free(&select_result);
+                        select_result = arm_result;
+                    } else {
+                        select_error = true;
+                    }
+                    select_found = true;
+                    break;
                 }
-                RegChunk *body_chunk = (RegChunk *)frame->chunk->constants[sel_arms[i].body_idx].as.closure.native_fn;
-                LatValue arm_result;
-                RegVMResult ar = regvm_run_sub(vm, body_chunk, &arm_result);
+                if (!closed) all_closed = false;
+            }
+            if (select_found || select_error) break;
+
+            if (all_closed && ch_arm_count > 0) {
+                /* All channels closed — execute default if present */
+                if (default_arm >= 0) {
+                    env_push_scope(vm->env);
+                    RegChunk *def_chunk = (RegChunk *)frame->chunk->constants[sel_arms[default_arm].body_idx].as.closure.native_fn;
+                    LatValue def_result;
+                    RegVMResult dr = regvm_run_sub(vm, def_chunk, &def_result);
+                    if (dr == REGVM_OK) {
+                        value_free(&select_result);
+                        select_result = def_result;
+                    } else {
+                        select_error = true;
+                    }
+                    frame = &vm->frames[vm->frame_count - 1];
+                    R = frame->regs;
+                    env_pop_scope(vm->env);
+                }
+                break;
+            }
+
+            /* If there's a default arm, execute it immediately */
+            if (default_arm >= 0) {
+                env_push_scope(vm->env);
+                RegChunk *def_chunk = (RegChunk *)frame->chunk->constants[sel_arms[default_arm].body_idx].as.closure.native_fn;
+                LatValue def_result;
+                RegVMResult dr = regvm_run_sub(vm, def_chunk, &def_result);
+                if (dr == REGVM_OK) {
+                    value_free(&select_result);
+                    select_result = def_result;
+                } else {
+                    select_error = true;
+                }
                 frame = &vm->frames[vm->frame_count - 1];
                 R = frame->regs;
                 env_pop_scope(vm->env);
-                if (ar == REGVM_OK) {
-                    value_free(&select_result);
-                    select_result = arm_result;
-                }
-                select_found = true;
                 break;
             }
-            (void)closed;
-        }
 
-        /* If no channel was ready, execute default arm if present */
-        if (!select_found && default_arm >= 0) {
-            env_push_scope(vm->env);
-            RegChunk *def_chunk = (RegChunk *)frame->chunk->constants[sel_arms[default_arm].body_idx].as.closure.native_fn;
-            LatValue def_result;
-            RegVMResult dr = regvm_run_sub(vm, def_chunk, &def_result);
-            frame = &vm->frames[vm->frame_count - 1];
-            R = frame->regs;
-            env_pop_scope(vm->env);
-            if (dr == REGVM_OK) {
-                value_free(&select_result);
-                select_result = def_result;
+            /* Block: register waiter on all channels, then wait */
+            for (size_t sk = 0; sk < ch_arm_count; sk++)
+                channel_add_waiter(channels[sel_indices[sk]], &sel_waiter);
+
+            pthread_mutex_lock(&sel_mutex);
+            if (timeout_ms >= 0) {
+                int rc = pthread_cond_timedwait(&sel_cond, &sel_mutex, &sel_deadline);
+                if (rc != 0) {
+                    /* Timeout expired */
+                    pthread_mutex_unlock(&sel_mutex);
+                    for (size_t sk = 0; sk < ch_arm_count; sk++)
+                        channel_remove_waiter(channels[sel_indices[sk]], &sel_waiter);
+                    if (timeout_arm >= 0) {
+                        env_push_scope(vm->env);
+                        RegChunk *to_body = (RegChunk *)frame->chunk->constants[sel_arms[timeout_arm].body_idx].as.closure.native_fn;
+                        LatValue to_result;
+                        RegVMResult tor = regvm_run_sub(vm, to_body, &to_result);
+                        if (tor == REGVM_OK) {
+                            value_free(&select_result);
+                            select_result = to_result;
+                        } else {
+                            select_error = true;
+                        }
+                        frame = &vm->frames[vm->frame_count - 1];
+                        R = frame->regs;
+                        env_pop_scope(vm->env);
+                    }
+                    break;
+                }
+            } else {
+                pthread_cond_wait(&sel_cond, &sel_mutex);
             }
+            pthread_mutex_unlock(&sel_mutex);
+
+            /* Remove waiters and retry */
+            for (size_t sk = 0; sk < ch_arm_count; sk++)
+                channel_remove_waiter(channels[sel_indices[sk]], &sel_waiter);
         }
 
+        pthread_mutex_destroy(&sel_mutex);
+        pthread_cond_destroy(&sel_cond);
+        free(sel_indices);
         for (uint8_t i = 0; i < arm_count; i++)
             if (channels[i]) channel_release(channels[i]);
         free(channels);
         env_pop_scope(vm->env);
 
+        if (select_error) {
+            value_free(&select_result);
+            char *err_msg = vm->error ? strdup(vm->error) : strdup("select error");
+            free(vm->error);
+            vm->error = NULL;
+            RegVMResult serr = rvm_handle_error(vm, &frame, &R, "%s", err_msg);
+            free(err_msg);
+            if (serr != REGVM_OK) return serr;
+            DISPATCH();
+        }
+
         reg_set(&R[dst_reg], select_result);
+#endif /* __EMSCRIPTEN__ */
         DISPATCH();
     }
 
@@ -5224,8 +5415,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (blocked)
                 RVM_ERROR("cannot modify a frozen value");
         }
-        if (R[a].phase == VTAG_SUBLIMATED && R[a].type == VAL_MAP)
-            RVM_ERROR("cannot add keys to a sublimated map");
+        if (R[a].phase == VTAG_SUBLIMATED)
+            RVM_ERROR("cannot modify a sublimated value");
         if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
             PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
             if (kp && *kp == VTAG_CRYSTAL)
@@ -5313,7 +5504,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         {
         LatValue invoke_result;
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
-        if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result)) {
+        if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, global_name)) {
             if (vm->error)
                 return REGVM_RUNTIME_ERROR;
             /* Cache builtin hit */
@@ -5464,7 +5655,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             LatValue obj_copy = rvm_clone(obj_ref);
             LatValue fb_result;
             LatValue *fb_args = (argc > 0) ? &R[args_base] : NULL;
-            if (rvm_invoke_builtin(vm, &obj_copy, method_name, fb_args, argc, &fb_result)) {
+            if (rvm_invoke_builtin(vm, &obj_copy, method_name, fb_args, argc, &fb_result, global_name)) {
                 /* Write back the mutated copy to the global */
                 value_free(obj_ref);
                 *obj_ref = obj_copy;
@@ -5503,9 +5694,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Try builtin — mutates R[loc_reg] in-place */
         {
+        const char *local_var_name = (frame->chunk->local_names && loc_reg < frame->chunk->local_name_cap)
+            ? frame->chunk->local_names[loc_reg] : NULL;
         LatValue invoke_result;
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
-        if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result)) {
+        if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result, local_var_name)) {
             if (vm->error)
                 return REGVM_RUNTIME_ERROR;
             /* Cache builtin hit */
