@@ -3010,8 +3010,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
                 if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
-                    (ref->as.closure.default_values == VM_NATIVE_MARKER ||
-                     ref->as.closure.default_values == VM_EXT_MARKER)) {
+                    ref->as.closure.default_values == VM_NATIVE_MARKER) {
+                    /* VM natives have no owned allocations — safe to borrow. */
                     push(vm, *ref);
                 } else {
                     push(vm, value_clone_fast(ref));
@@ -3034,8 +3034,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
                 if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
-                    (ref->as.closure.default_values == VM_NATIVE_MARKER ||
-                     ref->as.closure.default_values == VM_EXT_MARKER)) {
+                    ref->as.closure.default_values == VM_NATIVE_MARKER) {
+                    /* VM natives have no owned allocations — safe to borrow. */
                     push(vm, *ref);
                 } else {
                     push(vm, value_clone_fast(ref));

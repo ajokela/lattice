@@ -508,12 +508,13 @@ static void compile_expr(const Expr *e, int line) {
                     compile_stmt_reset(e->as.if_expr.then_stmts[i]);
                 /* Compile last expression WITHOUT pop — value stays on stack */
                 compile_expr(e->as.if_expr.then_stmts[e->as.if_expr.then_count - 1]->as.expr, line);
+                end_scope_preserve_tos(line);
             } else {
                 for (size_t i = 0; i < e->as.if_expr.then_count; i++)
                     compile_stmt_reset(e->as.if_expr.then_stmts[i]);
                 emit_byte(OP_UNIT, line);
+                end_scope_preserve_tos(line);
             }
-            end_scope(line);
 
             size_t else_jump = emit_jump(OP_JUMP, line);
             patch_jump(then_jump);
@@ -527,12 +528,13 @@ static void compile_expr(const Expr *e, int line) {
                     for (size_t i = 0; i + 1 < e->as.if_expr.else_count; i++)
                         compile_stmt_reset(e->as.if_expr.else_stmts[i]);
                     compile_expr(e->as.if_expr.else_stmts[e->as.if_expr.else_count - 1]->as.expr, line);
+                    end_scope_preserve_tos(line);
                 } else {
                     for (size_t i = 0; i < e->as.if_expr.else_count; i++)
                         compile_stmt_reset(e->as.if_expr.else_stmts[i]);
                     emit_byte(OP_UNIT, line);
+                    end_scope_preserve_tos(line);
                 }
-                end_scope(line);
             } else {
                 emit_byte(OP_NIL, line);
             }
