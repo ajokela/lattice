@@ -2363,6 +2363,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_INVOKE_LOCAL] = &&L_INVOKE_LOCAL,
         /* Phase query */
         [ROP_IS_CRYSTAL]   = &&L_IS_CRYSTAL,
+        [ROP_IS_FLUID]     = &&L_IS_FLUID,
         /* Type checking */
         [ROP_CHECK_TYPE]   = &&L_CHECK_TYPE,
         [ROP_FREEZE_FIELD] = &&L_FREEZE_FIELD,
@@ -5893,6 +5894,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         reg_set(&R[a], value_bool(R[b].phase == VTAG_CRYSTAL));
+        DISPATCH();
+    }
+
+    CASE(IS_FLUID) {
+        uint8_t a = REG_GET_A(instr);
+        uint8_t b = REG_GET_B(instr);
+        reg_set(&R[a], value_bool(R[b].phase == VTAG_FLUID));
         DISPATCH();
     }
 

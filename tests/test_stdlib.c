@@ -1443,7 +1443,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.22"
+        "0.3.23"
     );
 }
 
@@ -5868,7 +5868,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.22"
+        "Hello, Lattice!\nVersion 0.3.23"
     );
 }
 
@@ -9076,6 +9076,123 @@ static void test_crystallize_nested(void) {
         "    print(phase_of(a))\n"
         "}\n",
         "crystal\ncrystal\nfluid\nfluid"
+    );
+}
+
+/* ── Phase borrowing (borrow) ── */
+
+static void test_borrow_basic(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let data = freeze([1, 2, 3])\n"
+        "    borrow(data) {\n"
+        "        data.push(4)\n"
+        "        print(phase_of(data))\n"
+        "    }\n"
+        "    print(phase_of(data))\n"
+        "    print(data.len())\n"
+        "}\n",
+        "fluid\ncrystal\n4"
+    );
+}
+
+static void test_borrow_already_fluid(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    borrow(data) {\n"
+        "        data.push(4)\n"
+        "        print(phase_of(data))\n"
+        "    }\n"
+        "    print(phase_of(data))\n"
+        "    print(data.len())\n"
+        "}\n",
+        "fluid\nfluid\n4"
+    );
+}
+
+static void test_borrow_nested(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    fix a = freeze([1])\n"
+        "    fix b = freeze([2])\n"
+        "    borrow(a) {\n"
+        "        borrow(b) {\n"
+        "            print(phase_of(a))\n"
+        "            print(phase_of(b))\n"
+        "        }\n"
+        "        print(phase_of(b))\n"
+        "    }\n"
+        "    print(phase_of(a))\n"
+        "}\n",
+        "fluid\nfluid\ncrystal\ncrystal"
+    );
+}
+
+static void test_borrow_mutation_persists(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let data = freeze([1, 2, 3])\n"
+        "    borrow(data) {\n"
+        "        data.push(4)\n"
+        "        data.push(5)\n"
+        "    }\n"
+        "    print(data.len())\n"
+        "    print(phase_of(data))\n"
+        "}\n",
+        "5\ncrystal"
+    );
+}
+
+/* ── @fluid/@crystal annotations ── */
+
+static void test_annotation_crystal_binding(void) {
+    ASSERT_OUTPUT(
+        "@crystal\n"
+        "fix config = freeze([1, 2, 3])\n"
+        "fn main() {\n"
+        "    print(phase_of(config))\n"
+        "}\n",
+        "crystal"
+    );
+}
+
+static void test_annotation_fluid_fn(void) {
+    ASSERT_OUTPUT(
+        "@fluid\n"
+        "fn process(data: any) {\n"
+        "    print(data)\n"
+        "}\n"
+        "fn main() {\n"
+        "    process(42)\n"
+        "}\n",
+        "42"
+    );
+}
+
+static void test_annotation_parse_error(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "@invalid\n"
+        "let x = 1\n"
+        "fn main() {}\n",
+        "PARSE_ERROR:"
+    );
+}
+
+/* ── Composite phase constraints ── */
+
+static void test_composite_fluid_or_crystal(void) {
+    ASSERT_OUTPUT(
+        "fn process(data: (~|*) any) {\n"
+        "    print(phase_of(data))\n"
+        "}\n"
+        "fn main() {\n"
+        "    flux a = [1, 2, 3]\n"
+        "    fix b = freeze([4, 5, 6])\n"
+        "    process(a)\n"
+        "    process(b)\n"
+        "}\n",
+        "fluid\ncrystal"
     );
 }
 
@@ -15392,5 +15509,18 @@ void register_stdlib_tests(void) {
     register_test("test_err_keyword_suggestion", test_err_keyword_suggestion);
     register_test("test_err_keyword_no_suggestion", test_err_keyword_no_suggestion);
     register_test("test_err_type_suggestion_bool", test_err_type_suggestion_bool);
+
+    /* LAT-20: Phase system extensions */
+    /* Feature 1: borrow */
+    register_test("test_borrow_basic", test_borrow_basic);
+    register_test("test_borrow_already_fluid", test_borrow_already_fluid);
+    register_test("test_borrow_nested", test_borrow_nested);
+    register_test("test_borrow_mutation_persists", test_borrow_mutation_persists);
+    /* Feature 2: @fluid/@crystal annotations */
+    register_test("test_annotation_crystal_binding", test_annotation_crystal_binding);
+    register_test("test_annotation_fluid_fn", test_annotation_fluid_fn);
+    register_test("test_annotation_parse_error", test_annotation_parse_error);
+    /* Feature 3: composite phase constraints */
+    register_test("test_composite_fluid_or_crystal", test_composite_fluid_or_crystal);
 
 }

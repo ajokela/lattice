@@ -2529,6 +2529,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_CHECK_TYPE] = &&lbl_OP_CHECK_TYPE,
         [OP_CHECK_RETURN_TYPE] = &&lbl_OP_CHECK_RETURN_TYPE,
         [OP_IS_CRYSTAL] = &&lbl_OP_IS_CRYSTAL,
+        [OP_IS_FLUID] = &&lbl_OP_IS_FLUID,
         [OP_FREEZE_EXCEPT] = &&lbl_OP_FREEZE_EXCEPT,
         [OP_FREEZE_FIELD] = &&lbl_OP_FREEZE_FIELD,
         [OP_HALT] = &&lbl_OP_HALT,
@@ -5774,6 +5775,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 bool is_crystal = (val.phase == VTAG_CRYSTAL);
                 value_free(&val);
                 push(vm, value_bool(is_crystal));
+                break;
+            }
+
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_IS_FLUID:
+#endif
+            case OP_IS_FLUID: {
+                LatValue val = pop(vm);
+                bool is_fluid = (val.phase == VTAG_FLUID);
+                value_free(&val);
+                push(vm, value_bool(is_fluid));
                 break;
             }
 

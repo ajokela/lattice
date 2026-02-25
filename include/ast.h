@@ -8,6 +8,13 @@
 /* Phase annotation */
 typedef enum { PHASE_FLUID, PHASE_CRYSTAL, PHASE_UNSPECIFIED } AstPhase;
 
+/* Composite phase constraint bitmask */
+typedef uint8_t PhaseConstraint;
+#define PCON_FLUID      0x01
+#define PCON_CRYSTAL    0x02
+#define PCON_SUBLIMATED 0x04
+#define PCON_ANY        0x07
+
 /* Execution mode */
 typedef enum { MODE_CASUAL, MODE_STRICT } AstMode;
 
@@ -30,6 +37,7 @@ typedef enum { TYPE_NAMED, TYPE_ARRAY } TypeKindTag;
 typedef struct TypeExpr TypeExpr;
 struct TypeExpr {
     AstPhase phase;
+    PhaseConstraint constraint; /* composite constraint bitmask (0 = none) */
     TypeKindTag kind;
     char *name;              /* TYPE_NAMED: type name */
     TypeExpr *inner;         /* TYPE_ARRAY: element type */
@@ -86,6 +94,7 @@ typedef enum {
     EXPR_SPREAD,
     EXPR_TUPLE,
     EXPR_CRYSTALLIZE,
+    EXPR_BORROW,
     EXPR_SUBLIMATE,
     EXPR_TRY_PROPAGATE,
     EXPR_SELECT,
@@ -137,6 +146,7 @@ struct Expr {
         Expr *spread_expr;   /* SPREAD: inner expr to expand */
         struct { Expr **elems; size_t count; } tuple;  /* TUPLE */
         struct { Expr *expr; Stmt **body; size_t body_count; } crystallize;  /* CRYSTALLIZE */
+        struct { Expr *expr; Stmt **body; size_t body_count; } borrow;      /* BORROW */
         struct { Stmt **stmts; size_t count; } block;  /* FORGE, BLOCK, SPAWN */
         struct {
             Expr *cond;
@@ -197,6 +207,7 @@ struct Stmt {
     union {
         struct {
             AstPhase phase;
+            AstPhase phase_annotation; /* @fluid/@crystal annotation (PHASE_UNSPECIFIED = none) */
             char *name;
             TypeExpr *ty;    /* nullable */
             Expr *value;
@@ -263,6 +274,7 @@ struct FnDecl {
     Stmt   **body;
     size_t   body_count;
     FnDecl  *next_overload; /* phase-dispatch chain, NULL if none */
+    AstPhase phase_annotation; /* @fluid/@crystal annotation (PHASE_UNSPECIFIED = none) */
 };
 
 /* Struct field declaration */
@@ -390,6 +402,7 @@ Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t
 Expr *expr_spread(Expr *inner);
 Expr *expr_tuple(Expr **elems, size_t count);
 Expr *expr_crystallize(Expr *expr, Stmt **body, size_t body_count);
+Expr *expr_borrow(Expr *expr, Stmt **body, size_t body_count);
 Expr *expr_sublimate(Expr *inner);
 Expr *expr_try_propagate(Expr *inner);
 Expr *expr_select(SelectArm *arms, size_t arm_count);

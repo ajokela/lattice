@@ -118,6 +118,7 @@ static TokenType keyword_lookup(const char *ident) {
     if (strcmp(ident, "from") == 0)     return TOK_FROM;
     if (strcmp(ident, "as") == 0)       return TOK_AS;
     if (strcmp(ident, "crystallize") == 0) return TOK_CRYSTALLIZE;
+    if (strcmp(ident, "borrow") == 0)    return TOK_BORROW;
     if (strcmp(ident, "sublimate") == 0) return TOK_SUBLIMATE;
     if (strcmp(ident, "defer") == 0) return TOK_DEFER;
     if (strcmp(ident, "trait") == 0) return TOK_TRAIT;
@@ -224,6 +225,7 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         case ']': *out = token_simple(TOK_RBRACKET, line, col); return true;
         case ',': *out = token_simple(TOK_COMMA, line, col); return true;
         case ';': *out = token_simple(TOK_SEMICOLON, line, col); return true;
+        case '@': *out = token_simple(TOK_AT, line, col); return true;
         case '/':
             if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_SLASH_EQ, line, col); }
             else { *out = token_simple(TOK_SLASH, line, col); }

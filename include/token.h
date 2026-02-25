@@ -19,6 +19,7 @@ typedef enum {
     TOK_FROM,
     TOK_AS,
     TOK_CRYSTALLIZE,
+    TOK_BORROW,
     TOK_SUBLIMATE,
     TOK_DEFER,
     TOK_SELECT,
@@ -85,6 +86,7 @@ typedef enum {
 
     /* Punctuation */
     TOK_COMMA, TOK_COLON, TOK_COLONCOLON, TOK_SEMICOLON,
+    TOK_AT,        /* @ */
 
     /* String interpolation */
     TOK_INTERP_START,  /* first segment of interpolated string */

@@ -1576,6 +1576,61 @@ static void compile_expr(const Expr *e, int line) {
             break;
         }
 
+        case EXPR_BORROW: {
+            /* borrow(target) { body } — thaw target, run body, freeze target
+             * If already fluid, just run body without freeze afterward. */
+            if (e->as.borrow.expr->tag == EXPR_IDENT) {
+                const char *name = e->as.borrow.expr->as.str_val;
+                size_t name_idx = chunk_add_constant(current_chunk(), value_string(name));
+                int loc_type = 2; uint8_t slot = 0;
+                int local_slot = resolve_local(current, name);
+                if (local_slot != -1) { loc_type = 0; slot = (uint8_t)local_slot; }
+                else {
+                    int up_idx = resolve_upvalue(current, name);
+                    if (up_idx != -1) { loc_type = 1; slot = (uint8_t)up_idx; }
+                }
+                /* Check if already fluid — save result as a local */
+                begin_scope();
+                compile_expr(e->as.borrow.expr, line); /* push current value */
+                emit_byte(OP_IS_FLUID, line);           /* replace with bool */
+                add_local(""); /* track the was_fluid flag */
+                int flag_slot = current->local_count - 1;
+                /* Thaw the variable */
+                compile_expr(e->as.borrow.expr, line);
+                emit_byte(OP_THAW_VAR, line);
+                emit_byte((uint8_t)name_idx, line);
+                emit_byte((uint8_t)loc_type, line);
+                emit_byte(slot, line);
+                emit_byte(OP_POP, line); /* discard thaw result */
+                /* Execute body */
+                for (size_t i = 0; i < e->as.borrow.body_count; i++)
+                    compile_stmt(e->as.borrow.body[i]);
+                /* Conditional freeze: only if was NOT already fluid */
+                emit_bytes(OP_GET_LOCAL, (uint8_t)flag_slot, line); /* push was_fluid */
+                size_t skip_freeze = emit_jump(OP_JUMP_IF_FALSE, line);
+                /* was_fluid=true → skip freeze */
+                emit_byte(OP_POP, line);  /* pop true */
+                size_t past_freeze = emit_jump(OP_JUMP, line);
+                /* was_fluid=false → do freeze */
+                patch_jump(skip_freeze);
+                emit_byte(OP_POP, line);  /* pop false */
+                compile_expr(e->as.borrow.expr, line);
+                emit_byte(OP_FREEZE_VAR, line);
+                emit_byte((uint8_t)name_idx, line);
+                emit_byte((uint8_t)loc_type, line);
+                emit_byte(slot, line);
+                emit_byte(OP_POP, line); /* discard freeze result */
+                patch_jump(past_freeze);
+                end_scope(line); /* clean up was_fluid flag */
+                emit_byte(OP_UNIT, line);
+            } else {
+                /* Fallback: just thaw the expression */
+                compile_expr(e->as.borrow.expr, line);
+                emit_byte(OP_THAW, line);
+            }
+            break;
+        }
+
         case EXPR_SUBLIMATE: {
             compile_expr(e->as.freeze_expr, line);
             if (e->as.freeze_expr->tag == EXPR_IDENT) {

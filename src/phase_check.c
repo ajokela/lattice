@@ -70,6 +70,17 @@ static void pc_error(PhaseChecker *pc, const char *fmt, ...) {
     lat_vec_push(&pc->errors, &msg);
 }
 
+/* Check if a phase constraint bitmask accepts a given phase */
+static bool constraint_accepts(PhaseConstraint con, AstPhase phase) {
+    if (con == 0) return true; /* no constraint */
+    switch (phase) {
+        case PHASE_FLUID:       return (con & PCON_FLUID) != 0;
+        case PHASE_CRYSTAL:     return (con & PCON_CRYSTAL) != 0;
+        case PHASE_UNSPECIFIED: return true; /* unspecified = any */
+    }
+    return true;
+}
+
 /* Forward declarations */
 static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr);
 static void pc_check_stmt(PhaseChecker *pc, const Stmt *stmt);
@@ -115,8 +126,14 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
                             if (cand->params[i].is_variadic) break;
                             AstPhase pp = cand->params[i].ty.phase;
                             AstPhase ap = arg_phases[i];
-                            if (pp == PHASE_FLUID && ap == PHASE_CRYSTAL) { match = false; break; }
-                            if (pp == PHASE_CRYSTAL && ap == PHASE_FLUID) { match = false; break; }
+                            PhaseConstraint con = cand->params[i].ty.constraint;
+                            if (con != 0) {
+                                /* Composite constraint: check bitmask */
+                                if (!constraint_accepts(con, ap)) { match = false; break; }
+                            } else {
+                                if (pp == PHASE_FLUID && ap == PHASE_CRYSTAL) { match = false; break; }
+                                if (pp == PHASE_CRYSTAL && ap == PHASE_FLUID) { match = false; break; }
+                            }
                         }
                         if (match) { any_match = true; break; }
                     }
@@ -198,6 +215,14 @@ static AstPhase pc_check_expr(PhaseChecker *pc, const Expr *expr) {
             pc_push_scope(pc);
             for (size_t i = 0; i < expr->as.crystallize.body_count; i++)
                 pc_check_stmt(pc, expr->as.crystallize.body[i]);
+            pc_pop_scope(pc);
+            return PHASE_UNSPECIFIED;
+
+        case EXPR_BORROW:
+            pc_check_expr(pc, expr->as.borrow.expr);
+            pc_push_scope(pc);
+            for (size_t i = 0; i < expr->as.borrow.body_count; i++)
+                pc_check_stmt(pc, expr->as.borrow.body[i]);
             pc_pop_scope(pc);
             return PHASE_UNSPECIFIED;
 
@@ -321,6 +346,15 @@ static void pc_check_stmt(PhaseChecker *pc, const Stmt *stmt) {
     switch (stmt->tag) {
         case STMT_BINDING: {
             AstPhase value_phase = pc_check_expr(pc, stmt->as.binding.value);
+            /* Validate @fluid/@crystal annotations */
+            if (stmt->as.binding.phase_annotation == PHASE_CRYSTAL &&
+                value_phase == PHASE_FLUID)
+                pc_error(pc, "@crystal annotation violated: initializer for '%s' is fluid",
+                         stmt->as.binding.name);
+            if (stmt->as.binding.phase_annotation == PHASE_FLUID &&
+                value_phase == PHASE_CRYSTAL)
+                pc_error(pc, "@fluid annotation violated: initializer for '%s' is crystal",
+                         stmt->as.binding.name);
             if (pc->mode == MODE_STRICT) {
                 switch (stmt->as.binding.phase) {
                     case PHASE_UNSPECIFIED:

@@ -151,6 +151,14 @@ Expr *expr_crystallize(Expr *expr, Stmt **body, size_t body_count) {
     return e;
 }
 
+Expr *expr_borrow(Expr *expr, Stmt **body, size_t body_count) {
+    Expr *e = expr_alloc(EXPR_BORROW);
+    e->as.borrow.expr = expr;
+    e->as.borrow.body = body;
+    e->as.borrow.body_count = body_count;
+    return e;
+}
+
 Expr *expr_sublimate(Expr *inner) {
     Expr *e = expr_alloc(EXPR_SUBLIMATE);
     e->as.freeze_expr = inner;
@@ -367,6 +375,7 @@ static Stmt *stmt_alloc(StmtTag tag) {
 Stmt *stmt_binding(AstPhase phase, char *name, TypeExpr *ty, Expr *value) {
     Stmt *s = stmt_alloc(STMT_BINDING);
     s->as.binding.phase = phase;
+    s->as.binding.phase_annotation = PHASE_UNSPECIFIED;
     s->as.binding.name = name;
     s->as.binding.ty = ty;
     s->as.binding.value = value;
@@ -528,6 +537,12 @@ void expr_free(Expr *e) {
             for (size_t i = 0; i < e->as.crystallize.body_count; i++)
                 stmt_free(e->as.crystallize.body[i]);
             free(e->as.crystallize.body);
+            break;
+        case EXPR_BORROW:
+            expr_free(e->as.borrow.expr);
+            for (size_t i = 0; i < e->as.borrow.body_count; i++)
+                stmt_free(e->as.borrow.body[i]);
+            free(e->as.borrow.body);
             break;
         case EXPR_ANNEAL:
             expr_free(e->as.anneal.expr);

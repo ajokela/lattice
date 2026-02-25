@@ -70,7 +70,7 @@
         },
         {
           "name": "keyword.other.phase.lattice",
-          "match": "\\b(freeze|thaw|clone|forge|bond|unbond|react|unreact|crystallize|sublimate|anneal|except)\\b"
+          "match": "\\b(freeze|thaw|clone|forge|bond|unbond|react|unreact|crystallize|borrow|sublimate|anneal|except)\\b"
         },
         {
           "name": "keyword.control.concurrency.lattice",
@@ -79,6 +79,10 @@
         {
           "name": "keyword.other.print.lattice",
           "match": "\\b(print)\\b"
+        },
+        {
+          "name": "storage.modifier.annotation.lattice",
+          "match": "@(fluid|crystal)\\b"
         }
       ]
     },

@@ -62,7 +62,8 @@ static const char *simple_names[] = {
     [TOK_CLONE] = "clone", [TOK_PRINT] = "print",
     [TOK_TRY] = "try", [TOK_CATCH] = "catch", [TOK_SCOPE] = "scope", [TOK_TEST] = "test", [TOK_MATCH] = "match", [TOK_ENUM] = "enum",
     [TOK_IMPORT] = "import", [TOK_FROM] = "from", [TOK_AS] = "as",
-    [TOK_CRYSTALLIZE] = "crystallize", [TOK_SUBLIMATE] = "sublimate",
+    [TOK_CRYSTALLIZE] = "crystallize", [TOK_BORROW] = "borrow",
+    [TOK_SUBLIMATE] = "sublimate",
     [TOK_DEFER] = "defer", [TOK_SELECT] = "select",
     [TOK_TRAIT] = "trait", [TOK_IMPL] = "impl",
     [TOK_TILDE] = "~", [TOK_STAR] = "*",
@@ -83,6 +84,7 @@ static const char *simple_names[] = {
     [TOK_LBRACKET] = "[", [TOK_RBRACKET] = "]",
     [TOK_COMMA] = ",", [TOK_COLON] = ":", [TOK_COLONCOLON] = "::",
     [TOK_SEMICOLON] = ";",
+    [TOK_AT] = "@",
     [TOK_EOF] = "EOF",
 };
 

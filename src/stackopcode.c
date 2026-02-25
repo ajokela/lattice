@@ -107,6 +107,7 @@ static const char *names[] = {
     [OP_CHECK_TYPE]    = "OP_CHECK_TYPE",
     [OP_CHECK_RETURN_TYPE] = "OP_CHECK_RETURN_TYPE",
     [OP_IS_CRYSTAL]    = "OP_IS_CRYSTAL",
+    [OP_IS_FLUID]      = "OP_IS_FLUID",
     [OP_FREEZE_EXCEPT] = "OP_FREEZE_EXCEPT",
     [OP_FREEZE_FIELD]  = "OP_FREEZE_FIELD",
     [OP_HALT]          = "OP_HALT",

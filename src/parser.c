@@ -119,7 +119,51 @@ static Stmt **parse_block_stmts(Parser *p, size_t *count, char **err) {
 
 static TypeExpr *parse_type_expr(Parser *p, char **err) {
     TypeExpr *te = calloc(1, sizeof(TypeExpr));
-    if (peek_type(p) == TOK_TILDE || peek_type(p) == TOK_FLUX) {
+
+    /* Check for composite phase constraint: (~|*) or (flux|fix) etc. */
+    if (peek_type(p) == TOK_LPAREN) {
+        /* Lookahead: if next token after '(' is a phase symbol, parse composite */
+        size_t saved = p->pos;
+        advance(p); /* consume '(' */
+        TokenType first = peek_type(p);
+        if (first == TOK_TILDE || first == TOK_STAR ||
+            first == TOK_FLUX || first == TOK_FIX ||
+            (first == TOK_IDENT && peek(p)->as.str_val &&
+             strcmp(peek(p)->as.str_val, "sublimated") == 0)) {
+            /* Parse composite constraint */
+            PhaseConstraint con = 0;
+            for (;;) {
+                TokenType pt = peek_type(p);
+                if (pt == TOK_TILDE || pt == TOK_FLUX) {
+                    con |= PCON_FLUID;
+                    advance(p);
+                } else if (pt == TOK_STAR || pt == TOK_FIX) {
+                    con |= PCON_CRYSTAL;
+                    advance(p);
+                } else if (pt == TOK_IDENT && peek(p)->as.str_val &&
+                           strcmp(peek(p)->as.str_val, "sublimated") == 0) {
+                    con |= PCON_SUBLIMATED;
+                    advance(p);
+                } else {
+                    *err = strdup("expected phase symbol (~, *, flux, fix, sublimated) in composite constraint");
+                    free(te);
+                    return NULL;
+                }
+                if (peek_type(p) == TOK_PIPE) {
+                    advance(p); /* consume '|' */
+                } else {
+                    break;
+                }
+            }
+            if (!expect(p, TOK_RPAREN, err)) { free(te); return NULL; }
+            te->constraint = con;
+            te->phase = PHASE_UNSPECIFIED;
+        } else {
+            /* Not a composite constraint, rewind */
+            p->pos = saved;
+            te->phase = PHASE_UNSPECIFIED;
+        }
+    } else if (peek_type(p) == TOK_TILDE || peek_type(p) == TOK_FLUX) {
         advance(p); te->phase = PHASE_FLUID;
     } else if (peek_type(p) == TOK_STAR || peek_type(p) == TOK_FIX) {
         advance(p); te->phase = PHASE_CRYSTAL;
@@ -687,6 +731,24 @@ static Expr *parse_primary(Parser *p, char **err) {
             return NULL;
         }
         return expr_crystallize(e, stmts, count);
+    }
+    if (tt == TOK_BORROW) {
+        advance(p);
+        if (!expect(p, TOK_LPAREN, err)) return NULL;
+        Expr *e = parse_expr(p, err);
+        if (!e) return NULL;
+        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_LBRACE, err)) { expr_free(e); return NULL; }
+        size_t count;
+        Stmt **stmts = parse_block_stmts(p, &count, err);
+        if (!stmts && *err) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RBRACE, err)) {
+            expr_free(e);
+            for (size_t i = 0; i < count; i++) stmt_free(stmts[i]);
+            free(stmts);
+            return NULL;
+        }
+        return expr_borrow(e, stmts, count);
     }
     if (tt == TOK_SUBLIMATE) {
         advance(p);
@@ -1964,12 +2026,39 @@ Program parser_parse(Parser *p, char **err) {
 
         prog.items[n].exported = is_exported;
 
+        /* Check for @fluid/@crystal annotation */
+        AstPhase item_annotation = PHASE_UNSPECIFIED;
+        if (peek_type(p) == TOK_AT) {
+            advance(p);
+            if (peek_type(p) != TOK_IDENT) {
+                *err = NULL;
+                Token *t = peek(p);
+                (void)asprintf(err, "%zu:%zu: expected 'fluid' or 'crystal' after '@'", t->line, t->col);
+                prog.item_count = n;
+                return prog;
+            }
+            const char *ann = peek(p)->as.str_val;
+            if (strcmp(ann, "fluid") == 0) {
+                item_annotation = PHASE_FLUID;
+            } else if (strcmp(ann, "crystal") == 0) {
+                item_annotation = PHASE_CRYSTAL;
+            } else {
+                *err = NULL;
+                Token *t = peek(p);
+                (void)asprintf(err, "%zu:%zu: unknown annotation '@%s' (expected @fluid or @crystal)", t->line, t->col, ann);
+                prog.item_count = n;
+                return prog;
+            }
+            advance(p);
+        }
+
         if (peek_type(p) == TOK_FN) {
             prog.items[n].tag = ITEM_FUNCTION;
             if (!parse_fn_decl(p, &prog.items[n].as.fn_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }
+            prog.items[n].as.fn_decl.phase_annotation = item_annotation;
             if (is_exported)
                 prog_add_export(&prog, prog.items[n].as.fn_decl.name);
         } else if (peek_type(p) == TOK_STRUCT) {
@@ -2021,11 +2110,25 @@ Program parser_parse(Parser *p, char **err) {
                     return prog;
                 }
             }
+            if (item_annotation != PHASE_UNSPECIFIED) {
+                TokenType next = peek_type(p);
+                if (next != TOK_LET && next != TOK_FLUX && next != TOK_FIX && next != TOK_FN) {
+                    *err = NULL;
+                    Token *t = peek(p);
+                    (void)asprintf(err, "%zu:%zu: @fluid/@crystal annotation must precede fn or variable binding",
+                                   t->line, t->col);
+                    prog.item_count = n;
+                    return prog;
+                }
+            }
             prog.items[n].tag = ITEM_STMT;
             prog.items[n].as.stmt = parse_stmt(p, err);
             if (!prog.items[n].as.stmt) {
                 prog.item_count = n;
                 return prog;
+            }
+            if (prog.items[n].as.stmt->tag == STMT_BINDING) {
+                prog.items[n].as.stmt->as.binding.phase_annotation = item_annotation;
             }
             if (is_exported && prog.items[n].as.stmt->tag == STMT_BINDING) {
                 prog_add_export(&prog, prog.items[n].as.stmt->as.binding.name);

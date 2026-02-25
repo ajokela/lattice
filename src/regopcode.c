@@ -106,6 +106,7 @@ static const char *names[] = {
     [ROP_INVOKE_LOCAL] = "INVOKE_LOCAL",
     /* Phase query */
     [ROP_IS_CRYSTAL]   = "IS_CRYSTAL",
+    [ROP_IS_FLUID]     = "IS_FLUID",
     /* Type checking */
     [ROP_CHECK_TYPE]   = "CHECK_TYPE",
     [ROP_FREEZE_FIELD] = "FREEZE_FIELD",

@@ -183,6 +183,7 @@ typedef enum {
 
     /* Phase query */
     ROP_IS_CRYSTAL,    /* A, B      : R[A] = (R[B].phase == CRYSTAL)    */
+    ROP_IS_FLUID,      /* A, B      : R[A] = (R[B].phase == FLUID)      */
 
     /* Type checking */
     ROP_CHECK_TYPE,    /* A, Bx     : throw if type_name(R[A]) != K[Bx] + err word */

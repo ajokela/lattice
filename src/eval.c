@@ -7191,6 +7191,46 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             return eval_ok(result.value);
         }
 
+        case EXPR_BORROW: {
+            /* borrow(expr) { body } — temporarily thaw, execute body, restore phase */
+            if (expr->as.borrow.expr->tag != EXPR_IDENT) {
+                return eval_err(strdup("borrow() target must be a variable name"));
+            }
+            const char *name = expr->as.borrow.expr->as.str_val;
+            LatValue val;
+            if (!env_get(ev->env, name, &val)) {
+                char *err = NULL;
+                (void)asprintf(&err, "borrow(): undefined variable '%s'", name);
+                return eval_err(err);
+            }
+            PhaseTag saved_phase = val.phase;
+            /* If already fluid, just run the body */
+            if (saved_phase != VTAG_FLUID) {
+                LatValue thawed = value_thaw(&val);
+                value_free(&val);
+                env_set(ev->env, name, thawed);
+            } else {
+                value_free(&val);
+            }
+            /* Execute body */
+            stats_scope_push(&ev->stats);
+            env_push_scope(ev->env);
+            EvalResult result = eval_block_stmts(ev, expr->as.borrow.body, expr->as.borrow.body_count);
+            env_pop_scope(ev->env);
+            stats_scope_pop(&ev->stats);
+            /* Restore original phase */
+            if (saved_phase != VTAG_FLUID) {
+                LatValue cur;
+                if (env_get(ev->env, name, &cur)) {
+                    cur = value_freeze(cur);
+                    cur.phase = saved_phase;
+                    env_set(ev->env, name, cur);
+                }
+            }
+            if (!IS_OK(result)) return result;
+            return eval_ok(result.value);
+        }
+
         case EXPR_SUBLIMATE: {
             /* sublimate(expr) — shallow freeze: top-level locked, children mutable */
             if (expr->as.freeze_expr->tag == EXPR_IDENT) {

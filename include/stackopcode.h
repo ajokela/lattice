@@ -152,6 +152,7 @@ typedef enum {
 
     /* Phase queries */
     OP_IS_CRYSTAL,     /* Pop value, push bool (true if phase == VTAG_CRYSTAL) */
+    OP_IS_FLUID,       /* Pop value, push bool (true if phase == VTAG_FLUID) */
     OP_FREEZE_EXCEPT,  /* operands: name_idx, loc_type, loc_slot, except_count. Stack: [except_name1, ...] → [frozen_value] */
     OP_FREEZE_FIELD,   /* operands: parent_name_idx, loc_type, loc_slot. Stack: [key_str] → [frozen_value] */
 

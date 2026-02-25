@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, traits with `impl` blocks, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), bytecode compilation to `.latc` files (with both C and self-hosted compiler backends), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, traits with `impl` blocks, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, phase borrowing, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), `@fluid`/`@crystal` annotations, composite phase constraints, bytecode compilation to `.latc` files (with both C and self-hosted compiler backends), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -138,6 +138,24 @@ freeze(m)
 process(m)              // "immutable path"
 ```
 
+### Composite Phase Constraints
+
+Use union syntax `(~|*)` in parameter type annotations to accept multiple phases:
+
+```lattice
+fn process(data: (~|*) Map) {
+    // accepts both fluid and crystal Maps
+    print(phase_of(data))
+}
+
+flux m = Map::new()
+process(m)             // "fluid"
+fix f = freeze(m)
+process(f)             // "crystal"
+```
+
+Phase symbols can be combined with `|`: `~` (fluid), `*` (crystal), `sublimated`. Equivalent keyword forms also work: `(flux|fix)`.
+
 ### Crystallization Contracts
 
 Attach a validation closure to `freeze()` with `where`. The contract runs before the value is frozen and rejects invalid state:
@@ -219,6 +237,23 @@ crystallize(data) {
 // data is fluid again
 data.push(4)  // works
 ```
+
+### Phase Borrowing
+
+Temporarily thaw a crystal variable for the duration of a block, then auto-restore its original phase. The inverse of `crystallize()`:
+
+```lattice
+let data = freeze([1, 2, 3])
+borrow(data) {
+    // data is fluid here — mutations allowed
+    data.push(4)
+    print(phase_of(data))  // "fluid"
+}
+// data is crystal again, with the mutation preserved
+print(data.len())  // 4
+```
+
+If the variable is already fluid, `borrow` simply runs the body without changing anything.
 
 ### Sublimation (Shallow Freeze)
 
@@ -314,6 +349,22 @@ let cfg = Config { host: "localhost", port: 8080, retries: 0 }
 cfg.retries = 5    // allowed (flux field)
 // cfg.host = "other"  — error: field is crystal
 ```
+
+### Phase Annotations
+
+Use `@fluid` or `@crystal` before a declaration to assert its phase at compile time. No runtime effect — purely a static check:
+
+```lattice
+@crystal
+fix config = freeze({ port: 8080, host: "localhost" })
+
+@fluid
+fn process(data: any) {
+    data.push(1)
+}
+```
+
+In strict mode, the phase checker validates that the initializer's phase matches the annotation. Mismatches produce a compile-time error.
 
 ### Control Flow
 
@@ -1040,6 +1091,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `clone(val)` | Deep-clone a value |
 | `sublimate(val)` | Shallow freeze — locks structure, inner values stay mutable |
 | `crystallize(var) { ... }` | Temporarily freeze for block duration, then auto-restore |
+| `borrow(var) { ... }` | Temporarily thaw for block duration, then auto-restore |
 | `bond(target, ...deps)` | Link variables for cascading freeze |
 | `bond(target, dep, strategy)` | Bond with strategy: `"mirror"`, `"inverse"`, or `"gate"` |
 | `unbond(target, ...deps)` | Remove a bond |

@@ -1956,6 +1956,50 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         break;
     }
 
+    case EXPR_BORROW: {
+        /* borrow(x) { body } — thaw x, run body, freeze x back (if wasn't fluid) */
+        if (e->as.borrow.expr->tag == EXPR_IDENT) {
+            const char *name = e->as.borrow.expr->as.str_val;
+            uint16_t name_ki = add_constant(value_string(name));
+            int slot = resolve_local(rc, name);
+            uint8_t loc_type, slot_val;
+            if (slot >= 0) { loc_type = 0; slot_val = local_reg(slot); }
+            else {
+                int uv = resolve_upvalue(rc, name);
+                if (uv >= 0) { loc_type = 1; slot_val = (uint8_t)uv; }
+                else { loc_type = 2; slot_val = 0; }
+            }
+            /* Check if already fluid before thawing */
+            compile_expr(e->as.borrow.expr, dst, line);
+            uint8_t was_fluid = alloc_reg();
+            emit_ABC(ROP_IS_FLUID, was_fluid, dst, 0, line);
+            /* Thaw the variable */
+            compile_expr(e->as.borrow.expr, dst, line);
+            emit_ABC(ROP_THAW_VAR, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+            /* Execute body */
+            begin_scope();
+            for (size_t i = 0; i < e->as.borrow.body_count; i++)
+                compile_stmt(e->as.borrow.body[i]);
+            end_scope(line);
+            /* Conditional freeze: only if was NOT already fluid */
+            size_t skip_freeze = emit_jump_placeholder(ROP_JMPTRUE, was_fluid, line);
+            /* was not fluid → freeze back */
+            compile_expr(e->as.borrow.expr, dst, line);
+            emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+            patch_jump(skip_freeze);
+            free_reg(was_fluid);
+        } else {
+            /* Non-ident: just thaw value, run body */
+            compile_expr(e->as.borrow.expr, dst, line);
+            emit_ABC(ROP_THAW, dst, dst, 0, line);
+            begin_scope();
+            for (size_t i = 0; i < e->as.borrow.body_count; i++)
+                compile_stmt(e->as.borrow.body[i]);
+            end_scope(line);
+        }
+        break;
+    }
+
     case EXPR_SPAWN: {
         /* Spawn outside scope — compile as ROP_SCOPE with 0 spawns (sub-chunk so return works) */
         RegChunk *spawn_ch = compile_reg_sub_body(
