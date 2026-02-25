@@ -1,0 +1,5 @@
+// Parser edge case: unterminated block comment
+fn main() {
+    let x = 1
+    /* this block comment never closes
+    let y = 2

@@ -1,0 +1,45 @@
+// VM edge case: heavy string operations to stress ephemeral bump arena
+fn main() {
+    // String concatenation in a loop (exercises OP_ADD / OP_CONCAT with arena)
+    flux s = ""
+    for i in 0..200 {
+        s = s + "x"
+    }
+    print("len: " + to_string(s.len()))
+
+    // String interpolation stress
+    for i in 0..100 {
+        let msg = "i=${i} i*2=${i * 2}"
+    }
+    print("interpolation done")
+
+    // Many small string allocations (GC stress)
+    flux arr = []
+    for i in 0..500 {
+        arr.push("str_" + to_string(i))
+    }
+    print("arr len: " + to_string(arr.len()))
+    print("first: " + arr[0])
+    print("last: " + arr[499])
+
+    // String methods
+    let base = "Hello, World! Hello, Lattice!"
+    let r1 = base.replace("Hello", "Hi")
+    let r2 = base.split(", ")
+    let r3 = base.to_lower()
+    let r4 = base.to_upper()
+    let r5 = base.contains("World")
+    let r6 = base.starts_with("Hello")
+    let r7 = base.ends_with("Lattice!")
+    let r8 = base.trim()
+    print(r1)
+    print(to_string(r2.len()))
+    print(r3)
+
+    // Long string construction
+    flux long = ""
+    for i in 0..50 {
+        long = long + "abcdefghijklmnopqrstuvwxyz"
+    }
+    print("long len: " + to_string(long.len()))
+}

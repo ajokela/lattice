@@ -1,0 +1,40 @@
+// VM edge case: very large arrays to stress allocation and GC
+fn main() {
+    // Build a large array
+    flux arr = []
+    for i in 0..2000 {
+        arr.push(i)
+    }
+    print("len: " + to_string(arr.len()))
+
+    // Map over large array
+    let doubled = arr.map(|x| x * 2)
+    print("doubled len: " + to_string(doubled.len()))
+    print("doubled[0]: " + to_string(doubled[0]))
+    print("doubled[1999]: " + to_string(doubled[1999]))
+
+    // Filter large array
+    let evens = arr.filter(|x| x % 2 == 0)
+    print("evens len: " + to_string(evens.len()))
+
+    // Nested arrays
+    flux matrix = []
+    for i in 0..50 {
+        flux row = []
+        for j in 0..50 {
+            row.push(i * 50 + j)
+        }
+        matrix.push(row)
+    }
+    print("matrix size: " + to_string(matrix.len()) + "x" + to_string(matrix[0].len()))
+    print("matrix[25][25]: " + to_string(matrix[25][25]))
+
+    // Array of arrays created and discarded (GC stress)
+    for i in 0..100 {
+        let temp = []
+        for j in 0..100 {
+            temp.push("item_" + to_string(j))
+        }
+    }
+    print("gc stress complete")
+}

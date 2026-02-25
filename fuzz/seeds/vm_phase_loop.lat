@@ -1,0 +1,46 @@
+// VM edge case: rapid phase transitions in tight loops
+fn main() {
+    // Freeze/thaw cycle on integers
+    flux sum = 0
+    for i in 0..500 {
+        let frozen = freeze(i)
+        let thawed = thaw(frozen)
+        sum += thawed
+    }
+    print("int freeze/thaw sum: " + to_string(sum))
+
+    // Freeze/thaw cycle on strings
+    for i in 0..200 {
+        let s = "item_" + to_string(i)
+        let frozen = freeze(s)
+        let thawed = thaw(frozen)
+    }
+    print("string freeze/thaw done")
+
+    // Freeze/thaw cycle on arrays
+    for i in 0..100 {
+        flux arr = [i, i + 1, i + 2]
+        let frozen = freeze(arr)
+        flux thawed = thaw(frozen)
+        thawed.push(i + 3)
+    }
+    print("array freeze/thaw done")
+
+    // Deep freeze of nested structure
+    flux nested = [[1, 2], [3, 4], [5, 6]]
+    let deep_frozen = freeze(nested)
+    flux deep_thawed = thaw(deep_frozen)
+    deep_thawed.push([7, 8])
+    print("deep nested: " + to_string(deep_thawed.len()))
+
+    // Phase checking in loop
+    for i in 0..100 {
+        flux x = i
+        let px = phase_of(x)
+        fix y = freeze(x)
+        let py = phase_of(y)
+        flux z = thaw(y)
+        let pz = phase_of(z)
+    }
+    print("phase checks done")
+}

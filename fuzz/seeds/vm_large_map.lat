@@ -1,0 +1,36 @@
+// VM edge case: large maps to stress hash map implementation
+fn main() {
+    // Build a large map
+    flux m = Map::new()
+    for i in 0..500 {
+        m.set("key_" + to_string(i), i * i)
+    }
+    print("map size: " + to_string(m.len()))
+
+    // Read back values
+    let v0 = m.get("key_0")
+    let v250 = m.get("key_250")
+    let v499 = m.get("key_499")
+    print("key_0: " + to_string(v0))
+    print("key_250: " + to_string(v250))
+    print("key_499: " + to_string(v499))
+
+    // Overwrite all values
+    for i in 0..500 {
+        m.set("key_" + to_string(i), i)
+    }
+    print("after overwrite key_250: " + to_string(m.get("key_250")))
+
+    // Check keys
+    let keys = m.keys()
+    print("keys count: " + to_string(keys.len()))
+
+    // Many small maps created and discarded
+    for i in 0..200 {
+        let temp = Map::new()
+        temp.set("a", 1)
+        temp.set("b", 2)
+        temp.set("c", 3)
+    }
+    print("done")
+}

@@ -1,0 +1,60 @@
+// Compiler edge case: many traits, impls, and method dispatch
+trait Named {
+    fn name(self: any) -> String
+}
+
+trait Sized {
+    fn size(self: any) -> Int
+}
+
+trait Printable {
+    fn display(self: any) -> String
+}
+
+struct Dog { breed: String, weight: Int }
+struct Cat { color: String, age: Int }
+struct Fish { species: String, length: Int }
+
+impl Named for Dog {
+    fn name(self: any) -> String { return "Dog:" + self.breed }
+}
+impl Named for Cat {
+    fn name(self: any) -> String { return "Cat:" + self.color }
+}
+impl Named for Fish {
+    fn name(self: any) -> String { return "Fish:" + self.species }
+}
+
+impl Sized for Dog {
+    fn size(self: any) -> Int { return self.weight }
+}
+impl Sized for Cat {
+    fn size(self: any) -> Int { return self.age }
+}
+impl Sized for Fish {
+    fn size(self: any) -> Int { return self.length }
+}
+
+impl Printable for Dog {
+    fn display(self: any) -> String { return self.name() + " w=" + to_string(self.size()) }
+}
+impl Printable for Cat {
+    fn display(self: any) -> String { return self.name() + " age=" + to_string(self.size()) }
+}
+impl Printable for Fish {
+    fn display(self: any) -> String { return self.name() + " len=" + to_string(self.size()) }
+}
+
+fn main() {
+    let animals = [
+        Dog { breed: "Lab", weight: 30 },
+        Cat { color: "black", age: 5 },
+        Fish { species: "Salmon", length: 60 },
+        Dog { breed: "Poodle", weight: 15 },
+        Cat { color: "orange", age: 3 },
+    ]
+
+    for a in animals {
+        print(a.display())
+    }
+}

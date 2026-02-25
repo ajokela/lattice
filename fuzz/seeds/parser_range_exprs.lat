@@ -1,0 +1,35 @@
+// Parser edge case: range expressions and iteration patterns
+fn main() {
+    // Basic range
+    flux sum = 0
+    for i in 0..10 {
+        sum += i
+    }
+    print("0..10 sum: " + to_string(sum))
+
+    // Range with expressions
+    let start = 5
+    let end = 15
+    flux sum2 = 0
+    for i in start..end {
+        sum2 += i
+    }
+    print("5..15 sum: " + to_string(sum2))
+
+    // Enumerate
+    let arr = ["a", "b", "c", "d", "e"]
+    for pair in arr.enumerate() {
+        let idx = pair[0]
+        let val = pair[1]
+        print(to_string(idx) + ": " + val)
+    }
+
+    // Nested for loops with ranges
+    flux count = 0
+    for i in 0..10 {
+        for j in 0..10 {
+            count += 1
+        }
+    }
+    print("nested: " + to_string(count))
+}

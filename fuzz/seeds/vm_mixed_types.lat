@@ -1,0 +1,52 @@
+// VM edge case: mixed type operations and type coercion boundaries
+fn main() {
+    // Type checking functions
+    print(to_string(type_of(42)))
+    print(to_string(type_of(3.14)))
+    print(to_string(type_of("hello")))
+    print(to_string(type_of(true)))
+    print(to_string(type_of(nil)))
+    print(to_string(type_of([])))
+    print(to_string(type_of(Map::new())))
+
+    // Mixed array
+    let mixed = [1, "two", 3.0, true, nil, [4, 5]]
+    for item in mixed {
+        print(to_string(item) + " : " + to_string(type_of(item)))
+    }
+
+    // Integer/float boundary
+    let big = 2147483647
+    let neg = -2147483648
+    print(to_string(big))
+    print(to_string(neg))
+    print(to_string(big + 1))
+
+    // String to number conversions
+    let n1 = parse_int("42")
+    let n2 = parse_float("3.14")
+    print(to_string(n1))
+    print(to_string(n2))
+
+    // Division edge cases
+    let d1 = 10 / 3
+    let d2 = -10 / 3
+    let d3 = 10 % 3
+    let d4 = -10 % 3
+    print(to_string(d1) + " " + to_string(d2) + " " + to_string(d3) + " " + to_string(d4))
+
+    // Boolean operations
+    let b1 = true && false
+    let b2 = true || false
+    let b3 = !true
+    let b4 = !(true && false)
+    print(to_string(b1) + " " + to_string(b2) + " " + to_string(b3) + " " + to_string(b4))
+
+    // Equality with mixed types
+    print(to_string(1 == 1))
+    print(to_string(1 == 1.0))
+    print(to_string("a" == "a"))
+    print(to_string(nil == nil))
+    print(to_string(true == true))
+    print(to_string(1 != 2))
+}

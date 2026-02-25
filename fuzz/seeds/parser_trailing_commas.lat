@@ -1,0 +1,17 @@
+// Parser edge case: trailing commas in various positions
+struct Point {
+    x: Int,
+    y: Int,
+}
+
+fn add(a: Int, b: Int,) -> Int {
+    return a + b
+}
+
+fn main() {
+    let arr = [1, 2, 3,]
+    let p = Point { x: 1, y: 2, }
+    let r = add(10, 20,)
+    print(to_string(arr.len()))
+    print(to_string(r))
+}

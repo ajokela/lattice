@@ -1,0 +1,16 @@
+// Parser edge case: strict mode directive
+#mode strict
+
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+fn greet(name: String) -> String {
+    return "Hello, " + name
+}
+
+fn main() {
+    let result = add(1, 2)
+    print(to_string(result))
+    print(greet("World"))
+}

@@ -319,6 +319,7 @@ fuzz-seed:
 	@mkdir -p fuzz/corpus
 	@cp -v examples/*.lat fuzz/corpus/ 2>/dev/null || true
 	@cp -v benchmarks/*.lat fuzz/corpus/ 2>/dev/null || true
+	@cp -v fuzz/seeds/*.lat fuzz/corpus/ 2>/dev/null || true
 	@for f in $(FUZZ_EXCLUDE); do rm -f fuzz/corpus/$$f.lat; done
 	@echo "\n==> Corpus seeded with $$(ls fuzz/corpus/*.lat 2>/dev/null | wc -l | tr -d ' ') files (excluded: $(FUZZ_EXCLUDE))"
 

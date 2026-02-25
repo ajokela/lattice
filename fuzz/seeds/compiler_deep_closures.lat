@@ -1,0 +1,45 @@
+// Compiler edge case: deeply nested closures capturing from outer closures
+fn main() {
+    let a = 1
+    let f1 = |x: Int| {
+        let b = a + x
+        let f2 = |y: Int| {
+            let c = b + y
+            let f3 = |z: Int| {
+                let d = c + z
+                let f4 = |w: Int| {
+                    let e = d + w
+                    let f5 = |v: Int| {
+                        let f = e + v
+                        let f6 = |u: Int| {
+                            let g = f + u
+                            let f7 = |t: Int| {
+                                let h = g + t
+                                let f8 = |s: Int| {
+                                    let i = h + s
+                                    let f9 = |r: Int| {
+                                        let j = i + r
+                                        let f10 = |q: Int| {
+                                            return j + q
+                                        }
+                                        return f10(10)
+                                    }
+                                    return f9(9)
+                                }
+                                return f8(8)
+                            }
+                            return f7(7)
+                        }
+                        return f6(6)
+                    }
+                    return f5(5)
+                }
+                return f4(4)
+            }
+            return f3(3)
+        }
+        return f2(2)
+    }
+    let result = f1(1)
+    print(to_string(result))
+}

@@ -1,0 +1,61 @@
+// Compiler edge case: try/catch with various error scenarios
+fn might_fail(x: Int) {
+    if x < 0 {
+        throw "negative input"
+    }
+    if x == 0 {
+        throw "zero input"
+    }
+    return x * 2
+}
+
+fn nested_try() {
+    try {
+        try {
+            throw "inner error"
+        } catch e {
+            print("caught inner: " + to_string(e))
+            throw "rethrown: " + to_string(e)
+        }
+    } catch e {
+        print("caught outer: " + to_string(e))
+    }
+}
+
+fn try_in_loop() {
+    flux sum = 0
+    for i in -3..4 {
+        try {
+            let val = might_fail(i)
+            sum += val
+        } catch e {
+            print("skipping " + to_string(i) + ": " + to_string(e))
+        }
+    }
+    return sum
+}
+
+fn main() {
+    // Basic try/catch
+    try {
+        let r = might_fail(5)
+        print(to_string(r))
+    } catch e {
+        print("error: " + to_string(e))
+    }
+
+    // Catch the error
+    try {
+        let r = might_fail(-1)
+        print(to_string(r))
+    } catch e {
+        print("caught: " + to_string(e))
+    }
+
+    // Nested try
+    nested_try()
+
+    // Try in loop
+    let total = try_in_loop()
+    print("total: " + to_string(total))
+}

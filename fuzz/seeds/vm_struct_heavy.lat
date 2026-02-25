@@ -1,0 +1,84 @@
+// VM edge case: heavy struct allocation and field access patterns
+
+struct Node {
+    value: Int,
+    label: String,
+    next: any
+}
+
+struct Point3D {
+    x: Int,
+    y: Int,
+    z: Int
+}
+
+fn make_list(n: Int) {
+    flux head = nil
+    flux i = n
+    while i > 0 {
+        head = Node { value: i, label: "n" + to_string(i), next: head }
+        i -= 1
+    }
+    return head
+}
+
+fn list_sum(node: any) -> Int {
+    if node == nil { return 0 }
+    return node.value + list_sum(node.next)
+}
+
+fn list_len(node: any) -> Int {
+    flux count = 0
+    flux curr = node
+    while curr != nil {
+        count += 1
+        curr = curr.next
+    }
+    return count
+}
+
+fn main() {
+    // Linked list construction and traversal
+    let list = make_list(100)
+    print("list len: " + to_string(list_len(list)))
+    print("list sum: " + to_string(list_sum(list)))
+
+    // Many struct allocations
+    flux points = []
+    for i in 0..500 {
+        points.push(Point3D { x: i, y: i * 2, z: i * 3 })
+    }
+    print("points: " + to_string(points.len()))
+
+    // Field access stress
+    flux total = 0
+    for p in points {
+        total += p.x + p.y + p.z
+    }
+    print("total: " + to_string(total))
+
+    // Struct field mutation
+    for i in 0..100 {
+        flux p = Point3D { x: 0, y: 0, z: 0 }
+        p.x = i
+        p.y = i * 2
+        p.z = i * 3
+    }
+    print("mutation done")
+
+    // Nested struct construction
+    let deep = Node {
+        value: 1,
+        label: "root",
+        next: Node {
+            value: 2,
+            label: "mid",
+            next: Node {
+                value: 3,
+                label: "leaf",
+                next: nil
+            }
+        }
+    }
+    print("deep.next.next.value: " + to_string(deep.next.next.value))
+}

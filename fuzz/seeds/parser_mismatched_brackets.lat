@@ -1,0 +1,6 @@
+// Parser edge case: mismatched brackets
+fn main() {
+    let x = [1, 2, 3)
+    let y = (1 + 2]
+    let z = {1 + 2)
+}

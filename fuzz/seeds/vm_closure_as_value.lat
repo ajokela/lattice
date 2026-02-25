@@ -1,0 +1,61 @@
+// VM edge case: closures stored in arrays, maps, structs, passed around
+
+struct Handler {
+    name: String,
+    action: Fn
+}
+
+fn compose(f: Fn, g: Fn) {
+    return |x: any| { f(g(x)) }
+}
+
+fn apply_all(fns: any, value: any) {
+    flux result = value
+    for f in fns {
+        result = f(result)
+    }
+    return result
+}
+
+fn main() {
+    // Array of closures
+    let transforms = [
+        |x: Int| { x + 1 },
+        |x: Int| { x * 2 },
+        |x: Int| { x - 3 },
+        |x: Int| { x * x },
+    ]
+    print(to_string(apply_all(transforms, 5)))
+
+    // Closure composition
+    let add1 = |x: Int| { x + 1 }
+    let double = |x: Int| { x * 2 }
+    let add1_then_double = compose(double, add1)
+    print(to_string(add1_then_double(5)))
+
+    // Struct with closure field
+    let handlers = [
+        Handler { name: "increment", action: |x: Int| { x + 1 } },
+        Handler { name: "negate", action: |x: Int| { -x } },
+        Handler { name: "square", action: |x: Int| { x * x } },
+    ]
+
+    flux val = 3
+    for h in handlers {
+        val = h.action(val)
+        print(h.name + " => " + to_string(val))
+    }
+
+    // Closure returning closure
+    let make_adder = |n: Int| {
+        return |x: Int| { x + n }
+    }
+    let add10 = make_adder(10)
+    let add20 = make_adder(20)
+    print("add10(5): " + to_string(add10(5)))
+    print("add20(5): " + to_string(add20(5)))
+
+    // Immediately invoked closure
+    let result = (|x: Int| { x * x })(7)
+    print("iife: " + to_string(result))
+}

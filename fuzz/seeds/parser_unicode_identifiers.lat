@@ -1,0 +1,15 @@
+// Parser edge case: unicode in strings and unusual characters
+fn main() {
+    let greeting = "Hello, World!"
+    let emoji_str = "stars: \u{2B50}\u{2B50}\u{2B50}"
+    let japanese = "konnichiwa"
+    let empty = ""
+    let escaped = "line1\nline2\ttab\\backslash\"quote"
+    let multi_byte = "cafe\u{0301}"
+    let null_char = "before\0after"
+    let long_escape = "\n\n\n\n\n\n\n\n\n\n"
+    let mixed = "abc123!@#$%^&*()_+-=[]{}|;':\",./<>?"
+    print(greeting)
+    print(escaped)
+    print(mixed)
+}

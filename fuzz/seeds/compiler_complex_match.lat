@@ -1,0 +1,91 @@
+// Compiler edge case: complex pattern matching and enum destructuring
+
+enum Expr {
+    Num(any),
+    Add(any, any),
+    Mul(any, any),
+    Neg(any),
+    Var(any)
+}
+
+enum Option {
+    Some(any),
+    None
+}
+
+enum Result {
+    Ok(any),
+    Err(any)
+}
+
+fn eval_expr(e: any) -> Int {
+    match e {
+        Expr::Num(n) => n,
+        Expr::Add(a, b) => eval_expr(a) + eval_expr(b),
+        Expr::Mul(a, b) => eval_expr(a) * eval_expr(b),
+        Expr::Neg(x) => -eval_expr(x),
+        _ => 0
+    }
+}
+
+fn unwrap_or(opt: any, default: any) {
+    match opt {
+        Option::Some(v) => v,
+        Option::None => default,
+        _ => default
+    }
+}
+
+fn chain_results(a: any, b: any) {
+    match a {
+        Result::Ok(va) => {
+            match b {
+                Result::Ok(vb) => Result::Ok(va + vb),
+                Result::Err(e) => Result::Err(e),
+                _ => Result::Err("unknown")
+            }
+        },
+        Result::Err(e) => Result::Err(e),
+        _ => Result::Err("unknown")
+    }
+}
+
+fn main() {
+    // Nested enum construction
+    let expr = Expr::Add(
+        Expr::Mul(Expr::Num(3), Expr::Num(4)),
+        Expr::Neg(Expr::Num(2))
+    )
+    print(to_string(eval_expr(expr)))
+
+    // Match with many arms
+    let x = 5
+    let label = match x {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        4 => "four",
+        5 => "five",
+        6 => "six",
+        7 => "seven",
+        8 => "eight",
+        9 => "nine",
+        10 => "ten",
+        _ => "other"
+    }
+    print(label)
+
+    // Option chaining
+    let a = Option::Some(10)
+    let b = Option::None
+    print(to_string(unwrap_or(a, 0)))
+    print(to_string(unwrap_or(b, -1)))
+
+    // Nested result matching
+    let r = chain_results(Result::Ok(10), Result::Ok(20))
+    match r {
+        Result::Ok(v) => print("ok: " + to_string(v)),
+        Result::Err(e) => print("err: " + to_string(e)),
+        _ => print("unknown")
+    }
+}

@@ -1,0 +1,16 @@
+// Parser edge case: nested and adjacent comments
+fn main() {
+    // single line comment
+    // another single line comment
+    //// quadruple slash
+    let a = 1 // inline comment
+    /* block comment */
+    let b = /* inline block */ 2
+    /* multi
+       line
+       block
+       comment */
+    let c = 3
+    /* back to back */ /* comments */
+    print(to_string(a + b + c))
+}

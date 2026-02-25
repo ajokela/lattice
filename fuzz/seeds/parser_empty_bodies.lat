@@ -1,0 +1,46 @@
+// Parser edge case: empty function bodies, empty structs, empty enums
+
+struct Empty {}
+
+struct SingleField { x: Int }
+
+enum Unit {
+    A,
+    B,
+    C
+}
+
+fn do_nothing() {
+}
+
+fn also_nothing(x: Int) {
+}
+
+fn returns_nil() {
+    return nil
+}
+
+fn empty_if() {
+    if true {
+    }
+}
+
+fn empty_while() {
+    while false {
+    }
+}
+
+fn empty_for() {
+    for x in [] {
+    }
+}
+
+fn main() {
+    do_nothing()
+    also_nothing(1)
+    let r = returns_nil()
+    empty_if()
+    empty_while()
+    empty_for()
+    print("ok")
+}
