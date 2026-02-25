@@ -156,6 +156,9 @@ typedef enum {
     OP_FREEZE_EXCEPT,  /* operands: name_idx, loc_type, loc_slot, except_count. Stack: [except_name1, ...] → [frozen_value] */
     OP_FREEZE_FIELD,   /* operands: parent_name_idx, loc_type, loc_slot. Stack: [key_str] → [frozen_value] */
 
+    /* String append (fast path for local += string) */
+    OP_APPEND_STR_LOCAL, /* operands: slot. Pop TOS string, append to local[slot] in-place via realloc */
+
     /* Fallback to tree-walker */
     OP_HALT,           /* Stop execution */
 } Opcode;

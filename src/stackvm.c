@@ -45,7 +45,7 @@ typedef LatValue (*VMNativeFn)(LatValue *args, int arg_count);
  * unchanged.  The original buffer is freed if interning succeeds. */
 static inline LatValue stackvm_try_intern(LatValue v) {
     if (v.type != VAL_STR || v.region_id == REGION_INTERNED) return v;
-    size_t len = strlen(v.as.str_val);
+    size_t len = v.as.str_len ? v.as.str_len : strlen(v.as.str_val);
     if (len > INTERN_THRESHOLD) return v;
     const char *interned = intern(v.as.str_val);
     /* Free the original if it was heap-allocated (REGION_NONE) */
@@ -200,12 +200,15 @@ static inline LatValue value_clone_fast(const LatValue *src) {
         case VAL_STR: {
             if (src->region_id == REGION_INTERNED)
                 return *src;
+            /* Use cached length when available to avoid strlen */
+            size_t slen = src->as.str_len ? src->as.str_len : strlen(src->as.str_val);
             /* Intern short strings on clone to avoid strdup and enable
              * pointer-equality comparisons. */
-            if (strlen(src->as.str_val) <= INTERN_THRESHOLD)
+            if (slen <= INTERN_THRESHOLD)
                 return value_string_interned(src->as.str_val);
             LatValue v = *src;
             v.as.str_val = strdup(src->as.str_val);
+            v.as.str_len = slen;  /* preserve cached length */
             v.region_id = REGION_NONE;
             return v;
         }
@@ -331,24 +334,26 @@ static inline LatValue stackvm_ephemeral_string(StackVM *vm, char *s) {
 static inline LatValue stackvm_ephemeral_concat(StackVM *vm, const char *a, size_t la,
                                             const char *b, size_t lb) {
     size_t total = la + lb + 1;
+    size_t result_len = la + lb;
     if (vm->ephemeral) {
         char *buf = bump_alloc(vm->ephemeral, total);
         memcpy(buf, a, la);
         memcpy(buf + la, b, lb);
-        buf[la + lb] = '\0';
+        buf[result_len] = '\0';
         vm->ephemeral_on_stack = true;
         LatValue v;
         v.type = VAL_STR;
         v.phase = VTAG_UNPHASED;
         v.region_id = REGION_EPHEMERAL;
         v.as.str_val = buf;
+        v.as.str_len = result_len;
         return v;
     }
     char *buf = malloc(total);
     memcpy(buf, a, la);
     memcpy(buf + la, b, lb);
-    buf[la + lb] = '\0';
-    return value_string_owned(buf);
+    buf[result_len] = '\0';
+    return value_string_owned_len(buf, result_len);
 }
 
 /* If value is ephemeral, promote to malloc (or intern if short string). */
@@ -356,7 +361,8 @@ static inline void stackvm_promote_value(LatValue *v) {
     if (v->region_id == REGION_EPHEMERAL) {
         /* Try interning short strings to avoid a full deep-clone.
          * Interned strings are long-lived (owned by intern table). */
-        if (v->type == VAL_STR && strlen(v->as.str_val) <= INTERN_THRESHOLD) {
+        size_t slen = (v->type == VAL_STR && v->as.str_len) ? v->as.str_len : 0;
+        if (v->type == VAL_STR && (slen ? slen : strlen(v->as.str_val)) <= INTERN_THRESHOLD) {
             const char *interned = intern(v->as.str_val);
             v->as.str_val = (char *)interned;
             v->region_id = REGION_INTERNED;
@@ -2532,6 +2538,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_IS_FLUID] = &&lbl_OP_IS_FLUID,
         [OP_FREEZE_EXCEPT] = &&lbl_OP_FREEZE_EXCEPT,
         [OP_FREEZE_FIELD] = &&lbl_OP_FREEZE_FIELD,
+        [OP_APPEND_STR_LOCAL] = &&lbl_OP_APPEND_STR_LOCAL,
         [OP_HALT] = &&lbl_OP_HALT,
     };
 #endif
@@ -2637,13 +2644,28 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     char *rb = pb ? NULL : value_repr(&b);
                     if (!pa) pa = ra;
                     if (!pb) pb = rb;
-                    size_t la = strlen(pa), lb = strlen(pb);
-                    /* Direct malloc (not ephemeral) so SET_LOCAL_POP can move without promoting */
-                    char *buf = malloc(la + lb + 1);
-                    memcpy(buf, pa, la);
-                    memcpy(buf + la, pb, lb);
-                    buf[la + lb] = '\0';
-                    LatValue result = value_string_owned(buf);
+                    /* Use cached str_len when available */
+                    size_t la = (!ra && a.as.str_len) ? a.as.str_len : strlen(pa);
+                    size_t lb = (!rb && b.as.str_len) ? b.as.str_len : strlen(pb);
+                    /* Optimization: when the left operand is a malloc'd string
+                     * (REGION_NONE), realloc in-place to avoid copying the left
+                     * side.  This turns the common s += "x" pattern from O(n)
+                     * per append into amortized O(1) (realloc often extends). */
+                    char *buf;
+                    if (a.type == VAL_STR && a.region_id == REGION_NONE && !ra) {
+                        buf = realloc(a.as.str_val, la + lb + 1);
+                        memcpy(buf + la, pb, lb);
+                        buf[la + lb] = '\0';
+                        /* a's string has been consumed by realloc; prevent double-free */
+                        a.as.str_val = NULL;
+                        a.type = VAL_NIL;
+                    } else {
+                        buf = malloc(la + lb + 1);
+                        memcpy(buf, pa, la);
+                        memcpy(buf + la, pb, lb);
+                        buf[la + lb] = '\0';
+                    }
+                    LatValue result = value_string_owned_len(buf, la + lb);
                     free(ra); free(rb);
                     value_free(&a); value_free(&b);
                     /* Intern short concat results for pointer-equality comparisons */
@@ -6666,6 +6688,104 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                     }
                     VM_ERROR(err_fmt, actual);
+                }
+                break;
+            }
+
+            /* ── String append fast path ── */
+#ifdef VM_USE_COMPUTED_GOTO
+            lbl_OP_APPEND_STR_LOCAL:
+#endif
+            case OP_APPEND_STR_LOCAL: {
+                /* Append TOS (string) to local[slot] in-place via realloc.
+                 * Avoids the GET_LOCAL clone + ADD copy + SET_LOCAL_POP cycle
+                 * that would otherwise make repeated s += "x" O(n^2).
+                 * Uses cached str_len to avoid O(n) strlen on the accumulator. */
+                uint8_t slot = READ_BYTE();
+                LatValue rhs = pop(vm);
+                LatValue *local = &frame->slots[slot];
+                if (local->type == VAL_STR && rhs.type == VAL_STR) {
+                    const char *rp = rhs.as.str_val;
+                    size_t rl = rhs.as.str_len ? rhs.as.str_len : strlen(rp);
+                    if (rl == 0) {
+                        /* Appending empty string is a no-op */
+                        value_free(&rhs);
+                        break;
+                    }
+                    /* Use cached length if available, otherwise compute and cache */
+                    size_t ll = local->as.str_len ? local->as.str_len : strlen(local->as.str_val);
+                    if (local->region_id == REGION_NONE) {
+                        /* Direct realloc — no clone, no full copy */
+                        char *buf = realloc(local->as.str_val, ll + rl + 1);
+                        memcpy(buf + ll, rp, rl);
+                        buf[ll + rl] = '\0';
+                        local->as.str_val = buf;
+                    } else if (local->region_id == REGION_INTERNED ||
+                               local->region_id == REGION_CONST) {
+                        /* Can't mutate interned/const — make a fresh copy */
+                        char *buf = malloc(ll + rl + 1);
+                        memcpy(buf, local->as.str_val, ll);
+                        memcpy(buf + ll, rp, rl);
+                        buf[ll + rl] = '\0';
+                        /* Don't free interned/const strings */
+                        local->as.str_val = buf;
+                        local->region_id = REGION_NONE;
+                    } else {
+                        /* Ephemeral or region-owned — clone to malloc, then append */
+                        char *buf = malloc(ll + rl + 1);
+                        memcpy(buf, local->as.str_val, ll);
+                        memcpy(buf + ll, rp, rl);
+                        buf[ll + rl] = '\0';
+                        local->as.str_val = buf;
+                        local->region_id = REGION_NONE;
+                    }
+                    /* Update cached length */
+                    local->as.str_len = ll + rl;
+                    value_free(&rhs);
+                    /* Record history for tracked variables */
+                    if (vm->rt->tracking_active && frame->chunk->local_names &&
+                        slot < frame->chunk->local_name_cap && frame->chunk->local_names[slot]) {
+                        stackvm_record_history(vm, frame->chunk->local_names[slot], local);
+                    }
+                } else {
+                    /* Fallback for non-string types: inline ADD + store back.
+                     * Handles int += int, float += float, and mixed-type string concat. */
+                    LatValue a2 = value_clone_fast(local);
+                    LatValue result;
+                    if (a2.type == VAL_INT && rhs.type == VAL_INT) {
+                        result = value_int(a2.as.int_val + rhs.as.int_val);
+                    } else if (a2.type == VAL_FLOAT && rhs.type == VAL_FLOAT) {
+                        result = value_float(a2.as.float_val + rhs.as.float_val);
+                    } else if (a2.type == VAL_INT && rhs.type == VAL_FLOAT) {
+                        result = value_float((double)a2.as.int_val + rhs.as.float_val);
+                    } else if (a2.type == VAL_FLOAT && rhs.type == VAL_INT) {
+                        result = value_float(a2.as.float_val + (double)rhs.as.int_val);
+                    } else if (a2.type == VAL_STR || rhs.type == VAL_STR) {
+                        const char *pa2 = (a2.type == VAL_STR) ? a2.as.str_val : NULL;
+                        const char *pb2 = (rhs.type == VAL_STR) ? rhs.as.str_val : NULL;
+                        char *ra2 = pa2 ? NULL : value_repr(&a2);
+                        char *rb2 = pb2 ? NULL : value_repr(&rhs);
+                        if (!pa2) pa2 = ra2;
+                        if (!pb2) pb2 = rb2;
+                        size_t la2 = strlen(pa2), lb2 = strlen(pb2);
+                        char *buf = malloc(la2 + lb2 + 1);
+                        memcpy(buf, pa2, la2);
+                        memcpy(buf + la2, pb2, lb2);
+                        buf[la2 + lb2] = '\0';
+                        result = value_string_owned(buf);
+                        free(ra2); free(rb2);
+                    } else {
+                        value_free(&a2); value_free(&rhs);
+                        VM_ERROR("operands must be numbers for '+'"); break;
+                    }
+                    value_free(&a2); value_free(&rhs);
+                    value_free(local);
+                    *local = stackvm_try_intern(result);
+                    /* Record history for tracked variables */
+                    if (vm->rt->tracking_active && frame->chunk->local_names &&
+                        slot < frame->chunk->local_name_cap && frame->chunk->local_names[slot]) {
+                        stackvm_record_history(vm, frame->chunk->local_names[slot], local);
+                    }
                 }
                 break;
             }

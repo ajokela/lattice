@@ -25,6 +25,8 @@ benchmarks=(
     "bubble_sort:Bubble sort (500 elements)"
     "map_operations:Map ops (2K insert+look)"
     "string_concat:String concat (2K appends)"
+    "string_concat_intensive:String concat (200K appends)"
+    "string_concat_multi:String concat (50K multi-ch)"
     "matrix_mul:Matrix multiply (30x30)"
     "closures:Closures (1K create+call)"
     "scope_spawn:Scope/spawn (200 rounds)"

@@ -1922,6 +1922,20 @@ static void compile_stmt(const Stmt *s) {
                         }
                     }
                 }
+
+                /* Detect s += expr → OP_APPEND_STR_LOCAL (string append fast path)
+                 * Pattern: STMT_ASSIGN(IDENT(name), BINOP(ADD, IDENT(name), expr))
+                 * At runtime, falls back to generic ADD if types aren't strings. */
+                if (val->as.binop.op == BINOP_ADD &&
+                    val->as.binop.left->tag == EXPR_IDENT &&
+                    strcmp(val->as.binop.left->as.str_val, name) == 0) {
+                    int slot = resolve_local(current, name);
+                    if (slot >= 0) {
+                        compile_expr(val->as.binop.right, line);
+                        emit_bytes(OP_APPEND_STR_LOCAL, (uint8_t)slot, line);
+                        break;
+                    }
+                }
             }
 
             bool skip_pop = false;

@@ -1,0 +1,10 @@
+// Benchmark: intensive string concatenation (200K single-char appends)
+fn main() {
+    flux s = ""
+    flux i = 0
+    while i < 200000 {
+        s += "x"
+        i += 1
+    }
+    print(to_string(s.len()))
+}
