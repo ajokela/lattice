@@ -19,6 +19,7 @@
 #include "regex_ops.h"
 #include "time_ops.h"
 #include "datetime_ops.h"
+#include <time.h>
 #include "env_ops.h"
 #include "process_ops.h"
 #include "format_ops.h"
