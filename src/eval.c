@@ -8664,7 +8664,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                                    LatValue *args, size_t arg_count) {
     /* ── Enum methods ── */
     if (obj.type == VAL_ENUM) {
-        if (strcmp(method, "variant_name") == 0) {
+        if (strcmp(method, "variant_name") == 0 || strcmp(method, "tag") == 0) {
             if (arg_count != 0) return eval_err(strdup("variant_name() takes no arguments"));
             return eval_ok(value_string(obj.as.enm.variant_name));
         }
