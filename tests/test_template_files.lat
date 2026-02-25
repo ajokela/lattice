@@ -1,0 +1,57 @@
+// Test suite for template engine file-based features (includes, inheritance).
+//
+// Run: ./clat tests/test_template_files.lat
+
+import "lib/test" as t
+import "lib/template" as tmpl
+
+fn main() {
+    t.run([
+        // ----------------------------------------------------------------
+        // Template Includes
+        // ----------------------------------------------------------------
+        t.describe("Template Includes", |_| {
+            return [
+                t.it("include a partial template", |_| {
+                    let data = Map::new()
+                    data.set("username", "Alice")
+                    let tpl = "Before {% include \"tests/templates/header.html\" %} After"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "Before <header>Welcome, Alice!</header> After")
+                }),
+
+                t.it("include with missing file shows error comment", |_| {
+                    let data = Map::new()
+                    let tpl = "A{% include \"tests/templates/nonexistent.html\" %}B"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_contains(result, "include error")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Template Inheritance
+        // ----------------------------------------------------------------
+        t.describe("Template Inheritance", |_| {
+            return [
+                t.it("extends with block overrides", |_| {
+                    let data = Map::new()
+                    data.set("page_title", "Home")
+                    data.set("name", "World")
+                    let compiled = tmpl.from_file("tests/templates/child.html")
+                    let result = tmpl.render(compiled, data)
+                    t.assert_contains(result, "<title>Home</title>")
+                    t.assert_contains(result, "Hello, World!")
+                }),
+
+                t.it("base template blocks use defaults when not overridden", |_| {
+                    let data = Map::new()
+                    let compiled = tmpl.from_file("tests/templates/base.html")
+                    let result = tmpl.render(compiled, data)
+                    t.assert_contains(result, "<title>Default Title</title>")
+                    t.assert_contains(result, "Default content")
+                })
+            ]
+        })
+    ])
+}

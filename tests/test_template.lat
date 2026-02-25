@@ -1,0 +1,448 @@
+// Test suite for the template engine library.
+// Tests filters, Jinja2-style control flow, includes, and inheritance.
+//
+// Run: ./clat tests/test_template.lat
+
+import "lib/test" as t
+import "lib/template" as tmpl
+
+fn main() {
+    t.run([
+        // ----------------------------------------------------------------
+        // Basic variable interpolation (existing features)
+        // ----------------------------------------------------------------
+        t.describe("Basic Interpolation", |_| {
+            return [
+                t.it("simple variable", |_| {
+                    let data = Map::new()
+                    data.set("name", "World")
+                    let result = tmpl.render_string("Hello, {{name}}!", data)
+                    t.assert_eq(result, "Hello, World!")
+                }),
+
+                t.it("dotted variable path", |_| {
+                    let user = Map::new()
+                    user.set("name", "Alice")
+                    let data = Map::new()
+                    data.set("user", user)
+                    let result = tmpl.render_string("Hi {{user.name}}", data)
+                    t.assert_eq(result, "Hi Alice")
+                }),
+
+                t.it("HTML escaping by default", |_| {
+                    let data = Map::new()
+                    data.set("html", "<b>bold</b>")
+                    let result = tmpl.render_string("{{html}}", data)
+                    t.assert_eq(result, "&lt;b&gt;bold&lt;/b&gt;")
+                }),
+
+                t.it("raw triple-mustache", |_| {
+                    let data = Map::new()
+                    data.set("html", "<b>bold</b>")
+                    let result = tmpl.render_string("{{{html}}}", data)
+                    t.assert_eq(result, "<b>bold</b>")
+                }),
+
+                t.it("missing variable produces empty", |_| {
+                    let data = Map::new()
+                    let result = tmpl.render_string("A{{missing}}B", data)
+                    t.assert_eq(result, "AB")
+                }),
+
+                t.it("comment produces no output", |_| {
+                    let data = Map::new()
+                    let result = tmpl.render_string("A{{! comment }}B", data)
+                    t.assert_eq(result, "AB")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Filters
+        // ----------------------------------------------------------------
+        t.describe("Filters", |_| {
+            return [
+                t.it("upper filter", |_| {
+                    let data = Map::new()
+                    data.set("name", "alice")
+                    let result = tmpl.render_string("{{name | upper}}", data)
+                    t.assert_eq(result, "ALICE")
+                }),
+
+                t.it("lower filter", |_| {
+                    let data = Map::new()
+                    data.set("name", "ALICE")
+                    let result = tmpl.render_string("{{name | lower}}", data)
+                    t.assert_eq(result, "alice")
+                }),
+
+                t.it("trim filter", |_| {
+                    let data = Map::new()
+                    data.set("name", "  alice  ")
+                    let result = tmpl.render_string("{{name | trim}}", data)
+                    t.assert_eq(result, "alice")
+                }),
+
+                t.it("escape_html filter", |_| {
+                    let data = Map::new()
+                    data.set("html", "<script>alert('xss')</script>")
+                    // escape_html filter applied on top of raw_var
+                    let result = tmpl.render_string("{{{html | escape_html}}}", data)
+                    t.assert_eq(result, "&lt;script&gt;alert('xss')&lt;/script&gt;")
+                }),
+
+                t.it("default filter with fallback", |_| {
+                    let data = Map::new()
+                    let result = tmpl.render_string("{{{missing | default('N/A')}}}", data)
+                    t.assert_eq(result, "N/A")
+                }),
+
+                t.it("default filter when value exists", |_| {
+                    let data = Map::new()
+                    data.set("name", "Bob")
+                    let result = tmpl.render_string("{{{name | default('N/A')}}}", data)
+                    t.assert_eq(result, "Bob")
+                }),
+
+                t.it("chained filters", |_| {
+                    let data = Map::new()
+                    data.set("name", "  alice  ")
+                    let result = tmpl.render_string("{{{name | trim | upper}}}", data)
+                    t.assert_eq(result, "ALICE")
+                }),
+
+                t.it("capitalize filter", |_| {
+                    let data = Map::new()
+                    data.set("name", "alice")
+                    let result = tmpl.render_string("{{{name | capitalize}}}", data)
+                    t.assert_eq(result, "Alice")
+                }),
+
+                t.it("title filter", |_| {
+                    let data = Map::new()
+                    data.set("title", "hello world foo")
+                    let result = tmpl.render_string("{{{title | title}}}", data)
+                    t.assert_eq(result, "Hello World Foo")
+                }),
+
+                t.it("length filter", |_| {
+                    let data = Map::new()
+                    data.set("items", [1, 2, 3])
+                    let result = tmpl.render_string("{{{items | length}}}", data)
+                    t.assert_eq(result, "3")
+                }),
+
+                t.it("reverse filter", |_| {
+                    let data = Map::new()
+                    data.set("word", "hello")
+                    let result = tmpl.render_string("{{{word | reverse}}}", data)
+                    t.assert_eq(result, "olleh")
+                }),
+
+                t.it("join filter", |_| {
+                    let data = Map::new()
+                    data.set("items", ["a", "b", "c"])
+                    let result = tmpl.render_string("{{{items | join}}}", data)
+                    t.assert_eq(result, "a, b, c")
+                }),
+
+                t.it("join filter with custom separator", |_| {
+                    let data = Map::new()
+                    data.set("items", ["a", "b", "c"])
+                    let result = tmpl.render_string("{{{items | join(' | ')}}}", data)
+                    t.assert_eq(result, "a | b | c")
+                }),
+
+                t.it("truncate filter", |_| {
+                    let data = Map::new()
+                    data.set("text", "This is a very long piece of text that should be truncated")
+                    let result = tmpl.render_string("{{{text | truncate(10)}}}", data)
+                    t.assert_eq(result, "This is a ...")
+                }),
+
+                t.it("default with empty string", |_| {
+                    let data = Map::new()
+                    data.set("name", "")
+                    let result = tmpl.render_string("{{{name | default('anonymous')}}}", data)
+                    t.assert_eq(result, "anonymous")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Mustache-style conditionals and loops (existing)
+        // ----------------------------------------------------------------
+        t.describe("Mustache Conditionals & Loops", |_| {
+            return [
+                t.it("if truthy", |_| {
+                    let data = Map::new()
+                    data.set("show", true)
+                    let result = tmpl.render_string("{{#if show}}YES{{/if}}", data)
+                    t.assert_eq(result, "YES")
+                }),
+
+                t.it("if falsy with else", |_| {
+                    let data = Map::new()
+                    data.set("show", false)
+                    let result = tmpl.render_string("{{#if show}}YES{{else}}NO{{/if}}", data)
+                    t.assert_eq(result, "NO")
+                }),
+
+                t.it("unless truthy", |_| {
+                    let data = Map::new()
+                    data.set("hidden", true)
+                    let result = tmpl.render_string("{{#unless hidden}}SHOWN{{else}}HIDDEN{{/unless}}", data)
+                    t.assert_eq(result, "HIDDEN")
+                }),
+
+                t.it("each loop with maps", |_| {
+                    let item1 = Map::new()
+                    item1.set("name", "Alice")
+                    let item2 = Map::new()
+                    item2.set("name", "Bob")
+                    let data = Map::new()
+                    data.set("users", [item1, item2])
+                    let result = tmpl.render_string("{{#each users}}{{name}} {{/each}}", data)
+                    t.assert_eq(result, "Alice Bob ")
+                }),
+
+                t.it("each with @index", |_| {
+                    let data = Map::new()
+                    data.set("items", ["a", "b", "c"])
+                    let result = tmpl.render_string("{{#each items}}{{@index}}:{{this}} {{/each}}", data)
+                    t.assert_eq(result, "0:a 1:b 2:c ")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Jinja2-style for loops
+        // ----------------------------------------------------------------
+        t.describe("Jinja2 For Loops", |_| {
+            return [
+                t.it("basic for loop", |_| {
+                    let data = Map::new()
+                    data.set("items", ["apple", "banana", "cherry"])
+                    let result = tmpl.render_string("{% for item in items %}{{item}} {% endfor %}", data)
+                    t.assert_eq(result, "apple banana cherry ")
+                }),
+
+                t.it("for loop with maps", |_| {
+                    let u1 = Map::new()
+                    u1.set("name", "Alice")
+                    let u2 = Map::new()
+                    u2.set("name", "Bob")
+                    let data = Map::new()
+                    data.set("users", [u1, u2])
+                    let result = tmpl.render_string("{% for user in users %}{{user.name}},{% endfor %}", data)
+                    t.assert_eq(result, "Alice,Bob,")
+                }),
+
+                t.it("for loop with loop.index", |_| {
+                    let data = Map::new()
+                    data.set("items", ["a", "b", "c"])
+                    let result = tmpl.render_string("{% for x in items %}{{loop.index}}:{{x}} {% endfor %}", data)
+                    t.assert_eq(result, "0:a 1:b 2:c ")
+                }),
+
+                t.it("for loop with loop.first and loop.last", |_| {
+                    let data = Map::new()
+                    data.set("items", ["a", "b", "c"])
+                    let tpl = "{% for x in items %}{{#if @first}}[{{/if}}{{x}}{{#if @last}}]{{/if}}{% endfor %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "[abc]")
+                }),
+
+                t.it("for loop with loop.length", |_| {
+                    let data = Map::new()
+                    data.set("colors", ["red", "green", "blue"])
+                    let tpl = "{% for c in colors %}{{loop.length}}{% endfor %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "333")
+                }),
+
+                t.it("nested for loops", |_| {
+                    let g1 = Map::new()
+                    g1.set("name", "fruits")
+                    g1.set("items", ["apple", "pear"])
+                    let g2 = Map::new()
+                    g2.set("name", "vegs")
+                    g2.set("items", ["carrot"])
+                    let data = Map::new()
+                    data.set("groups", [g1, g2])
+                    let tpl = "{% for g in groups %}{{g.name}}:{% for item in g.items %}{{item}} {% endfor %}{% endfor %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "fruits:apple pear vegs:carrot ")
+                }),
+
+                t.it("for loop with missing list produces nothing", |_| {
+                    let data = Map::new()
+                    let result = tmpl.render_string("{% for x in missing %}{{x}}{% endfor %}", data)
+                    t.assert_eq(result, "")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Jinja2-style conditionals
+        // ----------------------------------------------------------------
+        t.describe("Jinja2 Conditionals", |_| {
+            return [
+                t.it("if truthy", |_| {
+                    let data = Map::new()
+                    data.set("logged_in", true)
+                    let result = tmpl.render_string("{% if logged_in %}Welcome{% endif %}", data)
+                    t.assert_eq(result, "Welcome")
+                }),
+
+                t.it("if falsy", |_| {
+                    let data = Map::new()
+                    data.set("logged_in", false)
+                    let result = tmpl.render_string("{% if logged_in %}Welcome{% endif %}", data)
+                    t.assert_eq(result, "")
+                }),
+
+                t.it("if/else", |_| {
+                    let data = Map::new()
+                    data.set("logged_in", false)
+                    let result = tmpl.render_string("{% if logged_in %}Welcome{% else %}Please log in{% endif %}", data)
+                    t.assert_eq(result, "Please log in")
+                }),
+
+                t.it("if/elif/else - first branch", |_| {
+                    let data = Map::new()
+                    data.set("role", "admin")
+                    data.set("is_admin", true)
+                    data.set("is_mod", false)
+                    let tpl = "{% if is_admin %}Admin{% elif is_mod %}Mod{% else %}User{% endif %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "Admin")
+                }),
+
+                t.it("if/elif/else - elif branch", |_| {
+                    let data = Map::new()
+                    data.set("is_admin", false)
+                    data.set("is_mod", true)
+                    let tpl = "{% if is_admin %}Admin{% elif is_mod %}Mod{% else %}User{% endif %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "Mod")
+                }),
+
+                t.it("if/elif/else - else branch", |_| {
+                    let data = Map::new()
+                    data.set("is_admin", false)
+                    data.set("is_mod", false)
+                    let tpl = "{% if is_admin %}Admin{% elif is_mod %}Mod{% else %}User{% endif %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "User")
+                }),
+
+                t.it("multiple elif branches", |_| {
+                    let data = Map::new()
+                    data.set("a", false)
+                    data.set("b", false)
+                    data.set("c", true)
+                    let tpl = "{% if a %}A{% elif b %}B{% elif c %}C{% else %}D{% endif %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "C")
+                }),
+
+                t.it("jinja2 if with nested content", |_| {
+                    let data = Map::new()
+                    data.set("show", true)
+                    data.set("name", "World")
+                    let tpl = "{% if show %}Hello {{name}}{% endif %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "Hello World")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Jinja2 comments
+        // ----------------------------------------------------------------
+        t.describe("Jinja2 Comments", |_| {
+            return [
+                t.it("jinja2 comment block", |_| {
+                    let data = Map::new()
+                    let result = tmpl.render_string("A{# this is a comment #}B", data)
+                    t.assert_eq(result, "AB")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Template Inheritance
+        // ----------------------------------------------------------------
+        t.describe("Template Inheritance", |_| {
+            return [
+                t.it("block with default content", |_| {
+                    let data = Map::new()
+                    data.set("title", "Home")
+                    let tpl = "<h1>{% block header %}Default Header{% endblock %}</h1>"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "<h1>Default Header</h1>")
+                }),
+
+                t.it("block with variable content", |_| {
+                    let data = Map::new()
+                    data.set("title", "Home")
+                    let tpl = "<title>{% block title %}{{title}}{% endblock %}</title>"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "<title>Home</title>")
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Mixed Mustache and Jinja2 syntax
+        // ----------------------------------------------------------------
+        t.describe("Mixed Syntax", |_| {
+            return [
+                t.it("for loop with mustache variable", |_| {
+                    let data = Map::new()
+                    data.set("items", ["x", "y"])
+                    let tpl = "{% for item in items %}[{{item}}]{% endfor %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "[x][y]")
+                }),
+
+                t.it("jinja2 if with mustache each inside", |_| {
+                    let data = Map::new()
+                    data.set("show_list", true)
+                    data.set("items", ["a", "b"])
+                    let tpl = "{% if show_list %}{{#each items}}{{this}} {{/each}}{% endif %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "a b ")
+                }),
+
+                t.it("filter on escaped var", |_| {
+                    let data = Map::new()
+                    data.set("name", "alice & bob")
+                    // Escaped var with upper filter: HTML escaping happens AFTER filter
+                    let result = tmpl.render_string("{{name | upper}}", data)
+                    t.assert_eq(result, "ALICE &amp; BOB")
+                }),
+
+                t.it("complex template combining features", |_| {
+                    let u1 = Map::new()
+                    u1.set("name", "alice")
+                    u1.set("active", true)
+                    let u2 = Map::new()
+                    u2.set("name", "bob")
+                    u2.set("active", false)
+                    let u3 = Map::new()
+                    u3.set("name", "charlie")
+                    u3.set("active", true)
+                    let data = Map::new()
+                    data.set("title", "users report")
+                    data.set("users", [u1, u2, u3])
+
+                    let tpl = "{{{title | title}}}: {% for user in users %}{% if user.active %}{{user.name | upper}} {% endif %}{% endfor %}"
+                    let result = tmpl.render_string(tpl, data)
+                    t.assert_eq(result, "Users Report: ALICE CHARLIE ")
+                })
+            ]
+        })
+    ])
+}
