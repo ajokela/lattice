@@ -294,6 +294,7 @@ static Chunk *compile_sub_body(Stmt **stmts, size_t count, int line) {
     return ch;
 }
 
+#ifndef __EMSCRIPTEN__
 /* Compile a single expression into a standalone sub-chunk (evaluates and returns value). */
 static Chunk *compile_sub_expr(const Expr *expr, int line) {
     Compiler *saved = current;
@@ -308,6 +309,7 @@ static Chunk *compile_sub_expr(const Expr *expr, int line) {
     current = saved;
     return ch;
 }
+#endif
 
 /* Store a pre-compiled Chunk* as a VAL_CLOSURE constant in the current chunk. */
 static size_t add_chunk_constant(Chunk *ch) {

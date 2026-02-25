@@ -376,6 +376,7 @@ static RegChunk *compile_reg_sub_body(Stmt **stmts, size_t count, int line) {
     return ch;
 }
 
+#ifndef __EMSCRIPTEN__
 /* Compile a single expression into a standalone RegChunk that returns its value. */
 static RegChunk *compile_reg_sub_expr(const Expr *expr, int line) {
     RegCompiler *saved = rc;
@@ -396,6 +397,7 @@ static RegChunk *compile_reg_sub_expr(const Expr *expr, int line) {
     rc = saved;
     return ch;
 }
+#endif
 
 /* Store a sub-RegChunk as a VAL_CLOSURE constant (body=NULL, native_fn=RegChunk*). */
 static uint16_t add_regchunk_constant(RegChunk *ch) {
@@ -2018,6 +2020,12 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
     }
 
     case EXPR_SCOPE: {
+#ifdef __EMSCRIPTEN__
+        /* WASM fallback: run as synchronous block */
+        for (size_t i = 0; i < e->as.block.count; i++)
+            compile_stmt(e->as.block.stmts[i]);
+        emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+#else
         size_t total = e->as.block.count;
 
         /* Count spawns and collect non-spawn stmts */
@@ -2072,10 +2080,14 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             emit_ABC(0, a, b, c, line);
         }
         free(spawn_indices);
+#endif
         break;
     }
 
     case EXPR_SELECT: {
+#ifdef __EMSCRIPTEN__
+        emit_ABC(ROP_LOADNIL, dst, 0, 0, line);
+#else
         size_t arm_count = e->as.select_expr.arm_count;
         SelectArm *arms = e->as.select_expr.arms;
 
@@ -2115,6 +2127,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             emit_ABC(0, flags, chan_idx, body_idx, line);
             emit_ABC(0, binding_idx, 0, 0, line);
         }
+#endif
         break;
     }
 

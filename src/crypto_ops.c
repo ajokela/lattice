@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef __EMSCRIPTEN__
+#include <unistd.h>  /* getentropy() for WASM random bytes */
+#endif
 
 /* ══════════════════════════════════════════════════════════════════════
  * Hex encoding — shared by both OpenSSL and pure-C paths
@@ -482,7 +485,23 @@ char *crypto_hmac_sha256(const char *key, size_t key_len,
 /* ── random_bytes fallback (already existed) ────────────────────────── */
 
 uint8_t *crypto_random_bytes(size_t n, char **err) {
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#if defined(__EMSCRIPTEN__)
+    uint8_t *buf = malloc(n);
+    if (!buf) { *err = strdup("random_bytes: allocation failed"); return NULL; }
+    /* getentropy is limited to 256 bytes per call */
+    size_t offset = 0;
+    while (offset < n) {
+        size_t chunk = n - offset;
+        if (chunk > 256) chunk = 256;
+        if (getentropy(buf + offset, chunk) != 0) {
+            free(buf);
+            *err = strdup("random_bytes: getentropy failed");
+            return NULL;
+        }
+        offset += chunk;
+    }
+    return buf;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
     uint8_t *buf = malloc(n);
     if (!buf) { *err = strdup("random_bytes: allocation failed"); return NULL; }
     arc4random_buf(buf, n);
