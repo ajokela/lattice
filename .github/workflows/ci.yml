@@ -30,6 +30,24 @@ jobs:
       - name: Test
         run: make test
 
+  gcc-werror:
+    name: GCC -Werror
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
+
+      - name: Build with GCC -Werror
+        run: make CC=gcc
+
+      - name: Build extensions
+        run: make ext-sqlite
+
+      - name: Test
+        run: make test
+
   asan:
     name: AddressSanitizer + UBSan
     runs-on: ubuntu-latest

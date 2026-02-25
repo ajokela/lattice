@@ -108,7 +108,7 @@ static void scan_file(LspSymbolIndex *idx, const char *path) {
                 /* Skip examples */
             } else {
                 /* Description text */
-                char trimmed[1024];
+                char trimmed[2048];
                 snprintf(trimmed, sizeof(trimmed), "%s", text);
                 trimmed[strcspn(trimmed, "\n\r")] = '\0';
                 if (desc[0]) strncat(desc, " ", sizeof(desc) - strlen(desc) - 1);
