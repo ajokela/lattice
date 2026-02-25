@@ -544,33 +544,38 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             }
         }
 
-        /* General binary: compile left into dst, right into tmp */
-        compile_expr(e->as.binop.left, dst, line);
+        /* General binary: compile left and right into separate temps to
+         * avoid register aliasing when dst overlaps a source operand.
+         * E.g. `y = x % y` where y is dst — compiling left into dst
+         * would clobber y before the right operand reads it. */
+        uint8_t lhs = alloc_reg();
+        compile_expr(e->as.binop.left, lhs, line);
         uint8_t rhs = alloc_reg();
         compile_expr(e->as.binop.right, rhs, line);
 
         switch (e->as.binop.op) {
-            case BINOP_ADD:  emit_ABC(ROP_ADD, dst, dst, rhs, line); break;
-            case BINOP_SUB:  emit_ABC(ROP_SUB, dst, dst, rhs, line); break;
-            case BINOP_MUL:  emit_ABC(ROP_MUL, dst, dst, rhs, line); break;
-            case BINOP_DIV:  emit_ABC(ROP_DIV, dst, dst, rhs, line); break;
-            case BINOP_MOD:  emit_ABC(ROP_MOD, dst, dst, rhs, line); break;
-            case BINOP_EQ:   emit_ABC(ROP_EQ, dst, dst, rhs, line); break;
-            case BINOP_NEQ:  emit_ABC(ROP_NEQ, dst, dst, rhs, line); break;
-            case BINOP_LT:   emit_ABC(ROP_LT, dst, dst, rhs, line); break;
-            case BINOP_GT:   emit_ABC(ROP_GT, dst, dst, rhs, line); break;
-            case BINOP_LTEQ: emit_ABC(ROP_LTEQ, dst, dst, rhs, line); break;
-            case BINOP_GTEQ: emit_ABC(ROP_GTEQ, dst, dst, rhs, line); break;
-            case BINOP_BIT_AND: emit_ABC(ROP_BIT_AND, dst, dst, rhs, line); break;
-            case BINOP_BIT_OR:  emit_ABC(ROP_BIT_OR, dst, dst, rhs, line); break;
-            case BINOP_BIT_XOR: emit_ABC(ROP_BIT_XOR, dst, dst, rhs, line); break;
-            case BINOP_LSHIFT:  emit_ABC(ROP_LSHIFT, dst, dst, rhs, line); break;
-            case BINOP_RSHIFT:  emit_ABC(ROP_RSHIFT, dst, dst, rhs, line); break;
+            case BINOP_ADD:  emit_ABC(ROP_ADD, dst, lhs, rhs, line); break;
+            case BINOP_SUB:  emit_ABC(ROP_SUB, dst, lhs, rhs, line); break;
+            case BINOP_MUL:  emit_ABC(ROP_MUL, dst, lhs, rhs, line); break;
+            case BINOP_DIV:  emit_ABC(ROP_DIV, dst, lhs, rhs, line); break;
+            case BINOP_MOD:  emit_ABC(ROP_MOD, dst, lhs, rhs, line); break;
+            case BINOP_EQ:   emit_ABC(ROP_EQ, dst, lhs, rhs, line); break;
+            case BINOP_NEQ:  emit_ABC(ROP_NEQ, dst, lhs, rhs, line); break;
+            case BINOP_LT:   emit_ABC(ROP_LT, dst, lhs, rhs, line); break;
+            case BINOP_GT:   emit_ABC(ROP_GT, dst, lhs, rhs, line); break;
+            case BINOP_LTEQ: emit_ABC(ROP_LTEQ, dst, lhs, rhs, line); break;
+            case BINOP_GTEQ: emit_ABC(ROP_GTEQ, dst, lhs, rhs, line); break;
+            case BINOP_BIT_AND: emit_ABC(ROP_BIT_AND, dst, lhs, rhs, line); break;
+            case BINOP_BIT_OR:  emit_ABC(ROP_BIT_OR, dst, lhs, rhs, line); break;
+            case BINOP_BIT_XOR: emit_ABC(ROP_BIT_XOR, dst, lhs, rhs, line); break;
+            case BINOP_LSHIFT:  emit_ABC(ROP_LSHIFT, dst, lhs, rhs, line); break;
+            case BINOP_RSHIFT:  emit_ABC(ROP_RSHIFT, dst, lhs, rhs, line); break;
             default:
                 rc_error = strdup("unsupported binary operator in regvm");
                 break;
         }
         free_reg(rhs);
+        free_reg(lhs);
         break;
     }
 

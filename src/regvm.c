@@ -3483,13 +3483,24 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 uint8_t index = REG_GET_B(desc);
 
                 if (is_local) {
-                    /* Capture from current frame's register */
-                    ObjUpvalue *uv = malloc(sizeof(ObjUpvalue));
-                    uv->location = &R[index];
-                    uv->closed = value_nil();
-                    uv->next = vm->open_upvalues;
-                    vm->open_upvalues = uv;
-                    upvals[i] = uv;
+                    /* Capture from current frame's register — deduplicate
+                     * so multiple closures sharing the same local share one
+                     * ObjUpvalue (mirrors stack VM's capture_upvalue). */
+                    LatValue *target = &R[index];
+                    ObjUpvalue *existing = NULL;
+                    for (ObjUpvalue *p = vm->open_upvalues; p; p = p->next) {
+                        if (p->location == target) { existing = p; break; }
+                    }
+                    if (existing) {
+                        upvals[i] = existing;
+                    } else {
+                        ObjUpvalue *uv = malloc(sizeof(ObjUpvalue));
+                        uv->location = target;
+                        uv->closed = value_nil();
+                        uv->next = vm->open_upvalues;
+                        vm->open_upvalues = uv;
+                        upvals[i] = uv;
+                    }
                 } else {
                     /* Capture from enclosing upvalue */
                     if (frame->upvalues && index < frame->upvalue_count)
