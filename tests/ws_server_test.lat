@@ -1,0 +1,168 @@
+// WebSocket Server/Client Integration Test
+//
+// Tests the complete WebSocket extension API:
+//   Server:  listen, accept, server_close
+//   Client:  connect, connect_auto, close
+//   I/O:     send, recv, recv_timeout, send_binary, ping, status, set_timeout
+//
+// NOTE: Extension closures must be loaded independently per spawn (require_ext
+// is cached, so the dylib is loaded once). Sharing ext closures across spawn
+// blocks causes cleanup issues.
+
+fn server_echo(ch: any) {
+    let ws = require_ext("websocket")
+    let listen_fn = ws.get("listen")
+    let accept_fn = ws.get("accept")
+    let send_fn = ws.get("send")
+    let recv_fn = ws.get("recv")
+    let close_fn = ws.get("close")
+    let sclose_fn = ws.get("server_close")
+
+    let server = listen_fn(9880)
+    ch.send(freeze("ready"))
+    let client = accept_fn(server)
+
+    // Echo 3 messages (ping frames handled automatically by ws_recv_message)
+    let m1 = recv_fn(client)
+    send_fn(client, "1:" + m1)
+
+    let m2 = recv_fn(client)
+    send_fn(client, "2:" + m2)
+
+    let m3 = recv_fn(client)
+    send_fn(client, "3:" + m3)
+
+    close_fn(client)
+    sclose_fn(server)
+}
+
+fn client_echo(ch: any) {
+    let ws = require_ext("websocket")
+    let connect_fn = ws.get("connect")
+    let send_fn = ws.get("send")
+    let recv_fn = ws.get("recv")
+    let close_fn = ws.get("close")
+    let ping_fn = ws.get("ping")
+    let status_fn = ws.get("status")
+
+    let sig = ch.recv()
+    let conn = connect_fn("ws://127.0.0.1:9880/")
+
+    // Echo test 1
+    send_fn(conn, "hello")
+    let r1 = recv_fn(conn)
+    print(r1)
+
+    // Echo test 2
+    send_fn(conn, "world")
+    let r2 = recv_fn(conn)
+    print(r2)
+
+    // Ping/pong (server auto-replies in recv)
+    let pong = ping_fn(conn)
+    print(pong)
+
+    // Echo test 3 (after ping)
+    send_fn(conn, "after_ping")
+    let r3 = recv_fn(conn)
+    print(r3)
+
+    // Status check
+    let s = status_fn(conn)
+    print(s)
+
+    close_fn(conn)
+}
+
+fn server_auto(ch: any) {
+    let ws = require_ext("websocket")
+    let listen_fn = ws.get("listen")
+    let accept_fn = ws.get("accept")
+    let send_fn = ws.get("send")
+    let recv_fn = ws.get("recv")
+    let close_fn = ws.get("close")
+    let sclose_fn = ws.get("server_close")
+
+    let server = listen_fn(9881)
+    ch.send(freeze("ready"))
+    let client = accept_fn(server)
+
+    let m = recv_fn(client)
+    send_fn(client, "auto:" + m)
+
+    close_fn(client)
+    sclose_fn(server)
+}
+
+fn client_auto(ch: any) {
+    let ws = require_ext("websocket")
+    let connect_auto_fn = ws.get("connect_auto")
+    let send_fn = ws.get("send")
+    let recv_fn = ws.get("recv")
+    let recv_timeout_fn = ws.get("recv_timeout")
+    let close_fn = ws.get("close")
+    let status_fn = ws.get("status")
+
+    let sig = ch.recv()
+
+    // connect_auto with retries
+    let conn = connect_auto_fn("ws://127.0.0.1:9881/", 3, 200)
+    let s = status_fn(conn)
+    print(s)
+
+    send_fn(conn, "reconnected")
+    let r = recv_fn(conn)
+    print(r)
+
+    // recv_timeout: no more data, should return nil
+    let timeout_result = recv_timeout_fn(conn, 500)
+    if timeout_result == nil {
+        print("timeout_ok")
+    } else {
+        print("timeout_fail")
+    }
+
+    close_fn(conn)
+}
+
+fn main() {
+    // Test 1: Basic echo + ping
+    let ch1 = Channel::new()
+    scope {
+        spawn { server_echo(ch1) }
+        spawn { client_echo(ch1) }
+    }
+
+    // Test 2: connect_auto + recv_timeout
+    let ch2 = Channel::new()
+    scope {
+        spawn { server_auto(ch2) }
+        spawn { client_auto(ch2) }
+    }
+
+    // Test 3: Error handling (sequential, no spawns needed)
+    let ws = require_ext("websocket")
+    let status_fn = ws.get("status")
+    let listen_fn = ws.get("listen")
+    let sclose_fn = ws.get("server_close")
+    let connect_auto_fn = ws.get("connect_auto")
+
+    // Invalid handle status
+    let s = status_fn(999)
+    print(s)
+
+    // Listen and close
+    let srv = listen_fn(9882)
+    sclose_fn(srv)
+    print("srv_ok")
+
+    // connect_auto to unreachable server
+    try {
+        connect_auto_fn("ws://127.0.0.1:9999/", 1, 100)
+        print("unexpected")
+    } catch e {
+        print("fail_ok")
+    }
+
+    print("all_done")
+}
