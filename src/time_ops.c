@@ -16,6 +16,12 @@ bool time_sleep_ms(int64_t ms, char **err) {
         *err = strdup("sleep() expects non-negative milliseconds");
         return false;
     }
+#ifdef __EMSCRIPTEN__
+    /* sleep() would block the single-threaded WASM event loop */
+    (void)ms;
+    *err = strdup("sleep: not available in browser (would block event loop)");
+    return false;
+#else
     struct timespec ts;
     ts.tv_sec = (time_t)(ms / 1000);
     ts.tv_nsec = (long)((ms % 1000) * 1000000);
@@ -24,4 +30,5 @@ bool time_sleep_ms(int64_t ms, char **err) {
         return false;
     }
     return true;
+#endif
 }

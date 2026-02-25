@@ -35,8 +35,8 @@
 #include <limits.h>
 #include <ctype.h>
 #include <libgen.h>
-#include <sys/resource.h>
 #ifndef __EMSCRIPTEN__
+#include <sys/resource.h>
 #include <pthread.h>
 #endif
 
@@ -11144,6 +11144,7 @@ const MemoryStats *evaluator_stats(const Evaluator *ev) {
     s->region_live_count = ev->heap->regions->count;
     s->region_live_data_bytes = region_live_data_bytes(ev->heap->regions);
     s->region_cumulative_data_bytes = ev->heap->regions->cumulative_data_bytes;
+#ifndef __EMSCRIPTEN__
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) == 0) {
 #ifdef __linux__
@@ -11152,6 +11153,7 @@ const MemoryStats *evaluator_stats(const Evaluator *ev) {
         s->rss_peak_kb = (size_t)ru.ru_maxrss / 1024;
 #endif
     }
+#endif
     return &ev->stats;
 }
 

@@ -15,7 +15,6 @@
 #include "builtin_methods.h"
 #include <stdlib.h>
 #include <limits.h>
-#include <libgen.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
