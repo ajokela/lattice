@@ -8,6 +8,7 @@
 #include "regvm.h"
 #include "runtime.h"
 #include <emscripten.h>
+#include <emscripten/heap.h>
 
 static StackVM *g_vm = NULL;
 static LatRuntime *g_rt = NULL;
@@ -293,6 +294,11 @@ void lat_destroy_regvm(void) {
     }
     reg_compiler_free_known_enums();
     free_stored_programs();
+}
+
+EMSCRIPTEN_KEEPALIVE
+size_t lat_heap_bytes(void) {
+    return emscripten_get_heap_size();
 }
 
 #endif /* __EMSCRIPTEN__ */
