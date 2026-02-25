@@ -224,9 +224,13 @@ static inline LatValue value_clone_fast(const LatValue *src) {
         }
         case VAL_CLOSURE: {
             if (src->as.closure.body == NULL && src->as.closure.native_fn != NULL &&
-                src->as.closure.default_values != VM_NATIVE_MARKER &&
-                src->as.closure.default_values != VM_EXT_MARKER) {
-                /* Bytecode closure: shallow copy + strdup param_names */
+                src->as.closure.default_values != VM_NATIVE_MARKER) {
+                /* Bytecode closure or extension native: shallow copy + strdup param_names.
+                 * Extension natives (VM_EXT_MARKER) must also use this path instead of
+                 * value_deep_clone to avoid lat_alloc/fluid_alloc mismatches when the
+                 * clone is later freed via value_free -> val_dealloc -> free().
+                 * NOTE: do NOT reset region_id — bytecode closures store upvalue
+                 * count in region_id (preserved by shallow copy of *src). */
                 LatValue v = *src;
                 if (src->as.closure.param_names) {
                     v.as.closure.param_names = malloc(src->as.closure.param_count * sizeof(char *));
@@ -3010,8 +3014,11 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
                 if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
-                    (ref->as.closure.default_values == VM_NATIVE_MARKER ||
-                     ref->as.closure.default_values == VM_EXT_MARKER)) {
+                    ref->as.closure.default_values == VM_NATIVE_MARKER) {
+                    /* VM_NATIVE_MARKER closures have no heap-owned param_names
+                     * — safe to shallow-copy.  VM_EXT_MARKER closures DO own
+                     * heap param_names, so they must be cloned to avoid
+                     * double-free when the callee is freed after OP_CALL. */
                     push(vm, *ref);
                 } else {
                     push(vm, value_clone_fast(ref));
@@ -3034,8 +3041,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
                 if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
-                    (ref->as.closure.default_values == VM_NATIVE_MARKER ||
-                     ref->as.closure.default_values == VM_EXT_MARKER)) {
+                    ref->as.closure.default_values == VM_NATIVE_MARKER) {
                     push(vm, *ref);
                 } else {
                     push(vm, value_clone_fast(ref));

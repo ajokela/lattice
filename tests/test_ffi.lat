@@ -1,0 +1,281 @@
+// Test FFI Extension — exercises struct marshalling, extended types,
+// memory operations, callbacks, and error handling.
+//
+// Extension functions accessed via .get() on the map returned by require_ext().
+
+let ffi = require_ext("ffi")
+
+// ── Bind all FFI functions ──
+let _open = ffi.get("open")
+let _close = ffi.get("close")
+let _sym = ffi.get("sym")
+let _call = ffi.get("call")
+let _nullptr = ffi.get("nullptr")
+let _error = ffi.get("error")
+let _errno = ffi.get("errno")
+let _strerror = ffi.get("strerror")
+let _addr = ffi.get("addr")
+
+let _struct_define = ffi.get("struct_define")
+let _struct_alloc = ffi.get("struct_alloc")
+let _struct_set = ffi.get("struct_set")
+let _struct_get = ffi.get("struct_get")
+let _struct_free = ffi.get("struct_free")
+let _struct_to_map = ffi.get("struct_to_map")
+let _struct_from_map = ffi.get("struct_from_map")
+let _sizeof = ffi.get("sizeof")
+
+let _alloc = ffi.get("alloc")
+let _free = ffi.get("free")
+let _read_i8 = ffi.get("read_i8")
+let _read_i16 = ffi.get("read_i16")
+let _read_i32 = ffi.get("read_i32")
+let _read_i64 = ffi.get("read_i64")
+let _read_f32 = ffi.get("read_f32")
+let _read_f64 = ffi.get("read_f64")
+let _read_ptr = ffi.get("read_ptr")
+let _write_i8 = ffi.get("write_i8")
+let _write_i16 = ffi.get("write_i16")
+let _write_i32 = ffi.get("write_i32")
+let _write_i64 = ffi.get("write_i64")
+let _write_f32 = ffi.get("write_f32")
+let _write_f64 = ffi.get("write_f64")
+let _write_ptr = ffi.get("write_ptr")
+let _memcpy = ffi.get("memcpy")
+let _memset = ffi.get("memset")
+let _string_to_ptr = ffi.get("string_to_ptr")
+
+let _callback = ffi.get("callback")
+let _callback_free = ffi.get("callback_free")
+
+// ── Test 1: Open libSystem (macOS) ──
+print("=== FFI Extension Tests ===")
+print("")
+
+let libc = _open("/usr/lib/libSystem.B.dylib")
+print("1. Opened libSystem: handle = ${libc}")
+
+// ── Test 2: Call strlen (s>i) ──
+let strlen_sym = _sym(libc, "strlen", "s>i")
+let result = _call(strlen_sym, "Hello, FFI!")
+print("2. strlen('Hello, FFI!') = ${result}")
+assert(result == 11, "strlen should return 11")
+
+// ── Test 3: Call abs (c>c) using C int type ──
+let abs_sym = _sym(libc, "abs", "c>c")
+let abs_result = _call(abs_sym, -42)
+print("3. abs(-42) = ${abs_result}")
+assert(abs_result == 42, "abs(-42) should return 42")
+
+// ── Test 4: Call atoi (s>c) ──
+let atoi_sym = _sym(libc, "atoi", "s>c")
+let atoi_result = _call(atoi_sym, "12345")
+print("4. atoi('12345') = ${atoi_result}")
+assert(atoi_result == 12345, "atoi should return 12345")
+
+// ── Test 5: Extended type codes — getpid (>c) ──
+let getpid_sym = _sym(libc, "getpid", ">c")
+let pid = _call(getpid_sym)
+print("5. getpid() = ${pid}")
+assert(pid > 0, "PID should be positive")
+
+// ── Test 6: Call math function — sqrt (f>f) ──
+let sqrt_sym = _sym(libc, "sqrt", "f>f")
+let sqrt_result = _call(sqrt_sym, 144.0)
+print("6. sqrt(144.0) = ${sqrt_result}")
+assert(sqrt_result == 12.0, "sqrt(144) should be 12.0")
+
+// ── Test 7: pow (ff>f) — two double args ──
+let pow_sym = _sym(libc, "pow", "ff>f")
+let pow_result = _call(pow_sym, 2.0, 10.0)
+print("7. pow(2.0, 10.0) = ${pow_result}")
+assert(pow_result == 1024.0, "pow(2,10) should be 1024")
+
+// ── Test 8: errno and strerror ──
+let errno_val = _errno()
+print("8. errno = ${errno_val}")
+let err_str = _strerror(2)
+print("   strerror(2) = ${err_str}")
+
+// ── Test 9: nullptr ──
+let null_ptr = _nullptr()
+print("9. nullptr = ${null_ptr}")
+assert(null_ptr == 0, "nullptr should be 0")
+
+// ── Test 10: Memory allocation and read/write ──
+let ptr = _alloc(64)
+print("10. Allocated 64 bytes at ptr = ${ptr}")
+assert(ptr != 0, "alloc should return non-null")
+
+// Write and read i32
+_write_i32(ptr, 0, 42)
+let val32 = _read_i32(ptr, 0)
+print("    write_i32/read_i32: ${val32}")
+assert(val32 == 42, "read_i32 should return 42")
+
+// Write and read i64
+_write_i64(ptr, 8, 1234567890123)
+let val64 = _read_i64(ptr, 8)
+print("    write_i64/read_i64: ${val64}")
+assert(val64 == 1234567890123, "read_i64 should match")
+
+// Write and read f64
+_write_f64(ptr, 16, 3.14159)
+let valf64 = _read_f64(ptr, 16)
+print("    write_f64/read_f64: ${valf64}")
+
+// Write and read i8
+_write_i8(ptr, 24, 127)
+let val8 = _read_i8(ptr, 24)
+print("    write_i8/read_i8: ${val8}")
+assert(val8 == 127, "read_i8 should return 127")
+
+// Write and read i16
+_write_i16(ptr, 26, 32000)
+let val16 = _read_i16(ptr, 26)
+print("    write_i16/read_i16: ${val16}")
+assert(val16 == 32000, "read_i16 should return 32000")
+
+// Write and read f32
+_write_f32(ptr, 28, 2.5)
+let valf32 = _read_f32(ptr, 28)
+print("    write_f32/read_f32: ${valf32}")
+
+_free(ptr)
+print("    Freed memory")
+
+// ── Test 11: memset and memcpy ──
+let buf1 = _alloc(16)
+let buf2 = _alloc(16)
+_memset(buf1, 65, 4)  // Fill with 'A' (65)
+_memcpy(buf2, buf1, 4)
+let byte0 = _read_i8(buf2, 0)
+print("11. memset(65)/memcpy: byte0 = ${byte0}")
+assert(byte0 == 65, "memcpy should copy the 'A' byte")
+_free(buf1)
+_free(buf2)
+
+// ── Test 12: string_to_ptr ──
+let sptr = _string_to_ptr("Hello from Lattice")
+print("12. string_to_ptr: ptr = ${sptr}")
+assert(sptr != 0, "string_to_ptr should return non-null")
+// Use strlen on the copied string
+let slen = _call(strlen_sym, sptr)
+print("    strlen of copied string = ${slen}")
+assert(slen == 18, "strlen should be 18")
+_free(sptr)
+
+// ── Test 13: Struct marshalling ──
+print("")
+print("=== Struct Marshalling Tests ===")
+print("")
+
+// Define a Point struct: { int32_t x; int32_t y; }
+let point_type = _struct_define("Point", [
+    ["x", "i32"],
+    ["y", "i32"]
+])
+print("13. Defined struct Point: type_id = ${point_type}")
+
+let point_size = _sizeof(point_type)
+print("    sizeof(Point) = ${point_size}")
+assert(point_size == 8, "Point should be 8 bytes")
+
+// Allocate and populate a Point
+let p = _struct_alloc(point_type)
+print("    Allocated Point at ${p}")
+_struct_set(p, point_type, "x", 10)
+_struct_set(p, point_type, "y", 20)
+
+let px = _struct_get(p, point_type, "x")
+let py = _struct_get(p, point_type, "y")
+print("    Point.x = ${px}, Point.y = ${py}")
+assert(px == 10, "x should be 10")
+assert(py == 20, "y should be 20")
+
+// ── Test 14: struct_to_map ──
+let pmap = _struct_to_map(p, point_type)
+print("14. struct_to_map: ${pmap}")
+
+_struct_free(p)
+print("    Freed Point struct")
+
+// ── Test 15: struct_from_map ──
+let p2 = _struct_from_map(point_type, pmap)
+let p2x = _struct_get(p2, point_type, "x")
+let p2y = _struct_get(p2, point_type, "y")
+print("15. struct_from_map: x=${p2x}, y=${p2y}")
+assert(p2x == 10, "round-trip x should be 10")
+assert(p2y == 20, "round-trip y should be 20")
+_struct_free(p2)
+
+// ── Test 16: Complex struct with mixed types ──
+let record_type = _struct_define("Record", [
+    ["id", "i64"],
+    ["score", "f64"],
+    ["flags", "u8"],
+    ["count", "i32"]
+])
+print("16. Defined struct Record: type_id = ${record_type}")
+let rec_size = _sizeof(record_type)
+print("    sizeof(Record) = ${rec_size}")
+
+let rec = _struct_alloc(record_type)
+_struct_set(rec, record_type, "id", 42)
+_struct_set(rec, record_type, "score", 99.5)
+_struct_set(rec, record_type, "flags", 255)
+_struct_set(rec, record_type, "count", 1000)
+
+let rec_map = _struct_to_map(rec, record_type)
+print("    Record = ${rec_map}")
+
+let rid = _struct_get(rec, record_type, "id")
+let rscore = _struct_get(rec, record_type, "score")
+let rflags = _struct_get(rec, record_type, "flags")
+let rcount = _struct_get(rec, record_type, "count")
+assert(rid == 42, "id should be 42")
+assert(rscore == 99.5, "score should be 99.5")
+assert(rflags == 255, "flags should be 255")
+assert(rcount == 1000, "count should be 1000")
+print("    All fields verified")
+_struct_free(rec)
+
+// ── Test 17: Callback (basic allocation test) ──
+print("")
+print("=== Callback Tests ===")
+print("")
+
+let cb_ptr = _callback("ii>i", nil)
+print("17. Allocated callback thunk: ptr = ${cb_ptr}")
+assert(cb_ptr != 0, "callback should return non-null thunk pointer")
+_callback_free(cb_ptr)
+print("    Freed callback")
+
+// ── Test 18: ffi.addr ──
+let strlen_addr = _addr(strlen_sym)
+print("18. addr(strlen) = ${strlen_addr}")
+assert(strlen_addr != 0, "function address should be non-null")
+
+// ── Test 19: Error handling ──
+print("")
+print("=== Error Handling Tests ===")
+print("")
+
+// Test dlerror
+let dl_err = _error()
+print("19. dlerror() = ${dl_err}")
+
+// ── Test 20: strerror for various errno values ──
+let e_perm = _strerror(1)
+let e_noent = _strerror(2)
+let e_intr = _strerror(4)
+print("20. strerror(1) = ${e_perm}")
+print("    strerror(2) = ${e_noent}")
+print("    strerror(4) = ${e_intr}")
+
+// ── Test 21: Close library ──
+_close(libc)
+print("21. Closed library handle")
+
+print("")
+print("=== All FFI tests passed ===")
