@@ -1,4 +1,5 @@
 #include "env.h"
+#include "string_ops.h"
 #include "memory.h"
 #include <stdlib.h>
 #include <string.h>
@@ -237,4 +238,33 @@ void env_iter_values(Env *env, EnvIterFn fn, void *ctx) {
     for (size_t i = 0; i < env->count; i++) {
         lat_map_iter(&env->scopes[i], iter_scope_values, args);
     }
+}
+
+/* ── Spellcheck suggestion for undefined variables ── */
+
+typedef struct {
+    const char *target;
+    const char *best;
+    int best_dist;
+} EnvSimilarCtx;
+
+static void env_similar_iter(const char *key, void *value, void *ctx) {
+    (void)value;
+    EnvSimilarCtx *sc = (EnvSimilarCtx *)ctx;
+    /* Skip internal names */
+    if (key[0] == '_' && key[1] == '_') return;
+    int d = lat_levenshtein(sc->target, key);
+    if (d > 0 && d < sc->best_dist) {
+        sc->best_dist = d;
+        sc->best = key;
+    }
+}
+
+const char *env_find_similar_name(const Env *env, const char *name) {
+    if (!env || !name) return NULL;
+    EnvSimilarCtx ctx = { .target = name, .best = NULL, .best_dist = 3 };
+    for (size_t i = 0; i < env->count; i++) {
+        lat_map_iter(&env->scopes[i], env_similar_iter, &ctx);
+    }
+    return ctx.best;
 }

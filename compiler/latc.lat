@@ -1416,65 +1416,219 @@ fn parse_match_expression() {
             compiler_error("unexpected end of input in match", line)
         }
 
-        let is_wildcard = peek_text() == "_"
+        // Determine pattern type by lookahead
+        // Binding pattern: identifier (not "_") followed by "if" or "=>"
+        // Range pattern: integer ".." integer
+        // Wildcard: "_"
+        // Literal: string, integer, float, true, false, nil
 
-        // DUP scrutinee for this arm
-        emit_byte(OP_DUP, line)
+        let pat_tok = peek()
+        flux is_binding = false
+        flux is_range = false
 
-        if is_wildcard {
-            advance()
-            emit_byte(OP_TRUE, line)
-        } else {
-            emit_byte(OP_DUP, line)     // extra dup for OP_EQ consumption
-            // Parse pattern as literal directly — parse_expression() would
-            // misinterpret string text like "-" or "*" as operators
-            let pat = peek()
-            if pat.type == "string" {
-                advance()
-                emit_constant(make_string_const(pat.text), line)
-            } else { if pat.type == "integer" {
-                advance()
-                let val = parse_int(pat.text)
-                emit_constant(make_int_const(val), line)
-            } else { if pat.type == "float" {
-                advance()
-                let val = parse_float(pat.text)
-                emit_constant(make_float_const(val), line)
-            } else { if pat.type == "true" {
-                advance()
-                emit_byte(OP_TRUE, line)
-            } else { if pat.type == "false" {
-                advance()
-                emit_byte(OP_FALSE, line)
-            } else { if pat.type == "nil" {
-                advance()
-                emit_byte(OP_NIL, line)
+        if pat_tok.type == "identifier" && pat_tok.text != "_" {
+            // An identifier that isn't _ is a binding pattern
+            // (it binds the scrutinee to a name, optionally with a guard)
+            if pos + 1 < len(tokens) {
+                let next_tok = tokens[pos + 1]
+                if next_tok.text == "if" || next_tok.text == "=>" {
+                    is_binding = true
+                }
+            }
+        }
+
+        if !is_binding && pat_tok.type == "integer" {
+            // Check for range pattern: int..int
+            if pos + 1 < len(tokens) && tokens[pos + 1].type == ".." {
+                is_range = true
+            }
+        }
+
+        if is_binding {
+            // === Binding pattern ===
+            // Stack invariant: scrutinee S stays on stack.
+            // DUP S -> [S, S']. S' becomes local binding.
+            // Guard references the binding. On match: body produces result,
+            // then we clean up the scope. On no match: pop guard_bool, pop n -> [S].
+            let binding_name = advance().text  // consume identifier
+
+            begin_scope()
+            add_local("")  // dummy slot tracks scrutinee S
+            emit_byte(OP_DUP, line)  // [S, S']
+            add_local(binding_name)
+
+            // Compile guard (or TRUE if none)
+            if peek_text() == "if" {
+                advance()  // consume 'if'
+                parse_expression()  // [S, n, guard_bool]
+            } else {
+                emit_byte(OP_TRUE, line)  // [S, n, true]
+            }
+
+            let next_arm = emit_jump(OP_JUMP_IF_FALSE, line)
+            emit_byte(OP_POP, line)  // pop bool: [S, n]
+
+            expect(nil, "=>")
+
+            // Compile arm body in a nested scope so body-locals
+            // are cleaned up before the binding variable.
+            begin_scope()
+            if peek_text() == "{" {
+                expect(nil, "{")
+                flux match_last_expr = false
+                while peek_text() != "}" {
+                    if peek() == nil {
+                        compiler_error("unexpected end of input in match arm block", line)
+                    }
+                    if match_last_expr {
+                        emit_byte(OP_POP, line)
+                    }
+                    match_last_expr = false
+                    if is_statement_start() {
+                        parse_statement()
+                    } else {
+                        parse_expression()
+                        match_last_expr = true
+                    }
+                }
+                expect(nil, "}")
+                if match_last_expr {
+                    end_scope_preserve_tos(line)
+                } else {
+                    end_scope(line)
+                    emit_byte(OP_UNIT, line)
+                }
             } else {
                 parse_expression()
-            } } } } } }
-            emit_byte(OP_EQ, line)
-        }
+                end_scope_preserve_tos(line)
+            }
 
-        let next_arm = emit_jump(OP_JUMP_IF_FALSE, line)
+            // Stack: [S(dummy), n(binding), result]
+            // Swap result past n, then pop n and S via manual cleanup
+            emit_byte(OP_SWAP, line)  // [S, result, n]
+            emit_byte(OP_POP, line)   // [S, result] — pop n
+            emit_byte(OP_SWAP, line)  // [result, S]
+            emit_byte(OP_POP, line)   // [result] — pop S
+            // Remove locals from compiler without emitting more pops
+            scope_depth = scope_depth - 1
+            while local_count > 0 && local_depth_arr[local_count - 1] > scope_depth {
+                local_count = local_count - 1
+            }
 
-        // Match succeeded: pop bool, pop dup, pop scrutinee
-        emit_byte(OP_POP, line)
-        emit_byte(OP_POP, line)
-        emit_byte(OP_POP, line)
+            end_jumps.push(emit_jump(OP_JUMP, line))
 
-        expect(nil, "=>")
-        if peek_text() == "{" {
-            parse_block_expression()
+            patch_jump(next_arm)
+            // JUMP_IF_FALSE doesn't pop: [S, n, false]
+            emit_byte(OP_POP, line)  // pop false: [S, n]
+            emit_byte(OP_POP, line)  // pop n: [S]
+            // scope_depth and local_count already cleaned in match path above
         } else {
-            parse_expression()
+            // === Non-binding pattern: LITERAL, WILDCARD, RANGE ===
+            emit_byte(OP_DUP, line)  // [S, S']
+
+            let is_wildcard = peek_text() == "_"
+
+            if is_wildcard {
+                advance()
+                emit_byte(OP_TRUE, line)  // [S, S', true]
+            } else { if is_range {
+                // Range pattern: int..int
+                // DUP S', compare >= start, if false skip to end,
+                // else DUP S' again, compare <= end
+                emit_byte(OP_DUP, line)  // [S, S', S'']
+                let range_start = advance()  // consume start integer
+                let start_val = parse_int(range_start.text)
+                emit_constant(make_int_const(start_val), line)
+                emit_byte(OP_GTEQ, line)  // [S, S', start_ok]
+                let range_fail = emit_jump(OP_JUMP_IF_FALSE, line)
+                emit_byte(OP_POP, line)  // pop true
+                advance()  // consume '..'
+                emit_byte(OP_DUP, line)  // [S, S', S'']
+                let range_end = advance()  // consume end integer
+                let end_val = parse_int(range_end.text)
+                emit_constant(make_int_const(end_val), line)
+                emit_byte(OP_LTEQ, line)  // [S, S', end_ok]
+                let range_done = emit_jump(OP_JUMP, line)
+                patch_jump(range_fail)
+                // range_fail lands here with [S, S', false] on stack
+                patch_jump(range_done)
+            } else {
+                emit_byte(OP_DUP, line)  // [S, S', S''] — extra dup for OP_EQ consumption
+                // Parse pattern as literal directly
+                let pat = peek()
+                if pat.type == "string" {
+                    advance()
+                    emit_constant(make_string_const(pat.text), line)
+                } else { if pat.type == "integer" {
+                    advance()
+                    let val = parse_int(pat.text)
+                    emit_constant(make_int_const(val), line)
+                } else { if pat.type == "float" {
+                    advance()
+                    let val = parse_float(pat.text)
+                    emit_constant(make_float_const(val), line)
+                } else { if pat.type == "true" {
+                    advance()
+                    emit_byte(OP_TRUE, line)
+                } else { if pat.type == "false" {
+                    advance()
+                    emit_byte(OP_FALSE, line)
+                } else { if pat.type == "nil" {
+                    advance()
+                    emit_byte(OP_NIL, line)
+                } else { if pat.text == "-" {
+                    // Negative literal
+                    advance()  // consume '-'
+                    let neg_pat = peek()
+                    if neg_pat.type == "integer" {
+                        advance()
+                        let val = parse_int(neg_pat.text)
+                        emit_constant(make_int_const(0 - val), line)
+                    } else { if neg_pat.type == "float" {
+                        advance()
+                        let val = parse_float(neg_pat.text)
+                        emit_constant(make_float_const(0.0 - val), line)
+                    } else {
+                        compiler_error("expected number after '-' in pattern", line)
+                    } }
+                } else {
+                    parse_expression()
+                } } } } } } }
+                emit_byte(OP_EQ, line)  // [S, S', bool]
+            } }
+
+            // Guard: if present, chain with pattern check
+            if peek_text() == "if" {
+                advance()  // consume 'if'
+                let guard_skip = emit_jump(OP_JUMP_IF_FALSE, line)
+                emit_byte(OP_POP, line)
+                parse_expression()
+                let guard_done = emit_jump(OP_JUMP, line)
+                patch_jump(guard_skip)
+                patch_jump(guard_done)
+            }
+
+            let next_arm = emit_jump(OP_JUMP_IF_FALSE, line)
+
+            // Match succeeded: pop bool, pop S', pop S
+            emit_byte(OP_POP, line)
+            emit_byte(OP_POP, line)
+            emit_byte(OP_POP, line)
+
+            expect(nil, "=>")
+            if peek_text() == "{" {
+                parse_block_expression()
+            } else {
+                parse_expression()
+            }
+
+            end_jumps.push(emit_jump(OP_JUMP, line))
+
+            // Match failed: patch here, pop bool + pop S'
+            patch_jump(next_arm)
+            emit_byte(OP_POP, line)  // pop false
+            emit_byte(OP_POP, line)  // pop S'
         }
-
-        end_jumps.push(emit_jump(OP_JUMP, line))
-
-        // Match failed: patch here, pop bool + pop dup
-        patch_jump(next_arm)
-        emit_byte(OP_POP, line)
-        emit_byte(OP_POP, line)
 
         // Optional trailing comma
         if peek_text() == "," {

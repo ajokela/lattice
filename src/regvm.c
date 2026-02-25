@@ -2568,8 +2568,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint16_t bx = REG_GET_Bx(instr);
         const char *name = frame->chunk->constants[bx].as.str_val;
         LatValue val;
-        if (!env_get(vm->env, name, &val))
-            RVM_ERROR("undefined variable '%s'", name);
+        if (!env_get(vm->env, name, &val)) {
+            const char *sug = env_find_similar_name(vm->env, name);
+            if (sug) RVM_ERROR("undefined variable '%s' (did you mean '%s'?)", name, sug);
+            else RVM_ERROR("undefined variable '%s'", name);
+        }
         /* env_get already returns a value_deep_clone'd copy — no need to
          * clone again.  Directly assign the owned value to the register. */
         reg_set(&R[a], val);
@@ -2580,8 +2583,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint16_t bx = REG_GET_Bx(instr);
         const char *name = frame->chunk->constants[bx].as.str_val;
-        if (!env_set(vm->env, name, rvm_clone(&R[a])))
-            RVM_ERROR("undefined variable '%s'", name);
+        if (!env_set(vm->env, name, rvm_clone(&R[a]))) {
+            const char *sug = env_find_similar_name(vm->env, name);
+            if (sug) RVM_ERROR("undefined variable '%s' (did you mean '%s'?)", name, sug);
+            else RVM_ERROR("undefined variable '%s'", name);
+        }
         /* Record history for tracked globals */
         {
             if (vm->rt->tracking_active)
@@ -3608,8 +3614,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
-        invoke_fail:
-        RVM_ERROR("no method '%s' on %s", method_name, value_type_name(&R[obj_reg]));
+        invoke_fail: {
+        const char *msug = builtin_find_similar_method(R[obj_reg].type, method_name);
+        if (msug)
+            RVM_ERROR("no method '%s' on %s (did you mean '%s'?)", method_name, value_type_name(&R[obj_reg]), msug);
+        else
+            RVM_ERROR("no method '%s' on %s", method_name, value_type_name(&R[obj_reg]));
+        }
     }
 
     CASE(FREEZE) {
@@ -5108,7 +5119,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Get a direct reference to the global value */
         LatValue *obj_ref = env_get_ref(vm->env, global_name);
         if (!obj_ref) {
-            RVM_ERROR("undefined variable '%s'", global_name);
+            const char *sug = env_find_similar_name(vm->env, global_name);
+            if (sug) RVM_ERROR("undefined variable '%s' (did you mean '%s'?)", global_name, sug);
+            else RVM_ERROR("undefined variable '%s'", global_name);
             DISPATCH();
         }
 
@@ -5445,7 +5458,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
-        RVM_ERROR("no method '%s' on %s", method_name, value_type_name(&R[loc_reg]));
+        {
+        const char *lmsug = builtin_find_similar_method(R[loc_reg].type, method_name);
+        if (lmsug)
+            RVM_ERROR("no method '%s' on %s (did you mean '%s'?)", method_name, value_type_name(&R[loc_reg]), lmsug);
+        else
+            RVM_ERROR("no method '%s' on %s", method_name, value_type_name(&R[loc_reg]));
+        }
     }
 
     CASE(IS_CRYSTAL) {

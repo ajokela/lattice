@@ -1,0 +1,173 @@
+// Lattice Heap Library (Min-Heap / Priority Queue)
+// Provides a binary min-heap where elements with lower priority values
+// are dequeued first. Uses closures over captured state.
+//
+// Usage:
+//   import "lib/heap" as Heap
+//
+//   let h = Heap.new()
+//   h.push("urgent", 1)
+//   h.push("normal", 5)
+//   h.push("critical", 0)
+//   print(h.peek())      // [0, "critical"]
+//   print(h.pop())       // [0, "critical"]
+//   print(h.len())       // 2
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Create a new empty min-heap.
+// Returns a Map of closures that share mutable state.
+// Internally stores [priority, value] pairs in a flat array.
+fn new() -> Map {
+    flux data = _make_array(16)
+    flux sz = 0
+
+    let h = Map::new()
+
+    h.set("push", |value, priority| {
+        // Grow if needed
+        if sz >= data.len() {
+            let cap = data.len()
+            let new_cap = cap * 2
+            flux new_data = _make_array(new_cap)
+            flux j = 0
+            while j < sz {
+                new_data[j] = data[j]
+                j = j + 1
+            }
+            data = new_data
+        }
+        // Insert at end
+        data[sz] = [priority, value]
+        sz = sz + 1
+        // Bubble up
+        flux i = sz - 1
+        while i > 0 {
+            let parent = (i - 1) / 2
+            if data[i][0] < data[parent][0] {
+                let tmp = data[i]
+                data[i] = data[parent]
+                data[parent] = tmp
+                i = parent
+            } else {
+                break
+            }
+        }
+    })
+
+    h.set("pop", |_| {
+        if sz == 0 {
+            assert(false, "heap underflow: pop from empty heap")
+        }
+        let result = data[0]
+        sz = sz - 1
+        if sz == 0 {
+            data[0] = nil
+            return result
+        }
+        // Move last to root
+        data[0] = data[sz]
+        data[sz] = nil
+        // Bubble down
+        flux i = 0
+        loop {
+            flux smallest = i
+            let left = 2 * i + 1
+            let right = 2 * i + 2
+            if left < sz {
+                if data[left][0] < data[smallest][0] {
+                    smallest = left
+                }
+            }
+            if right < sz {
+                if data[right][0] < data[smallest][0] {
+                    smallest = right
+                }
+            }
+            if smallest == i { break }
+            let tmp = data[i]
+            data[i] = data[smallest]
+            data[smallest] = tmp
+            i = smallest
+        }
+        return result
+    })
+
+    h.set("peek", |_| {
+        if sz == 0 { return nil }
+        return data[0]
+    })
+
+    h.set("len", |_| {
+        return sz
+    })
+
+    h.set("is_empty", |_| {
+        return sz == 0
+    })
+
+    return h
+}
+
+// Demo / test
+fn main() {
+    print("=== Min-Heap / Priority Queue ===")
+    print("")
+
+    let h = new()
+    let push = h.get("push")
+    let pop = h.get("pop")
+    let peek = h.get("peek")
+    let sz = h.get("len")
+    let empty = h.get("is_empty")
+
+    print("Empty heap, size: " + to_string(sz(nil)))
+
+    push("low priority task", 10)
+    push("critical task", 1)
+    push("medium task", 5)
+    push("urgent task", 2)
+    push("background task", 20)
+
+    print("After inserting 5 tasks:")
+    print("  size: " + to_string(sz(nil)))
+    let top = peek(nil)
+    print("  peek: priority=" + to_string(top[0]) + ", value=" + to_string(top[1]))
+
+    print("")
+    print("Popping in priority order:")
+    while !empty(nil) {
+        let entry = pop(nil)
+        print("  priority=" + to_string(entry[0]) + "  value=" + to_string(entry[1]))
+    }
+    print("")
+    print("is_empty: " + to_string(empty(nil)))
+
+    // Test with numeric values
+    print("")
+    print("--- Numeric priority queue ---")
+    push(42, 3)
+    push(17, 1)
+    push(99, 2)
+    push(5, 0)
+
+    print("Drain:")
+    while !empty(nil) {
+        let entry = pop(nil)
+        print("  [" + to_string(entry[0]) + "] " + to_string(entry[1]))
+    }
+
+    print("")
+    print("Heap demo complete.")
+}

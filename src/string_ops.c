@@ -374,6 +374,49 @@ char *lat_str_camel_case(const char *s) {
     return r;
 }
 
+/* ── Spellcheck / similarity helpers ── */
+
+int lat_levenshtein(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    if (la == 0) return (int)lb;
+    if (lb == 0) return (int)la;
+    /* Use single row of DP table to save memory */
+    size_t *row = malloc((lb + 1) * sizeof(size_t));
+    for (size_t j = 0; j <= lb; j++) row[j] = j;
+    for (size_t i = 1; i <= la; i++) {
+        size_t prev = row[0];
+        row[0] = i;
+        for (size_t j = 1; j <= lb; j++) {
+            size_t cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            size_t del = row[j] + 1;
+            size_t ins = row[j - 1] + 1;
+            size_t sub = prev + cost;
+            prev = row[j];
+            size_t best = del < ins ? del : ins;
+            row[j] = best < sub ? best : sub;
+        }
+    }
+    int result = (int)row[lb];
+    free(row);
+    return result;
+}
+
+const char *lat_find_similar(const char *name, const char **candidates, int max_distance) {
+    if (!name || !candidates) return NULL;
+    const char *best = NULL;
+    int best_dist = max_distance + 1;
+    for (int i = 0; candidates[i]; i++) {
+        /* Skip internal names (start with __) */
+        if (candidates[i][0] == '_' && candidates[i][1] == '_') continue;
+        int d = lat_levenshtein(name, candidates[i]);
+        if (d > 0 && d < best_dist) {
+            best_dist = d;
+            best = candidates[i];
+        }
+    }
+    return best;
+}
+
 char *lat_str_kebab_case(const char *s) {
     s = safe_str(s);
     size_t len = strlen(s);

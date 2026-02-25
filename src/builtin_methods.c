@@ -1,4 +1,5 @@
 #include "builtin_methods.h"
+#include "string_ops.h"
 #include "ds/hashmap.h"
 #include <stdlib.h>
 #include <string.h>
@@ -1300,4 +1301,68 @@ LatValue builtin_enum_is_variant(LatValue *obj, LatValue *args, int arg_count, c
     if (args[0].type == VAL_STR)
         return value_bool(strcmp(obj->as.enm.variant_name, args[0].as.str_val) == 0);
     return value_bool(false);
+}
+
+/* ========================================================================
+ * Method name suggestions for typo errors
+ * ======================================================================== */
+
+static const char *array_methods[] = {
+    "len", "length", "push", "pop", "contains", "enumerate", "reverse",
+    "join", "map", "filter", "reduce", "each", "sort", "sort_by", "find",
+    "any", "all", "flat_map", "flatten", "group_by", "unique", "index_of",
+    "zip", "sum", "min", "max", "first", "last", "take", "drop", "chunk",
+    "insert", "remove_at", "slice", NULL
+};
+
+static const char *string_methods[] = {
+    "len", "length", "split", "trim", "trim_start", "trim_end",
+    "to_upper", "to_lower", "starts_with", "ends_with", "replace",
+    "contains", "chars", "bytes", "reverse", "repeat", "pad_left",
+    "pad_right", "count", "is_empty", "index_of", "substring", NULL
+};
+
+static const char *map_methods[] = {
+    "len", "keys", "values", "entries", "get", "has", "set", "remove",
+    "merge", NULL
+};
+
+static const char *buffer_methods[] = {
+    "len", "push", "push_u16", "push_u32", "read_u8", "write_u8",
+    "read_u16", "write_u16", "read_u32", "write_u32", "read_i8",
+    "read_i16", "read_i32", "read_f32", "read_f64", "slice", "clear",
+    "fill", "resize", "to_string", "to_array", "to_hex", NULL
+};
+
+static const char *set_methods[] = {
+    "len", "has", "add", "remove", "to_array", "union", "intersection",
+    "difference", "is_subset", "is_superset", NULL
+};
+
+static const char *enum_methods[] = {
+    "tag", "enum_name", "payload", "is_variant", NULL
+};
+
+static const char *channel_methods[] = {
+    "send", "recv", "close", NULL
+};
+
+static const char *ref_methods[] = {
+    "deref", "set", "inner_type", "len", "contains", NULL
+};
+
+const char *builtin_find_similar_method(int val_type, const char *method) {
+    const char **candidates = NULL;
+    switch (val_type) {
+        case VAL_ARRAY:   candidates = array_methods; break;
+        case VAL_STR:     candidates = string_methods; break;
+        case VAL_MAP:     candidates = map_methods; break;
+        case VAL_BUFFER:  candidates = buffer_methods; break;
+        case VAL_SET:     candidates = set_methods; break;
+        case VAL_ENUM:    candidates = enum_methods; break;
+        case VAL_CHANNEL: candidates = channel_methods; break;
+        case VAL_REF:     candidates = ref_methods; break;
+        default:          return NULL;
+    }
+    return lat_find_similar(method, candidates, 2);
 }

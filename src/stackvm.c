@@ -908,7 +908,10 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 value_free(&val);
                 const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
                 char *err = NULL;
-                (void)asprintf(&err, "cannot push to %s array", phase_name);
+                if (var_name && obj->phase == VTAG_CRYSTAL)
+                    (void)asprintf(&err, "cannot push to %s array '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
+                else
+                    (void)asprintf(&err, "cannot push to %s array", phase_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -941,7 +944,10 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
                 const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
                 char *err = NULL;
-                (void)asprintf(&err, "cannot pop from %s array", phase_name);
+                if (var_name && obj->phase == VTAG_CRYSTAL)
+                    (void)asprintf(&err, "cannot pop from %s array '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
+                else
+                    (void)asprintf(&err, "cannot pop from %s array", phase_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -1466,7 +1472,10 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 value_free(&key);
                 const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
                 char *err = NULL;
-                (void)asprintf(&err, "cannot set on %s map", phase_name);
+                if (var_name && obj->phase == VTAG_CRYSTAL)
+                    (void)asprintf(&err, "cannot set on %s map '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
+                else
+                    (void)asprintf(&err, "cannot set on %s map", phase_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -2791,7 +2800,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 size_t hash = frame->chunk->const_hashes[idx];
                 LatValue *ref = env_get_ref_prehashed(vm->env, name, hash);
                 if (!ref) {
-                    VM_ERROR("undefined variable '%s'", name); break;
+                    const char *sug = env_find_similar_name(vm->env, name);
+                    if (sug) { VM_ERROR("undefined variable '%s' (did you mean '%s'?)", name, sug); }
+                    else { VM_ERROR("undefined variable '%s'", name); }
+                    break;
                 }
                 if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
                     (ref->as.closure.default_values == VM_NATIVE_MARKER ||
@@ -2812,7 +2824,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 size_t hash = frame->chunk->const_hashes[idx];
                 LatValue *ref = env_get_ref_prehashed(vm->env, name, hash);
                 if (!ref) {
-                    VM_ERROR("undefined variable '%s'", name); break;
+                    const char *sug = env_find_similar_name(vm->env, name);
+                    if (sug) { VM_ERROR("undefined variable '%s' (did you mean '%s'?)", name, sug); }
+                    else { VM_ERROR("undefined variable '%s'", name); }
+                    break;
                 }
                 if (ref->type == VAL_CLOSURE && ref->as.closure.native_fn != NULL &&
                     (ref->as.closure.default_values == VM_NATIVE_MARKER ||
@@ -4013,15 +4028,18 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         new_frame->upvalue_count = 0;
                         frame = new_frame;
                     } else {
-                        /* Method not found - error */
+                        /* Method not found - error with suggestion */
                         const char *tname = value_type_name(obj);
+                        int otype = obj->type;
                         for (int i = 0; i < arg_count; i++) {
                             LatValue v = pop(vm);
                             value_free(&v);
                         }
                         LatValue obj_val = pop(vm);
                         value_free(&obj_val);
-                        VM_ERROR("type '%s' has no method '%s'", tname, method_name);
+                        const char *msug = builtin_find_similar_method(otype, method_name);
+                        if (msug) { VM_ERROR("type '%s' has no method '%s' (did you mean '%s'?)", tname, method_name, msug); }
+                        else { VM_ERROR("type '%s' has no method '%s'", tname, method_name); }
                         break;
                     }
                 }
@@ -4199,12 +4217,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         new_frame->upvalue_count = 0;
                         frame = new_frame;
                     } else {
-                        /* Method not found - pop args, push nil */
+                        /* Method not found - error with suggestion */
+                        const char *tname = value_type_name(obj);
+                        int otype = obj->type;
                         for (int i = 0; i < arg_count; i++) {
                             LatValue v = pop(vm);
                             value_free(&v);
                         }
-                        push(vm, value_nil());
+                        const char *msug = builtin_find_similar_method(otype, method_name);
+                        if (msug) { VM_ERROR("type '%s' has no method '%s' (did you mean '%s'?)", tname, method_name, msug); }
+                        else { VM_ERROR("type '%s' has no method '%s'", tname, method_name); }
+                        break;
                     }
                 }
                 break;
@@ -4225,7 +4248,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (stackvm_invoke_builtin_is_simple(mhash_g)) {
                     LatValue *ref = env_get_ref(vm->env, global_name);
                     if (!ref) {
-                        VM_ERROR("undefined variable '%s'", global_name); break;
+                        const char *sug = env_find_similar_name(vm->env, global_name);
+                        if (sug) { VM_ERROR("undefined variable '%s' (did you mean '%s'?)", global_name, sug); }
+                        else { VM_ERROR("undefined variable '%s'", global_name); }
+                        break;
                     }
                     if (stackvm_invoke_builtin(vm, ref, method_name, arg_count, global_name)) {
                         if (vm->error) {
@@ -4244,7 +4270,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 /* Slow path: closure-invoking builtins or non-builtin dispatch */
                 LatValue obj_val;
                 if (!env_get(vm->env, global_name, &obj_val)) {
-                    VM_ERROR("undefined variable '%s'", global_name); break;
+                    const char *sug = env_find_similar_name(vm->env, global_name);
+                    if (sug) { VM_ERROR("undefined variable '%s' (did you mean '%s'?)", global_name, sug); }
+                    else { VM_ERROR("undefined variable '%s'", global_name); }
+                    break;
                 }
 
                 if (stackvm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name)) {
@@ -4610,7 +4639,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (stackvm_invoke_builtin_is_simple(mhash_g)) {
                     LatValue *ref = env_get_ref(vm->env, global_name);
                     if (!ref) {
-                        VM_ERROR("undefined variable '%s'", global_name); break;
+                        const char *sug = env_find_similar_name(vm->env, global_name);
+                        if (sug) { VM_ERROR("undefined variable '%s' (did you mean '%s'?)", global_name, sug); }
+                        else { VM_ERROR("undefined variable '%s'", global_name); }
+                        break;
                     }
                     if (stackvm_invoke_builtin(vm, ref, method_name, arg_count, global_name)) {
                         if (vm->error) {
@@ -4628,7 +4660,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 /* Slow path: closure-invoking builtins or non-builtin dispatch */
                 LatValue obj_val;
                 if (!env_get(vm->env, global_name, &obj_val)) {
-                    VM_ERROR("undefined variable '%s'", global_name); break;
+                    const char *sug = env_find_similar_name(vm->env, global_name);
+                    if (sug) { VM_ERROR("undefined variable '%s' (did you mean '%s'?)", global_name, sug); }
+                    else { VM_ERROR("undefined variable '%s'", global_name); }
+                    break;
                 }
 
                 if (stackvm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name)) {

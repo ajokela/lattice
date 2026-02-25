@@ -1,0 +1,162 @@
+// Lattice Queue Library (FIFO)
+// Provides a queue data structure using closures over captured state.
+// Uses a circular buffer that grows when capacity is exceeded.
+//
+// Usage:
+//   import "lib/queue" as Queue
+//
+//   let q = Queue.new()
+//   q.enqueue("first")
+//   q.enqueue("second")
+//   print(q.peek())       // "first"
+//   print(q.dequeue())    // "first"
+//   print(q.len())        // 1
+//   print(q.is_empty())   // false
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Create a new empty queue.
+// Returns a Map of closures that share mutable state.
+fn new() -> Map {
+    flux data = _make_array(8)
+    flux head = 0
+    flux tail = 0
+    flux sz = 0
+
+    let q = Map::new()
+
+    q.set("enqueue", |value| {
+        // Grow if full
+        if sz >= data.len() {
+            let cap = data.len()
+            let new_cap = cap * 2
+            flux new_data = _make_array(new_cap)
+            flux i = 0
+            while i < sz {
+                let idx = (head + i) % cap
+                new_data[i] = data[idx]
+                i = i + 1
+            }
+            data = new_data
+            head = 0
+            tail = sz
+        }
+        data[tail] = value
+        tail = (tail + 1) % data.len()
+        sz = sz + 1
+    })
+
+    q.set("dequeue", |_| {
+        if sz == 0 {
+            assert(false, "queue underflow: dequeue from empty queue")
+        }
+        let val = data[head]
+        data[head] = nil
+        head = (head + 1) % data.len()
+        sz = sz - 1
+        return val
+    })
+
+    q.set("peek", |_| {
+        if sz == 0 { return nil }
+        return data[head]
+    })
+
+    q.set("len", |_| {
+        return sz
+    })
+
+    q.set("is_empty", |_| {
+        return sz == 0
+    })
+
+    q.set("to_array", |_| {
+        flux result = []
+        let cap = data.len()
+        flux i = 0
+        while i < sz {
+            let idx = (head + i) % cap
+            flux r = clone(result)
+            r.push(data[idx])
+            result = r
+            i = i + 1
+        }
+        return result
+    })
+
+    return q
+}
+
+// Demo / test
+fn main() {
+    print("=== Queue (FIFO) ===")
+    print("")
+
+    let q = new()
+    let enqueue = q.get("enqueue")
+    let dequeue = q.get("dequeue")
+    let peek = q.get("peek")
+    let sz = q.get("len")
+    let empty = q.get("is_empty")
+    let to_arr = q.get("to_array")
+
+    print("Empty queue, size: " + to_string(sz(nil)))
+    print("is_empty: " + to_string(empty(nil)))
+
+    enqueue("alpha")
+    enqueue("beta")
+    enqueue("gamma")
+    print("After enqueuing alpha, beta, gamma:")
+    print("  size: " + to_string(sz(nil)))
+    print("  peek: " + to_string(peek(nil)))
+    print("  contents: " + to_string(to_arr(nil)))
+
+    print("Dequeued: " + to_string(dequeue(nil)))
+    print("Dequeued: " + to_string(dequeue(nil)))
+
+    print("After two dequeues:")
+    print("  size: " + to_string(sz(nil)))
+    print("  peek: " + to_string(peek(nil)))
+
+    enqueue("delta")
+    enqueue("epsilon")
+    print("After enqueuing delta, epsilon:")
+    print("  contents: " + to_string(to_arr(nil)))
+
+    // Test wrap-around by filling and draining multiple times
+    flux i = 0
+    while i < 10 {
+        enqueue(i)
+        i = i + 1
+    }
+    print("After adding 0..9:")
+    print("  size: " + to_string(sz(nil)))
+
+    // Drain all
+    while !empty(nil) {
+        let v = dequeue(nil)
+        // just drain silently
+    }
+    print("After draining all:")
+    print("  is_empty: " + to_string(empty(nil)))
+    print("  size: " + to_string(sz(nil)))
+
+    // Verify works after drain
+    enqueue("final")
+    print("After enqueue final:")
+    print("  peek: " + to_string(peek(nil)))
+    print("  dequeue: " + to_string(dequeue(nil)))
+    print("")
+    print("Queue demo complete.")
+}

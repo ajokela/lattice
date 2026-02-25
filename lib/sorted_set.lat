@@ -1,0 +1,364 @@
+// Lattice Sorted Set Library
+// Provides a sorted set using an AVL tree (self-balancing BST).
+// Elements are kept in sorted order; duplicates are rejected.
+// Uses closures over captured state for mutation.
+//
+// Nodes are Maps with keys: "v" (value), "l" (left), "r" (right), "h" (height).
+//
+// Usage:
+//   import "lib/sorted_set" as SortedSet
+//
+//   let s = SortedSet.new()
+//   s.insert(5)
+//   s.insert(3)
+//   s.insert(7)
+//   print(s.contains(5))    // true
+//   print(s.to_array())     // [3, 5, 7]
+//   s.remove(5)
+//   print(s.min())          // 3
+//   print(s.max())          // 7
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Internal helper: grow an array by doubling.
+fn _grow(arr: Array) -> Array {
+    let old_len = arr.len()
+    let new_cap = old_len * 2
+    flux new_arr = clone(arr)
+    flux i = old_len
+    while i < new_cap {
+        flux a = clone(new_arr)
+        a.push(nil)
+        new_arr = a
+        i = i + 1
+    }
+    return new_arr
+}
+
+// Create a new AVL tree node.
+fn _node(val: Any) -> Map {
+    let n = Map::new()
+    n["v"] = val
+    n["l"] = nil
+    n["r"] = nil
+    n["h"] = 1
+    return n
+}
+
+// Get height of a node (nil-safe).
+fn _height(node: Any) -> Int {
+    if node == nil { return 0 }
+    return node["h"]
+}
+
+// Update height of a node based on children.
+fn _update_h(node: Map) {
+    let lh = _height(node["l"])
+    let rh = _height(node["r"])
+    if lh > rh {
+        node["h"] = lh + 1
+    } else {
+        node["h"] = rh + 1
+    }
+}
+
+// Balance factor.
+fn _bf(node: Map) -> Int {
+    return _height(node["l"]) - _height(node["r"])
+}
+
+// Right rotation.
+fn _rot_r(y: Map) -> Map {
+    let x = y["l"]
+    y["l"] = x["r"]
+    x["r"] = y
+    _update_h(y)
+    _update_h(x)
+    return x
+}
+
+// Left rotation.
+fn _rot_l(x: Map) -> Map {
+    let y = x["r"]
+    x["r"] = y["l"]
+    y["l"] = x
+    _update_h(x)
+    _update_h(y)
+    return y
+}
+
+// Balance a node.
+fn _balance(node: Map) -> Map {
+    _update_h(node)
+    let b = _bf(node)
+    if b > 1 {
+        if _bf(node["l"]) < 0 {
+            node["l"] = _rot_l(node["l"])
+        }
+        return _rot_r(node)
+    }
+    if b < -1 {
+        if _bf(node["r"]) > 0 {
+            node["r"] = _rot_r(node["r"])
+        }
+        return _rot_l(node)
+    }
+    return node
+}
+
+// Insert value into subtree. Returns [new_root, did_insert].
+fn _insert(node: Any, val: Any) -> Array {
+    if node == nil {
+        return [_node(val), true]
+    }
+    if val < node["v"] {
+        let result = _insert(node["l"], val)
+        node["l"] = result[0]
+        return [_balance(node), result[1]]
+    }
+    if val > node["v"] {
+        let result = _insert(node["r"], val)
+        node["r"] = result[0]
+        return [_balance(node), result[1]]
+    }
+    // Duplicate
+    return [node, false]
+}
+
+// Find minimum node in subtree.
+fn _min_node(node: Map) -> Map {
+    flux cur = node
+    while cur["l"] != nil {
+        cur = cur["l"]
+    }
+    return cur
+}
+
+// Find maximum node in subtree.
+fn _max_node(node: Map) -> Map {
+    flux cur = node
+    while cur["r"] != nil {
+        cur = cur["r"]
+    }
+    return cur
+}
+
+// Remove value from subtree. Returns [new_root, did_remove].
+fn _remove(node: Any, val: Any) -> Array {
+    if node == nil {
+        return [nil, false]
+    }
+    if val < node["v"] {
+        let result = _remove(node["l"], val)
+        node["l"] = result[0]
+        if !result[1] { return [node, false] }
+        return [_balance(node), true]
+    }
+    if val > node["v"] {
+        let result = _remove(node["r"], val)
+        node["r"] = result[0]
+        if !result[1] { return [node, false] }
+        return [_balance(node), true]
+    }
+    // Found the node
+    if node["l"] == nil {
+        return [node["r"], true]
+    }
+    if node["r"] == nil {
+        return [node["l"], true]
+    }
+    // Two children: replace with in-order successor
+    let succ = _min_node(node["r"])
+    node["v"] = succ["v"]
+    let result = _remove(node["r"], succ["v"])
+    node["r"] = result[0]
+    return [_balance(node), true]
+}
+
+// Check if value exists in subtree.
+fn _contains(node: Any, val: Any) -> Bool {
+    if node == nil { return false }
+    if val < node["v"] { return _contains(node["l"], val) }
+    if val > node["v"] { return _contains(node["r"], val) }
+    return true
+}
+
+// Iterative in-order traversal. Returns a sorted array of all values.
+fn _to_sorted_array(root: Any) -> Array {
+    if root == nil { return [] }
+    // Explicit stack for iterative in-order traversal
+    flux stack = _make_array(16)
+    flux stack_sz = 0
+    flux result = _make_array(16)
+    flux result_sz = 0
+    flux current = root
+
+    loop {
+        while current != nil {
+            if stack_sz >= stack.len() {
+                stack = _grow(stack)
+            }
+            stack[stack_sz] = current
+            stack_sz = stack_sz + 1
+            current = current["l"]
+        }
+        if stack_sz == 0 { break }
+        stack_sz = stack_sz - 1
+        current = stack[stack_sz]
+        stack[stack_sz] = nil
+        // Add to result
+        if result_sz >= result.len() {
+            result = _grow(result)
+        }
+        result[result_sz] = current["v"]
+        result_sz = result_sz + 1
+        current = current["r"]
+    }
+
+    // Trim result to actual size
+    flux out = []
+    flux i = 0
+    while i < result_sz {
+        flux o = clone(out)
+        o.push(result[i])
+        out = o
+        i = i + 1
+    }
+    return out
+}
+
+// Create a new empty sorted set.
+// Returns a Map of closures that share mutable state.
+fn new() -> Map {
+    flux root = nil
+    flux count = 0
+
+    let s = Map::new()
+
+    s.set("insert", |val| {
+        let result = _insert(root, val)
+        root = result[0]
+        if result[1] {
+            count = count + 1
+        }
+    })
+
+    s.set("remove", |val| {
+        let result = _remove(root, val)
+        root = result[0]
+        if result[1] {
+            count = count - 1
+        }
+    })
+
+    s.set("contains", |val| {
+        return _contains(root, val)
+    })
+
+    s.set("to_array", |_| {
+        return _to_sorted_array(root)
+    })
+
+    s.set("min", |_| {
+        if root == nil { return nil }
+        let node = _min_node(root)
+        return node["v"]
+    })
+
+    s.set("max", |_| {
+        if root == nil { return nil }
+        let node = _max_node(root)
+        return node["v"]
+    })
+
+    s.set("len", |_| {
+        return count
+    })
+
+    s.set("is_empty", |_| {
+        return root == nil
+    })
+
+    return s
+}
+
+// Demo / test
+fn main() {
+    print("=== Sorted Set (AVL Tree) ===")
+    print("")
+
+    let s = new()
+    let insert = s.get("insert")
+    let remove = s.get("remove")
+    let contains = s.get("contains")
+    let to_arr = s.get("to_array")
+    let mn = s.get("min")
+    let mx = s.get("max")
+    let sz = s.get("len")
+    let empty = s.get("is_empty")
+
+    print("Empty set, size: " + to_string(sz(nil)))
+    print("is_empty: " + to_string(empty(nil)))
+
+    // Insert values
+    insert(5)
+    insert(3)
+    insert(7)
+    insert(1)
+    insert(4)
+    insert(6)
+    insert(9)
+    insert(2)
+    insert(8)
+
+    print("After inserting 5,3,7,1,4,6,9,2,8:")
+    print("  sorted: " + to_string(to_arr(nil)))
+    print("  size: " + to_string(sz(nil)))
+    print("  min: " + to_string(mn(nil)))
+    print("  max: " + to_string(mx(nil)))
+
+    // Duplicate rejection
+    insert(5)
+    insert(3)
+    print("After inserting duplicates 5,3:")
+    print("  sorted: " + to_string(to_arr(nil)))
+    print("  size: " + to_string(sz(nil)))
+
+    // Contains
+    print("contains(5): " + to_string(contains(5)))
+    print("contains(10): " + to_string(contains(10)))
+    print("contains(1): " + to_string(contains(1)))
+
+    // Removal
+    remove(5)
+    print("After removing 5:")
+    print("  sorted: " + to_string(to_arr(nil)))
+    print("  size: " + to_string(sz(nil)))
+    print("  contains(5): " + to_string(contains(5)))
+
+    remove(1)
+    remove(9)
+    print("After removing 1,9:")
+    print("  sorted: " + to_string(to_arr(nil)))
+    print("  min: " + to_string(mn(nil)))
+    print("  max: " + to_string(mx(nil)))
+
+    // Remove non-existent
+    remove(100)
+    print("After removing 100 (non-existent):")
+    print("  sorted: " + to_string(to_arr(nil)))
+
+    print("")
+    print("Sorted set demo complete.")
+}

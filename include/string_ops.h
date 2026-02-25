@@ -50,4 +50,15 @@ char *lat_str_snake_case(const char *s);
 char *lat_str_camel_case(const char *s);
 char *lat_str_kebab_case(const char *s);
 
+/* ── Spellcheck / similarity helpers ── */
+
+/* Compute Levenshtein edit distance between two strings.
+ * Returns the minimum number of single-character edits
+ * (insertions, deletions, substitutions) to transform a into b. */
+int lat_levenshtein(const char *a, const char *b);
+
+/* Search a NULL-terminated array of candidate names and return the best
+ * match within max_distance. Returns NULL if no match found. */
+const char *lat_find_similar(const char *name, const char **candidates, int max_distance);
+
 #endif /* STRING_OPS_H */

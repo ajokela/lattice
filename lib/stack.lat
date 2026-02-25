@@ -1,0 +1,140 @@
+// Lattice Stack Library (LIFO)
+// Provides a stack data structure using closures over captured state.
+//
+// Usage:
+//   import "lib/stack" as Stack
+//
+//   let s = Stack.new()
+//   s.push(10)
+//   s.push(20)
+//   print(s.peek())     // 20
+//   print(s.pop())      // 20
+//   print(s.len())      // 1
+//   print(s.is_empty()) // false
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Internal helper: grow an array by doubling its capacity.
+fn _grow(arr: Array) -> Array {
+    let old_len = arr.len()
+    let new_cap = old_len * 2
+    flux new_arr = clone(arr)
+    flux i = old_len
+    while i < new_cap {
+        flux a = clone(new_arr)
+        a.push(nil)
+        new_arr = a
+        i = i + 1
+    }
+    return new_arr
+}
+
+// Create a new empty stack.
+// Returns a Map of closures that share mutable state.
+fn new() -> Map {
+    flux data = _make_array(8)
+    flux sz = 0
+
+    let s = Map::new()
+
+    s.set("push", |value| {
+        if sz >= data.len() {
+            data = _grow(data)
+        }
+        data[sz] = value
+        sz = sz + 1
+    })
+
+    s.set("pop", |_| {
+        if sz == 0 {
+            assert(false, "stack underflow: pop from empty stack")
+        }
+        sz = sz - 1
+        let val = data[sz]
+        data[sz] = nil
+        return val
+    })
+
+    s.set("peek", |_| {
+        if sz == 0 { return nil }
+        return data[sz - 1]
+    })
+
+    s.set("len", |_| {
+        return sz
+    })
+
+    s.set("is_empty", |_| {
+        return sz == 0
+    })
+
+    s.set("to_array", |_| {
+        flux result = []
+        flux i = 0
+        while i < sz {
+            flux r = clone(result)
+            r.push(data[i])
+            result = r
+            i = i + 1
+        }
+        return result
+    })
+
+    return s
+}
+
+// Demo / test
+fn main() {
+    print("=== Stack (LIFO) ===")
+    print("")
+
+    let s = new()
+    let push = s.get("push")
+    let pop = s.get("pop")
+    let peek = s.get("peek")
+    let sz = s.get("len")
+    let empty = s.get("is_empty")
+    let to_arr = s.get("to_array")
+
+    print("Empty stack, size: " + to_string(sz(nil)))
+    print("is_empty: " + to_string(empty(nil)))
+
+    push(10)
+    push(20)
+    push(30)
+    print("After pushing 10, 20, 30:")
+    print("  size: " + to_string(sz(nil)))
+    print("  peek: " + to_string(peek(nil)))
+    print("  contents: " + to_string(to_arr(nil)))
+
+    print("Popped: " + to_string(pop(nil)))
+    print("Popped: " + to_string(pop(nil)))
+
+    print("After two pops:")
+    print("  size: " + to_string(sz(nil)))
+    print("  peek: " + to_string(peek(nil)))
+
+    push(40)
+    push(50)
+    print("After pushing 40, 50:")
+    print("  contents: " + to_string(to_arr(nil)))
+
+    // Pop all
+    while !empty(nil) {
+        print("  popped: " + to_string(pop(nil)))
+    }
+    print("is_empty: " + to_string(empty(nil)))
+    print("")
+    print("Stack demo complete.")
+}

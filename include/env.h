@@ -63,4 +63,9 @@ Env *env_clone(const Env *env);
 typedef void (*EnvIterFn)(LatValue *value, void *ctx);
 void env_iter_values(Env *env, EnvIterFn fn, void *ctx);
 
+/* Search all scopes for a variable name similar to 'name'.
+ * Returns the best match within edit distance 2, or NULL if none found.
+ * The returned pointer is valid as long as the environment is not modified. */
+const char *env_find_similar_name(const Env *env, const char *name);
+
 #endif /* ENV_H */

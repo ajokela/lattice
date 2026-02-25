@@ -2,6 +2,7 @@
 #include "lattice.h"
 #include "intern.h"
 #include "string_ops.h"
+#include "builtin_methods.h"
 #include "format_ops.h"
 #include "builtins.h"
 #include "array_ops.h"
@@ -637,7 +638,11 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
             LatValue *v = lat_map_get(&ev->env->scopes[s-1], expr->as.str_val);
             if (v) return v;
         }
-        (void)asprintf(err, "undefined variable '%s'", expr->as.str_val);
+        const char *suggestion = env_find_similar_name(ev->env, expr->as.str_val);
+        if (suggestion)
+            (void)asprintf(err, "undefined variable '%s' (did you mean '%s'?)", expr->as.str_val, suggestion);
+        else
+            (void)asprintf(err, "undefined variable '%s'", expr->as.str_val);
         return NULL;
     }
     if (expr->tag == EXPR_FIELD_ACCESS) {
@@ -1452,7 +1457,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             LatValue val;
             if (!env_get(ev->env, expr->as.str_val, &val)) {
                 char *err = NULL;
-                (void)asprintf(&err, "undefined variable '%s'", expr->as.str_val);
+                const char *suggestion = env_find_similar_name(ev->env, expr->as.str_val);
+                if (suggestion)
+                    (void)asprintf(&err, "undefined variable '%s' (did you mean '%s'?)", expr->as.str_val, suggestion);
+                else
+                    (void)asprintf(&err, "undefined variable '%s'", expr->as.str_val);
                 return eval_err(err);
             }
             return eval_ok(val);
@@ -8099,7 +8108,11 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             return eval_ok(r);
         }
         char *err2 = NULL;
-        (void)asprintf(&err2, "Enum has no method '%s'", method);
+        const char *esug = builtin_find_similar_method(VAL_ENUM, method);
+        if (esug)
+            (void)asprintf(&err2, "Enum has no method '%s' (did you mean '%s'?)", method, esug);
+        else
+            (void)asprintf(&err2, "Enum has no method '%s'", method);
         return eval_err(err2);
     }
 
@@ -8239,7 +8252,11 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             return eval_ok(value_bool(true));
         }
         char *err2 = NULL;
-        (void)asprintf(&err2, "Set has no method '%s'", method);
+        const char *ssug = builtin_find_similar_method(VAL_SET, method);
+        if (ssug)
+            (void)asprintf(&err2, "Set has no method '%s' (did you mean '%s'?)", method, ssug);
+        else
+            (void)asprintf(&err2, "Set has no method '%s'", method);
         return eval_err(err2);
     }
 
@@ -8466,7 +8483,11 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             return eval_ok(value_string_owned(hex));
         }
         char *berr2 = NULL;
-        (void)asprintf(&berr2, "Buffer has no method '%s'", method);
+        const char *bsug = builtin_find_similar_method(VAL_BUFFER, method);
+        if (bsug)
+            (void)asprintf(&berr2, "Buffer has no method '%s' (did you mean '%s'?)", method, bsug);
+        else
+            (void)asprintf(&berr2, "Buffer has no method '%s'", method);
         return eval_err(berr2);
     }
 
@@ -10048,12 +10069,20 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
 
         char *rerr = NULL;
-        (void)asprintf(&rerr, "Ref has no method '%s'", method);
+        const char *rsug = builtin_find_similar_method(VAL_REF, method);
+        if (rsug)
+            (void)asprintf(&rerr, "Ref has no method '%s' (did you mean '%s'?)", method, rsug);
+        else
+            (void)asprintf(&rerr, "Ref has no method '%s'", method);
         return eval_err(rerr);
     }
 
     char *err = NULL;
-    (void)asprintf(&err, "unknown method '.%s()' on %s", method, value_type_name(&obj));
+    const char *msug = builtin_find_similar_method(obj.type, method);
+    if (msug)
+        (void)asprintf(&err, "unknown method '.%s()' on %s (did you mean '%s'?)", method, value_type_name(&obj), msug);
+    else
+        (void)asprintf(&err, "unknown method '.%s()' on %s", method, value_type_name(&obj));
     return eval_err(err);
 }
 

@@ -346,8 +346,8 @@ static int run_latc_file(const char *path) {
 }
 
 static int run_file(const char *path, bool show_stats) {
-    /* Auto-detect .latc pre-compiled bytecode */
-    if (has_suffix(path, ".latc"))
+    /* Auto-detect .latc/.rlat pre-compiled bytecode */
+    if (has_suffix(path, ".latc") || has_suffix(path, ".rlat"))
         return run_latc_file(path);
 
     char *source = read_file(path);
@@ -895,19 +895,25 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        /* Build default output path: replace .lat with .latc (or append .latc) */
+        /* Build default output path:
+         * --regvm: replace .lat with .rlat (or append .rlat)
+         * stack VM: replace .lat with .latc (or append .latc) */
+        const char *ext = compile_regvm ? ".rlat" : ".latc";
         char *default_output = NULL;
         if (!output_path) {
             size_t ilen = strlen(input_path);
             if (has_suffix(input_path, ".lat")) {
-                default_output = malloc(ilen + 2); /* +1 for 'c', +1 for NUL */
-                memcpy(default_output, input_path, ilen);
-                default_output[ilen] = 'c';
-                default_output[ilen + 1] = '\0';
+                /* Replace trailing ".lat" with the appropriate extension */
+                size_t base_len = ilen - 4; /* strip ".lat" */
+                size_t ext_len = strlen(ext);
+                default_output = malloc(base_len + ext_len + 1);
+                memcpy(default_output, input_path, base_len);
+                memcpy(default_output + base_len, ext, ext_len + 1);
             } else {
-                default_output = malloc(ilen + 6);
+                size_t ext_len = strlen(ext);
+                default_output = malloc(ilen + ext_len + 1);
                 memcpy(default_output, input_path, ilen);
-                memcpy(default_output + ilen, ".latc", 6);
+                memcpy(default_output + ilen, ext, ext_len + 1);
             }
             output_path = default_output;
         }

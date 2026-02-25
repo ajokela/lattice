@@ -1440,7 +1440,7 @@ static void test_lat_eval_version(void) {
         "fn main() {\n"
         "    print(version())\n"
         "}\n",
-        "0.3.19"
+        "0.3.20"
     );
 }
 
@@ -5865,7 +5865,7 @@ static void test_triple_multiline_interpolation(void) {
         "    \"\"\"\n"
         "    print(s)\n"
         "}\n",
-        "Hello, Lattice!\nVersion 0.3.19"
+        "Hello, Lattice!\nVersion 0.3.20"
     );
 }
 
@@ -10018,6 +10018,134 @@ static void test_rlatc_file_save_load(void) {
     unlink(tmp_path);
 }
 
+/* ── RegVM .rlat scope/select round-trip tests ── */
+
+static void test_rlatc_round_trip_scope_spawn(void) {
+    /* scope { spawn { } } round-trips through serialize/deserialize */
+    char *out = rlatc_round_trip_capture(
+        "let x = 10\n"
+        "scope {\n"
+        "    spawn { print(x + 1) }\n"
+        "    spawn { print(x + 2) }\n"
+        "}\n"
+        "print(\"done\")\n"
+    );
+    /* Spawns may execute in any order, but "done" always comes last.
+     * Check that the output contains both spawn results and "done". */
+    ASSERT(strstr(out, "11") != NULL);
+    ASSERT(strstr(out, "12") != NULL);
+    ASSERT(strstr(out, "done") != NULL);
+    free(out);
+}
+
+static void test_rlatc_round_trip_scope_sync(void) {
+    /* scope with sync body (no spawns) round-trips correctly */
+    char *out = rlatc_round_trip_capture(
+        "let r = scope {\n"
+        "    42\n"
+        "}\n"
+        "print(r)\n"
+    );
+    ASSERT_STR_EQ(out, "42");
+    free(out);
+}
+
+static void test_rlatc_round_trip_select(void) {
+    /* select with channel arms round-trips through serialize/deserialize */
+    char *out = rlatc_round_trip_capture(
+        "let ch = Channel::new()\n"
+        "scope {\n"
+        "    spawn { ch.send(99) }\n"
+        "}\n"
+        "select {\n"
+        "    val from ch => {\n"
+        "        print(\"got: ${val}\")\n"
+        "    }\n"
+        "}\n"
+        "print(\"done\")\n"
+    );
+    ASSERT(strstr(out, "got: 99") != NULL);
+    ASSERT(strstr(out, "done") != NULL);
+    free(out);
+}
+
+static void test_rlatc_scope_file_save_load(void) {
+    /* Compile scope/spawn to .rlat file, load back and run */
+    const char *source =
+        "let x = 100\n"
+        "scope {\n"
+        "    spawn { print(x + 1) }\n"
+        "}\n"
+        "print(\"ok\")\n";
+
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    ASSERT(lex_err == NULL);
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    ASSERT(parse_err == NULL);
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    RegChunk *rchunk = reg_compile(&prog, &comp_err);
+    ASSERT(rchunk != NULL);
+
+    /* Save to temp .rlat file */
+    const char *tmp_path = "/tmp/test_rlatc_scope.rlat";
+    ASSERT(regchunk_save(rchunk, tmp_path) == 0);
+    regchunk_free(rchunk);
+
+    /* Load back */
+    char *load_err = NULL;
+    RegChunk *loaded = regchunk_load(tmp_path, &load_err);
+    ASSERT(loaded != NULL);
+
+    /* Run it */
+    fflush(stdout);
+    FILE *tmp = tmpfile();
+    int old_stdout = dup(fileno(stdout));
+    dup2(fileno(tmp), fileno(stdout));
+
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    RegVM rvm;
+    regvm_init(&rvm, &rt);
+    LatValue result;
+    RegVMResult rvm_res = regvm_run(&rvm, loaded, &result);
+
+    fflush(stdout);
+    dup2(old_stdout, fileno(stdout));
+    close(old_stdout);
+
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    fseek(tmp, 0, SEEK_SET);
+    char *output = malloc((size_t)len + 1);
+    size_t n = fread(output, 1, (size_t)len, tmp);
+    output[n] = '\0';
+    fclose(tmp);
+    if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
+
+    ASSERT(rvm_res == REGVM_OK);
+    ASSERT(strstr(output, "101") != NULL);
+    ASSERT(strstr(output, "ok") != NULL);
+
+    free(output);
+    value_free(&result);
+    regvm_free(&rvm);
+    lat_runtime_free(&rt);
+    regchunk_free(loaded);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++)
+        token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+    unlink(tmp_path);
+}
+
 /* ── Built-in stdlib module tests ── */
 
 static void test_builtin_math_sin(void) {
@@ -12714,6 +12842,629 @@ static void test_parity_array_index(void) {
     );
 }
 
+/* ======================================================================
+ * Error Message Diagnostics
+ * ====================================================================== */
+
+/* Test: undefined variable suggests similar name */
+static void test_err_undefined_var_suggestion(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "let get_users = 42\n"
+        "fn main() { print(get_user) }",
+        "EVAL_ERROR:undefined variable 'get_user' (did you mean 'get_users'?)"
+    );
+}
+
+/* Test: undefined variable with no similar name gives plain error */
+static void test_err_undefined_var_no_suggestion(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() { print(xyzzy_does_not_exist) }",
+        "EVAL_ERROR:undefined variable 'xyzzy_does_not_exist'"
+    );
+}
+
+/* Test: method typo on Array suggests correct method */
+static void test_err_method_suggestion_array(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let arr = [1, 2, 3]\n"
+        "    arr.pussh(4)\n"
+        "}",
+        "EVAL_ERROR:"
+    );
+    /* Verify the suggestion is present */
+    char *out = run_capture(
+        "fn main() {\n"
+        "    let arr = [1, 2, 3]\n"
+        "    arr.pussh(4)\n"
+        "}"
+    );
+    ASSERT(strstr(out, "did you mean 'push'?") != NULL);
+    free(out);
+}
+
+/* Test: method typo on String suggests correct method */
+static void test_err_method_suggestion_string(void) {
+    char *out = run_capture(
+        "fn main() {\n"
+        "    let s = \"hello\"\n"
+        "    s.triim()\n"
+        "}"
+    );
+    ASSERT(strstr(out, "did you mean 'trim'?") != NULL);
+    free(out);
+}
+
+/* Test: method with no close match gives plain error */
+static void test_err_method_no_suggestion(void) {
+    char *out = run_capture(
+        "fn main() {\n"
+        "    let arr = [1, 2, 3]\n"
+        "    arr.xyzzy()\n"
+        "}"
+    );
+    ASSERT(strstr(out, "EVAL_ERROR:") != NULL);
+    ASSERT(strstr(out, "did you mean") == NULL);
+    free(out);
+}
+
+/* Test: phase violation message includes variable name and thaw hint */
+static void test_err_phase_violation_hint(void) {
+    if (test_backend == BACKEND_TREE_WALK) return; /* tree-walk has different phase error path */
+    char *out = run_capture(
+        "let arr = freeze([1, 2, 3])\n"
+        "fn main() { arr.push(4) }"
+    );
+    ASSERT(strstr(out, "EVAL_ERROR:") != NULL);
+    ASSERT(strstr(out, "crystal") != NULL);
+    ASSERT(strstr(out, "thaw(arr)") != NULL);
+    free(out);
+}
+
+/* ======================================================================
+ * LAT-17: Concurrent scope/spawn edge case tests
+ * ====================================================================== */
+
+/* scope with multiple spawns writing to shared channels, sync body reads */
+static void test_scope_multi_spawn_shared_channels(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch1 = Channel::new()\n"
+        "    let ch2 = Channel::new()\n"
+        "    let ch3 = Channel::new()\n"
+        "    scope {\n"
+        "        spawn { ch1.send(freeze(10)) }\n"
+        "        spawn { ch2.send(freeze(20)) }\n"
+        "        spawn { ch3.send(freeze(30)) }\n"
+        "    }\n"
+        "    let total = ch1.recv() + ch2.recv() + ch3.recv()\n"
+        "    print(total)\n"
+        "}\n",
+        "60"
+    );
+}
+
+/* scope where sync body runs alongside spawns */
+static void test_scope_sync_body_with_spawns(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    scope {\n"
+        "        spawn { ch.send(freeze(100)) }\n"
+        "        print(\"sync\")\n"
+        "    }\n"
+        "    let val = ch.recv()\n"
+        "    print(val)\n"
+        "}\n",
+        "sync\n100"
+    );
+}
+
+/* nested scope: scope inside scope */
+static void test_scope_nested(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    scope {\n"
+        "        spawn {\n"
+        "            let inner_ch = Channel::new()\n"
+        "            scope {\n"
+        "                spawn { inner_ch.send(freeze(5)) }\n"
+        "            }\n"
+        "            let v = inner_ch.recv()\n"
+        "            ch.send(freeze(v * 2))\n"
+        "        }\n"
+        "    }\n"
+        "    print(ch.recv())\n"
+        "}\n",
+        "10"
+    );
+}
+
+/* scope with error in one spawn propagates */
+static void test_scope_spawn_error_div_zero(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    scope {\n"
+        "        spawn { ch.send(freeze(42)) }\n"
+        "        spawn {\n"
+        "            let x = 1 / 0\n"
+        "            ch.send(freeze(x))\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* scope as expression captures return value of sync body */
+static void test_scope_as_expression(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let result = scope {\n"
+        "        let a = 3\n"
+        "        let b = 7\n"
+        "        a * b\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "21"
+    );
+}
+
+/* spawn with closure capturing outer variable */
+static void test_spawn_captures_outer_variable(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    let multiplier = 5\n"
+        "    scope {\n"
+        "        spawn {\n"
+        "            let result = multiplier * 10\n"
+        "            ch.send(freeze(result))\n"
+        "        }\n"
+        "    }\n"
+        "    print(ch.recv())\n"
+        "}\n",
+        "50"
+    );
+}
+
+/* scope with many spawns all sending to one channel */
+static void test_scope_many_spawns_one_channel(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    scope {\n"
+        "        spawn { ch.send(freeze(1)) }\n"
+        "        spawn { ch.send(freeze(2)) }\n"
+        "        spawn { ch.send(freeze(3)) }\n"
+        "        spawn { ch.send(freeze(4)) }\n"
+        "    }\n"
+        "    flux total = 0\n"
+        "    total = total + ch.recv()\n"
+        "    total = total + ch.recv()\n"
+        "    total = total + ch.recv()\n"
+        "    total = total + ch.recv()\n"
+        "    print(total)\n"
+        "}\n",
+        "10"
+    );
+}
+
+/* spawn with closure that captures a computed value */
+static void test_spawn_closure_factory(void) {
+    ASSERT_OUTPUT(
+        "fn compute(x: Int) -> Int { return x * x }\n"
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    let val = compute(7)\n"
+        "    scope {\n"
+        "        spawn { ch.send(freeze(val)) }\n"
+        "    }\n"
+        "    print(ch.recv())\n"
+        "}\n",
+        "49"
+    );
+}
+
+/* scope with spawns: sync body side effects execute, spawns complete */
+static void test_scope_expr_with_spawns(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    scope {\n"
+        "        spawn { ch.send(freeze(1)) }\n"
+        "        print(\"sync_done\")\n"
+        "    }\n"
+        "    print(ch.recv())\n"
+        "}\n",
+        "sync_done\n1"
+    );
+}
+
+/* ======================================================================
+ * LAT-17: Select statement tests
+ * ====================================================================== */
+
+/* select with default arm when no channel data */
+static void test_select_default_arm(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    let result = select {\n"
+        "        val from ch => { val }\n"
+        "        default => { \"none\" }\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "none"
+    );
+}
+
+/* select with timeout arm */
+static void test_select_timeout_arm(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    let result = select {\n"
+        "        val from ch => { val }\n"
+        "        timeout(10) => { \"timed_out\" }\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "timed_out"
+    );
+}
+
+/* select with channel that has data ready */
+static void test_select_channel_ready(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.send(freeze(42))\n"
+        "    let result = select {\n"
+        "        val from ch => { val }\n"
+        "        default => { \"none\" }\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "42"
+    );
+}
+
+/* select with multiple channel arms */
+static void test_select_multiple_channels(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch1 = Channel::new()\n"
+        "    let ch2 = Channel::new()\n"
+        "    ch2.send(freeze(\"from_ch2\"))\n"
+        "    let result = select {\n"
+        "        v from ch1 => { v }\n"
+        "        v from ch2 => { v }\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "from_ch2"
+    );
+}
+
+/* select inside a loop */
+static void test_select_in_loop(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.send(freeze(1))\n"
+        "    ch.send(freeze(2))\n"
+        "    ch.send(freeze(3))\n"
+        "    ch.close()\n"
+        "    flux sum = 0\n"
+        "    flux done = false\n"
+        "    while !done {\n"
+        "        let result = select {\n"
+        "            v from ch => { v }\n"
+        "            default => { \"done\" }\n"
+        "        }\n"
+        "        if typeof(result) == \"Int\" {\n"
+        "            sum = sum + result\n"
+        "        } else {\n"
+        "            done = true\n"
+        "        }\n"
+        "    }\n"
+        "    print(sum)\n"
+        "}\n",
+        "6"
+    );
+}
+
+/* select as expression capturing value */
+static void test_select_as_expression(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    let ch = Channel::new()\n"
+        "    ch.send(freeze(\"hello\"))\n"
+        "    let msg = select {\n"
+        "        v from ch => { \"got: \" + v }\n"
+        "        default => { \"nothing\" }\n"
+        "    }\n"
+        "    print(msg)\n"
+        "}\n",
+        "got: hello"
+    );
+}
+
+/* ======================================================================
+ * LAT-17: Phase edge case tests
+ * ====================================================================== */
+
+/* freeze on nested structures: array of arrays */
+static void test_freeze_nested_array(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux outer = [[1, 2], [3, 4]]\n"
+        "    freeze(outer)\n"
+        "    print(phase_of(outer))\n"
+        "    print(outer)\n"
+        "}\n",
+        "crystal\n[[1, 2], [3, 4]]"
+    );
+}
+
+/* thaw and re-mutation */
+static void test_thaw_and_remutate(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux arr = [1, 2, 3]\n"
+        "    freeze(arr)\n"
+        "    print(phase_of(arr))\n"
+        "    thaw(arr)\n"
+        "    print(phase_of(arr))\n"
+        "    arr.push(4)\n"
+        "    print(arr)\n"
+        "}\n",
+        "crystal\nfluid\n[1, 2, 3, 4]"
+    );
+}
+
+/* phase transition across function boundaries */
+static void test_phase_across_function(void) {
+    ASSERT_OUTPUT(
+        "fn make_frozen() {\n"
+        "    flux data = [10, 20]\n"
+        "    freeze(data)\n"
+        "    return data\n"
+        "}\n"
+        "fn main() {\n"
+        "    let result = make_frozen()\n"
+        "    print(phase_of(result))\n"
+        "    print(result)\n"
+        "}\n",
+        "crystal\n[10, 20]"
+    );
+}
+
+/* sublimated array blocks push */
+static void test_sublimate_blocks_push_and_pop(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux items = [1, 2, 3]\n"
+        "    sublimate(items)\n"
+        "    items.push(4)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* phase pressure: no_grow blocks push on crystal value */
+static void test_pressure_no_grow_on_crystal(void) {
+    ASSERT_OUTPUT_STARTS_WITH(
+        "fn main() {\n"
+        "    flux data = [1, 2, 3]\n"
+        "    pressurize(data, \"no_grow\")\n"
+        "    data.push(4)\n"
+        "}\n",
+        "EVAL_ERROR:"
+    );
+}
+
+/* freeze preserves array content identity */
+static void test_freeze_preserves_content(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"a\"] = 1\n"
+        "    m[\"b\"] = 2\n"
+        "    freeze(m)\n"
+        "    print(phase_of(m))\n"
+        "    print(m[\"a\"])\n"
+        "    print(m[\"b\"])\n"
+        "}\n",
+        "crystal\n1\n2"
+    );
+}
+
+/* thaw a frozen map and add keys */
+static void test_thaw_frozen_map_add_keys(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"x\"] = 10\n"
+        "    freeze(m)\n"
+        "    thaw(m)\n"
+        "    m[\"y\"] = 20\n"
+        "    print(m.len())\n"
+        "}\n",
+        "2"
+    );
+}
+
+/* ======================================================================
+ * LAT-17: Closure capture edge case tests
+ * ====================================================================== */
+
+/* closure captures outer variable by value at definition time */
+static void test_closure_upvalue_nested_mutation(void) {
+    ASSERT_OUTPUT(
+        "fn make_adder(base: Int) {\n"
+        "    return |x| { base + x }\n"
+        "}\n"
+        "fn main() {\n"
+        "    let add10 = make_adder(10)\n"
+        "    let add20 = make_adder(20)\n"
+        "    print(add10(5))\n"
+        "    print(add20(5))\n"
+        "    print(add10(100))\n"
+        "}\n",
+        "15\n25\n110"
+    );
+}
+
+/* closure capturing loop variable (classic bug) */
+static void test_closure_capture_loop_var(void) {
+    ASSERT_OUTPUT(
+        "fn main() {\n"
+        "    flux fns = []\n"
+        "    for i in [0, 1, 2] {\n"
+        "        let val = i\n"
+        "        let f = |unused| { val }\n"
+        "        fns.push(f)\n"
+        "    }\n"
+        "    let f0 = fns[0]\n"
+        "    let f1 = fns[1]\n"
+        "    let f2 = fns[2]\n"
+        "    print(f0(0))\n"
+        "    print(f1(0))\n"
+        "    print(f2(0))\n"
+        "}\n",
+        "0\n1\n2"
+    );
+}
+
+/* closure captures outer value and can be called */
+static void test_closure_in_spawn(void) {
+    ASSERT_OUTPUT(
+        "fn make_greeter(greeting: String) {\n"
+        "    return |name| { greeting + \" \" + name }\n"
+        "}\n"
+        "fn main() {\n"
+        "    let greet = make_greeter(\"hello\")\n"
+        "    print(greet(\"world\"))\n"
+        "    print(greet(\"lattice\"))\n"
+        "}\n",
+        "hello world\nhello lattice"
+    );
+}
+
+/* recursive function (factorial) */
+static void test_closure_recursive(void) {
+    ASSERT_OUTPUT(
+        "fn fact(n: Int) -> Int {\n"
+        "    if n <= 1 { return 1 }\n"
+        "    return n * fact(n - 1)\n"
+        "}\n"
+        "fn main() {\n"
+        "    print(fact(5))\n"
+        "}\n",
+        "120"
+    );
+}
+
+/* counter closure (higher-order returning closure) */
+static void test_closure_counter(void) {
+    ASSERT_OUTPUT(
+        "fn make_counter() {\n"
+        "    flux count = 0\n"
+        "    return |_| {\n"
+        "        count = count + 1\n"
+        "        count\n"
+        "    }\n"
+        "}\n"
+        "fn main() {\n"
+        "    let counter = make_counter()\n"
+        "    print(counter(0))\n"
+        "    print(counter(0))\n"
+        "    print(counter(0))\n"
+        "}\n",
+        "1\n2\n3"
+    );
+}
+
+/* ======================================================================
+ * LAT-17: Error propagation tests
+ * ====================================================================== */
+
+/* try/catch around division by zero in a function */
+static void test_try_catch_in_function(void) {
+    ASSERT_OUTPUT(
+        "fn risky(a: Int, b: Int) -> Int {\n"
+        "    return a / b\n"
+        "}\n"
+        "fn main() {\n"
+        "    let result = try {\n"
+        "        risky(10, 0)\n"
+        "    } catch e {\n"
+        "        \"caught: \" + e\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "caught: division by zero"
+    );
+}
+
+/* error in deferred cleanup still prints deferred output */
+static void test_defer_with_error(void) {
+    ASSERT_OUTPUT(
+        "fn cleanup_fn() {\n"
+        "    defer { print(\"cleaned\") }\n"
+        "    print(\"before\")\n"
+        "}\n"
+        "fn main() {\n"
+        "    cleanup_fn()\n"
+        "}\n",
+        "before\ncleaned"
+    );
+}
+
+/* error propagation through multiple call frames */
+static void test_error_multi_frame(void) {
+    ASSERT_OUTPUT(
+        "fn inner() -> Int { return 1 / 0 }\n"
+        "fn middle() -> Int { return inner() }\n"
+        "fn outer() -> Int { return middle() }\n"
+        "fn main() {\n"
+        "    let result = try {\n"
+        "        outer()\n"
+        "    } catch e {\n"
+        "        e\n"
+        "    }\n"
+        "    print(result)\n"
+        "}\n",
+        "division by zero"
+    );
+}
+
+/* try/catch with conditional error generation */
+static void test_try_catch_conditional_error(void) {
+    ASSERT_OUTPUT(
+        "fn validate(x: Int) -> Int {\n"
+        "    if x < 0 { return 1 / 0 }\n"
+        "    return x\n"
+        "}\n"
+        "fn main() {\n"
+        "    let r = try {\n"
+        "        validate(-5)\n"
+        "        \"ok\"\n"
+        "    } catch e {\n"
+        "        \"caught: \" + e\n"
+        "    }\n"
+        "    print(r)\n"
+        "}\n",
+        "caught: division by zero"
+    );
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -13638,6 +14389,10 @@ void register_stdlib_tests(void) {
     register_test("test_rlatc_invalid_magic", test_rlatc_invalid_magic);
     register_test("test_rlatc_truncated", test_rlatc_truncated);
     register_test("test_rlatc_file_save_load", test_rlatc_file_save_load);
+    register_test("test_rlatc_round_trip_scope_spawn", test_rlatc_round_trip_scope_spawn);
+    register_test("test_rlatc_round_trip_scope_sync", test_rlatc_round_trip_scope_sync);
+    register_test("test_rlatc_round_trip_select", test_rlatc_round_trip_select);
+    register_test("test_rlatc_scope_file_save_load", test_rlatc_scope_file_save_load);
 
     /* Built-in stdlib modules */
     register_test("test_builtin_math_sin", test_builtin_math_sin);
@@ -13989,4 +14744,53 @@ void register_stdlib_tests(void) {
     /* Cross-backend parity: Array literal / index */
     register_test("test_parity_array_literal", test_parity_array_literal);
     register_test("test_parity_array_index", test_parity_array_index);
+
+    /* Error message diagnostics */
+    register_test("test_err_undefined_var_suggestion", test_err_undefined_var_suggestion);
+    register_test("test_err_undefined_var_no_suggestion", test_err_undefined_var_no_suggestion);
+    register_test("test_err_method_suggestion_array", test_err_method_suggestion_array);
+    register_test("test_err_method_suggestion_string", test_err_method_suggestion_string);
+    register_test("test_err_method_no_suggestion", test_err_method_no_suggestion);
+    register_test("test_err_phase_violation_hint", test_err_phase_violation_hint);
+
+    /* LAT-17: Concurrent scope/spawn edge cases */
+    register_test("test_scope_multi_spawn_shared_channels", test_scope_multi_spawn_shared_channels);
+    register_test("test_scope_sync_body_with_spawns", test_scope_sync_body_with_spawns);
+    register_test("test_scope_nested", test_scope_nested);
+    register_test("test_scope_spawn_error_div_zero", test_scope_spawn_error_div_zero);
+    register_test("test_scope_as_expression", test_scope_as_expression);
+    register_test("test_spawn_captures_outer_variable", test_spawn_captures_outer_variable);
+    register_test("test_scope_many_spawns_one_channel", test_scope_many_spawns_one_channel);
+    register_test("test_spawn_closure_factory", test_spawn_closure_factory);
+    register_test("test_scope_expr_with_spawns", test_scope_expr_with_spawns);
+
+    /* LAT-17: Select statement tests */
+    register_test("test_select_default_arm", test_select_default_arm);
+    register_test("test_select_timeout_arm", test_select_timeout_arm);
+    register_test("test_select_channel_ready", test_select_channel_ready);
+    register_test("test_select_multiple_channels", test_select_multiple_channels);
+    register_test("test_select_in_loop", test_select_in_loop);
+    register_test("test_select_as_expression", test_select_as_expression);
+
+    /* LAT-17: Phase edge cases */
+    register_test("test_freeze_nested_array", test_freeze_nested_array);
+    register_test("test_thaw_and_remutate", test_thaw_and_remutate);
+    register_test("test_phase_across_function", test_phase_across_function);
+    register_test("test_sublimate_blocks_push_and_pop", test_sublimate_blocks_push_and_pop);
+    register_test("test_pressure_no_grow_on_crystal", test_pressure_no_grow_on_crystal);
+    register_test("test_freeze_preserves_content", test_freeze_preserves_content);
+    register_test("test_thaw_frozen_map_add_keys", test_thaw_frozen_map_add_keys);
+
+    /* LAT-17: Closure capture edge cases */
+    register_test("test_closure_upvalue_nested_mutation", test_closure_upvalue_nested_mutation);
+    register_test("test_closure_capture_loop_var", test_closure_capture_loop_var);
+    register_test("test_closure_in_spawn", test_closure_in_spawn);
+    register_test("test_closure_recursive", test_closure_recursive);
+    register_test("test_closure_counter", test_closure_counter);
+
+    /* LAT-17: Error propagation */
+    register_test("test_try_catch_in_function", test_try_catch_in_function);
+    register_test("test_defer_with_error", test_defer_with_error);
+    register_test("test_error_multi_frame", test_error_multi_frame);
+    register_test("test_try_catch_conditional_error", test_try_catch_conditional_error);
 }

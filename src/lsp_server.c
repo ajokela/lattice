@@ -15,6 +15,50 @@ static const char *lattice_keywords[] = {
     NULL
 };
 
+/* ── Identifier character helpers ── */
+
+static int is_ident_char(char c) {
+    return (c == '_' ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9'));
+}
+
+/* Extract the identifier word at a given line:col in the document text.
+ * Returns a malloc'd string, or NULL if no identifier found.
+ * Optionally outputs the start column of the word. */
+static char *extract_word_at(const char *text, int line, int col, int *out_col) {
+    const char *p = text;
+    int cur_line = 0;
+    while (cur_line < line && *p) {
+        if (*p == '\n') cur_line++;
+        p++;
+    }
+    const char *line_start = p;
+    int cur_col = 0;
+    while (cur_col < col && *p && *p != '\n') {
+        cur_col++;
+        p++;
+    }
+
+    const char *ws = p;
+    while (ws > line_start && is_ident_char(ws[-1]))
+        ws--;
+
+    const char *we = p;
+    while (*we && is_ident_char(*we))
+        we++;
+
+    if (we <= ws) return NULL;
+
+    size_t wlen = (size_t)(we - ws);
+    char *word = malloc(wlen + 1);
+    memcpy(word, ws, wlen);
+    word[wlen] = '\0';
+    if (out_col) *out_col = (int)(ws - line_start);
+    return word;
+}
+
 /* ── Document management ── */
 
 static LspDocument *find_document(LspServer *srv, const char *uri) {
@@ -119,6 +163,20 @@ static void handle_initialize(LspServer *srv, int id) {
 
     /* Document symbols (outline / breadcrumbs) */
     cJSON_AddBoolToObject(caps, "documentSymbolProvider", 1);
+
+    /* Signature help */
+    cJSON *sigHelpOpts = cJSON_CreateObject();
+    cJSON *sigTriggers = cJSON_CreateArray();
+    cJSON_AddItemToArray(sigTriggers, cJSON_CreateString("("));
+    cJSON_AddItemToArray(sigTriggers, cJSON_CreateString(","));
+    cJSON_AddItemToObject(sigHelpOpts, "triggerCharacters", sigTriggers);
+    cJSON_AddItemToObject(caps, "signatureHelpProvider", sigHelpOpts);
+
+    /* References */
+    cJSON_AddBoolToObject(caps, "referencesProvider", 1);
+
+    /* Rename */
+    cJSON_AddBoolToObject(caps, "renameProvider", 1);
 
     cJSON_AddItemToObject(result, "capabilities", caps);
 
@@ -532,6 +590,410 @@ static void handle_document_symbol(LspServer *srv, cJSON *params, int id) {
     cJSON_Delete(resp);
 }
 
+/* ── Handler: textDocument/signatureHelp ── */
+
+/* Parse a signature string like "fn name(a: Int, b: String)" or "name(a: Int, b: String) -> Ret"
+ * and extract individual parameter label strings.
+ * Returns number of params extracted. params[] is filled with malloc'd strings. */
+static int parse_signature_params(const char *sig, char **params, int max_params) {
+    const char *open = strchr(sig, '(');
+    if (!open) return 0;
+    const char *close = strchr(open, ')');
+    if (!close) return 0;
+
+    /* Extract the content between parens */
+    size_t inner_len = (size_t)(close - open - 1);
+    if (inner_len == 0) return 0;
+
+    char *inner = malloc(inner_len + 1);
+    memcpy(inner, open + 1, inner_len);
+    inner[inner_len] = '\0';
+
+    int count = 0;
+    char *tok = inner;
+    while (*tok && count < max_params) {
+        /* Skip leading whitespace */
+        while (*tok == ' ' || *tok == '\t') tok++;
+        if (!*tok) break;
+
+        /* Find next comma or end */
+        char *comma = strchr(tok, ',');
+        char *end = comma ? comma : inner + inner_len;
+
+        /* Trim trailing whitespace */
+        char *trim_end = end;
+        while (trim_end > tok && (trim_end[-1] == ' ' || trim_end[-1] == '\t'))
+            trim_end--;
+
+        size_t plen = (size_t)(trim_end - tok);
+        if (plen > 0) {
+            params[count] = malloc(plen + 1);
+            memcpy(params[count], tok, plen);
+            params[count][plen] = '\0';
+            count++;
+        }
+
+        if (!comma) break;
+        tok = comma + 1;
+    }
+
+    free(inner);
+    return count;
+}
+
+/* Count commas before the cursor position on the current line, starting from
+ * the opening paren of the function call. This determines the active parameter. */
+static int count_active_param(const char *text, int line, int col) {
+    const char *p = text;
+    int cur_line = 0;
+    while (cur_line < line && *p) {
+        if (*p == '\n') cur_line++;
+        p++;
+    }
+    /* p points to start of target line. Walk to col. */
+    const char *line_end = p;
+    while (*line_end && *line_end != '\n') line_end++;
+
+    /* Scan backwards from col to find the opening '(' */
+    int depth = 0;
+    int commas = 0;
+    const char *cursor = p + (col < (int)(line_end - p) ? col : (int)(line_end - p));
+
+    for (const char *c = cursor - 1; c >= p; c--) {
+        if (*c == ')') depth++;
+        else if (*c == '(') {
+            if (depth == 0) break;  /* Found the matching open paren */
+            depth--;
+        } else if (*c == ',' && depth == 0) {
+            commas++;
+        }
+    }
+    return commas;
+}
+
+static void handle_signature_help(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    cJSON *pos = cJSON_GetObjectItem(params, "position");
+    if (!td || !pos) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    int line = cJSON_GetObjectItem(pos, "line")->valueint;
+    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+
+    LspDocument *doc = find_document(srv, uri);
+    if (!doc || !doc->text) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Walk backwards from cursor to find the function name before '(' */
+    const char *p = doc->text;
+    int cur_line = 0;
+    while (cur_line < line && *p) {
+        if (*p == '\n') cur_line++;
+        p++;
+    }
+    const char *line_start = p;
+    const char *line_end = p;
+    while (*line_end && *line_end != '\n') line_end++;
+
+    /* Find the opening paren by scanning back from cursor */
+    int eff_col = col < (int)(line_end - line_start) ? col : (int)(line_end - line_start);
+    const char *cursor = line_start + eff_col;
+
+    /* Scan backwards to find '(' (handling nested parens) */
+    int depth = 0;
+    const char *open_paren = NULL;
+    for (const char *c = cursor - 1; c >= line_start; c--) {
+        if (*c == ')') depth++;
+        else if (*c == '(') {
+            if (depth == 0) { open_paren = c; break; }
+            depth--;
+        }
+    }
+
+    if (!open_paren) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Extract function name just before the open paren */
+    const char *name_end = open_paren;
+    while (name_end > line_start && (name_end[-1] == ' ' || name_end[-1] == '\t'))
+        name_end--;
+    const char *name_start = name_end;
+    while (name_start > line_start && is_ident_char(name_start[-1]))
+        name_start--;
+
+    if (name_start >= name_end) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    size_t name_len = (size_t)(name_end - name_start);
+    char *func_name = malloc(name_len + 1);
+    memcpy(func_name, name_start, name_len);
+    func_name[name_len] = '\0';
+
+    /* Look up the function signature */
+    const char *sig = NULL;
+
+    /* Search builtins */
+    if (srv->index) {
+        for (size_t i = 0; i < srv->index->builtin_count; i++) {
+            if (strcmp(srv->index->builtins[i].name, func_name) == 0) {
+                sig = srv->index->builtins[i].signature;
+                break;
+            }
+        }
+        if (!sig) {
+            for (size_t i = 0; i < srv->index->method_count; i++) {
+                if (strcmp(srv->index->methods[i].name, func_name) == 0) {
+                    sig = srv->index->methods[i].signature;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Search document symbols */
+    if (!sig && doc) {
+        for (size_t i = 0; i < doc->symbol_count; i++) {
+            if (doc->symbols[i].kind == LSP_SYM_FUNCTION &&
+                strcmp(doc->symbols[i].name, func_name) == 0) {
+                sig = doc->symbols[i].signature;
+                break;
+            }
+        }
+    }
+
+    free(func_name);
+
+    if (!sig) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Parse parameters from signature */
+    char *param_labels[32];
+    int param_count = parse_signature_params(sig, param_labels, 32);
+
+    /* Determine active parameter from comma count */
+    int active_param = count_active_param(doc->text, line, col);
+    if (active_param >= param_count) active_param = param_count - 1;
+    if (active_param < 0) active_param = 0;
+
+    /* Build SignatureHelp response */
+    cJSON *result = cJSON_CreateObject();
+    cJSON *signatures = cJSON_CreateArray();
+    cJSON *sig_info = cJSON_CreateObject();
+
+    cJSON_AddStringToObject(sig_info, "label", sig);
+
+    /* Parameters */
+    cJSON *json_params = cJSON_CreateArray();
+    for (int i = 0; i < param_count; i++) {
+        cJSON *pi = cJSON_CreateObject();
+        cJSON_AddStringToObject(pi, "label", param_labels[i]);
+        cJSON_AddItemToArray(json_params, pi);
+        free(param_labels[i]);
+    }
+    cJSON_AddItemToObject(sig_info, "parameters", json_params);
+
+    cJSON_AddItemToArray(signatures, sig_info);
+    cJSON_AddItemToObject(result, "signatures", signatures);
+    cJSON_AddNumberToObject(result, "activeSignature", 0);
+    cJSON_AddNumberToObject(result, "activeParameter", active_param);
+
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
+/* ── Handler: textDocument/references ── */
+
+/* Check if position is inside a string literal (simple heuristic).
+ * Counts unescaped quotes from line start to the given column. */
+static bool in_string_literal(const char *line_start, int col) {
+    bool in_str = false;
+    char quote = 0;
+    for (int i = 0; i < col && line_start[i] && line_start[i] != '\n'; i++) {
+        char c = line_start[i];
+        if (in_str) {
+            if (c == '\\') { i++; continue; }  /* skip escaped char */
+            if (c == quote) in_str = false;
+        } else {
+            if (c == '"' || c == '\'') { in_str = true; quote = c; }
+        }
+    }
+    return in_str;
+}
+
+/* Find all occurrences of a word (as whole identifier) in the document text.
+ * Returns a cJSON array of Location objects. */
+static cJSON *find_all_references(const char *text, const char *uri,
+                                   const char *word) {
+    cJSON *locations = cJSON_CreateArray();
+    size_t word_len = strlen(word);
+    if (word_len == 0) return locations;
+
+    const char *p = text;
+    int line = 0;
+
+    while (*p) {
+        const char *line_start = p;
+
+        /* Scan this line for occurrences */
+        while (*p && *p != '\n') {
+            /* Check for word boundary match */
+            if (is_ident_char(*p)) {
+                const char *start = p;
+                while (*p && is_ident_char(*p)) p++;
+                size_t ident_len = (size_t)(p - start);
+
+                if (ident_len == word_len && memcmp(start, word, word_len) == 0) {
+                    int col = (int)(start - line_start);
+                    /* Skip if inside a string literal */
+                    if (!in_string_literal(line_start, col)) {
+                        cJSON *loc = cJSON_CreateObject();
+                        cJSON_AddStringToObject(loc, "uri", uri);
+                        cJSON *range = cJSON_CreateObject();
+                        cJSON *s = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(s, "line", line);
+                        cJSON_AddNumberToObject(s, "character", col);
+                        cJSON *e = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(e, "line", line);
+                        cJSON_AddNumberToObject(e, "character", col + (int)word_len);
+                        cJSON_AddItemToObject(range, "start", s);
+                        cJSON_AddItemToObject(range, "end", e);
+                        cJSON_AddItemToObject(loc, "range", range);
+                        cJSON_AddItemToArray(locations, loc);
+                    }
+                }
+                continue;  /* p already advanced past the identifier */
+            }
+            p++;
+        }
+
+        if (*p == '\n') { p++; line++; }
+    }
+
+    return locations;
+}
+
+static void handle_references(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    cJSON *pos = cJSON_GetObjectItem(params, "position");
+    if (!td || !pos) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    int line = cJSON_GetObjectItem(pos, "line")->valueint;
+    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+
+    LspDocument *doc = find_document(srv, uri);
+    if (!doc || !doc->text) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    char *word = extract_word_at(doc->text, line, col, NULL);
+    if (!word) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    cJSON *locations = find_all_references(doc->text, uri, word);
+    free(word);
+
+    cJSON *resp = lsp_make_response(id, locations);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
+/* ── Handler: textDocument/rename ── */
+
+static void handle_rename(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    cJSON *pos = cJSON_GetObjectItem(params, "position");
+    cJSON *new_name_node = cJSON_GetObjectItem(params, "newName");
+    if (!td || !pos || !new_name_node) {
+        cJSON *resp = lsp_make_error(id, -32602, "Invalid params");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    int line = cJSON_GetObjectItem(pos, "line")->valueint;
+    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+    const char *new_name = new_name_node->valuestring;
+
+    LspDocument *doc = find_document(srv, uri);
+    if (!doc || !doc->text) {
+        cJSON *resp = lsp_make_error(id, -32602, "Document not found");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    char *word = extract_word_at(doc->text, line, col, NULL);
+    if (!word) {
+        cJSON *resp = lsp_make_error(id, -32602, "No identifier at position");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Find all references and build TextEdit array */
+    cJSON *locations = find_all_references(doc->text, uri, word);
+    free(word);
+
+    cJSON *edits = cJSON_CreateArray();
+    int loc_count = cJSON_GetArraySize(locations);
+    for (int i = 0; i < loc_count; i++) {
+        cJSON *loc = cJSON_GetArrayItem(locations, i);
+        cJSON *range = cJSON_GetObjectItem(loc, "range");
+
+        cJSON *edit = cJSON_CreateObject();
+        cJSON_AddItemToObject(edit, "range", cJSON_Duplicate(range, 1));
+        cJSON_AddStringToObject(edit, "newText", new_name);
+        cJSON_AddItemToArray(edits, edit);
+    }
+    cJSON_Delete(locations);
+
+    /* Build WorkspaceEdit */
+    cJSON *result = cJSON_CreateObject();
+    cJSON *changes = cJSON_CreateObject();
+    cJSON_AddItemToObject(changes, uri, edits);
+    cJSON_AddItemToObject(result, "changes", changes);
+
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
 /* ── Server lifecycle ── */
 
 LspServer *lsp_server_new(void) {
@@ -585,6 +1047,12 @@ void lsp_server_run(LspServer *srv) {
             handle_definition(srv, params_node, id);
         } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
             handle_document_symbol(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/signatureHelp") == 0) {
+            handle_signature_help(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/references") == 0) {
+            handle_references(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/rename") == 0) {
+            handle_rename(srv, params_node, id);
         } else if (strcmp(method, "shutdown") == 0) {
             cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
             lsp_write_response(resp, stdout);

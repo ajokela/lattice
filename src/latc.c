@@ -617,17 +617,23 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err) {
         regchunk_free(c);
         return NULL;
     }
-    if (line_count <= c->lines_len) {
-        for (uint32_t i = 0; i < line_count; i++) {
-            uint32_t line_val;
-            if (!br_read_u32_le(br, &line_val)) {
-                *err = strdup("truncated: incomplete line data");
-                regchunk_free(c);
-                return NULL;
-            }
-            c->lines[i] = (int)line_val;
-        }
+    /* Ensure lines array is large enough, then read all line entries.
+     * We must always consume the serialized bytes to keep the reader
+     * position correct for subsequent fields (constants, local names). */
+    if (line_count > c->lines_cap) {
+        c->lines_cap = line_count;
+        c->lines = realloc(c->lines, c->lines_cap * sizeof(int));
     }
+    for (uint32_t i = 0; i < line_count; i++) {
+        uint32_t line_val;
+        if (!br_read_u32_le(br, &line_val)) {
+            *err = strdup("truncated: incomplete line data");
+            regchunk_free(c);
+            return NULL;
+        }
+        c->lines[i] = (int)line_val;
+    }
+    c->lines_len = line_count;
 
     /* Constants */
     uint32_t const_count;

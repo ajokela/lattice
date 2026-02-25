@@ -1,0 +1,493 @@
+// Test suite for stdlib data structure libraries.
+// Exercises each library (stack, queue, heap, sorted_set, graph)
+// with assertions to verify correct behavior.
+//
+// Run: ./clat tests/test_stdlib_libs.lat
+
+import "lib/test" as t
+import "lib/stack" as Stack
+import "lib/queue" as Queue
+import "lib/heap" as Heap
+import "lib/sorted_set" as SortedSet
+import "lib/graph" as Graph
+
+fn main() {
+    t.run([
+        // ----------------------------------------------------------------
+        // Stack tests
+        // ----------------------------------------------------------------
+        t.describe("Stack", |_| {
+            return [
+                t.it("new stack is empty", |_| {
+                    let s = Stack.new()
+                    let sz = s.get("len")
+                    let empty = s.get("is_empty")
+                    t.assert_eq(sz(nil), 0)
+                    t.assert_true(empty(nil))
+                }),
+
+                t.it("push and peek", |_| {
+                    let s = Stack.new()
+                    let push = s.get("push")
+                    let peek = s.get("peek")
+                    let sz = s.get("len")
+                    push(10)
+                    push(20)
+                    push(30)
+                    t.assert_eq(sz(nil), 3)
+                    t.assert_eq(peek(nil), 30)
+                }),
+
+                t.it("pop returns in LIFO order", |_| {
+                    let s = Stack.new()
+                    let push = s.get("push")
+                    let pop = s.get("pop")
+                    push(1)
+                    push(2)
+                    push(3)
+                    t.assert_eq(pop(nil), 3)
+                    t.assert_eq(pop(nil), 2)
+                    t.assert_eq(pop(nil), 1)
+                }),
+
+                t.it("pop from empty throws", |_| {
+                    let s = Stack.new()
+                    let pop = s.get("pop")
+                    t.assert_throws(|_| { pop(nil) })
+                }),
+
+                t.it("to_array returns bottom to top", |_| {
+                    let s = Stack.new()
+                    let push = s.get("push")
+                    let to_arr = s.get("to_array")
+                    push("a")
+                    push("b")
+                    push("c")
+                    let arr = to_arr(nil)
+                    t.assert_eq(arr[0], "a")
+                    t.assert_eq(arr[1], "b")
+                    t.assert_eq(arr[2], "c")
+                }),
+
+                t.it("push beyond initial capacity", |_| {
+                    let s = Stack.new()
+                    let push = s.get("push")
+                    let sz = s.get("len")
+                    let pop = s.get("pop")
+                    flux i = 0
+                    while i < 20 {
+                        push(i)
+                        i = i + 1
+                    }
+                    t.assert_eq(sz(nil), 20)
+                    t.assert_eq(pop(nil), 19)
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Queue tests
+        // ----------------------------------------------------------------
+        t.describe("Queue", |_| {
+            return [
+                t.it("new queue is empty", |_| {
+                    let q = Queue.new()
+                    let sz = q.get("len")
+                    let empty = q.get("is_empty")
+                    t.assert_eq(sz(nil), 0)
+                    t.assert_true(empty(nil))
+                }),
+
+                t.it("enqueue and peek", |_| {
+                    let q = Queue.new()
+                    let enqueue = q.get("enqueue")
+                    let peek = q.get("peek")
+                    let sz = q.get("len")
+                    enqueue("first")
+                    enqueue("second")
+                    enqueue("third")
+                    t.assert_eq(sz(nil), 3)
+                    t.assert_eq(peek(nil), "first")
+                }),
+
+                t.it("dequeue returns in FIFO order", |_| {
+                    let q = Queue.new()
+                    let enqueue = q.get("enqueue")
+                    let dequeue = q.get("dequeue")
+                    enqueue(10)
+                    enqueue(20)
+                    enqueue(30)
+                    t.assert_eq(dequeue(nil), 10)
+                    t.assert_eq(dequeue(nil), 20)
+                    t.assert_eq(dequeue(nil), 30)
+                }),
+
+                t.it("dequeue from empty throws", |_| {
+                    let q = Queue.new()
+                    let dequeue = q.get("dequeue")
+                    t.assert_throws(|_| { dequeue(nil) })
+                }),
+
+                t.it("to_array returns front to back", |_| {
+                    let q = Queue.new()
+                    let enqueue = q.get("enqueue")
+                    let dequeue = q.get("dequeue")
+                    let to_arr = q.get("to_array")
+                    enqueue("a")
+                    enqueue("b")
+                    enqueue("c")
+                    // Dequeue one so head advances
+                    dequeue(nil)
+                    enqueue("d")
+                    let arr = to_arr(nil)
+                    t.assert_eq(arr[0], "b")
+                    t.assert_eq(arr[1], "c")
+                    t.assert_eq(arr[2], "d")
+                }),
+
+                t.it("wrap-around with many enqueue/dequeue cycles", |_| {
+                    let q = Queue.new()
+                    let enqueue = q.get("enqueue")
+                    let dequeue = q.get("dequeue")
+                    let sz = q.get("len")
+                    // Enqueue and dequeue repeatedly to test wrap-around
+                    flux i = 0
+                    while i < 50 {
+                        enqueue(i)
+                        i = i + 1
+                    }
+                    flux j = 0
+                    while j < 50 {
+                        let v = dequeue(nil)
+                        t.assert_eq(v, j)
+                        j = j + 1
+                    }
+                    t.assert_eq(sz(nil), 0)
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Heap tests
+        // ----------------------------------------------------------------
+        t.describe("Heap", |_| {
+            return [
+                t.it("new heap is empty", |_| {
+                    let h = Heap.new()
+                    let sz = h.get("len")
+                    let empty = h.get("is_empty")
+                    t.assert_eq(sz(nil), 0)
+                    t.assert_true(empty(nil))
+                }),
+
+                t.it("push and peek returns min priority", |_| {
+                    let h = Heap.new()
+                    let push = h.get("push")
+                    let peek = h.get("peek")
+                    push("low", 10)
+                    push("high", 1)
+                    push("med", 5)
+                    let top = peek(nil)
+                    t.assert_eq(top[0], 1)
+                    t.assert_eq(top[1], "high")
+                }),
+
+                t.it("pop returns in priority order", |_| {
+                    let h = Heap.new()
+                    let push = h.get("push")
+                    let pop = h.get("pop")
+                    push("d", 4)
+                    push("a", 1)
+                    push("c", 3)
+                    push("b", 2)
+
+                    let e1 = pop(nil)
+                    t.assert_eq(e1[0], 1)
+                    t.assert_eq(e1[1], "a")
+
+                    let e2 = pop(nil)
+                    t.assert_eq(e2[0], 2)
+                    t.assert_eq(e2[1], "b")
+
+                    let e3 = pop(nil)
+                    t.assert_eq(e3[0], 3)
+                    t.assert_eq(e3[1], "c")
+
+                    let e4 = pop(nil)
+                    t.assert_eq(e4[0], 4)
+                    t.assert_eq(e4[1], "d")
+                }),
+
+                t.it("pop from empty throws", |_| {
+                    let h = Heap.new()
+                    let pop = h.get("pop")
+                    t.assert_throws(|_| { pop(nil) })
+                }),
+
+                t.it("many insertions maintain heap property", |_| {
+                    let h = Heap.new()
+                    let push = h.get("push")
+                    let pop = h.get("pop")
+                    let sz = h.get("len")
+                    // Insert in reverse order
+                    push("p10", 10)
+                    push("p9", 9)
+                    push("p8", 8)
+                    push("p7", 7)
+                    push("p6", 6)
+                    push("p5", 5)
+                    push("p4", 4)
+                    push("p3", 3)
+                    push("p2", 2)
+                    push("p1", 1)
+                    t.assert_eq(sz(nil), 10)
+                    // Pop should come out 1..10
+                    flux prev = 0
+                    flux count = 0
+                    while count < 10 {
+                        let entry = pop(nil)
+                        t.assert_gt(entry[0], prev)
+                        prev = entry[0]
+                        count = count + 1
+                    }
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Sorted Set tests
+        // ----------------------------------------------------------------
+        t.describe("SortedSet", |_| {
+            return [
+                t.it("new set is empty", |_| {
+                    let s = SortedSet.new()
+                    let sz = s.get("len")
+                    let empty = s.get("is_empty")
+                    t.assert_eq(sz(nil), 0)
+                    t.assert_true(empty(nil))
+                }),
+
+                t.it("insert and to_array returns sorted", |_| {
+                    let s = SortedSet.new()
+                    let insert = s.get("insert")
+                    let to_arr = s.get("to_array")
+                    insert(5)
+                    insert(3)
+                    insert(7)
+                    insert(1)
+                    insert(9)
+                    let arr = to_arr(nil)
+                    t.assert_eq(arr[0], 1)
+                    t.assert_eq(arr[1], 3)
+                    t.assert_eq(arr[2], 5)
+                    t.assert_eq(arr[3], 7)
+                    t.assert_eq(arr[4], 9)
+                }),
+
+                t.it("duplicates are rejected", |_| {
+                    let s = SortedSet.new()
+                    let insert = s.get("insert")
+                    let sz = s.get("len")
+                    insert(5)
+                    insert(5)
+                    insert(5)
+                    t.assert_eq(sz(nil), 1)
+                }),
+
+                t.it("contains works", |_| {
+                    let s = SortedSet.new()
+                    let insert = s.get("insert")
+                    let contains = s.get("contains")
+                    insert(3)
+                    insert(7)
+                    t.assert_true(contains(3))
+                    t.assert_true(contains(7))
+                    t.assert_false(contains(5))
+                }),
+
+                t.it("remove works", |_| {
+                    let s = SortedSet.new()
+                    let insert = s.get("insert")
+                    let remove = s.get("remove")
+                    let contains = s.get("contains")
+                    let sz = s.get("len")
+                    insert(1)
+                    insert(2)
+                    insert(3)
+                    remove(2)
+                    t.assert_false(contains(2))
+                    t.assert_eq(sz(nil), 2)
+                    t.assert_true(contains(1))
+                    t.assert_true(contains(3))
+                }),
+
+                t.it("min and max", |_| {
+                    let s = SortedSet.new()
+                    let insert = s.get("insert")
+                    let mn = s.get("min")
+                    let mx = s.get("max")
+                    insert(10)
+                    insert(5)
+                    insert(20)
+                    insert(1)
+                    insert(15)
+                    t.assert_eq(mn(nil), 1)
+                    t.assert_eq(mx(nil), 20)
+                }),
+
+                t.it("remove non-existent is no-op", |_| {
+                    let s = SortedSet.new()
+                    let insert = s.get("insert")
+                    let remove = s.get("remove")
+                    let sz = s.get("len")
+                    insert(1)
+                    insert(2)
+                    remove(99)
+                    t.assert_eq(sz(nil), 2)
+                }),
+
+                t.it("many insertions stay balanced", |_| {
+                    let s = SortedSet.new()
+                    let insert = s.get("insert")
+                    let to_arr = s.get("to_array")
+                    let sz = s.get("len")
+                    // Insert 1..15
+                    flux i = 1
+                    while i <= 15 {
+                        insert(i)
+                        i = i + 1
+                    }
+                    t.assert_eq(sz(nil), 15)
+                    let arr = to_arr(nil)
+                    // Verify sorted
+                    flux j = 0
+                    while j < arr.len() - 1 {
+                        t.assert_lt(arr[j], arr[j + 1])
+                        j = j + 1
+                    }
+                })
+            ]
+        }),
+
+        // ----------------------------------------------------------------
+        // Graph tests
+        // ----------------------------------------------------------------
+        t.describe("Graph", |_| {
+            return [
+                t.it("new graph is empty", |_| {
+                    let g = Graph.new()
+                    let nc = g.get("node_count")
+                    let ec = g.get("edge_count")
+                    t.assert_eq(nc(nil), 0)
+                    t.assert_eq(ec(nil), 0)
+                }),
+
+                t.it("add_node and has_node", |_| {
+                    let g = Graph.new()
+                    let add_node = g.get("add_node")
+                    let has_node = g.get("has_node")
+                    let nc = g.get("node_count")
+                    add_node("x")
+                    add_node("y")
+                    t.assert_true(has_node("x"))
+                    t.assert_true(has_node("y"))
+                    t.assert_false(has_node("z"))
+                    t.assert_eq(nc(nil), 2)
+                }),
+
+                t.it("add_edge auto-creates nodes", |_| {
+                    let g = Graph.new()
+                    let add_edge = g.get("add_edge")
+                    let has_node = g.get("has_node")
+                    let nc = g.get("node_count")
+                    add_edge("a", "b", 1)
+                    t.assert_true(has_node("a"))
+                    t.assert_true(has_node("b"))
+                    t.assert_eq(nc(nil), 2)
+                }),
+
+                t.it("neighbors returns edges", |_| {
+                    let g = Graph.new()
+                    let add_edge = g.get("add_edge")
+                    let neighbors = g.get("neighbors")
+                    add_edge("a", "b", 2)
+                    add_edge("a", "c", 3)
+                    let nb = neighbors("a")
+                    t.assert_eq(nb.len(), 2)
+                    t.assert_eq(nb[0][0], "b")
+                    t.assert_eq(nb[0][1], 2)
+                    t.assert_eq(nb[1][0], "c")
+                    t.assert_eq(nb[1][1], 3)
+                }),
+
+                t.it("bfs traversal order", |_| {
+                    let g = Graph.new()
+                    let add_edge = g.get("add_edge")
+                    let bfs = g.get("bfs")
+                    add_edge("a", "b", 1)
+                    add_edge("a", "c", 1)
+                    add_edge("b", "d", 1)
+                    add_edge("c", "d", 1)
+                    let order = bfs("a")
+                    t.assert_eq(order[0], "a")
+                    t.assert_eq(order.len(), 4)
+                    // b and c should be visited before d
+                    t.assert_contains(order, "b")
+                    t.assert_contains(order, "c")
+                    t.assert_contains(order, "d")
+                }),
+
+                t.it("dfs traversal visits all reachable", |_| {
+                    let g = Graph.new()
+                    let add_edge = g.get("add_edge")
+                    let dfs = g.get("dfs")
+                    add_edge("a", "b", 1)
+                    add_edge("b", "c", 1)
+                    add_edge("c", "d", 1)
+                    let order = dfs("a")
+                    t.assert_eq(order[0], "a")
+                    t.assert_eq(order.len(), 4)
+                }),
+
+                t.it("has_path finds path", |_| {
+                    let g = Graph.new()
+                    let add_edge = g.get("add_edge")
+                    let has_path = g.get("has_path")
+                    add_edge("a", "b", 1)
+                    add_edge("b", "c", 1)
+                    add_edge("c", "d", 1)
+                    t.assert_true(has_path("a", "d"))
+                    t.assert_true(has_path("a", "c"))
+                    t.assert_true(has_path("b", "d"))
+                }),
+
+                t.it("has_path returns false for unreachable", |_| {
+                    let g = Graph.new()
+                    let add_edge = g.get("add_edge")
+                    let add_node = g.get("add_node")
+                    let has_path = g.get("has_path")
+                    add_edge("a", "b", 1)
+                    add_node("z")
+                    t.assert_false(has_path("a", "z"))
+                    // Directed: b->a doesn't exist
+                    t.assert_false(has_path("b", "a"))
+                }),
+
+                t.it("has_path self-loop", |_| {
+                    let g = Graph.new()
+                    let add_node = g.get("add_node")
+                    let has_path = g.get("has_path")
+                    add_node("x")
+                    t.assert_true(has_path("x", "x"))
+                }),
+
+                t.it("neighbors of non-existent node returns empty", |_| {
+                    let g = Graph.new()
+                    let neighbors = g.get("neighbors")
+                    let nb = neighbors("none")
+                    t.assert_eq(nb.len(), 0)
+                })
+            ]
+        })
+    ])
+}

@@ -1,0 +1,347 @@
+// Lattice Graph Library (Directed Graph)
+// Provides a directed graph with weighted edges.
+// Nodes are identified by string or integer IDs (converted to strings internally).
+// Uses closures over captured state for mutation.
+//
+// Usage:
+//   import "lib/graph" as Graph
+//
+//   let g = Graph.new()
+//   g.add_node("a")
+//   g.add_edge("a", "b", 1)
+//   print(g.neighbors("a"))          // [["b", 1]]
+//   print(g.bfs("a"))                // ["a", "b"]
+//   print(g.has_path("a", "b"))      // true
+
+// Internal helper: create a new array of given size filled with nil.
+fn _make_array(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        flux a = clone(arr)
+        a.push(nil)
+        arr = a
+        i = i + 1
+    }
+    return arr
+}
+
+// Internal helper: grow an array by doubling.
+fn _grow(arr: Array) -> Array {
+    let old_len = arr.len()
+    let new_cap = old_len * 2
+    flux new_arr = clone(arr)
+    flux i = old_len
+    while i < new_cap {
+        flux a = clone(new_arr)
+        a.push(nil)
+        new_arr = a
+        i = i + 1
+    }
+    return new_arr
+}
+
+// Create a new empty directed graph.
+// Returns a Map of closures that share mutable state.
+fn new() -> Map {
+    // Adjacency list: adj[key] stores array of [target_id, weight] pairs
+    // We use a Map for adjacency and arrays for node list/edge storage
+    flux adj = Map::new()
+    flux node_ids = _make_array(8)
+    flux node_count = 0
+
+    let g = Map::new()
+
+    g.set("add_node", |id| {
+        let key = to_string(id)
+        if adj.has(key) { return nil }
+        adj[key] = "exists"
+        // Store edges separately since Map value arrays don't support push
+        // We'll use a different key for edges
+        adj[key + "_edges"] = _make_array(4)
+        adj[key + "_edge_count"] = 0
+        if node_count >= node_ids.len() {
+            node_ids = _grow(node_ids)
+        }
+        node_ids[node_count] = id
+        node_count = node_count + 1
+    })
+
+    g.set("add_edge", |src, dst, weight| {
+        // Auto-add nodes
+        let src_key = to_string(src)
+        let dst_key = to_string(dst)
+        if !adj.has(src_key) {
+            adj[src_key] = "exists"
+            adj[src_key + "_edges"] = _make_array(4)
+            adj[src_key + "_edge_count"] = 0
+            if node_count >= node_ids.len() {
+                node_ids = _grow(node_ids)
+            }
+            node_ids[node_count] = src
+            node_count = node_count + 1
+        }
+        if !adj.has(dst_key) {
+            adj[dst_key] = "exists"
+            adj[dst_key + "_edges"] = _make_array(4)
+            adj[dst_key + "_edge_count"] = 0
+            if node_count >= node_ids.len() {
+                node_ids = _grow(node_ids)
+            }
+            node_ids[node_count] = dst
+            node_count = node_count + 1
+        }
+        // Add edge
+        let edge_key = src_key + "_edges"
+        let count_key = src_key + "_edge_count"
+        let ec = adj[count_key]
+        let edges = adj[edge_key]
+        if ec >= edges.len() {
+            adj[edge_key] = _grow(edges)
+        }
+        adj[edge_key][ec] = [dst, weight]
+        adj[count_key] = ec + 1
+    })
+
+    g.set("neighbors", |id| {
+        let key = to_string(id)
+        if !adj.has(key) { return [] }
+        let edge_key = key + "_edges"
+        let count_key = key + "_edge_count"
+        let ec = adj[count_key]
+        let edges = adj[edge_key]
+        flux result = []
+        flux i = 0
+        while i < ec {
+            flux r = clone(result)
+            r.push(edges[i])
+            result = r
+            i = i + 1
+        }
+        return result
+    })
+
+    g.set("nodes", |_| {
+        flux result = []
+        flux i = 0
+        while i < node_count {
+            flux r = clone(result)
+            r.push(node_ids[i])
+            result = r
+            i = i + 1
+        }
+        return result
+    })
+
+    g.set("has_node", |id| {
+        return adj.has(to_string(id))
+    })
+
+    g.set("node_count", |_| {
+        return node_count
+    })
+
+    g.set("edge_count", |_| {
+        flux total = 0
+        flux i = 0
+        while i < node_count {
+            let key = to_string(node_ids[i])
+            total = total + adj[key + "_edge_count"]
+            i = i + 1
+        }
+        return total
+    })
+
+    g.set("bfs", |start| {
+        let start_key = to_string(start)
+        if !adj.has(start_key) { return [] }
+
+        flux result = []
+        flux result_sz = 0
+        let visited = Map::new()
+        flux queue = _make_array(16)
+        flux q_head = 0
+        flux q_tail = 0
+
+        visited[start_key] = true
+        queue[q_tail] = start
+        q_tail = q_tail + 1
+
+        while q_head < q_tail {
+            let current = queue[q_head]
+            q_head = q_head + 1
+
+            flux r = clone(result)
+            r.push(current)
+            result = r
+
+            let cur_key = to_string(current)
+            let ec = adj[cur_key + "_edge_count"]
+            let edges = adj[cur_key + "_edges"]
+            flux j = 0
+            while j < ec {
+                let neighbor = edges[j][0]
+                let nkey = to_string(neighbor)
+                if !visited.has(nkey) {
+                    visited[nkey] = true
+                    if q_tail >= queue.len() {
+                        queue = _grow(queue)
+                    }
+                    queue[q_tail] = neighbor
+                    q_tail = q_tail + 1
+                }
+                j = j + 1
+            }
+        }
+        return result
+    })
+
+    g.set("dfs", |start| {
+        let start_key = to_string(start)
+        if !adj.has(start_key) { return [] }
+
+        flux result = []
+        let visited = Map::new()
+        flux stack = _make_array(16)
+        flux stack_sz = 0
+
+        stack[0] = start
+        stack_sz = 1
+
+        while stack_sz > 0 {
+            stack_sz = stack_sz - 1
+            let current = stack[stack_sz]
+            let cur_key = to_string(current)
+
+            if visited.has(cur_key) { continue }
+            visited[cur_key] = true
+
+            flux r = clone(result)
+            r.push(current)
+            result = r
+
+            // Push neighbors in reverse order for consistent traversal
+            let ec = adj[cur_key + "_edge_count"]
+            let edges = adj[cur_key + "_edges"]
+            flux j = ec - 1
+            while j >= 0 {
+                let neighbor = edges[j][0]
+                let nkey = to_string(neighbor)
+                if !visited.has(nkey) {
+                    if stack_sz >= stack.len() {
+                        stack = _grow(stack)
+                    }
+                    stack[stack_sz] = neighbor
+                    stack_sz = stack_sz + 1
+                }
+                j = j - 1
+            }
+        }
+        return result
+    })
+
+    g.set("has_path", |src, dst| {
+        let src_key = to_string(src)
+        let dst_key = to_string(dst)
+        if !adj.has(src_key) { return false }
+        if !adj.has(dst_key) { return false }
+        if src_key == dst_key { return true }
+
+        let visited = Map::new()
+        flux queue = _make_array(16)
+        flux q_head = 0
+        flux q_tail = 0
+
+        visited[src_key] = true
+        queue[0] = src
+        q_tail = 1
+
+        while q_head < q_tail {
+            let current = queue[q_head]
+            q_head = q_head + 1
+            let cur_key = to_string(current)
+
+            let ec = adj[cur_key + "_edge_count"]
+            let edges = adj[cur_key + "_edges"]
+            flux j = 0
+            while j < ec {
+                let neighbor = edges[j][0]
+                let nkey = to_string(neighbor)
+                if nkey == dst_key { return true }
+                if !visited.has(nkey) {
+                    visited[nkey] = true
+                    if q_tail >= queue.len() {
+                        queue = _grow(queue)
+                    }
+                    queue[q_tail] = neighbor
+                    q_tail = q_tail + 1
+                }
+                j = j + 1
+            }
+        }
+        return false
+    })
+
+    return g
+}
+
+// Demo / test
+fn main() {
+    print("=== Directed Graph ===")
+    print("")
+
+    let g = new()
+    let add_edge = g.get("add_edge")
+    let add_node = g.get("add_node")
+    let get_neighbors = g.get("neighbors")
+    let get_nodes = g.get("nodes")
+    let nc = g.get("node_count")
+    let ec = g.get("edge_count")
+    let bfs = g.get("bfs")
+    let dfs = g.get("dfs")
+    let has_path = g.get("has_path")
+    let has_node = g.get("has_node")
+
+    // Build a sample graph:
+    //   a --2--> b --3--> d
+    //   a --4--> c --1--> d
+    //   b --5--> c
+    //   d --7--> e
+    add_edge("a", "b", 2)
+    add_edge("a", "c", 4)
+    add_edge("b", "c", 5)
+    add_edge("b", "d", 3)
+    add_edge("c", "d", 1)
+    add_edge("d", "e", 7)
+
+    print("Nodes: " + to_string(get_nodes(nil)))
+    print("Node count: " + to_string(nc(nil)))
+    print("Edge count: " + to_string(ec(nil)))
+
+    print("")
+    print("Neighbors of a: " + to_string(get_neighbors("a")))
+    print("Neighbors of b: " + to_string(get_neighbors("b")))
+    print("Neighbors of d: " + to_string(get_neighbors("d")))
+    print("Neighbors of e: " + to_string(get_neighbors("e")))
+
+    print("")
+    print("BFS from a: " + to_string(bfs("a")))
+    print("DFS from a: " + to_string(dfs("a")))
+
+    print("")
+    print("has_path(a, e): " + to_string(has_path("a", "e")))
+    print("has_path(a, d): " + to_string(has_path("a", "d")))
+    print("has_path(e, a): " + to_string(has_path("e", "a")))
+    print("has_path(c, e): " + to_string(has_path("c", "e")))
+
+    // Add an isolated node
+    add_node("z")
+    print("")
+    print("After adding isolated node z:")
+    print("has_path(a, z): " + to_string(has_path("a", "z")))
+    print("has_node(z): " + to_string(has_node("z")))
+    print("Neighbors of z: " + to_string(get_neighbors("z")))
+
+    print("")
+    print("Graph demo complete.")
+}

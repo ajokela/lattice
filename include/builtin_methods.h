@@ -143,4 +143,11 @@ LatValue builtin_enum_enum_name(LatValue *obj, LatValue *args, int arg_count, ch
 LatValue builtin_enum_payload(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_enum_is_variant(LatValue *obj, LatValue *args, int arg_count, char **error);
 
+/* ── Method name suggestion for typo errors ── */
+
+/* Given a type and a misspelled method name, return the closest valid method
+ * name within edit distance 2, or NULL if none found.
+ * val_type is one of VAL_ARRAY, VAL_STR, VAL_MAP, etc. */
+const char *builtin_find_similar_method(int val_type, const char *method);
+
 #endif /* BUILTIN_METHODS_H */

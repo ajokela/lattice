@@ -1,0 +1,328 @@
+// Test: trait declarations, trait implementations, and match patterns
+// Compiled via self-hosted compiler: clat compiler/latc.lat tests/latc_traits.lat out.latc
+
+// ============================================================================
+// Struct and Enum declarations
+// ============================================================================
+
+struct Animal { kind: any, name: any, legs: any }
+
+enum Status {
+    Active,
+    Inactive,
+    Error(any)
+}
+
+// ============================================================================
+// Trait declarations
+// ============================================================================
+
+trait Displayable {
+    fn display(self: any)
+}
+
+trait Countable {
+    fn count(self: any)
+}
+
+// ============================================================================
+// Trait implementations
+// ============================================================================
+
+impl Displayable for Animal {
+    fn display(self: any) {
+        return self.name + " the " + self.kind + " (" + to_string(self.legs) + " legs)"
+    }
+}
+
+impl Countable for Animal {
+    fn count(self: any) {
+        return self.legs
+    }
+}
+
+// ============================================================================
+// Test: trait methods work via impl
+// ============================================================================
+
+fn test_trait_methods() {
+    print("--- trait methods ---")
+    let dog = Animal { kind: "dog", name: "Rex", legs: 4 }
+    print(dog.display())
+    print(dog.count())
+
+    let spider = Animal { kind: "spider", name: "Charlotte", legs: 8 }
+    print(spider.display())
+    print(spider.count())
+}
+
+// ============================================================================
+// Test: multiple traits on same type
+// ============================================================================
+
+fn test_multiple_traits() {
+    print("--- multiple traits ---")
+    let cat = Animal { kind: "cat", name: "Whiskers", legs: 4 }
+    // Both trait methods should work
+    let desc = cat.display()
+    let cnt = cat.count()
+    print(desc)
+    print(cnt)
+}
+
+// ============================================================================
+// Test: basic match with literals
+// ============================================================================
+
+fn test_match_literals() {
+    print("--- match literals ---")
+    let x = 2
+    let result = match x {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        _ => "other"
+    }
+    print(result)
+
+    let s = "hello"
+    let greeting = match s {
+        "hi" => "informal",
+        "hello" => "formal",
+        _ => "unknown"
+    }
+    print(greeting)
+}
+
+// ============================================================================
+// Test: match with wildcard
+// ============================================================================
+
+fn test_match_wildcard() {
+    print("--- match wildcard ---")
+    let x = 999
+    let result = match x {
+        1 => "one",
+        2 => "two",
+        _ => "wildcard"
+    }
+    print(result)
+}
+
+// ============================================================================
+// Test: match with binding pattern and guards
+// ============================================================================
+
+fn test_match_binding_guard() {
+    print("--- match binding+guard ---")
+    let x = 15
+    let result = match x {
+        n if n < 0 => "negative",
+        n if n == 0 => "zero",
+        n if n <= 10 => "small:" + to_string(n),
+        n if n <= 20 => "medium:" + to_string(n),
+        _ => "large"
+    }
+    print(result)
+
+    // Test first arm matching
+    let y = -3
+    let r2 = match y {
+        n if n < 0 => "neg:" + to_string(n),
+        _ => "pos"
+    }
+    print(r2)
+
+    // Test binding without guard (always matches)
+    let z = 42
+    let r3 = match z {
+        val => "got:" + to_string(val)
+    }
+    print(r3)
+}
+
+// ============================================================================
+// Test: match with range patterns
+// ============================================================================
+
+fn test_match_range() {
+    print("--- match range ---")
+    let score = 85
+    let grade = match score {
+        0..59 => "F",
+        60..69 => "D",
+        70..79 => "C",
+        80..89 => "B",
+        90..100 => "A",
+        _ => "invalid"
+    }
+    print(grade)
+
+    // Test boundary: exactly at range start
+    let s2 = 60
+    let g2 = match s2 {
+        0..59 => "F",
+        60..69 => "D",
+        _ => "other"
+    }
+    print(g2)
+
+    // Test boundary: exactly at range end
+    let s3 = 59
+    let g3 = match s3 {
+        0..59 => "F",
+        60..69 => "D",
+        _ => "other"
+    }
+    print(g3)
+}
+
+// ============================================================================
+// Test: match with guard on wildcard
+// ============================================================================
+
+fn test_match_wildcard_guard() {
+    print("--- match wildcard+guard ---")
+    let x = 7
+    let result = match x {
+        _ if x > 10 => "big",
+        _ if x > 5 => "medium",
+        _ => "small"
+    }
+    print(result)
+}
+
+// ============================================================================
+// Test: match with block body
+// ============================================================================
+
+fn test_match_block_body() {
+    print("--- match block body ---")
+    let x = 42
+    let result = match x {
+        n if n > 100 => "huge",
+        n if n > 20 => {
+            let doubled = n * 2
+            "mid:" + to_string(doubled)
+        },
+        _ => "small"
+    }
+    print(result)
+}
+
+// ============================================================================
+// Test: match with boolean patterns
+// ============================================================================
+
+fn test_match_bool() {
+    print("--- match bool ---")
+    let flag = true
+    let result = match flag {
+        true => "yes",
+        false => "no"
+    }
+    print(result)
+
+    let flag2 = false
+    let result2 = match flag2 {
+        true => "yes",
+        false => "no"
+    }
+    print(result2)
+}
+
+// ============================================================================
+// Test: match no-match fallback (nil)
+// ============================================================================
+
+fn test_match_no_match() {
+    print("--- match no-match ---")
+    let x = 99
+    let result = match x {
+        1 => "one",
+        2 => "two"
+    }
+    print(result)
+}
+
+// ============================================================================
+// Test: match used as expression in function call
+// ============================================================================
+
+fn test_match_as_expr() {
+    print("--- match as expr ---")
+    let op = "*"
+    print(match op {
+        "+" => "add",
+        "-" => "sub",
+        "*" => "mul",
+        "/" => "div",
+        _ => "unknown"
+    })
+}
+
+// ============================================================================
+// Test: match with string patterns and guard combo
+// ============================================================================
+
+fn test_match_string_guard() {
+    print("--- match string+guard ---")
+    let cmd = "delete"
+    let safe = true
+    let result = match cmd {
+        "delete" if safe => "safe delete",
+        "delete" => "unsafe delete",
+        _ => "other"
+    }
+    print(result)
+
+    // Now test with safe=false
+    let safe2 = false
+    let result2 = match cmd {
+        "delete" if safe2 => "safe delete",
+        "delete" => "unsafe delete",
+        _ => "other"
+    }
+    print(result2)
+}
+
+// ============================================================================
+// Test: trait with self parameter mutations
+// ============================================================================
+
+trait Describable {
+    fn describe(self: any)
+}
+
+impl Describable for Status {
+    fn describe(self: any) {
+        return "Status:active"
+    }
+}
+
+fn test_trait_on_enum() {
+    print("--- trait on enum ---")
+    let s = Status::Active
+    print(s)
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() {
+    test_trait_methods()
+    test_multiple_traits()
+    test_match_literals()
+    test_match_wildcard()
+    test_match_binding_guard()
+    test_match_range()
+    test_match_wildcard_guard()
+    test_match_block_body()
+    test_match_bool()
+    test_match_no_match()
+    test_match_as_expr()
+    test_match_string_guard()
+    test_trait_on_enum()
+    print("ALL TRAIT/MATCH TESTS PASSED")
+}
