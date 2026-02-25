@@ -1,0 +1,7 @@
+let ffi = require_ext("ffi")
+let _nullptr = ffi.get("nullptr")
+
+let a = _nullptr()
+print(a)
+let b = _nullptr()
+print(b)
