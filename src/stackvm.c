@@ -270,14 +270,13 @@ static inline LatValue value_clone_fast(const LatValue *src) {
         case VAL_CLOSURE: {
             if (src->as.closure.body == NULL && src->as.closure.native_fn != NULL &&
                 src->as.closure.default_values != VM_NATIVE_MARKER && src->as.closure.default_values != VM_EXT_MARKER) {
-                /* Bytecode closure: shallow copy + strdup param_names */
+                /* Bytecode closure: shallow copy, do NOT copy param_names.
+                 * The prototype in the Chunk constant pool owns param_names
+                 * (freed by chunk_free).  Setting NULL here prevents
+                 * heap-use-after-free where multiple clones share the same
+                 * param_names pointer. */
                 LatValue v = *src;
-                if (src->as.closure.param_names) {
-                    v.as.closure.param_names = malloc(src->as.closure.param_count * sizeof(char *));
-                    if (!v.as.closure.param_names) return value_unit();
-                    for (size_t i = 0; i < src->as.closure.param_count; i++)
-                        v.as.closure.param_names[i] = strdup(src->as.closure.param_names[i]);
-                }
+                v.as.closure.param_names = NULL;
                 return v;
             }
             return value_deep_clone(src);

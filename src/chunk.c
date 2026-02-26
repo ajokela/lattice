@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Marker sentinels for native/extension closures (matches stackvm.c/regvm.c) */
+#define VM_NATIVE_MARKER ((struct Expr **)(uintptr_t)0x1)
+#define VM_EXT_MARKER    ((struct Expr **)(uintptr_t)0x2)
+
 static size_t chunk_fnv1a(const char *key) {
     size_t hash = 14695981039346656037ULL;
     for (const char *p = key; *p; p++) {
@@ -38,13 +42,23 @@ void chunk_free(Chunk *c) {
     if (!c) return;
     free(c->code);
     for (size_t i = 0; i < c->const_len; i++) {
-        /* Recursively free compiled sub-chunks stored as VAL_CLOSURE constants */
-        if (c->constants[i].type == VAL_CLOSURE && c->constants[i].as.closure.body == NULL &&
-            c->constants[i].as.closure.native_fn != NULL) {
-            chunk_free((Chunk *)c->constants[i].as.closure.native_fn);
-            c->constants[i].as.closure.native_fn = NULL;
+        LatValue *v = &c->constants[i];
+        /* Recursively free compiled sub-chunks stored as VAL_CLOSURE constants.
+         * Bytecode closure prototypes own param_names — runtime clones borrow
+         * (param_names=NULL), so we free them here explicitly. */
+        if (v->type == VAL_CLOSURE && v->as.closure.body == NULL && v->as.closure.native_fn != NULL &&
+            v->as.closure.default_values != VM_NATIVE_MARKER && v->as.closure.default_values != VM_EXT_MARKER) {
+            /* Free prototype-owned param_names */
+            if (v->as.closure.param_names) {
+                for (size_t pi = 0; pi < v->as.closure.param_count; pi++) free(v->as.closure.param_names[pi]);
+                free(v->as.closure.param_names);
+                v->as.closure.param_names = NULL;
+            }
+            chunk_free((Chunk *)v->as.closure.native_fn);
+            v->as.closure.native_fn = NULL;
+        } else {
+            value_free(v);
         }
-        value_free(&c->constants[i]);
     }
     free(c->constants);
     free(c->const_hashes);
