@@ -2,6 +2,7 @@
 #define ITERATOR_H
 
 #include "value.h"
+#include "channel.h"
 
 /* ── Iterator state types ── */
 
@@ -80,6 +81,11 @@ typedef struct {
     LatValue right;
 } IterZipState;
 
+/* Channel iterator: reads values from a channel until closed */
+typedef struct {
+    LatChannel *ch;
+} IterChannelState;
+
 /* ── Iterator constructors ── */
 
 /* Create iterator from array (clones the array) */
@@ -115,6 +121,9 @@ LatValue iter_skip(LatValue inner, int64_t n);
 LatValue iter_enumerate(LatValue inner);
 
 LatValue iter_zip(LatValue left, LatValue right);
+
+/* Create iterator from a channel (blocks on recv, done when channel closed+empty) */
+LatValue iter_from_channel(LatChannel *ch);
 
 /* ── Eager consumers ── */
 

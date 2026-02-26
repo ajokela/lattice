@@ -352,6 +352,34 @@ LatValue iter_zip(LatValue left, LatValue right) {
     return value_iterator(iter_zip_next, s, iter_zip_free);
 }
 
+/* ── Channel iterator ── */
+
+static LatValue iter_channel_next(void *state, bool *done) {
+    IterChannelState *s = (IterChannelState *)state;
+    bool ok;
+    LatValue val = channel_recv(s->ch, &ok);
+    if (!ok) {
+        *done = true;
+        return value_nil();
+    }
+    *done = false;
+    return val;
+}
+
+static void iter_channel_free(void *state) {
+    IterChannelState *s = (IterChannelState *)state;
+    channel_release(s->ch);
+    free(s);
+}
+
+LatValue iter_from_channel(LatChannel *ch) {
+    IterChannelState *s = malloc(sizeof(IterChannelState));
+    if (!s) return value_nil();
+    channel_retain(ch);
+    s->ch = ch;
+    return value_iterator(iter_channel_next, s, iter_channel_free);
+}
+
 /* ── Eager consumers ── */
 
 LatValue iter_collect(LatValue *iter) {

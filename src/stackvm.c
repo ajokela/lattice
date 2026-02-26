@@ -805,7 +805,7 @@ void stackvm_free_child(StackVM *child) {
 
 /* Export current frame's live locals into child's env as globals,
  * so re-compiled code can access them via OP_GET_GLOBAL. */
-static void stackvm_export_locals_to_env(StackVM *parent, StackVM *child) {
+void stackvm_export_locals_to_env(StackVM *parent, StackVM *child) {
     for (size_t fi = 0; fi < parent->frame_count; fi++) {
         StackCallFrame *f = &parent->frames[fi];
         if (!f->chunk) continue;

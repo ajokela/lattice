@@ -1593,6 +1593,19 @@ static void *spawn_thread_fn(void *arg) {
 
     return NULL;
 }
+
+/* Dispatch wrapper so eval can use iter_map_transform/iter_filter with closures */
+static LatValue eval_dispatch_call_closure(void *ctx, LatValue *closure, LatValue *args, int argc) {
+    Evaluator *ev = (Evaluator *)ctx;
+    EvalResult r = call_closure(ev, closure->as.closure.param_names, closure->as.closure.param_count,
+                                closure->as.closure.body, closure->as.closure.captured_env, args, (size_t)argc,
+                                closure->as.closure.default_values, closure->as.closure.has_variadic);
+    if (IS_OK(r)) return r.value;
+    /* On error, return nil and discard */
+    if (IS_ERR(r)) free(r.error);
+    return value_nil();
+}
+
 #endif /* __EMSCRIPTEN__ */
 
 /* ── Expression evaluation ── */
@@ -4980,6 +4993,55 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         cnt = args[1].as.int_val;
                     }
                     LatValue result = iter_repeat(args[0], cnt);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
+                }
+
+                /// @builtin async_iter(producer: Closure) -> Iterator
+                /// @category Iterators
+                /// Create an async iterator backed by a channel. The producer
+                /// closure receives a channel and sends values on it. When the
+                /// closure returns, the channel is auto-closed and iteration ends.
+                /// @example async_iter(|ch| { for i in 0..5 { ch.send(i) } })
+                /// @note Only available in bytecode VM backends (not tree-walk).
+                if (strcmp(fn_name, "async_iter") == 0) {
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_err(strdup("async_iter() is only available in bytecode VM mode"));
+                }
+
+                /// @builtin async_map(iter: Iterator, fn: Closure) -> Iterator
+                /// @category Iterators
+                /// Transform values from an async iterator using a mapping function.
+                /// @example async_map(it, |x| { x * 2 })
+                if (strcmp(fn_name, "async_map") == 0) {
+                    if (argc != 2 || args[0].type != VAL_ITERATOR || args[1].type != VAL_CLOSURE) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("async_map() expects (iterator, closure)"));
+                    }
+                    LatValue inner = args[0];
+                    args[0].type = VAL_NIL; /* prevent double-free; ownership moves */
+                    LatValue result = iter_map_transform(inner, args[1], ev, eval_dispatch_call_closure);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
+                }
+
+                /// @builtin async_filter(iter: Iterator, fn: Closure) -> Iterator
+                /// @category Iterators
+                /// Filter values from an async iterator using a predicate function.
+                /// @example async_filter(it, |x| { x > 5 })
+                if (strcmp(fn_name, "async_filter") == 0) {
+                    if (argc != 2 || args[0].type != VAL_ITERATOR || args[1].type != VAL_CLOSURE) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("async_filter() expects (iterator, closure)"));
+                    }
+                    LatValue inner = args[0];
+                    args[0].type = VAL_NIL;
+                    LatValue result = iter_filter(inner, args[1], ev, eval_dispatch_call_closure);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(result);

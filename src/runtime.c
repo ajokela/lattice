@@ -2422,6 +2422,205 @@ static LatValue native_repeat_iter(LatValue *args, int ac) {
     return iter_repeat(args[0], count);
 }
 
+/* ── async_iter: channel-based async iterator ── */
+
+#ifndef __EMSCRIPTEN__
+typedef struct {
+    LatValue closure;      /* The producer closure to call with the channel */
+    LatChannel *ch;        /* Channel to send values on */
+    LatRuntime *parent_rt; /* Parent runtime for dispatch info */
+    RTBackend backend;     /* Which backend is active */
+    void *parent_vm;       /* Parent VM for cloning */
+} AsyncIterTask;
+
+static void *async_iter_thread_fn(void *arg) {
+    AsyncIterTask *task = (AsyncIterTask *)arg;
+
+    if (task->backend == RT_BACKEND_STACK_VM) {
+        StackVM *parent = (StackVM *)task->parent_vm;
+        StackVM *child = stackvm_clone_for_thread(parent);
+        if (!child) {
+            channel_close(task->ch);
+            channel_release(task->ch);
+            value_free(&task->closure);
+            free(task);
+            return NULL;
+        }
+
+        /* Export parent locals so the closure can access captured variables */
+        stackvm_export_locals_to_env(parent, child);
+
+        /* Set up thread-local runtime and heap */
+        lat_runtime_set_current(child->rt);
+        child->rt->active_vm = child;
+        child->rt->backend = RT_BACKEND_STACK_VM;
+        child->rt->call_closure = task->parent_rt->call_closure;
+        child->rt->find_local_value = task->parent_rt->find_local_value;
+        child->rt->current_line = task->parent_rt->current_line;
+        child->rt->get_var_by_name = task->parent_rt->get_var_by_name;
+        child->rt->set_var_by_name = task->parent_rt->set_var_by_name;
+
+        DualHeap *heap = dual_heap_new();
+        value_set_heap(heap);
+        value_set_arena(NULL);
+
+        /* Call the closure with the channel as argument */
+        LatValue ch_val = value_channel(task->ch);
+        LatValue result = child->rt->call_closure(child, &task->closure, &ch_val, 1);
+        value_free(&result);
+        value_free(&ch_val);
+
+        /* Close the channel to signal done */
+        channel_close(task->ch);
+
+        dual_heap_free(heap);
+        stackvm_free_child(child);
+    } else {
+        /* RT_BACKEND_REG_VM */
+        RegVM *parent = (RegVM *)task->parent_vm;
+        RegVM *child = regvm_clone_for_thread(parent);
+        if (!child) {
+            channel_close(task->ch);
+            channel_release(task->ch);
+            value_free(&task->closure);
+            free(task);
+            return NULL;
+        }
+
+        lat_runtime_set_current(child->rt);
+        child->rt->active_vm = child;
+        child->rt->backend = RT_BACKEND_REG_VM;
+        child->rt->call_closure = task->parent_rt->call_closure;
+        child->rt->find_local_value = task->parent_rt->find_local_value;
+        child->rt->current_line = task->parent_rt->current_line;
+        child->rt->get_var_by_name = task->parent_rt->get_var_by_name;
+        child->rt->set_var_by_name = task->parent_rt->set_var_by_name;
+
+        DualHeap *heap = dual_heap_new();
+        value_set_heap(heap);
+        value_set_arena(NULL);
+
+        LatValue ch_val = value_channel(task->ch);
+        LatValue result = child->rt->call_closure(child, &task->closure, &ch_val, 1);
+        value_free(&result);
+        value_free(&ch_val);
+
+        channel_close(task->ch);
+
+        dual_heap_free(heap);
+        regvm_free_child(child);
+    }
+
+    channel_release(task->ch);
+    value_free(&task->closure);
+    free(task);
+    return NULL;
+}
+
+static LatValue native_async_iter(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_CLOSURE) {
+        current_rt->error = strdup("async_iter() expects 1 closure argument");
+        return value_nil();
+    }
+    if (!current_rt || !current_rt->active_vm) {
+        current_rt->error = strdup("async_iter: no active VM");
+        return value_nil();
+    }
+    if (current_rt->backend != RT_BACKEND_STACK_VM) {
+        current_rt->error = strdup("async_iter() is only supported in the stack VM backend");
+        return value_nil();
+    }
+
+    /* Create the channel */
+    LatChannel *ch = channel_new();
+    if (!ch) {
+        current_rt->error = strdup("async_iter: failed to create channel");
+        return value_nil();
+    }
+
+    /* Set up the async task */
+    AsyncIterTask *task = malloc(sizeof(AsyncIterTask));
+    if (!task) {
+        channel_release(ch);
+        current_rt->error = strdup("async_iter: allocation failed");
+        return value_nil();
+    }
+    task->closure = value_deep_clone(&args[0]);
+    task->ch = ch;
+    channel_retain(ch); /* The thread keeps a reference */
+    task->parent_rt = current_rt;
+    task->backend = current_rt->backend;
+    task->parent_vm = current_rt->active_vm;
+
+    /* Spawn the producer thread */
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&thread, &attr, async_iter_thread_fn, task);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        channel_release(ch); /* release the thread's ref */
+        channel_release(ch); /* release the main ref */
+        value_free(&task->closure);
+        free(task);
+        current_rt->error = strdup("async_iter: failed to create thread");
+        return value_nil();
+    }
+
+    /* Return a channel-based iterator */
+    LatValue result = iter_from_channel(ch);
+    channel_release(ch); /* iter_from_channel retained; drop our creation ref */
+    return result;
+}
+
+static LatValue native_async_map(LatValue *args, int ac) {
+    if (ac != 2) {
+        current_rt->error = strdup("async_map() expects 2 arguments (iterator, transform_fn)");
+        return value_nil();
+    }
+    if (args[0].type != VAL_ITERATOR) {
+        current_rt->error = strdup("async_map() first argument must be an Iterator");
+        return value_nil();
+    }
+    if (args[1].type != VAL_CLOSURE) {
+        current_rt->error = strdup("async_map() second argument must be a Closure");
+        return value_nil();
+    }
+    if (!current_rt || !current_rt->call_closure || !current_rt->active_vm) {
+        current_rt->error = strdup("async_map: no active VM");
+        return value_nil();
+    }
+    /* Use the existing iter_map_transform which calls the closure synchronously
+     * through the VM dispatch. We move ownership of the iterator. */
+    LatValue inner = args[0];
+    args[0].type = VAL_NIL; /* prevent double-free */
+    return iter_map_transform(inner, args[1], current_rt->active_vm, current_rt->call_closure);
+}
+
+static LatValue native_async_filter(LatValue *args, int ac) {
+    if (ac != 2) {
+        current_rt->error = strdup("async_filter() expects 2 arguments (iterator, predicate_fn)");
+        return value_nil();
+    }
+    if (args[0].type != VAL_ITERATOR) {
+        current_rt->error = strdup("async_filter() first argument must be an Iterator");
+        return value_nil();
+    }
+    if (args[1].type != VAL_CLOSURE) {
+        current_rt->error = strdup("async_filter() second argument must be a Closure");
+        return value_nil();
+    }
+    if (!current_rt || !current_rt->call_closure || !current_rt->active_vm) {
+        current_rt->error = strdup("async_filter: no active VM");
+        return value_nil();
+    }
+    LatValue inner = args[0];
+    args[0].type = VAL_NIL;
+    return iter_filter(inner, args[1], current_rt->active_vm, current_rt->call_closure);
+}
+#endif /* !__EMSCRIPTEN__ */
+
 static LatValue native_print_raw(LatValue *args, int ac) {
     for (int i = 0; i < ac; i++) {
         if (i > 0) printf(" ");
@@ -4114,6 +4313,11 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "iter", native_iter, 1);
     rt_register_native(rt, "range_iter", native_range_iter, -1);
     rt_register_native(rt, "repeat_iter", native_repeat_iter, -1);
+#ifndef __EMSCRIPTEN__
+    rt_register_native(rt, "async_iter", native_async_iter, 1);
+    rt_register_native(rt, "async_map", native_async_map, 2);
+    rt_register_native(rt, "async_filter", native_async_filter, 2);
+#endif
     rt_register_native(rt, "print_raw", native_print_raw, -1);
     rt_register_native(rt, "eprint", native_eprint, -1);
     rt_register_native(rt, "identity", native_identity, 1);
