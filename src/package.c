@@ -355,7 +355,7 @@ static bool registry_download_package(const char *name, const char *version,
 
     if (is_toml_bundle) {
         /* If the response is a TOML manifest, write it as lattice.toml */
-        char toml_path[PATH_MAX];
+        char toml_path[PATH_MAX + 16];
         snprintf(toml_path, sizeof(toml_path), "%s/lattice.toml", dest_dir);
         if (!builtin_write_file(toml_path, resp->body)) {
             *err = strdup("failed to write package lattice.toml");
@@ -364,7 +364,7 @@ static bool registry_download_package(const char *name, const char *version,
         }
     } else {
         /* Default: write body as main.lat (single-file package) */
-        char main_path[PATH_MAX];
+        char main_path[PATH_MAX + 16];
         snprintf(main_path, sizeof(main_path), "%s/main.lat", dest_dir);
         if (!builtin_write_file(main_path, resp->body)) {
             *err = strdup("failed to write package main.lat");
@@ -373,7 +373,7 @@ static bool registry_download_package(const char *name, const char *version,
         }
 
         /* Also generate a minimal lattice.toml for the cached package */
-        char toml_path[PATH_MAX];
+        char toml_path[PATH_MAX + 16];
         snprintf(toml_path, sizeof(toml_path), "%s/lattice.toml", dest_dir);
         char toml_buf[512];
         snprintf(toml_buf, sizeof(toml_buf),
