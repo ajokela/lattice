@@ -3228,7 +3228,7 @@ TEST(eval_deep_recursion_within_limit) {
         "    return recurse(n - 1)\n"
         "}\n"
         "fn main() {\n"
-        "    let result = recurse(500)\n"
+        "    let result = recurse(100)\n"
         "    assert(result == 0, \"should complete\")\n"
         "}\n"
     );

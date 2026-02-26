@@ -21,10 +21,10 @@ typedef struct {
 } ByteBuf;
 
 static void bb_init(ByteBuf *bb) {
+    bb->len = 0;
     bb->cap = 1024;
     bb->data = malloc(bb->cap);
-    if (!bb->data) return;
-    bb->len = 0;
+    if (!bb->data) { bb->cap = 0; return; }
 }
 
 static void bb_ensure(ByteBuf *bb, size_t need) {
