@@ -70,7 +70,7 @@ print("4. atoi('12345') = ${atoi_result}")
 assert(atoi_result == 12345, "atoi should return 12345")
 
 // ── Test 5: getpid ──
-let getpid_sym = _sym(libc, "getpid", ">c")
+let getpid_sym = _sym(libc, "getpid", ">i")
 let pid = _call(getpid_sym)
 print("5. getpid() = ${pid}")
 assert(pid > 0, "PID should be positive")

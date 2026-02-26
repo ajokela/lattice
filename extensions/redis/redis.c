@@ -8,6 +8,9 @@
  *           keys, incr, lpush, lrange, publish, ping
  */
 
+/* Enable POSIX extensions for getaddrinfo() on Linux with -std=c11 */
+#define _POSIX_C_SOURCE 200809L
+
 #include "lattice_ext.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,30 +54,28 @@ static int conn_get(int64_t id) {
 }
 
 static void conn_release(int64_t id) {
-    if (id >= 0 && id < conn_count) {
-        connections[id] = -1;
-    }
+    if (id >= 0 && id < conn_count) { connections[id] = -1; }
 }
 
 /* ── Dynamic buffer for building RESP commands and reading responses ── */
 
 typedef struct {
-    char  *data;
+    char *data;
     size_t len;
     size_t cap;
 } RespBuf;
 
 static void buf_init(RespBuf *b) {
-    b->cap  = 256;
-    b->len  = 0;
+    b->cap = 256;
+    b->len = 0;
     b->data = malloc(b->cap);
 }
 
 static void buf_free(RespBuf *b) {
     free(b->data);
     b->data = NULL;
-    b->len  = 0;
-    b->cap  = 0;
+    b->len = 0;
+    b->cap = 0;
 }
 
 static void buf_ensure(RespBuf *b, size_t extra) {
@@ -90,13 +91,9 @@ static void buf_append(RespBuf *b, const char *s, size_t n) {
     b->len += n;
 }
 
-static void buf_append_str(RespBuf *b, const char *s) {
-    buf_append(b, s, strlen(s));
-}
+static void buf_append_str(RespBuf *b, const char *s) { buf_append(b, s, strlen(s)); }
 
-static void buf_append_crlf(RespBuf *b) {
-    buf_append(b, "\r\n", 2);
-}
+static void buf_append_crlf(RespBuf *b) { buf_append(b, "\r\n", 2); }
 
 /* ── RESP protocol: build command ── */
 
@@ -144,14 +141,14 @@ static int resp_send(int fd, const RespBuf *cmd) {
  * We keep a read-ahead buffer and parse RESP incrementally.
  */
 typedef struct {
-    int    fd;
-    char   buf[RESP_BUF_SIZE];
+    int fd;
+    char buf[RESP_BUF_SIZE];
     size_t pos;
     size_t len;
 } RespReader;
 
 static void reader_init(RespReader *r, int fd) {
-    r->fd  = fd;
+    r->fd = fd;
     r->pos = 0;
     r->len = 0;
 }
@@ -306,21 +303,16 @@ static LatExtValue *resp_read_value(RespReader *r) {
             }
 
             int64_t i;
-            for (i = 0; i < count; i++) {
-                elems[i] = resp_read_value(r);
-            }
+            for (i = 0; i < count; i++) { elems[i] = resp_read_value(r); }
 
             LatExtValue *arr = lat_ext_array(elems, (size_t)count);
-            for (i = 0; i < count; i++) {
-                lat_ext_free(elems[i]);
-            }
+            for (i = 0; i < count; i++) { lat_ext_free(elems[i]); }
             free(elems);
             return arr;
         }
         default: {
             char errbuf[256];
-            snprintf(errbuf, sizeof(errbuf),
-                     "redis: unknown RESP type '%c'", type);
+            snprintf(errbuf, sizeof(errbuf), "redis: unknown RESP type '%c'", type);
             free(line);
             return lat_ext_error(errbuf);
         }
@@ -354,18 +346,11 @@ static LatExtValue *redis_send_command(int fd, const char **argv, size_t argc) {
 static const char *arg_to_string(LatExtValue *v, char *buf, size_t bufsz) {
     LatExtType t = lat_ext_type(v);
     switch (t) {
-        case LAT_EXT_STRING:
-            return lat_ext_as_string(v);
-        case LAT_EXT_INT:
-            snprintf(buf, bufsz, "%lld", (long long)lat_ext_as_int(v));
-            return buf;
-        case LAT_EXT_FLOAT:
-            snprintf(buf, bufsz, "%g", lat_ext_as_float(v));
-            return buf;
-        case LAT_EXT_BOOL:
-            return lat_ext_as_bool(v) ? "1" : "0";
-        default:
-            return "";
+        case LAT_EXT_STRING: return lat_ext_as_string(v);
+        case LAT_EXT_INT: snprintf(buf, bufsz, "%lld", (long long)lat_ext_as_int(v)); return buf;
+        case LAT_EXT_FLOAT: snprintf(buf, bufsz, "%g", lat_ext_as_float(v)); return buf;
+        case LAT_EXT_BOOL: return lat_ext_as_bool(v) ? "1" : "0";
+        default: return "";
     }
 }
 
@@ -384,21 +369,18 @@ static LatExtValue *redis_connect(LatExtValue **args, size_t argc) {
     }
     host = lat_ext_as_string(args[0]);
 
-    if (argc >= 2 && lat_ext_type(args[1]) == LAT_EXT_INT) {
-        port = (int)lat_ext_as_int(args[1]);
-    }
+    if (argc >= 2 && lat_ext_type(args[1]) == LAT_EXT_INT) { port = (int)lat_ext_as_int(args[1]); }
 
     snprintf(portstr, sizeof(portstr), "%d", port);
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
     rc = getaddrinfo(host, portstr, &hints, &res);
     if (rc != 0) {
         char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf),
-                 "redis.connect: %s", gai_strerror(rc));
+        snprintf(errbuf, sizeof(errbuf), "redis.connect: %s", gai_strerror(rc));
         return lat_ext_error(errbuf);
     }
 
@@ -414,8 +396,7 @@ static LatExtValue *redis_connect(LatExtValue **args, size_t argc) {
 
     if (fd < 0) {
         char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf),
-                 "redis.connect: unable to connect to %s:%d", host, port);
+        snprintf(errbuf, sizeof(errbuf), "redis.connect: unable to connect to %s:%d", host, port);
         return lat_ext_error(errbuf);
     }
 
@@ -468,7 +449,7 @@ static LatExtValue *redis_command(LatExtValue **args, size_t argc) {
     if (fd < 0) return lat_ext_error("redis.command: invalid connection handle");
 
     cmd_argc = argc - 1;
-    argv    = malloc(cmd_argc * sizeof(const char *));
+    argv = malloc(cmd_argc * sizeof(const char *));
     numbufs = calloc(cmd_argc, sizeof(char *));
 
     for (i = 0; i < cmd_argc; i++) {
@@ -484,9 +465,7 @@ static LatExtValue *redis_command(LatExtValue **args, size_t argc) {
 
     result = redis_send_command(fd, argv, cmd_argc);
 
-    for (i = 0; i < cmd_argc; i++) {
-        free(numbufs[i]);
-    }
+    for (i = 0; i < cmd_argc; i++) { free(numbufs[i]); }
     free(numbufs);
     free(argv);
     return result;
@@ -497,15 +476,14 @@ static LatExtValue *redis_get(LatExtValue **args, size_t argc) {
     int64_t id;
     int fd;
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.get() expects (handle: Int, key: String)");
     }
     id = lat_ext_as_int(args[0]);
     fd = conn_get(id);
     if (fd < 0) return lat_ext_error("redis.get: invalid connection handle");
 
-    const char *argv[] = { "GET", lat_ext_as_string(args[1]) };
+    const char *argv[] = {"GET", lat_ext_as_string(args[1])};
     return redis_send_command(fd, argv, 2);
 }
 
@@ -515,8 +493,7 @@ static LatExtValue *redis_set(LatExtValue **args, size_t argc) {
     int fd;
     char vbuf[64];
 
-    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.set() expects (handle: Int, key: String, value)");
     }
     id = lat_ext_as_int(args[0]);
@@ -524,7 +501,7 @@ static LatExtValue *redis_set(LatExtValue **args, size_t argc) {
     if (fd < 0) return lat_ext_error("redis.set: invalid connection handle");
 
     const char *val = arg_to_string(args[2], vbuf, sizeof(vbuf));
-    const char *argv[] = { "SET", lat_ext_as_string(args[1]), val };
+    const char *argv[] = {"SET", lat_ext_as_string(args[1]), val};
     return redis_send_command(fd, argv, 3);
 }
 
@@ -533,15 +510,14 @@ static LatExtValue *redis_del(LatExtValue **args, size_t argc) {
     int64_t id;
     int fd;
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.del() expects (handle: Int, key: String)");
     }
     id = lat_ext_as_int(args[0]);
     fd = conn_get(id);
     if (fd < 0) return lat_ext_error("redis.del: invalid connection handle");
 
-    const char *argv[] = { "DEL", lat_ext_as_string(args[1]) };
+    const char *argv[] = {"DEL", lat_ext_as_string(args[1])};
     return redis_send_command(fd, argv, 2);
 }
 
@@ -551,15 +527,14 @@ static LatExtValue *redis_exists(LatExtValue **args, size_t argc) {
     int fd;
     LatExtValue *result;
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.exists() expects (handle: Int, key: String)");
     }
     id = lat_ext_as_int(args[0]);
     fd = conn_get(id);
     if (fd < 0) return lat_ext_error("redis.exists: invalid connection handle");
 
-    const char *argv[] = { "EXISTS", lat_ext_as_string(args[1]) };
+    const char *argv[] = {"EXISTS", lat_ext_as_string(args[1])};
     result = redis_send_command(fd, argv, 2);
 
     /* EXISTS returns integer 0 or 1; convert to Bool */
@@ -578,8 +553,7 @@ static LatExtValue *redis_expire(LatExtValue **args, size_t argc) {
     char secbuf[32];
     LatExtValue *result;
 
-    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING ||
+    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING ||
         lat_ext_type(args[2]) != LAT_EXT_INT) {
         return lat_ext_error("redis.expire() expects (handle: Int, key: String, seconds: Int)");
     }
@@ -588,7 +562,7 @@ static LatExtValue *redis_expire(LatExtValue **args, size_t argc) {
     if (fd < 0) return lat_ext_error("redis.expire: invalid connection handle");
 
     snprintf(secbuf, sizeof(secbuf), "%lld", (long long)lat_ext_as_int(args[2]));
-    const char *argv[] = { "EXPIRE", lat_ext_as_string(args[1]), secbuf };
+    const char *argv[] = {"EXPIRE", lat_ext_as_string(args[1]), secbuf};
     result = redis_send_command(fd, argv, 3);
 
     /* EXPIRE returns integer 0 or 1; convert to Bool */
@@ -605,15 +579,14 @@ static LatExtValue *redis_keys(LatExtValue **args, size_t argc) {
     int64_t id;
     int fd;
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.keys() expects (handle: Int, pattern: String)");
     }
     id = lat_ext_as_int(args[0]);
     fd = conn_get(id);
     if (fd < 0) return lat_ext_error("redis.keys: invalid connection handle");
 
-    const char *argv[] = { "KEYS", lat_ext_as_string(args[1]) };
+    const char *argv[] = {"KEYS", lat_ext_as_string(args[1])};
     return redis_send_command(fd, argv, 2);
 }
 
@@ -622,15 +595,14 @@ static LatExtValue *redis_incr(LatExtValue **args, size_t argc) {
     int64_t id;
     int fd;
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.incr() expects (handle: Int, key: String)");
     }
     id = lat_ext_as_int(args[0]);
     fd = conn_get(id);
     if (fd < 0) return lat_ext_error("redis.incr: invalid connection handle");
 
-    const char *argv[] = { "INCR", lat_ext_as_string(args[1]) };
+    const char *argv[] = {"INCR", lat_ext_as_string(args[1])};
     return redis_send_command(fd, argv, 2);
 }
 
@@ -640,8 +612,7 @@ static LatExtValue *redis_lpush(LatExtValue **args, size_t argc) {
     int fd;
     char vbuf[64];
 
-    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.lpush() expects (handle: Int, key: String, value)");
     }
     id = lat_ext_as_int(args[0]);
@@ -649,7 +620,7 @@ static LatExtValue *redis_lpush(LatExtValue **args, size_t argc) {
     if (fd < 0) return lat_ext_error("redis.lpush: invalid connection handle");
 
     const char *val = arg_to_string(args[2], vbuf, sizeof(vbuf));
-    const char *argv[] = { "LPUSH", lat_ext_as_string(args[1]), val };
+    const char *argv[] = {"LPUSH", lat_ext_as_string(args[1]), val};
     return redis_send_command(fd, argv, 3);
 }
 
@@ -659,10 +630,8 @@ static LatExtValue *redis_lrange(LatExtValue **args, size_t argc) {
     int fd;
     char startbuf[32], stopbuf[32];
 
-    if (argc < 4 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING ||
-        lat_ext_type(args[2]) != LAT_EXT_INT ||
-        lat_ext_type(args[3]) != LAT_EXT_INT) {
+    if (argc < 4 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING ||
+        lat_ext_type(args[2]) != LAT_EXT_INT || lat_ext_type(args[3]) != LAT_EXT_INT) {
         return lat_ext_error("redis.lrange() expects (handle: Int, key: String, start: Int, stop: Int)");
     }
     id = lat_ext_as_int(args[0]);
@@ -671,7 +640,7 @@ static LatExtValue *redis_lrange(LatExtValue **args, size_t argc) {
 
     snprintf(startbuf, sizeof(startbuf), "%lld", (long long)lat_ext_as_int(args[2]));
     snprintf(stopbuf, sizeof(stopbuf), "%lld", (long long)lat_ext_as_int(args[3]));
-    const char *argv[] = { "LRANGE", lat_ext_as_string(args[1]), startbuf, stopbuf };
+    const char *argv[] = {"LRANGE", lat_ext_as_string(args[1]), startbuf, stopbuf};
     return redis_send_command(fd, argv, 4);
 }
 
@@ -680,8 +649,7 @@ static LatExtValue *redis_publish(LatExtValue **args, size_t argc) {
     int64_t id;
     int fd;
 
-    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING ||
+    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING ||
         lat_ext_type(args[2]) != LAT_EXT_STRING) {
         return lat_ext_error("redis.publish() expects (handle: Int, channel: String, message: String)");
     }
@@ -689,7 +657,7 @@ static LatExtValue *redis_publish(LatExtValue **args, size_t argc) {
     fd = conn_get(id);
     if (fd < 0) return lat_ext_error("redis.publish: invalid connection handle");
 
-    const char *argv[] = { "PUBLISH", lat_ext_as_string(args[1]), lat_ext_as_string(args[2]) };
+    const char *argv[] = {"PUBLISH", lat_ext_as_string(args[1]), lat_ext_as_string(args[2])};
     return redis_send_command(fd, argv, 3);
 }
 
@@ -705,7 +673,7 @@ static LatExtValue *redis_ping(LatExtValue **args, size_t argc) {
     fd = conn_get(id);
     if (fd < 0) return lat_ext_error("redis.ping: invalid connection handle");
 
-    const char *argv[] = { "PING" };
+    const char *argv[] = {"PING"};
     return redis_send_command(fd, argv, 1);
 }
 
@@ -714,22 +682,20 @@ static LatExtValue *redis_ping(LatExtValue **args, size_t argc) {
 void lat_ext_init(LatExtContext *ctx) {
     /* Initialize connection table */
     int i;
-    for (i = 0; i < MAX_CONNECTIONS; i++) {
-        connections[i] = -1;
-    }
+    for (i = 0; i < MAX_CONNECTIONS; i++) { connections[i] = -1; }
 
-    lat_ext_register(ctx, "connect",  redis_connect);
-    lat_ext_register(ctx, "close",    redis_close);
-    lat_ext_register(ctx, "command",  redis_command);
-    lat_ext_register(ctx, "get",      redis_get);
-    lat_ext_register(ctx, "set",      redis_set);
-    lat_ext_register(ctx, "del",      redis_del);
-    lat_ext_register(ctx, "exists",   redis_exists);
-    lat_ext_register(ctx, "expire",   redis_expire);
-    lat_ext_register(ctx, "keys",     redis_keys);
-    lat_ext_register(ctx, "incr",     redis_incr);
-    lat_ext_register(ctx, "lpush",    redis_lpush);
-    lat_ext_register(ctx, "lrange",   redis_lrange);
-    lat_ext_register(ctx, "publish",  redis_publish);
-    lat_ext_register(ctx, "ping",     redis_ping);
+    lat_ext_register(ctx, "connect", redis_connect);
+    lat_ext_register(ctx, "close", redis_close);
+    lat_ext_register(ctx, "command", redis_command);
+    lat_ext_register(ctx, "get", redis_get);
+    lat_ext_register(ctx, "set", redis_set);
+    lat_ext_register(ctx, "del", redis_del);
+    lat_ext_register(ctx, "exists", redis_exists);
+    lat_ext_register(ctx, "expire", redis_expire);
+    lat_ext_register(ctx, "keys", redis_keys);
+    lat_ext_register(ctx, "incr", redis_incr);
+    lat_ext_register(ctx, "lpush", redis_lpush);
+    lat_ext_register(ctx, "lrange", redis_lrange);
+    lat_ext_register(ctx, "publish", redis_publish);
+    lat_ext_register(ctx, "ping", redis_ping);
 }
