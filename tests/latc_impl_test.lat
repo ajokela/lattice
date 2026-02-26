@@ -1,0 +1,50 @@
+// Test trait + impl block compilation by the self-hosted compiler
+
+trait Describable {
+    fn describe(self: any) -> String
+}
+
+trait HasArea {
+    fn area(self: any) -> Float
+}
+
+struct Circle {
+    radius: Float
+}
+
+struct Rect {
+    width: Float,
+    height: Float
+}
+
+impl Describable for Circle {
+    fn describe(self: any) -> String {
+        return "Circle(r=" + to_string(self.radius) + ")"
+    }
+}
+
+impl HasArea for Circle {
+    fn area(self: any) -> Float {
+        return 3.14159 * self.radius * self.radius
+    }
+}
+
+impl Describable for Rect {
+    fn describe(self: any) -> String {
+        return "Rect(" + to_string(self.width) + "x" + to_string(self.height) + ")"
+    }
+}
+
+impl HasArea for Rect {
+    fn area(self: any) -> Float {
+        return self.width * self.height
+    }
+}
+
+let c = Circle { radius: 5.0 }
+print(c.describe())         // expect: Circle(r=5)
+print(c.area())             // expect: 78.53975
+
+let r = Rect { width: 4.0, height: 6.0 }
+print(r.describe())         // expect: Rect(4x6)
+print(r.area())             // expect: 24

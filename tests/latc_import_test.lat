@@ -1,0 +1,13 @@
+// Test all import forms compiled by the self-hosted compiler
+
+// Test 1: import "path" as alias
+import "tests/modules/math_utils" as mu
+print(mu.add(2, 3))    // expect: 5
+print(mu.sub(10, 4))   // expect: 6
+
+// Test 2: import { ... } from "path" (selective import)
+import { greet } from "tests/modules/greeter"
+print(greet("World"))  // expect: Hello, World!
+
+// Test 3: bare import
+import "math"

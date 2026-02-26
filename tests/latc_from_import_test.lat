@@ -1,0 +1,6 @@
+// Test from...import form compiled by the self-hosted compiler
+
+from "tests/modules/math_utils" import add, sub, PI
+print(add(10, 20))   // expect: 30
+print(sub(100, 42))  // expect: 58
+print(PI)             // expect: 3.14159

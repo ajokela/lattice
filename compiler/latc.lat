@@ -2754,6 +2754,7 @@ fn is_statement_start() {
     if txt == "defer" { return true }
     if txt == "try" { return true }
     if txt == "import" { return true }
+    if t.type == "from" { return true }
     if txt == "impl" { return true }
     if txt == "trait" { return true }
     if t.type == "scope" { return true }
@@ -2858,6 +2859,11 @@ fn parse_statement() {
 
     if txt == "import" {
         parse_import()
+        return
+    }
+
+    if t.type == "from" {
+        parse_from_import()
         return
     }
 
@@ -3845,10 +3851,123 @@ fn parse_try_catch() {
 
 fn parse_import() {
     let line = current_line()
-    advance()
+    advance()  // consume 'import'
+
+    // Selective import: import { name1, name2 } from "path"
+    if peek_text() == "{" {
+        advance()  // consume '{'
+        flux sel_names = []
+        while peek_text() != "}" {
+            if peek() == nil {
+                compiler_error("unexpected end of input in selective import", line)
+            }
+            sel_names.push(expect("identifier", nil).text)
+            if peek_text() == "," { advance() }
+        }
+        expect(nil, "}")
+        if peek_type() != "from" {
+            compiler_error("expected 'from' after import { ... }", line)
+        }
+        advance()  // consume 'from'
+        let path = expect("string", nil).text
+        let path_idx = string_constant(path)
+        emit_bytes(OP_IMPORT, path_idx, line)
+
+        // For each selective name: DUP module map, GET_FIELD, check not nil, DEFINE
+        let sel_count = len(sel_names)
+        for i in 0..sel_count {
+            emit_byte(OP_DUP, line)
+            let field_idx = string_constant(sel_names[i])
+            emit_bytes(OP_GET_FIELD, field_idx, line)
+            // Check that the export exists (not nil)
+            emit_byte(OP_DUP, line)
+            let import_ok = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+            // nil -> error: module does not export this name
+            emit_byte(OP_POP, line)  // pop nil dup
+            emit_byte(OP_POP, line)  // pop nil val
+            emit_byte(OP_POP, line)  // pop module map
+            let err_msg = "module '" + path + "' does not export '" + sel_names[i] + "'"
+            emit_constant(make_string_const(err_msg), line)
+            emit_byte(OP_THROW, line)
+            patch_jump(import_ok)
+            emit_byte(OP_POP, line)  // pop non-nil dup
+            if scope_depth > 0 {
+                add_local(sel_names[i])
+            } else {
+                let name_idx = string_constant(sel_names[i])
+                emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line)
+            }
+        }
+        emit_byte(OP_POP, line)  // pop original module map
+        return
+    }
+
+    // Full import: import "path" [as alias]
     let path = expect("string", nil).text
-    let idx = string_constant(path)
-    emit_bytes(OP_IMPORT, idx, line)
+    let path_idx = string_constant(path)
+    emit_bytes(OP_IMPORT, path_idx, line)
+
+    if peek_type() == "as" {
+        advance()  // consume 'as'
+        let alias = expect("identifier", nil).text
+        if scope_depth > 0 {
+            add_local(alias)
+        } else {
+            let name_idx = string_constant(alias)
+            emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line)
+        }
+    } else {
+        // Bare import — pop the module value
+        emit_byte(OP_POP, line)
+    }
+}
+
+fn parse_from_import() {
+    let line = current_line()
+    advance()  // consume 'from'
+    let path = expect("string", nil).text
+    if peek_type() != "import" {
+        compiler_error("expected 'import' after from \"...\"", line)
+    }
+    advance()  // consume 'import'
+
+    // Parse selective names: from "path" import name1, name2
+    flux sel_names = []
+    sel_names.push(expect("identifier", nil).text)
+    while peek_text() == "," {
+        advance()
+        sel_names.push(expect("identifier", nil).text)
+    }
+
+    let path_idx = string_constant(path)
+    emit_bytes(OP_IMPORT, path_idx, line)
+
+    // For each selective name: DUP module map, GET_FIELD, check not nil, DEFINE
+    let sel_count = len(sel_names)
+    for i in 0..sel_count {
+        emit_byte(OP_DUP, line)
+        let field_idx = string_constant(sel_names[i])
+        emit_bytes(OP_GET_FIELD, field_idx, line)
+        // Check that the export exists (not nil)
+        emit_byte(OP_DUP, line)
+        let import_ok = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+        // nil -> error
+        emit_byte(OP_POP, line)
+        emit_byte(OP_POP, line)
+        emit_byte(OP_POP, line)
+        let err_msg = "module '" + path + "' does not export '" + sel_names[i] + "'"
+        emit_constant(make_string_const(err_msg), line)
+        emit_byte(OP_THROW, line)
+        patch_jump(import_ok)
+        emit_byte(OP_POP, line)  // pop non-nil dup
+        if scope_depth > 0 {
+            add_local(sel_names[i])
+        } else {
+            let name_idx = string_constant(sel_names[i])
+            emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line)
+        }
+    }
+    emit_byte(OP_POP, line)  // pop original module map
 }
 
 fn parse_annotation() {
