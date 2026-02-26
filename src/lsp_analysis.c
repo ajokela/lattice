@@ -114,13 +114,14 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.signature = malloc(siglen);
                 if (!sym.signature) return;
                 char *p = sym.signature;
-                p += sprintf(p, "fn %s(", fn->name);
+                char *end = sym.signature + siglen;
+                p += snprintf(p, (size_t)(end - p), "fn %s(", fn->name);
                 for (size_t j = 0; j < fn->param_count; j++) {
-                    if (j > 0) p += sprintf(p, ", ");
-                    p += sprintf(p, "%s", fn->params[j].name);
-                    if (fn->params[j].ty.name) p += sprintf(p, ": %s", fn->params[j].ty.name);
+                    if (j > 0) p += snprintf(p, (size_t)(end - p), ", ");
+                    p += snprintf(p, (size_t)(end - p), "%s", fn->params[j].name);
+                    if (fn->params[j].ty.name) p += snprintf(p, (size_t)(end - p), ": %s", fn->params[j].ty.name);
                 }
-                sprintf(p, ")");
+                snprintf(p, (size_t)(end - p), ")");
                 find_decl_position(doc->text, "fn", fn->name, last_line, &sym.line, &sym.col);
                 found = true;
                 break;
@@ -131,7 +132,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.kind = LSP_SYM_STRUCT;
                 sym.signature = malloc(strlen(sd->name) + 16);
                 if (!sym.signature) return;
-                sprintf(sym.signature, "struct %s", sd->name);
+                snprintf(sym.signature, strlen(sd->name) + 16, "struct %s", sd->name);
                 find_decl_position(doc->text, "struct", sd->name, last_line, &sym.line, &sym.col);
 
                 /* Extract struct field info for completion */
@@ -161,7 +162,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.kind = LSP_SYM_ENUM;
                 sym.signature = malloc(strlen(ed->name) + 16);
                 if (!sym.signature) return;
-                sprintf(sym.signature, "enum %s", ed->name);
+                snprintf(sym.signature, strlen(ed->name) + 16, "enum %s", ed->name);
                 find_decl_position(doc->text, "enum", ed->name, last_line, &sym.line, &sym.col);
 
                 /* Extract enum variant info for completion */
@@ -230,8 +231,9 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                     if (!sym.signature) return;
 
                     if (stmt->as.binding.ty && stmt->as.binding.ty->name)
-                        sprintf(sym.signature, "%s %s: %s", phase_kw, stmt->as.binding.name, stmt->as.binding.ty->name);
-                    else sprintf(sym.signature, "%s %s", phase_kw, stmt->as.binding.name);
+                        snprintf(sym.signature, siglen, "%s %s: %s", phase_kw, stmt->as.binding.name,
+                                 stmt->as.binding.ty->name);
+                    else snprintf(sym.signature, siglen, "%s %s", phase_kw, stmt->as.binding.name);
 
                     /* Use the AST line number (1-based) converted to 0-based */
                     sym.line = stmt->line > 0 ? stmt->line - 1 : 0;
@@ -250,12 +252,13 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.signature = malloc(siglen);
                 if (!sym.signature) return;
                 char *p = sym.signature;
-                p += sprintf(p, "trait %s {", td->name);
+                char *end = sym.signature + siglen;
+                p += snprintf(p, (size_t)(end - p), "trait %s {", td->name);
                 for (size_t j = 0; j < td->method_count; j++) {
-                    if (j > 0) p += sprintf(p, ",");
-                    p += sprintf(p, " %s()", td->methods[j].name);
+                    if (j > 0) p += snprintf(p, (size_t)(end - p), ",");
+                    p += snprintf(p, (size_t)(end - p), " %s()", td->methods[j].name);
                 }
-                sprintf(p, " }");
+                snprintf(p, (size_t)(end - p), " }");
                 find_decl_position(doc->text, "trait", td->name, last_line, &sym.line, &sym.col);
                 found = true;
                 break;
@@ -268,13 +271,15 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 if (ib->type_name) nlen += strlen(ib->type_name);
                 sym.name = malloc(nlen);
                 if (!sym.name) return;
-                if (ib->trait_name && ib->type_name) sprintf(sym.name, "%s for %s", ib->trait_name, ib->type_name);
-                else if (ib->type_name) sprintf(sym.name, "%s", ib->type_name);
-                else sprintf(sym.name, "impl");
+                if (ib->trait_name && ib->type_name)
+                    snprintf(sym.name, nlen, "%s for %s", ib->trait_name, ib->type_name);
+                else if (ib->type_name) snprintf(sym.name, nlen, "%s", ib->type_name);
+                else snprintf(sym.name, nlen, "impl");
                 sym.kind = LSP_SYM_METHOD;
-                sym.signature = malloc(strlen(sym.name) + 8);
+                size_t sig_size = strlen(sym.name) + 8;
+                sym.signature = malloc(sig_size);
                 if (!sym.signature) return;
-                sprintf(sym.signature, "impl %s", sym.name);
+                snprintf(sym.signature, sig_size, "impl %s", sym.name);
                 find_decl_position(doc->text, "impl", ib->trait_name ? ib->trait_name : ib->type_name, last_line,
                                    &sym.line, &sym.col);
                 found = true;
