@@ -61,9 +61,12 @@ jobs:
           make ext-redis
           make ext-image
 
-      - name: Build WebSocket extension (Linux only, needs OpenSSL)
-        if: runner.os == 'Linux'
-        run: make ext-websocket
+      - name: Build WebSocket extension
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          fi
+          make ext-websocket
 
       - name: Test SQLite extension
         run: ./clat tests/ext_sqlite_test.lat
