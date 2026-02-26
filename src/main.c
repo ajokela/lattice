@@ -12,6 +12,7 @@
 #include "package.h"
 #include "formatter.h"
 #include "debugger.h"
+#include "completion.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -428,6 +429,8 @@ static void repl(void) {
     printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
 
+    lattice_completion_init();
+
     /* Disconnect the fluid heap so the compiler and StackVM use plain malloc/free */
     value_set_heap(NULL);
     value_set_arena(NULL);
@@ -577,6 +580,8 @@ static void repl_regvm(void) {
     printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
 
+    lattice_completion_init();
+
     value_set_heap(NULL);
     value_set_arena(NULL);
 
@@ -716,6 +721,8 @@ static void repl_tree_walk(void) {
     printf("Lattice v%s — crystallization-based programming language\n", LATTICE_VERSION);
     printf("Copyright (c) 2026 Alex Jokela. BSD 3-Clause License.\n");
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
+
+    lattice_completion_init();
 
     Evaluator *ev = evaluator_new();
     if (gc_stress_mode) evaluator_set_gc_stress(ev, true);
