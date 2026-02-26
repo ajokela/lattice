@@ -1053,7 +1053,10 @@ void value_free(LatValue *v) {
             val_dealloc(v, v->as.strct.field_phases);
             break;
         case VAL_CLOSURE:
-            if (v->as.closure.param_names) {
+            /* Guard: param_names must be a valid heap pointer (> page size).
+             * Marker values like 0x1/0x2 or corruption can place low addresses
+             * here via union aliasing; dereferencing them would SEGV. */
+            if (v->as.closure.param_names && (uintptr_t)v->as.closure.param_names > 0xFFF) {
                 for (size_t i = 0; i < v->as.closure.param_count; i++) val_dealloc(v, v->as.closure.param_names[i]);
                 val_dealloc(v, v->as.closure.param_names);
             }
