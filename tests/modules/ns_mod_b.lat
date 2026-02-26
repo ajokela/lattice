@@ -1,0 +1,16 @@
+// Module B: also defines struct Item and enum Status (same names, different shapes)
+export struct Item {
+    id: Int,
+    label: String,
+    weight: Float
+}
+
+export enum Status { Pending, Complete, Failed }
+
+export fn make_item(id: Int, lbl: String) -> Item {
+    return Item { id: id, label: lbl, weight: 0.0 }
+}
+
+export fn get_status() -> Status {
+    return Status::Pending
+}

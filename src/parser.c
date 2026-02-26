@@ -22,9 +22,7 @@ static Token *peek(Parser *p) {
     return &p->tokens[idx];
 }
 
-static TokenType peek_type(Parser *p) {
-    return peek(p)->type;
-}
+static TokenType peek_type(Parser *p) { return peek(p)->type; }
 
 static TokenType peek_ahead_type(Parser *p, size_t offset) {
     size_t idx = p->pos + offset;
@@ -38,9 +36,7 @@ static Token *advance(Parser *p) {
     return &p->tokens[idx];
 }
 
-static bool at_eof(Parser *p) {
-    return peek_type(p) == TOK_EOF;
-}
+static bool at_eof(Parser *p) { return peek_type(p) == TOK_EOF; }
 
 static char *parser_error_fmt(Parser *p, const char *fmt, ...) {
     Token *t = peek(p);
@@ -65,16 +61,12 @@ static bool expect(Parser *p, TokenType expected, char **err) {
         const char *expected_name = token_type_name(expected);
         int d = lat_levenshtein(peek(p)->as.str_val, expected_name);
         if (d > 0 && d <= 2) {
-            *err = parser_error_fmt(p, "expected '%s', got '%s' (did you mean '%s'?)",
-                                    expected_name,
-                                    peek(p)->as.str_val,
-                                    expected_name);
+            *err = parser_error_fmt(p, "expected '%s', got '%s' (did you mean '%s'?)", expected_name,
+                                    peek(p)->as.str_val, expected_name);
             return false;
         }
     }
-    *err = parser_error_fmt(p, "expected '%s', got '%s'",
-                            token_type_name(expected),
-                            token_type_name(peek_type(p)));
+    *err = parser_error_fmt(p, "expected '%s', got '%s'", token_type_name(expected), token_type_name(peek_type(p)));
     return false;
 }
 
@@ -83,8 +75,7 @@ static char *expect_ident(Parser *p, char **err) {
         Token *t = advance(p);
         return strdup(t->as.str_val);
     }
-    *err = parser_error_fmt(p, "expected identifier, got '%s'",
-                            token_type_name(peek_type(p)));
+    *err = parser_error_fmt(p, "expected identifier, got '%s'", token_type_name(peek_type(p)));
     return NULL;
 }
 
@@ -104,10 +95,12 @@ static Stmt **parse_block_stmts(Parser *p, size_t *count, char **err) {
     Stmt **stmts = malloc(cap * sizeof(Stmt *));
     if (!stmts) return NULL;
 
-
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
         Stmt *s = parse_stmt(p, err);
-        if (!s) { free(stmts); return NULL; }
+        if (!s) {
+            free(stmts);
+            return NULL;
+        }
         if (n >= cap) {
             cap *= 2;
             stmts = realloc(stmts, cap * sizeof(Stmt *));
@@ -124,17 +117,14 @@ static TypeExpr *parse_type_expr(Parser *p, char **err) {
     TypeExpr *te = calloc(1, sizeof(TypeExpr));
     if (!te) return NULL;
 
-
     /* Check for composite phase constraint: (~|*) or (flux|fix) etc. */
     if (peek_type(p) == TOK_LPAREN) {
         /* Lookahead: if next token after '(' is a phase symbol, parse composite */
         size_t saved = p->pos;
         advance(p); /* consume '(' */
         TokenType first = peek_type(p);
-        if (first == TOK_TILDE || first == TOK_STAR ||
-            first == TOK_FLUX || first == TOK_FIX ||
-            (first == TOK_IDENT && peek(p)->as.str_val &&
-             strcmp(peek(p)->as.str_val, "sublimated") == 0)) {
+        if (first == TOK_TILDE || first == TOK_STAR || first == TOK_FLUX || first == TOK_FIX ||
+            (first == TOK_IDENT && peek(p)->as.str_val && strcmp(peek(p)->as.str_val, "sublimated") == 0)) {
             /* Parse composite constraint */
             PhaseConstraint con = 0;
             for (;;) {
@@ -145,8 +135,7 @@ static TypeExpr *parse_type_expr(Parser *p, char **err) {
                 } else if (pt == TOK_STAR || pt == TOK_FIX) {
                     con |= PCON_CRYSTAL;
                     advance(p);
-                } else if (pt == TOK_IDENT && peek(p)->as.str_val &&
-                           strcmp(peek(p)->as.str_val, "sublimated") == 0) {
+                } else if (pt == TOK_IDENT && peek(p)->as.str_val && strcmp(peek(p)->as.str_val, "sublimated") == 0) {
                     con |= PCON_SUBLIMATED;
                     advance(p);
                 } else {
@@ -160,7 +149,10 @@ static TypeExpr *parse_type_expr(Parser *p, char **err) {
                     break;
                 }
             }
-            if (!expect(p, TOK_RPAREN, err)) { free(te); return NULL; }
+            if (!expect(p, TOK_RPAREN, err)) {
+                free(te);
+                return NULL;
+            }
             te->constraint = con;
             te->phase = PHASE_UNSPECIFIED;
         } else {
@@ -169,9 +161,11 @@ static TypeExpr *parse_type_expr(Parser *p, char **err) {
             te->phase = PHASE_UNSPECIFIED;
         }
     } else if (peek_type(p) == TOK_TILDE || peek_type(p) == TOK_FLUX) {
-        advance(p); te->phase = PHASE_FLUID;
+        advance(p);
+        te->phase = PHASE_FLUID;
     } else if (peek_type(p) == TOK_STAR || peek_type(p) == TOK_FIX) {
-        advance(p); te->phase = PHASE_CRYSTAL;
+        advance(p);
+        te->phase = PHASE_CRYSTAL;
     } else {
         te->phase = PHASE_UNSPECIFIED;
     }
@@ -180,14 +174,22 @@ static TypeExpr *parse_type_expr(Parser *p, char **err) {
         advance(p);
         te->kind = TYPE_ARRAY;
         te->inner = parse_type_expr(p, err);
-        if (!te->inner) { free(te); return NULL; }
+        if (!te->inner) {
+            free(te);
+            return NULL;
+        }
         if (!expect(p, TOK_RBRACKET, err)) {
-            type_expr_free(te); free(te); return NULL;
+            type_expr_free(te);
+            free(te);
+            return NULL;
         }
     } else {
         te->kind = TYPE_NAMED;
         te->name = expect_ident(p, err);
-        if (!te->name) { free(te); return NULL; }
+        if (!te->name) {
+            free(te);
+            return NULL;
+        }
     }
     return te;
 }
@@ -204,10 +206,16 @@ static Param *parse_params(Parser *p, size_t *count, char **err) {
     bool seen_variadic = false;
 
     while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
-        if (n >= cap) { cap *= 2; params = realloc(params, cap * sizeof(Param)); }
+        if (n >= cap) {
+            cap *= 2;
+            params = realloc(params, cap * sizeof(Param));
+        }
         if (seen_variadic) {
             *err = strdup("variadic parameter must be last");
-            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            for (size_t i = 0; i < n; i++) {
+                free(params[i].name);
+                if (params[i].default_value) expr_free(params[i].default_value);
+            }
             free(params);
             return NULL;
         }
@@ -220,20 +228,29 @@ static Param *parse_params(Parser *p, size_t *count, char **err) {
         }
         params[n].name = expect_ident(p, err);
         if (!params[n].name) {
-            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            for (size_t i = 0; i < n; i++) {
+                free(params[i].name);
+                if (params[i].default_value) expr_free(params[i].default_value);
+            }
             free(params);
             return NULL;
         }
         if (!expect(p, TOK_COLON, err)) {
             free(params[n].name);
-            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            for (size_t i = 0; i < n; i++) {
+                free(params[i].name);
+                if (params[i].default_value) expr_free(params[i].default_value);
+            }
             free(params);
             return NULL;
         }
         TypeExpr *te = parse_type_expr(p, err);
         if (!te) {
             free(params[n].name);
-            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            for (size_t i = 0; i < n; i++) {
+                free(params[i].name);
+                if (params[i].default_value) expr_free(params[i].default_value);
+            }
             free(params);
             return NULL;
         }
@@ -248,7 +265,10 @@ static Param *parse_params(Parser *p, size_t *count, char **err) {
             Expr *def = parse_expr(p, err);
             if (!def) {
                 free(params[n].name);
-                for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+                for (size_t i = 0; i < n; i++) {
+                    free(params[i].name);
+                    if (params[i].default_value) expr_free(params[i].default_value);
+                }
                 free(params);
                 return NULL;
             }
@@ -256,14 +276,20 @@ static Param *parse_params(Parser *p, size_t *count, char **err) {
         } else if (seen_default && !is_variadic) {
             *err = strdup("required parameter cannot follow a parameter with a default value");
             free(params[n].name);
-            for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+            for (size_t i = 0; i < n; i++) {
+                free(params[i].name);
+                if (params[i].default_value) expr_free(params[i].default_value);
+            }
             free(params);
             return NULL;
         }
         n++;
         if (peek_type(p) != TOK_RPAREN) {
             if (!expect(p, TOK_COMMA, err)) {
-                for (size_t i = 0; i < n; i++) { free(params[i].name); if (params[i].default_value) expr_free(params[i].default_value); }
+                for (size_t i = 0; i < n; i++) {
+                    free(params[i].name);
+                    if (params[i].default_value) expr_free(params[i].default_value);
+                }
                 free(params);
                 return NULL;
             }
@@ -281,11 +307,16 @@ static Expr **parse_args(Parser *p, size_t *count, char **err) {
     Expr **args = malloc(cap * sizeof(Expr *));
     if (!args) return NULL;
 
-
     while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
         Expr *e = parse_expr(p, err);
-        if (!e) { free(args); return NULL; }
-        if (n >= cap) { cap *= 2; args = realloc(args, cap * sizeof(Expr *)); }
+        if (!e) {
+            free(args);
+            return NULL;
+        }
+        if (n >= cap) {
+            cap *= 2;
+            args = realloc(args, cap * sizeof(Expr *));
+        }
         args[n++] = e;
         if (peek_type(p) != TOK_RPAREN) {
             if (!expect(p, TOK_COMMA, err)) {
@@ -331,7 +362,10 @@ static Expr *parse_nil_coalesce(Parser *p, char **err) {
     while (peek_type(p) == TOK_QUESTION_QUESTION) {
         advance(p);
         Expr *right = parse_or(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(BINOP_NIL_COALESCE, left, right);
     }
     return left;
@@ -343,7 +377,10 @@ static Expr *parse_or(Parser *p, char **err) {
     while (peek_type(p) == TOK_OR) {
         advance(p);
         Expr *right = parse_and_expr(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(BINOP_OR, left, right);
     }
     return left;
@@ -355,7 +392,10 @@ static Expr *parse_and_expr(Parser *p, char **err) {
     while (peek_type(p) == TOK_AND) {
         advance(p);
         Expr *right = parse_bitwise_or(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(BINOP_AND, left, right);
     }
     return left;
@@ -367,7 +407,10 @@ static Expr *parse_bitwise_or(Parser *p, char **err) {
     while (peek_type(p) == TOK_PIPE) {
         advance(p);
         Expr *right = parse_bitwise_xor(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(BINOP_BIT_OR, left, right);
     }
     return left;
@@ -379,7 +422,10 @@ static Expr *parse_bitwise_xor(Parser *p, char **err) {
     while (peek_type(p) == TOK_CARET) {
         advance(p);
         Expr *right = parse_bitwise_and(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(BINOP_BIT_XOR, left, right);
     }
     return left;
@@ -391,7 +437,10 @@ static Expr *parse_bitwise_and(Parser *p, char **err) {
     while (peek_type(p) == TOK_AMPERSAND) {
         advance(p);
         Expr *right = parse_equality(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(BINOP_BIT_AND, left, right);
     }
     return left;
@@ -407,7 +456,10 @@ static Expr *parse_equality(Parser *p, char **err) {
         else break;
         advance(p);
         Expr *right = parse_comparison(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(op, left, right);
     }
     return left;
@@ -425,7 +477,10 @@ static Expr *parse_comparison(Parser *p, char **err) {
         else break;
         advance(p);
         Expr *right = parse_shift(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(op, left, right);
     }
     return left;
@@ -441,7 +496,10 @@ static Expr *parse_shift(Parser *p, char **err) {
         else break;
         advance(p);
         Expr *right = parse_range_expr(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(op, left, right);
     }
     return left;
@@ -453,7 +511,10 @@ static Expr *parse_range_expr(Parser *p, char **err) {
     if (peek_type(p) == TOK_DOTDOT) {
         advance(p);
         Expr *right = parse_addition(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         return expr_range(left, right);
     }
     return left;
@@ -469,7 +530,10 @@ static Expr *parse_addition(Parser *p, char **err) {
         else break;
         advance(p);
         Expr *right = parse_multiplication(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(op, left, right);
     }
     return left;
@@ -486,7 +550,10 @@ static Expr *parse_multiplication(Parser *p, char **err) {
         else break;
         advance(p);
         Expr *right = parse_unary(p, err);
-        if (!right) { expr_free(left); return NULL; }
+        if (!right) {
+            expr_free(left);
+            return NULL;
+        }
         left = expr_binop(op, left, right);
     }
     return left;
@@ -537,14 +604,149 @@ static Expr *parse_postfix(Parser *p, char **err) {
             } else {
                 field = expect_ident(p, err);
             }
-            if (!field) { expr_free(e); return NULL; }
+            if (!field) {
+                expr_free(e);
+                return NULL;
+            }
+            /* Module-qualified struct literal: mod.StructName { field: val, ... }
+             * Only when base is an IDENT (module alias), field starts uppercase,
+             * and { ident : pattern follows (disambiguates from block). */
+            if (!optional && e->tag == EXPR_IDENT && field[0] && isupper((unsigned char)field[0]) &&
+                peek_type(p) == TOK_LBRACE && is_struct_literal_ahead(p)) {
+                char *mod_alias = strdup(e->as.str_val);
+                expr_free(e);
+                advance(p); /* consume { */
+                size_t cap = 4, n = 0;
+                FieldInit *fields = malloc(cap * sizeof(FieldInit));
+                if (!fields) {
+                    free(field);
+                    free(mod_alias);
+                    return NULL;
+                }
+                while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+                    if (n >= cap) {
+                        cap *= 2;
+                        fields = realloc(fields, cap * sizeof(FieldInit));
+                    }
+                    fields[n].name = expect_ident(p, err);
+                    if (!fields[n].name) {
+                        for (size_t i = 0; i < n; i++) {
+                            free(fields[i].name);
+                            expr_free(fields[i].value);
+                        }
+                        free(fields);
+                        free(field);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    if (!expect(p, TOK_COLON, err)) {
+                        free(fields[n].name);
+                        for (size_t i = 0; i < n; i++) {
+                            free(fields[i].name);
+                            expr_free(fields[i].value);
+                        }
+                        free(fields);
+                        free(field);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    fields[n].value = parse_expr(p, err);
+                    if (!fields[n].value) {
+                        free(fields[n].name);
+                        for (size_t i = 0; i < n; i++) {
+                            free(fields[i].name);
+                            expr_free(fields[i].value);
+                        }
+                        free(fields);
+                        free(field);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    n++;
+                    if (peek_type(p) != TOK_RBRACE) {
+                        if (!expect(p, TOK_COMMA, err)) {
+                            for (size_t i = 0; i < n; i++) {
+                                free(fields[i].name);
+                                expr_free(fields[i].value);
+                            }
+                            free(fields);
+                            free(field);
+                            free(mod_alias);
+                            return NULL;
+                        }
+                    }
+                }
+                if (!expect(p, TOK_RBRACE, err)) {
+                    for (size_t i = 0; i < n; i++) {
+                        free(fields[i].name);
+                        expr_free(fields[i].value);
+                    }
+                    free(fields);
+                    free(field);
+                    free(mod_alias);
+                    return NULL;
+                }
+                Expr *sl = expr_struct_lit(field, fields, n);
+                sl->as.struct_lit.module_alias = mod_alias;
+                e = sl;
+                continue;
+            }
+            /* Module-qualified enum variant: mod.EnumName::Variant */
+            if (!optional && e->tag == EXPR_IDENT && field[0] && isupper((unsigned char)field[0]) &&
+                peek_type(p) == TOK_COLONCOLON) {
+                char *mod_alias = strdup(e->as.str_val);
+                char *enum_name = field;
+                expr_free(e);
+                advance(p); /* consume :: */
+                char *variant = NULL;
+                if (peek_type(p) == TOK_FROM) {
+                    advance(p);
+                    variant = strdup("from");
+                } else {
+                    variant = expect_ident(p, err);
+                }
+                if (!variant) {
+                    free(enum_name);
+                    free(mod_alias);
+                    return NULL;
+                }
+                Expr **vargs = NULL;
+                size_t vargc = 0;
+                if (peek_type(p) == TOK_LPAREN) {
+                    advance(p);
+                    vargs = parse_args(p, &vargc, err);
+                    if (!vargs && *err) {
+                        free(enum_name);
+                        free(variant);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    if (!expect(p, TOK_RPAREN, err)) {
+                        free(enum_name);
+                        free(variant);
+                        free(mod_alias);
+                        for (size_t i = 0; i < vargc; i++) expr_free(vargs[i]);
+                        free(vargs);
+                        return NULL;
+                    }
+                }
+                Expr *ev_expr = expr_enum_variant(enum_name, variant, vargs, vargc);
+                ev_expr->as.enum_variant.module_alias = mod_alias;
+                e = ev_expr;
+                continue;
+            }
             if (peek_type(p) == TOK_LPAREN) {
                 advance(p);
                 size_t arg_count;
                 Expr **args = parse_args(p, &arg_count, err);
-                if (!args && *err) { free(field); expr_free(e); return NULL; }
+                if (!args && *err) {
+                    free(field);
+                    expr_free(e);
+                    return NULL;
+                }
                 if (!expect(p, TOK_RPAREN, err)) {
-                    free(field); expr_free(e);
+                    free(field);
+                    expr_free(e);
                     for (size_t i = 0; i < arg_count; i++) expr_free(args[i]);
                     free(args);
                     return NULL;
@@ -561,8 +763,15 @@ static Expr *parse_postfix(Parser *p, char **err) {
             bool optional = (peek_type(p) == TOK_QUESTION_LBRACKET);
             advance(p);
             Expr *idx = parse_expr(p, err);
-            if (!idx) { expr_free(e); return NULL; }
-            if (!expect(p, TOK_RBRACKET, err)) { expr_free(e); expr_free(idx); return NULL; }
+            if (!idx) {
+                expr_free(e);
+                return NULL;
+            }
+            if (!expect(p, TOK_RBRACKET, err)) {
+                expr_free(e);
+                expr_free(idx);
+                return NULL;
+            }
             Expr *ix = expr_index(e, idx);
             ix->as.index.optional = optional;
             e = ix;
@@ -570,7 +779,10 @@ static Expr *parse_postfix(Parser *p, char **err) {
             advance(p);
             size_t arg_count;
             Expr **args = parse_args(p, &arg_count, err);
-            if (!args && *err) { expr_free(e); return NULL; }
+            if (!args && *err) {
+                expr_free(e);
+                return NULL;
+            }
             if (!expect(p, TOK_RPAREN, err)) {
                 expr_free(e);
                 for (size_t i = 0; i < arg_count; i++) expr_free(args[i]);
@@ -614,7 +826,6 @@ static Expr *parse_primary(Parser *p, char **err) {
         Expr **exprs = malloc(cap * sizeof(Expr *));
         if (!exprs) return NULL;
 
-
         Token *t = advance(p); /* consume INTERP_START */
         parts[0] = strdup(t->as.str_val);
 
@@ -652,46 +863,86 @@ static Expr *parse_primary(Parser *p, char **err) {
         free(exprs);
         return NULL;
     }
-    if (tt == TOK_TRUE) { advance(p); return expr_bool_lit(true); }
-    if (tt == TOK_FALSE) { advance(p); return expr_bool_lit(false); }
-    if (tt == TOK_NIL) { advance(p); return expr_nil_lit(); }
+    if (tt == TOK_TRUE) {
+        advance(p);
+        return expr_bool_lit(true);
+    }
+    if (tt == TOK_FALSE) {
+        advance(p);
+        return expr_bool_lit(false);
+    }
+    if (tt == TOK_NIL) {
+        advance(p);
+        return expr_nil_lit();
+    }
 
     if (tt == TOK_FREEZE) {
         advance(p);
         if (!expect(p, TOK_LPAREN, err)) return NULL;
         Expr *e = parse_expr(p, err);
         if (!e) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(e);
+            return NULL;
+        }
         /* Optional 'where' clause: freeze(x) where |v| { ... } */
         Expr *contract = NULL;
         if (peek_type(p) == TOK_IDENT) {
             Token *maybe_where = peek(p);
             if (maybe_where->as.str_val && strcmp(maybe_where->as.str_val, "where") == 0) {
-                advance(p);  /* consume 'where' */
+                advance(p); /* consume 'where' */
                 contract = parse_expr(p, err);
-                if (!contract) { expr_free(e); return NULL; }
+                if (!contract) {
+                    expr_free(e);
+                    return NULL;
+                }
             }
         }
         /* Optional 'except' clause: freeze(x) except ["field1", "field2"] */
         if (peek_type(p) == TOK_IDENT) {
             Token *maybe_except = peek(p);
             if (maybe_except->as.str_val && strcmp(maybe_except->as.str_val, "except") == 0) {
-                advance(p);  /* consume 'except' */
-                if (!expect(p, TOK_LBRACKET, err)) { expr_free(e); if (contract) expr_free(contract); return NULL; }
+                advance(p); /* consume 'except' */
+                if (!expect(p, TOK_LBRACKET, err)) {
+                    expr_free(e);
+                    if (contract) expr_free(contract);
+                    return NULL;
+                }
                 size_t ecap = 4, en = 0;
                 Expr **except_fields = malloc(ecap * sizeof(Expr *));
                 if (!except_fields) return NULL;
 
                 while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
                     Expr *ef = parse_expr(p, err);
-                    if (!ef) { for (size_t i = 0; i < en; i++) expr_free(except_fields[i]); free(except_fields); expr_free(e); if (contract) expr_free(contract); return NULL; }
-                    if (en >= ecap) { ecap *= 2; except_fields = realloc(except_fields, ecap * sizeof(Expr *)); }
+                    if (!ef) {
+                        for (size_t i = 0; i < en; i++) expr_free(except_fields[i]);
+                        free(except_fields);
+                        expr_free(e);
+                        if (contract) expr_free(contract);
+                        return NULL;
+                    }
+                    if (en >= ecap) {
+                        ecap *= 2;
+                        except_fields = realloc(except_fields, ecap * sizeof(Expr *));
+                    }
                     except_fields[en++] = ef;
                     if (peek_type(p) != TOK_RBRACKET) {
-                        if (!expect(p, TOK_COMMA, err)) { for (size_t i = 0; i < en; i++) expr_free(except_fields[i]); free(except_fields); expr_free(e); if (contract) expr_free(contract); return NULL; }
+                        if (!expect(p, TOK_COMMA, err)) {
+                            for (size_t i = 0; i < en; i++) expr_free(except_fields[i]);
+                            free(except_fields);
+                            expr_free(e);
+                            if (contract) expr_free(contract);
+                            return NULL;
+                        }
                     }
                 }
-                if (!expect(p, TOK_RBRACKET, err)) { for (size_t i = 0; i < en; i++) expr_free(except_fields[i]); free(except_fields); expr_free(e); if (contract) expr_free(contract); return NULL; }
+                if (!expect(p, TOK_RBRACKET, err)) {
+                    for (size_t i = 0; i < en; i++) expr_free(except_fields[i]);
+                    free(except_fields);
+                    expr_free(e);
+                    if (contract) expr_free(contract);
+                    return NULL;
+                }
                 return expr_freeze_except(e, contract, except_fields, en);
             }
         }
@@ -702,7 +953,10 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_LPAREN, err)) return NULL;
         Expr *e = parse_expr(p, err);
         if (!e) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(e);
+            return NULL;
+        }
         return expr_thaw(e);
     }
     if (tt == TOK_CLONE) {
@@ -710,7 +964,10 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_LPAREN, err)) return NULL;
         Expr *e = parse_expr(p, err);
         if (!e) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(e);
+            return NULL;
+        }
         return expr_clone(e);
     }
     if (tt == TOK_ANNEAL) {
@@ -718,7 +975,10 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_LPAREN, err)) return NULL;
         Expr *target = parse_expr(p, err);
         if (!target) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(target); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(target);
+            return NULL;
+        }
         /* Expect closure: |params| { body } */
         if (peek_type(p) != TOK_PIPE) {
             *err = strdup("anneal requires a closure: anneal(val) |v| { ... }");
@@ -726,7 +986,10 @@ static Expr *parse_primary(Parser *p, char **err) {
             return NULL;
         }
         Expr *closure = parse_expr(p, err);
-        if (!closure) { expr_free(target); return NULL; }
+        if (!closure) {
+            expr_free(target);
+            return NULL;
+        }
         return expr_anneal(target, closure);
     }
     if (tt == TOK_CRYSTALLIZE) {
@@ -734,11 +997,20 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_LPAREN, err)) return NULL;
         Expr *e = parse_expr(p, err);
         if (!e) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
-        if (!expect(p, TOK_LBRACE, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(e);
+            return NULL;
+        }
+        if (!expect(p, TOK_LBRACE, err)) {
+            expr_free(e);
+            return NULL;
+        }
         size_t count;
         Stmt **stmts = parse_block_stmts(p, &count, err);
-        if (!stmts && *err) { expr_free(e); return NULL; }
+        if (!stmts && *err) {
+            expr_free(e);
+            return NULL;
+        }
         if (!expect(p, TOK_RBRACE, err)) {
             expr_free(e);
             for (size_t i = 0; i < count; i++) stmt_free(stmts[i]);
@@ -752,11 +1024,20 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_LPAREN, err)) return NULL;
         Expr *e = parse_expr(p, err);
         if (!e) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
-        if (!expect(p, TOK_LBRACE, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(e);
+            return NULL;
+        }
+        if (!expect(p, TOK_LBRACE, err)) {
+            expr_free(e);
+            return NULL;
+        }
         size_t count;
         Stmt **stmts = parse_block_stmts(p, &count, err);
-        if (!stmts && *err) { expr_free(e); return NULL; }
+        if (!stmts && *err) {
+            expr_free(e);
+            return NULL;
+        }
         if (!expect(p, TOK_RBRACE, err)) {
             expr_free(e);
             for (size_t i = 0; i < count; i++) stmt_free(stmts[i]);
@@ -770,7 +1051,10 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_LPAREN, err)) return NULL;
         Expr *e = parse_expr(p, err);
         if (!e) return NULL;
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(e); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(e);
+            return NULL;
+        }
         return expr_sublimate(e);
     }
     if (tt == TOK_PRINT) {
@@ -849,28 +1133,29 @@ static Expr *parse_primary(Parser *p, char **err) {
         }
         if (!expect(p, TOK_LBRACE, err)) {
             for (size_t i = 0; i < try_count; i++) stmt_free(try_stmts[i]);
-            free(try_stmts); free(catch_var);
+            free(try_stmts);
+            free(catch_var);
             return NULL;
         }
         size_t catch_count;
         Stmt **catch_stmts = parse_block_stmts(p, &catch_count, err);
         if (!catch_stmts && *err) {
             for (size_t i = 0; i < try_count; i++) stmt_free(try_stmts[i]);
-            free(try_stmts); free(catch_var);
+            free(try_stmts);
+            free(catch_var);
             return NULL;
         }
         if (!expect(p, TOK_RBRACE, err)) {
             for (size_t i = 0; i < try_count; i++) stmt_free(try_stmts[i]);
-            free(try_stmts); free(catch_var);
+            free(try_stmts);
+            free(catch_var);
             for (size_t i = 0; i < catch_count; i++) stmt_free(catch_stmts[i]);
             free(catch_stmts);
             return NULL;
         }
         return expr_try_catch(try_stmts, try_count, catch_var, catch_stmts, catch_count);
     }
-    if (tt == TOK_IDENT && peek(p)->as.str_val &&
-        strcmp(peek(p)->as.str_val, "select") == 0 &&
-        p->pos + 1 < p->count &&
+    if (tt == TOK_IDENT && peek(p)->as.str_val && strcmp(peek(p)->as.str_val, "select") == 0 && p->pos + 1 < p->count &&
         p->tokens[p->pos + 1].type == TOK_LBRACE) {
         advance(p);
         if (!expect(p, TOK_LBRACE, err)) return NULL;
@@ -879,11 +1164,13 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!arms) return NULL;
 
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-            if (n >= cap) { cap *= 2; arms = realloc(arms, cap * sizeof(SelectArm)); }
+            if (n >= cap) {
+                cap *= 2;
+                arms = realloc(arms, cap * sizeof(SelectArm));
+            }
             memset(&arms[n], 0, sizeof(SelectArm));
             /* Check for 'default' arm */
-            if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val &&
-                strcmp(peek(p)->as.str_val, "default") == 0) {
+            if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val && strcmp(peek(p)->as.str_val, "default") == 0) {
                 advance(p);
                 arms[n].is_default = true;
                 if (!expect(p, TOK_FATARROW, err)) goto select_fail;
@@ -896,8 +1183,7 @@ static Expr *parse_primary(Parser *p, char **err) {
                 continue;
             }
             /* Check for 'timeout(expr)' arm */
-            if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val &&
-                strcmp(peek(p)->as.str_val, "timeout") == 0) {
+            if (peek_type(p) == TOK_IDENT && peek(p)->as.str_val && strcmp(peek(p)->as.str_val, "timeout") == 0) {
                 advance(p);
                 arms[n].is_timeout = true;
                 if (!expect(p, TOK_LPAREN, err)) goto select_fail;
@@ -928,7 +1214,7 @@ static Expr *parse_primary(Parser *p, char **err) {
             if (peek_type(p) == TOK_COMMA) advance(p);
         }
         if (!expect(p, TOK_RBRACE, err)) {
-            select_fail:
+        select_fail:
             for (size_t i = 0; i < n; i++) {
                 free(arms[i].binding_name);
                 if (arms[i].channel_expr) expr_free(arms[i].channel_expr);
@@ -945,29 +1231,31 @@ static Expr *parse_primary(Parser *p, char **err) {
         advance(p);
         Expr *scrutinee = parse_expr(p, err);
         if (!scrutinee) return NULL;
-        if (!expect(p, TOK_LBRACE, err)) { expr_free(scrutinee); return NULL; }
+        if (!expect(p, TOK_LBRACE, err)) {
+            expr_free(scrutinee);
+            return NULL;
+        }
 
         size_t cap = 4, n = 0;
         MatchArm *arms = malloc(cap * sizeof(MatchArm));
         if (!arms) return NULL;
 
-
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-            if (n >= cap) { cap *= 2; arms = realloc(arms, cap * sizeof(MatchArm)); }
+            if (n >= cap) {
+                cap *= 2;
+                arms = realloc(arms, cap * sizeof(MatchArm));
+            }
 
             /* Parse optional phase qualifier: fluid/crystal */
             AstPhase phase_qual = PHASE_UNSPECIFIED;
             if (peek_type(p) == TOK_IDENT) {
                 Token *maybe_phase = peek(p);
-                if (maybe_phase->as.str_val &&
-                    (strcmp(maybe_phase->as.str_val, "fluid") == 0 ||
-                     strcmp(maybe_phase->as.str_val, "crystal") == 0)) {
+                if (maybe_phase->as.str_val && (strcmp(maybe_phase->as.str_val, "fluid") == 0 ||
+                                                strcmp(maybe_phase->as.str_val, "crystal") == 0)) {
                     TokenType next = peek_ahead_type(p, 1);
-                    if (next == TOK_IDENT || next == TOK_INT_LIT || next == TOK_FLOAT_LIT ||
-                        next == TOK_STRING_LIT || next == TOK_TRUE || next == TOK_FALSE ||
-                        next == TOK_NIL || next == TOK_MINUS) {
-                        phase_qual = strcmp(maybe_phase->as.str_val, "fluid") == 0
-                            ? PHASE_FLUID : PHASE_CRYSTAL;
+                    if (next == TOK_IDENT || next == TOK_INT_LIT || next == TOK_FLOAT_LIT || next == TOK_STRING_LIT ||
+                        next == TOK_TRUE || next == TOK_FALSE || next == TOK_NIL || next == TOK_MINUS) {
+                        phase_qual = strcmp(maybe_phase->as.str_val, "fluid") == 0 ? PHASE_FLUID : PHASE_CRYSTAL;
                         advance(p);
                     }
                 }
@@ -983,7 +1271,10 @@ static Expr *parse_primary(Parser *p, char **err) {
                     advance(p);
                     Expr *start = expr_int_lit(t->as.int_val);
                     Expr *end = parse_expr(p, err);
-                    if (!end) { expr_free(start); goto match_fail; }
+                    if (!end) {
+                        expr_free(start);
+                        goto match_fail;
+                    }
                     pat = pattern_range(start, end);
                 } else {
                     pat = pattern_literal(expr_int_lit(t->as.int_val));
@@ -1013,7 +1304,10 @@ static Expr *parse_primary(Parser *p, char **err) {
                         advance(p);
                         Expr *start = expr_ident(strdup(t->as.str_val));
                         Expr *end = parse_expr(p, err);
-                        if (!end) { expr_free(start); goto match_fail; }
+                        if (!end) {
+                            expr_free(start);
+                            goto match_fail;
+                        }
                         pat = pattern_range(start, end);
                     } else {
                         pat = pattern_binding(strdup(t->as.str_val));
@@ -1045,7 +1339,10 @@ static Expr *parse_primary(Parser *p, char **err) {
             if (peek_type(p) == TOK_IF) {
                 advance(p);
                 guard = parse_expr(p, err);
-                if (!guard) { pattern_free(pat); goto match_fail; }
+                if (!guard) {
+                    pattern_free(pat);
+                    goto match_fail;
+                }
             }
 
             /* => */
@@ -1098,7 +1395,7 @@ static Expr *parse_primary(Parser *p, char **err) {
         }
 
         if (!expect(p, TOK_RBRACE, err)) {
-            match_fail:
+        match_fail:
             for (size_t i = 0; i < n; i++) {
                 pattern_free(arms[i].pattern);
                 if (arms[i].guard) expr_free(arms[i].guard);
@@ -1115,10 +1412,16 @@ static Expr *parse_primary(Parser *p, char **err) {
         advance(p);
         Expr *cond = parse_expr(p, err);
         if (!cond) return NULL;
-        if (!expect(p, TOK_LBRACE, err)) { expr_free(cond); return NULL; }
+        if (!expect(p, TOK_LBRACE, err)) {
+            expr_free(cond);
+            return NULL;
+        }
         size_t then_count;
         Stmt **then_stmts = parse_block_stmts(p, &then_count, err);
-        if (!then_stmts && *err) { expr_free(cond); return NULL; }
+        if (!then_stmts && *err) {
+            expr_free(cond);
+            return NULL;
+        }
         if (!expect(p, TOK_RBRACE, err)) {
             expr_free(cond);
             for (size_t i = 0; i < then_count; i++) stmt_free(then_stmts[i]);
@@ -1189,7 +1492,10 @@ static Expr *parse_primary(Parser *p, char **err) {
                 return NULL;
             }
             if (is_spread) e = expr_spread(e);
-            if (n >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(Expr *)); }
+            if (n >= cap) {
+                cap *= 2;
+                elems = realloc(elems, cap * sizeof(Expr *));
+            }
             elems[n++] = e;
             if (peek_type(p) != TOK_RBRACKET) {
                 if (!expect(p, TOK_COMMA, err)) {
@@ -1226,7 +1532,10 @@ static Expr *parse_primary(Parser *p, char **err) {
                     free(elems);
                     return NULL;
                 }
-                if (n >= cap) { cap *= 2; elems = realloc(elems, cap * sizeof(Expr *)); }
+                if (n >= cap) {
+                    cap *= 2;
+                    elems = realloc(elems, cap * sizeof(Expr *));
+                }
                 elems[n++] = e;
                 if (peek_type(p) != TOK_RPAREN) {
                     if (!expect(p, TOK_COMMA, err)) {
@@ -1243,7 +1552,10 @@ static Expr *parse_primary(Parser *p, char **err) {
             }
             return expr_tuple(elems, n);
         }
-        if (!expect(p, TOK_RPAREN, err)) { expr_free(first); return NULL; }
+        if (!expect(p, TOK_RPAREN, err)) {
+            expr_free(first);
+            return NULL;
+        }
         return first;
     }
     if (tt == TOK_LBRACE) {
@@ -1274,8 +1586,12 @@ static Expr *parse_primary(Parser *p, char **err) {
         while (peek_type(p) != TOK_PIPE && !at_eof(p)) {
             if (has_variadic) {
                 *err = strdup("variadic parameter must be last");
-                for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
-                free(params); free(defaults);
+                for (size_t i = 0; i < n; i++) {
+                    free(params[i]);
+                    if (defaults[i]) expr_free(defaults[i]);
+                }
+                free(params);
+                free(defaults);
                 return NULL;
             }
             /* Check for variadic: ...name */
@@ -1287,8 +1603,12 @@ static Expr *parse_primary(Parser *p, char **err) {
             }
             char *name = expect_ident(p, err);
             if (!name) {
-                for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
-                free(params); free(defaults);
+                for (size_t i = 0; i < n; i++) {
+                    free(params[i]);
+                    if (defaults[i]) expr_free(defaults[i]);
+                }
+                free(params);
+                free(defaults);
                 return NULL;
             }
             if (n >= cap) {
@@ -1307,42 +1627,70 @@ static Expr *parse_primary(Parser *p, char **err) {
                 seen_default = true;
                 Expr *def = parse_bitwise_xor(p, err);
                 if (!def) {
-                    for (size_t i = 0; i <= n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
-                    free(params); free(defaults);
+                    for (size_t i = 0; i <= n; i++) {
+                        free(params[i]);
+                        if (defaults[i]) expr_free(defaults[i]);
+                    }
+                    free(params);
+                    free(defaults);
                     return NULL;
                 }
                 defaults[n] = def;
             } else if (seen_default && !is_variadic) {
                 *err = strdup("required parameter cannot follow a parameter with a default value");
                 free(name);
-                for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
-                free(params); free(defaults);
+                for (size_t i = 0; i < n; i++) {
+                    free(params[i]);
+                    if (defaults[i]) expr_free(defaults[i]);
+                }
+                free(params);
+                free(defaults);
                 return NULL;
             }
             n++;
             if (peek_type(p) != TOK_PIPE) {
                 if (!expect(p, TOK_COMMA, err)) {
-                    for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
-                    free(params); free(defaults);
+                    for (size_t i = 0; i < n; i++) {
+                        free(params[i]);
+                        if (defaults[i]) expr_free(defaults[i]);
+                    }
+                    free(params);
+                    free(defaults);
                     return NULL;
                 }
             }
         }
         if (!expect(p, TOK_PIPE, err)) {
-            for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
-            free(params); free(defaults);
+            for (size_t i = 0; i < n; i++) {
+                free(params[i]);
+                if (defaults[i]) expr_free(defaults[i]);
+            }
+            free(params);
+            free(defaults);
             return NULL;
         }
         Expr *body = parse_expr(p, err);
         if (!body) {
-            for (size_t i = 0; i < n; i++) { free(params[i]); if (defaults[i]) expr_free(defaults[i]); }
-            free(params); free(defaults);
+            for (size_t i = 0; i < n; i++) {
+                free(params[i]);
+                if (defaults[i]) expr_free(defaults[i]);
+            }
+            free(params);
+            free(defaults);
             return NULL;
         }
         /* Check if any defaults were actually used */
         bool any_defaults = false;
-        for (size_t i = 0; i < n; i++) { if (defaults[i]) { any_defaults = true; break; } }
-        if (!any_defaults && !has_variadic) { free(defaults); defaults = NULL; }
+        for (size_t i = 0; i < n; i++) {
+            if (defaults[i]) {
+                any_defaults = true;
+                break;
+            }
+        }
+        if (!any_defaults && !has_variadic) {
+            free(defaults);
+            defaults = NULL;
+        }
         return expr_closure(params, n, body, defaults, has_variadic);
     }
     if (tt == TOK_IDENT) {
@@ -1357,38 +1705,61 @@ static Expr *parse_primary(Parser *p, char **err) {
             if (!fields) return NULL;
 
             while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-                if (n >= cap) { cap *= 2; fields = realloc(fields, cap * sizeof(FieldInit)); }
+                if (n >= cap) {
+                    cap *= 2;
+                    fields = realloc(fields, cap * sizeof(FieldInit));
+                }
                 fields[n].name = expect_ident(p, err);
                 if (!fields[n].name) {
-                    for (size_t i = 0; i < n; i++) { free(fields[i].name); expr_free(fields[i].value); }
-                    free(fields); free(name);
+                    for (size_t i = 0; i < n; i++) {
+                        free(fields[i].name);
+                        expr_free(fields[i].value);
+                    }
+                    free(fields);
+                    free(name);
                     return NULL;
                 }
                 if (!expect(p, TOK_COLON, err)) {
                     free(fields[n].name);
-                    for (size_t i = 0; i < n; i++) { free(fields[i].name); expr_free(fields[i].value); }
-                    free(fields); free(name);
+                    for (size_t i = 0; i < n; i++) {
+                        free(fields[i].name);
+                        expr_free(fields[i].value);
+                    }
+                    free(fields);
+                    free(name);
                     return NULL;
                 }
                 fields[n].value = parse_expr(p, err);
                 if (!fields[n].value) {
                     free(fields[n].name);
-                    for (size_t i = 0; i < n; i++) { free(fields[i].name); expr_free(fields[i].value); }
-                    free(fields); free(name);
+                    for (size_t i = 0; i < n; i++) {
+                        free(fields[i].name);
+                        expr_free(fields[i].value);
+                    }
+                    free(fields);
+                    free(name);
                     return NULL;
                 }
                 n++;
                 if (peek_type(p) != TOK_RBRACE) {
                     if (!expect(p, TOK_COMMA, err)) {
-                        for (size_t i = 0; i < n; i++) { free(fields[i].name); expr_free(fields[i].value); }
-                        free(fields); free(name);
+                        for (size_t i = 0; i < n; i++) {
+                            free(fields[i].name);
+                            expr_free(fields[i].value);
+                        }
+                        free(fields);
+                        free(name);
                         return NULL;
                     }
                 }
             }
             if (!expect(p, TOK_RBRACE, err)) {
-                for (size_t i = 0; i < n; i++) { free(fields[i].name); expr_free(fields[i].value); }
-                free(fields); free(name);
+                for (size_t i = 0; i < n; i++) {
+                    free(fields[i].name);
+                    expr_free(fields[i].value);
+                }
+                free(fields);
+                free(name);
                 return NULL;
             }
             return expr_struct_lit(name, fields, n);
@@ -1404,7 +1775,10 @@ static Expr *parse_primary(Parser *p, char **err) {
             } else {
                 rhs = expect_ident(p, err);
             }
-            if (!rhs) { free(name); return NULL; }
+            if (!rhs) {
+                free(name);
+                return NULL;
+            }
 
             if (peek_type(p) == TOK_LPAREN) {
                 /* Could be enum variant with args or static method call.
@@ -1413,9 +1787,14 @@ static Expr *parse_primary(Parser *p, char **err) {
                 advance(p);
                 size_t arg_count;
                 Expr **args = parse_args(p, &arg_count, err);
-                if (!args && *err) { free(name); free(rhs); return NULL; }
+                if (!args && *err) {
+                    free(name);
+                    free(rhs);
+                    return NULL;
+                }
                 if (!expect(p, TOK_RPAREN, err)) {
-                    free(name); free(rhs);
+                    free(name);
+                    free(rhs);
                     for (size_t i = 0; i < arg_count; i++) expr_free(args[i]);
                     free(args);
                     return NULL;
@@ -1437,8 +1816,7 @@ static Expr *parse_primary(Parser *p, char **err) {
             return NULL;
         }
     }
-    *err = parser_error_fmt(p, "unexpected token '%s' in expression",
-                            token_type_name(peek_type(p)));
+    *err = parser_error_fmt(p, "unexpected token '%s' in expression", token_type_name(peek_type(p)));
     return NULL;
 }
 
@@ -1456,24 +1834,55 @@ static Stmt *parse_binding(Parser *p, AstPhase phase, char **err) {
 
         char *rest_name = NULL;
         while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
-            if (n >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
+            if (n >= cap) {
+                cap *= 2;
+                names = realloc(names, cap * sizeof(char *));
+            }
             if (peek_type(p) == TOK_DOTDOTDOT) {
                 advance(p);
                 rest_name = expect_ident(p, err);
-                if (!rest_name) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+                if (!rest_name) {
+                    for (size_t i = 0; i < n; i++) free(names[i]);
+                    free(names);
+                    return NULL;
+                }
                 break;
             }
             names[n] = expect_ident(p, err);
-            if (!names[n]) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+            if (!names[n]) {
+                for (size_t i = 0; i < n; i++) free(names[i]);
+                free(names);
+                return NULL;
+            }
             n++;
             if (peek_type(p) != TOK_RBRACKET && peek_type(p) != TOK_DOTDOTDOT) {
-                if (!expect(p, TOK_COMMA, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
+                if (!expect(p, TOK_COMMA, err)) {
+                    for (size_t i = 0; i < n; i++) free(names[i]);
+                    free(names);
+                    free(rest_name);
+                    return NULL;
+                }
             }
         }
-        if (!expect(p, TOK_RBRACKET, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
-        if (!expect(p, TOK_EQ, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
+        if (!expect(p, TOK_RBRACKET, err)) {
+            for (size_t i = 0; i < n; i++) free(names[i]);
+            free(names);
+            free(rest_name);
+            return NULL;
+        }
+        if (!expect(p, TOK_EQ, err)) {
+            for (size_t i = 0; i < n; i++) free(names[i]);
+            free(names);
+            free(rest_name);
+            return NULL;
+        }
         Expr *value = parse_expr(p, err);
-        if (!value) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); free(rest_name); return NULL; }
+        if (!value) {
+            for (size_t i = 0; i < n; i++) free(names[i]);
+            free(names);
+            free(rest_name);
+            return NULL;
+        }
         eat_semicolon(p);
         return stmt_destructure(phase, DESTRUCT_ARRAY, names, n, rest_name, value);
     }
@@ -1486,18 +1895,41 @@ static Stmt *parse_binding(Parser *p, AstPhase phase, char **err) {
         if (!names) return NULL;
 
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-            if (n >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
+            if (n >= cap) {
+                cap *= 2;
+                names = realloc(names, cap * sizeof(char *));
+            }
             names[n] = expect_ident(p, err);
-            if (!names[n]) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+            if (!names[n]) {
+                for (size_t i = 0; i < n; i++) free(names[i]);
+                free(names);
+                return NULL;
+            }
             n++;
             if (peek_type(p) != TOK_RBRACE) {
-                if (!expect(p, TOK_COMMA, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+                if (!expect(p, TOK_COMMA, err)) {
+                    for (size_t i = 0; i < n; i++) free(names[i]);
+                    free(names);
+                    return NULL;
+                }
             }
         }
-        if (!expect(p, TOK_RBRACE, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
-        if (!expect(p, TOK_EQ, err)) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+        if (!expect(p, TOK_RBRACE, err)) {
+            for (size_t i = 0; i < n; i++) free(names[i]);
+            free(names);
+            return NULL;
+        }
+        if (!expect(p, TOK_EQ, err)) {
+            for (size_t i = 0; i < n; i++) free(names[i]);
+            free(names);
+            return NULL;
+        }
         Expr *value = parse_expr(p, err);
-        if (!value) { for (size_t i = 0; i < n; i++) free(names[i]); free(names); return NULL; }
+        if (!value) {
+            for (size_t i = 0; i < n; i++) free(names[i]);
+            free(names);
+            return NULL;
+        }
         eat_semicolon(p);
         return stmt_destructure(phase, DESTRUCT_STRUCT, names, n, NULL, value);
     }
@@ -1510,12 +1942,29 @@ static Stmt *parse_binding(Parser *p, AstPhase phase, char **err) {
     if (peek_type(p) == TOK_COLON) {
         advance(p);
         ty = parse_type_expr(p, err);
-        if (!ty) { free(name); return NULL; }
+        if (!ty) {
+            free(name);
+            return NULL;
+        }
     }
 
-    if (!expect(p, TOK_EQ, err)) { free(name); if (ty) { type_expr_free(ty); free(ty); } return NULL; }
+    if (!expect(p, TOK_EQ, err)) {
+        free(name);
+        if (ty) {
+            type_expr_free(ty);
+            free(ty);
+        }
+        return NULL;
+    }
     Expr *value = parse_expr(p, err);
-    if (!value) { free(name); if (ty) { type_expr_free(ty); free(ty); } return NULL; }
+    if (!value) {
+        free(name);
+        if (ty) {
+            type_expr_free(ty);
+            free(ty);
+        }
+        return NULL;
+    }
     eat_semicolon(p);
     return stmt_binding(phase, name, ty, value);
 }
@@ -1524,15 +1973,30 @@ static Stmt *parse_for_stmt(Parser *p, char **err) {
     if (!expect(p, TOK_FOR, err)) return NULL;
     char *var = expect_ident(p, err);
     if (!var) return NULL;
-    if (!expect(p, TOK_IN, err)) { free(var); return NULL; }
+    if (!expect(p, TOK_IN, err)) {
+        free(var);
+        return NULL;
+    }
     Expr *iter = parse_expr(p, err);
-    if (!iter) { free(var); return NULL; }
-    if (!expect(p, TOK_LBRACE, err)) { free(var); expr_free(iter); return NULL; }
+    if (!iter) {
+        free(var);
+        return NULL;
+    }
+    if (!expect(p, TOK_LBRACE, err)) {
+        free(var);
+        expr_free(iter);
+        return NULL;
+    }
     size_t count;
     Stmt **body = parse_block_stmts(p, &count, err);
-    if (!body && *err) { free(var); expr_free(iter); return NULL; }
+    if (!body && *err) {
+        free(var);
+        expr_free(iter);
+        return NULL;
+    }
     if (!expect(p, TOK_RBRACE, err)) {
-        free(var); expr_free(iter);
+        free(var);
+        expr_free(iter);
         for (size_t i = 0; i < count; i++) stmt_free(body[i]);
         free(body);
         return NULL;
@@ -1544,10 +2008,16 @@ static Stmt *parse_while_stmt(Parser *p, char **err) {
     if (!expect(p, TOK_WHILE, err)) return NULL;
     Expr *cond = parse_expr(p, err);
     if (!cond) return NULL;
-    if (!expect(p, TOK_LBRACE, err)) { expr_free(cond); return NULL; }
+    if (!expect(p, TOK_LBRACE, err)) {
+        expr_free(cond);
+        return NULL;
+    }
     size_t count;
     Stmt **body = parse_block_stmts(p, &count, err);
-    if (!body && *err) { expr_free(cond); return NULL; }
+    if (!body && *err) {
+        expr_free(cond);
+        return NULL;
+    }
     if (!expect(p, TOK_RBRACE, err)) {
         expr_free(cond);
         for (size_t i = 0; i < count; i++) stmt_free(body[i]);
@@ -1583,9 +2053,11 @@ static Stmt *parse_import_stmt(Parser *p, char **err) {
         char **names = malloc(cap * sizeof(char *));
         if (!names) return NULL;
 
-
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-            if (count >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
+            if (count >= cap) {
+                cap *= 2;
+                names = realloc(names, cap * sizeof(char *));
+            }
             names[count] = expect_ident(p, err);
             if (!names[count]) {
                 for (size_t i = 0; i < count; i++) free(names[i]);
@@ -1629,7 +2101,10 @@ static Stmt *parse_import_stmt(Parser *p, char **err) {
     if (peek_type(p) == TOK_AS) {
         advance(p);
         alias = expect_ident(p, err);
-        if (!alias) { free(path); return NULL; }
+        if (!alias) {
+            free(path);
+            return NULL;
+        }
     }
 
     eat_semicolon(p);
@@ -1648,9 +2123,9 @@ static Stmt *parse_stmt(Parser *p, char **err) {
 static Stmt *parse_stmt_inner(Parser *p, char **err) {
     TokenType tt = peek_type(p);
 
-    if (tt == TOK_FLUX)  return parse_binding(p, PHASE_FLUID, err);
-    if (tt == TOK_FIX)   return parse_binding(p, PHASE_CRYSTAL, err);
-    if (tt == TOK_LET)   return parse_binding(p, PHASE_UNSPECIFIED, err);
+    if (tt == TOK_FLUX) return parse_binding(p, PHASE_FLUID, err);
+    if (tt == TOK_FIX) return parse_binding(p, PHASE_CRYSTAL, err);
+    if (tt == TOK_LET) return parse_binding(p, PHASE_UNSPECIFIED, err);
 
     if (tt == TOK_IMPORT) return parse_import_stmt(p, err);
 
@@ -1683,8 +2158,16 @@ static Stmt *parse_stmt_inner(Parser *p, char **err) {
     if (tt == TOK_FOR) return parse_for_stmt(p, err);
     if (tt == TOK_WHILE) return parse_while_stmt(p, err);
     if (tt == TOK_LOOP) return parse_loop_stmt(p, err);
-    if (tt == TOK_BREAK) { advance(p); eat_semicolon(p); return stmt_break(); }
-    if (tt == TOK_CONTINUE) { advance(p); eat_semicolon(p); return stmt_continue(); }
+    if (tt == TOK_BREAK) {
+        advance(p);
+        eat_semicolon(p);
+        return stmt_break();
+    }
+    if (tt == TOK_CONTINUE) {
+        advance(p);
+        eat_semicolon(p);
+        return stmt_continue();
+    }
 
     /* Expression statement or assignment */
     Expr *e = parse_expr(p, err);
@@ -1692,7 +2175,10 @@ static Stmt *parse_stmt_inner(Parser *p, char **err) {
     if (peek_type(p) == TOK_EQ) {
         advance(p);
         Expr *value = parse_expr(p, err);
-        if (!value) { expr_free(e); return NULL; }
+        if (!value) {
+            expr_free(e);
+            return NULL;
+        }
         eat_semicolon(p);
         return stmt_assign(e, value);
     }
@@ -1701,25 +2187,33 @@ static Stmt *parse_stmt_inner(Parser *p, char **err) {
         BinOpKind cop;
         bool is_compound = true;
         switch (peek_type(p)) {
-            case TOK_PLUS_EQ:    cop = BINOP_ADD; break;
-            case TOK_MINUS_EQ:   cop = BINOP_SUB; break;
-            case TOK_STAR_EQ:    cop = BINOP_MUL; break;
-            case TOK_SLASH_EQ:   cop = BINOP_DIV; break;
+            case TOK_PLUS_EQ: cop = BINOP_ADD; break;
+            case TOK_MINUS_EQ: cop = BINOP_SUB; break;
+            case TOK_STAR_EQ: cop = BINOP_MUL; break;
+            case TOK_SLASH_EQ: cop = BINOP_DIV; break;
             case TOK_PERCENT_EQ: cop = BINOP_MOD; break;
-            case TOK_AMP_EQ:     cop = BINOP_BIT_AND; break;
-            case TOK_PIPE_EQ:    cop = BINOP_BIT_OR; break;
-            case TOK_CARET_EQ:   cop = BINOP_BIT_XOR; break;
-            case TOK_LSHIFT_EQ:  cop = BINOP_LSHIFT; break;
-            case TOK_RSHIFT_EQ:  cop = BINOP_RSHIFT; break;
+            case TOK_AMP_EQ: cop = BINOP_BIT_AND; break;
+            case TOK_PIPE_EQ: cop = BINOP_BIT_OR; break;
+            case TOK_CARET_EQ: cop = BINOP_BIT_XOR; break;
+            case TOK_LSHIFT_EQ: cop = BINOP_LSHIFT; break;
+            case TOK_RSHIFT_EQ: cop = BINOP_RSHIFT; break;
             default: is_compound = false; break;
         }
         if (is_compound) {
             advance(p);
             Expr *rhs = parse_expr(p, err);
-            if (!rhs) { expr_free(e); return NULL; }
+            if (!rhs) {
+                expr_free(e);
+                return NULL;
+            }
             /* Desugar: target op= rhs  =>  target = target op rhs */
             Expr *target_clone = expr_clone_ast(e);
-            if (!target_clone) { expr_free(rhs); expr_free(e); *err = strdup("invalid compound assignment target"); return NULL; }
+            if (!target_clone) {
+                expr_free(rhs);
+                expr_free(e);
+                *err = strdup("invalid compound assignment target");
+                return NULL;
+            }
             Expr *binop = expr_binop(cop, target_clone, rhs);
             eat_semicolon(p);
             return stmt_assign(e, binop);
@@ -1738,16 +2232,30 @@ static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
     if (!expect(p, TOK_FN, err)) return false;
     out->name = expect_ident(p, err);
     if (!out->name) return false;
-    if (!expect(p, TOK_LPAREN, err)) { free(out->name); return false; }
+    if (!expect(p, TOK_LPAREN, err)) {
+        free(out->name);
+        return false;
+    }
     out->params = parse_params(p, &out->param_count, err);
-    if (!out->params && *err) { free(out->name); return false; }
-    if (!expect(p, TOK_RPAREN, err)) { free(out->name); free(out->params); return false; }
+    if (!out->params && *err) {
+        free(out->name);
+        return false;
+    }
+    if (!expect(p, TOK_RPAREN, err)) {
+        free(out->name);
+        free(out->params);
+        return false;
+    }
 
     out->return_type = NULL;
     if (peek_type(p) == TOK_ARROW) {
         advance(p);
         out->return_type = parse_type_expr(p, err);
-        if (!out->return_type) { free(out->name); free(out->params); return false; }
+        if (!out->return_type) {
+            free(out->name);
+            free(out->params);
+            return false;
+        }
     }
 
     /* Parse require/ensure contracts (contextual identifiers before '{') */
@@ -1755,28 +2263,35 @@ static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
         size_t ccap = 4, cn = 0;
         ContractClause *contracts = NULL;
         while (peek_type(p) == TOK_IDENT && peek(p)->as.str_val &&
-               (strcmp(peek(p)->as.str_val, "require") == 0 ||
-                strcmp(peek(p)->as.str_val, "ensure") == 0)) {
+               (strcmp(peek(p)->as.str_val, "require") == 0 || strcmp(peek(p)->as.str_val, "ensure") == 0)) {
             if (!contracts) contracts = malloc(ccap * sizeof(ContractClause));
             if (!contracts) return false;
 
-            if (cn >= ccap) { ccap *= 2; contracts = realloc(contracts, ccap * sizeof(ContractClause)); }
+            if (cn >= ccap) {
+                ccap *= 2;
+                contracts = realloc(contracts, ccap * sizeof(ContractClause));
+            }
             bool is_ensure = (strcmp(peek(p)->as.str_val, "ensure") == 0);
             advance(p);
             Expr *cond = parse_expr(p, err);
             if (!cond) {
-                for (size_t i = 0; i < cn; i++) { expr_free(contracts[i].condition); free(contracts[i].message); }
+                for (size_t i = 0; i < cn; i++) {
+                    expr_free(contracts[i].condition);
+                    free(contracts[i].message);
+                }
                 free(contracts);
-                free(out->name); free(out->params);
-                if (out->return_type) { type_expr_free(out->return_type); free(out->return_type); }
+                free(out->name);
+                free(out->params);
+                if (out->return_type) {
+                    type_expr_free(out->return_type);
+                    free(out->return_type);
+                }
                 return false;
             }
             char *msg = NULL;
             if (peek_type(p) == TOK_COMMA) {
                 advance(p);
-                if (peek_type(p) == TOK_STRING_LIT) {
-                    msg = strdup(advance(p)->as.str_val);
-                }
+                if (peek_type(p) == TOK_STRING_LIT) { msg = strdup(advance(p)->as.str_val); }
             }
             contracts[cn].condition = cond;
             contracts[cn].message = msg;
@@ -1788,20 +2303,34 @@ static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
     }
 
     if (!expect(p, TOK_LBRACE, err)) {
-        free(out->name); free(out->params);
-        if (out->return_type) { type_expr_free(out->return_type); free(out->return_type); }
+        free(out->name);
+        free(out->params);
+        if (out->return_type) {
+            type_expr_free(out->return_type);
+            free(out->return_type);
+        }
         if (out->contracts) {
-            for (size_t i = 0; i < out->contract_count; i++) { expr_free(out->contracts[i].condition); free(out->contracts[i].message); }
+            for (size_t i = 0; i < out->contract_count; i++) {
+                expr_free(out->contracts[i].condition);
+                free(out->contracts[i].message);
+            }
             free(out->contracts);
         }
         return false;
     }
     out->body = parse_block_stmts(p, &out->body_count, err);
     if (!out->body && *err) {
-        free(out->name); free(out->params);
-        if (out->return_type) { type_expr_free(out->return_type); free(out->return_type); }
+        free(out->name);
+        free(out->params);
+        if (out->return_type) {
+            type_expr_free(out->return_type);
+            free(out->return_type);
+        }
         if (out->contracts) {
-            for (size_t i = 0; i < out->contract_count; i++) { expr_free(out->contracts[i].condition); free(out->contracts[i].message); }
+            for (size_t i = 0; i < out->contract_count; i++) {
+                expr_free(out->contracts[i].condition);
+                free(out->contracts[i].message);
+            }
             free(out->contracts);
         }
         return false;
@@ -1817,33 +2346,57 @@ static bool parse_struct_decl(Parser *p, StructDecl *out, char **err) {
     if (!expect(p, TOK_STRUCT, err)) return false;
     out->name = expect_ident(p, err);
     if (!out->name) return false;
-    if (!expect(p, TOK_LBRACE, err)) { free(out->name); return false; }
+    if (!expect(p, TOK_LBRACE, err)) {
+        free(out->name);
+        return false;
+    }
 
     size_t cap = 4;
     size_t n = 0;
     out->fields = malloc(cap * sizeof(FieldDecl));
     if (!out->fields) return false;
 
-
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-        if (n >= cap) { cap *= 2; out->fields = realloc(out->fields, cap * sizeof(FieldDecl)); }
+        if (n >= cap) {
+            cap *= 2;
+            out->fields = realloc(out->fields, cap * sizeof(FieldDecl));
+        }
         out->fields[n].name = expect_ident(p, err);
-        if (!out->fields[n].name) { free(out->name); free(out->fields); return false; }
+        if (!out->fields[n].name) {
+            free(out->name);
+            free(out->fields);
+            return false;
+        }
         if (!expect(p, TOK_COLON, err)) {
-            free(out->fields[n].name); free(out->name); free(out->fields);
+            free(out->fields[n].name);
+            free(out->name);
+            free(out->fields);
             return false;
         }
         TypeExpr *te = parse_type_expr(p, err);
-        if (!te) { free(out->fields[n].name); free(out->name); free(out->fields); return false; }
+        if (!te) {
+            free(out->fields[n].name);
+            free(out->name);
+            free(out->fields);
+            return false;
+        }
         out->fields[n].ty = *te;
         free(te);
         n++;
         if (peek_type(p) != TOK_RBRACE) {
-            if (!expect(p, TOK_COMMA, err)) { free(out->name); free(out->fields); return false; }
+            if (!expect(p, TOK_COMMA, err)) {
+                free(out->name);
+                free(out->fields);
+                return false;
+            }
         }
     }
     out->field_count = n;
-    if (!expect(p, TOK_RBRACE, err)) { free(out->name); free(out->fields); return false; }
+    if (!expect(p, TOK_RBRACE, err)) {
+        free(out->name);
+        free(out->fields);
+        return false;
+    }
     return true;
 }
 
@@ -1857,9 +2410,15 @@ static bool parse_test_decl(Parser *p, TestDecl *out, char **err) {
     }
     Token *name_tok = advance(p);
     out->name = strdup(name_tok->as.str_val);
-    if (!expect(p, TOK_LBRACE, err)) { free(out->name); return false; }
+    if (!expect(p, TOK_LBRACE, err)) {
+        free(out->name);
+        return false;
+    }
     out->body = parse_block_stmts(p, &out->body_count, err);
-    if (!out->body && *err) { free(out->name); return false; }
+    if (!out->body && *err) {
+        free(out->name);
+        return false;
+    }
     if (!expect(p, TOK_RBRACE, err)) {
         free(out->name);
         for (size_t i = 0; i < out->body_count; i++) stmt_free(out->body[i]);
@@ -1875,16 +2434,21 @@ static bool parse_enum_decl(Parser *p, EnumDecl *out, char **err) {
     if (!expect(p, TOK_ENUM, err)) return false;
     out->name = expect_ident(p, err);
     if (!out->name) return false;
-    if (!expect(p, TOK_LBRACE, err)) { free(out->name); return false; }
+    if (!expect(p, TOK_LBRACE, err)) {
+        free(out->name);
+        return false;
+    }
 
     size_t cap = 4;
     size_t n = 0;
     out->variants = malloc(cap * sizeof(VariantDecl));
     if (!out->variants) return false;
 
-
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-        if (n >= cap) { cap *= 2; out->variants = realloc(out->variants, cap * sizeof(VariantDecl)); }
+        if (n >= cap) {
+            cap *= 2;
+            out->variants = realloc(out->variants, cap * sizeof(VariantDecl));
+        }
         out->variants[n].name = expect_ident(p, err);
         if (!out->variants[n].name) goto fail;
         out->variants[n].param_types = NULL;
@@ -1898,16 +2462,31 @@ static bool parse_enum_decl(Parser *p, EnumDecl *out, char **err) {
             if (!types) return false;
 
             while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
-                if (tn >= tcap) { tcap *= 2; types = realloc(types, tcap * sizeof(TypeExpr)); }
+                if (tn >= tcap) {
+                    tcap *= 2;
+                    types = realloc(types, tcap * sizeof(TypeExpr));
+                }
                 TypeExpr *te = parse_type_expr(p, err);
-                if (!te) { free(types); free(out->variants[n].name); goto fail; }
+                if (!te) {
+                    free(types);
+                    free(out->variants[n].name);
+                    goto fail;
+                }
                 types[tn++] = *te;
                 free(te);
                 if (peek_type(p) != TOK_RPAREN) {
-                    if (!expect(p, TOK_COMMA, err)) { free(types); free(out->variants[n].name); goto fail; }
+                    if (!expect(p, TOK_COMMA, err)) {
+                        free(types);
+                        free(out->variants[n].name);
+                        goto fail;
+                    }
                 }
             }
-            if (!expect(p, TOK_RPAREN, err)) { free(types); free(out->variants[n].name); goto fail; }
+            if (!expect(p, TOK_RPAREN, err)) {
+                free(types);
+                free(out->variants[n].name);
+                goto fail;
+            }
             out->variants[n].param_types = types;
             out->variants[n].param_count = tn;
         }
@@ -1925,8 +2504,7 @@ fail:
     for (size_t i = 0; i < n; i++) {
         free(out->variants[i].name);
         if (out->variants[i].param_types) {
-            for (size_t j = 0; j < out->variants[i].param_count; j++)
-                type_expr_free(&out->variants[i].param_types[j]);
+            for (size_t j = 0; j < out->variants[i].param_count; j++) type_expr_free(&out->variants[i].param_types[j]);
             free(out->variants[i].param_types);
         }
     }
@@ -1940,16 +2518,21 @@ static bool parse_trait_decl(Parser *p, TraitDecl *out, char **err) {
     if (!expect(p, TOK_TRAIT, err)) return false;
     out->name = expect_ident(p, err);
     if (!out->name) return false;
-    if (!expect(p, TOK_LBRACE, err)) { free(out->name); return false; }
+    if (!expect(p, TOK_LBRACE, err)) {
+        free(out->name);
+        return false;
+    }
 
     size_t cap = 4;
     size_t n = 0;
     out->methods = malloc(cap * sizeof(TraitMethod));
     if (!out->methods) return false;
 
-
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
-        if (n >= cap) { cap *= 2; out->methods = realloc(out->methods, cap * sizeof(TraitMethod)); }
+        if (n >= cap) {
+            cap *= 2;
+            out->methods = realloc(out->methods, cap * sizeof(TraitMethod));
+        }
 
         /* fn name(params) -> RetType */
         if (!expect(p, TOK_FN, err)) {
@@ -1960,30 +2543,63 @@ static bool parse_trait_decl(Parser *p, TraitDecl *out, char **err) {
                     type_expr_free(&out->methods[i].params[j].ty);
                 }
                 free(out->methods[i].params);
-                if (out->methods[i].return_type) { type_expr_free(out->methods[i].return_type); free(out->methods[i].return_type); }
+                if (out->methods[i].return_type) {
+                    type_expr_free(out->methods[i].return_type);
+                    free(out->methods[i].return_type);
+                }
             }
-            free(out->methods); free(out->name);
+            free(out->methods);
+            free(out->name);
             return false;
         }
         out->methods[n].name = expect_ident(p, err);
-        if (!out->methods[n].name) { free(out->methods); free(out->name); return false; }
-        if (!expect(p, TOK_LPAREN, err)) { free(out->methods[n].name); free(out->methods); free(out->name); return false; }
+        if (!out->methods[n].name) {
+            free(out->methods);
+            free(out->name);
+            return false;
+        }
+        if (!expect(p, TOK_LPAREN, err)) {
+            free(out->methods[n].name);
+            free(out->methods);
+            free(out->name);
+            return false;
+        }
         out->methods[n].params = parse_params(p, &out->methods[n].param_count, err);
-        if (!out->methods[n].params && *err) { free(out->methods[n].name); free(out->methods); free(out->name); return false; }
-        if (!expect(p, TOK_RPAREN, err)) { free(out->methods[n].name); free(out->methods[n].params); free(out->methods); free(out->name); return false; }
+        if (!out->methods[n].params && *err) {
+            free(out->methods[n].name);
+            free(out->methods);
+            free(out->name);
+            return false;
+        }
+        if (!expect(p, TOK_RPAREN, err)) {
+            free(out->methods[n].name);
+            free(out->methods[n].params);
+            free(out->methods);
+            free(out->name);
+            return false;
+        }
 
         out->methods[n].return_type = NULL;
         if (peek_type(p) == TOK_ARROW) {
             advance(p);
             out->methods[n].return_type = parse_type_expr(p, err);
-            if (!out->methods[n].return_type) { free(out->methods[n].name); free(out->methods[n].params); free(out->methods); free(out->name); return false; }
+            if (!out->methods[n].return_type) {
+                free(out->methods[n].name);
+                free(out->methods[n].params);
+                free(out->methods);
+                free(out->name);
+                return false;
+            }
         }
         n++;
         /* Allow optional semicolons between methods */
         eat_semicolon(p);
     }
     out->method_count = n;
-    if (!expect(p, TOK_RBRACE, err)) { trait_decl_free(out); return false; }
+    if (!expect(p, TOK_RBRACE, err)) {
+        trait_decl_free(out);
+        return false;
+    }
     return true;
 }
 
@@ -2002,21 +2618,32 @@ static bool parse_impl_block(Parser *p, ImplBlock *out, char **err) {
     }
     advance(p);
     out->type_name = expect_ident(p, err);
-    if (!out->type_name) { free(out->trait_name); return false; }
+    if (!out->type_name) {
+        free(out->trait_name);
+        return false;
+    }
 
-    if (!expect(p, TOK_LBRACE, err)) { free(out->trait_name); free(out->type_name); return false; }
+    if (!expect(p, TOK_LBRACE, err)) {
+        free(out->trait_name);
+        free(out->type_name);
+        return false;
+    }
 
     size_t cap = 4;
     size_t n = 0;
     out->methods = malloc(cap * sizeof(FnDecl));
     if (!out->methods) return false;
 
-
     while (peek_type(p) == TOK_FN && !at_eof(p)) {
-        if (n >= cap) { cap *= 2; out->methods = realloc(out->methods, cap * sizeof(FnDecl)); }
+        if (n >= cap) {
+            cap *= 2;
+            out->methods = realloc(out->methods, cap * sizeof(FnDecl));
+        }
         if (!parse_fn_decl(p, &out->methods[n], err)) {
             for (size_t i = 0; i < n; i++) fn_decl_free(&out->methods[i]);
-            free(out->methods); free(out->trait_name); free(out->type_name);
+            free(out->methods);
+            free(out->trait_name);
+            free(out->type_name);
             return false;
         }
         n++;
@@ -2024,7 +2651,9 @@ static bool parse_impl_block(Parser *p, ImplBlock *out, char **err) {
     out->method_count = n;
     if (!expect(p, TOK_RBRACE, err)) {
         for (size_t i = 0; i < n; i++) fn_decl_free(&out->methods[i]);
-        free(out->methods); free(out->trait_name); free(out->type_name);
+        free(out->methods);
+        free(out->trait_name);
+        free(out->type_name);
         return false;
     }
     return true;
@@ -2035,8 +2664,7 @@ static bool parse_impl_block(Parser *p, ImplBlock *out, char **err) {
 static void prog_add_export(Program *prog, const char *name) {
     if (prog->export_count >= prog->export_cap) {
         prog->export_cap = prog->export_cap ? prog->export_cap * 2 : 8;
-        prog->export_names = realloc(prog->export_names,
-                                     prog->export_cap * sizeof(char *));
+        prog->export_names = realloc(prog->export_names, prog->export_cap * sizeof(char *));
     }
     prog->export_names[prog->export_count++] = strdup(name);
 }
@@ -2049,10 +2677,8 @@ Program parser_parse(Parser *p, char **err) {
     /* Mode directive */
     if (peek_type(p) == TOK_MODE_DIRECTIVE) {
         Token *t = advance(p);
-        if (strcmp(t->as.str_val, "strict") == 0)
-            prog.mode = MODE_STRICT;
-        else
-            prog.mode = MODE_CASUAL;
+        if (strcmp(t->as.str_val, "strict") == 0) prog.mode = MODE_STRICT;
+        else prog.mode = MODE_CASUAL;
     } else {
         prog.mode = MODE_CASUAL;
     }
@@ -2060,8 +2686,10 @@ Program parser_parse(Parser *p, char **err) {
     size_t cap = 8;
     size_t n = 0;
     prog.items = malloc(cap * sizeof(Item));
-    if (!prog.items) { prog.item_count = 0; return prog; }
-
+    if (!prog.items) {
+        prog.item_count = 0;
+        return prog;
+    }
 
     while (!at_eof(p)) {
         if (n >= cap) {
@@ -2098,7 +2726,8 @@ Program parser_parse(Parser *p, char **err) {
             } else {
                 *err = NULL;
                 Token *t = peek(p);
-                lat_asprintf(err, "%zu:%zu: unknown annotation '@%s' (expected @fluid or @crystal)", t->line, t->col, ann);
+                lat_asprintf(err, "%zu:%zu: unknown annotation '@%s' (expected @fluid or @crystal)", t->line, t->col,
+                             ann);
                 prog.item_count = n;
                 return prog;
             }
@@ -2112,16 +2741,14 @@ Program parser_parse(Parser *p, char **err) {
                 return prog;
             }
             prog.items[n].as.fn_decl.phase_annotation = item_annotation;
-            if (is_exported)
-                prog_add_export(&prog, prog.items[n].as.fn_decl.name);
+            if (is_exported) prog_add_export(&prog, prog.items[n].as.fn_decl.name);
         } else if (peek_type(p) == TOK_STRUCT) {
             prog.items[n].tag = ITEM_STRUCT;
             if (!parse_struct_decl(p, &prog.items[n].as.struct_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }
-            if (is_exported)
-                prog_add_export(&prog, prog.items[n].as.struct_decl.name);
+            if (is_exported) prog_add_export(&prog, prog.items[n].as.struct_decl.name);
         } else if (peek_type(p) == TOK_TEST) {
             prog.items[n].tag = ITEM_TEST;
             if (!parse_test_decl(p, &prog.items[n].as.test_decl, err)) {
@@ -2134,16 +2761,14 @@ Program parser_parse(Parser *p, char **err) {
                 prog.item_count = n;
                 return prog;
             }
-            if (is_exported)
-                prog_add_export(&prog, prog.items[n].as.enum_decl.name);
+            if (is_exported) prog_add_export(&prog, prog.items[n].as.enum_decl.name);
         } else if (peek_type(p) == TOK_TRAIT) {
             prog.items[n].tag = ITEM_TRAIT;
             if (!parse_trait_decl(p, &prog.items[n].as.trait_decl, err)) {
                 prog.item_count = n;
                 return prog;
             }
-            if (is_exported)
-                prog_add_export(&prog, prog.items[n].as.trait_decl.name);
+            if (is_exported) prog_add_export(&prog, prog.items[n].as.trait_decl.name);
         } else if (peek_type(p) == TOK_IMPL) {
             prog.items[n].tag = ITEM_IMPL;
             if (!parse_impl_block(p, &prog.items[n].as.impl_block, err)) {
@@ -2158,7 +2783,7 @@ Program parser_parse(Parser *p, char **err) {
                     *err = NULL;
                     Token *t = peek(p);
                     lat_asprintf(err, "%zu:%zu: 'export' must precede fn, struct, enum, trait, or variable binding",
-                                   t->line, t->col);
+                                 t->line, t->col);
                     prog.item_count = n;
                     return prog;
                 }
@@ -2169,7 +2794,7 @@ Program parser_parse(Parser *p, char **err) {
                     *err = NULL;
                     Token *t = peek(p);
                     lat_asprintf(err, "%zu:%zu: @fluid/@crystal annotation must precede fn or variable binding",
-                                   t->line, t->col);
+                                 t->line, t->col);
                     prog.item_count = n;
                     return prog;
                 }

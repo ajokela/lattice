@@ -1,0 +1,15 @@
+// Module A: defines struct Item and enum Status
+export struct Item {
+    name: String,
+    value: Int
+}
+
+export enum Status { Active, Inactive }
+
+export fn make_item(n: String, v: Int) -> Item {
+    return Item { name: n, value: v }
+}
+
+export fn get_status() -> Status {
+    return Status::Active
+}
