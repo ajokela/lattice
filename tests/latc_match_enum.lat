@@ -1,0 +1,243 @@
+// Test: match expression with enum variant destructuring
+// Compiled via self-hosted compiler: clat compiler/latc.lat tests/latc_match_enum.lat out.latc
+
+// ============================================================================
+// Enum declarations
+// ============================================================================
+
+enum Option {
+    Some(any),
+    None
+}
+
+enum Result {
+    Ok(any),
+    Err(any)
+}
+
+enum Pair {
+    Both(any, any),
+    Single(any),
+    Empty
+}
+
+enum Tree {
+    Leaf(any),
+    Node(any, any, any)
+}
+
+// ============================================================================
+// Test: basic enum variant destructuring
+// ============================================================================
+
+fn test_basic_destructure() {
+    print("--- basic destructure ---")
+    let val = Option::Some(42)
+    let result = match val {
+        Option::Some(x) => "some: " + to_string(x),
+        Option::None => "none",
+        _ => "unknown"
+    }
+    print(result)
+    assert(result == "some: 42", "basic Some destructure")
+
+    let none = Option::None
+    let r2 = match none {
+        Option::Some(x) => "some: " + to_string(x),
+        Option::None => "none",
+        _ => "unknown"
+    }
+    print(r2)
+    assert(r2 == "none", "basic None match")
+}
+
+// ============================================================================
+// Test: multi-binding destructuring
+// ============================================================================
+
+fn test_multi_binding() {
+    print("--- multi binding ---")
+    let p = Pair::Both("hello", 99)
+    let result = match p {
+        Pair::Both(a, b) => to_string(a) + "=" + to_string(b),
+        Pair::Single(x) => "single: " + to_string(x),
+        Pair::Empty => "empty",
+        _ => "?"
+    }
+    print(result)
+    assert(result == "hello=99", "multi-binding destructure")
+
+    let s = Pair::Single(7)
+    let r2 = match s {
+        Pair::Both(a, b) => "both",
+        Pair::Single(x) => "single: " + to_string(x),
+        Pair::Empty => "empty",
+        _ => "?"
+    }
+    print(r2)
+    assert(r2 == "single: 7", "single-binding fallthrough")
+}
+
+// ============================================================================
+// Test: three-element destructuring
+// ============================================================================
+
+fn test_three_binding() {
+    print("--- three binding ---")
+    let tree = Tree::Node("root", Tree::Leaf(1), Tree::Leaf(2))
+    let result = match tree {
+        Tree::Leaf(v) => "leaf: " + to_string(v),
+        Tree::Node(val, left, right) => {
+            "node: " + to_string(val)
+        },
+        _ => "?"
+    }
+    print(result)
+    assert(result == "node: root", "three-binding destructure")
+}
+
+// ============================================================================
+// Test: destructured bindings used in computation
+// ============================================================================
+
+fn test_binding_computation() {
+    print("--- binding computation ---")
+    let r = Result::Ok(21)
+    let doubled = match r {
+        Result::Ok(v) => v * 2,
+        Result::Err(e) => 0 - 1,
+        _ => 0
+    }
+    print(doubled)
+    assert(doubled == 42, "binding used in computation")
+
+    let err = Result::Err("oops")
+    let r2 = match err {
+        Result::Ok(v) => v,
+        Result::Err(e) => "error: " + to_string(e),
+        _ => "?"
+    }
+    print(r2)
+    assert(r2 == "error: oops", "error destructure")
+}
+
+// ============================================================================
+// Test: enum destructure with block body
+// ============================================================================
+
+fn test_block_body() {
+    print("--- block body ---")
+    let val = Option::Some(10)
+    let result = match val {
+        Option::Some(n) => {
+            let doubled = n * 2
+            let tripled = n * 3
+            "doubled=" + to_string(doubled) + " tripled=" + to_string(tripled)
+        },
+        _ => "none"
+    }
+    print(result)
+    assert(result == "doubled=20 tripled=30", "block body with bindings")
+}
+
+// ============================================================================
+// Test: mixing destructure with other pattern types
+// ============================================================================
+
+fn test_mixed_patterns() {
+    print("--- mixed patterns ---")
+    // Enum destructure followed by literals and wildcards
+    let val = Option::Some(5)
+    let r1 = match val {
+        Option::Some(x) => "some:" + to_string(x),
+        _ => "other"
+    }
+    print(r1)
+    assert(r1 == "some:5", "enum destructure with wildcard fallback")
+
+    // Use regular enum comparison (no destructuring)
+    let c = Option::None
+    let r2 = match c {
+        Option::Some(x) => "some:" + to_string(x),
+        Option::None => "none",
+        _ => "other"
+    }
+    print(r2)
+    assert(r2 == "none", "non-destructuring enum after destructuring")
+}
+
+// ============================================================================
+// Test: nested match with destructuring
+// ============================================================================
+
+fn classify(val: any) {
+    return match val {
+        Result::Ok(v) => {
+            match v {
+                0 => "ok:zero",
+                _ => "ok:" + to_string(v)
+            }
+        },
+        Result::Err(e) => "err:" + to_string(e),
+        _ => "unknown"
+    }
+}
+
+fn test_nested_match() {
+    print("--- nested match ---")
+    print(classify(Result::Ok(0)))
+    assert(classify(Result::Ok(0)) == "ok:zero", "nested match zero")
+    print(classify(Result::Ok(42)))
+    assert(classify(Result::Ok(42)) == "ok:42", "nested match value")
+    print(classify(Result::Err("bad")))
+    assert(classify(Result::Err("bad")) == "err:bad", "nested match error")
+}
+
+// ============================================================================
+// Test: enum destructure no-match fallback (returns nil)
+// ============================================================================
+
+fn test_no_match_fallback() {
+    print("--- no match fallback ---")
+    let val = Pair::Empty
+    let result = match val {
+        Pair::Both(a, b) => "both",
+        Pair::Single(x) => "single"
+    }
+    print(result)
+    // No arm matches Pair::Empty, so nil is returned
+    assert(result == nil, "no-match returns nil")
+}
+
+// ============================================================================
+// Test: empty destructure (no bindings)
+// ============================================================================
+
+fn test_empty_destructure() {
+    print("--- empty destructure ---")
+    // Even with no payload, the syntax Enum::Variant() should work
+    let val = Option::Some(99)
+    let result = match val {
+        Option::Some(x) => x + 1,
+        _ => 0
+    }
+    print(result)
+    assert(result == 100, "destructure then compute")
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() {
+    test_basic_destructure()
+    test_multi_binding()
+    test_three_binding()
+    test_binding_computation()
+    test_block_body()
+    test_mixed_patterns()
+    test_nested_match()
+    test_no_match_fallback()
+    test_empty_destructure()
+    print("ALL ENUM MATCH TESTS PASSED")
+}

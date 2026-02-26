@@ -1847,26 +1847,175 @@ fn parse_match_expression() {
         let pat_tok = peek()
         flux is_binding = false
         flux is_range = false
+        flux is_enum_destructure = false
 
         if pat_tok.type == "identifier" && pat_tok.text != "_" {
-            // An identifier that isn't _ is a binding pattern
-            // (it binds the scrutinee to a name, optionally with a guard)
-            if pos + 1 < len(tokens) {
-                let next_tok = tokens[pos + 1]
-                if next_tok.text == "if" || next_tok.text == "=>" {
-                    is_binding = true
+            // Check for enum variant destructuring: Ident::Ident(bindings...)
+            // This must be checked BEFORE binding detection so that
+            // e.g. Option::Some(x) is not mis-classified as a binding on "Option".
+            if pos + 2 < len(tokens) && tokens[pos + 1].text == "::" && tokens[pos + 2].type == "identifier" {
+                // Ident::Ident — check if followed by "(" (destructuring) or "=>" / "if" (plain enum match)
+                if pos + 3 < len(tokens) && tokens[pos + 3].text == "(" {
+                    is_enum_destructure = true
+                }
+                // If not destructuring, the enum variant pattern (e.g. Color::Red)
+                // falls through to the non-binding path where parse_expression()
+                // handles it as an expression comparison.
+            }
+
+            if !is_enum_destructure {
+                // An identifier that isn't _ is a binding pattern
+                // (it binds the scrutinee to a name, optionally with a guard)
+                if pos + 1 < len(tokens) {
+                    let next_tok = tokens[pos + 1]
+                    if next_tok.text == "if" || next_tok.text == "=>" {
+                        is_binding = true
+                    }
                 }
             }
         }
 
-        if !is_binding && pat_tok.type == "integer" {
+        if !is_binding && !is_enum_destructure && pat_tok.type == "integer" {
             // Check for range pattern: int..int
             if pos + 1 < len(tokens) && tokens[pos + 1].type == ".." {
                 is_range = true
             }
         }
 
-        if is_binding {
+        if is_enum_destructure {
+            // === Enum variant destructuring pattern ===
+            // Pattern: EnumName::Variant(binding1, binding2, ...)
+            // Stack invariant: scrutinee S stays on stack across arms.
+            //
+            // Approach:
+            //   DUP S -> [S, S'].
+            //   DUP S' -> [S, S', S''].
+            //   Invoke .tag on S'' -> [S, S', tag_string].
+            //   Compare tag with variant_name -> [S, S', bool].
+            //   If false: pop bool + pop S' -> [S], next arm.
+            //   If true: pop bool. S' is the matched enum value.
+            //     Register S' as local. Extract payload into bindings.
+            //     Compile body -> result. Clean up bindings + S' + S.
+            //     Jump to end.
+
+            let ed_enum_name = advance().text     // consume EnumName
+            advance()                              // consume '::'
+            let ed_variant_name = advance().text   // consume Variant
+            advance()                              // consume '('
+
+            // Parse binding names
+            flux bind_names = []
+            if peek_text() != ")" {
+                bind_names.push(expect("identifier", nil).text)
+                while peek_text() == "," {
+                    advance()
+                    if peek_text() == ")" { break }
+                    bind_names.push(expect("identifier", nil).text)
+                }
+            }
+            expect(nil, ")")
+
+            let bind_count = len(bind_names)
+
+            // Stack: [S]
+            emit_byte(OP_DUP, line)   // [S, S']
+            emit_byte(OP_DUP, line)   // [S, S', S'']
+
+            // Get the tag: invoke .tag on S''
+            let tag_idx = string_constant("tag")
+            emit_byte(OP_INVOKE, line)
+            emit_byte(tag_idx, line)
+            emit_byte(0, line)  // 0 args
+            // Stack: [S, S', tag_string]
+
+            // Compare tag with variant name
+            emit_constant(make_string_const(ed_variant_name), line)
+            // Stack: [S, S', tag_string, variant_name_const]
+            emit_byte(OP_EQ, line)
+            // Stack: [S, S', bool]
+
+            let next_arm = emit_jump(OP_JUMP_IF_FALSE, line)
+            emit_byte(OP_POP, line)  // pop true: [S, S']
+
+            // Tag matched! Open a scope for S' and bindings.
+            begin_scope()
+            add_local("")  // dummy slot for scrutinee S on stack
+            add_local("")  // S' (the matched enum value)
+
+            // Extract payload elements as local bindings.
+            // For each binding: GET_LOCAL(enum_slot) -> .payload -> [i] -> add_local
+            let enum_slot = local_count - 1
+            for bi in 0..bind_count {
+                emit_bytes(OP_GET_LOCAL, enum_slot, line)
+                let payload_idx = string_constant("payload")
+                emit_byte(OP_INVOKE, line)
+                emit_byte(payload_idx, line)
+                emit_byte(0, line)  // 0 args -> returns payload array
+                emit_constant(make_int_const(bi), line)
+                emit_byte(OP_INDEX, line)
+                add_local(bind_names[bi])
+            }
+
+            expect(nil, "=>")
+
+            // Compile arm body in a nested scope
+            begin_scope()
+            if peek_text() == "{" {
+                expect(nil, "{")
+                flux match_last_expr = false
+                while peek_text() != "}" {
+                    if peek() == nil {
+                        compiler_error("unexpected end of input in match arm block", line)
+                    }
+                    if match_last_expr {
+                        emit_byte(OP_POP, line)
+                    }
+                    match_last_expr = false
+                    if is_statement_start() {
+                        parse_statement()
+                    } else {
+                        parse_expression()
+                        match_last_expr = true
+                    }
+                }
+                expect(nil, "}")
+                if match_last_expr {
+                    end_scope_preserve_tos(line)
+                } else {
+                    end_scope(line)
+                    emit_byte(OP_UNIT, line)
+                }
+            } else {
+                parse_expression()
+                end_scope_preserve_tos(line)
+            }
+
+            // Stack: [S(dummy), S'(enum), bind1...bindN, result]
+            // Swap result past each local and pop it
+            flux pi = 0
+            while pi < bind_count + 1 {
+                emit_byte(OP_SWAP, line)
+                emit_byte(OP_POP, line)
+                pi = pi + 1
+            }
+            // Stack: [S, result]
+            emit_byte(OP_SWAP, line)  // [result, S]
+            emit_byte(OP_POP, line)   // [result]
+
+            // Remove locals from compiler without emitting more pops
+            scope_depth = scope_depth - 1
+            while local_count > 0 && local_depth_arr[local_count - 1] > scope_depth {
+                local_count = local_count - 1
+            }
+
+            end_jumps.push(emit_jump(OP_JUMP, line))
+
+            patch_jump(next_arm)
+            // JUMP_IF_FALSE doesn't pop: [S, S', false]
+            emit_byte(OP_POP, line)  // pop false: [S, S']
+            emit_byte(OP_POP, line)  // pop S': [S]
+
+        } else { if is_binding {
             // === Binding pattern ===
             // Stack invariant: scrutinee S stays on stack.
             // DUP S -> [S, S']. S' becomes local binding.
@@ -2050,7 +2199,7 @@ fn parse_match_expression() {
             patch_jump(next_arm)
             emit_byte(OP_POP, line)  // pop false
             emit_byte(OP_POP, line)  // pop S'
-        }
+        } }
 
         // Optional trailing comma
         if peek_text() == "," {
