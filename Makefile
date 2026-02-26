@@ -177,7 +177,7 @@ FUZZ_VM_SRC    = $(FUZZ_DIR)/fuzz_vm.c
 FUZZ_VM_OBJ    = $(BUILD_DIR)/fuzz/fuzz_vm.o
 FUZZ_VM_TARGET = $(BUILD_DIR)/fuzz_vm
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite lsp deploy-coverage
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -399,6 +399,18 @@ ext-pg:
 
 ext-sqlite:
 	$(MAKE) -C extensions/sqlite
+
+ext-ffi:
+	$(MAKE) -C extensions/ffi
+
+ext-redis:
+	$(MAKE) -C extensions/redis
+
+ext-websocket:
+	$(MAKE) -C extensions/websocket
+
+ext-image:
+	$(MAKE) -C extensions/image
 
 SITE_DIR = ../lattice-lang.org
 

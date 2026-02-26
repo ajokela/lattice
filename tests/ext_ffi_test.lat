@@ -1,0 +1,171 @@
+// Extension test: FFI
+// Tests open, sym, call, memory ops, structs, and error handling.
+// Cross-platform: detects macOS vs Linux for libc path.
+
+let ffi = require_ext("ffi")
+
+let _open = ffi.get("open")
+let _close = ffi.get("close")
+let _sym = ffi.get("sym")
+let _call = ffi.get("call")
+let _nullptr = ffi.get("nullptr")
+let _error = ffi.get("error")
+let _errno = ffi.get("errno")
+let _strerror = ffi.get("strerror")
+let _addr = ffi.get("addr")
+
+let _struct_define = ffi.get("struct_define")
+let _struct_alloc = ffi.get("struct_alloc")
+let _struct_set = ffi.get("struct_set")
+let _struct_get = ffi.get("struct_get")
+let _struct_free = ffi.get("struct_free")
+let _struct_to_map = ffi.get("struct_to_map")
+let _sizeof = ffi.get("sizeof")
+
+let _alloc = ffi.get("alloc")
+let _free = ffi.get("free")
+let _read_i32 = ffi.get("read_i32")
+let _read_i64 = ffi.get("read_i64")
+let _read_i8 = ffi.get("read_i8")
+let _write_i32 = ffi.get("write_i32")
+let _write_i64 = ffi.get("write_i64")
+let _write_i8 = ffi.get("write_i8")
+let _memset = ffi.get("memset")
+let _memcpy = ffi.get("memcpy")
+let _string_to_ptr = ffi.get("string_to_ptr")
+
+// Determine libc path based on platform
+let plat = platform()
+let libc_path = if plat == "macos" {
+    "/usr/lib/libSystem.B.dylib"
+} else {
+    "libc.so.6"
+}
+
+print("=== FFI Extension Tests ===")
+print("Platform: ${plat}, libc: ${libc_path}")
+print("")
+
+// ── Test 1: Open libc ──
+let libc = _open(libc_path)
+assert(typeof(libc) == "Int", "open should return integer handle")
+print("1. Opened libc: handle = ${libc}")
+
+// ── Test 2: Call strlen ──
+let strlen_sym = _sym(libc, "strlen", "s>i")
+let result = _call(strlen_sym, "Hello, FFI!")
+print("2. strlen('Hello, FFI!') = ${result}")
+assert(result == 11, "strlen should return 11")
+
+// ── Test 3: Call abs ──
+let abs_sym = _sym(libc, "abs", "c>c")
+let abs_result = _call(abs_sym, -42)
+print("3. abs(-42) = ${abs_result}")
+assert(abs_result == 42, "abs(-42) should return 42")
+
+// ── Test 4: Call atoi ──
+let atoi_sym = _sym(libc, "atoi", "s>c")
+let atoi_result = _call(atoi_sym, "12345")
+print("4. atoi('12345') = ${atoi_result}")
+assert(atoi_result == 12345, "atoi should return 12345")
+
+// ── Test 5: getpid ──
+let getpid_sym = _sym(libc, "getpid", ">c")
+let pid = _call(getpid_sym)
+print("5. getpid() = ${pid}")
+assert(pid > 0, "PID should be positive")
+
+// ── Test 6: nullptr ──
+let null_ptr = _nullptr()
+print("6. nullptr = ${null_ptr}")
+assert(null_ptr == 0, "nullptr should be 0")
+
+// ── Test 7: Memory allocation and read/write ──
+let ptr = _alloc(64)
+print("7. Allocated 64 bytes at ptr = ${ptr}")
+assert(ptr != 0, "alloc should return non-null")
+
+_write_i32(ptr, 0, 42)
+let val32 = _read_i32(ptr, 0)
+print("   write_i32/read_i32: ${val32}")
+assert(val32 == 42, "read_i32 should return 42")
+
+_write_i64(ptr, 8, 1234567890123)
+let val64 = _read_i64(ptr, 8)
+print("   write_i64/read_i64: ${val64}")
+assert(val64 == 1234567890123, "read_i64 should match")
+
+_write_i8(ptr, 24, 127)
+let val8 = _read_i8(ptr, 24)
+print("   write_i8/read_i8: ${val8}")
+assert(val8 == 127, "read_i8 should return 127")
+
+_free(ptr)
+print("   Freed memory")
+
+// ── Test 8: memset and memcpy ──
+let buf1 = _alloc(16)
+let buf2 = _alloc(16)
+_memset(buf1, 65, 4)
+_memcpy(buf2, buf1, 4)
+let byte0 = _read_i8(buf2, 0)
+print("8. memset(65)/memcpy: byte0 = ${byte0}")
+assert(byte0 == 65, "memcpy should copy the 'A' byte")
+_free(buf1)
+_free(buf2)
+
+// ── Test 9: string_to_ptr ──
+let sptr = _string_to_ptr("Hello from Lattice")
+print("9. string_to_ptr: ptr = ${sptr}")
+assert(sptr != 0, "string_to_ptr should return non-null")
+let slen = _call(strlen_sym, sptr)
+print("   strlen of copied string = ${slen}")
+assert(slen == 18, "strlen should be 18")
+_free(sptr)
+
+// ── Test 10: Struct marshalling ──
+print("")
+print("=== Struct Tests ===")
+print("")
+
+let point_type = _struct_define("Point", [
+    ["x", "i32"],
+    ["y", "i32"]
+])
+print("10. Defined struct Point: type_id = ${point_type}")
+
+let point_size = _sizeof(point_type)
+print("    sizeof(Point) = ${point_size}")
+assert(point_size == 8, "Point should be 8 bytes")
+
+let p = _struct_alloc(point_type)
+_struct_set(p, point_type, "x", 10)
+_struct_set(p, point_type, "y", 20)
+
+let px = _struct_get(p, point_type, "x")
+let py = _struct_get(p, point_type, "y")
+print("    Point.x = ${px}, Point.y = ${py}")
+assert(px == 10, "x should be 10")
+assert(py == 20, "y should be 20")
+
+let pmap = _struct_to_map(p, point_type)
+print("    struct_to_map: ${pmap}")
+_struct_free(p)
+
+// ── Test 11: errno and strerror ──
+let errno_val = _errno()
+print("11. errno = ${errno_val}")
+let err_str = _strerror(2)
+print("    strerror(2) = ${err_str}")
+
+// ── Test 12: addr ──
+let strlen_addr = _addr(strlen_sym)
+print("12. addr(strlen) = ${strlen_addr}")
+assert(strlen_addr != 0, "function address should be non-null")
+
+// ── Test 13: Close library ──
+_close(libc)
+print("13. Closed library handle")
+
+print("")
+print("FFI extension: all tests passed")

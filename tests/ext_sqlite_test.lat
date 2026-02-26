@@ -1,0 +1,115 @@
+// Extension test: SQLite
+// Tests open, exec, query, status, last_insert_rowid, close
+
+let sqlite = require_ext("sqlite")
+
+let _open = sqlite.get("open")
+let _close = sqlite.get("close")
+let _exec = sqlite.get("exec")
+let _query = sqlite.get("query")
+let _status = sqlite.get("status")
+let _last_id = sqlite.get("last_insert_rowid")
+
+// ── Test 1: Open in-memory database ──
+let db = _open(":memory:")
+assert(typeof(db) == "Int", "open should return an integer handle")
+print("1. Opened in-memory database: handle = ${db}")
+
+// ── Test 2: Connection status ──
+let st = _status(db)
+assert(st == "ok", "status should be ok for open connection")
+print("2. Status: ${st}")
+
+// ── Test 3: Create table ──
+_exec(db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
+print("3. Created table users")
+
+// ── Test 4: Insert rows ──
+_exec(db, "INSERT INTO users (name, age) VALUES ('Alice', 30)")
+let alice_id = _last_id(db)
+assert(alice_id == 1, "first insert should have rowid 1")
+print("4. Inserted Alice, rowid = ${alice_id}")
+
+_exec(db, "INSERT INTO users (name, age) VALUES ('Bob', 25)")
+let bob_id = _last_id(db)
+assert(bob_id == 2, "second insert should have rowid 2")
+print("   Inserted Bob, rowid = ${bob_id}")
+
+_exec(db, "INSERT INTO users (name, age) VALUES ('Charlie', 35)")
+print("   Inserted Charlie")
+
+// ── Test 5: Query all rows ──
+let rows = _query(db, "SELECT * FROM users ORDER BY id")
+assert(len(rows) == 3, "should have 3 rows")
+print("5. Query returned ${len(rows)} rows")
+
+// ── Test 6: Verify row data ──
+let r0 = rows[0]
+let r0_name = r0.get("name")
+let r0_age = r0.get("age")
+assert(r0_name == "Alice", "first row name should be Alice")
+assert(r0_age == 30, "first row age should be 30")
+print("6. Row 0: name=${r0_name}, age=${r0_age}")
+
+let r1 = rows[1]
+let r1_name = r1.get("name")
+let r1_age = r1.get("age")
+assert(r1_name == "Bob", "second row name should be Bob")
+assert(r1_age == 25, "second row age should be 25")
+print("   Row 1: name=${r1_name}, age=${r1_age}")
+
+// ── Test 7: Query with WHERE clause ──
+let filtered = _query(db, "SELECT name FROM users WHERE age > 28")
+assert(len(filtered) == 2, "age > 28 should return 2 rows")
+print("7. Filtered query (age > 28): ${len(filtered)} rows")
+
+// ── Test 8: Parameterized query ──
+let param_rows = _query(db, "SELECT name FROM users WHERE age = ?", [25])
+assert(len(param_rows) == 1, "parameterized query should return 1 row")
+let param_name = param_rows[0].get("name")
+assert(param_name == "Bob", "should find Bob for age=25")
+print("8. Parameterized query (age=25): ${param_name}")
+
+// ── Test 9: Parameterized exec ──
+_exec(db, "UPDATE users SET age = ? WHERE name = ?", [31, "Alice"])
+let updated = _query(db, "SELECT age FROM users WHERE name = 'Alice'")
+let updated_age = updated[0].get("age")
+assert(updated_age == 31, "Alice age should be updated to 31")
+print("9. Parameterized update: Alice age = ${updated_age}")
+
+// ── Test 10: Delete and verify ──
+_exec(db, "DELETE FROM users WHERE name = 'Charlie'")
+let after_delete = _query(db, "SELECT * FROM users")
+assert(len(after_delete) == 2, "should have 2 rows after delete")
+print("10. After delete: ${len(after_delete)} rows remain")
+
+// ── Test 11: Multiple tables and JOIN ──
+_exec(db, "CREATE TABLE scores (user_id INTEGER, score REAL)")
+_exec(db, "INSERT INTO scores VALUES (1, 95.5)")
+_exec(db, "INSERT INTO scores VALUES (2, 87.3)")
+let join_rows = _query(db, "SELECT u.name, s.score FROM users u JOIN scores s ON u.id = s.user_id ORDER BY u.id")
+assert(len(join_rows) == 2, "join should return 2 rows")
+let j0_name = join_rows[0].get("name")
+let j0_score = join_rows[0].get("score")
+print("11. JOIN query: ${len(join_rows)} rows")
+print("    ${j0_name}: ${j0_score}")
+
+// ── Test 12: NULL handling ──
+_exec(db, "INSERT INTO users (name) VALUES ('Dave')")
+let dave = _query(db, "SELECT age FROM users WHERE name = 'Dave'")
+assert(len(dave) == 1, "should find Dave")
+let dave_age = dave[0].get("age")
+assert(dave_age == nil, "Dave age should be nil")
+print("12. NULL handling: Dave age = ${dave_age}")
+
+// ── Test 13: Close connection ──
+_close(db)
+print("13. Closed database connection")
+
+// ── Test 14: Status after close ──
+let st2 = _status(db)
+assert(st2 == "closed", "status should be closed after close")
+print("14. Status after close: ${st2}")
+
+print("")
+print("SQLite extension: all tests passed")
