@@ -76,12 +76,14 @@ static void stats_scope_pop(MemoryStats *s) {
 
 /* ── Call stack helpers (stack traces) ── */
 
-static void ev_push_frame(Evaluator *ev, const char *name) {
+static bool ev_push_frame(Evaluator *ev, const char *name) {
+    if (ev->call_depth >= ev->max_call_depth) return false;
     if (ev->call_depth >= ev->call_stack_cap) {
         ev->call_stack_cap = ev->call_stack_cap ? ev->call_stack_cap * 2 : 16;
         ev->call_stack = realloc(ev->call_stack, ev->call_stack_cap * sizeof(const char *));
     }
     ev->call_stack[ev->call_depth++] = name;
+    return true;
 }
 
 static void ev_pop_frame(Evaluator *ev) {
@@ -1011,7 +1013,11 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
         }
     }
     stats_fn_call(&ev->stats);
-    ev_push_frame(ev, decl->name);
+    if (!ev_push_frame(ev, decl->name)) {
+        char *err = NULL;
+        lat_asprintf(&err, "maximum recursion depth exceeded (limit: %zu)", ev->max_call_depth);
+        return eval_err(err);
+    }
     stats_scope_push(&ev->stats);
     env_push_scope(ev->env);
     for (size_t i = 0; i < decl->param_count; i++) {
@@ -5655,6 +5661,32 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(closure);
                 }
 
+                /// @builtin set_recursion_limit(n: Int) -> Unit
+                /// @category Core
+                /// Set the maximum recursion depth for the tree-walk evaluator.
+                /// Capped at 100000. Default is 1000.
+                /// @example set_recursion_limit(500)
+                if (strcmp(fn_name, "set_recursion_limit") == 0) {
+                    if (argc != 1 || args[0].type != VAL_INT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("set_recursion_limit() expects 1 integer argument")); }
+                    int64_t n = args[0].as.int_val;
+                    if (n < 1) n = 1;
+                    if (n > 100000) n = 100000;
+                    ev->max_call_depth = (size_t)n;
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin recursion_limit() -> Int
+                /// @category Core
+                /// Return the current maximum recursion depth.
+                /// @example recursion_limit()  // 1000
+                if (strcmp(fn_name, "recursion_limit") == 0) {
+                    if (argc != 0) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("recursion_limit() expects no arguments")); }
+                    free(args);
+                    return eval_ok(value_int((int64_t)ev->max_call_depth));
+                }
+
                 /* ── Named function lookup ── */
                 FnDecl *fd_head = find_fn(ev, fn_name);
                 if (fd_head) {
@@ -5716,7 +5748,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 ? expr->as.call.func->as.str_val : "<closure>";
             /* Native closure dispatch */
             if (callee_r.value.as.closure.native_fn && !callee_r.value.as.closure.body) {
-                ev_push_frame(ev, closure_name);
+                if (!ev_push_frame(ev, closure_name)) {
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    value_free(&callee_r.value);
+                    free(args);
+                    char *err = NULL;
+                    lat_asprintf(&err, "maximum recursion depth exceeded (limit: %zu)", ev->max_call_depth);
+                    return eval_err(err);
+                }
                 EvalResult res;
                 if (callee_r.value.as.closure.default_values == (struct Expr **)(uintptr_t)0x1) {
                     /* VM-style native (VMNativeFn signature) — used by builtin modules */
@@ -5754,7 +5793,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             /* Root callee and args so GC inside block-body closures won't sweep them */
             GC_PUSH(ev, &callee_r.value);
             for (size_t i = 0; i < argc; i++) GC_PUSH(ev, &args[i]);
-            ev_push_frame(ev, closure_name);
+            if (!ev_push_frame(ev, closure_name)) {
+                GC_POP_N(ev, argc);
+                GC_POP(ev);
+                for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                value_free(&callee_r.value);
+                free(args);
+                char *err = NULL;
+                lat_asprintf(&err, "maximum recursion depth exceeded (limit: %zu)", ev->max_call_depth);
+                return eval_err(err);
+            }
             EvalResult res = call_closure(ev,
                 callee_r.value.as.closure.param_names,
                 callee_r.value.as.closure.param_count,
@@ -10761,6 +10809,7 @@ Evaluator *evaluator_new(void) {
     ev->defer_count = 0;
     ev->defer_cap = 0;
     ev->assertions_enabled = true;
+    ev->max_call_depth = LATTICE_MAX_CALL_DEPTH;
     value_set_heap(ev->heap);
     return ev;
 }

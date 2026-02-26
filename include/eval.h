@@ -173,6 +173,7 @@ typedef struct Evaluator {
     const char   **call_stack;
     size_t         call_depth;
     size_t         call_stack_cap;
+    size_t         max_call_depth;  /* configurable limit, default LATTICE_MAX_CALL_DEPTH */
 } Evaluator;
 
 /* Create a new evaluator */

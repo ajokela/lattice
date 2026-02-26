@@ -3175,3 +3175,61 @@ TEST(phase_freeze_with_contract_fails) {
         "}\n"
     );
 }
+
+/* ── Recursion Depth Limit Tests ── */
+
+TEST(eval_recursion_depth_limit) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    char *err = NULL;
+    int rc = run_source_ok(
+        "fn blow_up() { blow_up() }\n"
+        "fn main() { blow_up() }\n",
+        &err);
+    ASSERT(rc != 0);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "maximum recursion depth exceeded") != NULL);
+    free(err);
+}
+
+TEST(eval_set_recursion_limit) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    char *err = NULL;
+    int rc = run_source_ok(
+        "fn recurse(n: Int) -> Int {\n"
+        "    if n <= 0 { return 0 }\n"
+        "    return recurse(n - 1)\n"
+        "}\n"
+        "fn main() {\n"
+        "    set_recursion_limit(50)\n"
+        "    recurse(100)\n"
+        "}\n",
+        &err);
+    ASSERT(rc != 0);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "maximum recursion depth exceeded") != NULL);
+    free(err);
+}
+
+TEST(eval_recursion_limit_query) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    let limit = recursion_limit()\n"
+        "    assert(limit == 1000, \"default should be 1000\")\n"
+        "}\n"
+    );
+}
+
+TEST(eval_deep_recursion_within_limit) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    ASSERT_RUNS(
+        "fn recurse(n: Int) -> Int {\n"
+        "    if n <= 0 { return 0 }\n"
+        "    return recurse(n - 1)\n"
+        "}\n"
+        "fn main() {\n"
+        "    let result = recurse(500)\n"
+        "    assert(result == 0, \"should complete\")\n"
+        "}\n"
+    );
+}

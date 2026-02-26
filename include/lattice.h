@@ -2,6 +2,7 @@
 #define LATTICE_H
 
 #define LATTICE_VERSION "0.3.24"
+#define LATTICE_MAX_CALL_DEPTH 1000
 
 #include <stddef.h>
 #include <stdint.h>
