@@ -1,0 +1,153 @@
+// Test framework feature tests
+// Run with: clat test tests/framework_test.lat
+
+// Helper function that throws
+fn explode() {
+    error("kaboom!")
+}
+
+// Helper function that does not throw
+fn safe() {
+    return 42
+}
+
+// ── assert_eq ──
+
+test "assert_eq with equal integers" {
+    assert_eq(1 + 1, 2)
+    assert_eq(0, 0)
+    assert_eq(-5, -5)
+}
+
+test "assert_eq with equal strings" {
+    assert_eq("hello", "hello")
+    assert_eq("", "")
+}
+
+test "assert_eq with equal booleans" {
+    assert_eq(true, true)
+    assert_eq(false, false)
+}
+
+test "assert_eq with equal arrays" {
+    assert_eq([1, 2, 3], [1, 2, 3])
+    assert_eq([], [])
+}
+
+test "assert_eq with nil" {
+    assert_eq(nil, nil)
+}
+
+// ── assert_ne ──
+
+test "assert_ne with different values" {
+    assert_ne(1, 2)
+    assert_ne("hello", "world")
+    assert_ne(true, false)
+    assert_ne([1], [2])
+}
+
+// ── assert_true / assert_false ──
+
+test "assert_true with true" {
+    assert_true(true)
+    assert_true(1 < 2)
+    assert_true(3 == 3)
+}
+
+test "assert_false with false" {
+    assert_false(false)
+    assert_false(1 > 2)
+    assert_false(3 != 3)
+}
+
+// ── assert_nil ──
+
+test "assert_nil with nil" {
+    assert_nil(nil)
+}
+
+// ── assert_throws ──
+
+test "assert_throws catches errors" {
+    let msg = assert_throws(|_| { error("boom") })
+    assert_eq(msg, "boom")
+}
+
+test "assert_throws with explode function" {
+    let msg = assert_throws(|_| { explode() })
+    assert_contains(msg, "kaboom")
+}
+
+// ── assert_contains ──
+
+test "assert_contains with strings" {
+    assert_contains("hello world", "world")
+    assert_contains("hello world", "hello")
+    assert_contains("abc", "b")
+}
+
+test "assert_contains with arrays" {
+    assert_contains([1, 2, 3], 2)
+    assert_contains(["a", "b", "c"], "b")
+}
+
+// ── assert_type ──
+
+test "assert_type checks types" {
+    assert_type(42, "Int")
+    assert_type(3.14, "Float")
+    assert_type("hello", "String")
+    assert_type(true, "Bool")
+    assert_type(nil, "Nil")
+    assert_type([1, 2], "Array")
+    assert_type(|_| { 1 }, "Closure")
+}
+
+// ── Negative tests: verify assertion helpers fail correctly ──
+
+test "assert_eq failure produces nice message" {
+    let msg = assert_throws(|_| { assert_eq(1, 2) })
+    assert_contains(msg, "assert_eq")
+    assert_contains(msg, "expected")
+    assert_contains(msg, "got")
+}
+
+test "assert_ne failure produces nice message" {
+    let msg = assert_throws(|_| { assert_ne(1, 1) })
+    assert_contains(msg, "assert_ne")
+    assert_contains(msg, "equal")
+}
+
+test "assert_true failure produces nice message" {
+    let msg = assert_throws(|_| { assert_true(false) })
+    assert_contains(msg, "assert_true")
+}
+
+test "assert_false failure produces nice message" {
+    let msg = assert_throws(|_| { assert_false(true) })
+    assert_contains(msg, "assert_false")
+}
+
+test "assert_nil failure produces nice message" {
+    let msg = assert_throws(|_| { assert_nil(42) })
+    assert_contains(msg, "assert_nil")
+}
+
+test "assert_throws failure when no error thrown" {
+    let msg = assert_throws(|_| { assert_throws(|_| { safe() }) })
+    assert_contains(msg, "assert_throws")
+    assert_contains(msg, "none was thrown")
+}
+
+test "assert_contains failure produces nice message" {
+    let msg = assert_throws(|_| { assert_contains("hello", "xyz") })
+    assert_contains(msg, "assert_contains")
+    assert_contains(msg, "does not contain")
+}
+
+test "assert_type failure produces nice message" {
+    let msg = assert_throws(|_| { assert_type(42, "String") })
+    assert_contains(msg, "assert_type")
+    assert_contains(msg, "expected type")
+}
