@@ -143,7 +143,7 @@ static void scan_file(LspSymbolIndex *idx, const char *path) {
 
 LspSymbolIndex *lsp_symbol_index_new(const char *eval_path) {
     LspSymbolIndex *idx = calloc(1, sizeof(LspSymbolIndex));
-    if (!idx) return;
+    if (!idx) return NULL;
     scan_file(idx, eval_path);
     return idx;
 }
