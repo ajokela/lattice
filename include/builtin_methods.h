@@ -57,8 +57,8 @@ LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, cha
 
 LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 LatValue builtin_array_filter(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
-LatValue builtin_array_reduce(LatValue *obj, LatValue *init, bool has_init,
-                              void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_reduce(LatValue *obj, LatValue *init, bool has_init, void *closure, BuiltinCallback cb,
+                              void *ctx, char **error);
 LatValue builtin_array_each(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 LatValue builtin_array_find(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 LatValue builtin_array_any(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
@@ -133,6 +133,7 @@ LatValue builtin_set_to_array(LatValue *obj, LatValue *args, int arg_count, char
 LatValue builtin_set_union(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_set_intersection(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_set_difference(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_set_symmetric_difference(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_set_is_subset(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_set_is_superset(LatValue *obj, LatValue *args, int arg_count, char **error);
 

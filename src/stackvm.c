@@ -866,82 +866,83 @@ static const char *stackvm_find_pressure(StackVM *vm, const char *name) {
 }
 
 /* ── Pre-computed djb2 hashes for builtin method names ── */
-#define MHASH_all          0x0b885ddeu
-#define MHASH_any          0x0b885e2du
-#define MHASH_bytes        0x0f30b64cu
-#define MHASH_chars        0x0f392d36u
-#define MHASH_chunk        0x0f3981beu
-#define MHASH_close        0x0f3b9a5bu
-#define MHASH_contains     0x42aa8264u
-#define MHASH_count        0x0f3d586eu
-#define MHASH_difference   0x52a92470u
-#define MHASH_drop         0x7c95d91au
-#define MHASH_each         0x7c961b96u
-#define MHASH_ends_with    0x9079bb6au
-#define MHASH_entries      0x6b84747fu
-#define MHASH_enum_name    0x9f13be1au
-#define MHASH_enumerate    0x9f82838bu
-#define MHASH_filter       0xfd7675abu
-#define MHASH_find         0x7c96cb66u
-#define MHASH_first        0x0f704b8du
-#define MHASH_flat         0x7c96d68cu
-#define MHASH_flat_map     0x022d3129u
-#define MHASH_flatten      0xb27dd5f3u
-#define MHASH_for_each     0x0f4aaefcu
-#define MHASH_get          0x0b887685u
-#define MHASH_group_by     0xdd0fdaecu
-#define MHASH_has          0x0b887a41u
-#define MHASH_index_of     0x66e4af51u
-#define MHASH_insert       0x04d4029au
-#define MHASH_intersection 0x40c04d3cu
-#define MHASH_is_empty     0xdc1854cfu
-#define MHASH_is_subset    0x805437d6u
-#define MHASH_is_superset  0x05f3913bu
-#define MHASH_is_variant   0x443eb735u
-#define MHASH_join         0x7c9915d5u
-#define MHASH_keys         0x7c9979c1u
-#define MHASH_last         0x7c99f459u
-#define MHASH_len          0x0b888bc4u
-#define MHASH_length       0x0b2deac7u
-#define MHASH_map          0x0b888f83u
-#define MHASH_max          0x0b888f8bu
-#define MHASH_merge        0x0fecc3f5u
-#define MHASH_min          0x0b889089u
-#define MHASH_pad_left     0xf3895c84u
-#define MHASH_pad_right    0x6523b4b7u
-#define MHASH_payload      0x9c4949cfu
-#define MHASH_pop          0x0b889e14u
-#define MHASH_push         0x7c9c7ae5u
-#define MHASH_recv         0x7c9d4d95u
-#define MHASH_reduce       0x19279c1du
-#define MHASH_add          0x0b885cceu
-#define MHASH_remove       0x192c7473u
-#define MHASH_remove_at    0xd988a4a7u
-#define MHASH_repeat       0x192dec66u
-#define MHASH_replace      0x3eef4e01u
-#define MHASH_reverse      0x3f5854c1u
-#define MHASH_send         0x7c9ddb4fu
-#define MHASH_set          0x0b88a991u
-#define MHASH_slice        0x105d06d5u
-#define MHASH_sort         0x7c9e066du
-#define MHASH_sort_by      0xa365ac87u
-#define MHASH_split        0x105f45f1u
-#define MHASH_starts_with  0xf5ef8361u
-#define MHASH_substring    0xcc998606u
-#define MHASH_sum          0x0b88ab9au
-#define MHASH_tag          0x0b88ad41u
-#define MHASH_take         0x7c9e564au
-#define MHASH_to_array     0xcebde966u
-#define MHASH_to_lower     0xcf836790u
-#define MHASH_to_upper     0xd026b2b3u
-#define MHASH_trim         0x7c9e9e61u
-#define MHASH_trim_end     0xcdcebb17u
-#define MHASH_trim_start   0x7d6a808eu
-#define MHASH_union        0x1082522eu
-#define MHASH_unique       0x20cca1bcu
-#define MHASH_values       0x22383ff5u
-#define MHASH_variant_name 0xb2b2b8bau
-#define MHASH_zip          0x0b88c7d8u
+#define MHASH_all                  0x0b885ddeu
+#define MHASH_any                  0x0b885e2du
+#define MHASH_bytes                0x0f30b64cu
+#define MHASH_chars                0x0f392d36u
+#define MHASH_chunk                0x0f3981beu
+#define MHASH_close                0x0f3b9a5bu
+#define MHASH_contains             0x42aa8264u
+#define MHASH_count                0x0f3d586eu
+#define MHASH_difference           0x52a92470u
+#define MHASH_drop                 0x7c95d91au
+#define MHASH_each                 0x7c961b96u
+#define MHASH_ends_with            0x9079bb6au
+#define MHASH_entries              0x6b84747fu
+#define MHASH_enum_name            0x9f13be1au
+#define MHASH_enumerate            0x9f82838bu
+#define MHASH_filter               0xfd7675abu
+#define MHASH_find                 0x7c96cb66u
+#define MHASH_first                0x0f704b8du
+#define MHASH_flat                 0x7c96d68cu
+#define MHASH_flat_map             0x022d3129u
+#define MHASH_flatten              0xb27dd5f3u
+#define MHASH_for_each             0x0f4aaefcu
+#define MHASH_get                  0x0b887685u
+#define MHASH_group_by             0xdd0fdaecu
+#define MHASH_has                  0x0b887a41u
+#define MHASH_index_of             0x66e4af51u
+#define MHASH_insert               0x04d4029au
+#define MHASH_intersection         0x40c04d3cu
+#define MHASH_is_empty             0xdc1854cfu
+#define MHASH_is_subset            0x805437d6u
+#define MHASH_is_superset          0x05f3913bu
+#define MHASH_is_variant           0x443eb735u
+#define MHASH_join                 0x7c9915d5u
+#define MHASH_keys                 0x7c9979c1u
+#define MHASH_last                 0x7c99f459u
+#define MHASH_len                  0x0b888bc4u
+#define MHASH_length               0x0b2deac7u
+#define MHASH_map                  0x0b888f83u
+#define MHASH_max                  0x0b888f8bu
+#define MHASH_merge                0x0fecc3f5u
+#define MHASH_min                  0x0b889089u
+#define MHASH_pad_left             0xf3895c84u
+#define MHASH_pad_right            0x6523b4b7u
+#define MHASH_payload              0x9c4949cfu
+#define MHASH_pop                  0x0b889e14u
+#define MHASH_push                 0x7c9c7ae5u
+#define MHASH_recv                 0x7c9d4d95u
+#define MHASH_reduce               0x19279c1du
+#define MHASH_add                  0x0b885cceu
+#define MHASH_remove               0x192c7473u
+#define MHASH_remove_at            0xd988a4a7u
+#define MHASH_repeat               0x192dec66u
+#define MHASH_replace              0x3eef4e01u
+#define MHASH_reverse              0x3f5854c1u
+#define MHASH_send                 0x7c9ddb4fu
+#define MHASH_set                  0x0b88a991u
+#define MHASH_slice                0x105d06d5u
+#define MHASH_sort                 0x7c9e066du
+#define MHASH_sort_by              0xa365ac87u
+#define MHASH_split                0x105f45f1u
+#define MHASH_starts_with          0xf5ef8361u
+#define MHASH_substring            0xcc998606u
+#define MHASH_sum                  0x0b88ab9au
+#define MHASH_symmetric_difference 0x1f3d47ecu
+#define MHASH_tag                  0x0b88ad41u
+#define MHASH_take                 0x7c9e564au
+#define MHASH_to_array             0xcebde966u
+#define MHASH_to_lower             0xcf836790u
+#define MHASH_to_upper             0xd026b2b3u
+#define MHASH_trim                 0x7c9e9e61u
+#define MHASH_trim_end             0xcdcebb17u
+#define MHASH_trim_start           0x7d6a808eu
+#define MHASH_union                0x1082522eu
+#define MHASH_unique               0x20cca1bcu
+#define MHASH_values               0x22383ff5u
+#define MHASH_variant_name         0xb2b2b8bau
+#define MHASH_zip                  0x0b88c7d8u
 /* Ref methods */
 #define MHASH_deref      0x0f49e72bu
 #define MHASH_inner_type 0xdf644222u
@@ -1082,6 +1083,7 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_union) return PIC_SET_UNION;
             if (mhash == MHASH_intersection) return PIC_SET_INTERSECTION;
             if (mhash == MHASH_difference) return PIC_SET_DIFFERENCE;
+            if (mhash == MHASH_symmetric_difference) return PIC_SET_SYMMETRIC_DIFFERENCE;
             if (mhash == MHASH_is_subset) return PIC_SET_IS_SUBSET;
             if (mhash == MHASH_is_superset) return PIC_SET_IS_SUPERSET;
             if (mhash == MHASH_contains) return PIC_SET_CONTAINS;
@@ -2068,6 +2070,15 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 args[0] = pop(vm);
                 char *err = NULL;
                 LatValue r = builtin_set_difference(obj, args, 1, &err);
+                value_free(&args[0]);
+                push(vm, r);
+                return true;
+            }
+            if (mhash == MHASH_symmetric_difference && strcmp(method, "symmetric_difference") == 0 && arg_count == 1) {
+                LatValue args[1];
+                args[0] = pop(vm);
+                char *err = NULL;
+                LatValue r = builtin_set_symmetric_difference(obj, args, 1, &err);
                 value_free(&args[0]);
                 push(vm, r);
                 return true;

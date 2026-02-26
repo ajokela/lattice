@@ -10970,6 +10970,38 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(result);
         }
+        /// @method Set.symmetric_difference(other: Set) -> Set
+        /// @category Set Methods
+        /// Return a new set with elements in either set but not in both.
+        /// @example s1.symmetric_difference(s2)
+        if (strcmp(method, "symmetric_difference") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_SET)
+                return eval_err(strdup(".symmetric_difference() expects 1 Set argument"));
+            LatValue result = value_set_new();
+            /* Add elements in self but not in other */
+            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
+                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    const char *key = obj.as.set.map->entries[i].key;
+                    if (!lat_map_contains(args[0].as.set.map, key)) {
+                        LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        lat_map_set(result.as.set.map, key, &cloned);
+                    }
+                }
+            }
+            /* Add elements in other but not in self */
+            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
+                if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED) {
+                    const char *key = args[0].as.set.map->entries[i].key;
+                    if (!lat_map_contains(obj.as.set.map, key)) {
+                        LatValue *sv = (LatValue *)args[0].as.set.map->entries[i].value;
+                        LatValue cloned = value_deep_clone(sv);
+                        lat_map_set(result.as.set.map, key, &cloned);
+                    }
+                }
+            }
+            return eval_ok(result);
+        }
         /// @method Set.is_subset(other: Set) -> Bool
         /// @category Set Methods
         /// Check if this set is a subset of other.
