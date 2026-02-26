@@ -6,6 +6,7 @@
 
 /* Output format for doc generation */
 typedef enum {
+    DOC_FMT_TEXT,
     DOC_FMT_MARKDOWN,
     DOC_FMT_JSON,
     DOC_FMT_HTML,
