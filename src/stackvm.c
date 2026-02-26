@@ -555,6 +555,9 @@ void stackvm_init(StackVM *vm, LatRuntime *rt) {
     if (!vm->call_wrapper.lines) return;
     vm->call_wrapper.lines_len = 3;
     vm->call_wrapper.lines_cap = 3;
+
+    /* Initialize GC (disabled by default; caller enables via gc.enabled) */
+    gc_init(&vm->gc);
 }
 
 void stackvm_free(StackVM *vm) {
@@ -611,6 +614,9 @@ void stackvm_free(StackVM *vm) {
     free(vm->call_wrapper.code);
     free(vm->call_wrapper.lines);
     pic_table_free(&vm->call_wrapper.pic);
+
+    /* Free GC-tracked objects */
+    gc_free(&vm->gc);
 }
 
 void stackvm_print_stack_trace(StackVM *vm) {
@@ -7164,6 +7170,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 vm->ephemeral_on_stack = false;
             }
             bump_arena_reset(vm->ephemeral);
+            /* GC safe point: collect at statement boundaries */
+            gc_maybe_collect(&vm->gc, vm);
             break;
         }
 

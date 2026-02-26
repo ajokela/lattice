@@ -66,6 +66,7 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+static bool gc_mode = false;
 static bool gc_stress_mode = false;
 static bool no_regions_mode = false;
 static bool no_assertions_mode = false;
@@ -256,6 +257,10 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         }
     }
 
+    if (gc_mode || gc_stress_mode) {
+        vm.gc.enabled = true;
+        vm.gc.stress = gc_stress_mode;
+    }
     LatValue result;
     StackVMResult vm_res = stackvm_run(&vm, chunk, &result);
     if (vm_res != STACKVM_OK) {
@@ -1272,7 +1277,11 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--stats") == 0) show_stats = true;
-        else if (strcmp(argv[i], "--gc-stress") == 0) gc_stress_mode = true;
+        else if (strcmp(argv[i], "--gc") == 0) gc_mode = true;
+        else if (strcmp(argv[i], "--gc-stress") == 0) {
+            gc_mode = true;
+            gc_stress_mode = true;
+        } else if (strcmp(argv[i], "--no-gc") == 0) gc_mode = false;
         else if (strcmp(argv[i], "--no-regions") == 0) no_regions_mode = true;
         else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;
         else if (strcmp(argv[i], "--tree-walk") == 0) tree_walk_mode = true;

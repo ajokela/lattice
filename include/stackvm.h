@@ -5,6 +5,7 @@
 #include "value.h"
 #include "env.h"
 #include "runtime.h"
+#include "gc.h"
 
 struct BumpArena; /* forward declaration */
 struct Debugger;  /* forward declaration */
@@ -88,6 +89,8 @@ typedef struct {
     LatRuntime *rt;
     /* Interactive debugger (NULL when not debugging) */
     struct Debugger *debugger;
+    /* Mark-and-sweep garbage collector (opt-in via --gc flag) */
+    GC gc;
 } StackVM;
 
 void stackvm_init(StackVM *vm, LatRuntime *rt);
