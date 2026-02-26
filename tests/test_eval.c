@@ -3993,3 +3993,34 @@ TEST(structured_error_backward_compat_is_error) {
                 "    assert(!is_error(\"hello\"), \"string should not be an error\")\n"
                 "}\n");
 }
+
+/* ── Tests: uuid() builtin ── */
+
+TEST(test_uuid_format) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let id = uuid()\n"
+                "    assert(id.len() == 36, \"UUID must be 36 chars\")\n"
+                "    assert(id[8] == \"-\", \"dash at pos 8\")\n"
+                "    assert(id[13] == \"-\", \"dash at pos 13\")\n"
+                "    assert(id[18] == \"-\", \"dash at pos 18\")\n"
+                "    assert(id[23] == \"-\", \"dash at pos 23\")\n"
+                "    assert(id[14] == \"4\", \"version must be 4\")\n"
+                "    let variant = id[19]\n"
+                "    assert(variant == \"8\" || variant == \"9\" || variant == \"a\" || variant == \"b\", \"variant "
+                "must be 8/9/a/b\")\n"
+                "}\n");
+}
+
+TEST(test_uuid_uniqueness) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let a = uuid()\n"
+                "    let b = uuid()\n"
+                "    assert(a != b, \"two UUIDs must be different\")\n"
+                "}\n");
+}
+
+TEST(test_uuid_type) {
+    ASSERT_RUNS("fn main() {\n"
+                "    assert(typeof(uuid()) == \"String\", \"uuid() returns String\")\n"
+                "}\n");
+}

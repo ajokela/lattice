@@ -1459,6 +1459,32 @@ static LatValue native_random_bytes(LatValue *args, int ac) {
     return result;
 }
 
+/// @builtin uuid() -> String
+/// @category Crypto
+/// Generate an RFC 4122 version 4 random UUID.
+static LatValue native_uuid(LatValue *args, int ac) {
+    (void)args;
+    if (ac != 0) {
+        current_rt->error = strdup("uuid() expects no arguments");
+        return value_nil();
+    }
+    char *err = NULL;
+    uint8_t *bytes = crypto_random_bytes(16, &err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
+    /* Set version (4) and variant (10xx) bits per RFC 4122 */
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    char buf[37];
+    snprintf(buf, sizeof(buf), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", bytes[0],
+             bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
+             bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+    free(bytes);
+    return value_string(buf);
+}
+
 /* ── Regex natives ── */
 
 static LatValue native_regex_match(LatValue *args, int ac) {
@@ -3654,6 +3680,7 @@ static LatValue build_crypto_module(void) {
     mod_set_native(&m, "sha512", native_sha512);
     mod_set_native(&m, "hmac_sha256", native_hmac_sha256);
     mod_set_native(&m, "random_bytes", native_random_bytes);
+    mod_set_native(&m, "uuid", native_uuid);
     mod_set_native(&m, "url_encode", native_url_encode);
     mod_set_native(&m, "url_decode", native_url_decode);
     return m;
@@ -4008,6 +4035,7 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "sha512", native_sha512, 1);
     rt_register_native(rt, "hmac_sha256", native_hmac_sha256, 2);
     rt_register_native(rt, "random_bytes", native_random_bytes, 1);
+    rt_register_native(rt, "uuid", native_uuid, 0);
 
     /* Regex */
     rt_register_native(rt, "regex_match", native_regex_match, -1);

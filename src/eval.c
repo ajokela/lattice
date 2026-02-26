@@ -5869,6 +5869,31 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin uuid() -> String
+                /// @category Crypto
+                /// Generate an RFC 4122 version 4 random UUID.
+                /// @example uuid()  // "550e8400-e29b-41d4-a716-446655440000"
+                if (strcmp(fn_name, "uuid") == 0) {
+                    if (argc != 0) {
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
+                        free(args);
+                        return eval_err(strdup("uuid() expects no arguments"));
+                    }
+                    free(args);
+                    char *cerr = NULL;
+                    uint8_t *bytes = crypto_random_bytes(16, &cerr);
+                    if (cerr) return eval_err(cerr);
+                    /* Set version (4) and variant (10xx) bits per RFC 4122 */
+                    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+                    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+                    char buf[37];
+                    snprintf(buf, sizeof(buf), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
+                             bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+                    free(bytes);
+                    return eval_ok(value_string(buf));
+                }
+
                 /* ── Date/time formatting builtins ── */
 
                 /// @builtin time_format(epoch_ms: Int, fmt: String) -> String
