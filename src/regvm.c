@@ -2620,6 +2620,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_FREEZE_EXCEPT] = &&L_FREEZE_EXCEPT,
         /* Require */
         [ROP_REQUIRE] = &&L_REQUIRE,
+        /* Slice assignment */
+        [ROP_SETSLICE] = &&L_SETSLICE,
+        [ROP_SETSLICE_LOCAL] = &&L_SETSLICE_LOCAL,
         /* Misc */
         [ROP_HALT] = &&L_HALT,
     };
@@ -5691,6 +5694,110 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     }
                 }
             }
+        }
+        DISPATCH();
+    }
+
+    CASE(SETSLICE) {
+        /* R[A][R[B]..R[B+1]] = R[C] — array slice splice */
+        uint8_t a = REG_GET_A(instr);
+        uint8_t b = REG_GET_B(instr);
+        uint8_t c = REG_GET_C(instr);
+
+        if (R[a].phase == VTAG_CRYSTAL) RVM_ERROR("cannot modify a frozen value");
+        if (R[a].phase == VTAG_SUBLIMATED) RVM_ERROR("cannot modify a sublimated value");
+        if (R[a].type != VAL_ARRAY) RVM_ERROR("slice assignment target must be an array");
+        if (R[c].type != VAL_ARRAY) RVM_ERROR("slice assignment value must be an array");
+        if (R[b].type != VAL_INT || R[b + 1].type != VAL_INT) RVM_ERROR("slice bounds must be integers");
+
+        int64_t start = R[b].as.int_val;
+        int64_t end = R[b + 1].as.int_val;
+        int64_t arr_len = (int64_t)R[a].as.array.len;
+
+        if (start < 0) start = 0;
+        if (start > arr_len) start = arr_len;
+        if (end < 0) end = 0;
+        if (end > arr_len) end = arr_len;
+        if (end < start) end = start;
+
+        size_t slice_start = (size_t)start;
+        size_t slice_end = (size_t)end;
+        size_t old_slice_len = slice_end - slice_start;
+        size_t new_slice_len = R[c].as.array.len;
+        size_t old_len = R[a].as.array.len;
+        size_t new_len = old_len - old_slice_len + new_slice_len;
+
+        for (size_t i = slice_start; i < slice_end; i++) { value_free(&R[a].as.array.elems[i]); }
+
+        if (new_len != old_len) {
+            if (new_len > R[a].as.array.cap) {
+                size_t new_cap = new_len < 4 ? 4 : new_len * 2;
+                R[a].as.array.elems = realloc(R[a].as.array.elems, new_cap * sizeof(LatValue));
+                R[a].as.array.cap = new_cap;
+            }
+            size_t tail_start = slice_end;
+            size_t tail_count = old_len - tail_start;
+            if (tail_count > 0) {
+                memmove(&R[a].as.array.elems[slice_start + new_slice_len], &R[a].as.array.elems[tail_start],
+                        tail_count * sizeof(LatValue));
+            }
+            R[a].as.array.len = new_len;
+        }
+
+        for (size_t i = 0; i < new_slice_len; i++) {
+            R[a].as.array.elems[slice_start + i] = rvm_clone(&R[c].as.array.elems[i]);
+        }
+        DISPATCH();
+    }
+
+    CASE(SETSLICE_LOCAL) {
+        /* R[A][R[B]..R[B+1]] = R[C] — in-place array slice splice */
+        uint8_t a = REG_GET_A(instr);
+        uint8_t b = REG_GET_B(instr);
+        uint8_t c = REG_GET_C(instr);
+
+        if (R[a].phase == VTAG_CRYSTAL) RVM_ERROR("cannot modify a frozen value");
+        if (R[a].phase == VTAG_SUBLIMATED) RVM_ERROR("cannot modify a sublimated value");
+        if (R[a].type != VAL_ARRAY) RVM_ERROR("slice assignment target must be an array");
+        if (R[c].type != VAL_ARRAY) RVM_ERROR("slice assignment value must be an array");
+        if (R[b].type != VAL_INT || R[b + 1].type != VAL_INT) RVM_ERROR("slice bounds must be integers");
+
+        int64_t start = R[b].as.int_val;
+        int64_t end = R[b + 1].as.int_val;
+        int64_t arr_len = (int64_t)R[a].as.array.len;
+
+        if (start < 0) start = 0;
+        if (start > arr_len) start = arr_len;
+        if (end < 0) end = 0;
+        if (end > arr_len) end = arr_len;
+        if (end < start) end = start;
+
+        size_t slice_start = (size_t)start;
+        size_t slice_end = (size_t)end;
+        size_t old_slice_len = slice_end - slice_start;
+        size_t new_slice_len = R[c].as.array.len;
+        size_t old_len = R[a].as.array.len;
+        size_t new_len = old_len - old_slice_len + new_slice_len;
+
+        for (size_t i = slice_start; i < slice_end; i++) { value_free(&R[a].as.array.elems[i]); }
+
+        if (new_len != old_len) {
+            if (new_len > R[a].as.array.cap) {
+                size_t new_cap = new_len < 4 ? 4 : new_len * 2;
+                R[a].as.array.elems = realloc(R[a].as.array.elems, new_cap * sizeof(LatValue));
+                R[a].as.array.cap = new_cap;
+            }
+            size_t tail_start = slice_end;
+            size_t tail_count = old_len - tail_start;
+            if (tail_count > 0) {
+                memmove(&R[a].as.array.elems[slice_start + new_slice_len], &R[a].as.array.elems[tail_start],
+                        tail_count * sizeof(LatValue));
+            }
+            R[a].as.array.len = new_len;
+        }
+
+        for (size_t i = 0; i < new_slice_len; i++) {
+            R[a].as.array.elems[slice_start + i] = rvm_clone(&R[c].as.array.elems[i]);
         }
         DISPATCH();
     }

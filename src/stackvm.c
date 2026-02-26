@@ -2905,6 +2905,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_FREEZE_EXCEPT] = &&lbl_OP_FREEZE_EXCEPT,
         [OP_FREEZE_FIELD] = &&lbl_OP_FREEZE_FIELD,
         [OP_APPEND_STR_LOCAL] = &&lbl_OP_APPEND_STR_LOCAL,
+        [OP_SET_SLICE] = &&lbl_OP_SET_SLICE,
+        [OP_SET_SLICE_LOCAL] = &&lbl_OP_SET_SLICE_LOCAL,
         [OP_HALT] = &&lbl_OP_HALT,
     };
 #endif
@@ -5761,6 +5763,173 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 VM_ERROR("invalid index assignment");
                 break;
             }
+            break;
+        }
+
+        /* ── Slice assignment ── */
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_SET_SLICE:
+#endif
+        case OP_SET_SLICE: {
+            /* Stack (bottom to top): [val, obj, start, end] */
+            LatValue end_v = pop(vm);
+            LatValue start_v = pop(vm);
+            LatValue obj = pop(vm);
+            LatValue val = pop(vm);
+
+            if (obj.type != VAL_ARRAY) {
+                value_free(&obj);
+                value_free(&val);
+                VM_ERROR("slice assignment target must be an array");
+                break;
+            }
+            if (val.type != VAL_ARRAY) {
+                value_free(&obj);
+                value_free(&val);
+                VM_ERROR("slice assignment value must be an array");
+                break;
+            }
+            if (obj.phase == VTAG_CRYSTAL) {
+                value_free(&obj);
+                value_free(&val);
+                VM_ERROR("cannot assign to slice of frozen array");
+                break;
+            }
+            if (start_v.type != VAL_INT || end_v.type != VAL_INT) {
+                value_free(&obj);
+                value_free(&val);
+                VM_ERROR("slice bounds must be integers");
+                break;
+            }
+
+            int64_t start = start_v.as.int_val;
+            int64_t end = end_v.as.int_val;
+            int64_t arr_len = (int64_t)obj.as.array.len;
+
+            /* Clamp bounds */
+            if (start < 0) start = 0;
+            if (start > arr_len) start = arr_len;
+            if (end < 0) end = 0;
+            if (end > arr_len) end = arr_len;
+            if (end < start) end = start;
+
+            size_t slice_start = (size_t)start;
+            size_t slice_end = (size_t)end;
+            size_t old_slice_len = slice_end - slice_start;
+            size_t new_slice_len = val.as.array.len;
+            size_t old_len = obj.as.array.len;
+            size_t new_len = old_len - old_slice_len + new_slice_len;
+
+            /* Free old elements in the replaced range */
+            for (size_t i = slice_start; i < slice_end; i++) { value_free(&obj.as.array.elems[i]); }
+
+            /* Resize if needed */
+            if (new_len != old_len) {
+                if (new_len > obj.as.array.cap) {
+                    size_t new_cap = new_len < 4 ? 4 : new_len * 2;
+                    obj.as.array.elems = realloc(obj.as.array.elems, new_cap * sizeof(LatValue));
+                    obj.as.array.cap = new_cap;
+                }
+                /* Shift tail elements */
+                size_t tail_start = slice_end;
+                size_t tail_count = old_len - tail_start;
+                if (tail_count > 0) {
+                    memmove(&obj.as.array.elems[slice_start + new_slice_len], &obj.as.array.elems[tail_start],
+                            tail_count * sizeof(LatValue));
+                }
+                obj.as.array.len = new_len;
+            }
+
+            /* Copy new elements into the slice region */
+            for (size_t i = 0; i < new_slice_len; i++) {
+                obj.as.array.elems[slice_start + i] = value_deep_clone(&val.as.array.elems[i]);
+            }
+
+            value_free(&val);
+            push(vm, obj);
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_SET_SLICE_LOCAL:
+#endif
+        case OP_SET_SLICE_LOCAL: {
+            uint8_t slot = READ_BYTE();
+            /* Stack (bottom to top): [val, start, end] */
+            LatValue end_v = pop(vm);
+            LatValue start_v = pop(vm);
+            LatValue val = pop(vm);
+            stackvm_promote_value(&val);
+            LatValue *obj = &frame->slots[slot];
+
+            /* Ref unwrap */
+            if (obj->type == VAL_REF) obj = &obj->as.ref.ref->value;
+
+            if (obj->type != VAL_ARRAY) {
+                value_free(&val);
+                VM_ERROR("slice assignment target must be an array");
+                break;
+            }
+            if (val.type != VAL_ARRAY) {
+                value_free(&val);
+                VM_ERROR("slice assignment value must be an array");
+                break;
+            }
+            if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
+                value_free(&val);
+                VM_ERROR("cannot modify a %s value", obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                break;
+            }
+            if (start_v.type != VAL_INT || end_v.type != VAL_INT) {
+                value_free(&val);
+                VM_ERROR("slice bounds must be integers");
+                break;
+            }
+
+            int64_t start = start_v.as.int_val;
+            int64_t end = end_v.as.int_val;
+            int64_t arr_len = (int64_t)obj->as.array.len;
+
+            /* Clamp bounds */
+            if (start < 0) start = 0;
+            if (start > arr_len) start = arr_len;
+            if (end < 0) end = 0;
+            if (end > arr_len) end = arr_len;
+            if (end < start) end = start;
+
+            size_t slice_start = (size_t)start;
+            size_t slice_end = (size_t)end;
+            size_t old_slice_len = slice_end - slice_start;
+            size_t new_slice_len = val.as.array.len;
+            size_t old_len = obj->as.array.len;
+            size_t new_len = old_len - old_slice_len + new_slice_len;
+
+            /* Free old elements in the replaced range */
+            for (size_t i = slice_start; i < slice_end; i++) { value_free(&obj->as.array.elems[i]); }
+
+            /* Resize if needed */
+            if (new_len != old_len) {
+                if (new_len > obj->as.array.cap) {
+                    size_t new_cap = new_len < 4 ? 4 : new_len * 2;
+                    obj->as.array.elems = realloc(obj->as.array.elems, new_cap * sizeof(LatValue));
+                    obj->as.array.cap = new_cap;
+                }
+                /* Shift tail elements */
+                size_t tail_start = slice_end;
+                size_t tail_count = old_len - tail_start;
+                if (tail_count > 0) {
+                    memmove(&obj->as.array.elems[slice_start + new_slice_len], &obj->as.array.elems[tail_start],
+                            tail_count * sizeof(LatValue));
+                }
+                obj->as.array.len = new_len;
+            }
+
+            /* Copy new elements into the slice region */
+            for (size_t i = 0; i < new_slice_len; i++) {
+                obj->as.array.elems[slice_start + i] = value_deep_clone(&val.as.array.elems[i]);
+            }
+
+            value_free(&val);
             break;
         }
 

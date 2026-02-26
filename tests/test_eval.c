@@ -3878,3 +3878,53 @@ TEST(gc_vm_init_state) {
     stackvm_free(&vm);
     lat_runtime_free(&rt);
 }
+
+/* ── Slice assignment tests ── */
+
+TEST(test_slice_assign_same_length) {
+    ASSERT_RUNS("flux arr = [1, 2, 3, 4, 5]\n"
+                "arr[1..3] = [8, 9]\n"
+                "assert(len(arr) == 5)\n"
+                "assert(arr[0] == 1)\n"
+                "assert(arr[1] == 8)\n"
+                "assert(arr[2] == 9)\n"
+                "assert(arr[3] == 4)\n"
+                "assert(arr[4] == 5)\n");
+}
+
+TEST(test_slice_assign_shorter) {
+    ASSERT_RUNS("flux arr = [1, 2, 3, 4, 5]\n"
+                "arr[1..4] = [8]\n"
+                "assert(len(arr) == 3)\n"
+                "assert(arr[0] == 1)\n"
+                "assert(arr[1] == 8)\n"
+                "assert(arr[2] == 5)\n");
+}
+
+TEST(test_slice_assign_longer) {
+    ASSERT_RUNS("flux arr = [1, 2, 3]\n"
+                "arr[1..2] = [8, 9, 10]\n"
+                "assert(len(arr) == 5)\n"
+                "assert(arr[0] == 1)\n"
+                "assert(arr[1] == 8)\n"
+                "assert(arr[2] == 9)\n"
+                "assert(arr[3] == 10)\n"
+                "assert(arr[4] == 3)\n");
+}
+
+TEST(test_slice_assign_empty_rhs) {
+    ASSERT_RUNS("flux arr = [1, 2, 3, 4]\n"
+                "arr[1..3] = []\n"
+                "assert(len(arr) == 2)\n"
+                "assert(arr[0] == 1)\n"
+                "assert(arr[1] == 4)\n");
+}
+
+TEST(test_slice_assign_beginning) {
+    ASSERT_RUNS("flux arr = [1, 2, 3]\n"
+                "arr[0..2] = [8, 9]\n"
+                "assert(len(arr) == 3)\n"
+                "assert(arr[0] == 8)\n"
+                "assert(arr[1] == 9)\n"
+                "assert(arr[2] == 3)\n");
+}

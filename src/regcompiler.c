@@ -2503,6 +2503,52 @@ static void compile_stmt(const Stmt *s) {
                     free_reg(obj_reg);
                 }
                 free_reg(val_reg);
+            } else if (s->as.assign.target->tag == EXPR_INDEX &&
+                       s->as.assign.target->as.index.index->tag == EXPR_RANGE) {
+                /* Slice assignment: arr[start..end] = rhs_array */
+                Expr *target = s->as.assign.target;
+                Expr *range_expr = target->as.index.index;
+                uint8_t val_reg = alloc_reg();
+                compile_expr(s->as.assign.value, val_reg, line);
+
+                uint8_t obj_reg;
+                bool obj_is_local = false;
+                if (target->as.index.object->tag == EXPR_IDENT) {
+                    int local = resolve_local(rc, target->as.index.object->as.str_val);
+                    if (local >= 0) {
+                        obj_reg = local_reg(local);
+                        obj_is_local = true;
+                    } else {
+                        obj_reg = alloc_reg();
+                        compile_expr(target->as.index.object, obj_reg, line);
+                    }
+                } else {
+                    obj_reg = alloc_reg();
+                    compile_expr(target->as.index.object, obj_reg, line);
+                }
+
+                /* Allocate consecutive registers for start and end */
+                uint8_t start_reg = alloc_reg();
+                uint8_t end_reg = alloc_reg();
+                compile_expr(range_expr->as.range.start, start_reg, line);
+                compile_expr(range_expr->as.range.end, end_reg, line);
+
+                emit_ABC(obj_is_local ? ROP_SETSLICE_LOCAL : ROP_SETSLICE, obj_reg, start_reg, val_reg, line);
+
+                if (!obj_is_local && target->as.index.object->tag == EXPR_IDENT) {
+                    const char *name = target->as.index.object->as.str_val;
+                    int uv = resolve_upvalue(rc, name);
+                    if (uv >= 0) {
+                        emit_ABC(ROP_SETUPVALUE, obj_reg, (uint8_t)uv, 0, line);
+                    } else {
+                        uint16_t nki = add_constant(value_string(name));
+                        emit_ABx(ROP_SETGLOBAL, obj_reg, nki, line);
+                    }
+                    free_reg(obj_reg);
+                }
+                free_reg(end_reg);
+                free_reg(start_reg);
+                free_reg(val_reg);
             } else if (s->as.assign.target->tag == EXPR_INDEX) {
                 Expr *target = s->as.assign.target;
                 uint8_t val_reg = alloc_reg();
