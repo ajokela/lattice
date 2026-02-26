@@ -1,6 +1,6 @@
 #include "runtime.h"
-#include "stackvm.h"       /* For StackVM, StackCallFrame, ObjUpvalue, stackvm_run, stackvm_track_chunk, Chunk types */
-#include "regvm.h"         /* For RegVM, RegChunk, regvm_run, regvm_track_chunk */
+#include "stackvm.h" /* For StackVM, StackCallFrame, ObjUpvalue, stackvm_run, stackvm_track_chunk, Chunk types */
+#include "regvm.h"   /* For RegVM, RegChunk, regvm_run, regvm_track_chunk */
 #include "stackopcode.h"
 #include "stackcompiler.h"
 #include "intern.h"
@@ -27,6 +27,7 @@
 #include "string_ops.h"
 #include "array_ops.h"
 #include "channel.h"
+#include "iterator.h"
 #include "ext.h"
 #include "lexer.h"
 #include "parser.h"
@@ -55,7 +56,6 @@ static _Thread_local LatRuntime *current_rt = NULL;
 void lat_runtime_set_current(LatRuntime *rt) { current_rt = rt; }
 LatRuntime *lat_runtime_current(void) { return current_rt; }
 
-
 /* ── Phase system functions ── */
 
 void rt_record_history(LatRuntime *rt, const char *name, LatValue *val) {
@@ -63,8 +63,8 @@ void rt_record_history(LatRuntime *rt, const char *name, LatValue *val) {
         if (strcmp(rt->tracked_vars[i].name, name) != 0) continue;
         if (rt->tracked_vars[i].snap_count >= rt->tracked_vars[i].snap_cap) {
             rt->tracked_vars[i].snap_cap = rt->tracked_vars[i].snap_cap ? rt->tracked_vars[i].snap_cap * 2 : 4;
-            rt->tracked_vars[i].snapshots = realloc(rt->tracked_vars[i].snapshots,
-                rt->tracked_vars[i].snap_cap * sizeof(*rt->tracked_vars[i].snapshots));
+            rt->tracked_vars[i].snapshots = realloc(
+                rt->tracked_vars[i].snapshots, rt->tracked_vars[i].snap_cap * sizeof(*rt->tracked_vars[i].snapshots));
         }
         size_t si = rt->tracked_vars[i].snap_count++;
         const char *phase_name = builtin_phase_of_str(val);
@@ -113,10 +113,16 @@ void rt_freeze_cascade(LatRuntime *rt, const char *target_name) {
             const char *strategy = rt->bonds[bi].dep_strategies ? rt->bonds[bi].dep_strategies[di] : "mirror";
             LatValue dval;
             if (!rt->get_var_by_name(rt->active_vm, dep, &dval)) continue;
-            if (dval.type == VAL_CHANNEL) { value_free(&dval); continue; }
+            if (dval.type == VAL_CHANNEL) {
+                value_free(&dval);
+                continue;
+            }
 
             if (strcmp(strategy, "mirror") == 0) {
-                if (dval.phase == VTAG_CRYSTAL) { value_free(&dval); continue; }
+                if (dval.phase == VTAG_CRYSTAL) {
+                    value_free(&dval);
+                    continue;
+                }
                 LatValue frozen = value_freeze(dval);
                 rt->set_var_by_name(rt->active_vm, dep, value_deep_clone(&frozen));
                 value_free(&frozen);
@@ -125,7 +131,10 @@ void rt_freeze_cascade(LatRuntime *rt, const char *target_name) {
                 rt_freeze_cascade(rt, dep);
                 if (rt->error) return;
             } else if (strcmp(strategy, "inverse") == 0) {
-                if (dval.phase != VTAG_CRYSTAL && dval.phase != VTAG_SUBLIMATED) { value_free(&dval); continue; }
+                if (dval.phase != VTAG_CRYSTAL && dval.phase != VTAG_SUBLIMATED) {
+                    value_free(&dval);
+                    continue;
+                }
                 LatValue thawed = value_thaw(&dval);
                 value_free(&dval);
                 rt->set_var_by_name(rt->active_vm, dep, value_deep_clone(&thawed));
@@ -251,7 +260,8 @@ static LatValue native_chr(LatValue *args, int arg_count) {
 static LatValue native_abs(LatValue *args, int arg_count) {
     if (arg_count != 1) return value_int(0);
     if (args[0].type == VAL_INT) return value_int(args[0].as.int_val < 0 ? -args[0].as.int_val : args[0].as.int_val);
-    if (args[0].type == VAL_FLOAT) return value_float(args[0].as.float_val < 0 ? -args[0].as.float_val : args[0].as.float_val);
+    if (args[0].type == VAL_FLOAT)
+        return value_float(args[0].as.float_val < 0 ? -args[0].as.float_val : args[0].as.float_val);
     return value_int(0);
 }
 
@@ -300,12 +310,14 @@ static LatValue native_is_error(LatValue *args, int arg_count) {
 }
 
 static LatValue native_map_new(LatValue *args, int arg_count) {
-    (void)args; (void)arg_count;
+    (void)args;
+    (void)arg_count;
     return value_map_new();
 }
 
 static LatValue native_set_new(LatValue *args, int arg_count) {
-    (void)args; (void)arg_count;
+    (void)args;
+    (void)arg_count;
     return value_set_new();
 }
 
@@ -322,7 +334,8 @@ static LatValue native_set_from(LatValue *args, int arg_count) {
 }
 
 static LatValue native_channel_new(LatValue *args, int arg_count) {
-    (void)args; (void)arg_count;
+    (void)args;
+    (void)arg_count;
     LatChannel *ch = channel_new();
     LatValue val = value_channel(ch);
     channel_release(ch);
@@ -344,10 +357,8 @@ static LatValue native_buffer_from(LatValue *args, int arg_count) {
     uint8_t *data = malloc(len > 0 ? len : 1);
     if (!data) return value_unit();
     for (size_t i = 0; i < len; i++) {
-        if (args[0].as.array.elems[i].type == VAL_INT)
-            data[i] = (uint8_t)(args[0].as.array.elems[i].as.int_val & 0xFF);
-        else
-            data[i] = 0;
+        if (args[0].as.array.elems[i].type == VAL_INT) data[i] = (uint8_t)(args[0].as.array.elems[i].as.int_val & 0xFF);
+        else data[i] = 0;
     }
     LatValue buf = value_buffer(data, len);
     free(data);
@@ -373,7 +384,10 @@ static LatValue native_read_file_bytes(LatValue *args, int ac) {
     fseek(f, 0, SEEK_END);
     long flen = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (flen < 0) { fclose(f); return value_nil(); }
+    if (flen < 0) {
+        fclose(f);
+        return value_nil();
+    }
     uint8_t *data = malloc((size_t)flen);
     if (!data) return value_unit();
     size_t nread = fread(data, 1, (size_t)flen, f);
@@ -414,8 +428,8 @@ static LatValue native_track(LatValue *args, int ac) {
     /* Register tracking */
     if (current_rt->tracked_count >= current_rt->tracked_cap) {
         current_rt->tracked_cap = current_rt->tracked_cap ? current_rt->tracked_cap * 2 : 4;
-        current_rt->tracked_vars = realloc(current_rt->tracked_vars,
-            current_rt->tracked_cap * sizeof(*current_rt->tracked_vars));
+        current_rt->tracked_vars =
+            realloc(current_rt->tracked_vars, current_rt->tracked_cap * sizeof(*current_rt->tracked_vars));
     }
     size_t idx = current_rt->tracked_count++;
     current_rt->tracking_active = true;
@@ -430,9 +444,7 @@ static LatValue native_track(LatValue *args, int ac) {
 }
 
 static LatValue native_phases(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR || !current_rt) {
-        return value_array(NULL, 0);
-    }
+    if (ac != 1 || args[0].type != VAL_STR || !current_rt) { return value_array(NULL, 0); }
     const char *name = args[0].as.str_val;
     for (size_t i = 0; i < current_rt->tracked_count; i++) {
         if (strcmp(current_rt->tracked_vars[i].name, name) != 0) continue;
@@ -445,8 +457,8 @@ static LatValue native_phases(LatValue *args, int ac) {
             LatValue val_clone = value_deep_clone(&current_rt->tracked_vars[i].snapshots[j].value);
             LatValue line_val = value_int(current_rt->tracked_vars[i].snapshots[j].line);
             LatValue fn_val = current_rt->tracked_vars[i].snapshots[j].fn_name
-                ? value_string(current_rt->tracked_vars[i].snapshots[j].fn_name)
-                : value_nil();
+                                  ? value_string(current_rt->tracked_vars[i].snapshots[j].fn_name)
+                                  : value_nil();
             lat_map_set(m.as.map.map, "phase", &phase_val);
             lat_map_set(m.as.map.map, "value", &val_clone);
             lat_map_set(m.as.map.map, "line", &line_val);
@@ -466,8 +478,7 @@ static LatValue native_phases(LatValue *args, int ac) {
 /// with keys: phase, value, line, fn.
 /// @example history(x)  // [{phase: "fluid", value: 10, line: 3, fn: "main"}, ...]
 static LatValue native_history(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR || !current_rt)
-        return value_array(NULL, 0);
+    if (ac != 1 || args[0].type != VAL_STR || !current_rt) return value_array(NULL, 0);
     const char *name = args[0].as.str_val;
     for (size_t i = 0; i < current_rt->tracked_count; i++) {
         if (strcmp(current_rt->tracked_vars[i].name, name) != 0) continue;
@@ -480,8 +491,8 @@ static LatValue native_history(LatValue *args, int ac) {
             LatValue val_clone = value_deep_clone(&current_rt->tracked_vars[i].snapshots[j].value);
             LatValue line_val = value_int(current_rt->tracked_vars[i].snapshots[j].line);
             LatValue fn_val = current_rt->tracked_vars[i].snapshots[j].fn_name
-                ? value_string(current_rt->tracked_vars[i].snapshots[j].fn_name)
-                : value_nil();
+                                  ? value_string(current_rt->tracked_vars[i].snapshots[j].fn_name)
+                                  : value_nil();
             lat_map_set(m.as.map.map, "phase", &phase_val);
             lat_map_set(m.as.map.map, "value", &val_clone);
             lat_map_set(m.as.map.map, "line", &line_val);
@@ -496,28 +507,25 @@ static LatValue native_history(LatValue *args, int ac) {
 }
 
 static LatValue native_rewind(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT || !current_rt)
-        return value_nil();
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT || !current_rt) return value_nil();
     const char *name = args[0].as.str_val;
     int64_t steps = args[1].as.int_val;
     for (size_t i = 0; i < current_rt->tracked_count; i++) {
         if (strcmp(current_rt->tracked_vars[i].name, name) != 0) continue;
         int64_t idx = (int64_t)current_rt->tracked_vars[i].snap_count - 1 - steps;
-        if (idx < 0 || idx >= (int64_t)current_rt->tracked_vars[i].snap_count)
-            return value_nil();
+        if (idx < 0 || idx >= (int64_t)current_rt->tracked_vars[i].snap_count) return value_nil();
         return value_deep_clone(&current_rt->tracked_vars[i].snapshots[idx].value);
     }
     return value_nil();
 }
 
 static LatValue native_pressurize(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR || !current_rt)
-        return value_unit();
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR || !current_rt) return value_unit();
     const char *name = args[0].as.str_val;
     const char *mode = args[1].as.str_val;
     /* Validate mode */
-    if (strcmp(mode, "no_grow") != 0 && strcmp(mode, "no_shrink") != 0 &&
-        strcmp(mode, "no_resize") != 0 && strcmp(mode, "read_heavy") != 0)
+    if (strcmp(mode, "no_grow") != 0 && strcmp(mode, "no_shrink") != 0 && strcmp(mode, "no_resize") != 0 &&
+        strcmp(mode, "read_heavy") != 0)
         return value_unit();
     /* Update existing or add new */
     for (size_t i = 0; i < current_rt->pressure_count; i++) {
@@ -529,8 +537,8 @@ static LatValue native_pressurize(LatValue *args, int ac) {
     }
     if (current_rt->pressure_count >= current_rt->pressure_cap) {
         current_rt->pressure_cap = current_rt->pressure_cap ? current_rt->pressure_cap * 2 : 4;
-        current_rt->pressures = realloc(current_rt->pressures,
-            current_rt->pressure_cap * sizeof(*current_rt->pressures));
+        current_rt->pressures =
+            realloc(current_rt->pressures, current_rt->pressure_cap * sizeof(*current_rt->pressures));
     }
     size_t idx = current_rt->pressure_count++;
     current_rt->pressures[idx].name = strdup(name);
@@ -556,8 +564,7 @@ static LatValue native_pressure_of(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR || !current_rt) return value_nil();
     const char *name = args[0].as.str_val;
     for (size_t i = 0; i < current_rt->pressure_count; i++) {
-        if (strcmp(current_rt->pressures[i].name, name) == 0)
-            return value_string(current_rt->pressures[i].mode);
+        if (strcmp(current_rt->pressures[i].name, name) == 0) return value_string(current_rt->pressures[i].mode);
     }
     return value_nil();
 }
@@ -619,7 +626,8 @@ static LatValue native_assert(LatValue *args, int arg_count) {
 }
 
 static LatValue native_version(LatValue *args, int arg_count) {
-    (void)args; (void)arg_count;
+    (void)args;
+    (void)arg_count;
     return value_string(LATTICE_VERSION);
 }
 
@@ -635,32 +643,41 @@ static LatValue native_input(LatValue *args, int arg_count) {
 
 /* ── Math natives (via math_ops.h) ── */
 
-#define MATH1(cname, mathfn) \
-static LatValue cname(LatValue *args, int ac) { \
-    if (ac != 1) return value_nil(); \
-    char *err = NULL; \
-    LatValue r = mathfn(&args[0], &err); \
-    if (err) { current_rt->error = err; return value_nil(); } \
-    return r; \
-}
+#define MATH1(cname, mathfn)                        \
+    static LatValue cname(LatValue *args, int ac) { \
+        if (ac != 1) return value_nil();            \
+        char *err = NULL;                           \
+        LatValue r = mathfn(&args[0], &err);        \
+        if (err) {                                  \
+            current_rt->error = err;                \
+            return value_nil();                     \
+        }                                           \
+        return r;                                   \
+    }
 
-#define MATH2(cname, mathfn) \
-static LatValue cname(LatValue *args, int ac) { \
-    if (ac != 2) return value_nil(); \
-    char *err = NULL; \
-    LatValue r = mathfn(&args[0], &args[1], &err); \
-    if (err) { current_rt->error = err; return value_nil(); } \
-    return r; \
-}
+#define MATH2(cname, mathfn)                           \
+    static LatValue cname(LatValue *args, int ac) {    \
+        if (ac != 2) return value_nil();               \
+        char *err = NULL;                              \
+        LatValue r = mathfn(&args[0], &args[1], &err); \
+        if (err) {                                     \
+            current_rt->error = err;                   \
+            return value_nil();                        \
+        }                                              \
+        return r;                                      \
+    }
 
-#define MATH3(cname, mathfn) \
-static LatValue cname(LatValue *args, int ac) { \
-    if (ac != 3) return value_nil(); \
-    char *err = NULL; \
-    LatValue r = mathfn(&args[0], &args[1], &args[2], &err); \
-    if (err) { current_rt->error = err; return value_nil(); } \
-    return r; \
-}
+#define MATH3(cname, mathfn)                                     \
+    static LatValue cname(LatValue *args, int ac) {              \
+        if (ac != 3) return value_nil();                         \
+        char *err = NULL;                                        \
+        LatValue r = mathfn(&args[0], &args[1], &args[2], &err); \
+        if (err) {                                               \
+            current_rt->error = err;                             \
+            return value_nil();                                  \
+        }                                                        \
+        return r;                                                \
+    }
 
 MATH1(native_round, math_round)
 MATH1(native_sqrt, math_sqrt)
@@ -690,22 +707,28 @@ MATH3(native_lerp, math_lerp)
 MATH3(native_clamp, math_clamp)
 
 static LatValue native_random(LatValue *args, int ac) {
-    (void)args; (void)ac;
+    (void)args;
+    (void)ac;
     return math_random();
 }
 static LatValue native_random_int(LatValue *args, int ac) {
     if (ac != 2) return value_nil();
     char *err = NULL;
     LatValue r = math_random_int(&args[0], &args[1], &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_math_pi(LatValue *args, int ac) {
-    (void)args; (void)ac;
+    (void)args;
+    (void)ac;
     return math_pi();
 }
 static LatValue native_math_e(LatValue *args, int ac) {
-    (void)args; (void)ac;
+    (void)args;
+    (void)ac;
     return math_e();
 }
 
@@ -716,17 +739,26 @@ static LatValue native_math_e(LatValue *args, int ac) {
 /* ── File system natives ── */
 
 static LatValue native_read_file(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) { current_rt->error = strdup("read_file() expects (path: String)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("read_file() expects (path: String)");
+        return value_nil();
+    }
     char *contents = builtin_read_file(args[0].as.str_val);
     if (!contents) return value_nil();
     return value_string_owned(contents);
 }
 static LatValue native_write_file(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { current_rt->error = strdup("write_file() expects (path: String, data: String)"); return value_bool(false); }
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_rt->error = strdup("write_file() expects (path: String, data: String)");
+        return value_bool(false);
+    }
     return value_bool(builtin_write_file(args[0].as.str_val, args[1].as.str_val));
 }
 static LatValue native_file_exists(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) { current_rt->error = strdup("file_exists() expects (path: String)"); return value_bool(false); }
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("file_exists() expects (path: String)");
+        return value_bool(false);
+    }
     return value_bool(fs_file_exists(args[0].as.str_val));
 }
 static LatValue native_delete_file(LatValue *args, int ac) {
@@ -736,7 +768,10 @@ static LatValue native_delete_file(LatValue *args, int ac) {
     }
     char *err = NULL;
     bool ok = fs_delete_file(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_list_dir(LatValue *args, int ac) {
@@ -747,7 +782,10 @@ static LatValue native_list_dir(LatValue *args, int ac) {
     char *err = NULL;
     size_t count = 0;
     char **entries = fs_list_dir(args[0].as.str_val, &count, &err);
-    if (err) { current_rt->error = err; return value_array(NULL, 0); }
+    if (err) {
+        current_rt->error = err;
+        return value_array(NULL, 0);
+    }
     if (!entries) return value_array(NULL, 0);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
     if (!elems) return value_unit();
@@ -761,17 +799,26 @@ static LatValue native_list_dir(LatValue *args, int ac) {
     return r;
 }
 static LatValue native_append_file(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) { current_rt->error = strdup("append_file() expects (path: String, data: String)"); return value_bool(false); }
+    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+        current_rt->error = strdup("append_file() expects (path: String, data: String)");
+        return value_bool(false);
+    }
     char *err = NULL;
     bool ok = fs_append_file(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_mkdir(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR) return value_bool(false);
     char *err = NULL;
     bool ok = fs_mkdir(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_fs_rename(LatValue *args, int ac) {
@@ -781,7 +828,10 @@ static LatValue native_fs_rename(LatValue *args, int ac) {
     }
     char *err = NULL;
     bool ok = fs_rename(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_is_dir(LatValue *args, int ac) {
@@ -799,7 +849,10 @@ static LatValue native_rmdir(LatValue *args, int ac) {
     }
     char *err = NULL;
     bool ok = fs_rmdir(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_glob(LatValue *args, int ac) {
@@ -807,7 +860,10 @@ static LatValue native_glob(LatValue *args, int ac) {
     char *err = NULL;
     size_t count = 0;
     char **matches = fs_glob(args[0].as.str_val, &count, &err);
-    if (err) { current_rt->error = err; return value_array(NULL, 0); }
+    if (err) {
+        current_rt->error = err;
+        return value_array(NULL, 0);
+    }
     if (!matches) return value_array(NULL, 0);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
     if (!elems) return value_unit();
@@ -833,11 +889,16 @@ static LatValue native_stat(LatValue *args, int ac) {
         return value_nil();
     }
     LatValue map = value_map_new();
-    LatValue v_sz = value_int(sz); lat_map_set(map.as.map.map, "size", &v_sz);
-    LatValue v_mt = value_int(mt); lat_map_set(map.as.map.map, "mtime", &v_mt);
-    LatValue v_md = value_int(md); lat_map_set(map.as.map.map, "mode", &v_md);
-    LatValue v_tp = value_string(tp); lat_map_set(map.as.map.map, "type", &v_tp);
-    LatValue v_pm = value_int(md); lat_map_set(map.as.map.map, "permissions", &v_pm);
+    LatValue v_sz = value_int(sz);
+    lat_map_set(map.as.map.map, "size", &v_sz);
+    LatValue v_mt = value_int(mt);
+    lat_map_set(map.as.map.map, "mtime", &v_mt);
+    LatValue v_md = value_int(md);
+    lat_map_set(map.as.map.map, "mode", &v_md);
+    LatValue v_tp = value_string(tp);
+    lat_map_set(map.as.map.map, "type", &v_tp);
+    LatValue v_pm = value_int(md);
+    lat_map_set(map.as.map.map, "permissions", &v_pm);
     return map;
 }
 static LatValue native_copy_file(LatValue *args, int ac) {
@@ -847,7 +908,10 @@ static LatValue native_copy_file(LatValue *args, int ac) {
     }
     char *err = NULL;
     bool ok = fs_copy_file(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_realpath(LatValue *args, int ac) {
@@ -857,21 +921,34 @@ static LatValue native_realpath(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = fs_realpath(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_tempdir(LatValue *args, int ac) {
-    (void)args; (void)ac;
-    char *err = NULL; char *r = fs_tempdir(&err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    (void)args;
+    (void)ac;
+    char *err = NULL;
+    char *r = fs_tempdir(&err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_tempfile(LatValue *args, int ac) {
-    (void)args; (void)ac;
-    char *err = NULL; char *r = fs_tempfile(&err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    (void)args;
+    (void)ac;
+    char *err = NULL;
+    char *r = fs_tempfile(&err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
@@ -879,7 +956,10 @@ static LatValue native_chmod(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_INT) return value_bool(false);
     char *err = NULL;
     bool ok = fs_chmod(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_file_size(LatValue *args, int ac) {
@@ -889,34 +969,52 @@ static LatValue native_file_size(LatValue *args, int ac) {
     }
     char *err = NULL;
     int64_t sz = fs_file_size(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_int(-1); }
+    if (err) {
+        current_rt->error = err;
+        return value_int(-1);
+    }
     return value_int(sz);
 }
 
 /* ── Path natives ── */
 
 static LatValue native_path_join(LatValue *args, int ac) {
-    if (ac < 1) { current_rt->error = strdup("path_join() expects at least 1 argument"); return value_string(""); }
+    if (ac < 1) {
+        current_rt->error = strdup("path_join() expects at least 1 argument");
+        return value_string("");
+    }
     for (int i = 0; i < ac; i++) {
-        if (args[i].type != VAL_STR) { current_rt->error = strdup("path_join() expects (String...)"); return value_string(""); }
+        if (args[i].type != VAL_STR) {
+            current_rt->error = strdup("path_join() expects (String...)");
+            return value_string("");
+        }
     }
     const char **parts = malloc((size_t)ac * sizeof(char *));
     if (!parts) return value_unit();
-    for (int i = 0; i < ac; i++)
-        parts[i] = args[i].as.str_val;
+    for (int i = 0; i < ac; i++) parts[i] = args[i].as.str_val;
     char *r = path_join(parts, (size_t)ac);
-    free(parts); return value_string_owned(r);
+    free(parts);
+    return value_string_owned(r);
 }
 static LatValue native_path_dir(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) { current_rt->error = strdup("path_dir() expects (path: String)"); return value_string("."); }
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("path_dir() expects (path: String)");
+        return value_string(".");
+    }
     return value_string_owned(path_dir(args[0].as.str_val));
 }
 static LatValue native_path_base(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) { current_rt->error = strdup("path_base() expects (path: String)"); return value_string(""); }
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("path_base() expects (path: String)");
+        return value_string("");
+    }
     return value_string_owned(path_base(args[0].as.str_val));
 }
 static LatValue native_path_ext(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) { current_rt->error = strdup("path_ext() expects (path: String)"); return value_string(""); }
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("path_ext() expects (path: String)");
+        return value_string("");
+    }
     return value_string_owned(path_ext(args[0].as.str_val));
 }
 
@@ -929,7 +1027,10 @@ static LatValue native_tcp_listen(LatValue *args, int ac) {
     }
     char *err = NULL;
     int fd = net_tcp_listen(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_int(-1); }
+    if (err) {
+        current_rt->error = err;
+        return value_int(-1);
+    }
     return value_int(fd);
 }
 static LatValue native_tcp_accept(LatValue *args, int ac) {
@@ -939,7 +1040,10 @@ static LatValue native_tcp_accept(LatValue *args, int ac) {
     }
     char *err = NULL;
     int fd = net_tcp_accept((int)args[0].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_int(-1); }
+    if (err) {
+        current_rt->error = err;
+        return value_int(-1);
+    }
     return value_int(fd);
 }
 static LatValue native_tcp_connect(LatValue *args, int ac) {
@@ -949,7 +1053,10 @@ static LatValue native_tcp_connect(LatValue *args, int ac) {
     }
     char *err = NULL;
     int fd = net_tcp_connect(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_int(-1); }
+    if (err) {
+        current_rt->error = err;
+        return value_int(-1);
+    }
     return value_int(fd);
 }
 static LatValue native_tcp_read(LatValue *args, int ac) {
@@ -959,7 +1066,10 @@ static LatValue native_tcp_read(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *data = net_tcp_read((int)args[0].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_string(""); }
+    if (err) {
+        current_rt->error = err;
+        return value_string("");
+    }
     if (!data) return value_string("");
     return value_string_owned(data);
 }
@@ -967,7 +1077,10 @@ static LatValue native_tcp_read_bytes(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) return value_string("");
     char *err = NULL;
     char *data = net_tcp_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_string(""); }
+    if (err) {
+        current_rt->error = err;
+        return value_string("");
+    }
     if (!data) return value_string("");
     return value_string_owned(data);
 }
@@ -975,18 +1088,25 @@ static LatValue native_tcp_write(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) return value_bool(false);
     char *err = NULL;
     bool ok = net_tcp_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_tcp_close(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_INT) return value_unit();
-    net_tcp_close((int)args[0].as.int_val); return value_unit();
+    net_tcp_close((int)args[0].as.int_val);
+    return value_unit();
 }
 static LatValue native_tcp_peer_addr(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_INT) return value_nil();
     char *err = NULL;
     char *addr = net_tcp_peer_addr((int)args[0].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!addr) return value_nil();
     return value_string_owned(addr);
 }
@@ -994,7 +1114,10 @@ static LatValue native_tcp_set_timeout(LatValue *args, int ac) {
     if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) return value_bool(false);
     char *err = NULL;
     bool ok = net_tcp_set_timeout((int)args[0].as.int_val, (int)args[1].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 
@@ -1007,38 +1130,65 @@ static LatValue native_tls_connect(LatValue *args, int ac) {
     }
     char *err = NULL;
     int fd = net_tls_connect(args[0].as.str_val, (int)args[1].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_int(-1); }
+    if (err) {
+        current_rt->error = err;
+        return value_int(-1);
+    }
     return value_int(fd);
 }
 static LatValue native_tls_read(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("tls_read() expects (fd: Int)"); return value_string(""); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("tls_read() expects (fd: Int)");
+        return value_string("");
+    }
     char *err = NULL;
     char *data = net_tls_read((int)args[0].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_string(""); }
+    if (err) {
+        current_rt->error = err;
+        return value_string("");
+    }
     if (!data) return value_string("");
     return value_string_owned(data);
 }
 static LatValue native_tls_read_bytes(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { current_rt->error = strdup("tls_read_bytes() expects (fd: Int, n: Int)"); return value_string(""); }
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) {
+        current_rt->error = strdup("tls_read_bytes() expects (fd: Int, n: Int)");
+        return value_string("");
+    }
     char *err = NULL;
     char *data = net_tls_read_bytes((int)args[0].as.int_val, (size_t)args[1].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_string(""); }
+    if (err) {
+        current_rt->error = err;
+        return value_string("");
+    }
     if (!data) return value_string("");
     return value_string_owned(data);
 }
 static LatValue native_tls_write(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) { current_rt->error = strdup("tls_write() expects (fd: Int, data: String)"); return value_bool(false); }
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_STR) {
+        current_rt->error = strdup("tls_write() expects (fd: Int, data: String)");
+        return value_bool(false);
+    }
     char *err = NULL;
     bool ok = net_tls_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val), &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_tls_close(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("tls_close() expects (fd: Int)"); return value_unit(); }
-    net_tls_close((int)args[0].as.int_val); return value_unit();
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("tls_close() expects (fd: Int)");
+        return value_unit();
+    }
+    net_tls_close((int)args[0].as.int_val);
+    return value_unit();
 }
 static LatValue native_tls_available(LatValue *args, int ac) {
-    (void)args; (void)ac; return value_bool(net_tls_available());
+    (void)args;
+    (void)ac;
+    return value_bool(net_tls_available());
 }
 
 /* ── HTTP natives ── */
@@ -1063,10 +1213,15 @@ static LatValue native_http_get(LatValue *args, int ac) {
         current_rt->error = strdup("http_get() expects (url: String)");
         return value_nil();
     }
-    HttpRequest req = {0}; req.method = "GET"; req.url = args[0].as.str_val;
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.url = args[0].as.str_val;
     char *err = NULL;
     HttpResponse *resp = http_execute(&req, &err);
-    if (!resp) { current_rt->error = err ? err : strdup("http_get: request failed"); return value_nil(); }
+    if (!resp) {
+        current_rt->error = err ? err : strdup("http_get: request failed");
+        return value_nil();
+    }
     return vm_build_http_response(resp);
 }
 static LatValue native_http_post(LatValue *args, int ac) {
@@ -1074,16 +1229,25 @@ static LatValue native_http_post(LatValue *args, int ac) {
         current_rt->error = strdup("http_post() expects (url: String, options?: Map)");
         return value_nil();
     }
-    HttpRequest req = {0}; req.method = "POST"; req.url = args[0].as.str_val;
+    HttpRequest req = {0};
+    req.method = "POST";
+    req.url = args[0].as.str_val;
     if (ac >= 2 && args[1].type == VAL_STR) {
-        req.body = args[1].as.str_val; req.body_len = strlen(args[1].as.str_val);
+        req.body = args[1].as.str_val;
+        req.body_len = strlen(args[1].as.str_val);
     } else if (ac >= 2 && args[1].type == VAL_MAP) {
         LatValue *bv = lat_map_get(args[1].as.map.map, "body");
-        if (bv && bv->type == VAL_STR) { req.body = bv->as.str_val; req.body_len = strlen(bv->as.str_val); }
+        if (bv && bv->type == VAL_STR) {
+            req.body = bv->as.str_val;
+            req.body_len = strlen(bv->as.str_val);
+        }
     }
     char *err = NULL;
     HttpResponse *resp = http_execute(&req, &err);
-    if (!resp) { current_rt->error = err ? err : strdup("http_post: request failed"); return value_nil(); }
+    if (!resp) {
+        current_rt->error = err ? err : strdup("http_post: request failed");
+        return value_nil();
+    }
     return vm_build_http_response(resp);
 }
 static LatValue native_http_request(LatValue *args, int ac) {
@@ -1096,11 +1260,17 @@ static LatValue native_http_request(LatValue *args, int ac) {
     req.url = args[1].as.str_val;
     if (ac == 3 && args[2].type == VAL_MAP) {
         LatValue *bv = lat_map_get(args[2].as.map.map, "body");
-        if (bv && bv->type == VAL_STR) { req.body = bv->as.str_val; req.body_len = strlen(bv->as.str_val); }
+        if (bv && bv->type == VAL_STR) {
+            req.body = bv->as.str_val;
+            req.body_len = strlen(bv->as.str_val);
+        }
     }
     char *err = NULL;
     HttpResponse *resp = http_execute(&req, &err);
-    if (!resp) { current_rt->error = err ? err : strdup("http_request: request failed"); return value_nil(); }
+    if (!resp) {
+        current_rt->error = err ? err : strdup("http_request: request failed");
+        return value_nil();
+    }
     return vm_build_http_response(resp);
 }
 
@@ -1113,7 +1283,10 @@ static LatValue native_json_parse(LatValue *args, int ac) {
     }
     char *err = NULL;
     LatValue r = json_parse(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_json_stringify(LatValue *args, int ac) {
@@ -1123,7 +1296,10 @@ static LatValue native_json_stringify(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = json_stringify(&args[0], &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 static LatValue native_toml_parse(LatValue *args, int ac) {
@@ -1133,7 +1309,10 @@ static LatValue native_toml_parse(LatValue *args, int ac) {
     }
     char *err = NULL;
     LatValue r = toml_ops_parse(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_toml_stringify(LatValue *args, int ac) {
@@ -1143,7 +1322,10 @@ static LatValue native_toml_stringify(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = toml_ops_stringify(&args[0], &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
@@ -1154,7 +1336,10 @@ static LatValue native_yaml_parse(LatValue *args, int ac) {
     }
     char *err = NULL;
     LatValue r = yaml_ops_parse(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_yaml_stringify(LatValue *args, int ac) {
@@ -1168,7 +1353,10 @@ static LatValue native_yaml_stringify(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = yaml_ops_stringify(&args[0], &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
@@ -1182,7 +1370,10 @@ static LatValue native_sha256(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = crypto_sha256(args[0].as.str_val, strlen(args[0].as.str_val), &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 static LatValue native_md5(LatValue *args, int ac) {
@@ -1192,7 +1383,10 @@ static LatValue native_md5(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = crypto_md5(args[0].as.str_val, strlen(args[0].as.str_val), &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 static LatValue native_base64_encode(LatValue *args, int ac) {
@@ -1207,9 +1401,13 @@ static LatValue native_base64_decode(LatValue *args, int ac) {
         current_rt->error = strdup("base64_decode: expected (str: Str)");
         return value_nil();
     }
-    char *err = NULL; size_t dl = 0;
+    char *err = NULL;
+    size_t dl = 0;
     char *r = crypto_base64_decode(args[0].as.str_val, strlen(args[0].as.str_val), &dl, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 
@@ -1220,7 +1418,10 @@ static LatValue native_sha512(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = crypto_sha512(args[0].as.str_val, strlen(args[0].as.str_val), &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 static LatValue native_hmac_sha256(LatValue *args, int ac) {
@@ -1229,9 +1430,12 @@ static LatValue native_hmac_sha256(LatValue *args, int ac) {
         return value_nil();
     }
     char *err = NULL;
-    char *r = crypto_hmac_sha256(args[0].as.str_val, strlen(args[0].as.str_val),
-                                  args[1].as.str_val, strlen(args[1].as.str_val), &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    char *r = crypto_hmac_sha256(args[0].as.str_val, strlen(args[0].as.str_val), args[1].as.str_val,
+                                 strlen(args[1].as.str_val), &err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 static LatValue native_random_bytes(LatValue *args, int ac) {
@@ -1246,7 +1450,10 @@ static LatValue native_random_bytes(LatValue *args, int ac) {
     }
     char *err = NULL;
     uint8_t *buf = crypto_random_bytes((size_t)n, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     LatValue result = value_buffer(buf, (size_t)n);
     free(buf);
     return result;
@@ -1261,7 +1468,10 @@ static LatValue native_regex_match(LatValue *args, int ac) {
     }
     char *err = NULL;
     LatValue r = regex_match(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return r;
 }
 static LatValue native_regex_find_all(LatValue *args, int ac) {
@@ -1271,15 +1481,20 @@ static LatValue native_regex_find_all(LatValue *args, int ac) {
     }
     char *err = NULL;
     LatValue r = regex_find_all(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_array(NULL, 0); }
+    if (err) {
+        current_rt->error = err;
+        return value_array(NULL, 0);
+    }
     return r;
 }
 static LatValue native_regex_replace(LatValue *args, int ac) {
-    if (ac != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR)
-        return value_nil();
+    if (ac != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR) return value_nil();
     char *err = NULL;
     char *r = regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
@@ -1288,13 +1503,23 @@ static LatValue native_regex_replace(LatValue *args, int ac) {
 
 static LatValue native_time(LatValue *args, int ac) {
     (void)args;
-    if (ac != 0) { current_rt->error = strdup("time() expects no arguments"); return value_int(0); }
+    if (ac != 0) {
+        current_rt->error = strdup("time() expects no arguments");
+        return value_int(0);
+    }
     return value_int(time_now_ms());
 }
 static LatValue native_sleep(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("sleep() expects (ms: Int)"); return value_unit(); }
-    char *err = NULL; time_sleep_ms(args[0].as.int_val, &err);
-    if (err) { current_rt->error = err; return value_unit(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("sleep() expects (ms: Int)");
+        return value_unit();
+    }
+    char *err = NULL;
+    time_sleep_ms(args[0].as.int_val, &err);
+    if (err) {
+        current_rt->error = err;
+        return value_unit();
+    }
     return value_unit();
 }
 static LatValue native_time_format(LatValue *args, int ac) {
@@ -1304,7 +1529,10 @@ static LatValue native_time_format(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = datetime_format(args[0].as.int_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 static LatValue native_time_parse(LatValue *args, int ac) {
@@ -1314,54 +1542,87 @@ static LatValue native_time_parse(LatValue *args, int ac) {
     }
     char *err = NULL;
     int64_t r = datetime_parse(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_int(r);
 }
 static LatValue native_time_year(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_year: expected (timestamp: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("time_year: expected (timestamp: Int)");
+        return value_nil();
+    }
     return value_int(datetime_year(args[0].as.int_val));
 }
 static LatValue native_time_month(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_month: expected (timestamp: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("time_month: expected (timestamp: Int)");
+        return value_nil();
+    }
     return value_int(datetime_month(args[0].as.int_val));
 }
 static LatValue native_time_day(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_day: expected (timestamp: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("time_day: expected (timestamp: Int)");
+        return value_nil();
+    }
     return value_int(datetime_day(args[0].as.int_val));
 }
 static LatValue native_time_hour(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_hour: expected (timestamp: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("time_hour: expected (timestamp: Int)");
+        return value_nil();
+    }
     return value_int(datetime_hour(args[0].as.int_val));
 }
 static LatValue native_time_minute(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_minute: expected (timestamp: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("time_minute: expected (timestamp: Int)");
+        return value_nil();
+    }
     return value_int(datetime_minute(args[0].as.int_val));
 }
 static LatValue native_time_second(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_second: expected (timestamp: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("time_second: expected (timestamp: Int)");
+        return value_nil();
+    }
     return value_int(datetime_second(args[0].as.int_val));
 }
 static LatValue native_time_weekday(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("time_weekday: expected (timestamp: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("time_weekday: expected (timestamp: Int)");
+        return value_nil();
+    }
     return value_int(datetime_weekday(args[0].as.int_val));
 }
 static LatValue native_time_add(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) { current_rt->error = strdup("time_add: expected (timestamp: Int, delta_ms: Int)"); return value_nil(); }
+    if (ac != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT) {
+        current_rt->error = strdup("time_add: expected (timestamp: Int, delta_ms: Int)");
+        return value_nil();
+    }
     return value_int(datetime_add(args[0].as.int_val, args[1].as.int_val));
 }
 static LatValue native_is_leap_year(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_INT) { current_rt->error = strdup("is_leap_year: expected (year: Int)"); return value_nil(); }
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("is_leap_year: expected (year: Int)");
+        return value_nil();
+    }
     return value_bool(datetime_is_leap_year((int)args[0].as.int_val));
 }
 
 /* ── Duration helpers ── */
 
 static LatValue make_duration_map(int64_t total_ms) {
-    int64_t ms = total_ms % 1000; if (ms < 0) ms = -ms;
+    int64_t ms = total_ms % 1000;
+    if (ms < 0) ms = -ms;
     int64_t rem = total_ms / 1000;
-    int64_t s = rem % 60; if (s < 0) s = -s;
+    int64_t s = rem % 60;
+    if (s < 0) s = -s;
     rem /= 60;
-    int64_t m = rem % 60; if (m < 0) m = -m;
+    int64_t m = rem % 60;
+    if (m < 0) m = -m;
     int64_t h = rem / 60;
 
     LatValue map = value_map_new();
@@ -1383,13 +1644,13 @@ static LatValue make_duration_map(int64_t total_ms) {
 /// Create a Duration map with hours, minutes, seconds, millis fields.
 /// @example duration(2, 30, 15, 0)  // {hours: 2, minutes: 30, seconds: 15, millis: 0, total_ms: 9015000}
 static LatValue native_duration(LatValue *args, int ac) {
-    if (ac != 4 || args[0].type != VAL_INT || args[1].type != VAL_INT ||
-        args[2].type != VAL_INT || args[3].type != VAL_INT) {
+    if (ac != 4 || args[0].type != VAL_INT || args[1].type != VAL_INT || args[2].type != VAL_INT ||
+        args[3].type != VAL_INT) {
         current_rt->error = strdup("duration: expected (hours: Int, minutes: Int, seconds: Int, millis: Int)");
         return value_nil();
     }
-    int64_t total = args[0].as.int_val * 3600000 + args[1].as.int_val * 60000 +
-                    args[2].as.int_val * 1000    + args[3].as.int_val;
+    int64_t total =
+        args[0].as.int_val * 3600000 + args[1].as.int_val * 60000 + args[2].as.int_val * 1000 + args[3].as.int_val;
     return make_duration_map(total);
 }
 
@@ -1458,20 +1719,21 @@ static LatValue native_duration_to_string(LatValue *args, int ac) {
         return value_nil();
     }
     int64_t total = duration_map_to_ms(&args[0]);
-    int64_t ms = total % 1000; if (ms < 0) ms = -ms;
+    int64_t ms = total % 1000;
+    if (ms < 0) ms = -ms;
     int64_t rem = total / 1000;
-    int64_t s = rem % 60; if (s < 0) s = -s;
+    int64_t s = rem % 60;
+    if (s < 0) s = -s;
     rem /= 60;
-    int64_t m = rem % 60; if (m < 0) m = -m;
+    int64_t m = rem % 60;
+    if (m < 0) m = -m;
     int64_t h = rem / 60;
 
     char buf[128];
     if (ms > 0) {
-        snprintf(buf, sizeof(buf), "%lldh %lldm %llds %lldms",
-                 (long long)h, (long long)m, (long long)s, (long long)ms);
+        snprintf(buf, sizeof(buf), "%lldh %lldm %llds %lldms", (long long)h, (long long)m, (long long)s, (long long)ms);
     } else {
-        snprintf(buf, sizeof(buf), "%lldh %lldm %llds",
-                 (long long)h, (long long)m, (long long)s);
+        snprintf(buf, sizeof(buf), "%lldh %lldm %llds", (long long)h, (long long)m, (long long)s);
     }
     return value_string(buf);
 }
@@ -1526,9 +1788,7 @@ static LatValue native_duration_millis(LatValue *args, int ac) {
 
 /* ── DateTime map helpers ── */
 
-static LatValue make_datetime_map(int year, int month, int day,
-                                  int hour, int minute, int second,
-                                  int tz_offset_sec) {
+static LatValue make_datetime_map(int year, int month, int day, int hour, int minute, int second, int tz_offset_sec) {
     LatValue map = value_map_new();
     LatValue vy = value_int(year);
     LatValue vmo = value_int(month);
@@ -1547,8 +1807,8 @@ static LatValue make_datetime_map(int year, int month, int day,
     return map;
 }
 
-static bool datetime_map_extract(LatValue *dt, int *year, int *month, int *day,
-                                 int *hour, int *minute, int *second, int *tz_offset) {
+static bool datetime_map_extract(LatValue *dt, int *year, int *month, int *day, int *hour, int *minute, int *second,
+                                 int *tz_offset) {
     if (dt->type != VAL_MAP) return false;
     LatValue *vy = lat_map_get(dt->as.map.map, "year");
     LatValue *vmo = lat_map_get(dt->as.map.map, "month");
@@ -1557,12 +1817,11 @@ static bool datetime_map_extract(LatValue *dt, int *year, int *month, int *day,
     LatValue *vmi = lat_map_get(dt->as.map.map, "minute");
     LatValue *vs = lat_map_get(dt->as.map.map, "second");
     LatValue *vtz = lat_map_get(dt->as.map.map, "tz_offset");
-    if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT ||
-        !vd || vd->type != VAL_INT) return false;
-    *year   = (int)vy->as.int_val;
-    *month  = (int)vmo->as.int_val;
-    *day    = (int)vd->as.int_val;
-    *hour   = (vh && vh->type == VAL_INT) ? (int)vh->as.int_val : 0;
+    if (!vy || vy->type != VAL_INT || !vmo || vmo->type != VAL_INT || !vd || vd->type != VAL_INT) return false;
+    *year = (int)vy->as.int_val;
+    *month = (int)vmo->as.int_val;
+    *day = (int)vd->as.int_val;
+    *hour = (vh && vh->type == VAL_INT) ? (int)vh->as.int_val : 0;
     *minute = (vmi && vmi->type == VAL_INT) ? (int)vmi->as.int_val : 0;
     *second = (vs && vs->type == VAL_INT) ? (int)vs->as.int_val : 0;
     *tz_offset = (vtz && vtz->type == VAL_INT) ? (int)vtz->as.int_val : 0;
@@ -1575,13 +1834,16 @@ static bool datetime_map_extract(LatValue *dt, int *year, int *month, int *day,
 /// @example datetime_now()  // {year: 2026, month: 2, day: 24, hour: 10, ...}
 static LatValue native_datetime_now(LatValue *args, int ac) {
     (void)args;
-    if (ac != 0) { current_rt->error = strdup("datetime_now: expects no arguments"); return value_nil(); }
+    if (ac != 0) {
+        current_rt->error = strdup("datetime_now: expects no arguments");
+        return value_nil();
+    }
     time_t now = time(NULL);
     struct tm local;
     localtime_r(&now, &local);
     int tz_off = datetime_tz_offset_seconds();
-    return make_datetime_map(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
-                             local.tm_hour, local.tm_min, local.tm_sec, tz_off);
+    return make_datetime_map(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min,
+                             local.tm_sec, tz_off);
 }
 
 /// @builtin datetime_from_epoch(epoch_seconds: Int) -> Map
@@ -1626,7 +1888,10 @@ static LatValue native_datetime_from_iso(LatValue *args, int ac) {
     }
     char *err = NULL;
     int64_t epoch = datetime_parse_iso(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     int y, mo, d, h, mi, s;
     datetime_to_utc_components(epoch, &y, &mo, &d, &h, &mi, &s);
     return make_datetime_map(y, mo, d, h, mi, s, 0);
@@ -1760,8 +2025,8 @@ static LatValue native_datetime_to_local(LatValue *args, int ac) {
     struct tm local;
     localtime_r(&t, &local);
     int local_tz = datetime_tz_offset_seconds();
-    return make_datetime_map(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
-                             local.tm_hour, local.tm_min, local.tm_sec, local_tz);
+    return make_datetime_map(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min,
+                             local.tm_sec, local_tz);
 }
 
 /// @builtin timezone_offset() -> Int
@@ -1769,7 +2034,10 @@ static LatValue native_datetime_to_local(LatValue *args, int ac) {
 /// Returns the current local timezone offset from UTC in seconds.
 static LatValue native_timezone_offset(LatValue *args, int ac) {
     (void)args;
-    if (ac != 0) { current_rt->error = strdup("timezone_offset: expects no arguments"); return value_nil(); }
+    if (ac != 0) {
+        current_rt->error = strdup("timezone_offset: expects no arguments");
+        return value_nil();
+    }
     return value_int(datetime_tz_offset_seconds());
 }
 
@@ -1783,7 +2051,10 @@ static LatValue native_days_in_month(LatValue *args, int ac) {
         return value_nil();
     }
     int r = datetime_days_in_month((int)args[0].as.int_val, (int)args[1].as.int_val);
-    if (r < 0) { current_rt->error = strdup("days_in_month: month must be 1-12"); return value_nil(); }
+    if (r < 0) {
+        current_rt->error = strdup("days_in_month: month must be 1-12");
+        return value_nil();
+    }
     return value_int(r);
 }
 
@@ -1809,14 +2080,20 @@ static LatValue native_day_of_year(LatValue *args, int ac) {
         return value_nil();
     }
     int r = datetime_day_of_year((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
-    if (r < 0) { current_rt->error = strdup("day_of_year: month must be 1-12"); return value_nil(); }
+    if (r < 0) {
+        current_rt->error = strdup("day_of_year: month must be 1-12");
+        return value_nil();
+    }
     return value_int(r);
 }
 
 /* ── Environment natives ── */
 
 static LatValue native_env(LatValue *args, int ac) {
-    if (ac != 1 || args[0].type != VAL_STR) { current_rt->error = strdup("env() expects (key: String)"); return value_unit(); }
+    if (ac != 1 || args[0].type != VAL_STR) {
+        current_rt->error = strdup("env() expects (key: String)");
+        return value_unit();
+    }
     char *val = envvar_get(args[0].as.str_val);
     if (!val) return value_unit();
     return value_string_owned(val);
@@ -1828,27 +2105,41 @@ static LatValue native_env_set(LatValue *args, int ac) {
     }
     char *err = NULL;
     bool ok = envvar_set(args[0].as.str_val, args[1].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_bool(false); }
+    if (err) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
     return value_bool(ok);
 }
 static LatValue native_env_keys(LatValue *args, int ac) {
-    (void)args; (void)ac;
-    char **keys = NULL; size_t count = 0;
+    (void)args;
+    (void)ac;
+    char **keys = NULL;
+    size_t count = 0;
     envvar_keys(&keys, &count);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
     if (!elems) return value_unit();
-    for (size_t i = 0; i < count; i++) { elems[i] = value_string(keys[i]); free(keys[i]); }
+    for (size_t i = 0; i < count; i++) {
+        elems[i] = value_string(keys[i]);
+        free(keys[i]);
+    }
     free(keys);
-    LatValue r = value_array(elems, count); free(elems);
+    LatValue r = value_array(elems, count);
+    free(elems);
     return r;
 }
 
 /* ── Process natives ── */
 
 static LatValue native_cwd(LatValue *args, int ac) {
-    (void)args; (void)ac;
-    char *err = NULL; char *r = process_cwd(&err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    (void)args;
+    (void)ac;
+    char *err = NULL;
+    char *r = process_cwd(&err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
@@ -1856,28 +2147,43 @@ static LatValue native_exec_cmd(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR) return value_nil();
     char *err = NULL;
     LatValue r = process_exec(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_shell(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR) return value_nil();
     char *err = NULL;
     LatValue r = process_shell(args[0].as.str_val, &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_platform(LatValue *args, int ac) {
-    (void)args; (void)ac; return value_string(process_platform());
+    (void)args;
+    (void)ac;
+    return value_string(process_platform());
 }
 static LatValue native_hostname(LatValue *args, int ac) {
-    (void)args; (void)ac;
-    char *err = NULL; char *r = process_hostname(&err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    (void)args;
+    (void)ac;
+    char *err = NULL;
+    char *r = process_hostname(&err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     if (!r) return value_nil();
     return value_string_owned(r);
 }
 static LatValue native_pid(LatValue *args, int ac) {
-    (void)args; (void)ac; return value_int(process_pid());
+    (void)args;
+    (void)ac;
+    return value_int(process_pid());
 }
 
 /* ── Type/utility natives ── */
@@ -1886,14 +2192,20 @@ static LatValue native_to_int(LatValue *args, int ac) {
     if (ac != 1) return value_nil();
     char *err = NULL;
     LatValue r = type_to_int(&args[0], &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_to_float(LatValue *args, int ac) {
     if (ac != 1) return value_nil();
     char *err = NULL;
     LatValue r = type_to_float(&args[0], &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return r;
 }
 static LatValue native_struct_name(LatValue *args, int ac) {
@@ -1905,9 +2217,9 @@ static LatValue native_struct_fields(LatValue *args, int ac) {
     size_t fc = args[0].as.strct.field_count;
     LatValue *elems = malloc((fc > 0 ? fc : 1) * sizeof(LatValue));
     if (!elems) return value_unit();
-    for (size_t i = 0; i < fc; i++)
-        elems[i] = value_string(args[0].as.strct.field_names[i]);
-    LatValue r = value_array(elems, fc); free(elems);
+    for (size_t i = 0; i < fc; i++) elems[i] = value_string(args[0].as.strct.field_names[i]);
+    LatValue r = value_array(elems, fc);
+    free(elems);
     return r;
 }
 static LatValue native_struct_to_map(LatValue *args, int ac) {
@@ -1927,7 +2239,8 @@ static LatValue native_repr(LatValue *args, int ac) {
             if (strcmp(args[0].as.strct.field_names[i], "repr") == 0 &&
                 args[0].as.strct.field_values[i].type == VAL_CLOSURE) {
                 LatValue self = value_deep_clone(&args[0]);
-                LatValue result = current_rt->call_closure(current_rt->active_vm, &args[0].as.strct.field_values[i], &self, 1);
+                LatValue result =
+                    current_rt->call_closure(current_rt->active_vm, &args[0].as.strct.field_values[i], &self, 1);
                 value_free(&self);
                 if (result.type == VAL_STR) return result;
                 value_free(&result);
@@ -1944,7 +2257,10 @@ static LatValue native_format(LatValue *args, int ac) {
     }
     char *err = NULL;
     char *r = format_string(args[0].as.str_val, args + 1, (size_t)(ac - 1), &err);
-    if (err) { current_rt->error = err; return value_nil(); }
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
     return value_string_owned(r);
 }
 static LatValue native_range(LatValue *args, int ac) {
@@ -1955,37 +2271,135 @@ static LatValue native_range(LatValue *args, int ac) {
     int64_t rstart = args[0].as.int_val, rend = args[1].as.int_val;
     int64_t rstep = (rstart <= rend) ? 1 : -1;
     if (ac == 3) {
-        if (args[2].type != VAL_INT) { current_rt->error = strdup("range() step must be Int"); return value_array(NULL, 0); }
+        if (args[2].type != VAL_INT) {
+            current_rt->error = strdup("range() step must be Int");
+            return value_array(NULL, 0);
+        }
         rstep = args[2].as.int_val;
     }
-    if (rstep == 0) { current_rt->error = strdup("range() step cannot be zero"); return value_array(NULL, 0); }
+    if (rstep == 0) {
+        current_rt->error = strdup("range() step cannot be zero");
+        return value_array(NULL, 0);
+    }
     size_t rcount = 0;
-    if (rstep > 0 && rstart < rend)
-        rcount = (size_t)((rend - rstart + rstep - 1) / rstep);
-    else if (rstep < 0 && rstart > rend)
-        rcount = (size_t)((rstart - rend + (-rstep) - 1) / (-rstep));
+    if (rstep > 0 && rstart < rend) rcount = (size_t)((rend - rstart + rstep - 1) / rstep);
+    else if (rstep < 0 && rstart > rend) rcount = (size_t)((rstart - rend + (-rstep) - 1) / (-rstep));
     LatValue *relems = malloc((rcount > 0 ? rcount : 1) * sizeof(LatValue));
     if (!relems) return value_unit();
     int64_t rcur = rstart;
-    for (size_t i = 0; i < rcount; i++) { relems[i] = value_int(rcur); rcur += rstep; }
-    LatValue r = value_array(relems, rcount); free(relems);
+    for (size_t i = 0; i < rcount; i++) {
+        relems[i] = value_int(rcur);
+        rcur += rstep;
+    }
+    LatValue r = value_array(relems, rcount);
+    free(relems);
     return r;
 }
+
+/* ── Iterator builtins ── */
+
+static LatValue native_iter(LatValue *args, int ac) {
+    if (ac != 1) {
+        current_rt->error = strdup("iter() expects 1 argument");
+        return value_nil();
+    }
+    switch (args[0].type) {
+        case VAL_ARRAY: return iter_from_array(&args[0]);
+        case VAL_MAP: return iter_from_map(&args[0]);
+        case VAL_STR: return iter_from_string(&args[0]);
+        case VAL_RANGE: return iter_from_range(args[0].as.range.start, args[0].as.range.end);
+        case VAL_SET: {
+            size_t n = lat_map_len(args[0].as.set.map);
+            LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            size_t ei = 0;
+            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
+                if (args[0].as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                elems[ei++] = value_deep_clone((LatValue *)args[0].as.set.map->entries[i].value);
+            }
+            LatValue tmp = value_array(elems, ei);
+            free(elems);
+            LatValue result = iter_from_array(&tmp);
+            value_free(&tmp);
+            return result;
+        }
+        case VAL_ITERATOR:
+            /* Already an iterator - pass through (move ownership) */
+            {
+                LatValue result = args[0];
+                args[0].type = VAL_NIL;
+                return result;
+            }
+        default: {
+            char *err = NULL;
+            lat_asprintf(&err, "iter() cannot iterate over %s", value_type_name(&args[0]));
+            current_rt->error = err;
+            return value_nil();
+        }
+    }
+}
+
+static LatValue native_range_iter(LatValue *args, int ac) {
+    if (ac < 2 || ac > 3 || args[0].type != VAL_INT || args[1].type != VAL_INT) {
+        current_rt->error = strdup("range_iter() expects (start: Int, end: Int, step?: Int)");
+        return value_nil();
+    }
+    int64_t start = args[0].as.int_val, end = args[1].as.int_val;
+    int64_t step = (start <= end) ? 1 : -1;
+    if (ac == 3) {
+        if (args[2].type != VAL_INT) {
+            current_rt->error = strdup("range_iter() step must be Int");
+            return value_nil();
+        }
+        step = args[2].as.int_val;
+    }
+    if (step == 0) {
+        current_rt->error = strdup("range_iter() step cannot be zero");
+        return value_nil();
+    }
+    return iter_range(start, end, step);
+}
+
+static LatValue native_repeat_iter(LatValue *args, int ac) {
+    if (ac < 1 || ac > 2) {
+        current_rt->error = strdup("repeat_iter() expects (value, count?)");
+        return value_nil();
+    }
+    int64_t count = -1;
+    if (ac == 2) {
+        if (args[1].type != VAL_INT) {
+            current_rt->error = strdup("repeat_iter() count must be Int");
+            return value_nil();
+        }
+        count = args[1].as.int_val;
+    }
+    return iter_repeat(args[0], count);
+}
+
 static LatValue native_print_raw(LatValue *args, int ac) {
     for (int i = 0; i < ac; i++) {
         if (i > 0) printf(" ");
         if (args[i].type == VAL_STR) printf("%s", args[i].as.str_val);
-        else { char *s = value_display(&args[i]); printf("%s", s); free(s); }
+        else {
+            char *s = value_display(&args[i]);
+            printf("%s", s);
+            free(s);
+        }
     }
-    fflush(stdout); return value_unit();
+    fflush(stdout);
+    return value_unit();
 }
 static LatValue native_eprint(LatValue *args, int ac) {
     for (int i = 0; i < ac; i++) {
         if (i > 0) fprintf(stderr, " ");
         if (args[i].type == VAL_STR) fprintf(stderr, "%s", args[i].as.str_val);
-        else { char *s = value_display(&args[i]); fprintf(stderr, "%s", s); free(s); }
+        else {
+            char *s = value_display(&args[i]);
+            fprintf(stderr, "%s", s);
+            free(s);
+        }
     }
-    fprintf(stderr, "\n"); return value_unit();
+    fprintf(stderr, "\n");
+    return value_unit();
 }
 static LatValue native_identity(LatValue *args, int ac) {
     if (ac != 1) return value_nil();
@@ -1993,9 +2407,9 @@ static LatValue native_identity(LatValue *args, int ac) {
 }
 static LatValue native_debug_assert(LatValue *args, int ac) {
     if (ac < 1) return value_unit();
-    bool ok = (args[0].type == VAL_BOOL) ? args[0].as.bool_val :
-              (args[0].type == VAL_INT) ? args[0].as.int_val != 0 :
-              args[0].type != VAL_NIL;
+    bool ok = (args[0].type == VAL_BOOL)  ? args[0].as.bool_val
+              : (args[0].type == VAL_INT) ? args[0].as.int_val != 0
+                                          : args[0].type != VAL_NIL;
     if (!ok) {
         const char *msg = (ac >= 2 && args[1].type == VAL_STR) ? args[1].as.str_val : "debug assertion failed";
         if (current_rt) {
@@ -2041,8 +2455,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     bool found = (realpath(file_path, resolved) != NULL);
     if (!found && current_rt->script_dir && file_path[0] != '/') {
         char script_rel[PATH_MAX];
-        snprintf(script_rel, sizeof(script_rel), "%s/%s",
-                 current_rt->script_dir, file_path);
+        snprintf(script_rel, sizeof(script_rel), "%s/%s", current_rt->script_dir, file_path);
         found = (realpath(script_rel, resolved) != NULL);
     }
     if (!found) {
@@ -2053,9 +2466,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     free(file_path);
 
     /* Dedup: skip if already required */
-    if (lat_map_get(&current_rt->required_files, resolved)) {
-        return value_bool(true);
-    }
+    if (lat_map_get(&current_rt->required_files, resolved)) { return value_bool(true); }
 
     /* Mark as loaded before execution (prevents circular requires) */
     bool loaded = true;
@@ -2088,8 +2499,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
         lat_asprintf(&current_rt->error, "require '%s': %s", resolved, parse_err);
         free(parse_err);
         program_free(&req_prog);
-        for (size_t ti = 0; ti < req_toks.len; ti++)
-            token_free(lat_vec_get(&req_toks, ti));
+        for (size_t ti = 0; ti < req_toks.len; ti++) token_free(lat_vec_get(&req_toks, ti));
         lat_vec_free(&req_toks);
         return value_bool(false);
     }
@@ -2099,12 +2509,10 @@ static LatValue native_require(LatValue *args, int arg_count) {
         char *comp_err = NULL;
         RegChunk *rchunk = reg_compile_module(&req_prog, &comp_err);
         program_free(&req_prog);
-        for (size_t ti = 0; ti < req_toks.len; ti++)
-            token_free(lat_vec_get(&req_toks, ti));
+        for (size_t ti = 0; ti < req_toks.len; ti++) token_free(lat_vec_get(&req_toks, ti));
         lat_vec_free(&req_toks);
         if (!rchunk) {
-            lat_asprintf(&current_rt->error, "require '%s': %s", resolved,
-                    comp_err ? comp_err : "compile error");
+            lat_asprintf(&current_rt->error, "require '%s': %s", resolved, comp_err ? comp_err : "compile error");
             free(comp_err);
             return value_bool(false);
         }
@@ -2114,7 +2522,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
         RegVMResult rr = regvm_run(rvm, rchunk, &req_result);
         if (rr != REGVM_OK) {
             lat_asprintf(&current_rt->error, "require '%s': runtime error: %s", resolved,
-                    rvm->error ? rvm->error : "(unknown)");
+                         rvm->error ? rvm->error : "(unknown)");
             return value_bool(false);
         }
         value_free(&req_result);
@@ -2122,12 +2530,10 @@ static LatValue native_require(LatValue *args, int arg_count) {
         char *comp_err = NULL;
         Chunk *req_chunk = stack_compile_module(&req_prog, &comp_err);
         program_free(&req_prog);
-        for (size_t ti = 0; ti < req_toks.len; ti++)
-            token_free(lat_vec_get(&req_toks, ti));
+        for (size_t ti = 0; ti < req_toks.len; ti++) token_free(lat_vec_get(&req_toks, ti));
         lat_vec_free(&req_toks);
         if (!req_chunk) {
-            lat_asprintf(&current_rt->error, "require '%s': %s", resolved,
-                    comp_err ? comp_err : "compile error");
+            lat_asprintf(&current_rt->error, "require '%s': %s", resolved, comp_err ? comp_err : "compile error");
             free(comp_err);
             return value_bool(false);
         }
@@ -2135,15 +2541,14 @@ static LatValue native_require(LatValue *args, int arg_count) {
         /* Track the chunk for proper lifetime management */
         if (vm->fn_chunk_count >= vm->fn_chunk_cap) {
             vm->fn_chunk_cap = vm->fn_chunk_cap ? vm->fn_chunk_cap * 2 : 8;
-            vm->fn_chunks = realloc(vm->fn_chunks,
-                                    vm->fn_chunk_cap * sizeof(Chunk *));
+            vm->fn_chunks = realloc(vm->fn_chunks, vm->fn_chunk_cap * sizeof(Chunk *));
         }
         vm->fn_chunks[vm->fn_chunk_count++] = req_chunk;
         LatValue req_result;
         StackVMResult req_r = stackvm_run(vm, req_chunk, &req_result);
         if (req_r != STACKVM_OK) {
             lat_asprintf(&current_rt->error, "require '%s': runtime error: %s", resolved,
-                    vm->error ? vm->error : "(unknown)");
+                         vm->error ? vm->error : "(unknown)");
             return value_bool(false);
         }
         value_free(&req_result);
@@ -2162,9 +2567,7 @@ static LatValue native_require_ext(LatValue *args, int arg_count) {
 
     /* Check cache */
     LatValue *cached = (LatValue *)lat_map_get(&current_rt->loaded_extensions, ext_name);
-    if (cached) {
-        return value_deep_clone(cached);
-    }
+    if (cached) { return value_deep_clone(cached); }
 
     /* Load extension */
     char *ext_err = NULL;
@@ -2197,15 +2600,15 @@ static LatValue native_require_ext(LatValue *args, int arg_count) {
 /* ── Missing native builtins ── */
 
 static LatValue native_args(LatValue *args, int arg_count) {
-    (void)args; (void)arg_count;
+    (void)args;
+    (void)arg_count;
     int ac = current_rt->prog_argc;
     char **av = current_rt->prog_argv;
     LatValue *elems = NULL;
     if (ac > 0) {
         elems = malloc((size_t)ac * sizeof(LatValue));
         if (!elems) return value_unit();
-        for (int i = 0; i < ac; i++)
-            elems[i] = value_string(av[i]);
+        for (int i = 0; i < ac; i++) elems[i] = value_string(av[i]);
     }
     LatValue arr = value_array(elems, (size_t)ac);
     free(elems);
@@ -2226,7 +2629,10 @@ static LatValue native_struct_from_map(LatValue *args, int arg_count) {
         lat_asprintf(&current_rt->error, "struct_from_map: unknown struct '%s'", sname);
         return value_nil();
     }
-    if (meta.type != VAL_ARRAY) { value_free(&meta); return value_nil(); }
+    if (meta.type != VAL_ARRAY) {
+        value_free(&meta);
+        return value_nil();
+    }
     size_t fc = meta.as.array.len;
     char **names = malloc(fc * sizeof(char *));
     if (!names) return value_unit();
@@ -2254,8 +2660,8 @@ static LatValue native_url_encode(LatValue *args, int arg_count) {
     size_t j = 0;
     for (size_t i = 0; i < slen; i++) {
         unsigned char c = (unsigned char)src[i];
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+            c == '.' || c == '~') {
             out[j++] = (char)c;
         } else {
             snprintf(out + j, 4, "%%%02X", c);
@@ -2275,7 +2681,7 @@ static LatValue native_url_decode(LatValue *args, int arg_count) {
     size_t j = 0;
     for (size_t i = 0; i < slen; i++) {
         if (src[i] == '%' && i + 2 < slen) {
-            char hex[3] = { src[i+1], src[i+2], '\0' };
+            char hex[3] = {src[i + 1], src[i + 2], '\0'};
             char *end = NULL;
             unsigned long val = strtoul(hex, &end, 16);
             if (end == hex + 2) {
@@ -2316,30 +2722,51 @@ static LatValue native_csv_parse(LatValue *args, int arg_count) {
                     if (pos >= input_len) break;
                     if (input[pos] == '"') {
                         if (pos + 1 < input_len && input[pos + 1] == '"') {
-                            if (field_len + 1 >= field_cap) { field_cap *= 2; field = realloc(field, field_cap); }
-                            field[field_len++] = '"'; pos += 2;
-                        } else { pos++; break; }
+                            if (field_len + 1 >= field_cap) {
+                                field_cap *= 2;
+                                field = realloc(field, field_cap);
+                            }
+                            field[field_len++] = '"';
+                            pos += 2;
+                        } else {
+                            pos++;
+                            break;
+                        }
                     } else {
-                        if (field_len + 1 >= field_cap) { field_cap *= 2; field = realloc(field, field_cap); }
+                        if (field_len + 1 >= field_cap) {
+                            field_cap *= 2;
+                            field = realloc(field, field_cap);
+                        }
                         field[field_len++] = input[pos++];
                     }
                 }
             } else {
                 while (pos < input_len && input[pos] != ',' && input[pos] != '\n' && input[pos] != '\r') {
-                    if (field_len + 1 >= field_cap) { field_cap *= 2; field = realloc(field, field_cap); }
+                    if (field_len + 1 >= field_cap) {
+                        field_cap *= 2;
+                        field = realloc(field, field_cap);
+                    }
                     field[field_len++] = input[pos++];
                 }
             }
             field[field_len] = '\0';
-            if (fields_len >= fields_cap) { fields_cap *= 2; fields = realloc(fields, fields_cap * sizeof(LatValue)); }
+            if (fields_len >= fields_cap) {
+                fields_cap *= 2;
+                fields = realloc(fields, fields_cap * sizeof(LatValue));
+            }
             fields[fields_len++] = value_string_owned(field);
-            if (pos < input_len && input[pos] == ',') { pos++; } else break;
+            if (pos < input_len && input[pos] == ',') {
+                pos++;
+            } else break;
         }
         if (pos < input_len && input[pos] == '\r') pos++;
         if (pos < input_len && input[pos] == '\n') pos++;
         LatValue row = value_array(fields, fields_len);
         free(fields);
-        if (rows_len >= rows_cap) { rows_cap *= 2; rows = realloc(rows, rows_cap * sizeof(LatValue)); }
+        if (rows_len >= rows_cap) {
+            rows_cap *= 2;
+            rows = realloc(rows, rows_cap * sizeof(LatValue));
+        }
         rows[rows_len++] = row;
     }
     LatValue result = value_array(rows, rows_len);
@@ -2355,10 +2782,16 @@ static LatValue native_csv_stringify(LatValue *args, int arg_count) {
     if (!out) return value_nil();
     for (size_t r = 0; r < data->as.array.len; r++) {
         LatValue *row = &data->as.array.elems[r];
-        if (row->type != VAL_ARRAY) { free(out); return value_nil(); }
+        if (row->type != VAL_ARRAY) {
+            free(out);
+            return value_nil();
+        }
         for (size_t c = 0; c < row->as.array.len; c++) {
             if (c > 0) {
-                if (out_len + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                if (out_len + 1 >= out_cap) {
+                    out_cap *= 2;
+                    out = realloc(out, out_cap);
+                }
                 out[out_len++] = ',';
             }
             char *field_str = value_display(&row->as.array.elems[c]);
@@ -2366,14 +2799,20 @@ static LatValue native_csv_stringify(LatValue *args, int arg_count) {
             bool needs_quote = false;
             for (size_t k = 0; k < flen; k++) {
                 if (field_str[k] == ',' || field_str[k] == '"' || field_str[k] == '\n' || field_str[k] == '\r') {
-                    needs_quote = true; break;
+                    needs_quote = true;
+                    break;
                 }
             }
             if (needs_quote) {
                 size_t extra = 0;
-                for (size_t k = 0; k < flen; k++) { if (field_str[k] == '"') extra++; }
+                for (size_t k = 0; k < flen; k++) {
+                    if (field_str[k] == '"') extra++;
+                }
                 size_t needed = flen + extra + 2;
-                while (out_len + needed >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                while (out_len + needed >= out_cap) {
+                    out_cap *= 2;
+                    out = realloc(out, out_cap);
+                }
                 out[out_len++] = '"';
                 for (size_t k = 0; k < flen; k++) {
                     if (field_str[k] == '"') out[out_len++] = '"';
@@ -2381,13 +2820,19 @@ static LatValue native_csv_stringify(LatValue *args, int arg_count) {
                 }
                 out[out_len++] = '"';
             } else {
-                while (out_len + flen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                while (out_len + flen >= out_cap) {
+                    out_cap *= 2;
+                    out = realloc(out, out_cap);
+                }
                 memcpy(out + out_len, field_str, flen);
                 out_len += flen;
             }
             free(field_str);
         }
-        if (out_len + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        if (out_len + 1 >= out_cap) {
+            out_cap *= 2;
+            out = realloc(out, out_cap);
+        }
         out[out_len++] = '\n';
     }
     out[out_len] = '\0';
@@ -2400,13 +2845,21 @@ static LatValue native_is_complete(LatValue *args, int arg_count) {
     Lexer lex = lexer_new(source);
     char *lex_err = NULL;
     LatVec toks = lexer_tokenize(&lex, &lex_err);
-    if (lex_err) { free(lex_err); lat_vec_free(&toks); return value_bool(false); }
+    if (lex_err) {
+        free(lex_err);
+        lat_vec_free(&toks);
+        return value_bool(false);
+    }
     int depth = 0;
     for (size_t j = 0; j < toks.len; j++) {
         Token *t = lat_vec_get(&toks, j);
         switch (t->type) {
-            case TOK_LBRACE: case TOK_LPAREN: case TOK_LBRACKET: depth++; break;
-            case TOK_RBRACE: case TOK_RPAREN: case TOK_RBRACKET: depth--; break;
+            case TOK_LBRACE:
+            case TOK_LPAREN:
+            case TOK_LBRACKET: depth++; break;
+            case TOK_RBRACE:
+            case TOK_RPAREN:
+            case TOK_RBRACKET: depth--; break;
             default: break;
         }
     }
@@ -2418,14 +2871,16 @@ static LatValue native_is_complete(LatValue *args, int arg_count) {
 static LatValue native_float_to_bits(LatValue *args, int arg_count) {
     if (arg_count != 1 || args[0].type != VAL_FLOAT) return value_nil();
     double d = args[0].as.float_val;
-    uint64_t bits; memcpy(&bits, &d, 8);
+    uint64_t bits;
+    memcpy(&bits, &d, 8);
     return value_int((int64_t)bits);
 }
 
 static LatValue native_bits_to_float(LatValue *args, int arg_count) {
     if (arg_count != 1 || args[0].type != VAL_INT) return value_nil();
     uint64_t bits = (uint64_t)args[0].as.int_val;
-    double d; memcpy(&d, &bits, 8);
+    double d;
+    memcpy(&d, &bits, 8);
     return value_float(d);
 }
 
@@ -2435,7 +2890,11 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
     Lexer lex = lexer_new(source);
     char *lex_err = NULL;
     LatVec toks = lexer_tokenize(&lex, &lex_err);
-    if (lex_err) { free(lex_err); lat_vec_free(&toks); return value_nil(); }
+    if (lex_err) {
+        free(lex_err);
+        lat_vec_free(&toks);
+        return value_nil();
+    }
     size_t tok_count = toks.len > 0 ? toks.len - 1 : 0;
     LatValue *elems = malloc((tok_count > 0 ? tok_count : 1) * sizeof(LatValue));
     if (!elems) return value_unit();
@@ -2453,7 +2912,7 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
         } else {
             text = strdup(token_type_name(t->type));
         }
-        char *fnames[3] = { "type", "text", "line" };
+        char *fnames[3] = {"type", "text", "line"};
         LatValue fvals[3];
         fvals[0] = value_string(type_str);
         fvals[1] = value_string_owned(text);
@@ -2475,7 +2934,8 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     LatVec toks = lexer_tokenize(&lex, &lex_err);
     if (lex_err) {
         lat_asprintf(&current_rt->error, "lat_eval: %s", lex_err);
-        free(lex_err); lat_vec_free(&toks);
+        free(lex_err);
+        lat_vec_free(&toks);
         return value_nil();
     }
     Parser parser = parser_new(&toks);
@@ -2483,7 +2943,8 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     Program prog = parser_parse(&parser, &parse_err);
     if (parse_err) {
         lat_asprintf(&current_rt->error, "lat_eval: %s", parse_err);
-        free(parse_err); program_free(&prog);
+        free(parse_err);
+        program_free(&prog);
         for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
         lat_vec_free(&toks);
         return value_nil();
@@ -2535,7 +2996,10 @@ static LatValue native_pipe(LatValue *args, int arg_count) {
     (void)0; /* uses dispatch */
     LatValue current = value_deep_clone(&args[0]);
     for (int i = 1; i < arg_count; i++) {
-        if (args[i].type != VAL_CLOSURE) { value_free(&current); return value_nil(); }
+        if (args[i].type != VAL_CLOSURE) {
+            value_free(&current);
+            return value_nil();
+        }
         LatValue result = current_rt->call_closure(current_rt->active_vm, &args[i], &current, 1);
         value_free(&current);
         current = result;
@@ -2544,8 +3008,7 @@ static LatValue native_pipe(LatValue *args, int arg_count) {
 }
 
 static LatValue native_compose(LatValue *args, int arg_count) {
-    if (arg_count < 2 || args[0].type != VAL_CLOSURE || args[1].type != VAL_CLOSURE)
-        return value_nil();
+    if (arg_count < 2 || args[0].type != VAL_CLOSURE || args[1].type != VAL_CLOSURE) return value_nil();
     StackVM *vm = (StackVM *)current_rt->active_vm;
 
     /* Store f and g in env with unique names so the composed closure can find them */
@@ -2597,9 +3060,15 @@ static char *latc_read_file(const char *path) {
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (len < 0) { fclose(f); return NULL; }
+    if (len < 0) {
+        fclose(f);
+        return NULL;
+    }
     char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
     size_t n = fread(buf, 1, (size_t)len, f);
     buf[n] = '\0';
     fclose(f);
@@ -2629,8 +3098,7 @@ static LatValue native_compile_file(LatValue *args, int ac) {
     if (parse_err) {
         free(parse_err);
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         free(source);
         return value_nil();
@@ -2639,8 +3107,7 @@ static LatValue native_compile_file(LatValue *args, int ac) {
     char *comp_err = NULL;
     Chunk *chunk = stack_compile(&prog, &comp_err);
     program_free(&prog);
-    for (size_t i = 0; i < tokens.len; i++)
-        token_free(lat_vec_get(&tokens, i));
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
     lat_vec_free(&tokens);
     free(source);
 
@@ -2918,18 +3385,54 @@ bool rt_try_builtin_import(const char *name, LatValue *out) {
     /* Paths with directory separators or leading dot are never built-in */
     if (strchr(name, '/') || strchr(name, '\\') || name[0] == '.') return false;
 
-    if (strcmp(name, "math") == 0)   { *out = build_math_module();   return true; }
-    if (strcmp(name, "fs") == 0)     { *out = build_fs_module();     return true; }
-    if (strcmp(name, "path") == 0)   { *out = build_path_module();   return true; }
-    if (strcmp(name, "json") == 0)   { *out = build_json_module();   return true; }
-    if (strcmp(name, "toml") == 0)   { *out = build_toml_module();   return true; }
-    if (strcmp(name, "yaml") == 0)   { *out = build_yaml_module();   return true; }
-    if (strcmp(name, "crypto") == 0) { *out = build_crypto_module(); return true; }
-    if (strcmp(name, "http") == 0)   { *out = build_http_module();   return true; }
-    if (strcmp(name, "net") == 0)    { *out = build_net_module();    return true; }
-    if (strcmp(name, "os") == 0)     { *out = build_os_module();     return true; }
-    if (strcmp(name, "time") == 0)   { *out = build_time_module();   return true; }
-    if (strcmp(name, "regex") == 0)  { *out = build_regex_module();  return true; }
+    if (strcmp(name, "math") == 0) {
+        *out = build_math_module();
+        return true;
+    }
+    if (strcmp(name, "fs") == 0) {
+        *out = build_fs_module();
+        return true;
+    }
+    if (strcmp(name, "path") == 0) {
+        *out = build_path_module();
+        return true;
+    }
+    if (strcmp(name, "json") == 0) {
+        *out = build_json_module();
+        return true;
+    }
+    if (strcmp(name, "toml") == 0) {
+        *out = build_toml_module();
+        return true;
+    }
+    if (strcmp(name, "yaml") == 0) {
+        *out = build_yaml_module();
+        return true;
+    }
+    if (strcmp(name, "crypto") == 0) {
+        *out = build_crypto_module();
+        return true;
+    }
+    if (strcmp(name, "http") == 0) {
+        *out = build_http_module();
+        return true;
+    }
+    if (strcmp(name, "net") == 0) {
+        *out = build_net_module();
+        return true;
+    }
+    if (strcmp(name, "os") == 0) {
+        *out = build_os_module();
+        return true;
+    }
+    if (strcmp(name, "time") == 0) {
+        *out = build_time_module();
+        return true;
+    }
+    if (strcmp(name, "regex") == 0) {
+        *out = build_regex_module();
+        return true;
+    }
     return false;
 }
 
@@ -3202,6 +3705,11 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "repr", native_repr, 1);
     rt_register_native(rt, "format", native_format, -1);
     rt_register_native(rt, "range", native_range, -1);
+
+    /* Iterators */
+    rt_register_native(rt, "iter", native_iter, 1);
+    rt_register_native(rt, "range_iter", native_range_iter, -1);
+    rt_register_native(rt, "repeat_iter", native_repeat_iter, -1);
     rt_register_native(rt, "print_raw", native_print_raw, -1);
     rt_register_native(rt, "eprint", native_eprint, -1);
     rt_register_native(rt, "identity", native_identity, 1);
@@ -3287,8 +3795,7 @@ void lat_runtime_free(LatRuntime *rt) {
     /* Free reactions */
     for (size_t i = 0; i < rt->reaction_count; i++) {
         free(rt->reactions[i].var_name);
-        for (size_t j = 0; j < rt->reactions[i].cb_count; j++)
-            value_free(&rt->reactions[i].callbacks[j]);
+        for (size_t j = 0; j < rt->reactions[i].cb_count; j++) value_free(&rt->reactions[i].callbacks[j]);
         free(rt->reactions[i].callbacks);
     }
     free(rt->reactions);

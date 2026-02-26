@@ -53,7 +53,7 @@ static char *lat_strdup(const char *s) {
 
 static void lat_free(void *ptr) {
     if (!ptr) return;
-    if (g_arena) return;  /* no-op during arena clone */
+    if (g_arena) return; /* no-op during arena clone */
     if (g_heap && fluid_dealloc(g_heap->fluid, ptr)) return;
     free(ptr);
 }
@@ -67,50 +67,50 @@ char *lat_strdup_routed(const char *s) { return lat_strdup(s); }
 /* ── Constructors ── */
 
 LatValue value_int(int64_t v) {
-    LatValue val = { .type = VAL_INT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_INT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.int_val = v;
     return val;
 }
 
 LatValue value_float(double v) {
-    LatValue val = { .type = VAL_FLOAT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_FLOAT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.float_val = v;
     return val;
 }
 
 LatValue value_bool(bool v) {
-    LatValue val = { .type = VAL_BOOL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_BOOL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.bool_val = v;
     return val;
 }
 
 LatValue value_string(const char *s) {
-    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.str_val = lat_strdup(s);
     return val;
 }
 
 LatValue value_string_owned(char *s) {
-    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.str_val = s;
     return val;
 }
 
 LatValue value_string_owned_len(char *s, size_t len) {
-    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.str_val = s;
     val.as.str_len = len;
     return val;
 }
 
 LatValue value_string_interned(const char *s) {
-    LatValue val = { .type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_INTERNED };
+    LatValue val = {.type = VAL_STR, .phase = VTAG_UNPHASED, .region_id = REGION_INTERNED};
     val.as.str_val = (char *)intern(s);
     return val;
 }
 
 LatValue value_array(LatValue *elems, size_t len) {
-    LatValue val = { .type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     size_t cap = len < 4 ? 4 : len;
     val.as.array.elems = lat_alloc(cap * sizeof(LatValue));
     if (len > 0) memcpy(val.as.array.elems, elems, len * sizeof(LatValue));
@@ -120,11 +120,11 @@ LatValue value_array(LatValue *elems, size_t len) {
 }
 
 LatValue value_struct(const char *name, char **field_names, LatValue *field_values, size_t count) {
-    LatValue val = { .type = VAL_STRUCT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_STRUCT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.strct.name = lat_strdup(name);
     val.as.strct.field_names = lat_alloc(count * sizeof(char *));
     val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
-    val.as.strct.field_phases = NULL;  /* lazy-allocated on first field freeze */
+    val.as.strct.field_phases = NULL; /* lazy-allocated on first field freeze */
     for (size_t i = 0; i < count; i++) {
         val.as.strct.field_names[i] = (char *)intern(field_names[i]);
         val.as.strct.field_values[i] = field_values[i];
@@ -134,7 +134,7 @@ LatValue value_struct(const char *name, char **field_names, LatValue *field_valu
 }
 
 LatValue value_struct_vm(const char *name, const char **field_names, LatValue *field_values, size_t count) {
-    LatValue val = { .type = VAL_STRUCT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_STRUCT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.strct.name = lat_strdup(name);
     val.as.strct.field_names = lat_alloc(count * sizeof(char *));
     val.as.strct.field_values = lat_alloc(count * sizeof(LatValue));
@@ -149,58 +149,50 @@ LatValue value_struct_vm(const char *name, const char **field_names, LatValue *f
 
 LatValue value_closure(char **param_names, size_t param_count, struct Expr *body, Env *captured,
                        struct Expr **default_values, bool has_variadic) {
-    LatValue val = { .type = VAL_CLOSURE, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_CLOSURE, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.closure.param_names = lat_alloc(param_count * sizeof(char *));
-    for (size_t i = 0; i < param_count; i++) {
-        val.as.closure.param_names[i] = lat_strdup(param_names[i]);
-    }
+    for (size_t i = 0; i < param_count; i++) { val.as.closure.param_names[i] = lat_strdup(param_names[i]); }
     val.as.closure.param_count = param_count;
-    val.as.closure.body = body;       /* borrowed reference */
+    val.as.closure.body = body; /* borrowed reference */
     val.as.closure.captured_env = captured;
-    val.as.closure.default_values = default_values;  /* borrowed from AST */
+    val.as.closure.default_values = default_values; /* borrowed from AST */
     val.as.closure.has_variadic = has_variadic;
     return val;
 }
 
-LatValue value_unit(void) {
-    return (LatValue){ .type = VAL_UNIT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
-}
+LatValue value_unit(void) { return (LatValue){.type = VAL_UNIT, .phase = VTAG_UNPHASED, .region_id = (size_t)-1}; }
 
-LatValue value_nil(void) {
-    return (LatValue){ .type = VAL_NIL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
-}
+LatValue value_nil(void) { return (LatValue){.type = VAL_NIL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1}; }
 
 LatValue value_range(int64_t start, int64_t end) {
-    LatValue val = { .type = VAL_RANGE, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_RANGE, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.range.start = start;
     val.as.range.end = end;
     return val;
 }
 
 LatValue value_map_new(void) {
-    LatValue val = { .type = VAL_MAP, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_MAP, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.map.map = lat_alloc(sizeof(LatMap));
     *val.as.map.map = lat_map_new(sizeof(LatValue));
-    val.as.map.key_phases = NULL;  /* lazy-allocated on first key freeze */
+    val.as.map.key_phases = NULL; /* lazy-allocated on first key freeze */
     return val;
 }
 
 LatValue value_channel(struct LatChannel *ch) {
-    LatValue val = { .type = VAL_CHANNEL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_CHANNEL, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     channel_retain(ch);
     val.as.channel.ch = ch;
     return val;
 }
 
-LatValue value_enum(const char *enum_name, const char *variant_name,
-                    LatValue *payload, size_t count) {
-    LatValue val = { .type = VAL_ENUM, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+LatValue value_enum(const char *enum_name, const char *variant_name, LatValue *payload, size_t count) {
+    LatValue val = {.type = VAL_ENUM, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.enm.enum_name = lat_strdup(enum_name);
     val.as.enm.variant_name = lat_strdup(variant_name);
     if (count > 0 && payload) {
         val.as.enm.payload = lat_alloc(count * sizeof(LatValue));
-        for (size_t i = 0; i < count; i++)
-            val.as.enm.payload[i] = value_deep_clone(&payload[i]);
+        for (size_t i = 0; i < count; i++) val.as.enm.payload[i] = value_deep_clone(&payload[i]);
         val.as.enm.payload_count = count;
     } else {
         val.as.enm.payload = NULL;
@@ -210,24 +202,22 @@ LatValue value_enum(const char *enum_name, const char *variant_name,
 }
 
 LatValue value_set_new(void) {
-    LatValue val = { .type = VAL_SET, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_SET, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     val.as.set.map = lat_alloc(sizeof(LatMap));
     *val.as.set.map = lat_map_new(sizeof(LatValue));
     return val;
 }
 
 LatValue value_tuple(LatValue *elems, size_t len) {
-    LatValue val = { .type = VAL_TUPLE, .phase = VTAG_CRYSTAL, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_TUPLE, .phase = VTAG_CRYSTAL, .region_id = (size_t)-1};
     val.as.tuple.elems = lat_alloc(len * sizeof(LatValue));
-    for (size_t i = 0; i < len; i++) {
-        val.as.tuple.elems[i] = value_deep_clone(&elems[i]);
-    }
+    for (size_t i = 0; i < len; i++) { val.as.tuple.elems[i] = value_deep_clone(&elems[i]); }
     val.as.tuple.len = len;
     return val;
 }
 
 LatValue value_buffer(const uint8_t *data, size_t len) {
-    LatValue val = { .type = VAL_BUFFER, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_BUFFER, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     size_t cap = len < 8 ? 8 : len;
     val.as.buffer.data = lat_alloc(cap);
     if (len > 0 && data) memcpy(val.as.buffer.data, data, len);
@@ -237,7 +227,7 @@ LatValue value_buffer(const uint8_t *data, size_t len) {
 }
 
 LatValue value_buffer_alloc(size_t size) {
-    LatValue val = { .type = VAL_BUFFER, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_BUFFER, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     size_t cap = size < 8 ? 8 : size;
     val.as.buffer.data = lat_calloc(cap, 1);
     val.as.buffer.len = size;
@@ -245,8 +235,18 @@ LatValue value_buffer_alloc(size_t size) {
     return val;
 }
 
+LatValue value_iterator(LatValue (*next_fn)(void *, bool *), void *state, void (*free_fn)(void *)) {
+    LatValue val = {.type = VAL_ITERATOR, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
+    val.as.iterator.next_fn = next_fn;
+    val.as.iterator.state = state;
+    val.as.iterator.free_fn = free_fn;
+    val.as.iterator.refcount = malloc(sizeof(size_t));
+    if (val.as.iterator.refcount) *val.as.iterator.refcount = 1;
+    return val;
+}
+
 LatValue value_ref(LatValue inner) {
-    LatValue val = { .type = VAL_REF, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
+    LatValue val = {.type = VAL_REF, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     LatRef *r = malloc(sizeof(LatRef));
     if (!r) return value_nil();
     r->value = value_deep_clone(&inner);
@@ -275,12 +275,12 @@ bool value_is_crystal(const LatValue *v) { return v->phase == VTAG_CRYSTAL; }
 /* ── Deep clone ── */
 
 LatValue value_deep_clone(const LatValue *v) {
-    LatValue out = { .type = v->type, .phase = v->phase, .region_id = (size_t)-1 };
+    LatValue out = {.type = v->type, .phase = v->phase, .region_id = (size_t)-1};
 
     switch (v->type) {
-        case VAL_INT:   out.as.int_val = v->as.int_val; break;
+        case VAL_INT: out.as.int_val = v->as.int_val; break;
         case VAL_FLOAT: out.as.float_val = v->as.float_val; break;
-        case VAL_BOOL:  out.as.bool_val = v->as.bool_val; break;
+        case VAL_BOOL: out.as.bool_val = v->as.bool_val; break;
         case VAL_STR:
             if (v->region_id == REGION_INTERNED) {
                 out.as.str_val = v->as.str_val;
@@ -293,9 +293,7 @@ LatValue value_deep_clone(const LatValue *v) {
             size_t len = v->as.array.len;
             size_t cap = v->as.array.cap;
             out.as.array.elems = lat_alloc(cap * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++) {
-                out.as.array.elems[i] = value_deep_clone(&v->as.array.elems[i]);
-            }
+            for (size_t i = 0; i < len; i++) { out.as.array.elems[i] = value_deep_clone(&v->as.array.elems[i]); }
             out.as.array.len = len;
             out.as.array.cap = cap;
             break;
@@ -329,7 +327,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 out.as.closure.param_names = NULL;
             }
             out.as.closure.param_count = pc;
-            out.as.closure.body = v->as.closure.body;  /* borrowed */
+            out.as.closure.body = v->as.closure.body; /* borrowed */
             /* Compiled bytecode closures store ObjUpvalue** in captured_env (not Env*).
              * Shallow-copy the pointer; the VM manages upvalue lifetime. */
             if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) {
@@ -347,12 +345,11 @@ LatValue value_deep_clone(const LatValue *v) {
                     env_retain(v->as.closure.captured_env);
                 }
             }
-            out.as.closure.default_values = v->as.closure.default_values;  /* borrowed */
+            out.as.closure.default_values = v->as.closure.default_values; /* borrowed */
             out.as.closure.has_variadic = v->as.closure.has_variadic;
-            out.as.closure.native_fn = v->as.closure.native_fn;  /* shared, not owned */
+            out.as.closure.native_fn = v->as.closure.native_fn; /* shared, not owned */
             /* Compiled bytecode closures store upvalue count in region_id */
-            if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL)
-                out.region_id = v->region_id;
+            if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) out.region_id = v->region_id;
             break;
         }
         case VAL_UNIT: break;
@@ -387,7 +384,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 LatMap *dst = lat_alloc(sizeof(LatMap));
                 dst->value_size = src->value_size;
                 dst->cap = src->cap;
-                dst->count = src->count;  /* preserve tombstone count for probe chains */
+                dst->count = src->count; /* preserve tombstone count for probe chains */
                 dst->live = src->live;
                 dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
                 for (size_t i = 0; i < src->cap; i++) {
@@ -422,8 +419,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 *out.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
                 for (size_t i = 0; i < ksrc->cap; i++) {
                     if (ksrc->entries[i].state == MAP_OCCUPIED) {
-                        lat_map_set(out.as.map.key_phases, ksrc->entries[i].key,
-                                    ksrc->entries[i].value);
+                        lat_map_set(out.as.map.key_phases, ksrc->entries[i].key, ksrc->entries[i].value);
                     }
                 }
             } else {
@@ -437,7 +433,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 LatMap *dst = lat_alloc(sizeof(LatMap));
                 dst->value_size = src->value_size;
                 dst->cap = src->cap;
-                dst->count = src->count;  /* preserve tombstone count for probe chains */
+                dst->count = src->count; /* preserve tombstone count for probe chains */
                 dst->live = src->live;
                 dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
                 for (size_t i = 0; i < src->cap; i++) {
@@ -486,6 +482,14 @@ LatValue value_deep_clone(const LatValue *v) {
             ref_retain(v->as.ref.ref);
             out.as.ref.ref = v->as.ref.ref;
             break;
+        case VAL_ITERATOR:
+            /* Shared refcount: shallow copy, bump refcount */
+            out.as.iterator.next_fn = v->as.iterator.next_fn;
+            out.as.iterator.state = v->as.iterator.state;
+            out.as.iterator.free_fn = v->as.iterator.free_fn;
+            out.as.iterator.refcount = v->as.iterator.refcount;
+            if (out.as.iterator.refcount) (*out.as.iterator.refcount)++;
+            break;
     }
     return out;
 }
@@ -495,9 +499,7 @@ LatValue value_deep_clone(const LatValue *v) {
 static void set_phase_recursive(LatValue *v, PhaseTag phase) {
     v->phase = phase;
     if (v->type == VAL_ARRAY) {
-        for (size_t i = 0; i < v->as.array.len; i++) {
-            set_phase_recursive(&v->as.array.elems[i], phase);
-        }
+        for (size_t i = 0; i < v->as.array.len; i++) { set_phase_recursive(&v->as.array.elems[i], phase); }
     } else if (v->type == VAL_STRUCT) {
         for (size_t i = 0; i < v->as.strct.field_count; i++) {
             set_phase_recursive(&v->as.strct.field_values[i], phase);
@@ -505,8 +507,7 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
         /* Update field-level phases */
         if (v->as.strct.field_phases) {
             if (phase == VTAG_CRYSTAL) {
-                for (size_t i = 0; i < v->as.strct.field_count; i++)
-                    v->as.strct.field_phases[i] = VTAG_CRYSTAL;
+                for (size_t i = 0; i < v->as.strct.field_count; i++) v->as.strct.field_phases[i] = VTAG_CRYSTAL;
             } else {
                 /* Thawing: clear per-field phases */
                 lat_free(v->as.strct.field_phases);
@@ -521,8 +522,7 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
             }
         }
     } else if (v->type == VAL_ENUM) {
-        for (size_t i = 0; i < v->as.enm.payload_count; i++)
-            set_phase_recursive(&v->as.enm.payload[i], phase);
+        for (size_t i = 0; i < v->as.enm.payload_count; i++) set_phase_recursive(&v->as.enm.payload[i], phase);
     } else if (v->type == VAL_SET) {
         for (size_t i = 0; i < v->as.set.map->cap; i++) {
             if (v->as.set.map->entries[i].state == MAP_OCCUPIED) {
@@ -531,9 +531,7 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
             }
         }
     } else if (v->type == VAL_TUPLE) {
-        for (size_t i = 0; i < v->as.tuple.len; i++) {
-            set_phase_recursive(&v->as.tuple.elems[i], phase);
-        }
+        for (size_t i = 0; i < v->as.tuple.len; i++) { set_phase_recursive(&v->as.tuple.elems[i], phase); }
     }
     /* VAL_BUFFER: just set phase tag (no nested values) */
     else if (v->type == VAL_REF) {
@@ -574,19 +572,13 @@ void value_print(const LatValue *v, FILE *out) {
 char *value_display(const LatValue *v) {
     char *buf = NULL;
     switch (v->type) {
-        case VAL_INT:
-            lat_asprintf(&buf, "%lld", (long long)v->as.int_val);
-            break;
+        case VAL_INT: lat_asprintf(&buf, "%lld", (long long)v->as.int_val); break;
         case VAL_FLOAT: {
             lat_asprintf(&buf, "%g", v->as.float_val);
             break;
         }
-        case VAL_BOOL:
-            buf = strdup(v->as.bool_val ? "true" : "false");
-            break;
-        case VAL_STR:
-            buf = strdup(v->as.str_val);
-            break;
+        case VAL_BOOL: buf = strdup(v->as.bool_val ? "true" : "false"); break;
+        case VAL_STR: buf = strdup(v->as.str_val); break;
         case VAL_ARRAY: {
             size_t cap = 64;
             buf = malloc(cap);
@@ -594,10 +586,16 @@ char *value_display(const LatValue *v) {
             size_t pos = 0;
             buf[pos++] = '[';
             for (size_t i = 0; i < v->as.array.len; i++) {
-                if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
+                if (i > 0) {
+                    buf[pos++] = ',';
+                    buf[pos++] = ' ';
+                }
                 char *elem = value_display(&v->as.array.elems[i]);
                 size_t elen = strlen(elem);
-                while (pos + elen + 4 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (pos + elen + 4 > cap) {
+                    cap *= 2;
+                    buf = realloc(buf, cap);
+                }
                 memcpy(buf + pos, elem, elen);
                 pos += elen;
                 free(elem);
@@ -612,19 +610,28 @@ char *value_display(const LatValue *v) {
             if (!buf) return strdup("<Struct>");
             size_t pos = 0;
             size_t nlen = strlen(v->as.strct.name);
-            while (pos + nlen + 8 > cap) { cap *= 2; buf = realloc(buf, cap); }
+            while (pos + nlen + 8 > cap) {
+                cap *= 2;
+                buf = realloc(buf, cap);
+            }
             memcpy(buf + pos, v->as.strct.name, nlen);
             pos += nlen;
             buf[pos++] = ' ';
             buf[pos++] = '{';
             buf[pos++] = ' ';
             for (size_t i = 0; i < v->as.strct.field_count; i++) {
-                if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
+                if (i > 0) {
+                    buf[pos++] = ',';
+                    buf[pos++] = ' ';
+                }
                 const char *fname = v->as.strct.field_names[i];
                 size_t flen = strlen(fname);
                 char *fval = value_display(&v->as.strct.field_values[i]);
                 size_t vlen = strlen(fval);
-                while (pos + flen + vlen + 8 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                while (pos + flen + vlen + 8 > cap) {
+                    cap *= 2;
+                    buf = realloc(buf, cap);
+                }
                 memcpy(buf + pos, fname, flen);
                 pos += flen;
                 buf[pos++] = ':';
@@ -649,10 +656,16 @@ char *value_display(const LatValue *v) {
             pos = plen;
             if (v->as.closure.param_names) {
                 for (size_t i = 0; i < v->as.closure.param_count; i++) {
-                    if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
+                    if (i > 0) {
+                        buf[pos++] = ',';
+                        buf[pos++] = ' ';
+                    }
                     const char *pn = v->as.closure.param_names[i];
                     size_t nl = strlen(pn);
-                    while (pos + nl + 4 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                    while (pos + nl + 4 > cap) {
+                        cap *= 2;
+                        buf = realloc(buf, cap);
+                    }
                     memcpy(buf + pos, pn, nl);
                     pos += nl;
                 }
@@ -662,18 +675,12 @@ char *value_display(const LatValue *v) {
             buf[pos] = '\0';
             break;
         }
-        case VAL_UNIT:
-            buf = strdup("()");
-            break;
-        case VAL_NIL:
-            buf = strdup("nil");
-            break;
+        case VAL_UNIT: buf = strdup("()"); break;
+        case VAL_NIL: buf = strdup("nil"); break;
         case VAL_RANGE:
             lat_asprintf(&buf, "%lld..%lld", (long long)v->as.range.start, (long long)v->as.range.end);
             break;
-        case VAL_CHANNEL:
-            buf = strdup("<Channel>");
-            break;
+        case VAL_CHANNEL: buf = strdup("<Channel>"); break;
         case VAL_ENUM: {
             if (v->as.enm.payload_count == 0) {
                 lat_asprintf(&buf, "%s::%s", v->as.enm.enum_name, v->as.enm.variant_name);
@@ -684,17 +691,30 @@ char *value_display(const LatValue *v) {
                 size_t epos = 0;
                 size_t enlen = strlen(v->as.enm.enum_name);
                 size_t vnlen = strlen(v->as.enm.variant_name);
-                while (epos + enlen + vnlen + 8 > ecap) { ecap *= 2; buf = realloc(buf, ecap); }
-                memcpy(buf + epos, v->as.enm.enum_name, enlen); epos += enlen;
-                buf[epos++] = ':'; buf[epos++] = ':';
-                memcpy(buf + epos, v->as.enm.variant_name, vnlen); epos += vnlen;
+                while (epos + enlen + vnlen + 8 > ecap) {
+                    ecap *= 2;
+                    buf = realloc(buf, ecap);
+                }
+                memcpy(buf + epos, v->as.enm.enum_name, enlen);
+                epos += enlen;
+                buf[epos++] = ':';
+                buf[epos++] = ':';
+                memcpy(buf + epos, v->as.enm.variant_name, vnlen);
+                epos += vnlen;
                 buf[epos++] = '(';
                 for (size_t i = 0; i < v->as.enm.payload_count; i++) {
-                    if (i > 0) { buf[epos++] = ','; buf[epos++] = ' '; }
+                    if (i > 0) {
+                        buf[epos++] = ',';
+                        buf[epos++] = ' ';
+                    }
                     char *elem = value_display(&v->as.enm.payload[i]);
                     size_t elen = strlen(elem);
-                    while (epos + elen + 4 > ecap) { ecap *= 2; buf = realloc(buf, ecap); }
-                    memcpy(buf + epos, elem, elen); epos += elen;
+                    while (epos + elen + 4 > ecap) {
+                        ecap *= 2;
+                        buf = realloc(buf, ecap);
+                    }
+                    memcpy(buf + epos, elem, elen);
+                    epos += elen;
                     free(elem);
                 }
                 buf[epos++] = ')';
@@ -707,20 +727,35 @@ char *value_display(const LatValue *v) {
             buf = malloc(cap2);
             if (!buf) return strdup("Set{}");
             size_t pos2 = 0;
-            memcpy(buf, "Set{", 4); pos2 = 4;
+            memcpy(buf, "Set{", 4);
+            pos2 = 4;
             bool sfirst = true;
             for (size_t i = 0; i < v->as.set.map->cap; i++) {
                 if (v->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
-                if (!sfirst) { while (pos2 + 3 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); } buf[pos2++] = ','; buf[pos2++] = ' '; }
+                if (!sfirst) {
+                    while (pos2 + 3 > cap2) {
+                        cap2 *= 2;
+                        buf = realloc(buf, cap2);
+                    }
+                    buf[pos2++] = ',';
+                    buf[pos2++] = ' ';
+                }
                 sfirst = false;
                 LatValue *sv = (LatValue *)v->as.set.map->entries[i].value;
                 char *elem = value_display(sv);
                 size_t elen = strlen(elem);
-                while (pos2 + elen + 4 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); }
-                memcpy(buf + pos2, elem, elen); pos2 += elen;
+                while (pos2 + elen + 4 > cap2) {
+                    cap2 *= 2;
+                    buf = realloc(buf, cap2);
+                }
+                memcpy(buf + pos2, elem, elen);
+                pos2 += elen;
                 free(elem);
             }
-            while (pos2 + 2 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); }
+            while (pos2 + 2 > cap2) {
+                cap2 *= 2;
+                buf = realloc(buf, cap2);
+            }
             buf[pos2++] = '}';
             buf[pos2] = '\0';
             break;
@@ -733,30 +768,41 @@ char *value_display(const LatValue *v) {
             buf[tpos++] = '(';
             for (size_t i = 0; i < v->as.tuple.len; i++) {
                 if (i > 0) {
-                    while (tpos + 3 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
-                    buf[tpos++] = ','; buf[tpos++] = ' ';
+                    while (tpos + 3 > tcap) {
+                        tcap *= 2;
+                        buf = realloc(buf, tcap);
+                    }
+                    buf[tpos++] = ',';
+                    buf[tpos++] = ' ';
                 }
                 char *elem = value_display(&v->as.tuple.elems[i]);
                 size_t elen = strlen(elem);
-                while (tpos + elen + 4 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
-                memcpy(buf + tpos, elem, elen); tpos += elen;
+                while (tpos + elen + 4 > tcap) {
+                    tcap *= 2;
+                    buf = realloc(buf, tcap);
+                }
+                memcpy(buf + tpos, elem, elen);
+                tpos += elen;
                 free(elem);
             }
             if (v->as.tuple.len == 1) {
-                while (tpos + 3 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
+                while (tpos + 3 > tcap) {
+                    tcap *= 2;
+                    buf = realloc(buf, tcap);
+                }
                 buf[tpos++] = ',';
             }
-            while (tpos + 2 > tcap) { tcap *= 2; buf = realloc(buf, tcap); }
+            while (tpos + 2 > tcap) {
+                tcap *= 2;
+                buf = realloc(buf, tcap);
+            }
             buf[tpos++] = ')';
             buf[tpos] = '\0';
             break;
         }
-        case VAL_BUFFER:
-            lat_asprintf(&buf, "Buffer<%zu bytes>", v->as.buffer.len);
-            break;
-        case VAL_REF:
-            lat_asprintf(&buf, "Ref<%s>", value_type_name(&v->as.ref.ref->value));
-            break;
+        case VAL_BUFFER: lat_asprintf(&buf, "Buffer<%zu bytes>", v->as.buffer.len); break;
+        case VAL_REF: lat_asprintf(&buf, "Ref<%s>", value_type_name(&v->as.ref.ref->value)); break;
+        case VAL_ITERATOR: buf = strdup("<Iterator>"); break;
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
@@ -766,23 +812,34 @@ char *value_display(const LatValue *v) {
             bool first = true;
             for (size_t i = 0; i < v->as.map.map->cap; i++) {
                 if (v->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
-                if (!first) { buf[pos2++] = ','; buf[pos2++] = ' '; }
+                if (!first) {
+                    buf[pos2++] = ',';
+                    buf[pos2++] = ' ';
+                }
                 first = false;
                 const char *key = v->as.map.map->entries[i].key;
                 LatValue *mval = (LatValue *)v->as.map.map->entries[i].value;
                 char *vstr = value_display(mval);
                 size_t klen = strlen(key);
                 size_t vlen = strlen(vstr);
-                while (pos2 + klen + vlen + 8 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); }
+                while (pos2 + klen + vlen + 8 > cap2) {
+                    cap2 *= 2;
+                    buf = realloc(buf, cap2);
+                }
                 buf[pos2++] = '"';
-                memcpy(buf + pos2, key, klen); pos2 += klen;
+                memcpy(buf + pos2, key, klen);
+                pos2 += klen;
                 buf[pos2++] = '"';
                 buf[pos2++] = ':';
                 buf[pos2++] = ' ';
-                memcpy(buf + pos2, vstr, vlen); pos2 += vlen;
+                memcpy(buf + pos2, vstr, vlen);
+                pos2 += vlen;
                 free(vstr);
             }
-            while (pos2 + 2 > cap2) { cap2 *= 2; buf = realloc(buf, cap2); }
+            while (pos2 + 2 > cap2) {
+                cap2 *= 2;
+                buf = realloc(buf, cap2);
+            }
             buf[pos2++] = '}';
             buf[pos2] = '\0';
             break;
@@ -810,10 +867,8 @@ char *value_repr(const LatValue *v) {
         char *buf = malloc(cap);
         if (!buf) return strdup("Buffer<>");
         int pos = snprintf(buf, cap, "Buffer<%zu bytes:", v->as.buffer.len);
-        for (size_t i = 0; i < show; i++)
-            pos += snprintf(buf + pos, cap - (size_t)pos, " %02x", v->as.buffer.data[i]);
-        if (v->as.buffer.len > 8)
-            pos += snprintf(buf + pos, cap - (size_t)pos, " ...");
+        for (size_t i = 0; i < show; i++) pos += snprintf(buf + pos, cap - (size_t)pos, " %02x", v->as.buffer.data[i]);
+        if (v->as.buffer.len > 8) pos += snprintf(buf + pos, cap - (size_t)pos, " ...");
         snprintf(buf + pos, cap - (size_t)pos, ">");
         return buf;
     }
@@ -825,23 +880,24 @@ char *value_repr(const LatValue *v) {
 
 const char *value_type_name(const LatValue *v) {
     switch (v->type) {
-        case VAL_INT:     return "Int";
-        case VAL_FLOAT:   return "Float";
-        case VAL_BOOL:    return "Bool";
-        case VAL_STR:     return "String";
-        case VAL_ARRAY:   return "Array";
-        case VAL_STRUCT:  return "Struct";
+        case VAL_INT: return "Int";
+        case VAL_FLOAT: return "Float";
+        case VAL_BOOL: return "Bool";
+        case VAL_STR: return "String";
+        case VAL_ARRAY: return "Array";
+        case VAL_STRUCT: return "Struct";
         case VAL_CLOSURE: return "Closure";
-        case VAL_UNIT:    return "Unit";
-        case VAL_NIL:     return "Nil";
-        case VAL_RANGE:   return "Range";
-        case VAL_MAP:     return "Map";
+        case VAL_UNIT: return "Unit";
+        case VAL_NIL: return "Nil";
+        case VAL_RANGE: return "Range";
+        case VAL_MAP: return "Map";
         case VAL_CHANNEL: return "Channel";
-        case VAL_ENUM:    return "Enum";
-        case VAL_SET:     return "Set";
-        case VAL_TUPLE:   return "Tuple";
-        case VAL_BUFFER:  return "Buffer";
-        case VAL_REF:     return "Ref";
+        case VAL_ENUM: return "Enum";
+        case VAL_SET: return "Set";
+        case VAL_TUPLE: return "Tuple";
+        case VAL_BUFFER: return "Buffer";
+        case VAL_REF: return "Ref";
+        case VAL_ITERATOR: return "Iterator";
     }
     return "?";
 }
@@ -851,36 +907,31 @@ const char *value_type_name(const LatValue *v) {
 bool value_eq(const LatValue *a, const LatValue *b) {
     if (a->type != b->type) return false;
     switch (a->type) {
-        case VAL_INT:   return a->as.int_val == b->as.int_val;
+        case VAL_INT: return a->as.int_val == b->as.int_val;
         case VAL_FLOAT: return a->as.float_val == b->as.float_val;
-        case VAL_BOOL:  return a->as.bool_val == b->as.bool_val;
+        case VAL_BOOL: return a->as.bool_val == b->as.bool_val;
         case VAL_STR:
             if (a->as.str_val == b->as.str_val) return true;
             return strcmp(a->as.str_val, b->as.str_val) == 0;
-        case VAL_UNIT:  return true;
-        case VAL_NIL:   return true;
-        case VAL_RANGE: return a->as.range.start == b->as.range.start &&
-                               a->as.range.end == b->as.range.end;
+        case VAL_UNIT: return true;
+        case VAL_NIL: return true;
+        case VAL_RANGE: return a->as.range.start == b->as.range.start && a->as.range.end == b->as.range.end;
         case VAL_ARRAY:
             if (a->as.array.len != b->as.array.len) return false;
             for (size_t i = 0; i < a->as.array.len; i++) {
-                if (!value_eq(&a->as.array.elems[i], &b->as.array.elems[i]))
-                    return false;
+                if (!value_eq(&a->as.array.elems[i], &b->as.array.elems[i])) return false;
             }
             return true;
         case VAL_STRUCT:
             if (strcmp(a->as.strct.name, b->as.strct.name) != 0) return false;
             if (a->as.strct.field_count != b->as.strct.field_count) return false;
             for (size_t i = 0; i < a->as.strct.field_count; i++) {
-                if (strcmp(a->as.strct.field_names[i], b->as.strct.field_names[i]) != 0)
-                    return false;
-                if (!value_eq(&a->as.strct.field_values[i], &b->as.strct.field_values[i]))
-                    return false;
+                if (strcmp(a->as.strct.field_names[i], b->as.strct.field_names[i]) != 0) return false;
+                if (!value_eq(&a->as.strct.field_values[i], &b->as.strct.field_values[i])) return false;
             }
             return true;
         case VAL_CLOSURE: return false;
-        case VAL_CHANNEL:
-            return a->as.channel.ch == b->as.channel.ch;
+        case VAL_CHANNEL: return a->as.channel.ch == b->as.channel.ch;
         case VAL_ENUM:
             if (strcmp(a->as.enm.enum_name, b->as.enm.enum_name) != 0) return false;
             if (strcmp(a->as.enm.variant_name, b->as.enm.variant_name) != 0) return false;
@@ -912,15 +963,14 @@ bool value_eq(const LatValue *a, const LatValue *b) {
         case VAL_TUPLE:
             if (a->as.tuple.len != b->as.tuple.len) return false;
             for (size_t i = 0; i < a->as.tuple.len; i++) {
-                if (!value_eq(&a->as.tuple.elems[i], &b->as.tuple.elems[i]))
-                    return false;
+                if (!value_eq(&a->as.tuple.elems[i], &b->as.tuple.elems[i])) return false;
             }
             return true;
         case VAL_BUFFER:
             if (a->as.buffer.len != b->as.buffer.len) return false;
             return memcmp(a->as.buffer.data, b->as.buffer.data, a->as.buffer.len) == 0;
-        case VAL_REF:
-            return a->as.ref.ref == b->as.ref.ref;
+        case VAL_REF: return a->as.ref.ref == b->as.ref.ref;
+        case VAL_ITERATOR: return false; /* iterators are stateful, never equal */
     }
     return false;
 }
@@ -929,22 +979,19 @@ bool value_eq(const LatValue *a, const LatValue *b) {
 
 static void val_dealloc(LatValue *v, void *ptr) {
     if (!ptr) return;
-    if (v->region_id != (size_t)-1) return;  /* arena-backed: no-op */
+    if (v->region_id != (size_t)-1) return; /* arena-backed: no-op */
     lat_free(ptr);
 }
 
 void value_free(LatValue *v) {
     if (v->region_id != (size_t)-1) {
-        memset(v, 0, sizeof(*v));  /* arena owns everything */
+        memset(v, 0, sizeof(*v)); /* arena owns everything */
         return;
     }
     switch (v->type) {
-        case VAL_STR:
-            val_dealloc(v, v->as.str_val);
-            break;
+        case VAL_STR: val_dealloc(v, v->as.str_val); break;
         case VAL_ARRAY:
-            for (size_t i = 0; i < v->as.array.len; i++)
-                value_free(&v->as.array.elems[i]);
+            for (size_t i = 0; i < v->as.array.len; i++) value_free(&v->as.array.elems[i]);
             val_dealloc(v, v->as.array.elems);
             break;
         case VAL_STRUCT:
@@ -959,14 +1006,12 @@ void value_free(LatValue *v) {
             break;
         case VAL_CLOSURE:
             if (v->as.closure.param_names) {
-                for (size_t i = 0; i < v->as.closure.param_count; i++)
-                    val_dealloc(v, v->as.closure.param_names[i]);
+                for (size_t i = 0; i < v->as.closure.param_count; i++) val_dealloc(v, v->as.closure.param_names[i]);
                 val_dealloc(v, v->as.closure.param_names);
             }
             /* Don't free compiled bytecode closures' env — they store ObjUpvalue**,
              * not Env*. The VM manages upvalue lifetime. */
-            if (v->as.closure.captured_env &&
-                !(v->as.closure.body == NULL && v->as.closure.native_fn != NULL))
+            if (v->as.closure.captured_env && !(v->as.closure.body == NULL && v->as.closure.native_fn != NULL))
                 env_release(v->as.closure.captured_env);
             break;
         case VAL_MAP:
@@ -987,15 +1032,13 @@ void value_free(LatValue *v) {
             }
             break;
         case VAL_CHANNEL:
-            if (v->as.channel.ch)
-                channel_release(v->as.channel.ch);
+            if (v->as.channel.ch) channel_release(v->as.channel.ch);
             break;
         case VAL_ENUM:
             val_dealloc(v, v->as.enm.enum_name);
             val_dealloc(v, v->as.enm.variant_name);
             if (v->as.enm.payload) {
-                for (size_t i = 0; i < v->as.enm.payload_count; i++)
-                    value_free(&v->as.enm.payload[i]);
+                for (size_t i = 0; i < v->as.enm.payload_count; i++) value_free(&v->as.enm.payload[i]);
                 val_dealloc(v, v->as.enm.payload);
             }
             break;
@@ -1012,18 +1055,20 @@ void value_free(LatValue *v) {
             }
             break;
         case VAL_TUPLE:
-            for (size_t i = 0; i < v->as.tuple.len; i++)
-                value_free(&v->as.tuple.elems[i]);
+            for (size_t i = 0; i < v->as.tuple.len; i++) value_free(&v->as.tuple.elems[i]);
             val_dealloc(v, v->as.tuple.elems);
             break;
-        case VAL_BUFFER:
-            val_dealloc(v, v->as.buffer.data);
+        case VAL_BUFFER: val_dealloc(v, v->as.buffer.data); break;
+        case VAL_REF: ref_release(v->as.ref.ref); break;
+        case VAL_ITERATOR:
+            if (v->as.iterator.refcount) {
+                if (--(*v->as.iterator.refcount) == 0) {
+                    if (v->as.iterator.free_fn && v->as.iterator.state) v->as.iterator.free_fn(v->as.iterator.state);
+                    free(v->as.iterator.refcount);
+                }
+            }
             break;
-        case VAL_REF:
-            ref_release(v->as.ref.ref);
-            break;
-        default:
-            break;
+        default: break;
     }
     memset(v, 0, sizeof(*v));
 }
@@ -1032,18 +1077,19 @@ void value_free(LatValue *v) {
 
 bool value_is_truthy(const LatValue *v) {
     switch (v->type) {
-        case VAL_BOOL:  return v->as.bool_val;
-        case VAL_INT:   return v->as.int_val != 0;
+        case VAL_BOOL: return v->as.bool_val;
+        case VAL_INT: return v->as.int_val != 0;
         case VAL_FLOAT: return v->as.float_val != 0.0;
-        case VAL_STR:   return v->as.str_val[0] != '\0';
-        case VAL_UNIT:  return false;
-        case VAL_NIL:   return false;
-        case VAL_MAP:     return lat_map_len(v->as.map.map) > 0;
-        case VAL_SET:     return lat_map_len(v->as.set.map) > 0;
-        case VAL_TUPLE:   return v->as.tuple.len > 0;
+        case VAL_STR: return v->as.str_val[0] != '\0';
+        case VAL_UNIT: return false;
+        case VAL_NIL: return false;
+        case VAL_MAP: return lat_map_len(v->as.map.map) > 0;
+        case VAL_SET: return lat_map_len(v->as.set.map) > 0;
+        case VAL_TUPLE: return v->as.tuple.len > 0;
         case VAL_CHANNEL: return true;
-        case VAL_BUFFER:  return v->as.buffer.len > 0;
-        case VAL_REF:     return true;
-        default:          return true;
+        case VAL_BUFFER: return v->as.buffer.len > 0;
+        case VAL_REF: return true;
+        case VAL_ITERATOR: return true;
+        default: return true;
     }
 }
