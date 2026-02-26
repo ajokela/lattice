@@ -75,6 +75,12 @@ void regchunk_free(RegChunk *c) {
         LatValue *v = &c->constants[i];
         if (v->type == VAL_CLOSURE && v->as.closure.body == NULL && v->as.closure.native_fn != NULL &&
             v->as.closure.default_values != VM_NATIVE_MARKER && v->as.closure.default_values != VM_EXT_MARKER) {
+            /* Free prototype-owned param_names (runtime closures borrow, not own) */
+            if (v->as.closure.param_names) {
+                for (size_t pi = 0; pi < v->as.closure.param_count; pi++) free(v->as.closure.param_names[pi]);
+                free(v->as.closure.param_names);
+                v->as.closure.param_names = NULL;
+            }
             regchunk_free((RegChunk *)v->as.closure.native_fn);
             v->as.closure.native_fn = NULL;
         } else {
@@ -378,12 +384,11 @@ static inline LatValue rvm_clone(const LatValue *src) {
             if (src->as.closure.body == NULL && src->as.closure.native_fn != NULL &&
                 src->as.closure.default_values != VM_NATIVE_MARKER && src->as.closure.default_values != VM_EXT_MARKER) {
                 LatValue v = *src;
-                if (src->as.closure.param_names) {
-                    v.as.closure.param_names = malloc(src->as.closure.param_count * sizeof(char *));
-                    if (!v.as.closure.param_names) return value_unit();
-                    for (size_t i = 0; i < src->as.closure.param_count; i++)
-                        v.as.closure.param_names[i] = strdup(src->as.closure.param_names[i]);
-                }
+                /* Bytecode closures don't own param_names — the prototype
+                 * (in the RegChunk constant pool) owns them.  Setting NULL
+                 * here prevents a heap-use-after-free where two register
+                 * clones could end up sharing the same param_names pointer. */
+                v.as.closure.param_names = NULL;
                 return v;
             }
             return value_deep_clone(src);
@@ -6013,6 +6018,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                             RVM_ERROR("stack overflow");
                             DISPATCH();
                         }
+                        /* Save upvalue info BEFORE freeing the closure */
+                        ObjUpvalue **upvals = (ObjUpvalue **)closure.as.closure.captured_env;
+                        size_t uv_count = closure.region_id != (size_t)-1 ? closure.region_id : 0;
+
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
                         int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
@@ -6032,9 +6041,6 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         nf->regs = new_regs;
                         nf->reg_count = mr;
                         nf->caller_result_reg = dst;
-
-                        ObjUpvalue **upvals = (ObjUpvalue **)closure.as.closure.captured_env;
-                        size_t uv_count = closure.region_id;
                         nf->upvalues = upvals;
                         nf->upvalue_count = uv_count;
 
