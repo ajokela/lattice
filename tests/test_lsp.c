@@ -1511,3 +1511,301 @@ TEST(test_lsp_code_action_empty) {
     cJSON_Delete(rpc_msg);
     lsp_server_free(srv);
 }
+
+/* ================================================================
+ * Diagnostics publishing tests
+ * ================================================================ */
+
+/* Helper: send a didOpen notification through the server loop and capture
+ * the diagnostics notification that is published in response. */
+static cJSON *capture_diagnostics_for_text(const char *text) {
+    LspServer *srv = lsp_server_new();
+    if (!srv) return NULL;
+    srv->initialized = true;
+
+    /* Build didOpen message */
+    cJSON *open_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(open_msg, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(open_msg, "method", "textDocument/didOpen");
+    cJSON *open_params = cJSON_CreateObject();
+    cJSON *td = cJSON_CreateObject();
+    cJSON_AddStringToObject(td, "uri", "file:///test_diag.lat");
+    cJSON_AddStringToObject(td, "text", text);
+    cJSON_AddNumberToObject(td, "version", 1);
+    cJSON_AddItemToObject(open_params, "textDocument", td);
+    cJSON_AddItemToObject(open_msg, "params", open_params);
+    char *open_str = cJSON_PrintUnformatted(open_msg);
+
+    const char *shutdown = "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}";
+    const char *exit_msg = "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}";
+
+    FILE *in_f = tmpfile();
+    if (!in_f) {
+        free(open_str);
+        cJSON_Delete(open_msg);
+        lsp_server_free(srv);
+        return NULL;
+    }
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(open_str), open_str);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(shutdown), shutdown);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(exit_msg), exit_msg);
+    rewind(in_f);
+    free(open_str);
+
+    FILE *saved_stdin = stdin;
+    FILE *saved_stdout = stdout;
+    FILE *out_f = tmpfile();
+    if (!out_f) {
+        fclose(in_f);
+        cJSON_Delete(open_msg);
+        lsp_server_free(srv);
+        return NULL;
+    }
+    stdin = in_f;
+    stdout = out_f;
+
+    lsp_server_run(srv);
+
+    stdin = saved_stdin;
+    stdout = saved_stdout;
+
+    /* Read captured output and find the publishDiagnostics notification */
+    rewind(out_f);
+    char buf[16384];
+    size_t nread = fread(buf, 1, sizeof(buf) - 1, out_f);
+    buf[nread] = '\0';
+    fclose(out_f);
+    fclose(in_f);
+    cJSON_Delete(open_msg);
+    lsp_server_free(srv);
+
+    /* Find the publishDiagnostics notification in the output.
+     * There may be multiple messages; scan for the one with publishDiagnostics. */
+    cJSON *result = NULL;
+    const char *scan = buf;
+    while ((scan = strstr(scan, "Content-Length:")) != NULL) {
+        const char *body = strstr(scan, "\r\n\r\n");
+        if (!body) break;
+        body += 4;
+        cJSON *msg = cJSON_Parse(body);
+        if (msg) {
+            cJSON *method = cJSON_GetObjectItem(msg, "method");
+            if (method && method->valuestring && strcmp(method->valuestring, "textDocument/publishDiagnostics") == 0) {
+                result = msg; /* Found it */
+                break;
+            }
+            cJSON_Delete(msg);
+        }
+        scan = body;
+    }
+    return result;
+}
+
+TEST(test_lsp_diagnostics_parse_error) {
+    /* Open a document with a syntax error — should publish diagnostics */
+    cJSON *notif = capture_diagnostics_for_text("fn broken( {\n}\n");
+    ASSERT(notif != NULL);
+
+    cJSON *params = cJSON_GetObjectItem(notif, "params");
+    ASSERT(params != NULL);
+
+    cJSON *uri = cJSON_GetObjectItem(params, "uri");
+    ASSERT(uri != NULL);
+    ASSERT_EQ_STR(uri->valuestring, "file:///test_diag.lat");
+
+    cJSON *diags = cJSON_GetObjectItem(params, "diagnostics");
+    ASSERT(diags != NULL);
+    ASSERT(cJSON_IsArray(diags));
+    ASSERT(cJSON_GetArraySize(diags) >= 1);
+
+    /* First diagnostic should be an error with a message */
+    cJSON *d0 = cJSON_GetArrayItem(diags, 0);
+    ASSERT(d0 != NULL);
+    cJSON *severity = cJSON_GetObjectItem(d0, "severity");
+    ASSERT(severity != NULL);
+    ASSERT_EQ_INT(severity->valueint, LSP_DIAG_ERROR);
+
+    cJSON *source = cJSON_GetObjectItem(d0, "source");
+    ASSERT(source != NULL);
+    ASSERT_EQ_STR(source->valuestring, "lattice");
+
+    cJSON *message = cJSON_GetObjectItem(d0, "message");
+    ASSERT(message != NULL);
+    ASSERT(strlen(message->valuestring) > 0);
+
+    /* Should have a range */
+    cJSON *range = cJSON_GetObjectItem(d0, "range");
+    ASSERT(range != NULL);
+    cJSON *start = cJSON_GetObjectItem(range, "start");
+    ASSERT(start != NULL);
+    ASSERT(cJSON_GetObjectItem(start, "line") != NULL);
+    ASSERT(cJSON_GetObjectItem(start, "character") != NULL);
+
+    cJSON_Delete(notif);
+}
+
+TEST(test_lsp_diagnostics_clean) {
+    /* Open a valid document — diagnostics array should be empty */
+    cJSON *notif = capture_diagnostics_for_text("let x = 42\nprint(x)\n");
+    ASSERT(notif != NULL);
+
+    cJSON *params = cJSON_GetObjectItem(notif, "params");
+    ASSERT(params != NULL);
+
+    cJSON *diags = cJSON_GetObjectItem(params, "diagnostics");
+    ASSERT(diags != NULL);
+    ASSERT(cJSON_IsArray(diags));
+    ASSERT_EQ_INT(cJSON_GetArraySize(diags), 0);
+
+    cJSON_Delete(notif);
+}
+
+TEST(test_lsp_diagnostics_on_change) {
+    /* Simulate didOpen with valid code, then didChange with broken code.
+     * The diagnostics from didChange should contain an error. */
+    LspServer *srv = lsp_server_new();
+    ASSERT(srv != NULL);
+    srv->initialized = true;
+
+    /* Build didOpen with valid code */
+    cJSON *open_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(open_msg, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(open_msg, "method", "textDocument/didOpen");
+    cJSON *open_params = cJSON_CreateObject();
+    cJSON *td_open = cJSON_CreateObject();
+    cJSON_AddStringToObject(td_open, "uri", "file:///test_change.lat");
+    cJSON_AddStringToObject(td_open, "text", "let x = 1\n");
+    cJSON_AddNumberToObject(td_open, "version", 1);
+    cJSON_AddItemToObject(open_params, "textDocument", td_open);
+    cJSON_AddItemToObject(open_msg, "params", open_params);
+    char *open_str = cJSON_PrintUnformatted(open_msg);
+
+    /* Build didChange with broken code */
+    cJSON *change_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(change_msg, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(change_msg, "method", "textDocument/didChange");
+    cJSON *change_params = cJSON_CreateObject();
+    cJSON *td_change = cJSON_CreateObject();
+    cJSON_AddStringToObject(td_change, "uri", "file:///test_change.lat");
+    cJSON_AddNumberToObject(td_change, "version", 2);
+    cJSON_AddItemToObject(change_params, "textDocument", td_change);
+    cJSON *changes = cJSON_CreateArray();
+    cJSON *change_item = cJSON_CreateObject();
+    cJSON_AddStringToObject(change_item, "text", "let x = \n");
+    cJSON_AddItemToArray(changes, change_item);
+    cJSON_AddItemToObject(change_params, "contentChanges", changes);
+    cJSON_AddItemToObject(change_msg, "params", change_params);
+    char *change_str = cJSON_PrintUnformatted(change_msg);
+
+    const char *shutdown = "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}";
+    const char *exit_str = "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}";
+
+    FILE *in_f = tmpfile();
+    ASSERT(in_f != NULL);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(open_str), open_str);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(change_str), change_str);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(shutdown), shutdown);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(exit_str), exit_str);
+    rewind(in_f);
+    free(open_str);
+    free(change_str);
+
+    FILE *saved_stdin = stdin;
+    FILE *saved_stdout = stdout;
+    FILE *out_f = tmpfile();
+    ASSERT(out_f != NULL);
+    stdin = in_f;
+    stdout = out_f;
+
+    lsp_server_run(srv);
+
+    stdin = saved_stdin;
+    stdout = saved_stdout;
+
+    /* Read captured output */
+    rewind(out_f);
+    char buf[16384];
+    size_t nread = fread(buf, 1, sizeof(buf) - 1, out_f);
+    buf[nread] = '\0';
+    fclose(out_f);
+    fclose(in_f);
+    cJSON_Delete(open_msg);
+    cJSON_Delete(change_msg);
+    lsp_server_free(srv);
+
+    /* Find the LAST publishDiagnostics notification (from didChange).
+     * There will be two: one from didOpen (clean) and one from didChange (error). */
+    cJSON *last_notif = NULL;
+    const char *scan_ptr = buf;
+    while ((scan_ptr = strstr(scan_ptr, "Content-Length:")) != NULL) {
+        const char *body = strstr(scan_ptr, "\r\n\r\n");
+        if (!body) break;
+        body += 4;
+        cJSON *msg = cJSON_Parse(body);
+        if (msg) {
+            cJSON *method = cJSON_GetObjectItem(msg, "method");
+            if (method && method->valuestring && strcmp(method->valuestring, "textDocument/publishDiagnostics") == 0) {
+                if (last_notif) cJSON_Delete(last_notif);
+                last_notif = msg;
+            } else {
+                cJSON_Delete(msg);
+            }
+        }
+        scan_ptr = body;
+    }
+
+    ASSERT(last_notif != NULL);
+    cJSON *params = cJSON_GetObjectItem(last_notif, "params");
+    ASSERT(params != NULL);
+
+    cJSON *diags = cJSON_GetObjectItem(params, "diagnostics");
+    ASSERT(diags != NULL);
+    ASSERT(cJSON_IsArray(diags));
+
+    /* The changed text "let x = \n" is a parse error — should have diagnostics */
+    ASSERT(cJSON_GetArraySize(diags) >= 1);
+
+    cJSON *d0 = cJSON_GetArrayItem(diags, 0);
+    ASSERT(d0 != NULL);
+    cJSON *severity = cJSON_GetObjectItem(d0, "severity");
+    ASSERT(severity != NULL);
+    ASSERT_EQ_INT(severity->valueint, LSP_DIAG_ERROR);
+
+    cJSON *source = cJSON_GetObjectItem(d0, "source");
+    ASSERT(source != NULL);
+    ASSERT_EQ_STR(source->valuestring, "lattice");
+
+    cJSON_Delete(last_notif);
+}
+
+TEST(test_lsp_diagnostics_compiler_error) {
+    /* Code that parses fine but has a compiler error */
+    cJSON *notif = capture_diagnostics_for_text("fn foo() {\n  break\n}\n");
+    ASSERT(notif != NULL);
+
+    cJSON *params = cJSON_GetObjectItem(notif, "params");
+    ASSERT(params != NULL);
+
+    cJSON *diags = cJSON_GetObjectItem(params, "diagnostics");
+    ASSERT(diags != NULL);
+    ASSERT(cJSON_IsArray(diags));
+    ASSERT(cJSON_GetArraySize(diags) >= 1);
+
+    /* Should report the compiler error */
+    cJSON *d0 = cJSON_GetArrayItem(diags, 0);
+    ASSERT(d0 != NULL);
+    cJSON *severity = cJSON_GetObjectItem(d0, "severity");
+    ASSERT(severity != NULL);
+    ASSERT_EQ_INT(severity->valueint, LSP_DIAG_ERROR);
+
+    cJSON *message = cJSON_GetObjectItem(d0, "message");
+    ASSERT(message != NULL);
+    /* The compiler should report "break outside of loop" */
+    ASSERT(strstr(message->valuestring, "break") != NULL);
+
+    cJSON *source = cJSON_GetObjectItem(d0, "source");
+    ASSERT(source != NULL);
+    ASSERT_EQ_STR(source->valuestring, "lattice");
+
+    cJSON_Delete(notif);
+}
