@@ -3902,6 +3902,57 @@ static void test_set_difference(void) {
                   "1\ntrue");
 }
 
+static void test_set_symmetric_difference(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let s1 = Set::from([1, 2, 3])\n"
+                  "    let s2 = Set::from([2, 3, 4])\n"
+                  "    let sd = s1.symmetric_difference(s2)\n"
+                  "    print(sd.len())\n"
+                  "    print(sd.has(1))\n"
+                  "    print(sd.has(4))\n"
+                  "    print(sd.has(2))\n"
+                  "    print(sd.has(3))\n"
+                  "}\n",
+                  "2\ntrue\ntrue\nfalse\nfalse");
+}
+
+static void test_set_symmetric_difference_disjoint(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let s1 = Set::from([1, 2])\n"
+                  "    let s2 = Set::from([3, 4])\n"
+                  "    let sd = s1.symmetric_difference(s2)\n"
+                  "    print(sd.len())\n"
+                  "    print(sd.has(1))\n"
+                  "    print(sd.has(2))\n"
+                  "    print(sd.has(3))\n"
+                  "    print(sd.has(4))\n"
+                  "}\n",
+                  "4\ntrue\ntrue\ntrue\ntrue");
+}
+
+static void test_set_symmetric_difference_identical(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let s1 = Set::from([1, 2, 3])\n"
+                  "    let s2 = Set::from([1, 2, 3])\n"
+                  "    let sd = s1.symmetric_difference(s2)\n"
+                  "    print(sd.len())\n"
+                  "}\n",
+                  "0");
+}
+
+static void test_set_symmetric_difference_empty(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let s1 = Set::from([1, 2, 3])\n"
+                  "    let s2 = Set::new()\n"
+                  "    let sd = s1.symmetric_difference(s2)\n"
+                  "    print(sd.len())\n"
+                  "    print(sd.has(1))\n"
+                  "    print(sd.has(2))\n"
+                  "    print(sd.has(3))\n"
+                  "}\n",
+                  "3\ntrue\ntrue\ntrue");
+}
+
 static void test_set_subset_superset(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    let s1 = Set::from([1, 2])\n"
@@ -10238,6 +10289,19 @@ static void test_parity_set_difference(void) {
                   "2\ntrue\ntrue\nfalse");
 }
 
+static void test_parity_set_symmetric_difference(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let a = Set::from([1, 2, 3])\n"
+                  "    let b = Set::from([2, 3, 4])\n"
+                  "    let sd = a.symmetric_difference(b)\n"
+                  "    print(sd.len())\n"
+                  "    print(sd.has(1))\n"
+                  "    print(sd.has(4))\n"
+                  "    print(sd.has(2))\n"
+                  "}\n",
+                  "2\ntrue\ntrue\nfalse");
+}
+
 static void test_parity_set_subset_superset(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    let a = Set::from([1, 2])\n"
@@ -12283,6 +12347,10 @@ void register_stdlib_tests(void) {
     register_test("test_set_union", test_set_union);
     register_test("test_set_intersection", test_set_intersection);
     register_test("test_set_difference", test_set_difference);
+    register_test("test_set_symmetric_difference", test_set_symmetric_difference);
+    register_test("test_set_symmetric_difference_disjoint", test_set_symmetric_difference_disjoint);
+    register_test("test_set_symmetric_difference_identical", test_set_symmetric_difference_identical);
+    register_test("test_set_symmetric_difference_empty", test_set_symmetric_difference_empty);
     register_test("test_set_subset_superset", test_set_subset_superset);
     register_test("test_set_for_in", test_set_for_in);
     register_test("test_set_duplicate_add", test_set_duplicate_add);
@@ -12972,6 +13040,7 @@ void register_stdlib_tests(void) {
     register_test("test_parity_set_union", test_parity_set_union);
     register_test("test_parity_set_intersection", test_parity_set_intersection);
     register_test("test_parity_set_difference", test_parity_set_difference);
+    register_test("test_parity_set_symmetric_difference", test_parity_set_symmetric_difference);
     register_test("test_parity_set_subset_superset", test_parity_set_subset_superset);
     register_test("test_parity_set_to_array", test_parity_set_to_array);
 
