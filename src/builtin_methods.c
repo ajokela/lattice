@@ -1277,7 +1277,7 @@ LatValue builtin_buffer_to_hex(LatValue *obj, LatValue *args, int arg_count, cha
 LatValue builtin_set_has(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    char *key = value_display(&args[0]);
+    char *key = value_hash_key(&args[0]);
     bool found = lat_map_contains(obj->as.set.map, key);
     free(key);
     return value_bool(found);
@@ -1286,7 +1286,7 @@ LatValue builtin_set_has(LatValue *obj, LatValue *args, int arg_count, char **er
 LatValue builtin_set_add(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    char *key = value_display(&args[0]);
+    char *key = value_hash_key(&args[0]);
     LatValue clone = value_deep_clone(&args[0]);
     lat_map_set(obj->as.set.map, key, &clone);
     free(key);
@@ -1296,7 +1296,7 @@ LatValue builtin_set_add(LatValue *obj, LatValue *args, int arg_count, char **er
 LatValue builtin_set_remove(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    char *key = value_display(&args[0]);
+    char *key = value_hash_key(&args[0]);
     lat_map_remove(obj->as.set.map, key);
     free(key);
     return value_unit();

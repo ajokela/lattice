@@ -3230,7 +3230,26 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_EQ: {
             LatValue b = pop(vm), a = pop(vm);
-            bool eq = value_eq(&a, &b);
+            bool eq;
+            /* Custom struct eq() method */
+            if (a.type == VAL_STRUCT && b.type == VAL_STRUCT) {
+                const char *eq_intern = intern("eq");
+                bool found_eq = false;
+                for (size_t i = 0; i < a.as.strct.field_count; i++) {
+                    if (a.as.strct.field_names[i] == eq_intern && a.as.strct.field_values[i].type == VAL_CLOSURE) {
+                        /* Pass self (a) and other (b) as args */
+                        LatValue eq_args[2] = {a, b};
+                        LatValue result = stackvm_call_closure(vm, &a.as.strct.field_values[i], eq_args, 2);
+                        eq = value_is_truthy(&result);
+                        value_free(&result);
+                        found_eq = true;
+                        break;
+                    }
+                }
+                if (!found_eq) eq = value_eq(&a, &b);
+            } else {
+                eq = value_eq(&a, &b);
+            }
             value_free(&a);
             value_free(&b);
             push(vm, value_bool(eq));
@@ -3241,7 +3260,26 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_NEQ: {
             LatValue b = pop(vm), a = pop(vm);
-            bool eq = value_eq(&a, &b);
+            bool eq;
+            /* Custom struct eq() method */
+            if (a.type == VAL_STRUCT && b.type == VAL_STRUCT) {
+                const char *eq_intern = intern("eq");
+                bool found_eq = false;
+                for (size_t i = 0; i < a.as.strct.field_count; i++) {
+                    if (a.as.strct.field_names[i] == eq_intern && a.as.strct.field_values[i].type == VAL_CLOSURE) {
+                        /* Pass self (a) and other (b) as args */
+                        LatValue eq_args[2] = {a, b};
+                        LatValue result = stackvm_call_closure(vm, &a.as.strct.field_values[i], eq_args, 2);
+                        eq = value_is_truthy(&result);
+                        value_free(&result);
+                        found_eq = true;
+                        break;
+                    }
+                }
+                if (!found_eq) eq = value_eq(&a, &b);
+            } else {
+                eq = value_eq(&a, &b);
+            }
             value_free(&a);
             value_free(&b);
             push(vm, value_bool(!eq));
