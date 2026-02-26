@@ -1,0 +1,143 @@
+// Test: try/catch round-trip through self-hosted compiler
+
+// Test 1: Basic try/catch as statement
+fn test_basic_try_catch() {
+    print("--- basic try/catch ---")
+    try {
+        let x = 1 / 0
+        print("FAIL: should not reach here")
+    } catch e {
+        print("caught")
+    }
+}
+
+// Test 2: Try with no error
+fn test_no_error() {
+    print("--- no error ---")
+    try {
+        let x = 10 + 20
+        print(x)
+    } catch e {
+        print("FAIL: should not catch")
+    }
+}
+
+// Test 3: Try/catch as expression (value-producing)
+fn test_try_expression() {
+    print("--- try expression ---")
+    let result = try {
+        10 / 2
+    } catch e {
+        0
+    }
+    print(result)
+}
+
+// Test 4: Try/catch as expression with error
+fn test_try_expression_error() {
+    print("--- try expression error ---")
+    let result = try {
+        10 / 0
+    } catch e {
+        -1
+    }
+    print(result)
+}
+
+// Test 5: Nested try/catch
+fn test_nested_try() {
+    print("--- nested try ---")
+    let r = try {
+        try {
+            1 / 0
+        } catch e {
+            42
+        }
+    } catch e {
+        0
+    }
+    print(r)
+}
+
+// Test 6: Try/catch with multiple statements in try body
+fn test_multi_stmt_try() {
+    print("--- multi stmt try ---")
+    let r = try {
+        let a = 10
+        let b = 20
+        a + b
+    } catch e {
+        0
+    }
+    print(r)
+}
+
+// Test 7: Error variable accessible in catch
+fn test_error_variable() {
+    print("--- error variable ---")
+    try {
+        let x = 1 / 0
+    } catch err {
+        // err should be a map with 'message' field
+        print("caught error")
+    }
+}
+
+// Test 8: Try/catch inside a function
+fn safe_divide(a: any, b: any) {
+    return try {
+        a / b
+    } catch e {
+        nil
+    }
+}
+
+fn test_try_in_function() {
+    print("--- try in function ---")
+    let r1 = safe_divide(10, 2)
+    print(r1)
+    let r2 = safe_divide(10, 0)
+    print(r2)
+}
+
+// Test 9: Try/catch with loop
+fn test_try_with_loop() {
+    print("--- try with loop ---")
+    flux count = 0
+    for i in 0..5 {
+        try {
+            if i == 3 {
+                let x = 1 / 0
+            }
+            count = count + 1
+        } catch e {
+            // skip errors
+        }
+    }
+    print(count)
+}
+
+// Test 10: Try/catch as statement (no value)
+fn test_try_statement() {
+    print("--- try statement ---")
+    try {
+        print("in try")
+    } catch e {
+        print("FAIL")
+    }
+    print("after try")
+}
+
+fn main() {
+    test_basic_try_catch()
+    test_no_error()
+    test_try_expression()
+    test_try_expression_error()
+    test_nested_try()
+    test_multi_stmt_try()
+    test_error_variable()
+    test_try_in_function()
+    test_try_with_loop()
+    test_try_statement()
+    print("ALL TRY/CATCH TESTS PASSED")
+}
