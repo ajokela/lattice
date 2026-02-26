@@ -13,6 +13,7 @@
 #include "formatter.h"
 #include "debugger.h"
 #include "completion.h"
+#include "doc_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1265,6 +1266,9 @@ int main(int argc, char **argv) {
         free(formatted);
         return 0;
     }
+
+    /* Check for 'doc' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "doc") == 0) { return doc_cmd(argc - 2, argv + 2); }
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--stats") == 0) show_stats = true;

@@ -103,7 +103,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/package.c \
        $(SRC_DIR)/formatter.c \
        $(SRC_DIR)/debugger.c \
-       $(SRC_DIR)/completion.c
+       $(SRC_DIR)/completion.c \
+       $(SRC_DIR)/doc_gen.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
