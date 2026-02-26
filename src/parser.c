@@ -608,6 +608,133 @@ static Expr *parse_postfix(Parser *p, char **err) {
                 expr_free(e);
                 return NULL;
             }
+            /* Module-qualified struct literal: mod.StructName { field: val, ... }
+             * Only when base is an IDENT (module alias), field starts uppercase,
+             * and { ident : pattern follows (disambiguates from block). */
+            if (!optional && e->tag == EXPR_IDENT && field[0] && isupper((unsigned char)field[0]) &&
+                peek_type(p) == TOK_LBRACE && is_struct_literal_ahead(p)) {
+                char *mod_alias = strdup(e->as.str_val);
+                expr_free(e);
+                advance(p); /* consume { */
+                size_t cap = 4, n = 0;
+                FieldInit *fields = malloc(cap * sizeof(FieldInit));
+                if (!fields) {
+                    free(field);
+                    free(mod_alias);
+                    return NULL;
+                }
+                while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
+                    if (n >= cap) {
+                        cap *= 2;
+                        fields = realloc(fields, cap * sizeof(FieldInit));
+                    }
+                    fields[n].name = expect_ident(p, err);
+                    if (!fields[n].name) {
+                        for (size_t i = 0; i < n; i++) {
+                            free(fields[i].name);
+                            expr_free(fields[i].value);
+                        }
+                        free(fields);
+                        free(field);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    if (!expect(p, TOK_COLON, err)) {
+                        free(fields[n].name);
+                        for (size_t i = 0; i < n; i++) {
+                            free(fields[i].name);
+                            expr_free(fields[i].value);
+                        }
+                        free(fields);
+                        free(field);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    fields[n].value = parse_expr(p, err);
+                    if (!fields[n].value) {
+                        free(fields[n].name);
+                        for (size_t i = 0; i < n; i++) {
+                            free(fields[i].name);
+                            expr_free(fields[i].value);
+                        }
+                        free(fields);
+                        free(field);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    n++;
+                    if (peek_type(p) != TOK_RBRACE) {
+                        if (!expect(p, TOK_COMMA, err)) {
+                            for (size_t i = 0; i < n; i++) {
+                                free(fields[i].name);
+                                expr_free(fields[i].value);
+                            }
+                            free(fields);
+                            free(field);
+                            free(mod_alias);
+                            return NULL;
+                        }
+                    }
+                }
+                if (!expect(p, TOK_RBRACE, err)) {
+                    for (size_t i = 0; i < n; i++) {
+                        free(fields[i].name);
+                        expr_free(fields[i].value);
+                    }
+                    free(fields);
+                    free(field);
+                    free(mod_alias);
+                    return NULL;
+                }
+                Expr *sl = expr_struct_lit(field, fields, n);
+                sl->as.struct_lit.module_alias = mod_alias;
+                e = sl;
+                continue;
+            }
+            /* Module-qualified enum variant: mod.EnumName::Variant */
+            if (!optional && e->tag == EXPR_IDENT && field[0] && isupper((unsigned char)field[0]) &&
+                peek_type(p) == TOK_COLONCOLON) {
+                char *mod_alias = strdup(e->as.str_val);
+                char *enum_name = field;
+                expr_free(e);
+                advance(p); /* consume :: */
+                char *variant = NULL;
+                if (peek_type(p) == TOK_FROM) {
+                    advance(p);
+                    variant = strdup("from");
+                } else {
+                    variant = expect_ident(p, err);
+                }
+                if (!variant) {
+                    free(enum_name);
+                    free(mod_alias);
+                    return NULL;
+                }
+                Expr **vargs = NULL;
+                size_t vargc = 0;
+                if (peek_type(p) == TOK_LPAREN) {
+                    advance(p);
+                    vargs = parse_args(p, &vargc, err);
+                    if (!vargs && *err) {
+                        free(enum_name);
+                        free(variant);
+                        free(mod_alias);
+                        return NULL;
+                    }
+                    if (!expect(p, TOK_RPAREN, err)) {
+                        free(enum_name);
+                        free(variant);
+                        free(mod_alias);
+                        for (size_t i = 0; i < vargc; i++) expr_free(vargs[i]);
+                        free(vargs);
+                        return NULL;
+                    }
+                }
+                Expr *ev_expr = expr_enum_variant(enum_name, variant, vargs, vargc);
+                ev_expr->as.enum_variant.module_alias = mod_alias;
+                e = ev_expr;
+                continue;
+            }
             if (peek_type(p) == TOK_LPAREN) {
                 advance(p);
                 size_t arg_count;

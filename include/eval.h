@@ -141,8 +141,11 @@ typedef struct Evaluator {
     LatMap loaded_extensions; /* char* -> LatValue (cached extension Maps) */
     LatVec module_exprs;      /* Expr* body wrappers kept alive for module closures */
     char *script_dir;         /* directory of the main script (for require) */
-    int prog_argc;            /* argc from main() for args() builtin */
-    char **prog_argv;         /* argv from main() for args() builtin */
+    /* Module namespace isolation */
+    char *module_prefix; /* set during module load to resolved path (NULL at top-level) */
+    LatMap module_paths; /* alias -> resolved module path for qualified access */
+    int prog_argc;       /* argc from main() for args() builtin */
+    char **prog_argv;    /* argv from main() for args() builtin */
     /* Phase propagation bonds */
     BondEntry *bonds;
     size_t bond_count;

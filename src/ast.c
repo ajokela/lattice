@@ -102,6 +102,7 @@ Expr *expr_struct_lit(char *name, FieldInit *fields, size_t field_count) {
     e->as.struct_lit.name = name;
     e->as.struct_lit.fields = fields;
     e->as.struct_lit.field_count = field_count;
+    e->as.struct_lit.module_alias = NULL;
     return e;
 }
 
@@ -284,6 +285,7 @@ Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t
     e->as.enum_variant.variant_name = variant_name;
     e->as.enum_variant.args = args;
     e->as.enum_variant.arg_count = arg_count;
+    e->as.enum_variant.module_alias = NULL;
     return e;
 }
 
@@ -531,6 +533,7 @@ void expr_free(Expr *e) {
             break;
         case EXPR_STRUCT_LIT:
             free(e->as.struct_lit.name);
+            free(e->as.struct_lit.module_alias);
             for (size_t i = 0; i < e->as.struct_lit.field_count; i++) {
                 free(e->as.struct_lit.fields[i].name);
                 expr_free(e->as.struct_lit.fields[i].value);
@@ -619,6 +622,7 @@ void expr_free(Expr *e) {
         case EXPR_ENUM_VARIANT:
             free(e->as.enum_variant.enum_name);
             free(e->as.enum_variant.variant_name);
+            free(e->as.enum_variant.module_alias);
             for (size_t i = 0; i < e->as.enum_variant.arg_count; i++) expr_free(e->as.enum_variant.args[i]);
             free(e->as.enum_variant.args);
             break;

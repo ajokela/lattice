@@ -701,6 +701,14 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
 /* We store FnDecl* pointers in the map */
 
 static FnDecl *find_fn(Evaluator *ev, const char *name) {
+    /* If currently inside a module load, try module-prefixed name first */
+    if (ev->module_prefix) {
+        char prefixed[1024];
+        snprintf(prefixed, sizeof(prefixed), "%s::%s", ev->module_prefix, name);
+        FnDecl **ptr = lat_map_get(&ev->fn_defs, prefixed);
+        if (ptr) return *ptr;
+    }
+    /* Then try unprefixed (global / top-level) */
     FnDecl **ptr = lat_map_get(&ev->fn_defs, name);
     return ptr ? *ptr : NULL;
 }
@@ -851,6 +859,31 @@ static FnDecl *resolve_overload(FnDecl *head, LatValue *args, size_t argc) {
     return best;
 }
 
+/* Register a function overload under a specific key (may differ from fn->name for namespacing) */
+static void register_fn_overload_as(LatMap *fn_defs, const char *key, FnDecl *new_fn) {
+    FnDecl **existing = lat_map_get(fn_defs, key);
+    if (!existing) {
+        lat_map_set(fn_defs, key, &new_fn);
+        return;
+    }
+    FnDecl *head = *existing;
+    if (phase_signatures_match(head, new_fn)) {
+        new_fn->next_overload = head->next_overload;
+        lat_map_set(fn_defs, key, &new_fn);
+        return;
+    }
+    for (FnDecl *prev = head; prev->next_overload; prev = prev->next_overload) {
+        if (phase_signatures_match(prev->next_overload, new_fn)) {
+            new_fn->next_overload = prev->next_overload->next_overload;
+            prev->next_overload = new_fn;
+            return;
+        }
+    }
+    /* Append new overload at head of chain */
+    new_fn->next_overload = head;
+    lat_map_set(fn_defs, key, &new_fn);
+}
+
 static void register_fn_overload(LatMap *fn_defs, FnDecl *new_fn) {
     FnDecl **existing = lat_map_get(fn_defs, new_fn->name);
     if (!existing) {
@@ -880,13 +913,51 @@ static void register_fn_overload(LatMap *fn_defs, FnDecl *new_fn) {
     lat_map_set(fn_defs, new_fn->name, &new_fn);
 }
 
+/* Resolve a module alias to its resolved path. Returns NULL if not found. */
+static const char *resolve_module_alias(Evaluator *ev, const char *alias) {
+    char **pp = lat_map_get(&ev->module_paths, alias);
+    return pp ? *pp : NULL;
+}
+
 static StructDecl *find_struct(Evaluator *ev, const char *name) {
+    /* If currently inside a module load, try module-prefixed name first */
+    if (ev->module_prefix) {
+        char prefixed[1024];
+        snprintf(prefixed, sizeof(prefixed), "%s::%s", ev->module_prefix, name);
+        StructDecl **ptr = lat_map_get(&ev->struct_defs, prefixed);
+        if (ptr) return *ptr;
+    }
+    /* Then try unprefixed (global / top-level) */
     StructDecl **ptr = lat_map_get(&ev->struct_defs, name);
     return ptr ? *ptr : NULL;
 }
 
+/* Find a struct in a specific module's namespace */
+static StructDecl *find_struct_in_module(Evaluator *ev, const char *module_path, const char *name) {
+    char prefixed[1024];
+    snprintf(prefixed, sizeof(prefixed), "%s::%s", module_path, name);
+    StructDecl **ptr = lat_map_get(&ev->struct_defs, prefixed);
+    return ptr ? *ptr : NULL;
+}
+
 static EnumDecl *find_enum(Evaluator *ev, const char *name) {
+    /* If currently inside a module load, try module-prefixed name first */
+    if (ev->module_prefix) {
+        char prefixed[1024];
+        snprintf(prefixed, sizeof(prefixed), "%s::%s", ev->module_prefix, name);
+        EnumDecl **ptr = lat_map_get(&ev->enum_defs, prefixed);
+        if (ptr) return *ptr;
+    }
+    /* Then try unprefixed (global / top-level) */
     EnumDecl **ptr = lat_map_get(&ev->enum_defs, name);
+    return ptr ? *ptr : NULL;
+}
+
+/* Find an enum in a specific module's namespace */
+static EnumDecl *find_enum_in_module(Evaluator *ev, const char *module_path, const char *name) {
+    char prefixed[1024];
+    snprintf(prefixed, sizeof(prefixed), "%s::%s", module_path, name);
+    EnumDecl **ptr = lat_map_get(&ev->enum_defs, prefixed);
     return ptr ? *ptr : NULL;
 }
 
@@ -1189,6 +1260,19 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
     Env *saved = ev->env;
     lat_vec_push(&ev->saved_envs, &saved);
     ev->env = closure_env;
+
+    /* If the closure was exported from a module, set module_prefix so that
+     * find_struct/find_enum/find_fn resolve types from the module's namespace. */
+    char *saved_module_prefix = ev->module_prefix;
+    ev->module_prefix = NULL;
+    {
+        LatValue mp_val;
+        if (env_get(closure_env, "__module_path__", &mp_val)) {
+            if (mp_val.type == VAL_STR) { ev->module_prefix = strdup(mp_val.as.str_val); }
+            value_free(&mp_val);
+        }
+    }
+
     stats_scope_push(&ev->stats);
     env_push_scope(ev->env);
     for (size_t i = 0; i < param_count; i++) {
@@ -1202,6 +1286,8 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
                 stats_scope_pop(&ev->stats);
                 ev->env = saved;
                 lat_vec_pop(&ev->saved_envs, &dummy);
+                free(ev->module_prefix);
+                ev->module_prefix = saved_module_prefix;
                 return eval_err(strdup("out of memory"));
             }
             for (size_t j = 0; j < rest_count; j++) rest_elems[j] = args[i + j];
@@ -1218,6 +1304,8 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
                 stats_scope_pop(&ev->stats);
                 ev->env = saved;
                 lat_vec_pop(&ev->saved_envs, NULL);
+                free(ev->module_prefix);
+                ev->module_prefix = saved_module_prefix;
                 return def;
             }
             env_define(ev->env, params[i], def.value);
@@ -1228,6 +1316,10 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
     stats_scope_pop(&ev->stats);
     ev->env = saved;
     lat_vec_pop(&ev->saved_envs, NULL);
+
+    /* Restore caller's module prefix */
+    free(ev->module_prefix);
+    ev->module_prefix = saved_module_prefix;
 
     if (IS_SIGNAL(result) && result.cf.tag == CF_RETURN) { return eval_ok(result.cf.value); }
     return result;
@@ -1402,6 +1494,15 @@ static Evaluator *create_child_evaluator(Evaluator *parent) {
     child->script_dir = parent->script_dir ? strdup(parent->script_dir) : NULL;
     child->max_call_depth = parent->max_call_depth;
     child->assertions_enabled = parent->assertions_enabled;
+    /* Copy module namespace mappings */
+    child->module_prefix = parent->module_prefix ? strdup(parent->module_prefix) : NULL;
+    child->module_paths = lat_map_new(sizeof(char *));
+    for (size_t i = 0; i < parent->module_paths.cap; i++) {
+        if (parent->module_paths.entries[i].state == MAP_OCCUPIED) {
+            char *path_copy = strdup(*(char **)parent->module_paths.entries[i].value);
+            lat_map_set(&child->module_paths, parent->module_paths.entries[i].key, &path_copy);
+        }
+    }
     return child;
 }
 
@@ -1412,6 +1513,14 @@ static void free_child_evaluator(Evaluator *child) {
     lat_map_free(&child->fn_defs);
     lat_map_free(&child->required_files);
     free(child->script_dir);
+    free(child->module_prefix);
+    for (size_t i = 0; i < child->module_paths.cap; i++) {
+        if (child->module_paths.entries[i].state == MAP_OCCUPIED) {
+            char **pp = (char **)child->module_paths.entries[i].value;
+            free(*pp);
+        }
+    }
+    lat_map_free(&child->module_paths);
     value_set_heap(NULL);
     dual_heap_free(child->heap);
     lat_vec_free(&child->gc_roots);
@@ -7895,8 +8004,20 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         case EXPR_STRUCT_LIT: {
             const char *sname = expr->as.struct_lit.name;
             size_t fc = expr->as.struct_lit.field_count;
-            /* Validate fields if struct def is registered */
-            StructDecl *sd = find_struct(ev, sname);
+            /* Validate fields if struct def is registered.
+             * If module_alias is set, resolve from that module's namespace. */
+            StructDecl *sd = NULL;
+            if (expr->as.struct_lit.module_alias) {
+                const char *mod_path = resolve_module_alias(ev, expr->as.struct_lit.module_alias);
+                if (mod_path) { sd = find_struct_in_module(ev, mod_path, sname); }
+                if (!sd) {
+                    char *err = NULL;
+                    lat_asprintf(&err, "module '%s' has no struct '%s'", expr->as.struct_lit.module_alias, sname);
+                    return eval_err(err);
+                }
+            } else {
+                sd = find_struct(ev, sname);
+            }
             if (sd) {
                 for (size_t i = 0; i < fc; i++) {
                     bool found = false;
@@ -9205,7 +9326,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             const char *enum_name = expr->as.enum_variant.enum_name;
             const char *variant_name = expr->as.enum_variant.variant_name;
 
-            EnumDecl *ed = find_enum(ev, enum_name);
+            /* If module_alias is set, resolve from that module's namespace */
+            EnumDecl *ed = NULL;
+            if (expr->as.enum_variant.module_alias) {
+                const char *mod_path = resolve_module_alias(ev, expr->as.enum_variant.module_alias);
+                if (mod_path) { ed = find_enum_in_module(ev, mod_path, enum_name); }
+                if (!ed) {
+                    char *err = NULL;
+                    lat_asprintf(&err, "module '%s' has no enum '%s'", expr->as.enum_variant.module_alias, enum_name);
+                    return eval_err(err);
+                }
+            } else {
+                ed = find_enum(ev, enum_name);
+            }
             if (!ed) {
                 /* Fall back to static call: Name::method(args)
                  * Build a temporary EXPR_CALL node and evaluate it so that
@@ -9598,20 +9731,31 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
         return eval_err(err);
     }
 
-    /* Register functions, structs, enums, traits, impls globally */
+    /* Register functions, structs, enums, traits, impls under module-prefixed keys
+     * ONLY. This prevents name collisions between modules. The module's own code
+     * resolves via module_prefix (set below), and callers use qualified access
+     * (alias.Name) or selective imports to reach these definitions. */
     for (size_t j = 0; j < mod_prog.item_count; j++) {
         if (mod_prog.items[j].tag == ITEM_STRUCT) {
             StructDecl *ptr = &mod_prog.items[j].as.struct_decl;
-            lat_map_set(&ev->struct_defs, ptr->name, &ptr);
+            char ns_key[1024];
+            snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
+            lat_map_set(&ev->struct_defs, ns_key, &ptr);
         } else if (mod_prog.items[j].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &mod_prog.items[j].as.fn_decl;
-            register_fn_overload(&ev->fn_defs, ptr);
+            char ns_key[1024];
+            snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
+            register_fn_overload_as(&ev->fn_defs, ns_key, ptr);
         } else if (mod_prog.items[j].tag == ITEM_ENUM) {
             EnumDecl *ptr = &mod_prog.items[j].as.enum_decl;
-            lat_map_set(&ev->enum_defs, ptr->name, &ptr);
+            char ns_key[1024];
+            snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
+            lat_map_set(&ev->enum_defs, ns_key, &ptr);
         } else if (mod_prog.items[j].tag == ITEM_TRAIT) {
             TraitDecl *ptr = &mod_prog.items[j].as.trait_decl;
-            lat_map_set(&ev->trait_defs, ptr->name, &ptr);
+            char ns_key[1024];
+            snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
+            lat_map_set(&ev->trait_defs, ns_key, &ptr);
         } else if (mod_prog.items[j].tag == ITEM_IMPL) {
             ImplBlock *ptr = &mod_prog.items[j].as.impl_block;
             char key[512];
@@ -9622,6 +9766,11 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
 
     /* Push a module scope and execute statements */
     env_push_scope(ev->env);
+
+    /* Set module_prefix so find_struct/find_enum/find_fn resolve
+     * the module's own declarations via prefix first */
+    char *prev_module_prefix = ev->module_prefix;
+    ev->module_prefix = strdup(resolved);
 
     char *prev_script_dir = ev->script_dir;
     char *resolved_copy = strdup(resolved);
@@ -9640,6 +9789,10 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     free(ev->script_dir);
     ev->script_dir = prev_script_dir;
 
+    /* Restore module prefix */
+    free(ev->module_prefix);
+    ev->module_prefix = prev_module_prefix;
+
     if (!IS_OK(exec_r)) {
         env_pop_scope(ev->env);
         for (size_t j = 0; j < mod_toks.len; j++) token_free(lat_vec_get(&mod_toks, j));
@@ -9651,6 +9804,10 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
 
     /* Build module Map from scope bindings and functions */
     LatValue module_map = value_map_new();
+
+    /* Store module's resolved path for namespace resolution */
+    LatValue path_val = value_string(resolved);
+    lat_map_set(module_map.as.map.map, "__module_path__", &path_val);
 
     /* Export top-level variable bindings from module scope */
     Scope *mod_scope = &ev->env->scopes[ev->env->count - 1];
@@ -9687,6 +9844,10 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
             lat_vec_push(&ev->module_exprs, &body);
 
             Env *captured = env_clone(ev->env);
+            /* Tag the closure's environment with its module path so that
+             * type lookups (find_struct, find_enum) resolve from the
+             * correct module namespace when the closure is called. */
+            env_define(captured, "__module_path__", value_string(resolved));
             Expr **defaults = NULL;
             bool has_variadic = false;
             if (fn->param_count > 0) {
@@ -10235,6 +10396,11 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
             LatValue module_map = mod_r.value;
 
+            /* Extract the module's resolved path for namespace resolution */
+            const char *mod_resolved_path = NULL;
+            LatValue *mp_val = (LatValue *)lat_map_get(module_map.as.map.map, "__module_path__");
+            if (mp_val && mp_val->type == VAL_STR) { mod_resolved_path = mp_val->as.str_val; }
+
             /* Selective import: import { x, y } from "path" */
             if (selective) {
                 for (size_t i = 0; i < sel_count; i++) {
@@ -10247,6 +10413,15 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         return eval_err(err);
                     }
                     env_define(ev->env, name, value_deep_clone(exported));
+
+                    /* For selective struct/enum imports, ensure the unprefixed
+                     * registry entry points to this module's definition */
+                    if (mod_resolved_path) {
+                        StructDecl *sd = find_struct_in_module(ev, mod_resolved_path, name);
+                        if (sd) { lat_map_set(&ev->struct_defs, name, &sd); }
+                        EnumDecl *ed = find_enum_in_module(ev, mod_resolved_path, name);
+                        if (ed) { lat_map_set(&ev->enum_defs, name, &ed); }
+                    }
                 }
                 value_free(&module_map);
                 return eval_ok(value_unit());
@@ -10256,6 +10431,12 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             if (!alias) {
                 value_free(&module_map);
                 return eval_err(strdup("import requires 'as <name>' or selective '{ ... } from'"));
+            }
+
+            /* Store alias -> resolved module path for qualified access */
+            if (mod_resolved_path) {
+                char *path_copy = strdup(mod_resolved_path);
+                lat_map_set(&ev->module_paths, alias, &path_copy);
             }
 
             env_define(ev->env, alias, module_map);
@@ -12247,6 +12428,8 @@ Evaluator *evaluator_new(void) {
     ev->module_cache = lat_map_new(sizeof(LatValue));
     ev->loaded_extensions = lat_map_new(sizeof(LatValue));
     ev->module_exprs = lat_vec_new(sizeof(Expr *));
+    ev->module_prefix = NULL;
+    ev->module_paths = lat_map_new(sizeof(char *));
     ev->bonds = NULL;
     ev->bond_count = 0;
     ev->bond_cap = 0;
@@ -12293,6 +12476,15 @@ void evaluator_free(Evaluator *ev) {
         }
     }
     lat_map_free(&ev->loaded_extensions);
+    /* Free module paths (alias -> resolved path strings) */
+    for (size_t i = 0; i < ev->module_paths.cap; i++) {
+        if (ev->module_paths.entries[i].state == MAP_OCCUPIED) {
+            char **pp = (char **)ev->module_paths.entries[i].value;
+            free(*pp);
+        }
+    }
+    lat_map_free(&ev->module_paths);
+    free(ev->module_prefix);
     /* Free body Expr wrappers kept alive for module closures */
     for (size_t i = 0; i < ev->module_exprs.len; i++) {
         Expr **ep = lat_vec_get(&ev->module_exprs, i);

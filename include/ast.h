@@ -230,6 +230,7 @@ struct Expr {
             char *name;
             FieldInit *fields;
             size_t field_count;
+            char *module_alias;
         } struct_lit;
 
         Expr *freeze_expr; /* THAW, CLONE: inner expr */
@@ -306,6 +307,7 @@ struct Expr {
             char *variant_name;
             Expr **args;
             size_t arg_count;
+            char *module_alias;
         } enum_variant;
         Expr *try_propagate_expr; /* EXPR_TRY_PROPAGATE: inner expr */
         struct {
