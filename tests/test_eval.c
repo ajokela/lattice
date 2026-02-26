@@ -3857,6 +3857,48 @@ TEST(gc_vm_maps) {
                 "}\n");
 }
 
+/* ── Test: String case-conversion methods ── */
+
+TEST(eval_string_capitalize) {
+    ASSERT_RUNS("fn main() {\n"
+                "    assert(\"hello world\".capitalize() == \"Hello world\")\n"
+                "    assert(\"HELLO\".capitalize() == \"Hello\")\n"
+                "    assert(\"\".capitalize() == \"\")\n"
+                "}\n");
+}
+
+TEST(eval_string_title_case) {
+    ASSERT_RUNS("fn main() {\n"
+                "    assert(\"hello world\".title_case() == \"Hello World\")\n"
+                "    assert(\"foo-bar_baz\".title_case() == \"Foo-Bar_Baz\")\n"
+                "    assert(\"\".title_case() == \"\")\n"
+                "}\n");
+}
+
+TEST(eval_string_snake_case) {
+    ASSERT_RUNS("fn main() {\n"
+                "    assert(\"helloWorld\".snake_case() == \"hello_world\")\n"
+                "    assert(\"hello-world\".snake_case() == \"hello_world\")\n"
+                "    assert(\"Hello World\".snake_case() == \"hello_world\")\n"
+                "}\n");
+}
+
+TEST(eval_string_camel_case) {
+    ASSERT_RUNS("fn main() {\n"
+                "    assert(\"hello_world\".camel_case() == \"helloWorld\")\n"
+                "    assert(\"hello-world\".camel_case() == \"helloWorld\")\n"
+                "    assert(\"Hello World\".camel_case() == \"helloWorld\")\n"
+                "}\n");
+}
+
+TEST(eval_string_kebab_case) {
+    ASSERT_RUNS("fn main() {\n"
+                "    assert(\"helloWorld\".kebab_case() == \"hello-world\")\n"
+                "    assert(\"hello_world\".kebab_case() == \"hello-world\")\n"
+                "    assert(\"Hello World\".kebab_case() == \"hello-world\")\n"
+                "}\n");
+}
+
 /* Test: GC integration — the VM's built-in GC is initialized correctly */
 TEST(gc_vm_init_state) {
     LatRuntime rt;

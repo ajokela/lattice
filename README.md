@@ -1453,6 +1453,11 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 | `.repeat(n)` | Repeat n times |
 | `.pad_left(width, ch)` | Pad on the left to target width |
 | `.pad_right(width, ch)` | Pad on the right to target width |
+| `.capitalize()` | Capitalize first letter, lowercase the rest |
+| `.title_case()` | Capitalize the first letter of each word |
+| `.snake_case()` | Convert to snake_case |
+| `.camel_case()` | Convert to camelCase |
+| `.kebab_case()` | Convert to kebab-case |
 
 ### Array Methods
 
