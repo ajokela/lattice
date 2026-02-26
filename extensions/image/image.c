@@ -6,58 +6,49 @@
  * Uses macOS sips for resize/convert/thumbnail operations.
  */
 
+/* Enable POSIX extensions for strcasecmp() on Linux with -std=c11 */
+#define _POSIX_C_SOURCE 200809L
+
 #include "lattice_ext.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include <strings.h> /* strcasecmp */
 
 /* Forward declare the init function (exported symbol) */
 void lat_ext_init(LatExtContext *ctx);
 
 /* ── Image format detection from magic bytes ── */
 
-typedef enum {
-    IMG_PNG,
-    IMG_JPEG,
-    IMG_GIF,
-    IMG_BMP,
-    IMG_WEBP,
-    IMG_UNKNOWN
-} ImageFormat;
+typedef enum { IMG_PNG, IMG_JPEG, IMG_GIF, IMG_BMP, IMG_WEBP, IMG_UNKNOWN } ImageFormat;
 
 static const char *format_name(ImageFormat fmt) {
     switch (fmt) {
-        case IMG_PNG:     return "png";
-        case IMG_JPEG:    return "jpeg";
-        case IMG_GIF:     return "gif";
-        case IMG_BMP:     return "bmp";
-        case IMG_WEBP:    return "webp";
+        case IMG_PNG: return "png";
+        case IMG_JPEG: return "jpeg";
+        case IMG_GIF: return "gif";
+        case IMG_BMP: return "bmp";
+        case IMG_WEBP: return "webp";
         case IMG_UNKNOWN: return "unknown";
     }
     return "unknown";
 }
 
 static ImageFormat detect_format(const unsigned char *buf, size_t len) {
-    if (len >= 8 && buf[0] == 0x89 && buf[1] == 'P' && buf[2] == 'N' &&
-        buf[3] == 'G' && buf[4] == 0x0D && buf[5] == 0x0A &&
-        buf[6] == 0x1A && buf[7] == 0x0A) {
+    if (len >= 8 && buf[0] == 0x89 && buf[1] == 'P' && buf[2] == 'N' && buf[3] == 'G' && buf[4] == 0x0D &&
+        buf[5] == 0x0A && buf[6] == 0x1A && buf[7] == 0x0A) {
         return IMG_PNG;
     }
-    if (len >= 3 && buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF) {
-        return IMG_JPEG;
-    }
-    if (len >= 6 && buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' &&
-        buf[3] == '8' && (buf[4] == '7' || buf[4] == '9') && buf[5] == 'a') {
+    if (len >= 3 && buf[0] == 0xFF && buf[1] == 0xD8 && buf[2] == 0xFF) { return IMG_JPEG; }
+    if (len >= 6 && buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == '8' &&
+        (buf[4] == '7' || buf[4] == '9') && buf[5] == 'a') {
         return IMG_GIF;
     }
-    if (len >= 2 && buf[0] == 'B' && buf[1] == 'M') {
-        return IMG_BMP;
-    }
-    if (len >= 12 && buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' &&
-        buf[3] == 'F' && buf[8] == 'W' && buf[9] == 'E' &&
-        buf[10] == 'B' && buf[11] == 'P') {
+    if (len >= 2 && buf[0] == 'B' && buf[1] == 'M') { return IMG_BMP; }
+    if (len >= 12 && buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F' && buf[8] == 'W' &&
+        buf[9] == 'E' && buf[10] == 'B' && buf[11] == 'P') {
         return IMG_WEBP;
     }
     return IMG_UNKNOWN;
@@ -66,27 +57,21 @@ static ImageFormat detect_format(const unsigned char *buf, size_t len) {
 /* ── Helper: read big-endian u32 ── */
 
 static uint32_t read_be32(const unsigned char *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
 /* ── Helper: read big-endian u16 ── */
 
-static uint16_t read_be16(const unsigned char *p) {
-    return (uint16_t)((uint16_t)p[0] << 8) | (uint16_t)p[1];
-}
+static uint16_t read_be16(const unsigned char *p) { return (uint16_t)((uint16_t)p[0] << 8) | (uint16_t)p[1]; }
 
 /* ── Helper: read little-endian u16 ── */
 
-static uint16_t read_le16(const unsigned char *p) {
-    return (uint16_t)((uint16_t)p[1] << 8) | (uint16_t)p[0];
-}
+static uint16_t read_le16(const unsigned char *p) { return (uint16_t)((uint16_t)p[1] << 8) | (uint16_t)p[0]; }
 
 /* ── Helper: read little-endian u32 ── */
 
 static uint32_t read_le32(const unsigned char *p) {
-    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[1] << 8)  | (uint32_t)p[0];
+    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[0];
 }
 
 /* ── Dimension parsing per format ── */
@@ -105,9 +90,9 @@ static Dimensions parse_png_dimensions(FILE *f) {
     if (fseek(f, 16, SEEK_SET) != 0) return d;
     if (fread(ihdr, 1, 8, f) != 8) return d;
 
-    d.width  = read_be32(ihdr);
+    d.width = read_be32(ihdr);
     d.height = read_be32(ihdr + 4);
-    d.valid  = 1;
+    d.valid = 1;
     return d;
 }
 
@@ -137,8 +122,8 @@ static Dimensions parse_jpeg_dimensions(FILE *f) {
             /* Read length (2) + precision (1) + height (2) + width (2) */
             if (fread(sof, 1, 7, f) != 7) return d;
             d.height = read_be16(sof + 3);
-            d.width  = read_be16(sof + 5);
-            d.valid  = 1;
+            d.width = read_be16(sof + 5);
+            d.valid = 1;
             return d;
         }
 
@@ -164,9 +149,9 @@ static Dimensions parse_gif_dimensions(FILE *f) {
     if (fseek(f, 6, SEEK_SET) != 0) return d;
     if (fread(buf, 1, 4, f) != 4) return d;
 
-    d.width  = read_le16(buf);
+    d.width = read_le16(buf);
     d.height = read_le16(buf + 2);
-    d.valid  = 1;
+    d.valid = 1;
     return d;
 }
 
@@ -183,7 +168,7 @@ static Dimensions parse_bmp_dimensions(FILE *f) {
     /* BMP height can be negative (top-down), use absolute value */
     h = (int32_t)read_le32(buf + 4);
     d.height = (uint32_t)(h < 0 ? -h : h);
-    d.valid  = 1;
+    d.valid = 1;
     return d;
 }
 
@@ -196,41 +181,38 @@ static Dimensions parse_webp_dimensions(FILE *f) {
     if (fread(chunk_hdr, 1, 8, f) != 8) return d;
 
     /* VP8 (lossy) */
-    if (chunk_hdr[0] == 'V' && chunk_hdr[1] == 'P' &&
-        chunk_hdr[2] == '8' && chunk_hdr[3] == ' ') {
+    if (chunk_hdr[0] == 'V' && chunk_hdr[1] == 'P' && chunk_hdr[2] == '8' && chunk_hdr[3] == ' ') {
         unsigned char vp8[10];
         /* Skip 3 bytes of VP8 bitstream header (frame tag) */
         if (fread(vp8, 1, 10, f) != 10) return d;
         /* Bytes 6-7: width (LE u16, lower 14 bits), bytes 8-9: height (LE u16, lower 14 bits) */
-        d.width  = read_le16(vp8 + 6) & 0x3FFF;
+        d.width = read_le16(vp8 + 6) & 0x3FFF;
         d.height = read_le16(vp8 + 8) & 0x3FFF;
-        d.valid  = 1;
+        d.valid = 1;
         return d;
     }
 
     /* VP8L (lossless) */
-    if (chunk_hdr[0] == 'V' && chunk_hdr[1] == 'P' &&
-        chunk_hdr[2] == '8' && chunk_hdr[3] == 'L') {
+    if (chunk_hdr[0] == 'V' && chunk_hdr[1] == 'P' && chunk_hdr[2] == '8' && chunk_hdr[3] == 'L') {
         unsigned char sig_and_bits[5];
         uint32_t bits;
         if (fread(sig_and_bits, 1, 5, f) != 5) return d;
         /* First byte is signature (0x2F), next 4 bytes contain width/height */
         bits = read_le32(sig_and_bits + 1);
-        d.width  = (bits & 0x3FFF) + 1;
+        d.width = (bits & 0x3FFF) + 1;
         d.height = ((bits >> 14) & 0x3FFF) + 1;
-        d.valid  = 1;
+        d.valid = 1;
         return d;
     }
 
     /* VP8X (extended) */
-    if (chunk_hdr[0] == 'V' && chunk_hdr[1] == 'P' &&
-        chunk_hdr[2] == '8' && chunk_hdr[3] == 'X') {
+    if (chunk_hdr[0] == 'V' && chunk_hdr[1] == 'P' && chunk_hdr[2] == '8' && chunk_hdr[3] == 'X') {
         unsigned char ext[10];
         if (fread(ext, 1, 10, f) != 10) return d;
         /* Bytes 4-6: canvas width - 1 (24-bit LE), bytes 7-9: canvas height - 1 (24-bit LE) */
-        d.width  = ((uint32_t)ext[4] | ((uint32_t)ext[5] << 8) | ((uint32_t)ext[6] << 16)) + 1;
+        d.width = ((uint32_t)ext[4] | ((uint32_t)ext[5] << 8) | ((uint32_t)ext[6] << 16)) + 1;
         d.height = ((uint32_t)ext[7] | ((uint32_t)ext[8] << 8) | ((uint32_t)ext[9] << 16)) + 1;
-        d.valid  = 1;
+        d.valid = 1;
         return d;
     }
 
@@ -239,10 +221,10 @@ static Dimensions parse_webp_dimensions(FILE *f) {
 
 static Dimensions get_dimensions(FILE *f, ImageFormat fmt) {
     switch (fmt) {
-        case IMG_PNG:  return parse_png_dimensions(f);
+        case IMG_PNG: return parse_png_dimensions(f);
         case IMG_JPEG: return parse_jpeg_dimensions(f);
-        case IMG_GIF:  return parse_gif_dimensions(f);
-        case IMG_BMP:  return parse_bmp_dimensions(f);
+        case IMG_GIF: return parse_gif_dimensions(f);
+        case IMG_BMP: return parse_bmp_dimensions(f);
         case IMG_WEBP: return parse_webp_dimensions(f);
         default: {
             Dimensions d = {0, 0, 0};
@@ -259,23 +241,25 @@ static int64_t get_file_size(const char *path) {
     return (int64_t)st.st_size;
 }
 
-/* ── Helper: infer sips format from file extension ── */
+/* ── Helper: infer sips format from file extension (macOS only) ── */
 
+#ifdef __APPLE__
 static const char *extension_to_sips_format(const char *path) {
     const char *dot = strrchr(path, '.');
     if (!dot) return NULL;
-    dot++;  /* skip the dot */
+    dot++; /* skip the dot */
 
-    if (strcasecmp(dot, "png") == 0)  return "png";
+    if (strcasecmp(dot, "png") == 0) return "png";
     if (strcasecmp(dot, "jpg") == 0 || strcasecmp(dot, "jpeg") == 0) return "jpeg";
-    if (strcasecmp(dot, "gif") == 0)  return "gif";
-    if (strcasecmp(dot, "bmp") == 0)  return "bmp";
+    if (strcasecmp(dot, "gif") == 0) return "gif";
+    if (strcasecmp(dot, "bmp") == 0) return "bmp";
     if (strcasecmp(dot, "tiff") == 0 || strcasecmp(dot, "tif") == 0) return "tiff";
     if (strcasecmp(dot, "heic") == 0) return "heic";
-    if (strcasecmp(dot, "pdf") == 0)  return "pdf";
-    if (strcasecmp(dot, "ico") == 0)  return "ico";
+    if (strcasecmp(dot, "pdf") == 0) return "pdf";
+    if (strcasecmp(dot, "ico") == 0) return "ico";
     return NULL;
 }
+#endif /* __APPLE__ */
 
 /* ── Extension functions ── */
 
@@ -339,9 +323,7 @@ static LatExtValue *image_dimensions(LatExtValue **args, size_t argc) {
     dim = get_dimensions(f, fmt);
     fclose(f);
 
-    if (!dim.valid) {
-        return lat_ext_error("image.dimensions: failed to read image dimensions");
-    }
+    if (!dim.valid) { return lat_ext_error("image.dimensions: failed to read image dimensions"); }
 
     map = lat_ext_map_new();
     w = lat_ext_int((int64_t)dim.width);
@@ -444,31 +426,23 @@ static LatExtValue *image_resize(LatExtValue **args, size_t argc) {
     char cmd[2048];
     int rc;
 
-    if (argc < 4 ||
-        lat_ext_type(args[0]) != LAT_EXT_STRING ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING ||
-        lat_ext_type(args[2]) != LAT_EXT_INT ||
-        lat_ext_type(args[3]) != LAT_EXT_INT) {
+    if (argc < 4 || lat_ext_type(args[0]) != LAT_EXT_STRING || lat_ext_type(args[1]) != LAT_EXT_STRING ||
+        lat_ext_type(args[2]) != LAT_EXT_INT || lat_ext_type(args[3]) != LAT_EXT_INT) {
         return lat_ext_error("image.resize() expects (src: String, dst: String, width: Int, height: Int)");
     }
 
     src = lat_ext_as_string(args[0]);
     dst = lat_ext_as_string(args[1]);
-    w   = lat_ext_as_int(args[2]);
-    h   = lat_ext_as_int(args[3]);
+    w = lat_ext_as_int(args[2]);
+    h = lat_ext_as_int(args[3]);
 
-    if (w <= 0 || h <= 0) {
-        return lat_ext_error("image.resize: width and height must be positive");
-    }
+    if (w <= 0 || h <= 0) { return lat_ext_error("image.resize: width and height must be positive"); }
 
-    snprintf(cmd, sizeof(cmd),
-             "sips -z %lld %lld '%s' --out '%s' > /dev/null 2>&1",
-             (long long)h, (long long)w, src, dst);
+    snprintf(cmd, sizeof(cmd), "sips -z %lld %lld '%s' --out '%s' > /dev/null 2>&1", (long long)h, (long long)w, src,
+             dst);
 
     rc = system(cmd);
-    if (rc != 0) {
-        return lat_ext_error("image.resize: sips command failed");
-    }
+    if (rc != 0) { return lat_ext_error("image.resize: sips command failed"); }
     return lat_ext_bool(true);
 #endif
 }
@@ -484,9 +458,7 @@ static LatExtValue *image_convert(LatExtValue **args, size_t argc) {
     char cmd[2048];
     int rc;
 
-    if (argc < 2 ||
-        lat_ext_type(args[0]) != LAT_EXT_STRING ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_STRING || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("image.convert() expects (src: String, dst: String)");
     }
 
@@ -494,18 +466,12 @@ static LatExtValue *image_convert(LatExtValue **args, size_t argc) {
     dst = lat_ext_as_string(args[1]);
 
     fmt = extension_to_sips_format(dst);
-    if (!fmt) {
-        return lat_ext_error("image.convert: cannot infer output format from destination file extension");
-    }
+    if (!fmt) { return lat_ext_error("image.convert: cannot infer output format from destination file extension"); }
 
-    snprintf(cmd, sizeof(cmd),
-             "sips -s format %s '%s' --out '%s' > /dev/null 2>&1",
-             fmt, src, dst);
+    snprintf(cmd, sizeof(cmd), "sips -s format %s '%s' --out '%s' > /dev/null 2>&1", fmt, src, dst);
 
     rc = system(cmd);
-    if (rc != 0) {
-        return lat_ext_error("image.convert: sips command failed");
-    }
+    if (rc != 0) { return lat_ext_error("image.convert: sips command failed"); }
     return lat_ext_bool(true);
 #endif
 }
@@ -528,20 +494,16 @@ static LatExtValue *image_thumbnail(LatExtValue **args, size_t argc) {
     char cmd[2048];
     int rc;
 
-    if (argc < 3 ||
-        lat_ext_type(args[0]) != LAT_EXT_STRING ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING ||
+    if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_STRING || lat_ext_type(args[1]) != LAT_EXT_STRING ||
         lat_ext_type(args[2]) != LAT_EXT_INT) {
         return lat_ext_error("image.thumbnail() expects (src: String, dst: String, max_size: Int)");
     }
 
-    src      = lat_ext_as_string(args[0]);
-    dst      = lat_ext_as_string(args[1]);
+    src = lat_ext_as_string(args[0]);
+    dst = lat_ext_as_string(args[1]);
     max_size = lat_ext_as_int(args[2]);
 
-    if (max_size <= 0) {
-        return lat_ext_error("image.thumbnail: max_size must be positive");
-    }
+    if (max_size <= 0) { return lat_ext_error("image.thumbnail: max_size must be positive"); }
 
     /* Read original dimensions to compute aspect-ratio-preserving size */
     f = fopen(src, "rb");
@@ -581,14 +543,10 @@ static LatExtValue *image_thumbnail(LatExtValue **args, size_t argc) {
         if (new_w == 0) new_w = 1;
     }
 
-    snprintf(cmd, sizeof(cmd),
-             "sips -z %u %u '%s' --out '%s' > /dev/null 2>&1",
-             new_h, new_w, src, dst);
+    snprintf(cmd, sizeof(cmd), "sips -z %u %u '%s' --out '%s' > /dev/null 2>&1", new_h, new_w, src, dst);
 
     rc = system(cmd);
-    if (rc != 0) {
-        return lat_ext_error("image.thumbnail: sips command failed");
-    }
+    if (rc != 0) { return lat_ext_error("image.thumbnail: sips command failed"); }
     return lat_ext_bool(true);
 #endif
 }
@@ -596,10 +554,10 @@ static LatExtValue *image_thumbnail(LatExtValue **args, size_t argc) {
 /* ── Extension init ── */
 
 void lat_ext_init(LatExtContext *ctx) {
-    lat_ext_register(ctx, "info",       image_info);
-    lat_ext_register(ctx, "format",     image_format);
+    lat_ext_register(ctx, "info", image_info);
+    lat_ext_register(ctx, "format", image_format);
     lat_ext_register(ctx, "dimensions", image_dimensions);
-    lat_ext_register(ctx, "resize",     image_resize);
-    lat_ext_register(ctx, "convert",    image_convert);
-    lat_ext_register(ctx, "thumbnail",  image_thumbnail);
+    lat_ext_register(ctx, "resize", image_resize);
+    lat_ext_register(ctx, "convert", image_convert);
+    lat_ext_register(ctx, "thumbnail", image_thumbnail);
 }
