@@ -1,0 +1,119 @@
+/// Math utilities module.
+/// Provides basic arithmetic and geometry functions.
+
+/// Adds two numbers together.
+/// Returns the sum as an integer.
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+/// Subtracts b from a.
+fn subtract(a: Int, b: Int) -> Int {
+    return a - b
+}
+
+/// Computes the factorial of n.
+/// Returns 1 for n <= 1.
+fn factorial(n: Int) -> Int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+// This is a regular comment and should NOT appear in docs.
+fn helper() {
+    print("not documented")
+}
+
+fn also_undocumented(x: Int) -> Int {
+    return x * 2
+}
+
+/// A 2D point in Cartesian space.
+struct Point {
+    /// The x coordinate
+    x: Float,
+    /// The y coordinate
+    y: Float
+}
+
+/// A named rectangle with position and size.
+struct Rect {
+    /// Top-left corner x
+    x: Int,
+    /// Top-left corner y
+    y: Int,
+    /// Width of the rectangle
+    width: Int,
+    /// Height of the rectangle
+    height: Int
+}
+
+/// Represents a color.
+enum Color {
+    /// Pure red
+    Red,
+    /// Pure green
+    Green,
+    /// Pure blue
+    Blue,
+    /// Custom RGB color with red, green, blue components
+    Rgb(Int, Int, Int)
+}
+
+/// Represents an optional value.
+enum Maybe {
+    Some(any),
+    None
+}
+
+/// A trait for objects that can be displayed as strings.
+trait Display {
+    /// Convert the object to a human-readable string.
+    fn to_string(self: any) -> String
+    /// Convert the object to a debug representation.
+    fn debug(self: any) -> String
+}
+
+/// A trait for comparable types.
+trait Comparable {
+    fn compare(self: any, other: any) -> Int
+}
+
+/// Implement Display for Point.
+impl Display for Point {
+    /// Formats the point as "(x, y)".
+    fn to_string(self: any) -> String {
+        return "(" + to_string(self.x) + ", " + to_string(self.y) + ")"
+    }
+
+    fn debug(self: any) -> String {
+        return "Point{x: " + to_string(self.x) + ", y: " + to_string(self.y) + "}"
+    }
+}
+
+/// The maximum allowed size.
+let MAX_SIZE: Int = 1024
+
+/// Current application version.
+fix VERSION = "1.0.0"
+
+/// Mutable counter for tracking calls.
+flux call_count: Int = 0
+
+/// Greets a user with an optional title.
+fn greet(name: String, title: String = "friend") -> String {
+    return "Hello, " + title + " " + name + "!"
+}
+
+/// Sums a variable number of integers.
+fn sum(...nums: [Int]) -> Int {
+    flux total = 0
+    for n in nums {
+        total += n
+    }
+    return total
+}
+
+print(add(1, 2))
