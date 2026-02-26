@@ -136,7 +136,7 @@ TEST_TARGET = $(BUILD_DIR)/test_runner
 WASM_SRCS   = $(LIB_SRCS) $(SRC_DIR)/wasm_api.c
 WASM_OUT    = lattice-lang.org/lattice.js
 WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinclude -O2 \
-              -sEXPORTED_FUNCTIONS=_lat_init,_lat_run_line,_lat_is_complete,_lat_destroy,_lat_init_regvm,_lat_run_line_regvm,_lat_destroy_regvm,_lat_heap_bytes,_free \
+              -sEXPORTED_FUNCTIONS=_lat_init,_lat_run_line,_lat_is_complete,_lat_destroy,_lat_init_regvm,_lat_run_line_regvm,_lat_destroy_regvm,_lat_get_error,_lat_clear_error,_lat_heap_bytes,_free \
               -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString \
               -sMODULARIZE=1 -sEXPORT_NAME=createLattice \
               -sALLOW_MEMORY_GROWTH=1

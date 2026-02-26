@@ -16,6 +16,18 @@ static RegVM *g_rvm = NULL;
 static LatRuntime *g_rrt = NULL;
 static int g_use_regvm = 0;
 
+/* ── Error buffer for JS callers ── */
+static char *g_last_error = NULL;
+
+/* Store an error string (heap-allocated copy). Replaces any previous error. */
+static void set_last_error(const char *fmt, ...) {
+    free(g_last_error);
+    va_list ap;
+    va_start(ap, fmt);
+    lat_vasprintf(&g_last_error, fmt, ap);
+    va_end(ap);
+}
+
 /* Keep parsed programs alive so struct/fn/enum decl pointers referenced by
  * compiled chunks remain valid. */
 static Program *g_programs = NULL;
@@ -71,13 +83,21 @@ void lat_init(void) {
 
 EMSCRIPTEN_KEEPALIVE
 const char *lat_run_line(const char *source) {
-    if (!g_vm) return "error: StackVM not initialized";
+    if (!g_vm) {
+        set_last_error("StackVM not initialized");
+        return "error: StackVM not initialized";
+    }
+
+    /* Clear previous error on new invocation */
+    free(g_last_error);
+    g_last_error = NULL;
 
     /* Lex */
     Lexer lex = lexer_new(source);
     char *lex_err = NULL;
     LatVec tokens = lexer_tokenize(&lex, &lex_err);
     if (lex_err) {
+        set_last_error("%s", lex_err);
         fprintf(stderr, "error: %s\n", lex_err);
         free(lex_err);
         lat_vec_free(&tokens);
@@ -89,6 +109,7 @@ const char *lat_run_line(const char *source) {
     char *parse_err = NULL;
     Program prog = parser_parse(&parser, &parse_err);
     if (parse_err) {
+        set_last_error("%s", parse_err);
         fprintf(stderr, "error: %s\n", parse_err);
         free(parse_err);
         program_free(&prog);
@@ -102,6 +123,7 @@ const char *lat_run_line(const char *source) {
     char *comp_err = NULL;
     Chunk *chunk = stack_compile_repl(&prog, &comp_err);
     if (!chunk) {
+        set_last_error("compile error: %s", comp_err);
         fprintf(stderr, "compile error: %s\n", comp_err);
         free(comp_err);
         store_program(prog, tokens);
@@ -112,6 +134,7 @@ const char *lat_run_line(const char *source) {
     LatValue result;
     StackVMResult vm_res = stackvm_run(g_vm, chunk, &result);
     if (vm_res != STACKVM_OK) {
+        set_last_error("%s", g_vm->error);
         fprintf(stderr, "error: %s\n", g_vm->error);
         free(g_vm->error);
         g_vm->error = NULL;
@@ -188,6 +211,8 @@ void lat_destroy(void) {
     }
     stack_compiler_free_known_enums();
     free_stored_programs();
+    free(g_last_error);
+    g_last_error = NULL;
 }
 
 /* ── Register StackVM WASM API ── */
@@ -215,13 +240,21 @@ void lat_init_regvm(void) {
 
 EMSCRIPTEN_KEEPALIVE
 const char *lat_run_line_regvm(const char *source) {
-    if (!g_rvm) return "error: RegVM not initialized";
+    if (!g_rvm) {
+        set_last_error("RegVM not initialized");
+        return "error: RegVM not initialized";
+    }
+
+    /* Clear previous error on new invocation */
+    free(g_last_error);
+    g_last_error = NULL;
 
     /* Lex */
     Lexer lex = lexer_new(source);
     char *lex_err = NULL;
     LatVec tokens = lexer_tokenize(&lex, &lex_err);
     if (lex_err) {
+        set_last_error("%s", lex_err);
         fprintf(stderr, "error: %s\n", lex_err);
         free(lex_err);
         lat_vec_free(&tokens);
@@ -233,6 +266,7 @@ const char *lat_run_line_regvm(const char *source) {
     char *parse_err = NULL;
     Program prog = parser_parse(&parser, &parse_err);
     if (parse_err) {
+        set_last_error("%s", parse_err);
         fprintf(stderr, "error: %s\n", parse_err);
         free(parse_err);
         program_free(&prog);
@@ -246,6 +280,7 @@ const char *lat_run_line_regvm(const char *source) {
     char *comp_err = NULL;
     RegChunk *chunk = reg_compile_repl(&prog, &comp_err);
     if (!chunk) {
+        set_last_error("compile error: %s", comp_err);
         fprintf(stderr, "compile error: %s\n", comp_err);
         free(comp_err);
         store_program(prog, tokens);
@@ -256,6 +291,7 @@ const char *lat_run_line_regvm(const char *source) {
     LatValue result;
     RegVMResult rvm_res = regvm_run(g_rvm, chunk, &result);
     if (rvm_res != REGVM_OK) {
+        set_last_error("%s", g_rvm->error);
         fprintf(stderr, "error: %s\n", g_rvm->error);
         free(g_rvm->error);
         g_rvm->error = NULL;
@@ -294,6 +330,21 @@ void lat_destroy_regvm(void) {
     }
     reg_compiler_free_known_enums();
     free_stored_programs();
+    free(g_last_error);
+    g_last_error = NULL;
+}
+
+/* ── Error query API ── */
+
+EMSCRIPTEN_KEEPALIVE
+const char *lat_get_error(void) {
+    return g_last_error;  /* NULL when no error */
+}
+
+EMSCRIPTEN_KEEPALIVE
+void lat_clear_error(void) {
+    free(g_last_error);
+    g_last_error = NULL;
 }
 
 EMSCRIPTEN_KEEPALIVE
