@@ -1,4 +1,5 @@
 #include "lsp.h"
+#include "formatter.h"
 #include "../vendor/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
@@ -418,6 +419,9 @@ static void handle_initialize(LspServer *srv, int id) {
 
     /* Rename */
     cJSON_AddBoolToObject(caps, "renameProvider", 1);
+
+    /* Formatting */
+    cJSON_AddBoolToObject(caps, "documentFormattingProvider", 1);
 
     cJSON_AddItemToObject(result, "capabilities", caps);
 
@@ -1839,6 +1843,84 @@ static void handle_rename(LspServer *srv, cJSON *params, int id) {
     cJSON_Delete(resp);
 }
 
+/* ── Handler: textDocument/formatting ── */
+
+static void handle_formatting(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    if (!td) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    LspDocument *doc = find_document(srv, uri);
+    if (!doc || !doc->text) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Run the formatter on the document text */
+    char *fmt_err = NULL;
+    char *formatted = lat_format(doc->text, &fmt_err);
+    if (!formatted) {
+        /* Formatting failed — return null result (no edits) */
+        free(fmt_err);
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* If already formatted, return empty edits array */
+    if (strcmp(doc->text, formatted) == 0) {
+        free(formatted);
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Count lines in original document to build the full-document range */
+    int last_line = 0;
+    int last_char = 0;
+    for (const char *p = doc->text; *p; p++) {
+        if (*p == '\n') {
+            last_line++;
+            last_char = 0;
+        } else {
+            last_char++;
+        }
+    }
+
+    /* Build a single TextEdit replacing the entire document */
+    cJSON *edit = cJSON_CreateObject();
+
+    cJSON *range = cJSON_CreateObject();
+    cJSON *start = cJSON_CreateObject();
+    cJSON_AddNumberToObject(start, "line", 0);
+    cJSON_AddNumberToObject(start, "character", 0);
+    cJSON *end = cJSON_CreateObject();
+    cJSON_AddNumberToObject(end, "line", last_line);
+    cJSON_AddNumberToObject(end, "character", last_char);
+    cJSON_AddItemToObject(range, "start", start);
+    cJSON_AddItemToObject(range, "end", end);
+    cJSON_AddItemToObject(edit, "range", range);
+
+    cJSON_AddStringToObject(edit, "newText", formatted);
+    free(formatted);
+
+    cJSON *edits = cJSON_CreateArray();
+    cJSON_AddItemToArray(edits, edit);
+
+    cJSON *resp = lsp_make_response(id, edits);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
 /* ── Server lifecycle ── */
 
 LspServer *lsp_server_new(void) {
@@ -1898,6 +1980,8 @@ void lsp_server_run(LspServer *srv) {
             handle_references(srv, params_node, id);
         } else if (strcmp(method, "textDocument/rename") == 0) {
             handle_rename(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/formatting") == 0) {
+            handle_formatting(srv, params_node, id);
         } else if (strcmp(method, "shutdown") == 0) {
             cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
             lsp_write_response(resp, stdout);
