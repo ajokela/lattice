@@ -42,6 +42,7 @@ void envvar_keys(char ***out_keys, size_t *out_count) {
         if (eq) {
             size_t klen = (size_t)(eq - environ[i]);
             keys[i] = malloc(klen + 1);
+            if (!keys[i]) { keys[i] = strdup(""); continue; }
             memcpy(keys[i], environ[i], klen);
             keys[i][klen] = '\0';
         } else {

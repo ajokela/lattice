@@ -12,6 +12,7 @@ static int compile_regex(regex_t *re, const char *pattern, char **err) {
     if (rc != 0) {
         size_t needed = regerror(rc, re, NULL, 0);
         char *buf = malloc(needed);
+        if (!buf) { *err = strdup("regex error: out of memory"); return rc; }
         regerror(rc, re, buf, needed);
         char *msg = NULL;
         lat_asprintf(&msg, "regex error: %s", buf);
@@ -46,6 +47,7 @@ LatValue regex_find_all(const char *pattern, const char *str, char **err) {
     size_t cap = 8;
     size_t len = 0;
     LatValue *elems = malloc(cap * sizeof(LatValue));
+    if (!elems) { regfree(&re); return value_array(NULL, 0); }
 
     regmatch_t match;
     const char *cursor = str;
@@ -60,6 +62,7 @@ LatValue regex_find_all(const char *pattern, const char *str, char **err) {
 
         size_t match_len = (size_t)(match.rm_eo - match.rm_so);
         char *substr = malloc(match_len + 1);
+        if (!substr) break;
         memcpy(substr, cursor + match.rm_so, match_len);
         substr[match_len] = '\0';
 
@@ -88,6 +91,7 @@ char *regex_replace(const char *pattern, const char *str, const char *replacemen
     size_t result_cap = strlen(str) + 64;
     size_t result_len = 0;
     char *result = malloc(result_cap);
+    if (!result) { regfree(&re); *err = strdup("regex replace: out of memory"); return NULL; }
 
     regmatch_t match;
     const char *cursor = str;

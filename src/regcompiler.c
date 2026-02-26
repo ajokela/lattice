@@ -97,6 +97,7 @@ static void rc_init(RegCompiler *comp, RegCompiler *enclosing, RegFuncType type)
     comp->local_count = 0;
     comp->local_cap = 256;
     comp->locals = malloc(comp->local_cap * sizeof(RegLocal));
+    if (!comp->locals) return;
     comp->upvalues = NULL;
     comp->upvalue_count = 0;
     comp->scope_depth = (type == REG_FUNC_SCRIPT) ? 0 : 1;
@@ -1511,6 +1512,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         RegCompilerUpvalue *upvalues = NULL;
         if (upvalue_count > 0) {
             upvalues = malloc(upvalue_count * sizeof(RegCompilerUpvalue));
+            if (!upvalues) return;
             memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(RegCompilerUpvalue));
         }
         rc_cleanup(&func_comp);
@@ -1527,6 +1529,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         fn_val.as.closure.param_count = e->as.closure.param_count;
         if (e->as.closure.param_count > 0) {
             fn_val.as.closure.param_names = malloc(e->as.closure.param_count * sizeof(char *));
+            if (!fn_val.as.closure.param_names) return;
             for (size_t pi = 0; pi < e->as.closure.param_count; pi++)
                 fn_val.as.closure.param_names[pi] = strdup(e->as.closure.params[pi]);
         }
@@ -1575,6 +1578,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         compile_expr(e->as.match_expr.scrutinee, scrutinee, line);
 
         size_t *end_jumps = malloc(e->as.match_expr.arm_count * sizeof(size_t));
+        if (!end_jumps) return;
         size_t end_count = 0;
 
         for (size_t i = 0; i < e->as.match_expr.arm_count; i++) {
@@ -2047,6 +2051,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         uint8_t sync_idx = 0xFF;
         if (sync_count > 0) {
             Stmt **sync_stmts = malloc(sync_count * sizeof(Stmt *));
+            if (!sync_stmts) return;
             size_t si = 0;
             for (size_t i = 0; i < total; i++) {
                 Stmt *s = e->as.block.stmts[i];
@@ -2060,8 +2065,10 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
         /* Compile each spawn body */
         uint8_t *spawn_indices = NULL;
-        if (spawn_count > 0)
+        if (spawn_count > 0) {
             spawn_indices = malloc(spawn_count * sizeof(uint8_t));
+            if (!spawn_indices) return;
+        }
         size_t spi = 0;
         for (size_t i = 0; i < total; i++) {
             Stmt *s = e->as.block.stmts[i];
@@ -2842,6 +2849,7 @@ static void compile_function_body(RegFuncType type, const char *name,
         }
         if (has_phase_constraints) {
             fn_chunk->param_phases = calloc(param_count, sizeof(uint8_t));
+            if (!fn_chunk->param_phases) return;
             fn_chunk->param_phase_count = (int)param_count;
             for (size_t i = 0; i < param_count; i++) {
                 if (params[i].is_variadic) break;
@@ -2854,6 +2862,7 @@ static void compile_function_body(RegFuncType type, const char *name,
     RegCompilerUpvalue *upvalues = NULL;
     if (upvalue_count > 0) {
         upvalues = malloc(upvalue_count * sizeof(RegCompilerUpvalue));
+        if (!upvalues) return;
         memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(RegCompilerUpvalue));
     }
     rc_cleanup(&func_comp);
@@ -2870,6 +2879,7 @@ static void compile_function_body(RegFuncType type, const char *name,
     fn_val.as.closure.param_count = param_count;
     if (param_count > 0 && params) {
         fn_val.as.closure.param_names = malloc(param_count * sizeof(char *));
+        if (!fn_val.as.closure.param_names) return;
         for (size_t pi = 0; pi < param_count; pi++)
             fn_val.as.closure.param_names[pi] = strdup(params[pi].name);
     }
@@ -2917,6 +2927,7 @@ RegChunk *reg_compile(const Program *prog, char **error) {
             StructDecl *sd = &prog->items[i].as.struct_decl;
             /* Store struct metadata as "__struct_<name>" global */
             LatValue *field_names = malloc(sd->field_count * sizeof(LatValue));
+            if (!field_names) return NULL;
             for (size_t j = 0; j < sd->field_count; j++)
                 field_names[j] = value_string(sd->fields[j].name);
             LatValue arr = value_array(field_names, sd->field_count);
@@ -2939,6 +2950,7 @@ RegChunk *reg_compile(const Program *prog, char **error) {
                 }
                 if (has_phase_ann) {
                     LatValue *phases = malloc(sd->field_count * sizeof(LatValue));
+                    if (!phases) return NULL;
                     for (size_t j = 0; j < sd->field_count; j++)
                         phases[j] = value_int((int64_t)sd->fields[j].ty.phase);
                     LatValue phase_arr = value_array(phases, sd->field_count);
@@ -3037,6 +3049,7 @@ RegChunk *reg_compile(const Program *prog, char **error) {
                 RegCompilerUpvalue *upvalues = NULL;
                 if (upvalue_count > 0) {
                     upvalues = malloc(upvalue_count * sizeof(RegCompilerUpvalue));
+                    if (!upvalues) return NULL;
                     memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(RegCompilerUpvalue));
                 }
                 rc_cleanup(&func_comp);
@@ -3052,6 +3065,7 @@ RegChunk *reg_compile(const Program *prog, char **error) {
                 fn_val.as.closure.param_count = method->param_count;
                 if (method->param_count > 0 && method->params) {
                     fn_val.as.closure.param_names = malloc(method->param_count * sizeof(char *));
+                    if (!fn_val.as.closure.param_names) return NULL;
                     for (size_t pi = 0; pi < method->param_count; pi++)
                         fn_val.as.closure.param_names[pi] = strdup(method->params[pi].name);
                 }
@@ -3154,6 +3168,7 @@ static RegChunk *reg_compile_internal(const Program *prog, char **error,
         case ITEM_STRUCT: {
             StructDecl *sd = &prog->items[i].as.struct_decl;
             LatValue *field_names = malloc(sd->field_count * sizeof(LatValue));
+            if (!field_names) return NULL;
             for (size_t j = 0; j < sd->field_count; j++)
                 field_names[j] = value_string(sd->fields[j].name);
             LatValue arr = value_array(field_names, sd->field_count);
@@ -3174,6 +3189,7 @@ static RegChunk *reg_compile_internal(const Program *prog, char **error,
                 }
                 if (has_phase_ann) {
                     LatValue *phases = malloc(sd->field_count * sizeof(LatValue));
+                    if (!phases) return NULL;
                     for (size_t j = 0; j < sd->field_count; j++)
                         phases[j] = value_int((int64_t)sd->fields[j].ty.phase);
                     LatValue phase_arr = value_array(phases, sd->field_count);
@@ -3234,6 +3250,7 @@ static RegChunk *reg_compile_internal(const Program *prog, char **error,
                 RegCompilerUpvalue *uvs = NULL;
                 if (uvc > 0) {
                     uvs = malloc(uvc * sizeof(RegCompilerUpvalue));
+                    if (!uvs) return NULL;
                     memcpy(uvs, func_comp.upvalues, uvc * sizeof(RegCompilerUpvalue));
                 }
                 rc_cleanup(&func_comp);
@@ -3248,6 +3265,7 @@ static RegChunk *reg_compile_internal(const Program *prog, char **error,
                 fn_val.as.closure.param_count = method->param_count;
                 if (method->param_count > 0 && method->params) {
                     fn_val.as.closure.param_names = malloc(method->param_count * sizeof(char *));
+                    if (!fn_val.as.closure.param_names) return NULL;
                     for (size_t pi = 0; pi < method->param_count; pi++)
                         fn_val.as.closure.param_names[pi] = strdup(method->params[pi].name);
                 }
@@ -3324,6 +3342,7 @@ RegChunk *reg_compile_module(const Program *prog, char **error) {
         result->has_exports = true;
         result->export_count = prog->export_count;
         result->export_names = malloc(prog->export_count * sizeof(char *));
+        if (!result->export_names) return NULL;
         for (size_t i = 0; i < prog->export_count; i++)
             result->export_names[i] = strdup(prog->export_names[i]);
     }

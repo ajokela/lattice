@@ -53,6 +53,7 @@ static char *extract_word_at(const char *text, int line, int col, int *out_col) 
 
     size_t wlen = (size_t)(we - ws);
     char *word = malloc(wlen + 1);
+    if (!word) return NULL;
     memcpy(word, ws, wlen);
     word[wlen] = '\0';
     if (out_col) *out_col = (int)(ws - line_start);
@@ -72,6 +73,7 @@ static LspDocument *find_document(LspServer *srv, const char *uri) {
 static LspDocument *add_document(LspServer *srv, const char *uri,
                                   const char *text, int version) {
     LspDocument *doc = calloc(1, sizeof(LspDocument));
+    if (!doc) return NULL;
     doc->uri = strdup(uri);
     doc->text = strdup(text);
     doc->version = version;
@@ -281,6 +283,7 @@ static char *extract_preceding_ident(const char *line_start, int col) {
     if (start >= end) return NULL;
     size_t len = (size_t)(end - start);
     char *id = malloc(len + 1);
+    if (!id) return NULL;
     memcpy(id, start, len);
     id[len] = '\0';
     return id;
@@ -396,6 +399,7 @@ static char *infer_variable_type(const char *text, const char *var_name,
                                     if (colon > tstart) {
                                         size_t tlen = (size_t)(colon - tstart);
                                         char *type = malloc(tlen + 1);
+                                        if (!type) return;
                                         memcpy(type, tstart, tlen);
                                         type[tlen] = '\0';
                                         return type;
@@ -446,6 +450,7 @@ static char *infer_variable_type(const char *text, const char *var_name,
         if (q > type_start) {
             size_t tlen = (size_t)(q - type_start);
             char *type = malloc(tlen + 1);
+            if (!type) return;
             memcpy(type, type_start, tlen);
             type[tlen] = '\0';
             return type;
@@ -498,6 +503,7 @@ static char *infer_variable_type(const char *text, const char *var_name,
             if (*q == '{' || (*q == ':' && *(q+1) == ':')) {
                 /* Check if this is a known struct name */
                 char *name = malloc(id_len + 1);
+                if (!name) return;
                 memcpy(name, id_start, id_len);
                 name[id_len] = '\0';
                 if (doc) {
@@ -692,6 +698,7 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                             size_t mlen = paren ? (size_t)(paren - method_start)
                                                 : strlen(method_start);
                             char *mname = malloc(mlen + 1);
+                            if (!mname) return NULL;
                             memcpy(mname, method_start, mlen);
                             mname[mlen] = '\0';
 
@@ -833,6 +840,7 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
 
     size_t word_len = (size_t)(word_end - word_start);
     char *word = malloc(word_len + 1);
+    if (!word) return;
     memcpy(word, word_start, word_len);
     word[word_len] = '\0';
 
@@ -851,6 +859,7 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
                     if (type) {
                         size_t blen = (sig ? strlen(sig) : 0) + strlen(type) + 48;
                         hover_buf = malloc(blen);
+                        if (!hover_buf) return;
                         snprintf(hover_buf, blen, "```lattice\n%s%s%s\n```",
                                  sig ? sig : word,
                                  /* Append type only if sig doesn't already have it */
@@ -863,6 +872,7 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
                         if (sig) {
                             size_t blen = strlen(sig) + 24;
                             hover_buf = malloc(blen);
+                            if (!hover_buf) return;
                             snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
                             hover_text = hover_buf;
                         }
@@ -873,6 +883,7 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
                     if (sig) {
                         size_t blen = strlen(sig) + 24;
                         hover_buf = malloc(blen);
+                        if (!hover_buf) return;
                         snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
                         hover_text = hover_buf;
                     }
@@ -910,6 +921,7 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
         if (type) {
             size_t blen = strlen(word) + strlen(type) + 32;
             hover_buf = malloc(blen);
+            if (!hover_buf) return NULL;
             snprintf(hover_buf, blen, "```lattice\n%s: %s\n```", word, type);
             hover_text = hover_buf;
             free(type);
@@ -922,6 +934,7 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
             if (strcmp(lattice_keywords[i], word) == 0) {
                 size_t blen = strlen(word) + 32;
                 hover_buf = malloc(blen);
+                if (!hover_buf) return NULL;
                 snprintf(hover_buf, blen, "*keyword* `%s`", word);
                 hover_text = hover_buf;
                 break;
@@ -1010,6 +1023,7 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
 
     size_t wlen = (size_t)(we - ws);
     char *word = malloc(wlen + 1);
+    if (!word) return;
     memcpy(word, ws, wlen);
     word[wlen] = '\0';
 
@@ -1227,6 +1241,7 @@ static int parse_signature_params(const char *sig, char **params, int max_params
     if (inner_len == 0) return 0;
 
     char *inner = malloc(inner_len + 1);
+    if (!inner) return NULL;
     memcpy(inner, open + 1, inner_len);
     inner[inner_len] = '\0';
 
@@ -1249,6 +1264,7 @@ static int parse_signature_params(const char *sig, char **params, int max_params
         size_t plen = (size_t)(trim_end - tok);
         if (plen > 0) {
             params[count] = malloc(plen + 1);
+            if (!params[count]) continue;
             memcpy(params[count], tok, plen);
             params[count][plen] = '\0';
             count++;
@@ -1364,6 +1380,7 @@ static void handle_signature_help(LspServer *srv, cJSON *params, int id) {
 
     size_t name_len = (size_t)(name_end - name_start);
     char *func_name = malloc(name_len + 1);
+    if (!func_name) return;
     memcpy(func_name, name_start, name_len);
     func_name[name_len] = '\0';
 
@@ -1619,6 +1636,7 @@ static void handle_rename(LspServer *srv, cJSON *params, int id) {
 
 LspServer *lsp_server_new(void) {
     LspServer *srv = calloc(1, sizeof(LspServer));
+    if (!srv) return;
     srv->log = stderr;
     return srv;
 }

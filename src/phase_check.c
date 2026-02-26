@@ -22,6 +22,7 @@ static void pc_init(PhaseChecker *pc, AstMode mode) {
     pc->scope_cap = 8;
     pc->scope_count = 1;
     pc->scope_stack = malloc(pc->scope_cap * sizeof(LatMap));
+    if (!pc->scope_stack) return;
     pc->scope_stack[0] = lat_map_new(sizeof(AstPhase));
     pc->struct_defs = lat_map_new(sizeof(StructDecl *));
     pc->fn_defs = lat_map_new(sizeof(FnDecl *));

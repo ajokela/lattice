@@ -63,6 +63,7 @@ bool pkg_manifest_parse(const char *toml_str, PkgManifest *out, char **err) {
     if (deps && deps->type == VAL_MAP) {
         size_t cap = 8;
         out->deps = malloc(cap * sizeof(PkgDep));
+        if (!out->deps) return false;
         out->dep_count = 0;
         out->dep_cap = cap;
 
@@ -94,6 +95,7 @@ char *pkg_manifest_to_toml(const PkgManifest *m) {
     /* Build TOML string manually for clean output */
     size_t cap = 512;
     char *buf = malloc(cap);
+    if (!buf) return NULL;
     size_t len = 0;
 
 #define APPEND(...) do { \
@@ -158,6 +160,7 @@ bool pkg_lock_parse(const char *toml_str, PkgLock *out, char **err) {
     if (packages && packages->type == VAL_ARRAY) {
         size_t cap = packages->as.array.len < 4 ? 4 : packages->as.array.len;
         out->entries = malloc(cap * sizeof(PkgLockEntry));
+        if (!out->entries) return false;
         out->entry_count = 0;
         out->entry_cap = cap;
 
@@ -186,6 +189,7 @@ bool pkg_lock_parse(const char *toml_str, PkgLock *out, char **err) {
 char *pkg_lock_to_toml(const PkgLock *lock) {
     size_t cap = 512;
     char *buf = malloc(cap);
+    if (!buf) return NULL;
     size_t len = 0;
 
 #define APPEND(...) do { \
@@ -336,6 +340,7 @@ static bool fetch_package(const char *name, const char *version, char **err) {
                         if (err) {
                             size_t elen = strlen(mkdir_err) + 64;
                             *err = malloc(elen);
+                            if (!err) return NULL;
                             snprintf(*err, elen, "cannot create lat_modules/: %s", mkdir_err);
                         }
                         free(mkdir_err);
@@ -351,6 +356,7 @@ static bool fetch_package(const char *name, const char *version, char **err) {
                     if (err) {
                         size_t elen = 256;
                         *err = malloc(elen);
+                        if (!err) return false;
                         snprintf(*err, elen, "failed to copy package '%s' from registry", name);
                     }
                     return false;
@@ -364,6 +370,7 @@ static bool fetch_package(const char *name, const char *version, char **err) {
     if (err) {
         size_t elen = 256;
         *err = malloc(elen);
+        if (!err) return false;
         snprintf(*err, elen, "package '%s' not found (not in lat_modules/ and no registry configured)", name);
     }
     return false;
@@ -413,6 +420,7 @@ int pkg_cmd_install(void) {
     memset(&lock, 0, sizeof(lock));
     lock.entry_cap = manifest.dep_count < 4 ? 4 : manifest.dep_count;
     lock.entries = malloc(lock.entry_cap * sizeof(PkgLockEntry));
+    if (!lock.entries) return 1;
     lock.entry_count = 0;
 
     int failures = 0;

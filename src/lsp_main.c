@@ -28,6 +28,7 @@ static char *find_eval_path(void) {
     /* exe is in project root, eval.c is in src/ */
     char *dir = dirname(exe_path);
     char *path = malloc(strlen(dir) + 32);
+    if (!path) return;
     sprintf(path, "%s/src/eval.c", dir);
 
     FILE *f = fopen(path, "r");
@@ -57,6 +58,7 @@ int main(int argc, char **argv) {
         size_t eval_len = strlen(eval_path);
         /* eval_path ends with "src/eval.c", replace with "src/builtin_methods.c" */
         char *methods_path = malloc(eval_len + 16);
+        if (!methods_path) return;
         /* Find last '/' before eval.c */
         char *last_slash = strrchr(eval_path, '/');
         if (last_slash) {

@@ -9,6 +9,7 @@
 LatStr lat_str_new(void) {
     LatStr s;
     s.data = malloc(INITIAL_CAP);
+    if (!s.data) { s.data = NULL; s.len = 0; s.cap = 0; return s; }
     s.data[0] = '\0';
     s.len = 0;
     s.cap = INITIAL_CAP;
@@ -25,6 +26,7 @@ LatStr lat_str_from_len(const char *cstr, size_t len) {
     s.cap = len + 1;
     if (s.cap < INITIAL_CAP) s.cap = INITIAL_CAP;
     s.data = malloc(s.cap);
+    if (!s.data) { s.data = NULL; s.len = 0; s.cap = 0; return s; }
     memcpy(s.data, cstr, len);
     s.data[len] = '\0';
     s.len = len;

@@ -47,6 +47,7 @@ static char *extract_name(const char *sig) {
     if (dot) start = dot + 1;
     size_t len = (size_t)(paren - start);
     char *name = malloc(len + 1);
+    if (!name) return NULL;
     memcpy(name, start, len);
     name[len] = '\0';
     return name;
@@ -61,6 +62,7 @@ static char *extract_owner_type(const char *sig) {
     if (!dot) return NULL;
     size_t len = (size_t)(dot - sig);
     char *type = malloc(len + 1);
+    if (!type) return NULL;
     memcpy(type, sig, len);
     type[len] = '\0';
     return type;
@@ -141,6 +143,7 @@ static void scan_file(LspSymbolIndex *idx, const char *path) {
 
 LspSymbolIndex *lsp_symbol_index_new(const char *eval_path) {
     LspSymbolIndex *idx = calloc(1, sizeof(LspSymbolIndex));
+    if (!idx) return;
     scan_file(idx, eval_path);
     return idx;
 }

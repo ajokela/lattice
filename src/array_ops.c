@@ -57,6 +57,10 @@ LatValue array_sort(const LatValue *arr, char **err) {
 
     /* Deep-clone elements into a working buffer */
     LatValue *buf = malloc(n * sizeof(LatValue));
+    if (!buf) {
+        *err = strdup("sort: out of memory");
+        return value_unit();
+    }
     for (size_t i = 0; i < n; i++) {
         buf[i] = value_deep_clone(&arr->as.array.elems[i]);
     }
@@ -100,6 +104,10 @@ LatValue array_flat(const LatValue *arr) {
     }
 
     LatValue *buf = malloc(total * sizeof(LatValue));
+    if (!buf) {
+        LatValue empty;
+        return value_array(&empty, 0);
+    }
     size_t pos = 0;
     for (size_t i = 0; i < n; i++) {
         if (arr->as.array.elems[i].type == VAL_ARRAY) {
@@ -138,6 +146,10 @@ LatValue array_slice(const LatValue *arr, int64_t start, int64_t end, char **err
     }
 
     LatValue *buf = malloc(count * sizeof(LatValue));
+    if (!buf) {
+        *err = strdup("slice: out of memory");
+        return value_unit();
+    }
     for (size_t i = 0; i < count; i++) {
         buf[i] = value_deep_clone(&arr->as.array.elems[start + (int64_t)i]);
     }

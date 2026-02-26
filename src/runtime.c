@@ -342,6 +342,7 @@ static LatValue native_buffer_from(LatValue *args, int arg_count) {
     if (arg_count != 1 || args[0].type != VAL_ARRAY) return value_buffer(NULL, 0);
     size_t len = args[0].as.array.len;
     uint8_t *data = malloc(len > 0 ? len : 1);
+    if (!data) return value_unit();
     for (size_t i = 0; i < len; i++) {
         if (args[0].as.array.elems[i].type == VAL_INT)
             data[i] = (uint8_t)(args[0].as.array.elems[i].as.int_val & 0xFF);
@@ -374,6 +375,7 @@ static LatValue native_read_file_bytes(LatValue *args, int ac) {
     fseek(f, 0, SEEK_SET);
     if (flen < 0) { fclose(f); return value_nil(); }
     uint8_t *data = malloc((size_t)flen);
+    if (!data) return value_unit();
     size_t nread = fread(data, 1, (size_t)flen, f);
     fclose(f);
     LatValue buf = value_buffer(data, nread);
@@ -436,6 +438,7 @@ static LatValue native_phases(LatValue *args, int ac) {
         if (strcmp(current_rt->tracked_vars[i].name, name) != 0) continue;
         size_t n = current_rt->tracked_vars[i].snap_count;
         LatValue *elems = malloc(n * sizeof(LatValue));
+        if (!elems) return value_unit();
         for (size_t j = 0; j < n; j++) {
             LatValue m = value_map_new();
             LatValue phase_val = value_string(current_rt->tracked_vars[i].snapshots[j].phase);
@@ -470,6 +473,7 @@ static LatValue native_history(LatValue *args, int ac) {
         if (strcmp(current_rt->tracked_vars[i].name, name) != 0) continue;
         size_t n = current_rt->tracked_vars[i].snap_count;
         LatValue *elems = malloc(n * sizeof(LatValue));
+        if (!elems) return value_unit();
         for (size_t j = 0; j < n; j++) {
             LatValue m = value_map_new();
             LatValue phase_val = value_string(current_rt->tracked_vars[i].snapshots[j].phase);
@@ -746,6 +750,7 @@ static LatValue native_list_dir(LatValue *args, int ac) {
     if (err) { current_rt->error = err; return value_array(NULL, 0); }
     if (!entries) return value_array(NULL, 0);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
+    if (!elems) return value_unit();
     for (size_t i = 0; i < count; i++) {
         elems[i] = value_string(entries[i]);
         free(entries[i]);
@@ -805,6 +810,7 @@ static LatValue native_glob(LatValue *args, int ac) {
     if (err) { current_rt->error = err; return value_array(NULL, 0); }
     if (!matches) return value_array(NULL, 0);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
+    if (!elems) return value_unit();
     for (size_t i = 0; i < count; i++) {
         elems[i] = value_string(matches[i]);
         free(matches[i]);
@@ -895,6 +901,7 @@ static LatValue native_path_join(LatValue *args, int ac) {
         if (args[i].type != VAL_STR) { current_rt->error = strdup("path_join() expects (String...)"); return value_string(""); }
     }
     const char **parts = malloc((size_t)ac * sizeof(char *));
+    if (!parts) return value_unit();
     for (int i = 0; i < ac; i++)
         parts[i] = args[i].as.str_val;
     char *r = path_join(parts, (size_t)ac);
@@ -1829,6 +1836,7 @@ static LatValue native_env_keys(LatValue *args, int ac) {
     char **keys = NULL; size_t count = 0;
     envvar_keys(&keys, &count);
     LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
+    if (!elems) return value_unit();
     for (size_t i = 0; i < count; i++) { elems[i] = value_string(keys[i]); free(keys[i]); }
     free(keys);
     LatValue r = value_array(elems, count); free(elems);
@@ -1896,6 +1904,7 @@ static LatValue native_struct_fields(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STRUCT) return value_array(NULL, 0);
     size_t fc = args[0].as.strct.field_count;
     LatValue *elems = malloc((fc > 0 ? fc : 1) * sizeof(LatValue));
+    if (!elems) return value_unit();
     for (size_t i = 0; i < fc; i++)
         elems[i] = value_string(args[0].as.strct.field_names[i]);
     LatValue r = value_array(elems, fc); free(elems);
@@ -1956,6 +1965,7 @@ static LatValue native_range(LatValue *args, int ac) {
     else if (rstep < 0 && rstart > rend)
         rcount = (size_t)((rstart - rend + (-rstep) - 1) / (-rstep));
     LatValue *relems = malloc((rcount > 0 ? rcount : 1) * sizeof(LatValue));
+    if (!relems) return value_unit();
     int64_t rcur = rstart;
     for (size_t i = 0; i < rcount; i++) { relems[i] = value_int(rcur); rcur += rstep; }
     LatValue r = value_array(relems, rcount); free(relems);
@@ -2021,6 +2031,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
         file_path = strdup(raw_path);
     } else {
         file_path = malloc(plen + 5);
+        if (!file_path) return value_unit();
         memcpy(file_path, raw_path, plen);
         memcpy(file_path + plen, ".lat", 5);
     }
@@ -2192,6 +2203,7 @@ static LatValue native_args(LatValue *args, int arg_count) {
     LatValue *elems = NULL;
     if (ac > 0) {
         elems = malloc((size_t)ac * sizeof(LatValue));
+        if (!elems) return value_unit();
         for (int i = 0; i < ac; i++)
             elems[i] = value_string(av[i]);
     }
@@ -2217,7 +2229,9 @@ static LatValue native_struct_from_map(LatValue *args, int arg_count) {
     if (meta.type != VAL_ARRAY) { value_free(&meta); return value_nil(); }
     size_t fc = meta.as.array.len;
     char **names = malloc(fc * sizeof(char *));
+    if (!names) return value_unit();
     LatValue *vals = malloc(fc * sizeof(LatValue));
+    if (!vals) return value_unit();
     for (size_t j = 0; j < fc; j++) {
         names[j] = meta.as.array.elems[j].as.str_val;
         LatValue *found = (LatValue *)lat_map_get(args[1].as.map.map, names[j]);
@@ -2236,6 +2250,7 @@ static LatValue native_url_encode(LatValue *args, int arg_count) {
     size_t slen = strlen(src);
     size_t cap = slen * 3 + 1;
     char *out = malloc(cap);
+    if (!out) return value_unit();
     size_t j = 0;
     for (size_t i = 0; i < slen; i++) {
         unsigned char c = (unsigned char)src[i];
@@ -2256,6 +2271,7 @@ static LatValue native_url_decode(LatValue *args, int arg_count) {
     const char *src = args[0].as.str_val;
     size_t slen = strlen(src);
     char *out = malloc(slen + 1);
+    if (!out) return value_unit();
     size_t j = 0;
     for (size_t i = 0; i < slen; i++) {
         if (src[i] == '%' && i + 2 < slen) {
@@ -2284,13 +2300,16 @@ static LatValue native_csv_parse(LatValue *args, int arg_count) {
     size_t pos = 0, input_len = strlen(input);
     size_t rows_cap = 8, rows_len = 0;
     LatValue *rows = malloc(rows_cap * sizeof(LatValue));
+    if (!rows) return value_unit();
 
     while (pos < input_len) {
         size_t fields_cap = 8, fields_len = 0;
         LatValue *fields = malloc(fields_cap * sizeof(LatValue));
+        if (!fields) return value_unit();
         for (;;) {
             size_t field_cap = 64, field_len = 0;
             char *field = malloc(field_cap);
+            if (!field) return value_unit();
             if (pos < input_len && input[pos] == '"') {
                 pos++;
                 for (;;) {
@@ -2333,6 +2352,7 @@ static LatValue native_csv_stringify(LatValue *args, int arg_count) {
     LatValue *data = &args[0];
     size_t out_cap = 256, out_len = 0;
     char *out = malloc(out_cap);
+    if (!out) return value_nil();
     for (size_t r = 0; r < data->as.array.len; r++) {
         LatValue *row = &data->as.array.elems[r];
         if (row->type != VAL_ARRAY) { free(out); return value_nil(); }
@@ -2418,6 +2438,7 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
     if (lex_err) { free(lex_err); lat_vec_free(&toks); return value_nil(); }
     size_t tok_count = toks.len > 0 ? toks.len - 1 : 0;
     LatValue *elems = malloc((tok_count > 0 ? tok_count : 1) * sizeof(LatValue));
+    if (!elems) return value_unit();
     for (size_t j = 0; j < tok_count; j++) {
         Token *t = lat_vec_get(&toks, j);
         const char *type_str = token_type_name(t->type);
@@ -2560,6 +2581,7 @@ static LatValue native_compose(LatValue *args, int arg_count) {
 
     /* Build a compiled closure with 1 parameter */
     char **params = malloc(sizeof(char *));
+    if (!params) return value_unit();
     params[0] = strdup("x");
     LatValue closure = value_closure(params, 1, NULL, NULL, NULL, false);
     closure.as.closure.native_fn = (void *)chunk;

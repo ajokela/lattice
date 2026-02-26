@@ -64,8 +64,10 @@ void lat_init(void) {
     value_set_arena(NULL);
 
     g_rt = malloc(sizeof(LatRuntime));
+    if (!g_rt) return;
     lat_runtime_init(g_rt);
     g_vm = malloc(sizeof(StackVM));
+    if (!g_vm) return;
     stackvm_init(g_vm, g_rt);
 }
 
@@ -206,8 +208,10 @@ void lat_init_regvm(void) {
     value_set_arena(NULL);
 
     g_rrt = malloc(sizeof(LatRuntime));
+    if (!g_rrt) return;
     lat_runtime_init(g_rrt);
     g_rvm = malloc(sizeof(RegVM));
+    if (!g_rvm) return;
     regvm_init(g_rvm, g_rrt);
 
     g_use_regvm = 1;

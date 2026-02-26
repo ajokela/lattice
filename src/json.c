@@ -30,6 +30,7 @@ static void jp_error(JsonParser *p, const char *msg) {
     if (!p->err) {
         size_t len = strlen(msg) + 64;
         p->err = malloc(len);
+        if (!p->err) { p->err = strdup("json_parse error: out of memory"); return; }
         snprintf(p->err, len, "json_parse error at position %zu: %s", p->pos, msg);
     }
 }
@@ -53,6 +54,7 @@ static LatValue jp_parse_string(JsonParser *p) {
     size_t cap = 64;
     size_t len = 0;
     char *buf = malloc(cap);
+    if (!buf) { jp_error(p, "out of memory"); return value_unit(); }
 
     while (p->src[p->pos] != '\0') {
         char c = p->src[p->pos];
@@ -164,6 +166,7 @@ static LatValue jp_parse_number(JsonParser *p) {
     /* Extract the substring and convert */
     size_t numlen = (size_t)((p->src + p->pos) - start);
     char *numstr = malloc(numlen + 1);
+    if (!numstr) { jp_error(p, "out of memory"); return value_unit(); }
     memcpy(numstr, start, numlen);
     numstr[numlen] = '\0';
 
@@ -188,6 +191,7 @@ static LatValue jp_parse_array(JsonParser *p) {
     size_t cap = 8;
     size_t len = 0;
     LatValue *elems = malloc(cap * sizeof(LatValue));
+    if (!elems) { jp_error(p, "out of memory"); return value_unit(); }
 
     jp_skip_ws(p);
     if (jp_peek(p) == ']') {
@@ -372,9 +376,11 @@ static void jb_init(JsonBuf *b) {
     b->cap = 128;
     b->len = 0;
     b->buf = malloc(b->cap);
+    /* buf checked lazily by caller via jb_serialize error path */
 }
 
 static void jb_ensure(JsonBuf *b, size_t extra) {
+    if (!b->buf) return;
     while (b->len + extra >= b->cap) {
         b->cap *= 2;
         b->buf = realloc(b->buf, b->cap);

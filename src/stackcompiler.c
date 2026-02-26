@@ -48,6 +48,7 @@ static void compiler_init(Compiler *comp, Compiler *enclosing, FunctionType type
     comp->local_count = 0;
     comp->local_cap = 256;
     comp->locals = malloc(comp->local_cap * sizeof(Local));
+    if (!comp->locals) { compile_error = strdup("out of memory"); return; }
     comp->upvalues = NULL;
     comp->upvalue_count = 0;
     comp->scope_depth = (type == FUNC_SCRIPT) ? 0 : 1;
@@ -880,6 +881,7 @@ static void compile_expr(const Expr *e, int line) {
             CompilerUpvalue *upvalues = NULL;
             if (upvalue_count > 0) {
                 upvalues = malloc(upvalue_count * sizeof(CompilerUpvalue));
+                if (!upvalues) return;
                 memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(CompilerUpvalue));
             }
 
@@ -896,6 +898,7 @@ static void compile_expr(const Expr *e, int line) {
                 fn_chunk->fn_has_variadic = vd;
                 if (dc > 0) {
                     fn_chunk->default_values = malloc(dc * sizeof(LatValue));
+                    if (!fn_chunk->default_values) return;
                     int di = 0;
                     for (size_t i = 0; i < e->as.closure.param_count; i++) {
                         if (e->as.closure.default_values && e->as.closure.default_values[i]) {
@@ -917,6 +920,7 @@ static void compile_expr(const Expr *e, int line) {
             fn_val.region_id = (size_t)-1;
             if (e->as.closure.param_count > 0) {
                 fn_val.as.closure.param_names = malloc(e->as.closure.param_count * sizeof(char *));
+                if (!fn_val.as.closure.param_names) return;
                 for (size_t i = 0; i < e->as.closure.param_count; i++)
                     fn_val.as.closure.param_names[i] = strdup(e->as.closure.params[i]);
             } else {
@@ -950,6 +954,7 @@ static void compile_expr(const Expr *e, int line) {
         case EXPR_MATCH: {
             compile_expr(e->as.match_expr.scrutinee, line);
             size_t *end_jumps = malloc(e->as.match_expr.arm_count * sizeof(size_t));
+            if (!end_jumps) return;
             size_t end_jump_count = 0;
 
             /* Stack invariant: scrutinee S stays on stack across all arms.
@@ -1705,6 +1710,7 @@ static void compile_expr(const Expr *e, int line) {
             uint8_t sync_idx = 0xFF;
             if (sync_count > 0) {
                 Stmt **sync_stmts = malloc(sync_count * sizeof(Stmt *));
+                if (!sync_stmts) return;
                 size_t si = 0;
                 for (size_t i = 0; i < total; i++) {
                     Stmt *s = e->as.block.stmts[i];
@@ -1718,8 +1724,10 @@ static void compile_expr(const Expr *e, int line) {
 
             /* Compile each spawn body */
             uint8_t *spawn_indices = NULL;
-            if (spawn_count > 0)
+            if (spawn_count > 0) {
                 spawn_indices = malloc(spawn_count * sizeof(uint8_t));
+                if (!spawn_indices) return;
+            }
             size_t spi = 0;
             for (size_t i = 0; i < total; i++) {
                 Stmt *s = e->as.block.stmts[i];
@@ -2462,6 +2470,7 @@ static void compile_function_body(FunctionType type, const char *name,
     CompilerUpvalue *upvalues = NULL;
     if (upvalue_count > 0) {
         upvalues = malloc(upvalue_count * sizeof(CompilerUpvalue));
+        if (!upvalues) return;
         memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(CompilerUpvalue));
     }
 
@@ -2476,6 +2485,7 @@ static void compile_function_body(FunctionType type, const char *name,
     fn_chunk->fn_has_variadic = has_variadic;
     if (default_count > 0) {
         fn_chunk->default_values = malloc(default_count * sizeof(LatValue));
+        if (!fn_chunk->default_values) return;
         int di = 0;
         for (size_t i = first_param; i < param_count; i++) {
             if (params[i].default_value) {
@@ -2497,6 +2507,7 @@ static void compile_function_body(FunctionType type, const char *name,
         if (has_phase_constraints) {
             int pc = (int)(param_count - first_param);
             fn_chunk->param_phases = calloc(pc, sizeof(uint8_t));
+            if (!fn_chunk->param_phases) return;
             fn_chunk->param_phase_count = pc;
             for (size_t i = first_param; i < param_count; i++) {
                 if (params[i].is_variadic) break;
@@ -2517,6 +2528,7 @@ static void compile_function_body(FunctionType type, const char *name,
     /* Set param_names for display (e.g. value_repr shows <closure|name|>) */
     if (param_count > 0) {
         fn_val.as.closure.param_names = malloc(param_count * sizeof(char *));
+        if (!fn_val.as.closure.param_names) return;
         for (size_t i = 0; i < param_count; i++)
             fn_val.as.closure.param_names[i] = strdup(params[i].name);
     } else {
@@ -2578,6 +2590,7 @@ Chunk *stack_compile(const Program *prog, char **error) {
                  * We emit field names as an array constant. */
                 StructDecl *sd = &prog->items[i].as.struct_decl;
                 LatValue *field_names = malloc(sd->field_count * sizeof(LatValue));
+                if (!field_names) break;
                 for (size_t j = 0; j < sd->field_count; j++)
                     field_names[j] = value_string(sd->fields[j].name);
                 LatValue arr = value_array(field_names, sd->field_count);
@@ -2597,6 +2610,7 @@ Chunk *stack_compile(const Program *prog, char **error) {
                     }
                     if (has_phase) {
                         LatValue *phases = malloc(sd->field_count * sizeof(LatValue));
+                        if (!phases) break;
                         for (size_t j = 0; j < sd->field_count; j++)
                             phases[j] = value_int((int64_t)sd->fields[j].ty.phase);
                         LatValue phase_arr = value_array(phases, sd->field_count);
@@ -2710,6 +2724,7 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
             case ITEM_STRUCT: {
                 StructDecl *sd = &prog->items[i].as.struct_decl;
                 LatValue *field_names = malloc(sd->field_count * sizeof(LatValue));
+                if (!field_names) break;
                 for (size_t j = 0; j < sd->field_count; j++)
                     field_names[j] = value_string(sd->fields[j].name);
                 LatValue arr = value_array(field_names, sd->field_count);
@@ -2728,6 +2743,7 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
                     }
                     if (has_phase) {
                         LatValue *phases = malloc(sd->field_count * sizeof(LatValue));
+                        if (!phases) break;
                         for (size_t j = 0; j < sd->field_count; j++)
                             phases[j] = value_int((int64_t)sd->fields[j].ty.phase);
                         LatValue phase_arr = value_array(phases, sd->field_count);
@@ -2795,7 +2811,8 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
         result->has_exports = true;
         result->export_count = prog->export_count;
         result->export_names = malloc(prog->export_count * sizeof(char *));
-        for (size_t i = 0; i < prog->export_count; i++)
+        if (!result->export_names) { result->has_exports = false; result->export_count = 0; }
+        else for (size_t i = 0; i < prog->export_count; i++)
             result->export_names[i] = strdup(prog->export_names[i]);
     }
 
@@ -2838,6 +2855,7 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
             case ITEM_STRUCT: {
                 StructDecl *sd = &prog->items[i].as.struct_decl;
                 LatValue *field_names = malloc(sd->field_count * sizeof(LatValue));
+                if (!field_names) break;
                 for (size_t j = 0; j < sd->field_count; j++)
                     field_names[j] = value_string(sd->fields[j].name);
                 LatValue arr = value_array(field_names, sd->field_count);
@@ -2855,6 +2873,7 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
                     }
                     if (has_phase) {
                         LatValue *phases = malloc(sd->field_count * sizeof(LatValue));
+                        if (!phases) break;
                         for (size_t j = 0; j < sd->field_count; j++)
                             phases[j] = value_int((int64_t)sd->fields[j].ty.phase);
                         LatValue phase_arr = value_array(phases, sd->field_count);

@@ -79,6 +79,7 @@ static char *read_ident(Lexer *lex) {
     }
     size_t len = lex->pos - start;
     char *s = malloc(len + 1);
+    if (!s) return NULL;
     memcpy(s, lex->source + start, len);
     s[len] = '\0';
     return s;
@@ -197,6 +198,7 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         /* Copy source span, stripping underscores (and 0x prefix for hex) */
         size_t span_len = lex->pos - start;
         char *num_str = malloc(span_len + 1);
+        if (!num_str) return NULL;
         size_t j = 0;
         for (size_t i = 0; i < span_len; i++) {
             char c = lex->source[start + i];
@@ -394,6 +396,7 @@ static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err) {
     size_t buf_cap = 64;
     size_t buf_len = 0;
     char *buf = malloc(buf_cap);
+    if (!buf) return NULL;
 
     for (;;) {
         if (lex->pos >= lex->len) {
@@ -444,6 +447,7 @@ static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err) {
             buf_cap = 64;
             buf_len = 0;
             buf = malloc(buf_cap);
+            if (!buf) return NULL;
             continue;
         }
 
@@ -492,6 +496,7 @@ static bool lex_single_quote_string(Lexer *lex, LatVec *tokens, char **err) {
     size_t buf_cap = 64;
     size_t buf_len = 0;
     char *buf = malloc(buf_cap);
+    if (!buf) return NULL;
 
     for (;;) {
         if (lex->pos >= lex->len) {
@@ -565,6 +570,7 @@ static char *dedent_triple_string(const char *raw, size_t raw_len, size_t *out_l
     if (closing_indent == 0) {
         /* No dedenting needed */
         char *result = malloc(content_end + 1);
+        if (!result) return NULL;
         memcpy(result, raw, content_end);
         result[content_end] = '\0';
         *out_len = content_end;
@@ -574,6 +580,7 @@ static char *dedent_triple_string(const char *raw, size_t raw_len, size_t *out_l
     /* Dedent: strip up to closing_indent whitespace from start of each line */
     size_t result_cap = content_end + 1;
     char *result = malloc(result_cap);
+    if (!result) return NULL;
     size_t result_len = 0;
     size_t i = 0;
     bool at_line_start = true;
@@ -625,6 +632,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
     size_t raw_cap = 256;
     size_t raw_len = 0;
     char *raw = malloc(raw_cap);
+    if (!raw) return NULL;
 
     for (;;) {
         if (lex->pos >= lex->len) {
@@ -657,6 +665,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
     size_t buf_cap = 64;
     size_t buf_len = 0;
     char *buf = malloc(buf_cap);
+    if (!buf) return NULL;
     size_t pos = 0;
 
     while (pos < dedented_len) {
@@ -703,6 +712,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             /* Lex expression tokens via a sub-lexer */
             size_t expr_len = pos - expr_start;
             char *expr_src = malloc(expr_len + 1);
+            if (!expr_src) return NULL;
             memcpy(expr_src, dedented + expr_start, expr_len);
             expr_src[expr_len] = '\0';
 
@@ -722,6 +732,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             buf_cap = 64;
             buf_len = 0;
             buf = malloc(buf_cap);
+            if (!buf) return NULL;
             continue;
         }
 

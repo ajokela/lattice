@@ -17,6 +17,7 @@ void intern_init(void) {
     g_intern.cap = INTERN_INIT_CAP;
     g_intern.count = 0;
     g_intern.entries = calloc(g_intern.cap, sizeof(char *));
+    /* if calloc fails, intern() will call intern_init() again on next use */
 }
 
 void intern_free(void) {
@@ -37,6 +38,7 @@ static uint32_t intern_hash(const char *s) {
 static void intern_grow(void) {
     size_t new_cap = g_intern.cap * 2;
     char **new_entries = calloc(new_cap, sizeof(char *));
+    if (!new_entries) return;
     for (size_t i = 0; i < g_intern.cap; i++) {
         if (!g_intern.entries[i]) continue;
         uint32_t h = intern_hash(g_intern.entries[i]) & (uint32_t)(new_cap - 1);

@@ -18,6 +18,7 @@ static size_t fnv1a(const char *key) {
 
 static void lat_map_alloc_entries(LatMap *m, size_t cap) {
     m->entries = calloc(cap, sizeof(LatMapEntry));
+    if (!m->entries) return;
     /* Point each entry's value to its inline buffer */
     for (size_t i = 0; i < cap; i++)
         m->entries[i].value = m->entries[i]._ibuf;

@@ -102,6 +102,8 @@ static Stmt **parse_block_stmts(Parser *p, size_t *count, char **err) {
     size_t cap = 8;
     size_t n = 0;
     Stmt **stmts = malloc(cap * sizeof(Stmt *));
+    if (!stmts) return NULL;
+
 
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
         Stmt *s = parse_stmt(p, err);
@@ -120,6 +122,8 @@ static Stmt **parse_block_stmts(Parser *p, size_t *count, char **err) {
 
 static TypeExpr *parse_type_expr(Parser *p, char **err) {
     TypeExpr *te = calloc(1, sizeof(TypeExpr));
+    if (!te) return NULL;
+
 
     /* Check for composite phase constraint: (~|*) or (flux|fix) etc. */
     if (peek_type(p) == TOK_LPAREN) {
@@ -194,6 +198,8 @@ static Param *parse_params(Parser *p, size_t *count, char **err) {
     size_t cap = 4;
     size_t n = 0;
     Param *params = malloc(cap * sizeof(Param));
+    if (!params) return NULL;
+
     bool seen_default = false;
     bool seen_variadic = false;
 
@@ -273,6 +279,8 @@ static Expr **parse_args(Parser *p, size_t *count, char **err) {
     size_t cap = 4;
     size_t n = 0;
     Expr **args = malloc(cap * sizeof(Expr *));
+    if (!args) return NULL;
+
 
     while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
         Expr *e = parse_expr(p, err);
@@ -601,7 +609,11 @@ static Expr *parse_primary(Parser *p, char **err) {
         size_t cap = 4;
         size_t count = 0;
         char **parts = malloc((cap + 1) * sizeof(char *));
+        if (!parts) return NULL;
+
         Expr **exprs = malloc(cap * sizeof(Expr *));
+        if (!exprs) return NULL;
+
 
         Token *t = advance(p); /* consume INTERP_START */
         parts[0] = strdup(t->as.str_val);
@@ -668,6 +680,8 @@ static Expr *parse_primary(Parser *p, char **err) {
                 if (!expect(p, TOK_LBRACKET, err)) { expr_free(e); if (contract) expr_free(contract); return NULL; }
                 size_t ecap = 4, en = 0;
                 Expr **except_fields = malloc(ecap * sizeof(Expr *));
+                if (!except_fields) return NULL;
+
                 while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
                     Expr *ef = parse_expr(p, err);
                     if (!ef) { for (size_t i = 0; i < en; i++) expr_free(except_fields[i]); free(except_fields); expr_free(e); if (contract) expr_free(contract); return NULL; }
@@ -862,6 +876,8 @@ static Expr *parse_primary(Parser *p, char **err) {
         if (!expect(p, TOK_LBRACE, err)) return NULL;
         size_t cap = 4, n = 0;
         SelectArm *arms = malloc(cap * sizeof(SelectArm));
+        if (!arms) return NULL;
+
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
             if (n >= cap) { cap *= 2; arms = realloc(arms, cap * sizeof(SelectArm)); }
             memset(&arms[n], 0, sizeof(SelectArm));
@@ -933,6 +949,8 @@ static Expr *parse_primary(Parser *p, char **err) {
 
         size_t cap = 4, n = 0;
         MatchArm *arms = malloc(cap * sizeof(MatchArm));
+        if (!arms) return NULL;
+
 
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
             if (n >= cap) { cap *= 2; arms = realloc(arms, cap * sizeof(MatchArm)); }
@@ -1063,6 +1081,8 @@ static Expr *parse_primary(Parser *p, char **err) {
                     goto match_fail;
                 }
                 body = malloc(sizeof(Stmt *));
+                if (!body) return NULL;
+
                 body[0] = stmt_expr(arm_expr);
                 body_count = 1;
             }
@@ -1119,6 +1139,8 @@ static Expr *parse_primary(Parser *p, char **err) {
                     return NULL;
                 }
                 else_stmts = malloc(sizeof(Stmt *));
+                if (!else_stmts) return NULL;
+
                 else_stmts[0] = stmt_expr(inner_if);
                 else_count = 1;
             } else {
@@ -1152,6 +1174,8 @@ static Expr *parse_primary(Parser *p, char **err) {
         size_t cap = 4;
         size_t n = 0;
         Expr **elems = malloc(cap * sizeof(Expr *));
+        if (!elems) return NULL;
+
         while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
             bool is_spread = false;
             if (peek_type(p) == TOK_DOTDOTDOT) {
@@ -1191,6 +1215,8 @@ static Expr *parse_primary(Parser *p, char **err) {
             advance(p);
             size_t cap = 4, n = 1;
             Expr **elems = malloc(cap * sizeof(Expr *));
+            if (!elems) return NULL;
+
             elems[0] = first;
             /* (expr,) is a single-element tuple */
             while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
@@ -1238,7 +1264,11 @@ static Expr *parse_primary(Parser *p, char **err) {
         size_t cap = 4;
         size_t n = 0;
         char **params = malloc(cap * sizeof(char *));
+        if (!params) return NULL;
+
         Expr **defaults = calloc(cap, sizeof(Expr *));
+        if (!defaults) return NULL;
+
         bool has_variadic = false;
         bool seen_default = false;
         while (peek_type(p) != TOK_PIPE && !at_eof(p)) {
@@ -1324,6 +1354,8 @@ static Expr *parse_primary(Parser *p, char **err) {
             size_t cap = 4;
             size_t n = 0;
             FieldInit *fields = malloc(cap * sizeof(FieldInit));
+            if (!fields) return NULL;
+
             while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
                 if (n >= cap) { cap *= 2; fields = realloc(fields, cap * sizeof(FieldInit)); }
                 fields[n].name = expect_ident(p, err);
@@ -1420,6 +1452,8 @@ static Stmt *parse_binding(Parser *p, AstPhase phase, char **err) {
         advance(p);
         size_t cap = 4, n = 0;
         char **names = malloc(cap * sizeof(char *));
+        if (!names) return NULL;
+
         char *rest_name = NULL;
         while (peek_type(p) != TOK_RBRACKET && !at_eof(p)) {
             if (n >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
@@ -1449,6 +1483,8 @@ static Stmt *parse_binding(Parser *p, AstPhase phase, char **err) {
         advance(p);
         size_t cap = 4, n = 0;
         char **names = malloc(cap * sizeof(char *));
+        if (!names) return NULL;
+
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
             if (n >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
             names[n] = expect_ident(p, err);
@@ -1545,6 +1581,8 @@ static Stmt *parse_import_stmt(Parser *p, char **err) {
         advance(p);
         size_t cap = 4, count = 0;
         char **names = malloc(cap * sizeof(char *));
+        if (!names) return NULL;
+
 
         while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
             if (count >= cap) { cap *= 2; names = realloc(names, cap * sizeof(char *)); }
@@ -1720,6 +1758,8 @@ static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
                (strcmp(peek(p)->as.str_val, "require") == 0 ||
                 strcmp(peek(p)->as.str_val, "ensure") == 0)) {
             if (!contracts) contracts = malloc(ccap * sizeof(ContractClause));
+            if (!contracts) return false;
+
             if (cn >= ccap) { ccap *= 2; contracts = realloc(contracts, ccap * sizeof(ContractClause)); }
             bool is_ensure = (strcmp(peek(p)->as.str_val, "ensure") == 0);
             advance(p);
@@ -1782,6 +1822,8 @@ static bool parse_struct_decl(Parser *p, StructDecl *out, char **err) {
     size_t cap = 4;
     size_t n = 0;
     out->fields = malloc(cap * sizeof(FieldDecl));
+    if (!out->fields) return false;
+
 
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
         if (n >= cap) { cap *= 2; out->fields = realloc(out->fields, cap * sizeof(FieldDecl)); }
@@ -1838,6 +1880,8 @@ static bool parse_enum_decl(Parser *p, EnumDecl *out, char **err) {
     size_t cap = 4;
     size_t n = 0;
     out->variants = malloc(cap * sizeof(VariantDecl));
+    if (!out->variants) return false;
+
 
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
         if (n >= cap) { cap *= 2; out->variants = realloc(out->variants, cap * sizeof(VariantDecl)); }
@@ -1851,6 +1895,8 @@ static bool parse_enum_decl(Parser *p, EnumDecl *out, char **err) {
             advance(p);
             size_t tcap = 4, tn = 0;
             TypeExpr *types = malloc(tcap * sizeof(TypeExpr));
+            if (!types) return false;
+
             while (peek_type(p) != TOK_RPAREN && !at_eof(p)) {
                 if (tn >= tcap) { tcap *= 2; types = realloc(types, tcap * sizeof(TypeExpr)); }
                 TypeExpr *te = parse_type_expr(p, err);
@@ -1899,6 +1945,8 @@ static bool parse_trait_decl(Parser *p, TraitDecl *out, char **err) {
     size_t cap = 4;
     size_t n = 0;
     out->methods = malloc(cap * sizeof(TraitMethod));
+    if (!out->methods) return false;
+
 
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
         if (n >= cap) { cap *= 2; out->methods = realloc(out->methods, cap * sizeof(TraitMethod)); }
@@ -1961,6 +2009,8 @@ static bool parse_impl_block(Parser *p, ImplBlock *out, char **err) {
     size_t cap = 4;
     size_t n = 0;
     out->methods = malloc(cap * sizeof(FnDecl));
+    if (!out->methods) return false;
+
 
     while (peek_type(p) == TOK_FN && !at_eof(p)) {
         if (n >= cap) { cap *= 2; out->methods = realloc(out->methods, cap * sizeof(FnDecl)); }
@@ -2010,6 +2060,8 @@ Program parser_parse(Parser *p, char **err) {
     size_t cap = 8;
     size_t n = 0;
     prog.items = malloc(cap * sizeof(Item));
+    if (!prog.items) { prog.item_count = 0; return prog; }
+
 
     while (!at_eof(p)) {
         if (n >= cap) {

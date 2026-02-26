@@ -156,6 +156,7 @@ static bool is_falsy(LatValue *v) {
 
 static ObjUpvalue *new_upvalue(LatValue *slot) {
     ObjUpvalue *uv = calloc(1, sizeof(ObjUpvalue));
+    if (!uv) return NULL;
     uv->location = slot;
     uv->closed = value_nil();
     uv->next = NULL;
@@ -215,6 +216,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
         case VAL_BUFFER: {
             LatValue v = *src;
             v.as.buffer.data = malloc(src->as.buffer.cap);
+            if (!v.as.buffer.data) return value_unit();
             memcpy(v.as.buffer.data, src->as.buffer.data, src->as.buffer.len);
             v.region_id = REGION_NONE;
             return v;
@@ -233,6 +235,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
                 LatValue v = *src;
                 if (src->as.closure.param_names) {
                     v.as.closure.param_names = malloc(src->as.closure.param_count * sizeof(char *));
+                    if (!v.as.closure.param_names) return value_unit();
                     for (size_t i = 0; i < src->as.closure.param_count; i++)
                         v.as.closure.param_names[i] = strdup(src->as.closure.param_names[i]);
                 }
@@ -245,14 +248,17 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             size_t fc = src->as.strct.field_count;
             v.as.strct.name = strdup(src->as.strct.name);
             v.as.strct.field_names = malloc(fc * sizeof(char *));
+            if (!v.as.strct.field_names) return value_unit();
             v.as.strct.field_values = malloc(fc * sizeof(LatValue));
+            if (!v.as.strct.field_values) return value_unit();
             for (size_t i = 0; i < fc; i++) {
                 v.as.strct.field_names[i] = src->as.strct.field_names[i]; /* interned, shared */
                 v.as.strct.field_values[i] = value_clone_fast(&src->as.strct.field_values[i]);
             }
             if (src->as.strct.field_phases) {
                 v.as.strct.field_phases = malloc(fc * sizeof(PhaseTag));
-                memcpy(v.as.strct.field_phases, src->as.strct.field_phases, fc * sizeof(PhaseTag));
+                if (v.as.strct.field_phases)
+                    memcpy(v.as.strct.field_phases, src->as.strct.field_phases, fc * sizeof(PhaseTag));
             }
             v.region_id = REGION_NONE;
             return v;
@@ -262,6 +268,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             size_t len = src->as.array.len;
             size_t cap = src->as.array.cap;
             v.as.array.elems = malloc(cap * sizeof(LatValue));
+            if (!v.as.array.elems) return value_unit();
             for (size_t i = 0; i < len; i++)
                 v.as.array.elems[i] = value_clone_fast(&src->as.array.elems[i]);
             v.region_id = REGION_NONE;
@@ -271,6 +278,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             LatValue v = *src;
             size_t len = src->as.tuple.len;
             v.as.tuple.elems = malloc(len * sizeof(LatValue));
+            if (!v.as.tuple.elems) return value_unit();
             for (size_t i = 0; i < len; i++)
                 v.as.tuple.elems[i] = value_clone_fast(&src->as.tuple.elems[i]);
             v.region_id = REGION_NONE;
@@ -289,6 +297,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             if (src->as.map.key_phases) {
                 LatMap *ksrc = src->as.map.key_phases;
                 v.as.map.key_phases = malloc(sizeof(LatMap));
+                if (!v.as.map.key_phases) { v.region_id = REGION_NONE; return v; }
                 *v.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
                 for (size_t i = 0; i < ksrc->cap; i++) {
                     if (ksrc->entries[i].state == MAP_OCCUPIED)
@@ -350,6 +359,7 @@ static inline LatValue stackvm_ephemeral_concat(StackVM *vm, const char *a, size
         return v;
     }
     char *buf = malloc(total);
+    if (!buf) return value_unit();
     memcpy(buf, a, la);
     memcpy(buf + la, b, lb);
     buf[result_len] = '\0';
@@ -534,12 +544,14 @@ void stackvm_init(StackVM *vm, LatRuntime *rt) {
     /* Pre-build the call wrapper chunk: [OP_CALL, 0, OP_RETURN] */
     memset(&vm->call_wrapper, 0, sizeof(Chunk));
     vm->call_wrapper.code = malloc(3);
+    if (!vm->call_wrapper.code) return;
     vm->call_wrapper.code[0] = OP_CALL;
     vm->call_wrapper.code[1] = 0;
     vm->call_wrapper.code[2] = OP_RETURN;
     vm->call_wrapper.code_len = 3;
     vm->call_wrapper.code_cap = 3;
     vm->call_wrapper.lines = calloc(3, sizeof(int));
+    if (!vm->call_wrapper.lines) return;
     vm->call_wrapper.lines_len = 3;
     vm->call_wrapper.lines_cap = 3;
 
@@ -647,6 +659,7 @@ typedef struct {
 StackVM *stackvm_clone_for_thread(StackVM *parent) {
     /* Create a child runtime with cloned env + fresh phase arrays */
     LatRuntime *child_rt = calloc(1, sizeof(LatRuntime));
+    if (!child_rt) return NULL;
     child_rt->env = env_clone(parent->rt->env);
     child_rt->struct_meta = parent->rt->struct_meta; /* shared read-only */
     child_rt->script_dir = parent->rt->script_dir ? strdup(parent->rt->script_dir) : NULL;
@@ -657,6 +670,7 @@ StackVM *stackvm_clone_for_thread(StackVM *parent) {
     child_rt->loaded_extensions = lat_map_new(sizeof(LatValue));
 
     StackVM *child = calloc(1, sizeof(StackVM));
+    if (!child) return NULL;
     child->rt = child_rt;
     child->stack_top = child->stack;
     child->env = child_rt->env;
@@ -674,12 +688,14 @@ StackVM *stackvm_clone_for_thread(StackVM *parent) {
     /* Pre-build the call wrapper chunk */
     memset(&child->call_wrapper, 0, sizeof(Chunk));
     child->call_wrapper.code = malloc(3);
+    if (!child->call_wrapper.code) return NULL;
     child->call_wrapper.code[0] = OP_CALL;
     child->call_wrapper.code[1] = 0;
     child->call_wrapper.code[2] = OP_RETURN;
     child->call_wrapper.code_len = 3;
     child->call_wrapper.code_cap = 3;
     child->call_wrapper.lines = calloc(3, sizeof(int));
+    if (!child->call_wrapper.lines) return NULL;
     child->call_wrapper.lines_len = 3;
     child->call_wrapper.lines_cap = 3;
 
@@ -1232,6 +1248,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             /* Deep clone the array for sorting */
             size_t len = obj->as.array.len;
             LatValue *elems = malloc(len * sizeof(LatValue));
+            if (!elems) return false;
             for (size_t i = 0; i < len; i++)
                 elems[i] = value_deep_clone(&obj->as.array.elems[i]);
 
@@ -2179,6 +2196,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
                 size_t n = lat_map_len(inner->as.map.map);
                 LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                if (!elems) return false;
                 size_t ei = 0;
                 for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                     if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2191,6 +2209,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
                 size_t n = lat_map_len(inner->as.map.map);
                 LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                if (!elems) return false;
                 size_t ei = 0;
                 for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                     if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2204,6 +2223,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
                 size_t n = lat_map_len(inner->as.map.map);
                 LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                if (!elems) return false;
                 size_t ei = 0;
                 for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                     if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2368,6 +2388,7 @@ static void stackvm_iter_convert_to_array(LatValue *iter) {
     LatMap *hm = is_map ? iter->as.map.map : iter->as.set.map;
     size_t len = lat_map_len(hm);
     LatValue *elms = malloc((len ? len : 1) * sizeof(LatValue));
+    if (!elms) { return; }
     size_t ei = 0;
     for (size_t i = 0; i < hm->cap; i++) {
         if (hm->entries[i].state == MAP_OCCUPIED) {
@@ -2422,6 +2443,7 @@ static int stackvm_adjust_call_args(StackVM *vm, Chunk *fn_chunk, int arity, int
         LatValue *elems = NULL;
         if (extra > 0) {
             elems = malloc(extra * sizeof(LatValue));
+            if (!elems) return 0;
             for (int i = extra - 1; i >= 0; i--)
                 elems[i] = pop(vm);
         }
@@ -2661,6 +2683,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         a.type = VAL_NIL;
                     } else {
                         buf = malloc(la + lb + 1);
+                        if (!buf) return STACKVM_RUNTIME_ERROR;
                         memcpy(buf, pa, la);
                         memcpy(buf + la, pb, lb);
                         buf[la + lb] = '\0';
@@ -3127,6 +3150,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                 /* Append to existing overload set */
                                 size_t new_len = existing.as.array.len + 1;
                                 LatValue *new_elems = malloc(new_len * sizeof(LatValue));
+                                if (!new_elems) return STACKVM_RUNTIME_ERROR;
                                 for (size_t i = 0; i < existing.as.array.len; i++)
                                     new_elems[i] = existing.as.array.elems[i];
                                 new_elems[existing.as.array.len] = val;
@@ -3420,6 +3444,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 ObjUpvalue **upvalues = NULL;
                 if (upvalue_count > 0) {
                     upvalues = calloc(upvalue_count, sizeof(ObjUpvalue *));
+                    if (!upvalues) return STACKVM_RUNTIME_ERROR;
                     for (uint8_t i = 0; i < upvalue_count; i++) {
                         uint8_t is_local = READ_BYTE();
                         uint8_t index = READ_BYTE();
@@ -3460,6 +3485,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 ObjUpvalue **upvalues = NULL;
                 if (upvalue_count > 0) {
                     upvalues = calloc(upvalue_count, sizeof(ObjUpvalue *));
+                    if (!upvalues) return STACKVM_RUNTIME_ERROR;
                     for (uint8_t i = 0; i < upvalue_count; i++) {
                         uint8_t is_local = READ_BYTE();
                         uint8_t index = READ_BYTE();
@@ -3601,6 +3627,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         total++;
                 }
                 LatValue *flat = malloc(total * sizeof(LatValue));
+                if (!flat) return STACKVM_RUNTIME_ERROR;
                 size_t pos = 0;
                 for (size_t i = 0; i < arr.as.array.len; i++) {
                     if (arr.as.array.elems[i].type == VAL_ARRAY) {
@@ -3628,6 +3655,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatValue *pairs = NULL;
                 if (pair_count > 0) {
                     pairs = malloc(pair_count * 2 * sizeof(LatValue));
+                    if (!pairs) return STACKVM_RUNTIME_ERROR;
                     for (int i = pair_count * 2 - 1; i >= 0; i--)
                         pairs[i] = pop(vm);
                     for (uint8_t i = 0; i < pair_count; i++) {
@@ -3698,7 +3726,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (phase_ref &&
                     phase_ref->type == VAL_ARRAY && phase_ref->as.array.len == field_count) {
                     s.as.strct.field_phases = calloc(field_count, sizeof(PhaseTag));
-                    for (uint8_t i = 0; i < field_count; i++) {
+                    for (uint8_t i = 0; s.as.strct.field_phases && i < field_count; i++) {
                         int64_t p = phase_ref->as.array.elems[i].as.int_val;
                         if (p == 1) { /* PHASE_CRYSTAL */
                             s.as.strct.field_values[i] = value_freeze(s.as.strct.field_values[i]);
@@ -3743,6 +3771,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatValue *payload = NULL;
                 if (payload_count > 0) {
                     payload = malloc(payload_count * sizeof(LatValue));
+                    if (!payload) return STACKVM_RUNTIME_ERROR;
                     for (int i = payload_count - 1; i >= 0; i--)
                         payload[i] = pop(vm);
                 }
@@ -3840,6 +3869,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     } else {
                         size_t slice_len = (size_t)(end - start);
                         char *slice = malloc(slice_len + 1);
+                        if (!slice) return STACKVM_RUNTIME_ERROR;
                         memcpy(slice, obj.as.str_val + start, slice_len);
                         slice[slice_len] = '\0';
                         value_free(&obj);
@@ -3860,6 +3890,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     } else {
                         size_t slice_len = (size_t)(end - start);
                         LatValue *elems = malloc(slice_len * sizeof(LatValue));
+                        if (!elems) return STACKVM_RUNTIME_ERROR;
                         for (size_t i = 0; i < slice_len; i++)
                             elems[i] = value_deep_clone(&obj.as.array.elems[start + i]);
                         value_free(&obj);
@@ -4007,6 +4038,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         /* Always return an array of all payloads */
                         if (obj.as.enm.payload_count > 0) {
                             LatValue *elems = malloc(obj.as.enm.payload_count * sizeof(LatValue));
+                            if (!elems) return STACKVM_RUNTIME_ERROR;
                             for (size_t i = 0; i < obj.as.enm.payload_count; i++) {
                                 elems[i] = obj.as.enm.payload[i];
                                 obj.as.enm.payload[i] = (LatValue){.type = VAL_NIL};
@@ -4212,6 +4244,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                 LatValue self_copy = value_deep_clone(obj);
                                 int total_args = arg_count + 1;
                                 LatValue *args = malloc(total_args * sizeof(LatValue));
+                                if (!args) return STACKVM_RUNTIME_ERROR;
                                 args[0] = self_copy;
                                 for (int ai = arg_count - 1; ai >= 0; ai--)
                                     args[ai + 1] = pop(vm);
@@ -4423,6 +4456,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                             LatValue self_copy = value_deep_clone(obj);
                             int total_args = arg_count + 1;
                             LatValue *args = malloc(total_args * sizeof(LatValue));
+                            if (!args) return STACKVM_RUNTIME_ERROR;
                             args[0] = self_copy;
                             for (int ai = arg_count - 1; ai >= 0; ai--)
                                 args[ai + 1] = pop(vm);
@@ -4689,6 +4723,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                             LatValue self_copy = value_deep_clone(obj);
                             int total_args = arg_count + 1;
                             LatValue *args = malloc(total_args * sizeof(LatValue));
+                            if (!args) return STACKVM_RUNTIME_ERROR;
                             args[0] = self_copy;
                             for (int ai = arg_count - 1; ai >= 0; ai--)
                                 args[ai + 1] = pop(vm);
@@ -4887,6 +4922,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                             LatValue self_copy = value_deep_clone(obj);
                             int total_args = arg_count + 1;
                             LatValue *args = malloc(total_args * sizeof(LatValue));
+                            if (!args) return STACKVM_RUNTIME_ERROR;
                             args[0] = self_copy;
                             for (int ai = arg_count - 1; ai >= 0; ai--)
                                 args[ai + 1] = pop(vm);
@@ -5137,6 +5173,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                             LatValue self_copy = value_deep_clone(obj);
                             int total_args = arg_count + 1;
                             LatValue *args = malloc(total_args * sizeof(LatValue));
+                            if (!args) return STACKVM_RUNTIME_ERROR;
                             args[0] = self_copy;
                             for (int ai = arg_count - 1; ai >= 0; ai--)
                                 args[ai + 1] = pop(vm);
@@ -5823,6 +5860,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
                 /* Pop except field names from stack (pushed first-to-last) */
                 char **except_names = malloc(except_count * sizeof(char *));
+                if (!except_names) return STACKVM_RUNTIME_ERROR;
                 for (int i = except_count - 1; i >= 0; i--) {
                     LatValue v = pop(vm);
                     except_names[i] = (v.type == VAL_STR) ? strdup(v.as.str_val) : strdup("");
@@ -5849,6 +5887,9 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (val.type == VAL_STRUCT) {
                     if (!val.as.strct.field_phases) {
                         val.as.strct.field_phases = calloc(val.as.strct.field_count, sizeof(PhaseTag));
+                        if (!val.as.strct.field_phases) {
+                            VM_ERROR("out of memory"); break;
+                        }
                         for (size_t i = 0; i < val.as.strct.field_count; i++)
                             val.as.strct.field_phases[i] = val.phase;
                     }
@@ -5869,6 +5910,9 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 } else if (val.type == VAL_MAP) {
                     if (!val.as.map.key_phases) {
                         val.as.map.key_phases = calloc(1, sizeof(LatMap));
+                        if (!val.as.map.key_phases) {
+                            VM_ERROR("out of memory"); break;
+                        }
                         *val.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
                     }
                     for (size_t i = 0; i < val.as.map.map->cap; i++) {
@@ -5981,6 +6025,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             case OP_PRINT: {
                 uint8_t argc = READ_BYTE();
                 LatValue *vals = malloc(argc * sizeof(LatValue));
+                if (!vals) return STACKVM_RUNTIME_ERROR;
                 for (int i = argc - 1; i >= 0; i--)
                     vals[i] = pop(vm);
                 for (uint8_t i = 0; i < argc; i++) {
@@ -6027,6 +6072,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     file_path = strdup(raw_path);
                 } else {
                     file_path = malloc(plen + 5);
+                    if (!file_path) return STACKVM_RUNTIME_ERROR;
                     memcpy(file_path, raw_path, plen);
                     memcpy(file_path + plen, ".lat", 5);
                 }
@@ -6230,6 +6276,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
                     /* Create child VMs for each spawn */
                     VMSpawnTask *tasks = calloc(spawn_count, sizeof(VMSpawnTask));
+                    if (!tasks) return STACKVM_RUNTIME_ERROR;
                     for (uint8_t i = 0; i < spawn_count && !first_error; i++) {
                         Chunk *sp_chunk = (Chunk *)frame->chunk->constants[spawn_indices[i]].as.closure.native_fn;
                         tasks[i].chunk = sp_chunk;
@@ -6287,6 +6334,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 uint8_t arm_count = READ_BYTE();
                 typedef struct { uint8_t flags, chan_idx, body_idx, binding_idx; } SelArmInfo;
                 SelArmInfo *arm_info = malloc(arm_count * sizeof(SelArmInfo));
+                if (!arm_info) return STACKVM_RUNTIME_ERROR;
                 for (uint8_t i = 0; i < arm_count; i++) {
                     arm_info[i].flags = READ_BYTE();
                     arm_info[i].chan_idx = READ_BYTE();
@@ -6323,6 +6371,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
                 /* Evaluate all channel expressions upfront */
                 LatChannel **channels = calloc(arm_count, sizeof(LatChannel *));
+                if (!channels) return STACKVM_RUNTIME_ERROR;
                 for (uint8_t i = 0; i < arm_count; i++) {
                     if (arm_info[i].flags & 0x03) continue; /* skip default/timeout */
                     Chunk *ch_chunk = (Chunk *)frame->chunk->constants[arm_info[i].chan_idx].as.closure.native_fn;
@@ -6380,6 +6429,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 /* Build shuffled index array for fairness */
                 size_t ch_arm_count = 0;
                 size_t *indices = malloc(arm_count * sizeof(size_t));
+                if (!indices) return STACKVM_RUNTIME_ERROR;
                 for (uint8_t i = 0; i < arm_count; i++) {
                     if (!(arm_info[i].flags & 0x03))
                         indices[ch_arm_count++] = i;
@@ -6738,6 +6788,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                local->region_id == REGION_CONST) {
                         /* Can't mutate interned/const — make a fresh copy */
                         char *buf = malloc(ll + rl + 1);
+                        if (!buf) return STACKVM_RUNTIME_ERROR;
                         memcpy(buf, local->as.str_val, ll);
                         memcpy(buf + ll, rp, rl);
                         buf[ll + rl] = '\0';
@@ -6747,6 +6798,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     } else {
                         /* Ephemeral or region-owned — clone to malloc, then append */
                         char *buf = malloc(ll + rl + 1);
+                        if (!buf) return STACKVM_RUNTIME_ERROR;
                         memcpy(buf, local->as.str_val, ll);
                         memcpy(buf + ll, rp, rl);
                         buf[ll + rl] = '\0';
@@ -6783,6 +6835,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         if (!pb2) pb2 = rb2;
                         size_t la2 = strlen(pa2), lb2 = strlen(pb2);
                         char *buf = malloc(la2 + lb2 + 1);
+                        if (!buf) return STACKVM_RUNTIME_ERROR;
                         memcpy(buf, pa2, la2);
                         memcpy(buf + la2, pb2, lb2);
                         buf[la2 + lb2] = '\0';

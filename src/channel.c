@@ -5,6 +5,7 @@
 
 LatChannel *channel_new(void) {
     LatChannel *ch = calloc(1, sizeof(LatChannel));
+    if (!ch) return NULL;
     ch->buffer = lat_vec_new(sizeof(LatValue));
     ch->closed = false;
     ch->refcount = 1;
