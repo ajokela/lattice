@@ -12,6 +12,7 @@
 #include "stackvm.h"
 #include "regvm.h"
 #include "runtime.h"
+#include "package.h"
 #include "test_backend.h"
 
 /* Import test macros from test_main.c */
@@ -4189,4 +4190,186 @@ TEST(test_slice_assign_beginning) {
                 "assert(arr[0] == 8)\n"
                 "assert(arr[1] == 9)\n"
                 "assert(arr[2] == 3)\n");
+}
+
+/* ── Package system: semver and dependency graph tests ── */
+
+TEST(test_semver_parse) {
+    int major, minor, patch;
+
+    /* Standard version */
+    ASSERT(pkg_semver_parse("1.2.3", &major, &minor, &patch));
+    ASSERT_EQ_INT(1, major);
+    ASSERT_EQ_INT(2, minor);
+    ASSERT_EQ_INT(3, patch);
+
+    /* Major only */
+    ASSERT(pkg_semver_parse("5", &major, &minor, &patch));
+    ASSERT_EQ_INT(5, major);
+    ASSERT_EQ_INT(0, minor);
+    ASSERT_EQ_INT(0, patch);
+
+    /* Major.minor */
+    ASSERT(pkg_semver_parse("2.7", &major, &minor, &patch));
+    ASSERT_EQ_INT(2, major);
+    ASSERT_EQ_INT(7, minor);
+    ASSERT_EQ_INT(0, patch);
+
+    /* Zero version */
+    ASSERT(pkg_semver_parse("0.0.0", &major, &minor, &patch));
+    ASSERT_EQ_INT(0, major);
+    ASSERT_EQ_INT(0, minor);
+    ASSERT_EQ_INT(0, patch);
+
+    /* Invalid / empty */
+    ASSERT(!pkg_semver_parse(NULL, &major, &minor, &patch));
+    ASSERT(!pkg_semver_parse("", &major, &minor, &patch));
+}
+
+TEST(test_semver_compare) {
+    /* Equal */
+    ASSERT_EQ_INT(0, pkg_semver_compare("1.2.3", "1.2.3"));
+
+    /* Major difference */
+    ASSERT(pkg_semver_compare("2.0.0", "1.0.0") > 0);
+    ASSERT(pkg_semver_compare("1.0.0", "2.0.0") < 0);
+
+    /* Minor difference */
+    ASSERT(pkg_semver_compare("1.3.0", "1.2.0") > 0);
+    ASSERT(pkg_semver_compare("1.2.0", "1.3.0") < 0);
+
+    /* Patch difference */
+    ASSERT(pkg_semver_compare("1.2.4", "1.2.3") > 0);
+    ASSERT(pkg_semver_compare("1.2.3", "1.2.4") < 0);
+
+    /* Zero versions */
+    ASSERT_EQ_INT(0, pkg_semver_compare("0.0.0", "0.0.0"));
+    ASSERT(pkg_semver_compare("0.0.1", "0.0.0") > 0);
+}
+
+TEST(test_semver_caret_constraint) {
+    /* ^1.2.3 means >=1.2.3, <2.0.0 */
+    ASSERT(pkg_semver_satisfies("^1.2.3", "1.2.3"));  /* exact */
+    ASSERT(pkg_semver_satisfies("^1.2.3", "1.2.5"));  /* higher patch */
+    ASSERT(pkg_semver_satisfies("^1.2.3", "1.3.0"));  /* higher minor */
+    ASSERT(pkg_semver_satisfies("^1.2.3", "1.9.9"));  /* much higher */
+    ASSERT(!pkg_semver_satisfies("^1.2.3", "2.0.0")); /* next major */
+    ASSERT(!pkg_semver_satisfies("^1.2.3", "0.9.0")); /* lower major */
+    ASSERT(!pkg_semver_satisfies("^1.2.3", "1.2.2")); /* lower patch */
+    ASSERT(!pkg_semver_satisfies("^1.2.3", "1.1.9")); /* lower minor */
+
+    /* ^0.2.0 means >=0.2.0, <1.0.0 */
+    ASSERT(pkg_semver_satisfies("^0.2.0", "0.2.0"));
+    ASSERT(pkg_semver_satisfies("^0.2.0", "0.3.0"));
+    ASSERT(!pkg_semver_satisfies("^0.2.0", "1.0.0"));
+}
+
+TEST(test_semver_tilde_constraint) {
+    /* ~1.2.3 means >=1.2.3, <1.3.0 (same major.minor) */
+    ASSERT(pkg_semver_satisfies("~1.2.3", "1.2.3"));  /* exact */
+    ASSERT(pkg_semver_satisfies("~1.2.3", "1.2.5"));  /* higher patch */
+    ASSERT(pkg_semver_satisfies("~1.2.3", "1.2.99")); /* much higher patch */
+    ASSERT(!pkg_semver_satisfies("~1.2.3", "1.3.0")); /* next minor */
+    ASSERT(!pkg_semver_satisfies("~1.2.3", "2.0.0")); /* next major */
+    ASSERT(!pkg_semver_satisfies("~1.2.3", "1.2.2")); /* lower patch */
+    ASSERT(!pkg_semver_satisfies("~1.2.3", "1.1.9")); /* lower minor */
+
+    /* ~0.1.0 means >=0.1.0, <0.2.0 */
+    ASSERT(pkg_semver_satisfies("~0.1.0", "0.1.0"));
+    ASSERT(pkg_semver_satisfies("~0.1.0", "0.1.5"));
+    ASSERT(!pkg_semver_satisfies("~0.1.0", "0.2.0"));
+}
+
+TEST(test_semver_gte_constraint) {
+    ASSERT(pkg_semver_satisfies(">=1.0.0", "1.0.0"));
+    ASSERT(pkg_semver_satisfies(">=1.0.0", "1.0.1"));
+    ASSERT(pkg_semver_satisfies(">=1.0.0", "2.0.0"));
+    ASSERT(!pkg_semver_satisfies(">=1.0.0", "0.9.9"));
+}
+
+TEST(test_semver_exact_and_wildcard) {
+    /* Exact match */
+    ASSERT(pkg_semver_satisfies("1.2.3", "1.2.3"));
+    ASSERT(!pkg_semver_satisfies("1.2.3", "1.2.4"));
+
+    /* Wildcard */
+    ASSERT(pkg_semver_satisfies("*", "0.0.1"));
+    ASSERT(pkg_semver_satisfies("*", "99.99.99"));
+}
+
+TEST(test_circular_dependency_detection) {
+    /* Build a graph: A -> B -> C -> A (cycle) */
+    PkgDepGraph g;
+    pkg_dep_graph_init(&g);
+
+    size_t a = pkg_dep_graph_add_node(&g, "pkg-a");
+    size_t b = pkg_dep_graph_add_node(&g, "pkg-b");
+    size_t c = pkg_dep_graph_add_node(&g, "pkg-c");
+
+    pkg_dep_graph_add_edge(&g, a, b);
+    pkg_dep_graph_add_edge(&g, b, c);
+    pkg_dep_graph_add_edge(&g, c, a); /* cycle! */
+
+    char *cycle_path = NULL;
+    ASSERT(pkg_dep_graph_has_cycle(&g, &cycle_path));
+    ASSERT(cycle_path != NULL);
+
+    /* The cycle path should mention all three packages */
+    ASSERT(strstr(cycle_path, "pkg-a") != NULL);
+    ASSERT(strstr(cycle_path, "pkg-b") != NULL);
+    ASSERT(strstr(cycle_path, "pkg-c") != NULL);
+
+    free(cycle_path);
+    pkg_dep_graph_free(&g);
+}
+
+TEST(test_no_circular_dependency) {
+    /* Build an acyclic graph: A -> B, A -> C, B -> D */
+    PkgDepGraph g;
+    pkg_dep_graph_init(&g);
+
+    size_t a = pkg_dep_graph_add_node(&g, "root");
+    size_t b = pkg_dep_graph_add_node(&g, "dep-b");
+    size_t c = pkg_dep_graph_add_node(&g, "dep-c");
+    size_t d = pkg_dep_graph_add_node(&g, "dep-d");
+
+    pkg_dep_graph_add_edge(&g, a, b);
+    pkg_dep_graph_add_edge(&g, a, c);
+    pkg_dep_graph_add_edge(&g, b, d);
+
+    char *cycle_path = NULL;
+    ASSERT(!pkg_dep_graph_has_cycle(&g, &cycle_path));
+    ASSERT(cycle_path == NULL);
+
+    pkg_dep_graph_free(&g);
+}
+
+TEST(test_dep_graph_duplicate_nodes) {
+    /* Adding the same node twice should return the same index */
+    PkgDepGraph g;
+    pkg_dep_graph_init(&g);
+
+    size_t first = pkg_dep_graph_add_node(&g, "my-pkg");
+    size_t second = pkg_dep_graph_add_node(&g, "my-pkg");
+    ASSERT_EQ_INT((long long)first, (long long)second);
+    ASSERT_EQ_INT(1, (long long)g.node_count);
+
+    pkg_dep_graph_free(&g);
+}
+
+TEST(test_dep_graph_self_cycle) {
+    /* A package depending on itself should be detected */
+    PkgDepGraph g;
+    pkg_dep_graph_init(&g);
+
+    size_t a = pkg_dep_graph_add_node(&g, "self-dep");
+    pkg_dep_graph_add_edge(&g, a, a);
+
+    char *cycle_path = NULL;
+    ASSERT(pkg_dep_graph_has_cycle(&g, &cycle_path));
+    ASSERT(cycle_path != NULL);
+    ASSERT(strstr(cycle_path, "self-dep") != NULL);
+
+    free(cycle_path);
+    pkg_dep_graph_free(&g);
 }
