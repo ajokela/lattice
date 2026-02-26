@@ -7,3 +7,5 @@ crash-*
 fuzz/corpus/
 scripts/jira_*.py
 .env
+extensions/**/*.dylib
+extensions/**/*.so
