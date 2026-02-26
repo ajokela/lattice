@@ -92,6 +92,18 @@ jobs:
       - name: Analyze
         run: make analyze
 
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev clang-tidy
+
+      - name: Run clang-tidy
+        run: make clang-tidy
+
   heaptrack:
     name: Heap Profiling
     runs-on: ubuntu-latest

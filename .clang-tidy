@@ -1,0 +1,29 @@
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-switch-missing-default-case,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-macro-parentheses,
+  -bugprone-casting-through-void,
+  -bugprone-implicit-widening-of-multiplication-result,
+  performance-*,
+  -performance-no-int-to-ptr,
+  portability-*,
+  misc-redundant-expression,
+  misc-unused-using-decls,
+
+WarningsAsErrors: >
+  bugprone-use-after-move,
+  bugprone-double-free,
+  bugprone-sizeof-expression,
+  bugprone-undefined-memory-manipulation,
+  bugprone-suspicious-memory-comparison,
+  bugprone-null-dereference,
+
+HeaderFilterRegex: 'include/.*\.h'
+
+CheckOptions:
+  - key: bugprone-suspicious-string-compare.WarnOnImplicitComparison
+    value: true

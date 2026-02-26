@@ -169,7 +169,7 @@ FUZZ_VM_SRC    = $(FUZZ_DIR)/fuzz_vm.c
 FUZZ_VM_OBJ    = $(BUILD_DIR)/fuzz/fuzz_vm.o
 FUZZ_VM_TARGET = $(BUILD_DIR)/fuzz_vm
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze fuzz fuzz-latc fuzz-vm fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite lsp deploy-coverage
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -319,6 +319,15 @@ analyze:
 		echo "==> $$TOTAL warnings total, all suppressed (known false positives)"; \
 	fi; \
 	rm -f "$$ALL_OUT" "$$NEW_OUT"
+
+clang-tidy:
+	@echo "==> Running clang-tidy on source files..."
+	@FAIL=0; \
+	for f in $(LIB_SRCS); do \
+		clang-tidy $$f -- -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -D_DEFAULT_SOURCE 2>&1 || FAIL=1; \
+	done; \
+	if [ $$FAIL -eq 0 ]; then echo "==> clang-tidy: all clean"; \
+	else echo "==> clang-tidy: issues found"; exit 1; fi
 
 $(BUILD_DIR)/fuzz/%.o: $(FUZZ_DIR)/%.c
 	@mkdir -p $(dir $@)
