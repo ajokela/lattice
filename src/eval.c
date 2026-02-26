@@ -1594,6 +1594,8 @@ static void *spawn_thread_fn(void *arg) {
     return NULL;
 }
 
+#endif /* __EMSCRIPTEN__ */
+
 /* Dispatch wrapper so eval can use iter_map_transform/iter_filter with closures */
 static LatValue eval_dispatch_call_closure(void *ctx, LatValue *closure, LatValue *args, int argc) {
     Evaluator *ev = (Evaluator *)ctx;
@@ -1605,8 +1607,6 @@ static LatValue eval_dispatch_call_closure(void *ctx, LatValue *closure, LatValu
     if (IS_ERR(r)) free(r.error);
     return value_nil();
 }
-
-#endif /* __EMSCRIPTEN__ */
 
 /* ── Expression evaluation ── */
 

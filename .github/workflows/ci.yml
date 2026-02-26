@@ -149,6 +149,30 @@ jobs:
             heaptrack_output.txt
           retention-days: 14
 
+  wasm:
+    name: WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 'latest'
+
+      - name: Build WASM
+        run: |
+          mkdir -p build
+          make wasm WASM_OUT=build/lattice.js
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run WASM smoke tests
+        run: node tests/wasm_smoke_test.js
+
   fuzz:
     name: Fuzz (60s smoke test)
     runs-on: ubuntu-latest
