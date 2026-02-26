@@ -3,6 +3,7 @@
 #include "parser.h"
 #include "eval.h"
 #include "phase_check.h"
+#include "match_check.h"
 #include "stackcompiler.h"
 #include "stackvm.h"
 #include "latc.h"
@@ -14,25 +15,28 @@
 #include <string.h>
 #include <libgen.h>
 #ifndef __EMSCRIPTEN__
-  #if defined(LATTICE_HAS_EDITLINE)
-    #include <editline/readline.h>
-  #elif defined(LATTICE_HAS_READLINE)
-    #include <readline/readline.h>
-    #include <readline/history.h>
-  #else
-    /* Minimal fallback: no line editing, no history */
-    static char *readline(const char *prompt) {
-        if (prompt) fputs(prompt, stdout);
-        fflush(stdout);
-        char *buf = malloc(4096);
-        if (!buf) return NULL;
-        if (!fgets(buf, 4096, stdin)) { free(buf); return NULL; }
-        size_t len = strlen(buf);
-        if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
-        return buf;
+#if defined(LATTICE_HAS_EDITLINE)
+#include <editline/readline.h>
+#elif defined(LATTICE_HAS_READLINE)
+#include <readline/readline.h>
+#include <readline/history.h>
+#else
+/* Minimal fallback: no line editing, no history */
+static char *readline(const char *prompt) {
+    if (prompt) fputs(prompt, stdout);
+    fflush(stdout);
+    char *buf = malloc(4096);
+    if (!buf) return NULL;
+    if (!fgets(buf, 4096, stdin)) {
+        free(buf);
+        return NULL;
     }
-    static void add_history(const char *line) { (void)line; }
-  #endif
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+    return buf;
+}
+static void add_history(const char *line) { (void)line; }
+#endif
 #endif
 
 static char *read_file(const char *path) {
@@ -41,9 +45,15 @@ static char *read_file(const char *path) {
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (len < 0) { fclose(f); return NULL; }
+    if (len < 0) {
+        fclose(f);
+        return NULL;
+    }
     char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
     size_t n = fread(buf, 1, (size_t)len, f);
     buf[n] = '\0';
     fclose(f);
@@ -55,7 +65,7 @@ static bool no_regions_mode = false;
 static bool no_assertions_mode = false;
 static bool tree_walk_mode = false;
 static bool regvm_mode = false;
-static int  saved_argc = 0;
+static int saved_argc = 0;
 static char **saved_argv = NULL;
 
 static int run_source(const char *source, bool show_stats, const char *script_dir) {
@@ -77,8 +87,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         fprintf(stderr, "error: %s\n", parse_err);
         free(parse_err);
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         return 1;
     }
@@ -94,24 +103,22 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             }
             lat_vec_free(&errors);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             return 1;
         }
         lat_vec_free(&errors);
     }
 
+    /* Match exhaustiveness check (always runs, warnings only) */
+    check_match_exhaustiveness(&prog);
+
     /* Evaluate */
     Evaluator *ev = evaluator_new();
-    if (gc_stress_mode)
-        evaluator_set_gc_stress(ev, true);
-    if (no_regions_mode)
-        evaluator_set_no_regions(ev, true);
-    if (no_assertions_mode)
-        evaluator_set_assertions(ev, false);
-    if (script_dir)
-        evaluator_set_script_dir(ev, script_dir);
+    if (gc_stress_mode) evaluator_set_gc_stress(ev, true);
+    if (no_regions_mode) evaluator_set_no_regions(ev, true);
+    if (no_assertions_mode) evaluator_set_assertions(ev, false);
+    if (script_dir) evaluator_set_script_dir(ev, script_dir);
     evaluator_set_argv(ev, saved_argc, saved_argv);
 
     /* Tree-walk interpreter (legacy path) */
@@ -122,8 +129,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             free(eval_err);
             evaluator_free(ev);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             return 1;
         }
@@ -135,8 +141,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
 
         evaluator_free(ev);
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         return 0;
     }
@@ -153,16 +158,14 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             free(rcomp_err);
             evaluator_free(ev);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             return 1;
         }
 
         LatRuntime rrt;
         lat_runtime_init(&rrt);
-        if (script_dir)
-            rrt.script_dir = strdup(script_dir);
+        if (script_dir) rrt.script_dir = strdup(script_dir);
         rrt.prog_argc = saved_argc;
         rrt.prog_argv = saved_argv;
 
@@ -178,8 +181,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             regchunk_free(rchunk);
             evaluator_free(ev);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             return 1;
         }
@@ -189,8 +191,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         regchunk_free(rchunk);
         evaluator_free(ev);
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         return 0;
     }
@@ -209,16 +210,14 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         free(comp_err);
         evaluator_free(ev);
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         return 1;
     }
 
     LatRuntime rt;
     lat_runtime_init(&rt);
-    if (script_dir)
-        rt.script_dir = strdup(script_dir);
+    if (script_dir) rt.script_dir = strdup(script_dir);
     rt.prog_argc = saved_argc;
     rt.prog_argv = saved_argv;
 
@@ -234,8 +233,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         chunk_free(chunk);
         evaluator_free(ev);
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         return 1;
     }
@@ -245,8 +243,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
     chunk_free(chunk);
     evaluator_free(ev);
     program_free(&prog);
-    for (size_t i = 0; i < tokens.len; i++)
-        token_free(lat_vec_get(&tokens, i));
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
     lat_vec_free(&tokens);
     return 0;
 }
@@ -348,8 +345,7 @@ static int run_latc_file(const char *path) {
 
 static int run_file(const char *path, bool show_stats) {
     /* Auto-detect .latc/.rlat pre-compiled bytecode */
-    if (has_suffix(path, ".latc") || has_suffix(path, ".rlat"))
-        return run_latc_file(path);
+    if (has_suffix(path, ".latc") || has_suffix(path, ".rlat")) return run_latc_file(path);
 
     char *source = read_file(path);
     if (!source) {
@@ -382,18 +378,16 @@ static bool input_is_complete(const char *source) {
     for (size_t i = 0; i < tokens.len; i++) {
         Token *t = lat_vec_get(&tokens, i);
         switch (t->type) {
-            case TOK_LBRACE: case TOK_LPAREN: case TOK_LBRACKET:
-                depth++;
-                break;
-            case TOK_RBRACE: case TOK_RPAREN: case TOK_RBRACKET:
-                depth--;
-                break;
-            default:
-                break;
+            case TOK_LBRACE:
+            case TOK_LPAREN:
+            case TOK_LBRACKET: depth++; break;
+            case TOK_RBRACE:
+            case TOK_RPAREN:
+            case TOK_RBRACKET: depth--; break;
+            default: break;
         }
     }
-    for (size_t i = 0; i < tokens.len; i++)
-        token_free(lat_vec_get(&tokens, i));
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
     lat_vec_free(&tokens);
     return depth <= 0;
 }
@@ -434,16 +428,13 @@ static void repl(void) {
             break;
         }
 
-        if (accumulated[0] != '\0')
-            strcat(accumulated, "\n");
+        if (accumulated[0] != '\0') strcat(accumulated, "\n");
         strcat(accumulated, line);
 
-        if (line[0] != '\0')
-            add_history(line);
+        if (line[0] != '\0') add_history(line);
         free(line);
 
-        if (!input_is_complete(accumulated))
-            continue;
+        if (!input_is_complete(accumulated)) continue;
 
         /* Lex */
         Lexer lex = lexer_new(accumulated);
@@ -464,8 +455,7 @@ static void repl(void) {
             fprintf(stderr, "error: %s\n", parse_err);
             free(parse_err);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             accumulated[0] = '\0';
             continue;
@@ -501,8 +491,7 @@ static void repl(void) {
             free(vm.error);
             vm.error = NULL;
             /* Reset StackVM state for next iteration */
-            for (LatValue *slot = vm.stack; slot < vm.stack_top; slot++)
-                value_free(slot);
+            for (LatValue *slot = vm.stack; slot < vm.stack_top; slot++) value_free(slot);
             vm.stack_top = vm.stack;
             vm.frame_count = 0;
             vm.handler_count = 0;
@@ -543,12 +532,10 @@ static void repl(void) {
     stackvm_free(&vm);
     lat_runtime_free(&rt);
     stack_compiler_free_known_enums();
-    for (size_t i = 0; i < prog_count; i++)
-        program_free(&kept_progs[i]);
+    for (size_t i = 0; i < prog_count; i++) program_free(&kept_progs[i]);
     free(kept_progs);
     for (size_t i = 0; i < tok_count; i++) {
-        for (size_t j = 0; j < kept_tokens[i].len; j++)
-            token_free(lat_vec_get(&kept_tokens[i], j));
+        for (size_t j = 0; j < kept_tokens[i].len; j++) token_free(lat_vec_get(&kept_tokens[i], j));
         lat_vec_free(&kept_tokens[i]);
     }
     free(kept_tokens);
@@ -589,16 +576,13 @@ static void repl_regvm(void) {
             break;
         }
 
-        if (accumulated[0] != '\0')
-            strcat(accumulated, "\n");
+        if (accumulated[0] != '\0') strcat(accumulated, "\n");
         strcat(accumulated, line);
 
-        if (line[0] != '\0')
-            add_history(line);
+        if (line[0] != '\0') add_history(line);
         free(line);
 
-        if (!input_is_complete(accumulated))
-            continue;
+        if (!input_is_complete(accumulated)) continue;
 
         /* Lex */
         Lexer lex = lexer_new(accumulated);
@@ -619,8 +603,7 @@ static void repl_regvm(void) {
             fprintf(stderr, "error: %s\n", parse_err);
             free(parse_err);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             accumulated[0] = '\0';
             continue;
@@ -654,8 +637,7 @@ static void repl_regvm(void) {
             free(rvm.error);
             rvm.error = NULL;
             /* Reset StackVM state for next iteration */
-            for (size_t i = 0; i < rvm.reg_stack_top; i++)
-                value_free_inline(&rvm.reg_stack[i]);
+            for (size_t i = 0; i < rvm.reg_stack_top; i++) value_free_inline(&rvm.reg_stack[i]);
             rvm.reg_stack_top = 0;
             rvm.frame_count = 0;
             rvm.handler_count = 0;
@@ -690,12 +672,10 @@ static void repl_regvm(void) {
     regvm_free(&rvm);
     lat_runtime_free(&rt);
     reg_compiler_free_known_enums();
-    for (size_t i = 0; i < prog_count; i++)
-        program_free(&kept_progs[i]);
+    for (size_t i = 0; i < prog_count; i++) program_free(&kept_progs[i]);
     free(kept_progs);
     for (size_t i = 0; i < tok_count; i++) {
-        for (size_t j = 0; j < kept_tokens[i].len; j++)
-            token_free(lat_vec_get(&kept_tokens[i], j));
+        for (size_t j = 0; j < kept_tokens[i].len; j++) token_free(lat_vec_get(&kept_tokens[i], j));
         lat_vec_free(&kept_tokens[i]);
     }
     free(kept_tokens);
@@ -707,12 +687,9 @@ static void repl_tree_walk(void) {
     printf("Type expressions to evaluate. Ctrl-D to exit.\n\n");
 
     Evaluator *ev = evaluator_new();
-    if (gc_stress_mode)
-        evaluator_set_gc_stress(ev, true);
-    if (no_regions_mode)
-        evaluator_set_no_regions(ev, true);
-    if (no_assertions_mode)
-        evaluator_set_assertions(ev, false);
+    if (gc_stress_mode) evaluator_set_gc_stress(ev, true);
+    if (no_regions_mode) evaluator_set_no_regions(ev, true);
+    if (no_assertions_mode) evaluator_set_assertions(ev, false);
     evaluator_set_argv(ev, saved_argc, saved_argv);
 
     /* Keep programs alive so struct/fn/enum decl pointers stay valid */
@@ -734,16 +711,13 @@ static void repl_tree_walk(void) {
             break;
         }
 
-        if (accumulated[0] != '\0')
-            strcat(accumulated, "\n");
+        if (accumulated[0] != '\0') strcat(accumulated, "\n");
         strcat(accumulated, line);
 
-        if (line[0] != '\0')
-            add_history(line);
+        if (line[0] != '\0') add_history(line);
         free(line);
 
-        if (!input_is_complete(accumulated))
-            continue;
+        if (!input_is_complete(accumulated)) continue;
 
         /* Lex */
         Lexer lex = lexer_new(accumulated);
@@ -764,8 +738,7 @@ static void repl_tree_walk(void) {
             fprintf(stderr, "error: %s\n", parse_err);
             free(parse_err);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             accumulated[0] = '\0';
             continue;
@@ -801,12 +774,10 @@ static void repl_tree_walk(void) {
     }
 
     evaluator_free(ev);
-    for (size_t i = 0; i < prog_count; i++)
-        program_free(&kept_progs[i]);
+    for (size_t i = 0; i < prog_count; i++) program_free(&kept_progs[i]);
     free(kept_progs);
     for (size_t i = 0; i < tok_count; i++) {
-        for (size_t j = 0; j < kept_tokens[i].len; j++)
-            token_free(lat_vec_get(&kept_tokens[i], j));
+        for (size_t j = 0; j < kept_tokens[i].len; j++) token_free(lat_vec_get(&kept_tokens[i], j));
         lat_vec_free(&kept_tokens[i]);
     }
     free(kept_tokens);
@@ -840,21 +811,20 @@ static int run_test_file(const char *path) {
         fprintf(stderr, "error: %s\n", parse_err);
         free(parse_err);
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         free(path_copy);
         free(source);
         return 1;
     }
 
+    /* Match exhaustiveness check */
+    check_match_exhaustiveness(&prog);
+
     Evaluator *ev = evaluator_new();
-    if (gc_stress_mode)
-        evaluator_set_gc_stress(ev, true);
-    if (no_regions_mode)
-        evaluator_set_no_regions(ev, true);
-    if (no_assertions_mode)
-        evaluator_set_assertions(ev, false);
+    if (gc_stress_mode) evaluator_set_gc_stress(ev, true);
+    if (no_regions_mode) evaluator_set_no_regions(ev, true);
+    if (no_assertions_mode) evaluator_set_assertions(ev, false);
     evaluator_set_script_dir(ev, dir);
     evaluator_set_argv(ev, saved_argc, saved_argv);
 
@@ -862,8 +832,7 @@ static int run_test_file(const char *path) {
 
     evaluator_free(ev);
     program_free(&prog);
-    for (size_t i = 0; i < tokens.len; i++)
-        token_free(lat_vec_get(&tokens, i));
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
     lat_vec_free(&tokens);
     free(path_copy);
     free(source);
@@ -953,13 +922,15 @@ int main(int argc, char **argv) {
             fprintf(stderr, "error: %s\n", parse_err);
             free(parse_err);
             program_free(&prog);
-            for (size_t i = 0; i < tokens.len; i++)
-                token_free(lat_vec_get(&tokens, i));
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
             free(source);
             free(default_output);
             return 1;
         }
+
+        /* Match exhaustiveness check */
+        check_match_exhaustiveness(&prog);
 
         value_set_heap(NULL);
         value_set_arena(NULL);
@@ -972,8 +943,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "regvm compile error: %s\n", comp_err);
                 free(comp_err);
                 program_free(&prog);
-                for (size_t i = 0; i < tokens.len; i++)
-                    token_free(lat_vec_get(&tokens, i));
+                for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
                 lat_vec_free(&tokens);
                 free(source);
                 free(default_output);
@@ -985,8 +955,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "error: cannot write '%s'\n", output_path);
                 regchunk_free(rchunk);
                 program_free(&prog);
-                for (size_t i = 0; i < tokens.len; i++)
-                    token_free(lat_vec_get(&tokens, i));
+                for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
                 lat_vec_free(&tokens);
                 free(source);
                 free(default_output);
@@ -1002,8 +971,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "compile error: %s\n", comp_err);
                 free(comp_err);
                 program_free(&prog);
-                for (size_t i = 0; i < tokens.len; i++)
-                    token_free(lat_vec_get(&tokens, i));
+                for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
                 lat_vec_free(&tokens);
                 free(source);
                 free(default_output);
@@ -1015,8 +983,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "error: cannot write '%s'\n", output_path);
                 chunk_free(chunk);
                 program_free(&prog);
-                for (size_t i = 0; i < tokens.len; i++)
-                    token_free(lat_vec_get(&tokens, i));
+                for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
                 lat_vec_free(&tokens);
                 free(source);
                 free(default_output);
@@ -1027,8 +994,7 @@ int main(int argc, char **argv) {
         }
 
         program_free(&prog);
-        for (size_t i = 0; i < tokens.len; i++)
-            token_free(lat_vec_get(&tokens, i));
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
         lat_vec_free(&tokens);
         free(source);
         free(default_output);
@@ -1039,14 +1005,10 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "test") == 0) {
         const char *test_path = NULL;
         for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "--gc-stress") == 0)
-                gc_stress_mode = true;
-            else if (strcmp(argv[i], "--no-regions") == 0)
-                no_regions_mode = true;
-            else if (strcmp(argv[i], "--no-assertions") == 0)
-                no_assertions_mode = true;
-            else if (!test_path)
-                test_path = argv[i];
+            if (strcmp(argv[i], "--gc-stress") == 0) gc_stress_mode = true;
+            else if (strcmp(argv[i], "--no-regions") == 0) no_regions_mode = true;
+            else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;
+            else if (!test_path) test_path = argv[i];
             else {
                 fprintf(stderr, "usage: clat test [file.lat]\n");
                 return 1;
@@ -1060,14 +1022,10 @@ int main(int argc, char **argv) {
     }
 
     /* Check for 'init' subcommand */
-    if (argc >= 2 && strcmp(argv[1], "init") == 0) {
-        return pkg_cmd_init();
-    }
+    if (argc >= 2 && strcmp(argv[1], "init") == 0) { return pkg_cmd_init(); }
 
     /* Check for 'install' subcommand */
-    if (argc >= 2 && strcmp(argv[1], "install") == 0) {
-        return pkg_cmd_install();
-    }
+    if (argc >= 2 && strcmp(argv[1], "install") == 0) { return pkg_cmd_install(); }
 
     /* Check for 'add' subcommand */
     if (argc >= 2 && strcmp(argv[1], "add") == 0) {
@@ -1089,18 +1047,12 @@ int main(int argc, char **argv) {
     }
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--stats") == 0)
-            show_stats = true;
-        else if (strcmp(argv[i], "--gc-stress") == 0)
-            gc_stress_mode = true;
-        else if (strcmp(argv[i], "--no-regions") == 0)
-            no_regions_mode = true;
-        else if (strcmp(argv[i], "--no-assertions") == 0)
-            no_assertions_mode = true;
-        else if (strcmp(argv[i], "--tree-walk") == 0)
-            tree_walk_mode = true;
-        else if (strcmp(argv[i], "--regvm") == 0)
-            regvm_mode = true;
+        if (strcmp(argv[i], "--stats") == 0) show_stats = true;
+        else if (strcmp(argv[i], "--gc-stress") == 0) gc_stress_mode = true;
+        else if (strcmp(argv[i], "--no-regions") == 0) no_regions_mode = true;
+        else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;
+        else if (strcmp(argv[i], "--tree-walk") == 0) tree_walk_mode = true;
+        else if (strcmp(argv[i], "--regvm") == 0) regvm_mode = true;
         else if (!file) {
             file = argv[i];
             /* Remaining args after filename are passed to the script via args() */
@@ -1110,14 +1062,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (file)
-        return run_file(file, show_stats);
-    else if (tree_walk_mode)
-        repl_tree_walk();
-    else if (regvm_mode)
-        repl_regvm();
-    else
-        repl();
+    if (file) return run_file(file, show_stats);
+    else if (tree_walk_mode) repl_tree_walk();
+    else if (regvm_mode) repl_regvm();
+    else repl();
 
     return 0;
 }

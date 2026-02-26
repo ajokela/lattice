@@ -99,6 +99,7 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/regcompiler.c \
        $(SRC_DIR)/regvm.c \
        $(SRC_DIR)/builtin_methods.c \
+       $(SRC_DIR)/match_check.c \
        $(SRC_DIR)/package.c
 
 # All source files except main.c (for tests)
