@@ -1,3 +1,4 @@
+#include "lattice.h"
 #include "parser.h"
 #include "string_ops.h"
 #include <stdlib.h>
@@ -46,10 +47,10 @@ static char *parser_error_fmt(Parser *p, const char *fmt, ...) {
     char *inner = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&inner, fmt, args);
+    lat_vasprintf(&inner, fmt, args);
     va_end(args);
     char *err = NULL;
-    (void)asprintf(&err, "%zu:%zu: parse error: %s", t->line, t->col, inner);
+    lat_asprintf(&err, "%zu:%zu: parse error: %s", t->line, t->col, inner);
     free(inner);
     return err;
 }
@@ -2033,7 +2034,7 @@ Program parser_parse(Parser *p, char **err) {
             if (peek_type(p) != TOK_IDENT) {
                 *err = NULL;
                 Token *t = peek(p);
-                (void)asprintf(err, "%zu:%zu: expected 'fluid' or 'crystal' after '@'", t->line, t->col);
+                lat_asprintf(err, "%zu:%zu: expected 'fluid' or 'crystal' after '@'", t->line, t->col);
                 prog.item_count = n;
                 return prog;
             }
@@ -2045,7 +2046,7 @@ Program parser_parse(Parser *p, char **err) {
             } else {
                 *err = NULL;
                 Token *t = peek(p);
-                (void)asprintf(err, "%zu:%zu: unknown annotation '@%s' (expected @fluid or @crystal)", t->line, t->col, ann);
+                lat_asprintf(err, "%zu:%zu: unknown annotation '@%s' (expected @fluid or @crystal)", t->line, t->col, ann);
                 prog.item_count = n;
                 return prog;
             }
@@ -2104,7 +2105,7 @@ Program parser_parse(Parser *p, char **err) {
                 if (next != TOK_LET && next != TOK_FLUX && next != TOK_FIX) {
                     *err = NULL;
                     Token *t = peek(p);
-                    (void)asprintf(err, "%zu:%zu: 'export' must precede fn, struct, enum, trait, or variable binding",
+                    lat_asprintf(err, "%zu:%zu: 'export' must precede fn, struct, enum, trait, or variable binding",
                                    t->line, t->col);
                     prog.item_count = n;
                     return prog;
@@ -2115,7 +2116,7 @@ Program parser_parse(Parser *p, char **err) {
                 if (next != TOK_LET && next != TOK_FLUX && next != TOK_FIX && next != TOK_FN) {
                     *err = NULL;
                     Token *t = peek(p);
-                    (void)asprintf(err, "%zu:%zu: @fluid/@crystal annotation must precede fn or variable binding",
+                    lat_asprintf(err, "%zu:%zu: @fluid/@crystal annotation must precede fn or variable binding",
                                    t->line, t->col);
                     prog.item_count = n;
                     return prog;

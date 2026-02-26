@@ -1,3 +1,4 @@
+#include "lattice.h"
 #include "phase_check.h"
 #include "ds/hashmap.h"
 #include <stdlib.h>
@@ -65,7 +66,7 @@ static void pc_error(PhaseChecker *pc, const char *fmt, ...) {
     char *msg = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&msg, fmt, args);
+    lat_vasprintf(&msg, fmt, args);
     va_end(args);
     lat_vec_push(&pc->errors, &msg);
 }

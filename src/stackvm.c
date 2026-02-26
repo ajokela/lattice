@@ -91,7 +91,7 @@ static StackVMResult runtime_error(StackVM *vm, const char *fmt, ...) {
     char *inner = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&inner, fmt, args);
+    lat_vasprintf(&inner, fmt, args);
     va_end(args);
     vm->error = inner;
     return STACKVM_RUNTIME_ERROR;
@@ -105,7 +105,7 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
     char *inner = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&inner, fmt, args);
+    lat_vasprintf(&inner, fmt, args);
     va_end(args);
 
     if (vm->handler_count > 0) {
@@ -1105,9 +1105,9 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
                 char *err = NULL;
                 if (var_name && obj->phase == VTAG_CRYSTAL)
-                    (void)asprintf(&err, "cannot push to %s array '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
+                    lat_asprintf(&err, "cannot push to %s array '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
                 else
-                    (void)asprintf(&err, "cannot push to %s array", phase_name);
+                    lat_asprintf(&err, "cannot push to %s array", phase_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -1118,7 +1118,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 LatValue val = pop(vm);
                 value_free(&val);
                 char *err = NULL;
-                (void)asprintf(&err, "pressurized (%s): cannot push to '%s'", pmode, var_name);
+                lat_asprintf(&err, "pressurized (%s): cannot push to '%s'", pmode, var_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -1141,9 +1141,9 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
                 char *err = NULL;
                 if (var_name && obj->phase == VTAG_CRYSTAL)
-                    (void)asprintf(&err, "cannot pop from %s array '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
+                    lat_asprintf(&err, "cannot pop from %s array '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
                 else
-                    (void)asprintf(&err, "cannot pop from %s array", phase_name);
+                    lat_asprintf(&err, "cannot pop from %s array", phase_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -1152,7 +1152,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             const char *pmode = stackvm_find_pressure(vm, var_name);
             if (pressure_blocks_shrink(pmode)) {
                 char *err = NULL;
-                (void)asprintf(&err, "pressurized (%s): cannot pop from '%s'", pmode, var_name);
+                lat_asprintf(&err, "pressurized (%s): cannot pop from '%s'", pmode, var_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -1375,7 +1375,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             if (pressure_blocks_shrink(pmode)) {
                 LatValue idx_v = pop(vm); value_free(&idx_v);
                 char *err = NULL;
-                (void)asprintf(&err, "pressurized (%s): cannot remove_at from '%s'", pmode, var_name);
+                lat_asprintf(&err, "pressurized (%s): cannot remove_at from '%s'", pmode, var_name);
                 vm->error = err;
                 push(vm, value_unit()); return true;
             }
@@ -1454,7 +1454,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 LatValue val = pop(vm); LatValue idx_v = pop(vm);
                 value_free(&val); value_free(&idx_v);
                 char *err = NULL;
-                (void)asprintf(&err, "pressurized (%s): cannot insert into '%s'", pmode, var_name);
+                lat_asprintf(&err, "pressurized (%s): cannot insert into '%s'", pmode, var_name);
                 vm->error = err;
                 push(vm, value_unit()); return true;
             }
@@ -1669,9 +1669,9 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
                 char *err = NULL;
                 if (var_name && obj->phase == VTAG_CRYSTAL)
-                    (void)asprintf(&err, "cannot set on %s map '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
+                    lat_asprintf(&err, "cannot set on %s map '%s' (use thaw(%s) to make it mutable)", phase_name, var_name, var_name);
                 else
-                    (void)asprintf(&err, "cannot set on %s map", phase_name);
+                    lat_asprintf(&err, "cannot set on %s map", phase_name);
                 vm->error = err;
                 push(vm, value_unit());
                 return true;
@@ -2388,7 +2388,7 @@ static int stackvm_adjust_call_args(StackVM *vm, Chunk *fn_chunk, int arity, int
     bool vd = fn_chunk->fn_has_variadic;
     if (dc == 0 && !vd) {
         if (arg_count != arity) {
-            (void)asprintf(&vm->error, "expected %d arguments but got %d", arity, arg_count);
+            lat_asprintf(&vm->error, "expected %d arguments but got %d", arity, arg_count);
             return -1;
         }
         return arg_count;
@@ -2398,11 +2398,11 @@ static int stackvm_adjust_call_args(StackVM *vm, Chunk *fn_chunk, int arity, int
 
     if (arg_count < required || (!vd && arg_count > arity)) {
         if (vd)
-            (void)asprintf(&vm->error, "expected at least %d arguments but got %d", required, arg_count);
+            lat_asprintf(&vm->error, "expected at least %d arguments but got %d", required, arg_count);
         else if (dc > 0)
-            (void)asprintf(&vm->error, "expected %d to %d arguments but got %d", required, arity, arg_count);
+            lat_asprintf(&vm->error, "expected %d to %d arguments but got %d", required, arity, arg_count);
         else
-            (void)asprintf(&vm->error, "expected %d arguments but got %d", arity, arg_count);
+            lat_asprintf(&vm->error, "expected %d arguments but got %d", arity, arg_count);
         return -1;
     }
 
@@ -5572,7 +5572,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         if (target_val.phase == VTAG_CRYSTAL) {
                             value_free(&target_val); value_free(&dep_v); value_free(&strategy_v);
                             char *msg = NULL;
-                            (void)asprintf(&msg, "cannot bond already-frozen variable '%s'", target_name);
+                            lat_asprintf(&msg, "cannot bond already-frozen variable '%s'", target_name);
                             vm->error = msg;
                             StackVMResult r = stackvm_handle_native_error(vm, &frame);
                             if (r != STACKVM_OK) return r;
@@ -5588,7 +5588,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     if (!dep_found) dep_found = stackvm_find_local_value(vm, dep_name, &dep_val);
                     if (!dep_found) {
                         char *msg = NULL;
-                        (void)asprintf(&msg, "cannot bond undefined variable '%s'", dep_name);
+                        lat_asprintf(&msg, "cannot bond undefined variable '%s'", dep_name);
                         value_free(&dep_v); value_free(&strategy_v);
                         vm->error = msg;
                         StackVMResult r = stackvm_handle_native_error(vm, &frame);
@@ -6066,11 +6066,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatVec mod_toks = lexer_tokenize(&mod_lex, &lex_err);
                 free(source);
                 if (lex_err) {
-                    char errmsg[2048];
-                    snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, lex_err);
+                    char *errmsg = NULL;
+                    lat_asprintf(&errmsg, "import '%s': %s", resolved, lex_err);
                     free(lex_err);
                     lat_vec_free(&mod_toks);
-                    VM_ERROR("%s", errmsg); break;
+                    VM_ERROR("%s", errmsg ? errmsg : "import lex error");
+                    free(errmsg); break;
                 }
 
                 /* Parse */
@@ -6078,14 +6079,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 char *parse_err = NULL;
                 Program mod_prog = parser_parse(&mod_parser, &parse_err);
                 if (parse_err) {
-                    char errmsg[2048];
-                    snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, parse_err);
+                    char *errmsg = NULL;
+                    lat_asprintf(&errmsg, "import '%s': %s", resolved, parse_err);
                     free(parse_err);
                     program_free(&mod_prog);
                     for (size_t ti = 0; ti < mod_toks.len; ti++)
                         token_free(lat_vec_get(&mod_toks, ti));
                     lat_vec_free(&mod_toks);
-                    VM_ERROR("%s", errmsg); break;
+                    VM_ERROR("%s", errmsg ? errmsg : "import parse error");
+                    free(errmsg); break;
                 }
 
                 /* Compile as module (no auto-call of main) */
@@ -6099,11 +6101,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 lat_vec_free(&mod_toks);
 
                 if (!mod_chunk) {
-                    char errmsg[2048];
-                    snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved,
-                             comp_err ? comp_err : "compile error");
+                    char *errmsg = NULL;
+                    lat_asprintf(&errmsg, "import '%s': %s", resolved,
+                                 comp_err ? comp_err : "compile error");
                     free(comp_err);
-                    VM_ERROR("%s", errmsg); break;
+                    VM_ERROR("%s", errmsg ? errmsg : "import compile error");
+                    free(errmsg); break;
                 }
 
                 /* Track the chunk for proper lifetime management */
@@ -6668,7 +6671,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         const char *tsug = lat_find_similar_type(type_name, NULL, NULL);
                         if (tsug) {
                             char *base = NULL;
-                            (void)asprintf(&base, err_fmt, actual);
+                            lat_asprintf(&base, err_fmt, actual);
                             VM_ERROR("%s (did you mean '%s'?)", base, tsug);
                             free(base);
                         }
@@ -6693,7 +6696,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         const char *tsug = lat_find_similar_type(type_name, NULL, NULL);
                         if (tsug) {
                             char *base = NULL;
-                            (void)asprintf(&base, err_fmt, actual);
+                            lat_asprintf(&base, err_fmt, actual);
                             VM_ERROR("%s (did you mean '%s'?)", base, tsug);
                             free(base);
                         }

@@ -1,3 +1,4 @@
+#include "lattice.h"
 #include "value.h"
 #include "env.h"
 #include "memory.h"
@@ -573,10 +574,10 @@ char *value_display(const LatValue *v) {
     char *buf = NULL;
     switch (v->type) {
         case VAL_INT:
-            (void)asprintf(&buf, "%lld", (long long)v->as.int_val);
+            lat_asprintf(&buf, "%lld", (long long)v->as.int_val);
             break;
         case VAL_FLOAT: {
-            (void)asprintf(&buf, "%g", v->as.float_val);
+            lat_asprintf(&buf, "%g", v->as.float_val);
             break;
         }
         case VAL_BOOL:
@@ -664,14 +665,14 @@ char *value_display(const LatValue *v) {
             buf = strdup("nil");
             break;
         case VAL_RANGE:
-            (void)asprintf(&buf, "%lld..%lld", (long long)v->as.range.start, (long long)v->as.range.end);
+            lat_asprintf(&buf, "%lld..%lld", (long long)v->as.range.start, (long long)v->as.range.end);
             break;
         case VAL_CHANNEL:
             buf = strdup("<Channel>");
             break;
         case VAL_ENUM: {
             if (v->as.enm.payload_count == 0) {
-                (void)asprintf(&buf, "%s::%s", v->as.enm.enum_name, v->as.enm.variant_name);
+                lat_asprintf(&buf, "%s::%s", v->as.enm.enum_name, v->as.enm.variant_name);
             } else {
                 size_t ecap = 64;
                 buf = malloc(ecap);
@@ -744,10 +745,10 @@ char *value_display(const LatValue *v) {
             break;
         }
         case VAL_BUFFER:
-            (void)asprintf(&buf, "Buffer<%zu bytes>", v->as.buffer.len);
+            lat_asprintf(&buf, "Buffer<%zu bytes>", v->as.buffer.len);
             break;
         case VAL_REF:
-            (void)asprintf(&buf, "Ref<%s>", value_type_name(&v->as.ref.ref->value));
+            lat_asprintf(&buf, "Ref<%s>", value_type_name(&v->as.ref.ref->value));
             break;
         case VAL_MAP: {
             size_t cap2 = 64;

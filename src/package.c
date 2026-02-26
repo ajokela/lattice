@@ -634,7 +634,9 @@ int pkg_cmd_remove(const char *name) {
     if (fs_is_dir(mod_path)) {
         char cmd[PATH_MAX + 16];
         snprintf(cmd, sizeof(cmd), "rm -rf '%s'", mod_path);
-        (void)system(cmd);
+        if (system(cmd) != 0) {
+            fprintf(stderr, "warning: failed to remove '%s'\n", mod_path);
+        }
     }
 
     /* Update lock file */

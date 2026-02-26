@@ -1,4 +1,5 @@
 #include "lexer.h"
+#include "lattice.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -143,7 +144,7 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         char *word = read_ident(lex);
         if (strcmp(word, "mode") != 0) {
             *err = NULL;
-            (void)asprintf(err, "%zu:%zu: unexpected directive '#%s'", line, col, word);
+            lat_asprintf(err, "%zu:%zu: unexpected directive '#%s'", line, col, word);
             free(word);
             return false;
         }
@@ -152,7 +153,7 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         char *mode = read_ident(lex);
         if (strcmp(mode, "casual") != 0 && strcmp(mode, "strict") != 0) {
             *err = NULL;
-            (void)asprintf(err, "%zu:%zu: expected 'casual' or 'strict' after #mode, got '%s'", line, col, mode);
+            lat_asprintf(err, "%zu:%zu: expected 'casual' or 'strict' after #mode, got '%s'", line, col, mode);
             free(mode);
             return false;
         }
@@ -322,7 +323,7 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
             return true;
         default:
             *err = NULL;
-            (void)asprintf(err, "%zu:%zu: unexpected character '%c'", line, col, ch);
+            lat_asprintf(err, "%zu:%zu: unexpected character '%c'", line, col, ch);
             return false;
     }
 }
@@ -333,7 +334,7 @@ static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len,
                                size_t *buf_cap, size_t line, size_t col, char **err) {
     if (lex->pos >= lex->len) {
         *err = NULL;
-        (void)asprintf(err, "%zu:%zu: unterminated string escape", line, col);
+        lat_asprintf(err, "%zu:%zu: unterminated string escape", line, col);
         return false;
     }
     char esc = lex_advance(lex);
@@ -350,7 +351,7 @@ static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len,
         case 'x': {
             if (lex->pos + 1 >= lex->len) {
                 *err = NULL;
-                (void)asprintf(err, "%zu:%zu: incomplete \\x escape", line, col);
+                lat_asprintf(err, "%zu:%zu: incomplete \\x escape", line, col);
                 return false;
             }
             char h1 = lex_advance(lex);
@@ -364,7 +365,7 @@ static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len,
             else if (h2 >= 'A' && h2 <= 'F') d2 = h2 - 'A' + 10;
             if (d1 < 0 || d2 < 0) {
                 *err = NULL;
-                (void)asprintf(err, "%zu:%zu: invalid hex escape '\\x%c%c'", line, col, h1, h2);
+                lat_asprintf(err, "%zu:%zu: invalid hex escape '\\x%c%c'", line, col, h1, h2);
                 return false;
             }
             c = (char)((d1 << 4) | d2);
@@ -398,7 +399,7 @@ static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err) {
         if (lex->pos >= lex->len) {
             free(buf);
             *err = NULL;
-            (void)asprintf(err, "%zu:%zu: unterminated string literal", line, col);
+            lat_asprintf(err, "%zu:%zu: unterminated string literal", line, col);
             return false;
         }
 
@@ -420,7 +421,7 @@ static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err) {
                 skip_whitespace_and_comments(lex);
                 if (lex->pos >= lex->len) {
                     *err = NULL;
-                    (void)asprintf(err, "%zu:%zu: unterminated string interpolation", line, col);
+                    lat_asprintf(err, "%zu:%zu: unterminated string interpolation", line, col);
                     return false;
                 }
                 /* End of interpolation */
@@ -496,7 +497,7 @@ static bool lex_single_quote_string(Lexer *lex, LatVec *tokens, char **err) {
         if (lex->pos >= lex->len) {
             free(buf);
             *err = NULL;
-            (void)asprintf(err, "%zu:%zu: unterminated string literal", line, col);
+            lat_asprintf(err, "%zu:%zu: unterminated string literal", line, col);
             return false;
         }
 
@@ -629,7 +630,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
         if (lex->pos >= lex->len) {
             free(raw);
             *err = NULL;
-            (void)asprintf(err, "%zu:%zu: unterminated triple-quoted string", line, col);
+            lat_asprintf(err, "%zu:%zu: unterminated triple-quoted string", line, col);
             return false;
         }
         if (lex_peek(lex) == '"' && lex_peek_ahead(lex, 1) == '"' &&
@@ -694,7 +695,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             if (depth != 0) {
                 free(buf); free(dedented);
                 *err = NULL;
-                (void)asprintf(err, "%zu:%zu: unterminated interpolation in triple-quoted string",
+                lat_asprintf(err, "%zu:%zu: unterminated interpolation in triple-quoted string",
                                line, col);
                 return false;
             }
@@ -742,7 +743,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
                     if (pos + 1 >= dedented_len) {
                         free(buf); free(dedented);
                         *err = NULL;
-                        (void)asprintf(err, "%zu:%zu: incomplete \\x escape in triple-quoted string",
+                        lat_asprintf(err, "%zu:%zu: incomplete \\x escape in triple-quoted string",
                                        line, col);
                         return false;
                     }
@@ -758,7 +759,7 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
                     if (d1 < 0 || d2 < 0) {
                         free(buf); free(dedented);
                         *err = NULL;
-                        (void)asprintf(err, "%zu:%zu: invalid hex escape in triple-quoted string",
+                        lat_asprintf(err, "%zu:%zu: invalid hex escape in triple-quoted string",
                                        line, col);
                         return false;
                     }

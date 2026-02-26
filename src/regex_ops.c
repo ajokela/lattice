@@ -1,3 +1,4 @@
+#include "lattice.h"
 #include "regex_ops.h"
 #include <regex.h>
 #include <stdlib.h>
@@ -13,7 +14,7 @@ static int compile_regex(regex_t *re, const char *pattern, char **err) {
         char *buf = malloc(needed);
         regerror(rc, re, buf, needed);
         char *msg = NULL;
-        (void)asprintf(&msg, "regex error: %s", buf);
+        lat_asprintf(&msg, "regex error: %s", buf);
         free(buf);
         *err = msg;
         return rc;

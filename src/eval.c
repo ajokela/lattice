@@ -559,7 +559,7 @@ static EvalResult fire_reactions(Evaluator *ev, const char *var_name, const char
             if (!IS_OK(r)) {
                 value_free(&cur);
                 char *err = NULL;
-                (void)asprintf(&err, "reaction error: %s", r.error);
+                lat_asprintf(&err, "reaction error: %s", r.error);
                 free(r.error);
                 return eval_err(err);
             }
@@ -606,7 +606,7 @@ static char *freeze_cascade(Evaluator *ev, const char *target_name) {
                 if (dval.phase != VTAG_CRYSTAL) {
                     value_free(&dval);
                     char *err = NULL;
-                    (void)asprintf(&err, "gate bond: '%s' must be crystal before '%s' can freeze", dep, target_name);
+                    lat_asprintf(&err, "gate bond: '%s' must be crystal before '%s' can freeze", dep, target_name);
                     return err;
                 }
                 value_free(&dval);
@@ -641,16 +641,16 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
         }
         const char *suggestion = env_find_similar_name(ev->env, expr->as.str_val);
         if (suggestion)
-            (void)asprintf(err, "undefined variable '%s' (did you mean '%s'?)", expr->as.str_val, suggestion);
+            lat_asprintf(err, "undefined variable '%s' (did you mean '%s'?)", expr->as.str_val, suggestion);
         else
-            (void)asprintf(err, "undefined variable '%s'", expr->as.str_val);
+            lat_asprintf(err, "undefined variable '%s'", expr->as.str_val);
         return NULL;
     }
     if (expr->tag == EXPR_FIELD_ACCESS) {
         LatValue *parent = resolve_lvalue(ev, expr->as.field_access.object, err);
         if (!parent) return NULL;
         if (parent->type != VAL_STRUCT) {
-            (void)asprintf(err, "cannot access field '%s' on %s",
+            lat_asprintf(err, "cannot access field '%s' on %s",
                            expr->as.field_access.field, value_type_name(parent));
             return NULL;
         }
@@ -659,7 +659,7 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
                 return &parent->as.strct.field_values[i];
             }
         }
-        (void)asprintf(err, "struct has no field '%s'", expr->as.field_access.field);
+        lat_asprintf(err, "struct has no field '%s'", expr->as.field_access.field);
         return NULL;
     }
     if (expr->tag == EXPR_INDEX) {
@@ -701,14 +701,14 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
             size_t idx = (size_t)idxr.value.as.int_val;
             value_free(&idxr.value);
             if (idx >= parent->as.array.len) {
-                (void)asprintf(err, "index %zu out of bounds (length %zu)",
+                lat_asprintf(err, "index %zu out of bounds (length %zu)",
                                idx, parent->as.array.len);
                 return NULL;
             }
             return &parent->as.array.elems[idx];
         }
         value_free(&idxr.value);
-        (void)asprintf(err, "cannot index into %s", value_type_name(parent));
+        lat_asprintf(err, "cannot index into %s", value_type_name(parent));
         return NULL;
     }
     *err = strdup("invalid lvalue expression");
@@ -964,13 +964,13 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
     if (arg_count < required || (!has_variadic && arg_count > max_positional)) {
         char *err = NULL;
         if (has_variadic)
-            (void)asprintf(&err, "function '%s' expects at least %zu arguments, got %zu",
+            lat_asprintf(&err, "function '%s' expects at least %zu arguments, got %zu",
                            decl->name, required, arg_count);
         else if (required < max_positional)
-            (void)asprintf(&err, "function '%s' expects %zu to %zu arguments, got %zu",
+            lat_asprintf(&err, "function '%s' expects %zu to %zu arguments, got %zu",
                            decl->name, required, max_positional, arg_count);
         else
-            (void)asprintf(&err, "function '%s' expects %zu arguments, got %zu",
+            lat_asprintf(&err, "function '%s' expects %zu arguments, got %zu",
                            decl->name, required, arg_count);
         return eval_err(err);
     }
@@ -980,7 +980,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
         if (decl->params[i].ty.phase != PHASE_UNSPECIFIED &&
             !phase_compatible(args[i].phase, decl->params[i].ty.phase)) {
             char *err = NULL;
-            (void)asprintf(&err, "function '%s' parameter '%s' requires %s argument, got %s",
+            lat_asprintf(&err, "function '%s' parameter '%s' requires %s argument, got %s",
                            decl->name, decl->params[i].name,
                            ast_phase_name(decl->params[i].ty.phase),
                            phase_tag_name(args[i].phase));
@@ -997,13 +997,13 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             if (!is_known_type_name(tyname)) {
                 const char *tsug = lat_find_similar_type(tyname, NULL, NULL);
                 if (tsug) {
-                    (void)asprintf(&err, "function '%s' parameter '%s' expects type %s, got %s (did you mean '%s'?)",
+                    lat_asprintf(&err, "function '%s' parameter '%s' expects type %s, got %s (did you mean '%s'?)",
                                    decl->name, decl->params[i].name,
                                    tyname, value_type_display(&args[i]), tsug);
                     return eval_err(err);
                 }
             }
-            (void)asprintf(&err, "function '%s' parameter '%s' expects type %s, got %s",
+            lat_asprintf(&err, "function '%s' parameter '%s' expects type %s, got %s",
                            decl->name, decl->params[i].name,
                            tyname,
                            value_type_display(&args[i]));
@@ -1048,9 +1048,9 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             if (!truthy) {
                 char *err = NULL;
                 if (decl->contracts[i].message)
-                    (void)asprintf(&err, "require failed in '%s': %s", decl->name, decl->contracts[i].message);
+                    lat_asprintf(&err, "require failed in '%s': %s", decl->name, decl->contracts[i].message);
                 else
-                    (void)asprintf(&err, "require contract failed in '%s'", decl->name);
+                    lat_asprintf(&err, "require contract failed in '%s'", decl->name);
                 env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
                 return eval_err(err);
             }
@@ -1094,9 +1094,9 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
                     else value_free(&result.cf.value);
                     char *err = NULL;
                     if (decl->contracts[i].message)
-                        (void)asprintf(&err, "ensure failed in '%s': %s", decl->name, decl->contracts[i].message);
+                        lat_asprintf(&err, "ensure failed in '%s': %s", decl->name, decl->contracts[i].message);
                     else
-                        (void)asprintf(&err, "ensure contract failed in '%s'", decl->name);
+                        lat_asprintf(&err, "ensure contract failed in '%s'", decl->name);
                     env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
                     return eval_err(err);
                 }
@@ -1109,9 +1109,9 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
                     else value_free(&result.cf.value);
                     char *err = NULL;
                     if (decl->contracts[i].message)
-                        (void)asprintf(&err, "ensure failed in '%s': %s", decl->name, decl->contracts[i].message);
+                        lat_asprintf(&err, "ensure failed in '%s': %s", decl->name, decl->contracts[i].message);
                     else
-                        (void)asprintf(&err, "ensure contract failed in '%s'", decl->name);
+                        lat_asprintf(&err, "ensure contract failed in '%s'", decl->name);
                     env_pop_scope(ev->env); stats_scope_pop(&ev->stats);
                     return eval_err(err);
                 }
@@ -1128,7 +1128,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             if (rtyname && !is_known_type_name(rtyname)) {
                 const char *rtsug = lat_find_similar_type(rtyname, NULL, NULL);
                 if (rtsug) {
-                    (void)asprintf(&err, "function '%s' return type expects %s, got %s (did you mean '%s'?)",
+                    lat_asprintf(&err, "function '%s' return type expects %s, got %s (did you mean '%s'?)",
                                    decl->name, rtyname, value_type_display(ret_val), rtsug);
                     if (IS_OK(result)) value_free(&result.value);
                     else value_free(&result.cf.value);
@@ -1136,7 +1136,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
                     return eval_err(err);
                 }
             }
-            (void)asprintf(&err, "function '%s' return type expects %s, got %s",
+            lat_asprintf(&err, "function '%s' return type expects %s, got %s",
                            decl->name, rtyname, value_type_display(ret_val));
             if (IS_OK(result)) value_free(&result.value);
             else value_free(&result.cf.value);
@@ -1198,11 +1198,11 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
     if (arg_count < required || (!has_variadic && arg_count > max_positional)) {
         char *err = NULL;
         if (has_variadic)
-            (void)asprintf(&err, "closure expects at least %zu arguments, got %zu", required, arg_count);
+            lat_asprintf(&err, "closure expects at least %zu arguments, got %zu", required, arg_count);
         else if (required < max_positional)
-            (void)asprintf(&err, "closure expects %zu to %zu arguments, got %zu", required, max_positional, arg_count);
+            lat_asprintf(&err, "closure expects %zu to %zu arguments, got %zu", required, max_positional, arg_count);
         else
-            (void)asprintf(&err, "closure expects %zu arguments, got %zu", param_count, arg_count);
+            lat_asprintf(&err, "closure expects %zu arguments, got %zu", param_count, arg_count);
         return eval_err(err);
     }
     stats_closure_call(&ev->stats);
@@ -1367,7 +1367,7 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
     }
 
     char *err = NULL;
-    (void)asprintf(&err, "unsupported binary operation on %s and %s",
+    lat_asprintf(&err, "unsupported binary operation on %s and %s",
                    value_type_name(lv), value_type_name(rv));
     return eval_err(err);
 }
@@ -1378,7 +1378,7 @@ static EvalResult eval_unaryop(UnaryOpKind op, LatValue *val) {
     if (op == UNOP_NOT && val->type == VAL_BOOL) return eval_ok(value_bool(!val->as.bool_val));
     if (op == UNOP_BIT_NOT && val->type == VAL_INT) return eval_ok(value_int(~val->as.int_val));
     char *err = NULL;
-    (void)asprintf(&err, "unsupported unary operation on %s", value_type_name(val));
+    lat_asprintf(&err, "unsupported unary operation on %s", value_type_name(val));
     return eval_err(err);
 }
 
@@ -1490,9 +1490,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 char *err = NULL;
                 const char *suggestion = env_find_similar_name(ev->env, expr->as.str_val);
                 if (suggestion)
-                    (void)asprintf(&err, "undefined variable '%s' (did you mean '%s'?)", expr->as.str_val, suggestion);
+                    lat_asprintf(&err, "undefined variable '%s' (did you mean '%s'?)", expr->as.str_val, suggestion);
                 else
-                    (void)asprintf(&err, "undefined variable '%s'", expr->as.str_val);
+                    lat_asprintf(&err, "undefined variable '%s'", expr->as.str_val);
                 return eval_err(err);
             }
             return eval_ok(val);
@@ -1565,7 +1565,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue tmp;
                 if (!env_get(ev->env, var_name, &tmp)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "cannot react to undefined variable '%s'", var_name);
+                    lat_asprintf(&err, "cannot react to undefined variable '%s'", var_name);
                     return eval_err(err);
                 }
                 value_free(&tmp);
@@ -1684,14 +1684,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         LatValue tmp;
                         if (!env_get(ev->env, vname, &tmp)) {
                             char *err = NULL;
-                            (void)asprintf(&err, "cannot bond undefined variable '%s'", vname);
+                            lat_asprintf(&err, "cannot bond undefined variable '%s'", vname);
                             free(strategy);
                             return eval_err(err);
                         }
                         if (tmp.phase == VTAG_CRYSTAL) {
                             value_free(&tmp);
                             char *err = NULL;
-                            (void)asprintf(&err, "cannot bond already-frozen variable '%s'", vname);
+                            lat_asprintf(&err, "cannot bond already-frozen variable '%s'", vname);
                             free(strategy);
                             return eval_err(err);
                         }
@@ -1769,7 +1769,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue tmp;
                 if (!env_get(ev->env, var_name, &tmp)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "seed(): undefined variable '%s'", var_name);
+                    lat_asprintf(&err, "seed(): undefined variable '%s'", var_name);
                     return eval_err(err);
                 }
                 value_free(&tmp);
@@ -1818,7 +1818,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue tmp;
                 if (!env_get(ev->env, var_name, &tmp)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "pressurize(): undefined variable '%s'", var_name);
+                    lat_asprintf(&err, "pressurize(): undefined variable '%s'", var_name);
                     return eval_err(err);
                 }
                 value_free(&tmp);
@@ -1832,7 +1832,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (strcmp(mode, "no_grow") != 0 && strcmp(mode, "no_shrink") != 0 &&
                     strcmp(mode, "no_resize") != 0 && strcmp(mode, "read_heavy") != 0) {
                     char *err = NULL;
-                    (void)asprintf(&err, "pressurize() unknown mode '%s'", mode);
+                    lat_asprintf(&err, "pressurize() unknown mode '%s'", mode);
                     value_free(&mr.value);
                     return eval_err(err);
                 }
@@ -2019,7 +2019,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     StructDecl *sd = find_struct(ev, sname);
                     if (!sd) {
                         char *err = NULL;
-                        (void)asprintf(&err, "struct_from_map: undefined struct '%s'", sname);
+                        lat_asprintf(&err, "struct_from_map: undefined struct '%s'", sname);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
                         return eval_err(err);
@@ -2092,7 +2092,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     const char *vname = args[0].as.str_val;
                     LatValue cur;
                     if (!env_get(ev->env, vname, &cur)) {
-                        char *err = NULL; (void)asprintf(&err, "track(): undefined variable '%s'", vname);
+                        char *err = NULL; lat_asprintf(&err, "track(): undefined variable '%s'", vname);
                         for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(err);
                     }
@@ -2219,7 +2219,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     const char *vname = args[0].as.str_val;
                     LatValue val;
                     if (!env_get(ev->env, vname, &val)) {
-                        char *err = NULL; (void)asprintf(&err, "grow(): undefined variable '%s'", vname);
+                        char *err = NULL; lat_asprintf(&err, "grow(): undefined variable '%s'", vname);
                         for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                         return eval_err(err);
                     }
@@ -2234,7 +2234,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             cb->as.closure.default_values, cb->as.closure.has_variadic);
                         if (!IS_OK(vr)) {
                             char *msg = NULL;
-                            (void)asprintf(&msg, "grow() seed contract failed: %s", vr.error);
+                            lat_asprintf(&msg, "grow() seed contract failed: %s", vr.error);
                             free(vr.error); value_free(&val);
                             for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                             return eval_err(msg);
@@ -2728,7 +2728,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     if (!found) {
                         char *err = NULL;
-                        (void)asprintf(&err, "require: cannot find '%s'", file_path);
+                        lat_asprintf(&err, "require: cannot find '%s'", file_path);
                         free(file_path);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
@@ -2748,7 +2748,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     char *source = builtin_read_file(resolved);
                     if (!source) {
                         char *err = NULL;
-                        (void)asprintf(&err, "require: cannot read '%s'", resolved);
+                        lat_asprintf(&err, "require: cannot read '%s'", resolved);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
                         return eval_err(err);
@@ -2760,7 +2760,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(source);
                     if (req_lex_err) {
                         char *err = NULL;
-                        (void)asprintf(&err, "require '%s': %s", resolved, req_lex_err);
+                        lat_asprintf(&err, "require '%s': %s", resolved, req_lex_err);
                         free(req_lex_err);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
@@ -2772,7 +2772,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     Program req_prog = parser_parse(&req_parser, &req_parse_err);
                     if (req_parse_err) {
                         char *err = NULL;
-                        (void)asprintf(&err, "require '%s': %s", resolved, req_parse_err);
+                        lat_asprintf(&err, "require '%s': %s", resolved, req_parse_err);
                         free(req_parse_err);
                         program_free(&req_prog);
                         for (size_t j = 0; j < req_toks.len; j++) token_free(lat_vec_get(&req_toks, j));
@@ -2966,9 +2966,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         if (t->type == TOK_IDENT || t->type == TOK_STRING_LIT || t->type == TOK_MODE_DIRECTIVE) {
                             text = strdup(t->as.str_val);
                         } else if (t->type == TOK_INT_LIT) {
-                            (void)asprintf(&text, "%lld", (long long)t->as.int_val);
+                            lat_asprintf(&text, "%lld", (long long)t->as.int_val);
                         } else if (t->type == TOK_FLOAT_LIT) {
-                            (void)asprintf(&text, "%g", t->as.float_val);
+                            lat_asprintf(&text, "%g", t->as.float_val);
                         } else {
                             text = strdup(token_type_name(t->type));
                         }
@@ -3153,7 +3153,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (strcmp(fn_name, "error") == 0) {
                     if (argc != 1 || args[0].type != VAL_STR) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("error() expects 1 string argument")); }
                     char *msg = NULL;
-                    (void)asprintf(&msg, "EVAL_ERROR:%s", args[0].as.str_val);
+                    lat_asprintf(&msg, "EVAL_ERROR:%s", args[0].as.str_val);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_string_owned(msg));
@@ -5591,7 +5591,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 1; i < argc; i++) {
                         if (args[i].type != VAL_CLOSURE) {
                             char *err = NULL;
-                            (void)asprintf(&err, "pipe() argument %zu is not a function", i + 1);
+                            lat_asprintf(&err, "pipe() argument %zu is not a function", i + 1);
                             for (size_t j = 0; j < argc; j++) value_free(&args[j]);
                             free(args);
                             return eval_err(err);
@@ -5663,7 +5663,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         fd = resolve_overload(fd_head, args, argc);
                         if (!fd) {
                             char *err = NULL;
-                            (void)asprintf(&err, "no matching overload for '%s' with given argument phases", fn_name);
+                            lat_asprintf(&err, "no matching overload for '%s' with given argument phases", fn_name);
                             for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                             free(args);
                             return eval_err(err);
@@ -5705,7 +5705,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             }
             if (callee_r.value.type != VAL_CLOSURE) {
                 char *err = NULL;
-                (void)asprintf(&err, "'%s' is not callable", value_type_name(&callee_r.value));
+                lat_asprintf(&err, "'%s' is not callable", value_type_name(&callee_r.value));
                 value_free(&callee_r.value);
                 for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                 free(args);
@@ -5779,7 +5779,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue existing;
                 if (!env_get(ev->env, var_name, &existing)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "undefined variable '%s'", var_name);
+                    lat_asprintf(&err, "undefined variable '%s'", var_name);
                     return eval_err(err);
                 }
                 if (existing.type != VAL_ARRAY && existing.type != VAL_BUFFER && existing.type != VAL_REF) {
@@ -5804,7 +5804,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (pressure_blocks_grow(pmode)) {
                         value_free(&existing);
                         char *err = NULL;
-                        (void)asprintf(&err, "pressurized (%s): cannot push to '%s'", pmode, var_name);
+                        lat_asprintf(&err, "pressurized (%s): cannot push to '%s'", pmode, var_name);
                         return eval_err(err);
                     }
                 }
@@ -5876,7 +5876,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             const char *pmode = find_pressure(ev, vn);
                             if (pressure_blocks_shrink(pmode)) {
                                 char *err = NULL;
-                                (void)asprintf(&err, "pressurized (%s): cannot pop from '%s'", pmode, vn);
+                                lat_asprintf(&err, "pressurized (%s): cannot pop from '%s'", pmode, vn);
                                 return eval_err(err);
                             }
                         }
@@ -5905,7 +5905,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             const char *pmode = find_pressure(ev, vn);
                             if (pressure_blocks_grow(pmode)) {
                                 char *err = NULL;
-                                (void)asprintf(&err, "pressurized (%s): cannot insert into '%s'", pmode, vn);
+                                lat_asprintf(&err, "pressurized (%s): cannot insert into '%s'", pmode, vn);
                                 return eval_err(err);
                             }
                         }
@@ -5960,7 +5960,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             const char *pmode = find_pressure(ev, vn);
                             if (pressure_blocks_shrink(pmode)) {
                                 char *err = NULL;
-                                (void)asprintf(&err, "pressurized (%s): cannot remove from '%s'", pmode, vn);
+                                lat_asprintf(&err, "pressurized (%s): cannot remove from '%s'", pmode, vn);
                                 return eval_err(err);
                             }
                         }
@@ -6000,7 +6000,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             const char *pmode = find_pressure(ev, vn);
                             if (pressure_blocks_grow(pmode)) {
                                 char *err = NULL;
-                                (void)asprintf(&err, "pressurized (%s): cannot merge into '%s'", pmode, vn);
+                                lat_asprintf(&err, "pressurized (%s): cannot merge into '%s'", pmode, vn);
                                 return eval_err(err);
                             }
                         }
@@ -6044,7 +6044,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             const char *pmode = find_pressure(ev, vn);
                             if (pressure_blocks_shrink(pmode)) {
                                 char *err = NULL;
-                                (void)asprintf(&err, "pressurized (%s): cannot remove from '%s'", pmode, vn);
+                                lat_asprintf(&err, "pressurized (%s): cannot remove from '%s'", pmode, vn);
                                 return eval_err(err);
                             }
                         }
@@ -6345,13 +6345,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 long idx = strtol(field, &endptr, 10);
                 if (*endptr != '\0' || idx < 0) {
                     char *err = NULL;
-                    (void)asprintf(&err, "tuple field must be a non-negative integer, got '%s'", field);
+                    lat_asprintf(&err, "tuple field must be a non-negative integer, got '%s'", field);
                     value_free(&objr.value);
                     return eval_err(err);
                 }
                 if ((size_t)idx >= objr.value.as.tuple.len) {
                     char *err = NULL;
-                    (void)asprintf(&err, "tuple index %ld out of bounds (len=%zu)",
+                    lat_asprintf(&err, "tuple index %ld out of bounds (len=%zu)",
                                    idx, objr.value.as.tuple.len);
                     value_free(&objr.value);
                     return eval_err(err);
@@ -6369,13 +6369,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
                 char *err = NULL;
-                (void)asprintf(&err, "map has no key '%s'", field);
+                lat_asprintf(&err, "map has no key '%s'", field);
                 value_free(&objr.value);
                 return eval_err(err);
             }
             if (objr.value.type != VAL_STRUCT) {
                 char *err = NULL;
-                (void)asprintf(&err, "cannot access field '%s' on %s",
+                lat_asprintf(&err, "cannot access field '%s' on %s",
                                expr->as.field_access.field, value_type_name(&objr.value));
                 value_free(&objr.value);
                 return eval_err(err);
@@ -6388,7 +6388,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
             }
             char *err = NULL;
-            (void)asprintf(&err, "struct has no field '%s'", expr->as.field_access.field);
+            lat_asprintf(&err, "struct has no field '%s'", expr->as.field_access.field);
             value_free(&objr.value);
             return eval_err(err);
         }
@@ -6410,7 +6410,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 value_free(&idxr.value);
                 if (idx >= objr.value.as.array.len) {
                     char *err = NULL;
-                    (void)asprintf(&err, "index %zu out of bounds (length %zu)",
+                    lat_asprintf(&err, "index %zu out of bounds (length %zu)",
                                    idx, objr.value.as.array.len);
                     value_free(&objr.value);
                     return eval_err(err);
@@ -6425,7 +6425,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 size_t slen = strlen(objr.value.as.str_val);
                 if (idx >= slen) {
                     char *err = NULL;
-                    (void)asprintf(&err, "string index %zu out of bounds (length %zu)", idx, slen);
+                    lat_asprintf(&err, "string index %zu out of bounds (length %zu)", idx, slen);
                     value_free(&objr.value);
                     return eval_err(err);
                 }
@@ -6456,7 +6456,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 value_free(&idxr.value);
                 if (bidx >= objr.value.as.buffer.len) {
                     char *berr = NULL;
-                    (void)asprintf(&berr, "buffer index %zu out of bounds (length %zu)",
+                    lat_asprintf(&berr, "buffer index %zu out of bounds (length %zu)",
                                    bidx, objr.value.as.buffer.len);
                     value_free(&objr.value);
                     return eval_err(berr);
@@ -6480,7 +6480,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     value_free(&idxr.value);
                     if (idx >= inner->as.array.len) {
                         char *berr = NULL;
-                        (void)asprintf(&berr, "index %zu out of bounds (length %zu)",
+                        lat_asprintf(&berr, "index %zu out of bounds (length %zu)",
                                        idx, inner->as.array.len);
                         value_free(&objr.value);
                         return eval_err(berr);
@@ -6491,7 +6491,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
             }
             char *err = NULL;
-            (void)asprintf(&err, "cannot index %s with %s",
+            lat_asprintf(&err, "cannot index %s with %s",
                            value_type_name(&objr.value), value_type_name(&idxr.value));
             value_free(&objr.value);
             value_free(&idxr.value);
@@ -6515,7 +6515,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     if (er.value.type != VAL_ARRAY) {
                         char *msg = NULL;
-                        (void)asprintf(&msg, "cannot spread non-array value of type %s",
+                        lat_asprintf(&msg, "cannot spread non-array value of type %s",
                                        value_type_name(&er.value));
                         GC_POP_N(ev, gc_count);
                         for (size_t j = 0; j < out; j++) value_free(&elems[j]);
@@ -6589,7 +6589,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     if (!found) {
                         char *err = NULL;
-                        (void)asprintf(&err, "struct '%s' has no field '%s'",
+                        lat_asprintf(&err, "struct '%s' has no field '%s'",
                                        sname, expr->as.struct_lit.fields[i].name);
                         return eval_err(err);
                     }
@@ -6668,7 +6668,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
                 if (fi == (size_t)-1) {
                     char *err = NULL;
-                    (void)asprintf(&err, "struct has no field '%s'", fname);
+                    lat_asprintf(&err, "struct has no field '%s'", fname);
                     return eval_err(err);
                 }
                 /* Run contract if present */
@@ -6683,7 +6683,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     value_free(&cr.value);
                     if (!IS_OK(vr)) {
                         char *msg = NULL;
-                        (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                        lat_asprintf(&msg, "freeze contract failed: %s", vr.error);
                         free(vr.error);
                         return eval_err(msg);
                     }
@@ -6724,7 +6724,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue *val_ptr = (LatValue *)lat_map_get(parent->as.map.map, key);
                 if (!val_ptr) {
                     char *err = NULL;
-                    (void)asprintf(&err, "map has no key '%s'", key);
+                    lat_asprintf(&err, "map has no key '%s'", key);
                     free(key);
                     return eval_err(err);
                 }
@@ -6740,7 +6740,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     value_free(&cr.value);
                     if (!IS_OK(vr)) {
                         char *msg = NULL;
-                        (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                        lat_asprintf(&msg, "freeze contract failed: %s", vr.error);
                         free(vr.error);
                         free(key);
                         return eval_err(msg);
@@ -6768,7 +6768,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue val;
                     if (!env_remove(ev->env, name, &val)) {
                         char *err = NULL;
-                        (void)asprintf(&err, "undefined variable '%s'", name);
+                        lat_asprintf(&err, "undefined variable '%s'", name);
                         return eval_err(err);
                     }
                     if (val.type == VAL_CHANNEL) {
@@ -6787,7 +6787,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         value_free(&cr.value);
                         if (!IS_OK(vr)) {
                             char *msg = NULL;
-                            (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                            lat_asprintf(&msg, "freeze contract failed: %s", vr.error);
                             free(vr.error);
                             value_free(&val);
                             return eval_err(msg);
@@ -6811,7 +6811,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue val;
                 if (!env_get(ev->env, name, &val)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "undefined variable '%s'", name);
+                    lat_asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
                 }
                 if (val.type == VAL_CHANNEL) {
@@ -6913,7 +6913,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             ev->seeds[si].contract.as.closure.has_variadic);
                         if (!IS_OK(vr)) {
                             char *msg = NULL;
-                            (void)asprintf(&msg, "seed contract failed on freeze: %s", vr.error);
+                            lat_asprintf(&msg, "seed contract failed on freeze: %s", vr.error);
                             free(vr.error);
                             value_free(&val);
                             return eval_err(msg);
@@ -6938,7 +6938,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     value_free(&cr.value);
                     if (!IS_OK(vr)) {
                         char *msg = NULL;
-                        (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                        lat_asprintf(&msg, "freeze contract failed: %s", vr.error);
                         free(vr.error);
                         value_free(&val);
                         return eval_err(msg);
@@ -6978,7 +6978,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 value_free(&cr.value);
                 if (!IS_OK(vr)) {
                     char *msg = NULL;
-                    (void)asprintf(&msg, "freeze contract failed: %s", vr.error);
+                    lat_asprintf(&msg, "freeze contract failed: %s", vr.error);
                     free(vr.error);
                     value_free(&er.value);
                     return eval_err(msg);
@@ -7004,7 +7004,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue val;
                 if (!env_get(ev->env, name, &val)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "undefined variable '%s'", name);
+                    lat_asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
                 }
                 uint64_t tt0 = now_ns();
@@ -7059,7 +7059,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (!env_get(ev->env, name, &val)) {
                     value_free(&clr.value);
                     char *err = NULL;
-                    (void)asprintf(&err, "undefined variable '%s'", name);
+                    lat_asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
                 }
                 if (val.phase != VTAG_CRYSTAL) {
@@ -7086,7 +7086,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 if (!IS_OK(tr)) {
                     char *msg = NULL;
-                    (void)asprintf(&msg, "anneal failed: %s", tr.error);
+                    lat_asprintf(&msg, "anneal failed: %s", tr.error);
                     free(tr.error);
                     return eval_err(msg);
                 }
@@ -7139,7 +7139,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
             if (!IS_OK(tr)) {
                 char *msg = NULL;
-                (void)asprintf(&msg, "anneal failed: %s", tr.error);
+                lat_asprintf(&msg, "anneal failed: %s", tr.error);
                 free(tr.error);
                 return eval_err(msg);
             }
@@ -7161,7 +7161,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             LatValue val;
             if (!env_get(ev->env, name, &val)) {
                 char *err = NULL;
-                (void)asprintf(&err, "crystallize(): undefined variable '%s'", name);
+                lat_asprintf(&err, "crystallize(): undefined variable '%s'", name);
                 return eval_err(err);
             }
             PhaseTag saved_phase = val.phase;
@@ -7201,7 +7201,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             LatValue val;
             if (!env_get(ev->env, name, &val)) {
                 char *err = NULL;
-                (void)asprintf(&err, "borrow(): undefined variable '%s'", name);
+                lat_asprintf(&err, "borrow(): undefined variable '%s'", name);
                 return eval_err(err);
             }
             PhaseTag saved_phase = val.phase;
@@ -7239,7 +7239,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 LatValue val;
                 if (!env_get(ev->env, name, &val)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "sublimate(): undefined variable '%s'", name);
+                    lat_asprintf(&err, "sublimate(): undefined variable '%s'", name);
                     return eval_err(err);
                 }
                 val.phase = VTAG_SUBLIMATED;  /* Only set top-level phase, don't recurse */
@@ -7669,9 +7669,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 vcands[ed->variant_count] = NULL;
                 const char *vsug = lat_find_similar(variant_name, vcands, 2);
                 if (vsug)
-                    (void)asprintf(&err2, "enum '%s' has no variant '%s' (did you mean '%s'?)", enum_name, variant_name, vsug);
+                    lat_asprintf(&err2, "enum '%s' has no variant '%s' (did you mean '%s'?)", enum_name, variant_name, vsug);
                 else
-                    (void)asprintf(&err2, "enum '%s' has no variant '%s'", enum_name, variant_name);
+                    lat_asprintf(&err2, "enum '%s' has no variant '%s'", enum_name, variant_name);
                 free(vcands);
                 return eval_err(err2);
             }
@@ -7679,7 +7679,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             size_t provided = expr->as.enum_variant.arg_count;
             if (provided != vd->param_count) {
                 char *err2 = NULL;
-                (void)asprintf(&err2, "variant '%s::%s' expects %zu argument%s, got %zu",
+                lat_asprintf(&err2, "variant '%s::%s' expects %zu argument%s, got %zu",
                                enum_name, variant_name, vd->param_count,
                                vd->param_count == 1 ? "" : "s", provided);
                 return eval_err(err2);
@@ -7952,7 +7952,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
         }
         if (!found) {
             char *err = NULL;
-            (void)asprintf(&err, "import: cannot find '%s'", file_path);
+            lat_asprintf(&err, "import: cannot find '%s'", file_path);
             free(file_path);
             return eval_err(err);
         }
@@ -7968,7 +7968,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     /* Check for circular imports */
     if (lat_map_get(&ev->required_files, resolved)) {
         char *err = NULL;
-        (void)asprintf(&err, "import: circular dependency on '%s'", resolved);
+        lat_asprintf(&err, "import: circular dependency on '%s'", resolved);
         return eval_err(err);
     }
 
@@ -7980,7 +7980,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     char *source = builtin_read_file(resolved);
     if (!source) {
         char *err = NULL;
-        (void)asprintf(&err, "import: cannot read '%s'", resolved);
+        lat_asprintf(&err, "import: cannot read '%s'", resolved);
         return eval_err(err);
     }
 
@@ -7991,7 +7991,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     free(source);
     if (mod_lex_err) {
         char *err = NULL;
-        (void)asprintf(&err, "import '%s': %s", resolved, mod_lex_err);
+        lat_asprintf(&err, "import '%s': %s", resolved, mod_lex_err);
         free(mod_lex_err);
         return eval_err(err);
     }
@@ -8002,7 +8002,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     Program mod_prog = parser_parse(&mod_parser, &mod_parse_err);
     if (mod_parse_err) {
         char *err = NULL;
-        (void)asprintf(&err, "import '%s': %s", resolved, mod_parse_err);
+        lat_asprintf(&err, "import '%s': %s", resolved, mod_parse_err);
         free(mod_parse_err);
         program_free(&mod_prog);
         for (size_t j = 0; j < mod_toks.len; j++) token_free(lat_vec_get(&mod_toks, j));
@@ -8167,7 +8167,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     case PHASE_FLUID:
                         if (value_is_crystal(&vr.value)) {
                             char *err = NULL;
-                            (void)asprintf(&err, "strict mode: 'flux' binding '%s' produced a crystal value",
+                            lat_asprintf(&err, "strict mode: 'flux' binding '%s' produced a crystal value",
                                            stmt->as.binding.name);
                             value_free(&vr.value);
                             return eval_err(err);
@@ -8183,7 +8183,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         break;
                     case PHASE_UNSPECIFIED: {
                         char *err = NULL;
-                        (void)asprintf(&err, "strict mode: binding '%s' requires an explicit phase (flux/fix)",
+                        lat_asprintf(&err, "strict mode: binding '%s' requires an explicit phase (flux/fix)",
                                        stmt->as.binding.name);
                         value_free(&vr.value);
                         return eval_err(err);
@@ -8214,7 +8214,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         value_free(&existing);
                         if (is_crys) {
                             char *err = NULL;
-                            (void)asprintf(&err, "strict mode: cannot assign to crystal binding '%s'", name);
+                            lat_asprintf(&err, "strict mode: cannot assign to crystal binding '%s'", name);
                             value_free(&valr.value);
                             return eval_err(err);
                         }
@@ -8222,7 +8222,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 }
                 if (!env_set(ev->env, name, valr.value)) {
                     char *err = NULL;
-                    (void)asprintf(&err, "undefined variable '%s'", name);
+                    lat_asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
                 }
                 record_history(ev, name);
@@ -8247,7 +8247,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     if (bidx >= buf_chk->as.buffer.len) {
                         value_free(&valr.value);
                         char *berr = NULL;
-                        (void)asprintf(&berr, "buffer index %zu out of bounds (length %zu)",
+                        lat_asprintf(&berr, "buffer index %zu out of bounds (length %zu)",
                                        bidx, buf_chk->as.buffer.len);
                         return eval_err(berr);
                     }
@@ -8278,7 +8278,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 if (parent && parent->phase == VTAG_SUBLIMATED) {
                     const char *fname = stmt->as.assign.target->as.field_access.field;
                     char *err = NULL;
-                    (void)asprintf(&err, "cannot assign to field '%s' of sublimated value", fname);
+                    lat_asprintf(&err, "cannot assign to field '%s' of sublimated value", fname);
                     value_free(&valr.value);
                     return eval_err(err);
                 }
@@ -8296,7 +8296,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 if (parent && parent->type == VAL_STRUCT && parent->phase == VTAG_CRYSTAL) {
                     const char *fname = stmt->as.assign.target->as.field_access.field;
                     char *err = NULL;
-                    (void)asprintf(&err, "cannot assign to field '%s' of frozen struct", fname);
+                    lat_asprintf(&err, "cannot assign to field '%s' of frozen struct", fname);
                     value_free(&valr.value);
                     return eval_err(err);
                 }
@@ -8306,7 +8306,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         if (parent->as.strct.field_names[fi] == intern(fname)) {
                             if (parent->as.strct.field_phases[fi] == VTAG_CRYSTAL) {
                                 char *err = NULL;
-                                (void)asprintf(&err, "cannot assign to frozen field '%s'", fname);
+                                lat_asprintf(&err, "cannot assign to frozen field '%s'", fname);
                                 value_free(&valr.value);
                                 return eval_err(err);
                             }
@@ -8332,7 +8332,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         PhaseTag *kp = (PhaseTag *)lat_map_get(parent->as.map.key_phases, kidxr.value.as.str_val);
                         if (kp && *kp == VTAG_CRYSTAL) {
                             char *err = NULL;
-                            (void)asprintf(&err, "cannot assign to frozen key '%s'", kidxr.value.as.str_val);
+                            lat_asprintf(&err, "cannot assign to frozen key '%s'", kidxr.value.as.str_val);
                             value_free(&kidxr.value);
                             value_free(&valr.value);
                             return eval_err(err);
@@ -8448,7 +8448,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 value_free(&iter_r.value);
             } else {
                 char *err = NULL;
-                (void)asprintf(&err, "cannot iterate over %s", value_type_name(&iter_r.value));
+                lat_asprintf(&err, "cannot iterate over %s", value_type_name(&iter_r.value));
                 value_free(&iter_r.value);
                 return eval_err(err);
             }
@@ -8514,7 +8514,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             if (stmt->as.destructure.kind == DESTRUCT_ARRAY) {
                 if (vr.value.type != VAL_ARRAY) {
                     char *err = NULL;
-                    (void)asprintf(&err, "cannot destructure %s as array",
+                    lat_asprintf(&err, "cannot destructure %s as array",
                                    value_type_name(&vr.value));
                     value_free(&vr.value);
                     return eval_err(err);
@@ -8525,14 +8525,14 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
                 if (!has_rest && arr_len != name_count) {
                     char *err = NULL;
-                    (void)asprintf(&err, "array destructure: expected %zu elements, got %zu",
+                    lat_asprintf(&err, "array destructure: expected %zu elements, got %zu",
                                    name_count, arr_len);
                     value_free(&vr.value);
                     return eval_err(err);
                 }
                 if (has_rest && arr_len < name_count) {
                     char *err = NULL;
-                    (void)asprintf(&err, "array destructure: expected at least %zu elements, got %zu",
+                    lat_asprintf(&err, "array destructure: expected at least %zu elements, got %zu",
                                    name_count, arr_len);
                     value_free(&vr.value);
                     return eval_err(err);
@@ -8577,7 +8577,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 /* DESTRUCT_STRUCT */
                 if (vr.value.type != VAL_STRUCT && vr.value.type != VAL_MAP) {
                     char *err = NULL;
-                    (void)asprintf(&err, "cannot destructure %s as struct",
+                    lat_asprintf(&err, "cannot destructure %s as struct",
                                    value_type_name(&vr.value));
                     value_free(&vr.value);
                     return eval_err(err);
@@ -8607,7 +8607,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
                     if (!found) {
                         char *err = NULL;
-                        (void)asprintf(&err, "destructure: field '%s' not found", fname);
+                        lat_asprintf(&err, "destructure: field '%s' not found", fname);
                         value_free(&vr.value);
                         return eval_err(err);
                     }
@@ -8645,7 +8645,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     LatValue *exported = (LatValue *)lat_map_get(module_map.as.map.map, name);
                     if (!exported) {
                         char *err = NULL;
-                        (void)asprintf(&err, "module '%s' does not export '%s'", path, name);
+                        lat_asprintf(&err, "module '%s' does not export '%s'", path, name);
                         value_free(&module_map);
                         return eval_err(err);
                     }
@@ -8751,9 +8751,9 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         char *err2 = NULL;
         const char *esug = builtin_find_similar_method(VAL_ENUM, method);
         if (esug)
-            (void)asprintf(&err2, "Enum has no method '%s' (did you mean '%s'?)", method, esug);
+            lat_asprintf(&err2, "Enum has no method '%s' (did you mean '%s'?)", method, esug);
         else
-            (void)asprintf(&err2, "Enum has no method '%s'", method);
+            lat_asprintf(&err2, "Enum has no method '%s'", method);
         return eval_err(err2);
     }
 
@@ -8895,9 +8895,9 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         char *err2 = NULL;
         const char *ssug = builtin_find_similar_method(VAL_SET, method);
         if (ssug)
-            (void)asprintf(&err2, "Set has no method '%s' (did you mean '%s'?)", method, ssug);
+            lat_asprintf(&err2, "Set has no method '%s' (did you mean '%s'?)", method, ssug);
         else
-            (void)asprintf(&err2, "Set has no method '%s'", method);
+            lat_asprintf(&err2, "Set has no method '%s'", method);
         return eval_err(err2);
     }
 
@@ -9126,9 +9126,9 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         char *berr2 = NULL;
         const char *bsug = builtin_find_similar_method(VAL_BUFFER, method);
         if (bsug)
-            (void)asprintf(&berr2, "Buffer has no method '%s' (did you mean '%s'?)", method, bsug);
+            lat_asprintf(&berr2, "Buffer has no method '%s' (did you mean '%s'?)", method, bsug);
         else
-            (void)asprintf(&berr2, "Buffer has no method '%s'", method);
+            lat_asprintf(&berr2, "Buffer has no method '%s'", method);
         return eval_err(berr2);
     }
 
@@ -9619,7 +9619,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         size_t len = obj.as.array.len;
         if (idx < 0 || (size_t)idx > len) {
             char *err = NULL;
-            (void)asprintf(&err, ".insert() index %lld out of bounds (length %zu)",
+            lat_asprintf(&err, ".insert() index %lld out of bounds (length %zu)",
                            (long long)idx, len);
             return eval_err(err);
         }
@@ -9637,7 +9637,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         size_t len = obj.as.array.len;
         if (idx < 0 || (size_t)idx >= len) {
             char *err = NULL;
-            (void)asprintf(&err, ".remove_at() index %lld out of bounds (length %zu)",
+            lat_asprintf(&err, ".remove_at() index %lld out of bounds (length %zu)",
                            (long long)idx, len);
             return eval_err(err);
         }
@@ -10404,7 +10404,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
         }
         char *err = NULL;
-        (void)asprintf(&err, "struct has no field '%s'", args[0].as.str_val);
+        lat_asprintf(&err, "struct has no field '%s'", args[0].as.str_val);
         return eval_err(err);
     }
 
@@ -10712,18 +10712,18 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         char *rerr = NULL;
         const char *rsug = builtin_find_similar_method(VAL_REF, method);
         if (rsug)
-            (void)asprintf(&rerr, "Ref has no method '%s' (did you mean '%s'?)", method, rsug);
+            lat_asprintf(&rerr, "Ref has no method '%s' (did you mean '%s'?)", method, rsug);
         else
-            (void)asprintf(&rerr, "Ref has no method '%s'", method);
+            lat_asprintf(&rerr, "Ref has no method '%s'", method);
         return eval_err(rerr);
     }
 
     char *err = NULL;
     const char *msug = builtin_find_similar_method(obj.type, method);
     if (msug)
-        (void)asprintf(&err, "unknown method '.%s()' on %s (did you mean '%s'?)", method, value_type_name(&obj), msug);
+        lat_asprintf(&err, "unknown method '.%s()' on %s (did you mean '%s'?)", method, value_type_name(&obj), msug);
     else
-        (void)asprintf(&err, "unknown method '.%s()' on %s", method, value_type_name(&obj));
+        lat_asprintf(&err, "unknown method '.%s()' on %s", method, value_type_name(&obj));
     return eval_err(err);
 }
 

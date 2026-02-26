@@ -1,3 +1,4 @@
+#include "lattice.h"
 #include "ext.h"
 #include "lattice_ext.h"
 #include "eval.h"
@@ -101,7 +102,7 @@ void lat_ext_map_set(LatExtValue *map, const char *key, LatExtValue *val) {
 LatExtValue *lat_ext_error(const char *msg) {
     /* Errors are strings prefixed with "EVAL_ERROR:" */
     char *err = NULL;
-    (void)asprintf(&err, "EVAL_ERROR:%s", msg);
+    lat_asprintf(&err, "EVAL_ERROR:%s", msg);
     LatExtValue *ev = malloc(sizeof(LatExtValue));
     ev->val = value_string_owned(err);
     return ev;
@@ -210,13 +211,13 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
 
     /* Validate extension name */
     if (!name || name[0] == '\0') {
-        (void)asprintf(err, "require_ext: extension name cannot be empty");
+        lat_asprintf(err, "require_ext: extension name cannot be empty");
         return value_nil();
     }
 
     /* Reject names containing path separators to prevent path traversal */
     if (strchr(name, '/') || strchr(name, '\\')) {
-        (void)asprintf(err, "require_ext: extension name '%s' cannot contain path separators", name);
+        lat_asprintf(err, "require_ext: extension name '%s' cannot contain path separators", name);
         return value_nil();
     }
 
@@ -261,7 +262,7 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     }
 
     if (!handle) {
-        (void)asprintf(err, "require_ext: cannot find extension '%s' "
+        lat_asprintf(err, "require_ext: cannot find extension '%s' "
                        "(searched ./extensions/, ./extensions/%s/, ~/.lattice/ext/, $LATTICE_EXT_PATH)",
                        name, name);
         return value_nil();
@@ -270,7 +271,7 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     /* Look up init function */
     LatExtInitFn init_fn = (LatExtInitFn)dlsym(handle, "lat_ext_init");
     if (!init_fn) {
-        (void)asprintf(err, "require_ext: extension '%s' has no lat_ext_init()", name);
+        lat_asprintf(err, "require_ext: extension '%s' has no lat_ext_init()", name);
         dlclose(handle);
         return value_nil();
     }
@@ -308,7 +309,7 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
 
 LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     (void)ev;
-    (void)asprintf(err, "require_ext: native extensions not available in WASM (tried '%s')", name);
+    lat_asprintf(err, "require_ext: native extensions not available in WASM (tried '%s')", name);
     return value_nil();
 }
 

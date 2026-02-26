@@ -1,3 +1,4 @@
+#include "lattice.h"
 #include "regvm.h"
 #include "regopcode.h"
 #include "runtime.h"
@@ -404,7 +405,7 @@ static RegVMResult rvm_error(RegVM *vm, const char *fmt, ...) {
     char *msg = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&msg, fmt, args);
+    lat_vasprintf(&msg, fmt, args);
     va_end(args);
 
     vm->error = msg;
@@ -422,7 +423,7 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr,
     char *inner = NULL;
     va_list args;
     va_start(args, fmt);
-    (void)vasprintf(&inner, fmt, args);
+    lat_vasprintf(&inner, fmt, args);
     va_end(args);
 
     /* If there's an active handler, pass raw message to catch variable */
@@ -779,7 +780,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
             if (value_is_crystal(obj)) {
                 if (var_name)
-                    (void)asprintf(&vm->error, "cannot push to crystal array '%s' (use thaw(%s) to make it mutable)", var_name, var_name);
+                    lat_asprintf(&vm->error, "cannot push to crystal array '%s' (use thaw(%s) to make it mutable)", var_name, var_name);
                 else
                     vm->error = strdup("cannot push to a crystal array");
                 *result = value_unit();
@@ -802,7 +803,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                                     if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
                                         const char *mode = vm->rt->pressures[pi].mode;
                                         if (strcmp(mode, "no_grow") == 0 || strcmp(mode, "no_resize") == 0) {
-                                            (void)asprintf(&vm->error, "pressurized (%s): cannot push to '%s'",
+                                            lat_asprintf(&vm->error, "pressurized (%s): cannot push to '%s'",
                                                            mode, cf->chunk->local_names[r]);
                                             *result = value_unit();
                                             return true;
@@ -830,7 +831,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
             if (value_is_crystal(obj)) {
                 if (var_name)
-                    (void)asprintf(&vm->error, "cannot pop from crystal array '%s' (use thaw(%s) to make it mutable)", var_name, var_name);
+                    lat_asprintf(&vm->error, "cannot pop from crystal array '%s' (use thaw(%s) to make it mutable)", var_name, var_name);
                 else
                     vm->error = strdup("cannot pop from a crystal array");
                 *result = value_unit();
@@ -852,7 +853,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                                     if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
                                         const char *mode = vm->rt->pressures[pi].mode;
                                         if (strcmp(mode, "no_shrink") == 0 || strcmp(mode, "no_resize") == 0) {
-                                            (void)asprintf(&vm->error, "pressurized (%s): cannot pop from '%s'",
+                                            lat_asprintf(&vm->error, "pressurized (%s): cannot pop from '%s'",
                                                            mode, cf->chunk->local_names[r]);
                                             *result = value_unit();
                                             return true;
@@ -1234,7 +1235,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                                 if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
                                     const char *mode = vm->rt->pressures[pi].mode;
                                     if (strcmp(mode, "no_grow") == 0 || strcmp(mode, "no_resize") == 0) {
-                                        (void)asprintf(&vm->error, "pressurized (%s): cannot insert into '%s'",
+                                        lat_asprintf(&vm->error, "pressurized (%s): cannot insert into '%s'",
                                                        mode, cf->chunk->local_names[r]);
                                         *result = value_unit();
                                         return true;
@@ -1283,7 +1284,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
                                 if (strcmp(vm->rt->pressures[pi].name, cf->chunk->local_names[r]) == 0) {
                                     const char *mode = vm->rt->pressures[pi].mode;
                                     if (strcmp(mode, "no_shrink") == 0 || strcmp(mode, "no_resize") == 0) {
-                                        (void)asprintf(&vm->error, "pressurized (%s): cannot remove from '%s'",
+                                        lat_asprintf(&vm->error, "pressurized (%s): cannot remove from '%s'",
                                                        mode, cf->chunk->local_names[r]);
                                         *result = value_unit();
                                         return true;
@@ -4170,7 +4171,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 vm->error = strdup(thrown.as.str_val);
             } else {
                 char *repr = value_display(&thrown);
-                (void)asprintf(&vm->error, "unhandled exception: %s", repr);
+                lat_asprintf(&vm->error, "unhandled exception: %s", repr);
                 free(repr);
             }
             value_free(&thrown);
@@ -4738,7 +4739,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             free(file_path);
         } else if (!realpath(file_path, resolved)) {
             char *emsg = NULL;
-            (void)asprintf(&emsg, "import: cannot find '%s'", file_path);
+            lat_asprintf(&emsg, "import: cannot find '%s'", file_path);
             free(file_path);
             /* Set error directly without [line N] prefix for import errors */
             vm->error = emsg;
@@ -4767,11 +4768,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatVec mod_toks = lexer_tokenize(&mod_lex, &lex_err);
         free(source);
         if (lex_err) {
-            char errmsg[2048];
-            snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, lex_err);
+            char *errmsg = NULL;
+            lat_asprintf(&errmsg, "import '%s': %s", resolved, lex_err);
             free(lex_err);
             lat_vec_free(&mod_toks);
-            RVM_ERROR("%s", errmsg);
+            RVM_ERROR("%s", errmsg ? errmsg : "import lex error");
         }
 
         /* Parse */
@@ -4779,14 +4780,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         char *parse_err = NULL;
         Program mod_prog = parser_parse(&mod_parser, &parse_err);
         if (parse_err) {
-            char errmsg[2048];
-            snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved, parse_err);
+            char *errmsg = NULL;
+            lat_asprintf(&errmsg, "import '%s': %s", resolved, parse_err);
             free(parse_err);
             program_free(&mod_prog);
             for (size_t ti = 0; ti < mod_toks.len; ti++)
                 token_free(lat_vec_get(&mod_toks, ti));
             lat_vec_free(&mod_toks);
-            RVM_ERROR("%s", errmsg);
+            RVM_ERROR("%s", errmsg ? errmsg : "import parse error");
         }
 
         /* Compile as module */
@@ -4800,11 +4801,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         lat_vec_free(&mod_toks);
 
         if (!mod_chunk) {
-            char errmsg[2048];
-            snprintf(errmsg, sizeof(errmsg), "import '%s': %s", resolved,
-                     comp_err ? comp_err : "compile error");
+            char *errmsg = NULL;
+            lat_asprintf(&errmsg, "import '%s': %s", resolved,
+                         comp_err ? comp_err : "compile error");
             free(comp_err);
-            RVM_ERROR("%s", errmsg);
+            RVM_ERROR("%s", errmsg ? errmsg : "import compile error");
         }
 
         /* Track chunk */
@@ -4889,7 +4890,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         }
         if (!found) {
             char *emsg = NULL;
-            (void)asprintf(&emsg, "require: cannot find '%s'", raw_path);
+            lat_asprintf(&emsg, "require: cannot find '%s'", raw_path);
             free(file_path);
             /* Set error directly without [line N] prefix, matching native_require */
             vm->error = emsg;
@@ -4917,11 +4918,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatVec req_toks = lexer_tokenize(&req_lex, &lex_err);
         free(source);
         if (lex_err) {
-            char errmsg[2048];
-            snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved, lex_err);
+            char *errmsg = NULL;
+            lat_asprintf(&errmsg, "require '%s': %s", resolved, lex_err);
             free(lex_err);
             lat_vec_free(&req_toks);
-            RVM_ERROR("%s", errmsg);
+            RVM_ERROR("%s", errmsg ? errmsg : "require lex error");
         }
 
         /* Parse */
@@ -4929,14 +4930,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         char *parse_err = NULL;
         Program req_prog = parser_parse(&req_parser, &parse_err);
         if (parse_err) {
-            char errmsg[2048];
-            snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved, parse_err);
+            char *errmsg = NULL;
+            lat_asprintf(&errmsg, "require '%s': %s", resolved, parse_err);
             free(parse_err);
             program_free(&req_prog);
             for (size_t ti = 0; ti < req_toks.len; ti++)
                 token_free(lat_vec_get(&req_toks, ti));
             lat_vec_free(&req_toks);
-            RVM_ERROR("%s", errmsg);
+            RVM_ERROR("%s", errmsg ? errmsg : "require parse error");
         }
 
         /* Compile as module (via regcompiler, not stack VM compiler) */
@@ -4950,11 +4951,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         lat_vec_free(&req_toks);
 
         if (!req_chunk) {
-            char errmsg[2048];
-            snprintf(errmsg, sizeof(errmsg), "require '%s': %s", resolved,
-                     comp_err ? comp_err : "compile error");
+            char *errmsg = NULL;
+            lat_asprintf(&errmsg, "require '%s': %s", resolved,
+                         comp_err ? comp_err : "compile error");
             free(comp_err);
-            RVM_ERROR("%s", errmsg);
+            RVM_ERROR("%s", errmsg ? errmsg : "require compile error");
         }
 
         /* Track chunk */
@@ -6001,7 +6002,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 const char *fmt = frame->chunk->constants[err_word].as.str_val;
                 if (tsug) {
                     char *base = NULL;
-                    (void)asprintf(&base, fmt, display);
+                    lat_asprintf(&base, fmt, display);
                     RVM_ERROR("%s (did you mean '%s'?)", base, tsug);
                     free(base);
                 } else {

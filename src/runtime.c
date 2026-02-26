@@ -93,7 +93,7 @@ void rt_fire_reactions(LatRuntime *rt, const char *name, const char *phase) {
             value_free(&result);
             if (rt->error) {
                 char *wrapped = NULL;
-                (void)asprintf(&wrapped, "reaction error: %s", rt->error);
+                lat_asprintf(&wrapped, "reaction error: %s", rt->error);
                 free(rt->error);
                 rt->error = wrapped;
                 value_free(&cur);
@@ -136,7 +136,7 @@ void rt_freeze_cascade(LatRuntime *rt, const char *target_name) {
                 if (dval.phase != VTAG_CRYSTAL) {
                     value_free(&dval);
                     char *err = NULL;
-                    (void)asprintf(&err, "gate bond: '%s' must be crystal before '%s' can freeze", dep, target_name);
+                    lat_asprintf(&err, "gate bond: '%s' must be crystal before '%s' can freeze", dep, target_name);
                     rt->error = err;
                     return;
                 }
@@ -168,7 +168,7 @@ char *rt_validate_seeds(LatRuntime *rt, const char *name, LatValue *val, bool co
             char *msg = NULL;
             char *inner = rt->error;
             rt->error = NULL;
-            (void)asprintf(&msg, "seed contract failed: %s", inner);
+            lat_asprintf(&msg, "seed contract failed: %s", inner);
             free(inner);
             value_free(&result);
             return msg;
@@ -405,7 +405,7 @@ static LatValue native_track(LatValue *args, int ac) {
     if (!found) found = current_rt->find_local_value(current_rt->active_vm, name, &val);
     if (!found) {
         char *msg = NULL;
-        (void)asprintf(&msg, "track: undefined variable '%s'", name);
+        lat_asprintf(&msg, "track: undefined variable '%s'", name);
         current_rt->error = msg;
         return value_unit();
     }
@@ -604,7 +604,7 @@ static LatValue native_assert(LatValue *args, int arg_count) {
         /* Use StackVM error mechanism instead of exit() so tests can catch failures */
         if (current_rt) {
             char *err = NULL;
-            (void)asprintf(&err, "assertion failed: %s", msg);
+            lat_asprintf(&err, "assertion failed: %s", msg);
             current_rt->error = err;
         } else {
             fprintf(stderr, "assertion failed: %s\n", msg);
@@ -1990,7 +1990,7 @@ static LatValue native_debug_assert(LatValue *args, int ac) {
         const char *msg = (ac >= 2 && args[1].type == VAL_STR) ? args[1].as.str_val : "debug assertion failed";
         if (current_rt) {
             char *err = NULL;
-            (void)asprintf(&err, "debug assertion failed: %s", msg);
+            lat_asprintf(&err, "debug assertion failed: %s", msg);
             current_rt->error = err;
         } else {
             fprintf(stderr, "debug assertion failed: %s\n", msg);
@@ -2035,7 +2035,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
         found = (realpath(script_rel, resolved) != NULL);
     }
     if (!found) {
-        (void)asprintf(&current_rt->error, "require: cannot find '%s'", raw_path);
+        lat_asprintf(&current_rt->error, "require: cannot find '%s'", raw_path);
         free(file_path);
         return value_bool(false);
     }
@@ -2053,7 +2053,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     /* Read the file */
     char *source = builtin_read_file(resolved);
     if (!source) {
-        (void)asprintf(&current_rt->error, "require: cannot read '%s'", resolved);
+        lat_asprintf(&current_rt->error, "require: cannot read '%s'", resolved);
         return value_bool(false);
     }
 
@@ -2063,7 +2063,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     LatVec req_toks = lexer_tokenize(&req_lex, &lex_err);
     free(source);
     if (lex_err) {
-        (void)asprintf(&current_rt->error, "require '%s': %s", resolved, lex_err);
+        lat_asprintf(&current_rt->error, "require '%s': %s", resolved, lex_err);
         free(lex_err);
         lat_vec_free(&req_toks);
         return value_bool(false);
@@ -2074,7 +2074,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
     char *parse_err = NULL;
     Program req_prog = parser_parse(&req_parser, &parse_err);
     if (parse_err) {
-        (void)asprintf(&current_rt->error, "require '%s': %s", resolved, parse_err);
+        lat_asprintf(&current_rt->error, "require '%s': %s", resolved, parse_err);
         free(parse_err);
         program_free(&req_prog);
         for (size_t ti = 0; ti < req_toks.len; ti++)
@@ -2092,7 +2092,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
             token_free(lat_vec_get(&req_toks, ti));
         lat_vec_free(&req_toks);
         if (!rchunk) {
-            (void)asprintf(&current_rt->error, "require '%s': %s", resolved,
+            lat_asprintf(&current_rt->error, "require '%s': %s", resolved,
                     comp_err ? comp_err : "compile error");
             free(comp_err);
             return value_bool(false);
@@ -2102,7 +2102,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
         LatValue req_result;
         RegVMResult rr = regvm_run(rvm, rchunk, &req_result);
         if (rr != REGVM_OK) {
-            (void)asprintf(&current_rt->error, "require '%s': runtime error: %s", resolved,
+            lat_asprintf(&current_rt->error, "require '%s': runtime error: %s", resolved,
                     rvm->error ? rvm->error : "(unknown)");
             return value_bool(false);
         }
@@ -2115,7 +2115,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
             token_free(lat_vec_get(&req_toks, ti));
         lat_vec_free(&req_toks);
         if (!req_chunk) {
-            (void)asprintf(&current_rt->error, "require '%s': %s", resolved,
+            lat_asprintf(&current_rt->error, "require '%s': %s", resolved,
                     comp_err ? comp_err : "compile error");
             free(comp_err);
             return value_bool(false);
@@ -2131,7 +2131,7 @@ static LatValue native_require(LatValue *args, int arg_count) {
         LatValue req_result;
         StackVMResult req_r = stackvm_run(vm, req_chunk, &req_result);
         if (req_r != STACKVM_OK) {
-            (void)asprintf(&current_rt->error, "require '%s': runtime error: %s", resolved,
+            lat_asprintf(&current_rt->error, "require '%s': runtime error: %s", resolved,
                     vm->error ? vm->error : "(unknown)");
             return value_bool(false);
         }
@@ -2159,7 +2159,7 @@ static LatValue native_require_ext(LatValue *args, int arg_count) {
     char *ext_err = NULL;
     LatValue ext_map = ext_load(NULL, ext_name, &ext_err);
     if (ext_err) {
-        (void)asprintf(&current_rt->error, "require_ext: %s", ext_err);
+        lat_asprintf(&current_rt->error, "require_ext: %s", ext_err);
         free(ext_err);
         return value_nil();
     }
@@ -2211,7 +2211,7 @@ static LatValue native_struct_from_map(LatValue *args, int arg_count) {
     snprintf(meta_key, sizeof(meta_key), "__struct_%s", sname);
     LatValue meta;
     if (!env_get(current_rt->env, meta_key, &meta)) {
-        (void)asprintf(&current_rt->error, "struct_from_map: unknown struct '%s'", sname);
+        lat_asprintf(&current_rt->error, "struct_from_map: unknown struct '%s'", sname);
         return value_nil();
     }
     if (meta.type != VAL_ARRAY) { value_free(&meta); return value_nil(); }
@@ -2426,9 +2426,9 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
             t->type == TOK_INTERP_START || t->type == TOK_INTERP_MID || t->type == TOK_INTERP_END) {
             text = strdup(t->as.str_val);
         } else if (t->type == TOK_INT_LIT) {
-            (void)asprintf(&text, "%lld", (long long)t->as.int_val);
+            lat_asprintf(&text, "%lld", (long long)t->as.int_val);
         } else if (t->type == TOK_FLOAT_LIT) {
-            (void)asprintf(&text, "%g", t->as.float_val);
+            lat_asprintf(&text, "%g", t->as.float_val);
         } else {
             text = strdup(token_type_name(t->type));
         }
@@ -2453,7 +2453,7 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     char *lex_err = NULL;
     LatVec toks = lexer_tokenize(&lex, &lex_err);
     if (lex_err) {
-        (void)asprintf(&current_rt->error, "lat_eval: %s", lex_err);
+        lat_asprintf(&current_rt->error, "lat_eval: %s", lex_err);
         free(lex_err); lat_vec_free(&toks);
         return value_nil();
     }
@@ -2461,7 +2461,7 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     char *parse_err = NULL;
     Program prog = parser_parse(&parser, &parse_err);
     if (parse_err) {
-        (void)asprintf(&current_rt->error, "lat_eval: %s", parse_err);
+        lat_asprintf(&current_rt->error, "lat_eval: %s", parse_err);
         free(parse_err); program_free(&prog);
         for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
         lat_vec_free(&toks);
@@ -2475,7 +2475,7 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
         for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
         lat_vec_free(&toks);
         if (!rchunk) {
-            (void)asprintf(&current_rt->error, "lat_eval: %s", comp_err ? comp_err : "compile error");
+            lat_asprintf(&current_rt->error, "lat_eval: %s", comp_err ? comp_err : "compile error");
             free(comp_err);
             return value_nil();
         }
@@ -2493,7 +2493,7 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j));
     lat_vec_free(&toks);
     if (!chunk) {
-        (void)asprintf(&current_rt->error, "lat_eval: %s", comp_err ? comp_err : "compile error");
+        lat_asprintf(&current_rt->error, "lat_eval: %s", comp_err ? comp_err : "compile error");
         free(comp_err);
         return value_nil();
     }
