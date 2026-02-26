@@ -2180,6 +2180,42 @@ static void compile_stmt(const Stmt *s) {
                         }
                     }
                 }
+            } else if (s->as.assign.target->tag == EXPR_INDEX &&
+                       s->as.assign.target->as.index.index->tag == EXPR_RANGE) {
+                /* Slice assignment: arr[start..end] = rhs_array */
+                Expr *target = s->as.assign.target;
+                Expr *range_expr = target->as.index.index;
+                /* Stack has: [val] from compile_expr(value) above */
+
+                /* Check if object is a local variable (fast path) */
+                if (target->as.index.object->tag == EXPR_IDENT) {
+                    int slot = resolve_local(current, target->as.index.object->as.str_val);
+                    if (slot >= 0) {
+                        compile_expr(range_expr->as.range.start, line);
+                        compile_expr(range_expr->as.range.end, line);
+                        /* Stack: [val, start, end] */
+                        emit_bytes(OP_SET_SLICE_LOCAL, (uint8_t)slot, line);
+                        break; /* SET_SLICE_LOCAL pushes nothing, skip OP_POP */
+                    }
+                }
+                /* Non-local: compile obj, start, end then use OP_SET_SLICE */
+                /* Stack: [val] */
+                compile_expr(target->as.index.object, line);
+                compile_expr(range_expr->as.range.start, line);
+                compile_expr(range_expr->as.range.end, line);
+                /* Stack: [val, obj, start, end] */
+                emit_byte(OP_SET_SLICE, line);
+                /* Stack: [modified_obj] — write back */
+                if (target->as.index.object->tag == EXPR_IDENT) {
+                    const char *name = target->as.index.object->as.str_val;
+                    int upvalue = resolve_upvalue(current, name);
+                    if (upvalue >= 0) {
+                        emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
+                    } else {
+                        size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
+                        emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
+                    }
+                }
             } else if (s->as.assign.target->tag == EXPR_INDEX) {
                 Expr *target = s->as.assign.target;
                 /* If object is a local, use OP_SET_INDEX_LOCAL to mutate in-place */

@@ -8198,6 +8198,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 value_free(&idxr.value);
                 return eval_ok(value_string_owned(sliced));
             }
+            /* Array slicing with range */
+            if (objr.value.type == VAL_ARRAY && idxr.value.type == VAL_RANGE) {
+                char *slice_err = NULL;
+                LatValue sliced =
+                    array_slice(&objr.value, idxr.value.as.range.start, idxr.value.as.range.end, &slice_err);
+                value_free(&objr.value);
+                value_free(&idxr.value);
+                if (slice_err) return eval_err(slice_err);
+                return eval_ok(sliced);
+            }
             /* Map indexing: map["key"] */
             if (objr.value.type == VAL_MAP && idxr.value.type == VAL_STR) {
                 LatValue *found = (LatValue *)lat_map_get(objr.value.as.map.map, idxr.value.as.str_val);
@@ -10349,6 +10359,133 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     value_free(&valr.value);
                     return eval_ok(value_unit());
                 }
+            }
+
+            /* Array slice assignment: arr[start..end] = rhs_array */
+            if (stmt->as.assign.target->tag == EXPR_INDEX &&
+                stmt->as.assign.target->as.index.index->tag == EXPR_RANGE) {
+                char *arr_err = NULL;
+                LatValue *arr_lv = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &arr_err);
+                if (!arr_lv) {
+                    value_free(&valr.value);
+                    return eval_err(arr_err);
+                }
+                /* Ref unwrap */
+                LatValue *arr = arr_lv;
+                if (arr->type == VAL_REF) arr = &arr->as.ref.ref->value;
+
+                if (arr->type != VAL_ARRAY) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("slice assignment target must be an array"));
+                }
+                /* Phase check: reject mutation on frozen/sublimated arrays */
+                if (arr->phase == VTAG_CRYSTAL) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("cannot assign to slice of frozen array"));
+                }
+                if (arr->phase == VTAG_SUBLIMATED) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("cannot assign to slice of sublimated array"));
+                }
+                /* Evaluate range bounds */
+                EvalResult sr = eval_expr(ev, stmt->as.assign.target->as.index.index->as.range.start);
+                if (!IS_OK(sr)) {
+                    value_free(&valr.value);
+                    return sr;
+                }
+                EvalResult er = eval_expr(ev, stmt->as.assign.target->as.index.index->as.range.end);
+                if (!IS_OK(er)) {
+                    value_free(&valr.value);
+                    value_free(&sr.value);
+                    return er;
+                }
+                if (sr.value.type != VAL_INT || er.value.type != VAL_INT) {
+                    value_free(&valr.value);
+                    value_free(&sr.value);
+                    value_free(&er.value);
+                    return eval_err(strdup("slice bounds must be integers"));
+                }
+                int64_t start = sr.value.as.int_val;
+                int64_t end = er.value.as.int_val;
+                value_free(&sr.value);
+                value_free(&er.value);
+
+                /* Re-resolve arr_lv since eval_expr may have invalidated pointers */
+                arr_err = NULL;
+                arr_lv = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &arr_err);
+                if (!arr_lv) {
+                    value_free(&valr.value);
+                    return eval_err(arr_err);
+                }
+                arr = arr_lv;
+                if (arr->type == VAL_REF) arr = &arr->as.ref.ref->value;
+
+                /* Clamp bounds */
+                int64_t arr_len = (int64_t)arr->as.array.len;
+                if (start < 0) start = 0;
+                if (start > arr_len) start = arr_len;
+                if (end < 0) end = 0;
+                if (end > arr_len) end = arr_len;
+                if (end < start) end = start;
+
+                /* RHS must be an array */
+                if (valr.value.type != VAL_ARRAY) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("slice assignment value must be an array"));
+                }
+
+                size_t slice_start = (size_t)start;
+                size_t slice_end = (size_t)end;
+                size_t old_slice_len = slice_end - slice_start;
+                size_t new_slice_len = valr.value.as.array.len;
+                size_t old_len = arr->as.array.len;
+                size_t new_len = old_len - old_slice_len + new_slice_len;
+
+                /* Build a new array value with the splice applied, then
+                 * swap it into the variable.  This avoids realloc on
+                 * memory potentially owned by the fluid heap. */
+                size_t tmp_cap = new_len < 4 ? 4 : new_len;
+                LatValue *tmp = malloc(tmp_cap * sizeof(LatValue));
+                if (!tmp) {
+                    value_free(&valr.value);
+                    return eval_err(strdup("out of memory"));
+                }
+
+                /* Deep-clone prefix (before slice) */
+                for (size_t i = 0; i < slice_start; i++) { tmp[i] = value_deep_clone(&arr->as.array.elems[i]); }
+                /* Deep-clone new elements from RHS */
+                for (size_t i = 0; i < new_slice_len; i++) {
+                    tmp[slice_start + i] = value_deep_clone(&valr.value.as.array.elems[i]);
+                }
+                /* Deep-clone suffix (after slice) */
+                size_t tail_count = old_len - slice_end;
+                for (size_t i = 0; i < tail_count; i++) {
+                    tmp[slice_start + new_slice_len + i] = value_deep_clone(&arr->as.array.elems[slice_end + i]);
+                }
+
+                /* Construct a proper new array value via value_array
+                 * (which allocates via lat_alloc, tracked by the heap). */
+                PhaseTag saved_phase = arr->phase;
+                LatValue new_arr = value_array(tmp, new_len);
+                new_arr.phase = saved_phase;
+
+                /* value_array copied the LatValues via memcpy (shallow),
+                 * so just free the temporary buffer, not the elements. */
+                free(tmp);
+
+                /* Free old array and replace in-place */
+                value_free(arr);
+                *arr = new_arr;
+
+                value_free(&valr.value);
+
+                /* Record history for root variable */
+                if (ev->tracked_count > 0) {
+                    const Expr *root = stmt->as.assign.target->as.index.object;
+                    while (root->tag == EXPR_INDEX) root = root->as.index.object;
+                    if (root->tag == EXPR_IDENT) record_history(ev, root->as.str_val);
+                }
+                return eval_ok(value_unit());
             }
 
             /* For field access, index, and nested chains: use resolve_lvalue */
