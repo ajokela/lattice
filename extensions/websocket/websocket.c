@@ -11,6 +11,9 @@
  * ping/pong handling, and proper masking (client masks, server does not).
  */
 
+/* Enable POSIX extensions for getaddrinfo, nanosleep on Linux with -std=c11 */
+#define _POSIX_C_SOURCE 200809L
+
 #include "lattice_ext.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,36 +47,30 @@ void lat_ext_init(LatExtContext *ctx);
 /* Maximum reassembled fragmented message: 64 MB */
 #define MAX_FRAGMENT_TOTAL (64 * 1024 * 1024)
 
-typedef enum {
-    WS_STATE_CLOSED,
-    WS_STATE_CONNECTED
-} WsState;
+typedef enum { WS_STATE_CLOSED, WS_STATE_CONNECTED } WsState;
 
-typedef enum {
-    WS_ROLE_CLIENT,
-    WS_ROLE_SERVER
-} WsRole;
+typedef enum { WS_ROLE_CLIENT, WS_ROLE_SERVER } WsRole;
 
 typedef struct {
-    int       fd;
-    WsState   state;
-    WsRole    role;
-    int       recv_timeout_sec;  /* 0 = blocking */
+    int fd;
+    WsState state;
+    WsRole role;
+    int recv_timeout_sec; /* 0 = blocking */
 } WsConn;
 
 /* Server listener sockets */
 typedef struct {
-    int  fd;
-    int  port;
-    int  active;
+    int fd;
+    int port;
+    int active;
 } WsServer;
 
-static WsConn   connections[MAX_CONNECTIONS];
-static int       conn_count = 0;
-static WsServer  servers[MAX_SERVERS];
-static int       server_count = 0;
-static int       initialized = 0;
-static int       sigpipe_suppressed = 0;
+static WsConn connections[MAX_CONNECTIONS];
+static int conn_count = 0;
+static WsServer servers[MAX_SERVERS];
+static int server_count = 0;
+static int initialized = 0;
+static int sigpipe_suppressed = 0;
 
 static void ensure_init(void) {
     if (!initialized) {
@@ -188,7 +185,7 @@ static char *base64_encode(const unsigned char *input, int length) {
 
 typedef struct {
     char host[256];
-    int  port;
+    int port;
     char path[1024];
 } WsUrl;
 
@@ -212,7 +209,7 @@ static int parse_ws_url(const char *url, WsUrl *out) {
     host_start = p;
     host_end = NULL;
     port_start = NULL;
-    out->port = 80;  /* default */
+    out->port = 80; /* default */
 
     while (*p && *p != '/' && *p != ':') p++;
 
@@ -260,18 +257,14 @@ static int tcp_connect(const char *host, int port) {
 
     snprintf(port_str, sizeof(port_str), "%d", port);
 
-    if (getaddrinfo(host, port_str, &hints, &res) != 0) {
-        return -1;
-    }
+    if (getaddrinfo(host, port_str, &hints, &res) != 0) { return -1; }
 
     fd = -1;
     for (rp = res; rp != NULL; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd == -1) continue;
 
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
-            break;  /* success */
-        }
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) { break; /* success */ }
 
         close(fd);
         fd = -1;
@@ -356,9 +349,7 @@ static int ws_client_handshake(int fd, const char *host, int port, const char *p
     int i;
 
     /* Generate random 16-byte key */
-    for (i = 0; i < 16; i++) {
-        key_bytes[i] = (unsigned char)(rand() & 0xFF);
-    }
+    for (i = 0; i < 16; i++) { key_bytes[i] = (unsigned char)(rand() & 0xFF); }
     key_b64 = base64_encode(key_bytes, 16);
 
     /* Compute expected Sec-WebSocket-Accept: SHA1(key + magic), base64 encoded */
@@ -369,24 +360,24 @@ static int ws_client_handshake(int fd, const char *host, int port, const char *p
     /* Build HTTP upgrade request */
     if (port == 80) {
         snprintf(request, sizeof(request),
-            "GET %s HTTP/1.1\r\n"
-            "Host: %s\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Sec-WebSocket-Key: %s\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n",
-            path, host, key_b64);
+                 "GET %s HTTP/1.1\r\n"
+                 "Host: %s\r\n"
+                 "Upgrade: websocket\r\n"
+                 "Connection: Upgrade\r\n"
+                 "Sec-WebSocket-Key: %s\r\n"
+                 "Sec-WebSocket-Version: 13\r\n"
+                 "\r\n",
+                 path, host, key_b64);
     } else {
         snprintf(request, sizeof(request),
-            "GET %s HTTP/1.1\r\n"
-            "Host: %s:%d\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Sec-WebSocket-Key: %s\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n",
-            path, host, port, key_b64);
+                 "GET %s HTTP/1.1\r\n"
+                 "Host: %s:%d\r\n"
+                 "Upgrade: websocket\r\n"
+                 "Connection: Upgrade\r\n"
+                 "Sec-WebSocket-Key: %s\r\n"
+                 "Sec-WebSocket-Version: 13\r\n"
+                 "\r\n",
+                 path, host, port, key_b64);
     }
 
     free(key_b64);
@@ -410,11 +401,8 @@ static int ws_client_handshake(int fd, const char *host, int port, const char *p
         total_read += (int)n;
 
         /* Check for \r\n\r\n end of headers */
-        if (total_read >= 4 &&
-            response[total_read - 4] == '\r' &&
-            response[total_read - 3] == '\n' &&
-            response[total_read - 2] == '\r' &&
-            response[total_read - 1] == '\n') {
+        if (total_read >= 4 && response[total_read - 4] == '\r' && response[total_read - 3] == '\n' &&
+            response[total_read - 2] == '\r' && response[total_read - 1] == '\n') {
             break;
         }
     }
@@ -422,8 +410,7 @@ static int ws_client_handshake(int fd, const char *host, int port, const char *p
     response[total_read] = '\0';
 
     /* Verify 101 status */
-    if (strncmp(response, "HTTP/1.1 101", 12) != 0 &&
-        strncmp(response, "HTTP/1.0 101", 12) != 0) {
+    if (strncmp(response, "HTTP/1.1 101", 12) != 0 && strncmp(response, "HTTP/1.0 101", 12) != 0) {
         free(accept_b64);
         return -1;
     }
@@ -467,19 +454,15 @@ static int ws_server_handshake(int fd) {
         if (n <= 0) return -1;
         total_read += (int)n;
 
-        if (total_read >= 4 &&
-            request[total_read - 4] == '\r' &&
-            request[total_read - 3] == '\n' &&
-            request[total_read - 2] == '\r' &&
-            request[total_read - 1] == '\n') {
+        if (total_read >= 4 && request[total_read - 4] == '\r' && request[total_read - 3] == '\n' &&
+            request[total_read - 2] == '\r' && request[total_read - 1] == '\n') {
             break;
         }
     }
     request[total_read] = '\0';
 
     /* Verify it looks like a WebSocket upgrade request */
-    if (strstr(request, "Upgrade: websocket") == NULL &&
-        strstr(request, "Upgrade: WebSocket") == NULL &&
+    if (strstr(request, "Upgrade: websocket") == NULL && strstr(request, "Upgrade: WebSocket") == NULL &&
         strstr(request, "upgrade: websocket") == NULL) {
         return -1;
     }
@@ -507,18 +490,16 @@ static int ws_server_handshake(int fd) {
 
     /* Send HTTP 101 response */
     snprintf(response, sizeof(response),
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: %s\r\n"
-        "\r\n",
-        accept_b64);
+             "HTTP/1.1 101 Switching Protocols\r\n"
+             "Upgrade: websocket\r\n"
+             "Connection: Upgrade\r\n"
+             "Sec-WebSocket-Accept: %s\r\n"
+             "\r\n",
+             accept_b64);
 
     free(accept_b64);
 
-    if (send_all(fd, response, strlen(response)) != 0) {
-        return -1;
-    }
+    if (send_all(fd, response, strlen(response)) != 0) { return -1; }
 
     return 0;
 }
@@ -538,8 +519,7 @@ static int ws_server_handshake(int fd) {
  *   - Client-to-server frames MUST be masked
  *   - Server-to-client frames MUST NOT be masked
  */
-static int ws_send_frame_ex(int fd, int opcode, const unsigned char *payload,
-                            size_t len, int use_mask) {
+static int ws_send_frame_ex(int fd, int opcode, const unsigned char *payload, size_t len, int use_mask) {
     unsigned char header[14];
     size_t header_len = 0;
     unsigned char mask_key[4];
@@ -576,9 +556,7 @@ static int ws_send_frame_ex(int fd, int opcode, const unsigned char *payload,
     if (use_mask) {
         size_t i;
         /* Generate mask key */
-        for (i = 0; i < 4; i++) {
-            mask_key[i] = (unsigned char)(rand() & 0xFF);
-        }
+        for (i = 0; i < 4; i++) { mask_key[i] = (unsigned char)(rand() & 0xFF); }
 
         /* Append mask key to header */
         memcpy(header + header_len, mask_key, 4);
@@ -592,9 +570,7 @@ static int ws_send_frame_ex(int fd, int opcode, const unsigned char *payload,
             unsigned char *masked = malloc(len);
             int rc;
             if (!masked) return -1;
-            for (i = 0; i < len; i++) {
-                masked[i] = payload[i] ^ mask_key[i % 4];
-            }
+            for (i = 0; i < len; i++) { masked[i] = payload[i] ^ mask_key[i % 4]; }
             rc = send_all(fd, masked, len);
             free(masked);
             if (rc != 0) return -1;
@@ -617,10 +593,10 @@ static int ws_send_frame_conn(WsConn *conn, int opcode, const unsigned char *pay
 }
 
 typedef struct {
-    int           opcode;
+    int opcode;
     unsigned char *payload;
-    size_t        payload_len;
-    int           fin;
+    size_t payload_len;
+    int fin;
 } WsFrame;
 
 static int ws_recv_frame(int fd, WsFrame *frame) {
@@ -649,9 +625,7 @@ static int ws_recv_frame(int fd, WsFrame *frame) {
         unsigned char ext[8];
         if (recv_all(fd, ext, 8) != 0) return -1;
         payload_len = 0;
-        for (i = 0; i < 8; i++) {
-            payload_len = (payload_len << 8) | ext[i];
-        }
+        for (i = 0; i < 8; i++) { payload_len = (payload_len << 8) | ext[i]; }
     }
 
     /* Read mask key if present */
@@ -675,9 +649,7 @@ static int ws_recv_frame(int fd, WsFrame *frame) {
 
         /* Unmask if needed */
         if (masked) {
-            for (i = 0; i < (size_t)payload_len; i++) {
-                frame->payload[i] ^= mask_key[i % 4];
-            }
+            for (i = 0; i < (size_t)payload_len; i++) { frame->payload[i] ^= mask_key[i % 4]; }
         }
     }
 
@@ -734,16 +706,13 @@ static unsigned char *ws_recv_message(WsConn *conn, int *out_opcode, size_t *out
 
                 case WS_OP_CLOSE:
                     /* Send close frame back if we haven't already */
-                    ws_send_frame_conn(conn, WS_OP_CLOSE, frame.payload,
-                                       frame.payload_len > 2 ? 2 : frame.payload_len);
+                    ws_send_frame_conn(conn, WS_OP_CLOSE, frame.payload, frame.payload_len > 2 ? 2 : frame.payload_len);
                     ws_frame_free(&frame);
                     free(frag_buf);
                     conn->state = WS_STATE_CLOSED;
                     return NULL;
 
-                default:
-                    ws_frame_free(&frame);
-                    continue;
+                default: ws_frame_free(&frame); continue;
             }
         }
 
@@ -844,8 +813,7 @@ static LatExtValue *ws_connect(LatExtValue **args, size_t argc) {
     fd = tcp_connect(url.host, url.port);
     if (fd < 0) {
         char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf), "ws.connect: failed to connect to %s:%d",
-                 url.host, url.port);
+        snprintf(errbuf, sizeof(errbuf), "ws.connect: failed to connect to %s:%d", url.host, url.port);
         return lat_ext_error(errbuf);
     }
 
@@ -925,9 +893,8 @@ static LatExtValue *ws_connect_auto(LatExtValue **args, size_t argc) {
 
     {
         char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf),
-                 "ws.connect_auto: failed to connect to %s:%d after %d attempts",
-                 url.host, url.port, (int)max_retries + 1);
+        snprintf(errbuf, sizeof(errbuf), "ws.connect_auto: failed to connect to %s:%d after %d attempts", url.host,
+                 url.port, (int)max_retries + 1);
         return lat_ext_error(errbuf);
     }
 }
@@ -965,8 +932,7 @@ static LatExtValue *ws_send(LatExtValue **args, size_t argc) {
 
     ensure_init();
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("ws.send() expects (handle: Int, message: String)");
     }
 
@@ -1010,9 +976,7 @@ static LatExtValue *ws_recv(LatExtValue **args, size_t argc) {
     if (conn->state != WS_STATE_CONNECTED) return lat_ext_nil();
 
     msg_data = ws_recv_message(conn, &msg_opcode, &msg_len);
-    if (!msg_data) {
-        return lat_ext_nil();
-    }
+    if (!msg_data) { return lat_ext_nil(); }
 
     /* Convert to null-terminated string for Lattice */
     {
@@ -1045,8 +1009,7 @@ static LatExtValue *ws_recv_timeout(LatExtValue **args, size_t argc) {
 
     ensure_init();
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_INT) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_INT) {
         return lat_ext_error("ws.recv_timeout() expects (handle: Int, timeout_ms: Int)");
     }
 
@@ -1103,8 +1066,7 @@ static LatExtValue *ws_send_binary(LatExtValue **args, size_t argc) {
 
     ensure_init();
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_STRING) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_STRING) {
         return lat_ext_error("ws.send_binary() expects (handle: Int, data: String)");
     }
 
@@ -1213,9 +1175,7 @@ static LatExtValue *ws_ping(LatExtValue **args, size_t argc) {
         tv.tv_sec = 5;
         tv.tv_usec = 0;
         ready = select(conn->fd + 1, &readfds, NULL, NULL, &tv);
-        if (ready <= 0) {
-            return lat_ext_bool(false);
-        }
+        if (ready <= 0) { return lat_ext_bool(false); }
     }
 }
 
@@ -1238,15 +1198,12 @@ static LatExtValue *ws_listen(LatExtValue **args, size_t argc) {
     }
 
     port = lat_ext_as_int(args[0]);
-    if (port <= 0 || port > 65535) {
-        return lat_ext_error("ws.listen: port must be between 1 and 65535");
-    }
+    if (port <= 0 || port > 65535) { return lat_ext_error("ws.listen: port must be between 1 and 65535"); }
 
     fd = tcp_listen((int)port);
     if (fd < 0) {
         char errbuf[512];
-        snprintf(errbuf, sizeof(errbuf), "ws.listen: failed to listen on port %d: %s",
-                 (int)port, strerror(errno));
+        snprintf(errbuf, sizeof(errbuf), "ws.listen: failed to listen on port %d: %s", (int)port, strerror(errno));
         return lat_ext_error(errbuf);
     }
 
@@ -1343,8 +1300,7 @@ static LatExtValue *ws_set_timeout(LatExtValue **args, size_t argc) {
 
     ensure_init();
 
-    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT ||
-        lat_ext_type(args[1]) != LAT_EXT_INT) {
+    if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_INT || lat_ext_type(args[1]) != LAT_EXT_INT) {
         return lat_ext_error("ws.set_timeout() expects (handle: Int, seconds: Int)");
     }
 
@@ -1368,19 +1324,19 @@ static LatExtValue *ws_set_timeout(LatExtValue **args, size_t argc) {
 
 void lat_ext_init(LatExtContext *ctx) {
     /* Client functions */
-    lat_ext_register(ctx, "connect",      ws_connect);
+    lat_ext_register(ctx, "connect", ws_connect);
     lat_ext_register(ctx, "connect_auto", ws_connect_auto);
-    lat_ext_register(ctx, "close",        ws_close);
-    lat_ext_register(ctx, "send",         ws_send);
-    lat_ext_register(ctx, "recv",         ws_recv);
+    lat_ext_register(ctx, "close", ws_close);
+    lat_ext_register(ctx, "send", ws_send);
+    lat_ext_register(ctx, "recv", ws_recv);
     lat_ext_register(ctx, "recv_timeout", ws_recv_timeout);
-    lat_ext_register(ctx, "send_binary",  ws_send_binary);
-    lat_ext_register(ctx, "status",       ws_status);
-    lat_ext_register(ctx, "ping",         ws_ping);
-    lat_ext_register(ctx, "set_timeout",  ws_set_timeout);
+    lat_ext_register(ctx, "send_binary", ws_send_binary);
+    lat_ext_register(ctx, "status", ws_status);
+    lat_ext_register(ctx, "ping", ws_ping);
+    lat_ext_register(ctx, "set_timeout", ws_set_timeout);
 
     /* Server functions */
-    lat_ext_register(ctx, "listen",       ws_listen);
-    lat_ext_register(ctx, "accept",       ws_accept);
+    lat_ext_register(ctx, "listen", ws_listen);
+    lat_ext_register(ctx, "accept", ws_accept);
     lat_ext_register(ctx, "server_close", ws_server_close);
 }
