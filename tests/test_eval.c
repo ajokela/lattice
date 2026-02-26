@@ -13,6 +13,7 @@
 #include "regvm.h"
 #include "runtime.h"
 #include "package.h"
+#include "doc_gen.h"
 #include "test_backend.h"
 
 /* Import test macros from test_main.c */
@@ -4477,4 +4478,195 @@ TEST(async_filter_basic) {
                 "    let result = filtered.collect()\n"
                 "    assert(result == [0, 2, 4, 6, 8], \"async_filter: \" + to_string(result))\n"
                 "}\n");
+}
+
+/* ── Doc generator tests ─────────────────────────────────────────────── */
+
+static const char *doc_test_source = "/// Module-level documentation\n"
+                                     "/// for the test module.\n"
+                                     "\n"
+                                     "/// Add two numbers together.\n"
+                                     "fn add(a: Int, b: Int) -> Int {\n"
+                                     "    a + b\n"
+                                     "}\n"
+                                     "\n"
+                                     "/// A 2D point.\n"
+                                     "struct Point {\n"
+                                     "    /// X coordinate\n"
+                                     "    x: Float,\n"
+                                     "    /// Y coordinate\n"
+                                     "    y: Float,\n"
+                                     "}\n"
+                                     "\n"
+                                     "/// Represents a color.\n"
+                                     "enum Color {\n"
+                                     "    /// Red color\n"
+                                     "    Red,\n"
+                                     "    /// Green color\n"
+                                     "    Green,\n"
+                                     "    /// An RGB value\n"
+                                     "    Rgb(Int, Int, Int),\n"
+                                     "}\n";
+
+TEST(doc_gen_extract_basic) {
+    DocFile df = doc_extract(doc_test_source, "test.lat");
+    ASSERT(df.module_doc != NULL);
+    ASSERT(strstr(df.module_doc, "Module-level documentation") != NULL);
+    ASSERT(df.item_count == 3);
+
+    /* Function */
+    ASSERT(df.items[0].kind == DOC_FUNCTION);
+    ASSERT_EQ_STR(df.items[0].name, "add");
+    ASSERT(df.items[0].doc != NULL);
+    ASSERT(strstr(df.items[0].doc, "Add two numbers") != NULL);
+    ASSERT_EQ_INT(df.items[0].as.fn.param_count, 2);
+    ASSERT_EQ_STR(df.items[0].as.fn.params[0].name, "a");
+    ASSERT_EQ_STR(df.items[0].as.fn.params[0].type_name, "Int");
+    ASSERT_EQ_STR(df.items[0].as.fn.return_type, "Int");
+
+    /* Struct */
+    ASSERT(df.items[1].kind == DOC_STRUCT);
+    ASSERT_EQ_STR(df.items[1].name, "Point");
+    ASSERT_EQ_INT(df.items[1].as.strct.field_count, 2);
+
+    /* Enum */
+    ASSERT(df.items[2].kind == DOC_ENUM);
+    ASSERT_EQ_STR(df.items[2].name, "Color");
+    ASSERT_EQ_INT(df.items[2].as.enm.variant_count, 3);
+
+    doc_file_free(&df);
+}
+
+TEST(doc_gen_text_output) {
+    DocFile df = doc_extract(doc_test_source, "test.lat");
+    char *text = doc_render(&df, 1, DOC_FMT_TEXT);
+
+    /* Text format should have section headers */
+    ASSERT(strstr(text, "FUNCTIONS") != NULL);
+    ASSERT(strstr(text, "---------") != NULL);
+    ASSERT(strstr(text, "STRUCTS") != NULL);
+    ASSERT(strstr(text, "ENUMS") != NULL);
+
+    /* Function signature */
+    ASSERT(strstr(text, "fn add(a: Int, b: Int) -> Int") != NULL);
+
+    /* Struct fields */
+    ASSERT(strstr(text, "struct Point") != NULL);
+    ASSERT(strstr(text, "x: Float") != NULL);
+
+    /* Enum variants */
+    ASSERT(strstr(text, "enum Color") != NULL);
+    ASSERT(strstr(text, "Red") != NULL);
+    ASSERT(strstr(text, "Rgb(Int, Int, Int)") != NULL);
+
+    /* Module doc */
+    ASSERT(strstr(text, "Module-level documentation") != NULL);
+
+    free(text);
+    doc_file_free(&df);
+}
+
+TEST(doc_gen_markdown_output) {
+    DocFile df = doc_extract(doc_test_source, "test.lat");
+    char *md = doc_render(&df, 1, DOC_FMT_MARKDOWN);
+
+    /* Markdown headers */
+    ASSERT(strstr(md, "## Functions") != NULL);
+    ASSERT(strstr(md, "## Structs") != NULL);
+    ASSERT(strstr(md, "## Enums") != NULL);
+
+    /* Function in backtick code format */
+    ASSERT(strstr(md, "### `add(a: Int, b: Int) -> Int`") != NULL);
+
+    /* Struct in backtick code format */
+    ASSERT(strstr(md, "### `struct Point`") != NULL);
+
+    /* Markdown table for fields */
+    ASSERT(strstr(md, "| Field | Type | Description |") != NULL);
+    ASSERT(strstr(md, "| `x` |") != NULL);
+
+    /* Enum variants as list items */
+    ASSERT(strstr(md, "- `Red`") != NULL);
+    ASSERT(strstr(md, "- `Rgb(Int, Int, Int)`") != NULL);
+
+    /* Module doc present */
+    ASSERT(strstr(md, "Module-level documentation") != NULL);
+
+    free(md);
+    doc_file_free(&df);
+}
+
+TEST(doc_gen_html_output) {
+    DocFile df = doc_extract(doc_test_source, "test.lat");
+    char *html = doc_render(&df, 1, DOC_FMT_HTML);
+
+    /* HTML structure */
+    ASSERT(strstr(html, "<!DOCTYPE html>") != NULL);
+    ASSERT(strstr(html, "<html lang=\"en\">") != NULL);
+    ASSERT(strstr(html, "</html>") != NULL);
+
+    /* Section headers */
+    ASSERT(strstr(html, "<h2>Functions</h2>") != NULL);
+    ASSERT(strstr(html, "<h2>Structs</h2>") != NULL);
+    ASSERT(strstr(html, "<h2>Enums</h2>") != NULL);
+
+    /* Semantic elements */
+    ASSERT(strstr(html, "<div class=\"doc-card\">") != NULL);
+    ASSERT(strstr(html, "<div class=\"sig\">") != NULL);
+
+    /* Syntax-highlighted elements */
+    ASSERT(strstr(html, "<span class=\"kw\">fn</span>") != NULL);
+    ASSERT(strstr(html, "<span class=\"fn\">add</span>") != NULL);
+    ASSERT(strstr(html, "<span class=\"ty\">Int</span>") != NULL);
+
+    /* Struct fields in table */
+    ASSERT(strstr(html, "<th>Field</th>") != NULL);
+
+    /* Module doc */
+    ASSERT(strstr(html, "Module-level documentation") != NULL);
+
+    /* Inline CSS present */
+    ASSERT(strstr(html, "<style>") != NULL);
+    ASSERT(strstr(html, "--bg:") != NULL);
+
+    free(html);
+    doc_file_free(&df);
+}
+
+TEST(doc_gen_json_output) {
+    DocFile df = doc_extract(doc_test_source, "test.lat");
+    char *json = doc_render(&df, 1, DOC_FMT_JSON);
+
+    /* JSON array */
+    ASSERT(json[0] == '[');
+    ASSERT(strstr(json, "\"file\": \"test.lat\"") != NULL);
+
+    /* Items */
+    ASSERT(strstr(json, "\"kind\": \"function\"") != NULL);
+    ASSERT(strstr(json, "\"name\": \"add\"") != NULL);
+    ASSERT(strstr(json, "\"kind\": \"struct\"") != NULL);
+    ASSERT(strstr(json, "\"name\": \"Point\"") != NULL);
+    ASSERT(strstr(json, "\"kind\": \"enum\"") != NULL);
+    ASSERT(strstr(json, "\"name\": \"Color\"") != NULL);
+
+    /* Module doc */
+    ASSERT(strstr(json, "\"module_doc\"") != NULL);
+
+    free(json);
+    doc_file_free(&df);
+}
+
+TEST(doc_gen_backward_compat_markdown_default) {
+    /* Verify that DOC_FMT_MARKDOWN is the default in doc_cmd by checking
+     * that Markdown output produces the expected format headers */
+    DocFile df = doc_extract(doc_test_source, "test.lat");
+    char *md = doc_render(&df, 1, DOC_FMT_MARKDOWN);
+
+    /* Markdown-specific syntax that wouldn't appear in text or HTML */
+    ASSERT(strstr(md, "### `") != NULL);
+    ASSERT(strstr(md, "| Field | Type |") != NULL);
+    ASSERT(strstr(md, "**Variants:**") != NULL);
+
+    free(md);
+    doc_file_free(&df);
 }

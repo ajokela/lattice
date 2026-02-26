@@ -1227,6 +1227,177 @@ static void sb_append_html_esc(StrBuf *sb, const char *s) {
     }
 }
 
+/* ── Plain text renderer ─────────────────────────────────────────────────── */
+
+static void render_text_params(StrBuf *sb, const DocParam *params, size_t count) {
+    sb_append(sb, "(");
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) sb_append(sb, ", ");
+        if (params[i].is_variadic) sb_append(sb, "...");
+        sb_append(sb, params[i].name);
+        if (params[i].type_name) {
+            sb_append(sb, ": ");
+            sb_append(sb, params[i].type_name);
+        }
+        if (params[i].has_default) sb_append(sb, " = ...");
+    }
+    sb_append(sb, ")");
+}
+
+static void render_text(StrBuf *sb, const DocFile *files, size_t file_count) {
+    for (size_t fi = 0; fi < file_count; fi++) {
+        const DocFile *df = &files[fi];
+
+        if (file_count > 1) { sb_printf(sb, "=== %s ===\n\n", df->filename); }
+
+        if (df->module_doc) {
+            sb_append(sb, df->module_doc);
+            sb_append(sb, "\n\n");
+        }
+
+        bool has_functions = false, has_structs = false, has_enums = false;
+        bool has_traits = false, has_impls = false, has_vars = false;
+
+        for (size_t i = 0; i < df->item_count; i++) {
+            switch (df->items[i].kind) {
+                case DOC_FUNCTION: has_functions = true; break;
+                case DOC_STRUCT: has_structs = true; break;
+                case DOC_ENUM: has_enums = true; break;
+                case DOC_TRAIT: has_traits = true; break;
+                case DOC_IMPL: has_impls = true; break;
+                case DOC_VARIABLE: has_vars = true; break;
+                case DOC_MODULE: break;
+            }
+        }
+
+        /* Functions */
+        if (has_functions) {
+            sb_append(sb, "FUNCTIONS\n");
+            sb_append(sb, "---------\n\n");
+            for (size_t i = 0; i < df->item_count; i++) {
+                const DocItem *it = &df->items[i];
+                if (it->kind != DOC_FUNCTION) continue;
+
+                sb_printf(sb, "  fn %s", it->name);
+                render_text_params(sb, it->as.fn.params, it->as.fn.param_count);
+                if (it->as.fn.return_type) sb_printf(sb, " -> %s", it->as.fn.return_type);
+                sb_append(sb, "\n");
+
+                if (it->doc) sb_printf(sb, "    %s\n", it->doc);
+                sb_append(sb, "\n");
+            }
+        }
+
+        /* Structs */
+        if (has_structs) {
+            sb_append(sb, "STRUCTS\n");
+            sb_append(sb, "-------\n\n");
+            for (size_t i = 0; i < df->item_count; i++) {
+                const DocItem *it = &df->items[i];
+                if (it->kind != DOC_STRUCT) continue;
+
+                sb_printf(sb, "  struct %s\n", it->name);
+                if (it->doc) sb_printf(sb, "    %s\n", it->doc);
+
+                for (size_t j = 0; j < it->as.strct.field_count; j++) {
+                    const DocField *f = &it->as.strct.fields[j];
+                    sb_printf(sb, "    - %s", f->name);
+                    if (f->type_name) sb_printf(sb, ": %s", f->type_name);
+                    if (f->doc) sb_printf(sb, "  -- %s", f->doc);
+                    sb_append(sb, "\n");
+                }
+                sb_append(sb, "\n");
+            }
+        }
+
+        /* Enums */
+        if (has_enums) {
+            sb_append(sb, "ENUMS\n");
+            sb_append(sb, "-----\n\n");
+            for (size_t i = 0; i < df->item_count; i++) {
+                const DocItem *it = &df->items[i];
+                if (it->kind != DOC_ENUM) continue;
+
+                sb_printf(sb, "  enum %s\n", it->name);
+                if (it->doc) sb_printf(sb, "    %s\n", it->doc);
+
+                for (size_t j = 0; j < it->as.enm.variant_count; j++) {
+                    const DocVariant *v = &it->as.enm.variants[j];
+                    sb_printf(sb, "    - %s", v->name);
+                    if (v->params) sb_printf(sb, "(%s)", v->params);
+                    if (v->doc) sb_printf(sb, "  -- %s", v->doc);
+                    sb_append(sb, "\n");
+                }
+                sb_append(sb, "\n");
+            }
+        }
+
+        /* Traits */
+        if (has_traits) {
+            sb_append(sb, "TRAITS\n");
+            sb_append(sb, "------\n\n");
+            for (size_t i = 0; i < df->item_count; i++) {
+                const DocItem *it = &df->items[i];
+                if (it->kind != DOC_TRAIT) continue;
+
+                sb_printf(sb, "  trait %s\n", it->name);
+                if (it->doc) sb_printf(sb, "    %s\n", it->doc);
+
+                for (size_t j = 0; j < it->as.trait.method_count; j++) {
+                    const DocTraitMethod *m = &it->as.trait.methods[j];
+                    sb_printf(sb, "    fn %s", m->name);
+                    render_text_params(sb, m->params, m->param_count);
+                    if (m->return_type) sb_printf(sb, " -> %s", m->return_type);
+                    if (m->doc) sb_printf(sb, "  -- %s", m->doc);
+                    sb_append(sb, "\n");
+                }
+                sb_append(sb, "\n");
+            }
+        }
+
+        /* Impl blocks */
+        if (has_impls) {
+            sb_append(sb, "IMPLEMENTATIONS\n");
+            sb_append(sb, "---------------\n\n");
+            for (size_t i = 0; i < df->item_count; i++) {
+                const DocItem *it = &df->items[i];
+                if (it->kind != DOC_IMPL) continue;
+
+                sb_printf(sb, "  impl %s for %s\n", it->as.impl.trait_name, it->as.impl.type_name);
+                if (it->doc) sb_printf(sb, "    %s\n", it->doc);
+
+                for (size_t j = 0; j < it->as.impl.method_count; j++) {
+                    const DocTraitMethod *m = &it->as.impl.methods[j];
+                    sb_printf(sb, "    fn %s", m->name);
+                    render_text_params(sb, m->params, m->param_count);
+                    if (m->return_type) sb_printf(sb, " -> %s", m->return_type);
+                    if (m->doc) sb_printf(sb, "  -- %s", m->doc);
+                    sb_append(sb, "\n");
+                }
+                sb_append(sb, "\n");
+            }
+        }
+
+        /* Variables */
+        if (has_vars) {
+            sb_append(sb, "VARIABLES\n");
+            sb_append(sb, "---------\n\n");
+            for (size_t i = 0; i < df->item_count; i++) {
+                const DocItem *it = &df->items[i];
+                if (it->kind != DOC_VARIABLE) continue;
+
+                sb_printf(sb, "  %s %s", it->as.var.phase, it->name);
+                if (it->as.var.type_name) sb_printf(sb, ": %s", it->as.var.type_name);
+                sb_append(sb, "\n");
+                if (it->doc) sb_printf(sb, "    %s\n", it->doc);
+                sb_append(sb, "\n");
+            }
+        }
+
+        if (fi + 1 < file_count) { sb_append(sb, "========================================\n\n"); }
+    }
+}
+
 /* ── Markdown renderer ──────────────────────────────────────────────────── */
 
 static void render_markdown(StrBuf *sb, const DocFile *files, size_t file_count) {
@@ -1905,6 +2076,7 @@ char *doc_render(const DocFile *files, size_t file_count, DocFormat fmt) {
     sb_init(&sb);
 
     switch (fmt) {
+        case DOC_FMT_TEXT: render_text(&sb, files, file_count); break;
         case DOC_FMT_MARKDOWN: render_markdown(&sb, files, file_count); break;
         case DOC_FMT_JSON: render_json(&sb, files, file_count); break;
         case DOC_FMT_HTML: render_html(&sb, files, file_count); break;
@@ -1976,6 +2148,24 @@ int doc_cmd(int argc, char **argv) {
             fmt = DOC_FMT_HTML;
         } else if (strcmp(argv[i], "--markdown") == 0 || strcmp(argv[i], "--md") == 0) {
             fmt = DOC_FMT_MARKDOWN;
+        } else if (strcmp(argv[i], "--text") == 0) {
+            fmt = DOC_FMT_TEXT;
+        } else if (strcmp(argv[i], "--doc-format") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --doc-format requires an argument (text, md, json, html)\n");
+                free(inputs);
+                return 1;
+            }
+            i++;
+            if (strcmp(argv[i], "text") == 0) fmt = DOC_FMT_TEXT;
+            else if (strcmp(argv[i], "md") == 0 || strcmp(argv[i], "markdown") == 0) fmt = DOC_FMT_MARKDOWN;
+            else if (strcmp(argv[i], "json") == 0) fmt = DOC_FMT_JSON;
+            else if (strcmp(argv[i], "html") == 0) fmt = DOC_FMT_HTML;
+            else {
+                fprintf(stderr, "error: unknown format '%s' (expected: text, md, json, html)\n", argv[i]);
+                free(inputs);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--output") == 0 || strcmp(argv[i], "-o") == 0) {
             if (i + 1 < argc) output_dir = argv[++i];
             else {
@@ -1987,16 +2177,19 @@ int doc_cmd(int argc, char **argv) {
             printf("Usage: clat doc [options] <file.lat|dir>...\n\n");
             printf("Generate documentation from Lattice source files.\n\n");
             printf("Options:\n");
-            printf("  --md, --markdown   Markdown output (default)\n");
-            printf("  --json             JSON output\n");
-            printf("  --html             HTML output\n");
-            printf("  -o, --output DIR   Write output files to DIR\n");
-            printf("  -h, --help         Show this help\n\n");
+            printf("  --md, --markdown          Markdown output (default)\n");
+            printf("  --text                    Plain text output\n");
+            printf("  --json                    JSON output\n");
+            printf("  --html                    HTML output\n");
+            printf("  --doc-format FORMAT       Set format (text, md, json, html)\n");
+            printf("  -o, --output DIR          Write output files to DIR\n");
+            printf("  -h, --help                Show this help\n\n");
             printf("Examples:\n");
-            printf("  clat doc file.lat            Markdown to stdout\n");
-            printf("  clat doc --json file.lat     JSON to stdout\n");
-            printf("  clat doc --html dir/         HTML to stdout\n");
-            printf("  clat doc -o docs/ src/       Write docs to docs/\n");
+            printf("  clat doc file.lat                Markdown to stdout\n");
+            printf("  clat doc --text file.lat         Plain text to stdout\n");
+            printf("  clat doc --doc-format html dir/  HTML to stdout\n");
+            printf("  clat doc --json file.lat         JSON to stdout\n");
+            printf("  clat doc -o docs/ src/           Write docs to docs/\n");
             free(inputs);
             return 0;
         } else {
@@ -2080,7 +2273,8 @@ int doc_cmd(int argc, char **argv) {
         mkdir(output_dir, 0755);
 
         const char *ext = ".md";
-        if (fmt == DOC_FMT_JSON) ext = ".json";
+        if (fmt == DOC_FMT_TEXT) ext = ".txt";
+        else if (fmt == DOC_FMT_JSON) ext = ".json";
         else if (fmt == DOC_FMT_HTML) ext = ".html";
 
         for (size_t i = 0; i < doc_count; i++) {
