@@ -74,6 +74,38 @@ jobs:
       - name: Test FFI extension
         run: ./clat tests/ext_ffi_test.lat
 
+      - name: Test Image extension
+        run: ./clat tests/ext_image_test.lat
+
+  redis-extension:
+    name: Redis Extension Tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
+
+      - name: Build Lattice
+        run: make
+
+      - name: Build Redis extension
+        run: make ext-redis
+
+      - name: Test Redis extension
+        run: ./clat tests/ext_redis_test.lat
+
   gcc-werror:
     name: GCC -Werror
     runs-on: ubuntu-latest
