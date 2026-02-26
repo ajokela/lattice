@@ -1,0 +1,192 @@
+// Test: match expressions round-trip through self-hosted compiler
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Rgb(r, g, b)
+}
+
+enum Option {
+    Some(value),
+    None
+}
+
+// Test 1: Basic literal match
+fn test_literal_match() {
+    print("--- literal match ---")
+    let x = 2
+    let r = match x {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        _ => "other"
+    }
+    print(r)
+}
+
+// Test 2: String pattern match
+fn test_string_match() {
+    print("--- string match ---")
+    let op = "*"
+    let r = match op {
+        "+" => "add",
+        "-" => "sub",
+        "*" => "mul",
+        "/" => "div",
+        _ => "unknown"
+    }
+    print(r)
+}
+
+// Test 3: Boolean match
+fn test_bool_match() {
+    print("--- bool match ---")
+    let b = true
+    let r = match b {
+        true => "yes",
+        false => "no"
+    }
+    print(r)
+}
+
+// Test 4: Wildcard match (fallback)
+fn test_wildcard() {
+    print("--- wildcard ---")
+    let x = 999
+    let r = match x {
+        1 => "FAIL",
+        2 => "FAIL",
+        _ => "wildcard"
+    }
+    print(r)
+}
+
+// Test 5: No match fallback (nil)
+fn test_no_match() {
+    print("--- no match ---")
+    let x = 42
+    let r = match x {
+        1 => "one",
+        2 => "two"
+    }
+    print(r)
+}
+
+// Test 6: Binding pattern with guard
+fn test_binding_guard() {
+    print("--- binding guard ---")
+    let score = 85
+    let grade = match score {
+        s if s >= 90 => "A",
+        s if s >= 80 => "B",
+        s if s >= 70 => "C",
+        _ => "F"
+    }
+    print(grade)
+}
+
+// Test 7: Range pattern
+fn test_range_match() {
+    print("--- range match ---")
+    let x = 50
+    let r = match x {
+        1..10 => "small",
+        11..100 => "medium",
+        _ => "large"
+    }
+    print(r)
+}
+
+// Test 8: Enum variant destructuring
+fn test_enum_destructure() {
+    print("--- enum destructure ---")
+    let c = Color::Rgb(255, 128, 0)
+    let r = match c {
+        Color::Red() => "red",
+        Color::Green() => "green",
+        Color::Blue() => "blue",
+        Color::Rgb(r, g, b) => {
+            "rgb"
+        }
+    }
+    print(r)
+}
+
+// Test 9: Option enum pattern
+fn test_option_match() {
+    print("--- option match ---")
+    let val = Option::Some(42)
+    let r = match val {
+        Option::Some(v) => v * 2,
+        Option::None() => 0
+    }
+    print(r)
+
+    let empty = Option::None()
+    let r2 = match empty {
+        Option::Some(v) => v,
+        Option::None() => -1
+    }
+    print(r2)
+}
+
+// Test 10: Match with block bodies
+fn test_block_body() {
+    print("--- block body ---")
+    let x = 3
+    let r = match x {
+        1 => {
+            let a = 10
+            a + 1
+        },
+        3 => {
+            let b = 20
+            let c = 5
+            b + c
+        },
+        _ => 0
+    }
+    print(r)
+}
+
+// Test 11: Negative literal pattern
+fn test_negative_pattern() {
+    print("--- negative pattern ---")
+    let x = -5
+    let r = match x {
+        -5 => "neg five",
+        0 => "zero",
+        5 => "five",
+        _ => "other"
+    }
+    print(r)
+}
+
+// Test 12: Match in expression position
+fn test_match_in_expr() {
+    print("--- match in expr ---")
+    let x = 2
+    let result = 10 + match x {
+        1 => 100,
+        2 => 200,
+        _ => 0
+    }
+    print(result)
+}
+
+fn main() {
+    test_literal_match()
+    test_string_match()
+    test_bool_match()
+    test_wildcard()
+    test_no_match()
+    test_binding_guard()
+    test_range_match()
+    test_enum_destructure()
+    test_option_match()
+    test_block_body()
+    test_negative_pattern()
+    test_match_in_expr()
+    print("ALL MATCH TESTS PASSED")
+}

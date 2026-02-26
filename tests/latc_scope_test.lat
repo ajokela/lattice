@@ -1,0 +1,109 @@
+// Test: scope/spawn round-trip through self-hosted compiler
+
+// Test 1: Basic scope with spawns
+fn test_basic_scope() {
+    print("--- basic scope ---")
+    scope {
+        spawn {
+            print("task A")
+        }
+        spawn {
+            print("task B")
+        }
+    }
+    print("after scope")
+}
+
+// Test 2: Scope with single spawn
+fn test_single_spawn() {
+    print("--- single spawn ---")
+    scope {
+        spawn {
+            print("solo task")
+        }
+    }
+    print("done")
+}
+
+// Test 3: Scope as expression
+fn test_scope_expression() {
+    print("--- scope expression ---")
+    let r = scope {
+        spawn {
+            print("expr spawn")
+        }
+    }
+    print("scope done")
+}
+
+// Test 4: Scope with sync body (non-spawn statements)
+fn test_scope_with_sync() {
+    print("--- scope with sync ---")
+    scope {
+        spawn {
+            print("spawned work")
+        }
+    }
+    print("sync after")
+}
+
+// Test 5: Multiple spawns
+fn test_many_spawns() {
+    print("--- many spawns ---")
+    scope {
+        spawn {
+            print("s1")
+        }
+        spawn {
+            print("s2")
+        }
+        spawn {
+            print("s3")
+        }
+    }
+    print("all spawns done")
+}
+
+// Test 6: Scope inside function
+fn run_tasks() {
+    scope {
+        spawn {
+            print("fn spawn 1")
+        }
+        spawn {
+            print("fn spawn 2")
+        }
+    }
+}
+
+fn test_scope_in_function() {
+    print("--- scope in function ---")
+    run_tasks()
+    print("function returned")
+}
+
+// Test 7: Scope inside try
+fn test_scope_in_try() {
+    print("--- scope in try ---")
+    try {
+        scope {
+            spawn {
+                print("try spawn")
+            }
+        }
+        print("try ok")
+    } catch e {
+        print("FAIL")
+    }
+}
+
+fn main() {
+    test_basic_scope()
+    test_single_spawn()
+    test_scope_expression()
+    test_scope_with_sync()
+    test_many_spawns()
+    test_scope_in_function()
+    test_scope_in_try()
+    print("ALL SCOPE/SPAWN TESTS PASSED")
+}

@@ -1133,6 +1133,12 @@ fn parse_primary() {
         return
     }
 
+    // try expression
+    if t.type == "try" {
+        parse_try_expression()
+        return
+    }
+
     // scope expression
     if t.type == "scope" {
         parse_scope()
@@ -2218,6 +2224,108 @@ fn parse_match_expression() {
     }
 }
 
+fn parse_try_expression() {
+    // try { body } catch name { handler }
+    // Produces a value: the last expression of the try body on success,
+    // or the last expression of the catch body on error.
+    let line = current_line()
+    advance()  // consume 'try'
+
+    let handler_jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line)
+
+    // Save local state so we can restore it for catch path
+    let saved_local_count = local_count
+    let saved_scope_depth = scope_depth
+
+    // Compile try body — last expression becomes the try value
+    expect(nil, "{")
+    begin_scope()
+    flux last_was_expr = false
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in try body", line)
+        }
+        if last_was_expr {
+            emit_byte(OP_POP, line)
+        }
+        last_was_expr = false
+        if is_statement_start() {
+            parse_statement()
+        } else {
+            parse_expression()
+            last_was_expr = true
+        }
+    }
+    expect(nil, "}")
+    if last_was_expr {
+        end_scope_preserve_tos(line)
+    } else {
+        end_scope(line)
+        emit_byte(OP_UNIT, line)
+    }
+
+    emit_byte(OP_POP_EXCEPTION_HANDLER, line)
+    let end_jump = emit_jump(OP_JUMP, line)
+
+    // Catch block: restore compiler state then compile catch body
+    patch_jump(handler_jump)
+    // Restore compiler state to match what the handler expects (stack reset + error pushed)
+    while local_count > saved_local_count {
+        local_count = local_count - 1
+    }
+    scope_depth = saved_scope_depth
+
+    expect(nil, "catch")
+    let err_name = expect("identifier", nil).text
+
+    expect(nil, "{")
+    begin_scope()
+    add_local(err_name)
+
+    flux catch_last_expr = false
+    while peek_text() != "}" {
+        if peek() == nil {
+            compiler_error("unexpected end of input in catch body", line)
+        }
+        if catch_last_expr {
+            emit_byte(OP_POP, line)
+        }
+        catch_last_expr = false
+        if is_statement_start() {
+            parse_statement()
+        } else {
+            parse_expression()
+            catch_last_expr = true
+        }
+    }
+    expect(nil, "}")
+
+    if catch_last_expr {
+        // Result on TOS, error variable below it.
+        // Use SET_LOCAL to overwrite error var with result, then POP the extra copy
+        let err_slot = saved_local_count  // error variable is at this slot
+        emit_bytes(OP_SET_LOCAL, err_slot, line)
+        emit_byte(OP_POP, line)
+    } else {
+        emit_byte(OP_UNIT, line)
+        let err_slot = saved_local_count
+        emit_bytes(OP_SET_LOCAL, err_slot, line)
+        emit_byte(OP_POP, line)
+    }
+    // Pop the error variable (which now holds the result)
+    // Actually: we need to keep the value. The error local was added at saved_local_count.
+    // After SET_LOCAL + POP, we have [result_in_err_slot].
+    // But we didn't add a scope, so we need to clean up differently.
+    // Simplest: end_scope will pop the err local. We want to preserve TOS first.
+
+    // Actually let's restructure: the error variable slot contains our result.
+    // GET_LOCAL it, then clean up scope.
+    emit_bytes(OP_GET_LOCAL, saved_local_count, line)
+    end_scope(line)
+
+    patch_jump(end_jump)
+}
+
 fn parse_block_expression() {
     let line = current_line()
     expect(nil, "{")
@@ -2752,7 +2860,6 @@ fn is_statement_start() {
     if txt == "struct" { return true }
     if txt == "enum" { return true }
     if txt == "defer" { return true }
-    if txt == "try" { return true }
     if txt == "import" { return true }
     if t.type == "from" { return true }
     if txt == "impl" { return true }
@@ -2849,11 +2956,6 @@ fn parse_statement() {
 
     if txt == "defer" {
         parse_defer()
-        return
-    }
-
-    if txt == "try" {
-        parse_try_catch()
         return
     }
 
@@ -3807,46 +3909,6 @@ fn parse_defer() {
     end_scope(line)
     emit_byte(OP_RETURN, line)
     patch_jump(jump)
-}
-
-fn parse_try_catch() {
-    let line = current_line()
-    advance()
-
-    let handler_jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line)
-
-    expect(nil, "{")
-    begin_scope()
-    while peek_text() != "}" {
-        if peek() == nil {
-            compiler_error("unexpected end of input in try body", line)
-        }
-        parse_statement_or_expression()
-    }
-    expect(nil, "}")
-    end_scope(line)
-
-    emit_byte(OP_POP_EXCEPTION_HANDLER, line)
-    let skip_catch = emit_jump(OP_JUMP, line)
-
-    patch_jump(handler_jump)
-    expect(nil, "catch")
-    let err_name = expect("identifier", nil).text
-
-    expect(nil, "{")
-    begin_scope()
-    add_local(err_name)
-
-    while peek_text() != "}" {
-        if peek() == nil {
-            compiler_error("unexpected end of input in catch body", line)
-        }
-        parse_statement_or_expression()
-    }
-    expect(nil, "}")
-    end_scope(line)
-
-    patch_jump(skip_catch)
 }
 
 fn parse_import() {
