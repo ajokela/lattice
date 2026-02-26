@@ -3742,8 +3742,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             while (*prev) {
                 ObjUpvalue *uv = *prev;
                 if (uv->location >= frame_base && uv->location < frame_end) {
-                    /* Close this upvalue: move value to uv->closed */
-                    uv->closed = *uv->location;
+                    /* Close this upvalue: clone value into uv->closed.
+                     * Must use rvm_clone (not bitwise copy) so that
+                     * uv->closed owns independent heap allocations.
+                     * Otherwise frame cleanup frees shared pointers
+                     * (e.g. closure param_names), leaving uv->closed
+                     * with dangling references (heap-use-after-free). */
+                    uv->closed = rvm_clone(uv->location);
                     *uv->location = value_nil(); /* prevent double-free */
                     uv->location = &uv->closed;
                     *prev = uv->next;
