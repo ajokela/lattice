@@ -1974,6 +1974,57 @@ static void test_regex_replace_delete(void) {
                   "abc");
 }
 
+/* regex_match: case-insensitive flag */
+static void test_regex_case_insensitive(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(regex_match(\"[a-z]+\", \"HELLO\", \"i\"))\n"
+                  "}\n",
+                  "true");
+}
+
+/* regex_find_all: multiline flag */
+static void test_regex_multiline(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let matches = regex_find_all(\"^line\", \"line1\\nline2\", \"m\")\n"
+                  "    print(len(matches))\n"
+                  "}\n",
+                  "2");
+}
+
+/* regex_match: combined flags "im" */
+static void test_regex_combined_flags(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(regex_match(\"^hello\", \"world\\nHELLO\", \"im\"))\n"
+                  "}\n",
+                  "true");
+}
+
+/* regex_replace: case-insensitive flag */
+static void test_regex_replace_flags(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(regex_replace(\"hello\", \"HELLO world\", \"hi\", \"i\"))\n"
+                  "}\n",
+                  "hi world");
+}
+
+/* regex: no flags backward compatibility */
+static void test_regex_no_flags_backward_compat(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(regex_match(\"[0-9]+\", \"abc123\"))\n"
+                  "    print(regex_find_all(\"[a-z]+\", \"foo123bar\"))\n"
+                  "    print(regex_replace(\"[0-9]\", \"a1b2\", \"X\"))\n"
+                  "}\n",
+                  "true\n[foo, bar]\naXbX");
+}
+
+/* regex_match: invalid flag returns error */
+static void test_regex_invalid_flag(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    print(regex_match(\"x\", \"x\", \"z\"))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
 /* ======================================================================
  * format() Builtin
  * ====================================================================== */
@@ -12030,6 +12081,12 @@ void register_stdlib_tests(void) {
     register_test("test_regex_replace_whitespace", test_regex_replace_whitespace);
     register_test("test_regex_match_error", test_regex_match_error);
     register_test("test_regex_replace_delete", test_regex_replace_delete);
+    register_test("test_regex_case_insensitive", test_regex_case_insensitive);
+    register_test("test_regex_multiline", test_regex_multiline);
+    register_test("test_regex_combined_flags", test_regex_combined_flags);
+    register_test("test_regex_replace_flags", test_regex_replace_flags);
+    register_test("test_regex_no_flags_backward_compat", test_regex_no_flags_backward_compat);
+    register_test("test_regex_invalid_flag", test_regex_invalid_flag);
 
     /* format() */
     register_test("test_format_basic", test_format_basic);
