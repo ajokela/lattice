@@ -1,0 +1,5 @@
+[package]
+name = "hello"
+version = "1.0.0"
+description = "A simple greeting library for Lattice"
+license = "MIT"

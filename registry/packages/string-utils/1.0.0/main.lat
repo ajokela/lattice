@@ -1,0 +1,170 @@
+// string-utils - String utility functions for Lattice.
+//
+// Usage:
+//   import "string-utils" as str
+//   print(str.repeat("ha", 3))            // "hahaha"
+//   print(str.truncate("hello world", 5)) // "hello..."
+//   print(str.slug("Hello World!"))        // "hello-world"
+//   print(str.word_count("one two three")) // 3
+
+// Repeat a string n times.
+fn repeat(s: String, n: Int) -> String {
+    flux result = ""
+    flux i = 0
+    while i < n {
+        result = result + s
+        i = i + 1
+    }
+    return result
+}
+
+// Truncate a string to max_len characters, appending "..." if truncated.
+fn truncate(s: String, max_len: Int) -> String {
+    if len(s) <= max_len {
+        return s
+    }
+    return s.substring(0, max_len) + "..."
+}
+
+// Pad a string on the left to reach the target length.
+fn pad_left(s: String, target_len: Int, pad_char: String) -> String {
+    flux result = s
+    while len(result) < target_len {
+        result = pad_char + result
+    }
+    return result
+}
+
+// Pad a string on the right to reach the target length.
+fn pad_right(s: String, target_len: Int, pad_char: String) -> String {
+    flux result = s
+    while len(result) < target_len {
+        result = result + pad_char
+    }
+    return result
+}
+
+// Center a string within the given width, padding with pad_char.
+fn center(s: String, width: Int, pad_char: String) -> String {
+    if len(s) >= width {
+        return s
+    }
+    let total_pad = width - len(s)
+    let left_pad = total_pad / 2
+    let right_pad = total_pad - left_pad
+    return repeat(pad_char, left_pad) + s + repeat(pad_char, right_pad)
+}
+
+// Count the number of words in a string (split by whitespace).
+fn word_count(s: String) -> Int {
+    let trimmed = s.trim()
+    if len(trimmed) == 0 {
+        return 0
+    }
+    let parts = trimmed.split(" ")
+    // Filter out empty strings from multiple spaces
+    flux count = 0
+    for part in parts {
+        if len(part.trim()) > 0 {
+            count = count + 1
+        }
+    }
+    return count
+}
+
+// Check if a string contains only digits.
+fn is_numeric(s: String) -> Bool {
+    if len(s) == 0 { return false }
+    let digits = "0123456789"
+    let chars = s.chars()
+    for ch in chars {
+        if !digits.contains(ch) {
+            return false
+        }
+    }
+    return true
+}
+
+// Check if a string contains only letters (a-z, A-Z).
+fn is_alpha(s: String) -> Bool {
+    if len(s) == 0 { return false }
+    let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    let chars = s.chars()
+    for ch in chars {
+        if !letters.contains(ch) {
+            return false
+        }
+    }
+    return true
+}
+
+// Convert a string to a URL-friendly slug.
+// Lowercases, replaces non-alphanumeric with hyphens, collapses multiple hyphens.
+fn slug(s: String) -> String {
+    let lower = s.to_lower()
+    let chars = lower.chars()
+    let allowed = "abcdefghijklmnopqrstuvwxyz0123456789"
+    flux result = ""
+    flux last_was_hyphen = false
+    for ch in chars {
+        if allowed.contains(ch) {
+            result = result + ch
+            last_was_hyphen = false
+        } else {
+            if !last_was_hyphen && len(result) > 0 {
+                result = result + "-"
+                last_was_hyphen = true
+            }
+        }
+    }
+    // Trim trailing hyphen
+    if len(result) > 0 && result.substring(len(result) - 1, len(result)) == "-" {
+        result = result.substring(0, len(result) - 1)
+    }
+    return result
+}
+
+// Reverse a string.
+fn reverse(s: String) -> String {
+    let chars = s.chars()
+    flux result = ""
+    flux i = len(chars) - 1
+    while i >= 0 {
+        result = result + chars[i]
+        i = i - 1
+    }
+    return result
+}
+
+// Count occurrences of a substring within a string.
+fn count_occurrences(haystack: String, needle: String) -> Int {
+    if len(needle) == 0 { return 0 }
+    flux count = 0
+    flux pos = 0
+    let hs_len = len(haystack)
+    let nd_len = len(needle)
+    while pos + nd_len <= hs_len {
+        let segment = haystack.substring(pos, pos + nd_len)
+        if segment == needle {
+            count = count + 1
+            pos = pos + nd_len
+        } else {
+            pos = pos + 1
+        }
+    }
+    return count
+}
+
+// Join an array of strings with a separator.
+fn join(arr: Array, sep: String) -> String {
+    flux result = ""
+    flux i = 0
+    for item in arr {
+        if i > 0 {
+            result = result + sep
+        }
+        result = result + to_string(item)
+        i = i + 1
+    }
+    return result
+}

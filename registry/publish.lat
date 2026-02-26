@@ -1,0 +1,254 @@
+// Lattice Package Registry Publisher
+// Publishes a local package to a Lattice package registry server.
+//
+// Usage:
+//   clat registry/publish.lat <package-dir>
+//   clat registry/publish.lat <package-dir> http://localhost:8080
+//
+// The package directory must contain:
+//   - lattice.toml with [package] name and version
+//   - main.lat (the package source)
+//
+// Environment:
+//   LATTICE_REGISTRY - registry URL (default: http://localhost:8080/v1)
+//
+// Example:
+//   clat registry/publish.lat registry/packages/hello/1.0.0
+
+// ---------------------------------------------------------------------------
+// HTTP Client Helper
+// ---------------------------------------------------------------------------
+
+// Parse an HTTP URL into host, port, and path components.
+fn parse_url(url: String) -> Map {
+    let result = Map::new()
+    result.set("host", "localhost")
+    result.set("port", 8080)
+    result.set("path", "/")
+
+    flux rest = url
+    if url.starts_with("http://") {
+        rest = url.substring(7, len(url))
+    } else if url.starts_with("https://") {
+        rest = url.substring(8, len(url))
+        result.set("port", 443)
+    }
+
+    // Split host from path
+    let slash_idx = rest.index_of("/")
+    flux host_part = rest
+    if slash_idx >= 0 {
+        host_part = rest.substring(0, slash_idx)
+        result.set("path", rest.substring(slash_idx, len(rest)))
+    }
+
+    // Extract port from host if present
+    let colon_idx = host_part.index_of(":")
+    if colon_idx >= 0 {
+        result.set("host", host_part.substring(0, colon_idx))
+        let port_str = host_part.substring(colon_idx + 1, len(host_part))
+        let port_val = try {
+            parse_int(port_str)
+        } catch _e {
+            8080
+        }
+        result.set("port", port_val)
+    } else {
+        result.set("host", host_part)
+    }
+
+    return result
+}
+
+// Send an HTTP POST request and return the raw response.
+fn http_post(host: String, port: Int, path: String, body: String, content_type: String) -> String {
+    let conn = tcp_connect(host, port)
+
+    let request = "POST " + path + " HTTP/1.1\r\n"
+        + "Host: " + host + "\r\n"
+        + "Content-Type: " + content_type + "\r\n"
+        + "Content-Length: " + to_string(len(body)) + "\r\n"
+        + "Connection: close\r\n"
+        + "\r\n"
+        + body
+
+    tcp_write(conn, request)
+
+    // Read the full response
+    flux response = ""
+    loop {
+        let chunk = tcp_read(conn)
+        if len(chunk) == 0 { break }
+        response = response + chunk
+    }
+
+    tcp_close(conn)
+    return response
+}
+
+// Parse the HTTP status code from a raw response.
+fn parse_status(raw: String) -> Int {
+    let lines = raw.split("\r\n")
+    if len(lines) == 0 { return 0 }
+    let parts = lines[0].split(" ")
+    if len(parts) >= 2 {
+        let code = try {
+            parse_int(parts[1])
+        } catch _e {
+            0
+        }
+        return code
+    }
+    return 0
+}
+
+// Parse the body from a raw HTTP response.
+fn parse_body(raw: String) -> String {
+    let idx = raw.index_of("\r\n\r\n")
+    if idx >= 0 {
+        return raw.substring(idx + 4, len(raw))
+    }
+    return ""
+}
+
+// ---------------------------------------------------------------------------
+// TOML Parser (minimal, for reading lattice.toml)
+// ---------------------------------------------------------------------------
+
+// Extract a value for a key from TOML content (simple line-based parser).
+// Handles: key = "value"
+fn toml_get(content: String, key: String) -> String {
+    let lines = content.split("\n")
+    for line in lines {
+        let trimmed = line.trim()
+        if trimmed.starts_with(key) {
+            let eq_pos = trimmed.index_of("=")
+            if eq_pos >= 0 {
+                let raw_val = trimmed.substring(eq_pos + 1, len(trimmed)).trim()
+                // Strip surrounding quotes
+                if len(raw_val) >= 2 && raw_val.starts_with("\"") {
+                    return raw_val.substring(1, len(raw_val) - 1)
+                }
+                return raw_val
+            }
+        }
+    }
+    return ""
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let argv = args()
+
+    if len(argv) < 2 {
+        print("Lattice Package Publisher")
+        print("")
+        print("Usage: clat registry/publish.lat <package-dir> [registry-url]")
+        print("")
+        print("  <package-dir>   Directory containing lattice.toml and main.lat")
+        print("  [registry-url]  Registry base URL (default: http://localhost:8080/v1)")
+        print("                  Can also be set via LATTICE_REGISTRY env var.")
+        print("")
+        print("Example:")
+        print("  clat registry/publish.lat registry/packages/hello/1.0.0")
+        exit(1)
+    }
+
+    let pkg_dir = argv[1]
+
+    // Determine registry URL
+    flux registry_url = "http://localhost:8080/v1"
+    if len(argv) > 2 {
+        registry_url = argv[2]
+    } else {
+        let env_reg = env("LATTICE_REGISTRY")
+        if typeof(env_reg) == "String" && len(env_reg) > 0 {
+            registry_url = env_reg
+        }
+    }
+
+    // Read lattice.toml
+    let toml_path = pkg_dir + "/lattice.toml"
+    if !file_exists(toml_path) {
+        eprint("Error: " + toml_path + " not found\n")
+        eprint("The package directory must contain a lattice.toml file.\n")
+        exit(1)
+    }
+    let toml_content = read_file(toml_path)
+
+    // Extract package metadata
+    let pkg_name = toml_get(toml_content, "name")
+    let pkg_version = toml_get(toml_content, "version")
+
+    if len(pkg_name) == 0 {
+        eprint("Error: lattice.toml is missing 'name' in [package]\n")
+        exit(1)
+    }
+    if len(pkg_version) == 0 {
+        eprint("Error: lattice.toml is missing 'version' in [package]\n")
+        exit(1)
+    }
+
+    // Read main.lat source
+    let main_path = pkg_dir + "/main.lat"
+    if !file_exists(main_path) {
+        eprint("Error: " + main_path + " not found\n")
+        eprint("The package directory must contain a main.lat file.\n")
+        exit(1)
+    }
+    let source = read_file(main_path)
+
+    print("Publishing " + pkg_name + "@" + pkg_version + " to " + registry_url)
+    print("  Source: " + main_path + " (" + to_string(len(source)) + " bytes)")
+
+    // Build the publish payload
+    let payload = Map::new()
+    payload.set("source", source)
+    payload.set("toml", toml_content)
+    let body = json_stringify(payload)
+
+    // Parse registry URL
+    let publish_path = "/v1/packages/" + pkg_name + "/" + pkg_version
+    let url_parts = parse_url(registry_url)
+    let host = url_parts.get("host")
+    let port = url_parts.get("port")
+
+    // Send the POST request
+    print("  POST " + host + ":" + to_string(port) + publish_path)
+
+    let raw_response = try {
+        http_post(host, port, publish_path, body, "application/json")
+    } catch e {
+        eprint("Error: failed to connect to registry at " + registry_url + "\n")
+        eprint("  " + to_string(e) + "\n")
+        eprint("  Is the registry server running?\n")
+        exit(1)
+        ""
+    }
+
+    let status = parse_status(raw_response)
+    let resp_body = parse_body(raw_response)
+
+    if status == 201 {
+        print("")
+        print("Published " + pkg_name + "@" + pkg_version + " successfully!")
+        if len(resp_body) > 0 {
+            print("  Response: " + resp_body)
+        }
+    } else if status == 409 {
+        eprint("Error: version " + pkg_version + " already exists for package " + pkg_name + "\n")
+        if len(resp_body) > 0 {
+            eprint("  " + resp_body + "\n")
+        }
+        exit(1)
+    } else {
+        eprint("Error: publish failed with HTTP " + to_string(status) + "\n")
+        if len(resp_body) > 0 {
+            eprint("  " + resp_body + "\n")
+        }
+        exit(1)
+    }
+}

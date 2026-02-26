@@ -1,0 +1,5 @@
+[package]
+name = "string-utils"
+version = "1.0.0"
+description = "String utility functions for Lattice"
+license = "MIT"

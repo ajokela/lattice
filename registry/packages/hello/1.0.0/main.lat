@@ -1,0 +1,40 @@
+// hello - A simple greeting library for Lattice.
+//
+// Usage:
+//   import "hello" as hello
+//   print(hello.greet("World"))
+//   print(hello.greet_formal("Dr.", "Smith"))
+
+// Return a friendly greeting for the given name.
+fn greet(name: String) -> String {
+    return "Hello, " + name + "!"
+}
+
+// Return a formal greeting with a title.
+fn greet_formal(title: String, surname: String) -> String {
+    return "Good day, " + title + " " + surname + "."
+}
+
+// Return a time-appropriate greeting.
+// hour should be 0-23.
+fn greet_timed(name: String, hour: Int) -> String {
+    flux greeting = "Hello"
+    if hour < 12 {
+        greeting = "Good morning"
+    } else if hour < 17 {
+        greeting = "Good afternoon"
+    } else {
+        greeting = "Good evening"
+    }
+    return greeting + ", " + name + "!"
+}
+
+// Return a greeting in the specified language.
+// Supported: "en", "es", "fr", "de", "ja"
+fn greet_i18n(name: String, lang: String) -> String {
+    if lang == "es" { return "Hola, " + name + "!" }
+    if lang == "fr" { return "Bonjour, " + name + "!" }
+    if lang == "de" { return "Hallo, " + name + "!" }
+    if lang == "ja" { return "Konnichiwa, " + name + "!" }
+    return "Hello, " + name + "!"
+}

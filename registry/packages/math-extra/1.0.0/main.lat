@@ -1,0 +1,127 @@
+// math-extra - Additional math utilities for Lattice.
+//
+// Usage:
+//   import "math-extra" as math
+//   print(math.factorial(5))      // 120
+//   print(math.fibonacci(10))     // 55
+//   print(math.gcd(12, 8))        // 4
+//   print(math.clamp(15, 0, 10))  // 10
+
+// Compute the factorial of n (n!).
+// Returns 1 for n <= 1.
+fn factorial(n: Int) -> Int {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+// Compute the nth Fibonacci number (0-indexed).
+// fib(0) = 0, fib(1) = 1, fib(2) = 1, fib(3) = 2, ...
+fn fibonacci(n: Int) -> Int {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    flux a = 0
+    flux b = 1
+    flux i = 2
+    while i <= n {
+        let temp = a + b
+        a = b
+        b = temp
+        i = i + 1
+    }
+    return b
+}
+
+// Compute the greatest common divisor of a and b using Euclid's algorithm.
+fn gcd(a: Int, b: Int) -> Int {
+    flux x = a
+    flux y = b
+    if x < 0 { x = 0 - x }
+    if y < 0 { y = 0 - y }
+    while y != 0 {
+        let temp = y
+        y = x % y
+        x = temp
+    }
+    return x
+}
+
+// Compute the least common multiple of a and b.
+fn lcm(a: Int, b: Int) -> Int {
+    if a == 0 || b == 0 { return 0 }
+    let g = gcd(a, b)
+    return (a / g) * b
+}
+
+// Clamp a value between min and max.
+fn clamp(value: Int, min_val: Int, max_val: Int) -> Int {
+    if value < min_val { return min_val }
+    if value > max_val { return max_val }
+    return value
+}
+
+// Return the absolute value of n.
+fn abs(n: Int) -> Int {
+    if n < 0 { return 0 - n }
+    return n
+}
+
+// Compute base raised to the power of exp (integer exponentiation).
+fn pow(base: Int, exp: Int) -> Int {
+    if exp < 0 { return 0 }
+    if exp == 0 { return 1 }
+    flux result = 1
+    flux i = 0
+    while i < exp {
+        result = result * base
+        i = i + 1
+    }
+    return result
+}
+
+// Check if a number is prime.
+fn is_prime(n: Int) -> Bool {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 { return false }
+    flux i = 3
+    while i * i <= n {
+        if n % i == 0 { return false }
+        i = i + 2
+    }
+    return true
+}
+
+// Return the sum of all elements in an array.
+fn sum(arr: Array) -> Int {
+    flux total = 0
+    for item in arr {
+        total = total + item
+    }
+    return total
+}
+
+// Return the minimum value in a non-empty array.
+fn min(arr: Array) -> Int {
+    flux result = arr[0]
+    flux i = 1
+    while i < len(arr) {
+        if arr[i] < result {
+            result = arr[i]
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// Return the maximum value in a non-empty array.
+fn max(arr: Array) -> Int {
+    flux result = arr[0]
+    flux i = 1
+    while i < len(arr) {
+        if arr[i] > result {
+            result = arr[i]
+        }
+        i = i + 1
+    }
+    return result
+}
