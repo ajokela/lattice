@@ -10144,22 +10144,22 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
     for (size_t j = 0; j < mod_prog.item_count; j++) {
         if (mod_prog.items[j].tag == ITEM_STRUCT) {
             StructDecl *ptr = &mod_prog.items[j].as.struct_decl;
-            char ns_key[1024];
+            char ns_key[PATH_MAX + 256];
             snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
             lat_map_set(&ev->struct_defs, ns_key, &ptr);
         } else if (mod_prog.items[j].tag == ITEM_FUNCTION) {
             FnDecl *ptr = &mod_prog.items[j].as.fn_decl;
-            char ns_key[1024];
+            char ns_key[PATH_MAX + 256];
             snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
             register_fn_overload_as(&ev->fn_defs, ns_key, ptr);
         } else if (mod_prog.items[j].tag == ITEM_ENUM) {
             EnumDecl *ptr = &mod_prog.items[j].as.enum_decl;
-            char ns_key[1024];
+            char ns_key[PATH_MAX + 256];
             snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
             lat_map_set(&ev->enum_defs, ns_key, &ptr);
         } else if (mod_prog.items[j].tag == ITEM_TRAIT) {
             TraitDecl *ptr = &mod_prog.items[j].as.trait_decl;
-            char ns_key[1024];
+            char ns_key[PATH_MAX + 256];
             snprintf(ns_key, sizeof(ns_key), "%s::%s", resolved, ptr->name);
             lat_map_set(&ev->trait_defs, ns_key, &ptr);
         } else if (mod_prog.items[j].tag == ITEM_IMPL) {
