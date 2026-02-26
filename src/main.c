@@ -11,6 +11,7 @@
 #include "runtime.h"
 #include "package.h"
 #include "formatter.h"
+#include "debugger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,10 +67,12 @@ static bool no_regions_mode = false;
 static bool no_assertions_mode = false;
 static bool tree_walk_mode = false;
 static bool regvm_mode = false;
+static bool debug_mode = false;
+static int debug_break_line = -1; /* Initial breakpoint line (-1 = none) */
 static int saved_argc = 0;
 static char **saved_argv = NULL;
 
-static int run_source(const char *source, bool show_stats, const char *script_dir) {
+static int run_source(const char *source, bool show_stats, const char *script_dir, const char *source_path) {
     /* Lex */
     Lexer lex = lexer_new(source);
     char *lex_err = NULL;
@@ -224,11 +227,37 @@ static int run_source(const char *source, bool show_stats, const char *script_di
 
     StackVM vm;
     stackvm_init(&vm, &rt);
+
+    /* Attach debugger if --debug mode */
+    Debugger *dbg = NULL;
+    if (debug_mode) {
+        dbg = debugger_new();
+        if (dbg) {
+            if (source_path) debugger_load_source(dbg, source_path);
+            if (debug_break_line > 0) {
+                debugger_add_breakpoint(dbg, debug_break_line);
+                /* When a breakpoint is set, start in 'continue' mode */
+                dbg->step_mode = false;
+                dbg->running = true;
+            }
+            vm.debugger = dbg;
+            fprintf(stderr, "Lattice debugger attached.\n");
+            if (dbg->bp_count > 0) {
+                fprintf(stderr, "Breakpoints:");
+                for (size_t i = 0; i < dbg->bp_count; i++) fprintf(stderr, " line %d", dbg->breakpoints_line[i]);
+                fprintf(stderr, "\n");
+            } else {
+                fprintf(stderr, "Stepping from first instruction. Type 'help' for commands.\n");
+            }
+        }
+    }
+
     LatValue result;
     StackVMResult vm_res = stackvm_run(&vm, chunk, &result);
     if (vm_res != STACKVM_OK) {
         fprintf(stderr, "vm error: %s\n", vm.error);
         stackvm_print_stack_trace(&vm);
+        debugger_free(dbg);
         stackvm_free(&vm);
         lat_runtime_free(&rt);
         chunk_free(chunk);
@@ -239,6 +268,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 1;
     }
     value_free(&result);
+    debugger_free(dbg);
     stackvm_free(&vm);
     lat_runtime_free(&rt);
     chunk_free(chunk);
@@ -356,7 +386,7 @@ static int run_file(const char *path, bool show_stats) {
     /* Extract directory of the script for require() resolution */
     char *path_copy = strdup(path);
     char *dir = dirname(path_copy);
-    int result = run_source(source, show_stats, dir);
+    int result = run_source(source, show_stats, dir, path);
     free(path_copy);
     free(source);
     return result;
@@ -1132,7 +1162,16 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;
         else if (strcmp(argv[i], "--tree-walk") == 0) tree_walk_mode = true;
         else if (strcmp(argv[i], "--regvm") == 0) regvm_mode = true;
-        else if (!file) {
+        else if (strcmp(argv[i], "--debug") == 0) debug_mode = true;
+        else if (strcmp(argv[i], "--break") == 0) {
+            if (i + 1 < argc) {
+                debug_break_line = atoi(argv[++i]);
+                debug_mode = true;
+            } else {
+                fprintf(stderr, "error: --break requires a line number\n");
+                return 1;
+            }
+        } else if (!file) {
             file = argv[i];
             /* Remaining args after filename are passed to the script via args() */
             saved_argc = argc - i;

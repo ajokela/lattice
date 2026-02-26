@@ -101,7 +101,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/builtin_methods.c \
        $(SRC_DIR)/match_check.c \
        $(SRC_DIR)/package.c \
-       $(SRC_DIR)/formatter.c
+       $(SRC_DIR)/formatter.c \
+       $(SRC_DIR)/debugger.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
@@ -141,7 +142,8 @@ TEST_SRCS = $(TEST_DIR)/test_main.c \
             $(TEST_DIR)/test_eval.c \
             $(TEST_DIR)/test_stdlib.c \
             $(TEST_DIR)/test_lsp.c \
-            $(TEST_DIR)/test_latc.c
+            $(TEST_DIR)/test_latc.c \
+            $(TEST_DIR)/test_debugger.c
 
 TEST_OBJS   = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/tests/%.o)
 TEST_TARGET = $(BUILD_DIR)/test_runner

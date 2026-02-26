@@ -1,0 +1,11 @@
+let x = 10
+let y = 20
+let sum = x + y
+print(sum)
+
+fn double(n: any) {
+    return n * 2
+}
+
+let result = double(sum)
+print(result)
