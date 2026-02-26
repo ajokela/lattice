@@ -1462,12 +1462,18 @@ static LatValue native_random_bytes(LatValue *args, int ac) {
 /* ── Regex natives ── */
 
 static LatValue native_regex_match(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
-        current_rt->error = strdup("regex_match: expected (pattern: Str, input: Str)");
+    if ((ac != 2 && ac != 3) || args[0].type != VAL_STR || args[1].type != VAL_STR ||
+        (ac == 3 && args[2].type != VAL_STR)) {
+        current_rt->error = strdup("regex_match: expected (pattern: Str, input: Str, flags?: Str)");
         return value_bool(false);
     }
+    int extra_flags = 0;
     char *err = NULL;
-    LatValue r = regex_match(args[0].as.str_val, args[1].as.str_val, &err);
+    if (ac == 3 && parse_regex_flags(args[2].as.str_val, &extra_flags, &err) != 0) {
+        current_rt->error = err;
+        return value_bool(false);
+    }
+    LatValue r = regex_match(args[0].as.str_val, args[1].as.str_val, extra_flags, &err);
     if (err) {
         current_rt->error = err;
         return value_bool(false);
@@ -1475,12 +1481,18 @@ static LatValue native_regex_match(LatValue *args, int ac) {
     return r;
 }
 static LatValue native_regex_find_all(LatValue *args, int ac) {
-    if (ac != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
-        current_rt->error = strdup("regex_find_all: expected (pattern: Str, input: Str)");
+    if ((ac != 2 && ac != 3) || args[0].type != VAL_STR || args[1].type != VAL_STR ||
+        (ac == 3 && args[2].type != VAL_STR)) {
+        current_rt->error = strdup("regex_find_all: expected (pattern: Str, input: Str, flags?: Str)");
         return value_array(NULL, 0);
     }
+    int extra_flags = 0;
     char *err = NULL;
-    LatValue r = regex_find_all(args[0].as.str_val, args[1].as.str_val, &err);
+    if (ac == 3 && parse_regex_flags(args[2].as.str_val, &extra_flags, &err) != 0) {
+        current_rt->error = err;
+        return value_array(NULL, 0);
+    }
+    LatValue r = regex_find_all(args[0].as.str_val, args[1].as.str_val, extra_flags, &err);
     if (err) {
         current_rt->error = err;
         return value_array(NULL, 0);
@@ -1488,9 +1500,18 @@ static LatValue native_regex_find_all(LatValue *args, int ac) {
     return r;
 }
 static LatValue native_regex_replace(LatValue *args, int ac) {
-    if (ac != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR) return value_nil();
+    if ((ac != 3 && ac != 4) || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR ||
+        (ac == 4 && args[3].type != VAL_STR)) {
+        current_rt->error = strdup("regex_replace: expected (pattern: Str, input: Str, replacement: Str, flags?: Str)");
+        return value_nil();
+    }
+    int extra_flags = 0;
     char *err = NULL;
-    char *r = regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, &err);
+    if (ac == 4 && parse_regex_flags(args[3].as.str_val, &extra_flags, &err) != 0) {
+        current_rt->error = err;
+        return value_nil();
+    }
+    char *r = regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, extra_flags, &err);
     if (err) {
         current_rt->error = err;
         return value_nil();
@@ -3989,9 +4010,9 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "random_bytes", native_random_bytes, 1);
 
     /* Regex */
-    rt_register_native(rt, "regex_match", native_regex_match, 2);
-    rt_register_native(rt, "regex_find_all", native_regex_find_all, 2);
-    rt_register_native(rt, "regex_replace", native_regex_replace, 3);
+    rt_register_native(rt, "regex_match", native_regex_match, -1);
+    rt_register_native(rt, "regex_find_all", native_regex_find_all, -1);
+    rt_register_native(rt, "regex_replace", native_regex_replace, -1);
 
     /* Time/DateTime */
     rt_register_native(rt, "time", native_time, 0);

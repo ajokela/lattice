@@ -5,14 +5,37 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Helper: compile a POSIX extended regex.
+/* Parse a flags string into POSIX regex flags.
+ * Returns 0 on success, -1 on error (sets *err). */
+int parse_regex_flags(const char *flags, int *out_flags, char **err) {
+    int f = 0;
+    for (const char *p = flags; *p; p++) {
+        switch (*p) {
+            case 'i': f |= REG_ICASE; break;
+            case 'm': f |= REG_NEWLINE; break;
+            default: {
+                char *msg = NULL;
+                lat_asprintf(&msg, "regex error: invalid flag '%c'", *p);
+                *err = msg;
+                return -1;
+            }
+        }
+    }
+    *out_flags = f;
+    return 0;
+}
+
+/* Helper: compile a POSIX extended regex with additional flags.
  * Returns 0 on success. On failure, sets *err and returns non-zero. */
-static int compile_regex(regex_t *re, const char *pattern, char **err) {
-    int rc = regcomp(re, pattern, REG_EXTENDED);
+static int compile_regex(regex_t *re, const char *pattern, int extra_flags, char **err) {
+    int rc = regcomp(re, pattern, REG_EXTENDED | extra_flags);
     if (rc != 0) {
         size_t needed = regerror(rc, re, NULL, 0);
         char *buf = malloc(needed);
-        if (!buf) { *err = strdup("regex error: out of memory"); return rc; }
+        if (!buf) {
+            *err = strdup("regex error: out of memory");
+            return rc;
+        }
         regerror(rc, re, buf, needed);
         char *msg = NULL;
         lat_asprintf(&msg, "regex error: %s", buf);
@@ -25,11 +48,9 @@ static int compile_regex(regex_t *re, const char *pattern, char **err) {
 
 /* ── regex_match ── */
 
-LatValue regex_match(const char *pattern, const char *str, char **err) {
+LatValue regex_match(const char *pattern, const char *str, int extra_flags, char **err) {
     regex_t re;
-    if (compile_regex(&re, pattern, err) != 0) {
-        return value_unit();
-    }
+    if (compile_regex(&re, pattern, extra_flags, err) != 0) { return value_unit(); }
     int result = regexec(&re, str, 0, NULL, 0);
     regfree(&re);
     return value_bool(result == 0);
@@ -37,17 +58,18 @@ LatValue regex_match(const char *pattern, const char *str, char **err) {
 
 /* ── regex_find_all ── */
 
-LatValue regex_find_all(const char *pattern, const char *str, char **err) {
+LatValue regex_find_all(const char *pattern, const char *str, int extra_flags, char **err) {
     regex_t re;
-    if (compile_regex(&re, pattern, err) != 0) {
-        return value_unit();
-    }
+    if (compile_regex(&re, pattern, extra_flags, err) != 0) { return value_unit(); }
 
     /* Collect matches into a dynamic array */
     size_t cap = 8;
     size_t len = 0;
     LatValue *elems = malloc(cap * sizeof(LatValue));
-    if (!elems) { regfree(&re); return value_array(NULL, 0); }
+    if (!elems) {
+        regfree(&re);
+        return value_array(NULL, 0);
+    }
 
     regmatch_t match;
     const char *cursor = str;
@@ -81,17 +103,19 @@ LatValue regex_find_all(const char *pattern, const char *str, char **err) {
 
 /* ── regex_replace ── */
 
-char *regex_replace(const char *pattern, const char *str, const char *replacement, char **err) {
+char *regex_replace(const char *pattern, const char *str, const char *replacement, int extra_flags, char **err) {
     regex_t re;
-    if (compile_regex(&re, pattern, err) != 0) {
-        return NULL;
-    }
+    if (compile_regex(&re, pattern, extra_flags, err) != 0) { return NULL; }
 
     size_t repl_len = strlen(replacement);
     size_t result_cap = strlen(str) + 64;
     size_t result_len = 0;
     char *result = malloc(result_cap);
-    if (!result) { regfree(&re); *err = strdup("regex replace: out of memory"); return NULL; }
+    if (!result) {
+        regfree(&re);
+        *err = strdup("regex replace: out of memory");
+        return NULL;
+    }
 
     regmatch_t match;
     const char *cursor = str;

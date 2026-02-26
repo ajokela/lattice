@@ -5632,55 +5632,82 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Regex builtins ── */
 
-                /// @builtin regex_match(pattern: String, str: String) -> Bool
+                /// @builtin regex_match(pattern: String, str: String, flags?: String) -> Bool
                 /// @category Regex
                 /// Test if a string matches a regular expression pattern.
+                /// Optional flags: "i" (case-insensitive), "m" (multiline).
                 /// @example regex_match("^[0-9]+$", "123")  // true
+                /// @example regex_match("[a-z]+", "HELLO", "i")  // true
                 if (strcmp(fn_name, "regex_match") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+                    if ((argc != 2 && argc != 3) || args[0].type != VAL_STR || args[1].type != VAL_STR ||
+                        (argc == 3 && args[2].type != VAL_STR)) {
                         for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                         free(args);
-                        return eval_err(strdup("regex_match() expects (String pattern, String str)"));
+                        return eval_err(strdup("regex_match() expects (String pattern, String str, String flags?)"));
                     }
+                    int extra_flags = 0;
                     char *rerr = NULL;
-                    LatValue result = regex_match(args[0].as.str_val, args[1].as.str_val, &rerr);
+                    if (argc == 3 && parse_regex_flags(args[2].as.str_val, &extra_flags, &rerr) != 0) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(rerr);
+                    }
+                    LatValue result = regex_match(args[0].as.str_val, args[1].as.str_val, extra_flags, &rerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (rerr) return eval_err(rerr);
                     return eval_ok(result);
                 }
 
-                /// @builtin regex_find_all(pattern: String, str: String) -> Array
+                /// @builtin regex_find_all(pattern: String, str: String, flags?: String) -> Array
                 /// @category Regex
                 /// Find all matches of a pattern in a string, returning an array.
+                /// Optional flags: "i" (case-insensitive), "m" (multiline).
                 /// @example regex_find_all("[0-9]+", "a1b2c3")  // ["1", "2", "3"]
                 if (strcmp(fn_name, "regex_find_all") == 0) {
-                    if (argc != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR) {
+                    if ((argc != 2 && argc != 3) || args[0].type != VAL_STR || args[1].type != VAL_STR ||
+                        (argc == 3 && args[2].type != VAL_STR)) {
                         for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                         free(args);
-                        return eval_err(strdup("regex_find_all() expects (String pattern, String str)"));
+                        return eval_err(strdup("regex_find_all() expects (String pattern, String str, String flags?)"));
                     }
+                    int extra_flags = 0;
                     char *rerr = NULL;
-                    LatValue result = regex_find_all(args[0].as.str_val, args[1].as.str_val, &rerr);
+                    if (argc == 3 && parse_regex_flags(args[2].as.str_val, &extra_flags, &rerr) != 0) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(rerr);
+                    }
+                    LatValue result = regex_find_all(args[0].as.str_val, args[1].as.str_val, extra_flags, &rerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (rerr) return eval_err(rerr);
                     return eval_ok(result);
                 }
 
-                /// @builtin regex_replace(pattern: String, str: String, replacement: String) -> String
+                /// @builtin regex_replace(pattern: String, str: String, replacement: String, flags?: String) -> String
                 /// @category Regex
                 /// Replace all matches of a pattern in a string.
+                /// Optional flags: "i" (case-insensitive), "m" (multiline).
                 /// @example regex_replace("[0-9]", "a1b2", "X")  // "aXbX"
+                /// @example regex_replace("hello", "HELLO world", "hi", "i")  // "hi world"
                 if (strcmp(fn_name, "regex_replace") == 0) {
-                    if (argc != 3 || args[0].type != VAL_STR || args[1].type != VAL_STR || args[2].type != VAL_STR) {
+                    if ((argc != 3 && argc != 4) || args[0].type != VAL_STR || args[1].type != VAL_STR ||
+                        args[2].type != VAL_STR || (argc == 4 && args[3].type != VAL_STR)) {
                         for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                         free(args);
-                        return eval_err(
-                            strdup("regex_replace() expects (String pattern, String str, String replacement)"));
+                        return eval_err(strdup(
+                            "regex_replace() expects (String pattern, String str, String replacement, String flags?)"));
                     }
+                    int extra_flags = 0;
                     char *rerr = NULL;
-                    char *result = regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, &rerr);
+                    if (argc == 4 && parse_regex_flags(args[3].as.str_val, &extra_flags, &rerr) != 0) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(rerr);
+                    }
+                    char *result =
+                        regex_replace(args[0].as.str_val, args[1].as.str_val, args[2].as.str_val, extra_flags, &rerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (rerr) return eval_err(rerr);
