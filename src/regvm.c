@@ -3797,16 +3797,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         closure.as.closure.body = NULL;
         closure.as.closure.native_fn = fn_proto.as.closure.native_fn;
         closure.as.closure.param_count = fn_proto.as.closure.param_count;
-        /* Copy param_names from prototype */
-        if (fn_proto.as.closure.param_names && fn_proto.as.closure.param_count > 0) {
-            closure.as.closure.param_names = malloc(fn_proto.as.closure.param_count * sizeof(char *));
-            if (!closure.as.closure.param_names) return REGVM_RUNTIME_ERROR;
-            for (size_t pi = 0; pi < fn_proto.as.closure.param_count; pi++)
-                closure.as.closure.param_names[pi] =
-                    fn_proto.as.closure.param_names[pi] ? strdup(fn_proto.as.closure.param_names[pi]) : NULL;
-        } else {
-            closure.as.closure.param_names = NULL;
-        }
+        /* RegVM bytecode closures never own param_names.  The prototype
+         * in the constant pool owns them (freed by regchunk_free).
+         * Keeping param_names NULL on all runtime closures eliminates an
+         * entire class of UAF / double-free bugs. Trade-off: closures
+         * display as <closure||> instead of <closure|param_name|>. */
+        closure.as.closure.param_names = NULL;
         closure.as.closure.default_values = NULL;
         closure.as.closure.has_variadic = fn_proto.as.closure.has_variadic;
         closure.as.closure.captured_env = NULL;

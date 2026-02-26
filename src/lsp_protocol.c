@@ -13,9 +13,7 @@ cJSON *lsp_read_message(FILE *in) {
     while (fgets(header, sizeof(header), in)) {
         if (header[0] == '\r' || header[0] == '\n') break;
 
-        if (strncmp(header, "Content-Length:", 15) == 0) {
-            content_length = atoi(header + 15);
-        }
+        if (strncmp(header, "Content-Length:", 15) == 0) { content_length = atoi(header + 15); }
     }
 
     if (content_length <= 0) return NULL;
@@ -87,7 +85,7 @@ char *lsp_uri_to_path(const char *uri) {
     /* Strip "file://" prefix */
     const char *path_start = uri;
     if (strncmp(uri, "file:///", 8) == 0) {
-        path_start = uri + 7;  /* Keep one leading / */
+        path_start = uri + 7; /* Keep one leading / */
     } else if (strncmp(uri, "file://", 7) == 0) {
         path_start = uri + 7;
     }
@@ -101,7 +99,7 @@ char *lsp_uri_to_path(const char *uri) {
     while (*p) {
         if (*p == '%' && p[1] && p[2]) {
             /* Decode percent-encoded byte */
-            char hex[3] = { p[1], p[2], '\0' };
+            char hex[3] = {p[1], p[2], '\0'};
             *out++ = (char)strtol(hex, NULL, 16);
             p += 3;
         } else {
@@ -131,12 +129,11 @@ char *lsp_path_to_uri(const char *path) {
     while (*p) {
         unsigned char c = (unsigned char)*p;
         /* Unreserved characters: A-Z a-z 0-9 - . _ ~ / : */
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' ||
             c == '_' || c == '~' || c == '/' || c == ':') {
             *out++ = (char)c;
         } else {
-            out += sprintf(out, "%%%02X", c);
+            out += snprintf(out, 4, "%%%02X", c);
         }
         p++;
     }
