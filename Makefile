@@ -141,13 +141,17 @@ WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinc
               -sMODULARIZE=1 -sEXPORT_NAME=createLattice \
               -sALLOW_MEMORY_GROWTH=1
 
-# Fuzz harness
+# Fuzz harnesses
 FUZZ_DIR    = fuzz
 FUZZ_SRC    = $(FUZZ_DIR)/fuzz_eval.c
 FUZZ_OBJ    = $(BUILD_DIR)/fuzz/fuzz_eval.o
 FUZZ_TARGET = $(BUILD_DIR)/fuzz_eval
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze fuzz fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite lsp deploy-coverage
+FUZZ_VM_SRC    = $(FUZZ_DIR)/fuzz_vm.c
+FUZZ_VM_OBJ    = $(BUILD_DIR)/fuzz/fuzz_vm.o
+FUZZ_VM_TARGET = $(BUILD_DIR)/fuzz_vm
+
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze fuzz fuzz-vm fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -314,6 +318,16 @@ fuzz: clean $(LIB_OBJS) $(FUZZ_OBJ)
 	@echo "\n==> Fuzzer built: $(FUZZ_TARGET)"
 	@echo "    Run:  $(FUZZ_TARGET) fuzz/corpus/ -max_len=4096"
 	@echo "    Seed: cp examples/*.lat benchmarks/*.lat fuzz/corpus/"
+
+fuzz-vm: CC = $(FUZZ_CC)
+fuzz-vm: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-vm: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-vm: clean $(LIB_OBJS) $(FUZZ_VM_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_VM_TARGET) $(LIB_OBJS) $(FUZZ_VM_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus
+	@echo "\n==> VM fuzzer built: $(FUZZ_VM_TARGET)"
+	@echo "    Run:  $(FUZZ_VM_TARGET) fuzz/corpus/ -max_len=4096"
+	@echo "    Seed: make fuzz-seed"
 
 FUZZ_EXCLUDE = http_server http_client https_client tls_client orm_demo
 fuzz-seed:
