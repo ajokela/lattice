@@ -1,0 +1,1964 @@
+% Formal Operational Semantics and Typing Rules for the Lattice Phase System
+% Suitable for inclusion in a research paper or technical report.
+%
+% Compile with: pdflatex lattice_formal_semantics.tex
+%
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathpartir}
+\usepackage{stmaryrd}        % \llbracket, \rrbracket
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{enumitem}
+% Lightning bolt for errors: use textcomp dagger if marvosym unavailable
+\newcommand{\errormark}{\,\text{\textdagger}}
+
+% ── Theorem environments ──
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+% ── Notation macros ──
+\newcommand{\kw}[1]{\mathbf{#1}}           % keyword
+\newcommand{\flx}{\kw{flux}}
+\newcommand{\fixkw}{\kw{fix}}
+\newcommand{\letkw}{\kw{let}}
+\newcommand{\freezekw}{\kw{freeze}}
+\newcommand{\thawkw}{\kw{thaw}}
+\newcommand{\clonekw}{\kw{clone}}
+\newcommand{\forgekw}{\kw{forge}}
+\newcommand{\returnkw}{\kw{return}}
+\newcommand{\spawnkw}{\kw{spawn}}
+
+% Phase tags
+\newcommand{\fluid}{\mathsf{fluid}}
+\newcommand{\crystal}{\mathsf{crystal}}
+\newcommand{\unphased}{\bot}
+
+% Phase set
+\newcommand{\Phase}{\mathsf{Phase}}
+
+% Semantic domains
+\newcommand{\Val}{\mathsf{Val}}
+\newcommand{\TVal}{\mathsf{TVal}}        % tagged value
+\newcommand{\Env}{\mathsf{Env}}
+\newcommand{\Store}{\mathsf{Store}}
+\newcommand{\Loc}{\mathsf{Loc}}
+\newcommand{\Region}{\mathsf{Region}}
+\newcommand{\RegId}{\mathsf{RId}}
+\newcommand{\FHeap}{\mathsf{FHeap}}
+\newcommand{\RStore}{\mathsf{RStore}}
+\newcommand{\Arena}{\mathsf{Arena}}
+\newcommand{\Page}{\mathsf{Page}}
+\newcommand{\Expr}{\mathsf{Expr}}
+\newcommand{\Stmt}{\mathsf{Stmt}}
+\newcommand{\Decl}{\mathsf{Decl}}
+\newcommand{\Var}{\mathsf{Var}}
+
+% Tagged value notation: v^σ
+\newcommand{\tval}[2]{#1^{#2}}
+
+% Deep clone
+\newcommand{\dc}[1]{\mathsf{deepclone}(#1)}
+
+% Judgment forms
+\newcommand{\phchk}[2]{#1 \vdash #2\ \mathbf{ok}}
+\newcommand{\phexpr}[3]{#1 \vdash #2 : #3}
+
+% Store operations
+\newcommand{\dom}{\mathrm{dom}}
+\newcommand{\migrate}{\rightsquigarrow}
+
+% Evaluation
+\newcommand{\bigeval}[5]{\langle #1, #2 \rangle \Downarrow_{#3} \langle #4, #5 \rangle}
+\newcommand{\evstmt}[4]{\langle #1, #2 \rangle \Downarrow \langle #3, #4 \rangle}
+
+% ── Document ──
+\title{Formal Semantics of the Lattice Phase System}
+\author{Alex Jokela\\{\small\texttt{alex.c.jokela@gmail.com}}}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+We present formal operational semantics and static phase-checking rules for the
+\emph{phase system} of the Lattice programming language.  Lattice associates
+every runtime value with a \emph{phase tag}---either $\fluid$ (mutable) or
+$\crystal$ (immutable)---and mediates transitions between phases through
+explicit $\freezekw$, $\thawkw$, and $\clonekw$ operations.  The phase system
+is supported by a \emph{dual-heap memory architecture}: a garbage-collected
+fluid heap for mutable data and an arena-based region store for frozen
+(crystal) data.  We formalize the abstract syntax, a big-step operational
+semantics with store-passing, a static phase-checking judgment, and the memory
+model.  We prove six key soundness properties: phase monotonicity, value
+isolation, consuming freeze semantics, forge soundness, heap separation,
+and thaw independence.
+\end{abstract}
+
+%% ════════════════════════════════════════════════════════════════════
+\section{Phase Tags and Semantic Domains}
+\label{sec:domains}
+
+\begin{definition}[Phase Tags]
+The set of \emph{phase tags} is:
+\[
+  \sigma \in \Phase \triangleq \{ \fluid,\; \crystal,\; \unphased \}
+\]
+where $\fluid$ denotes mutable data, $\crystal$ denotes deeply immutable
+data, and $\unphased$ ($\bot$) denotes data whose phase has not been
+explicitly specified.
+\end{definition}
+
+\begin{definition}[Tagged Values]
+A \emph{tagged value} is a pair $\tval{v}{\sigma}$ where $v$ is a raw value
+and $\sigma \in \Phase$ is its phase tag.  The raw value domain is:
+\[
+  v \in \Val ::= n \mid r \mid b \mid s \mid [v_1, \ldots, v_k]
+    \mid S\{f_1\!:\!v_1, \ldots, f_k\!:\!v_k\}
+    \mid \langle \bar{x}, e, \rho \rangle
+    \mid ()
+    \mid \{s_1\!:\!v_1, \ldots, s_k\!:\!v_k\}
+\]
+where $n \in \mathbb{Z}$, $r \in \mathbb{R}$, $b \in \mathbb{B}$,
+$s \in \mathsf{String}$, and $\langle \bar{x}, e, \rho \rangle$ is a closure
+with parameters $\bar{x}$, body $e$, and captured environment $\rho$.
+\end{definition}
+
+\begin{definition}[Environments and Stores]
+An \emph{environment} $\rho : \Var \rightharpoonup \TVal$ maps variable names
+to tagged values.  We write $\rho[x \mapsto \tval{v}{\sigma}]$ for extension
+and $\rho \setminus x$ for removal.  Variable lookup produces a \emph{deep clone}:
+\[
+  \rho(x) = \dc{\rho_{\mathrm{raw}}(x)}
+\]
+This ensures \emph{value isolation}: the caller receives an independent copy,
+and mutations to the copy do not affect the stored original.
+\end{definition}
+
+\begin{definition}[Dual-Heap Store]
+The \emph{store} $\mu$ is a disjoint union of two sub-stores:
+\[
+  \mu = (\mathcal{F}, \mathcal{R})
+  \qquad\text{where}\qquad
+  \mathcal{F} \in \FHeap
+  \qquad\text{and}\qquad
+  \mathcal{R} \in \RStore = \RegId \rightharpoonup \Region
+\]
+\begin{itemize}[nosep]
+  \item $\mathcal{F}$ (the \emph{fluid heap}) is a set of tracked allocations
+        managed by mark-sweep garbage collection.  All $\fluid$- and
+        $\unphased$-tagged values reside here.
+  \item $\mathcal{R}$ (the \emph{region store}) maps region identifiers to
+        arena-allocated regions.  Each region $R$ is a sequence of pages
+        with bump-pointer allocation.  All $\crystal$-tagged values reside in
+        exactly one region.
+\end{itemize}
+\end{definition}
+
+%% ════════════════════════════════════════════════════════════════════
+\section{Abstract Syntax}
+\label{sec:syntax}
+
+\[
+\begin{array}{rcll}
+  d \in \Decl &::=& \flx\; x = e
+                    \mid \fixkw\; x = e
+                    \mid \letkw\; x = e
+              & \text{(declarations)} \\[4pt]
+  e \in \Expr &::=& x \mid c \mid e_1 \oplus e_2
+                    \mid [e_1, \ldots, e_k]
+                    \mid S\{f_1\!:\!e_1, \ldots\}
+              & \text{(base expressions)} \\
+              &\mid& |x_1, \ldots, x_k|\; \{\ \bar{s}\ \}
+              & \text{(closures)} \\
+              &\mid& e.f \mid e[e'] \mid e(e_1, \ldots, e_k)
+              & \text{(access, index, call)} \\
+              &\mid& \freezekw(e) \mid \thawkw(e) \mid \clonekw(e)
+              & \text{(phase operations)} \\
+              &\mid& \forgekw\;\{\ \bar{s}\ \}
+              & \text{(forge block)} \\
+              &\mid& \kw{if}\; e\; \{\ \bar{s}\ \}\; [\kw{else}\; \{\ \bar{s}\ \}]
+              & \text{(conditional)} \\[4pt]
+  s \in \Stmt &::=& d \mid x = e \mid e \mid \returnkw\; e
+              & \text{(statements)} \\
+              &\mid& \kw{for}\; x\; \kw{in}\; e\; \{\ \bar{s}\ \}
+                    \mid \kw{while}\; e\; \{\ \bar{s}\ \}
+              & \text{(loops)} \\
+\end{array}
+\]
+
+\medskip
+\noindent
+Lattice programs operate in one of two \emph{modes}:
+$\mathcal{M} \in \{ \mathsf{casual}, \mathsf{strict} \}$.
+The mode affects both the static checking rules and the runtime behavior
+of $\freezekw$.
+
+%% ════════════════════════════════════════════════════════════════════
+\section{Static Phase Checking}
+\label{sec:static}
+
+The static phase checker operates on the abstract syntax tree \emph{before}
+evaluation.  It maintains a \emph{phase context} $\Gamma : \Var
+\rightharpoonup \Phase$ mapping variable names to their declared phases, and
+emits errors for phase violations.
+
+\subsection{Phase-Checking Judgment for Expressions}
+
+The judgment $\phexpr{\Gamma}{e}{\sigma}$ means ``under context $\Gamma$,
+expression $e$ has inferred phase $\sigma$.''
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{PC-Lit}]
+    {c \text{ is a literal}}
+    {\phexpr{\Gamma}{c}{\unphased}}
+
+  \inferrule*[lab=\textsc{PC-Var}]
+    {\Gamma(x) = \sigma}
+    {\phexpr{\Gamma}{x}{\sigma}}
+
+  \inferrule*[lab=\textsc{PC-BinOp}]
+    {\phexpr{\Gamma}{e_1}{\sigma_1} \\
+     \phexpr{\Gamma}{e_2}{\sigma_2}}
+    {\phexpr{\Gamma}{e_1 \oplus e_2}{\unphased}}
+
+  \inferrule*[lab=\textsc{PC-Freeze}]
+    {\phexpr{\Gamma}{e}{\sigma} \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \sigma \neq \crystal}
+    {\phexpr{\Gamma}{\freezekw(e)}{\crystal}}
+
+  \inferrule*[lab=\textsc{PC-Thaw}]
+    {\phexpr{\Gamma}{e}{\sigma} \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \sigma \neq \fluid}
+    {\phexpr{\Gamma}{\thawkw(e)}{\fluid}}
+
+  \inferrule*[lab=\textsc{PC-Clone}]
+    {\phexpr{\Gamma}{e}{\sigma}}
+    {\phexpr{\Gamma}{\clonekw(e)}{\sigma}}
+
+  \inferrule*[lab=\textsc{PC-Forge}]
+    {\Gamma' = \Gamma \\
+     \forall s_i \in \bar{s}.\; \Gamma' \vdash s_i\ \mathbf{ok}}
+    {\phexpr{\Gamma}{\forgekw\;\{\ \bar{s}\ \}}{\crystal}}
+
+  \inferrule*[lab=\textsc{PC-FieldAcc}]
+    {\phexpr{\Gamma}{e}{\sigma} \\
+     \sigma' = \sigma \sqcup_{\crystal} \sigma
+     \quad\text{(if } \sigma = \crystal \text{ then } \sigma' = \crystal \text{, else } \sigma' = \sigma\text{)}}
+    {\phexpr{\Gamma}{e.f}{\sigma'}}
+
+  \inferrule*[lab=\textsc{PC-Closure}]
+    { }
+    {\phexpr{\Gamma}{|\bar{x}|\;\{\ \bar{s}\ \}}{\unphased}}
+\end{mathpar}
+
+\subsection{Phase-Checking Judgment for Statements}
+
+The judgment $\phchk{\Gamma}{s}$ means ``statement $s$ is well-phased under
+$\Gamma$,'' and may extend $\Gamma$ with new bindings.
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{PC-Flux}]
+    {\phexpr{\Gamma}{e}{\sigma_e} \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \sigma_e \neq \crystal}
+    {\phchk{\Gamma}{\flx\; x = e} \\
+     \Gamma' = \Gamma[x \mapsto \fluid]}
+
+  \inferrule*[lab=\textsc{PC-Fix}]
+    {\phexpr{\Gamma}{e}{\sigma_e}}
+    {\phchk{\Gamma}{\fixkw\; x = e} \\
+     \Gamma' = \Gamma[x \mapsto \crystal]}
+
+  \inferrule*[lab=\textsc{PC-Let-Casual}]
+    {\mathcal{M} = \mathsf{casual} \\
+     \phexpr{\Gamma}{e}{\sigma_e}}
+    {\phchk{\Gamma}{\letkw\; x = e} \\
+     \Gamma' = \Gamma[x \mapsto \sigma_e]}
+
+  \inferrule*[lab=\textsc{PC-Let-Strict}]
+    {\mathcal{M} = \mathsf{strict}}
+    {\phchk{\Gamma}{\letkw\; x = e}\errormark \quad
+     \text{(error: use $\flx$ or $\fixkw$)}}
+
+  \inferrule*[lab=\textsc{PC-Assign}]
+    {\phexpr{\Gamma}{e}{\sigma_e} \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \Gamma(x) \neq \crystal}
+    {\phchk{\Gamma}{x = e}}
+
+  \inferrule*[lab=\textsc{PC-Spawn-Strict}]
+    {\mathcal{M} = \mathsf{strict} \\
+     x \in \mathrm{FV}(\bar{s}) \\
+     \Gamma(x) = \fluid}
+    {\phchk{\Gamma}{\spawnkw\;\{\ \bar{s}\ \}}\errormark \quad
+     \text{(error: fluid across thread boundary)}}
+\end{mathpar}
+
+\noindent
+The \textsc{PC-Spawn-Strict} rule prevents fluid (mutable) bindings from
+being captured across thread boundaries, enforcing that shared data must
+be crystal (immutable).
+
+%% ════════════════════════════════════════════════════════════════════
+\section{Big-Step Operational Semantics}
+\label{sec:operational}
+
+We define a big-step (natural) semantics with store-passing.  Configurations
+have the form $\langle \rho, \mu, e \rangle$ where $\rho$ is the environment,
+$\mu = (\mathcal{F}, \mathcal{R})$ is the dual-heap store, and $e$ is the
+expression to evaluate.  Evaluation is written:
+\[
+  \langle \rho, \mu, e \rangle \Downarrow \langle \mu', \tval{v}{\sigma} \rangle
+\]
+We omit the mode subscript when the rule applies uniformly to both modes.
+
+\subsection{Auxiliary Operations}
+
+\begin{definition}[Deep Clone]
+$\dc{\tval{v}{\sigma}}$ produces a structurally identical value
+$\tval{v'}{\sigma}$ where $v'$ shares no mutable state with $v$.  On compound
+values (arrays, structs, maps, closures), the operation recurses into all
+sub-values.  Formally:
+\begin{align*}
+  \dc{\tval{n}{\sigma}} &= \tval{n}{\sigma}
+    && \text{(integers, floats, bools: identity)} \\
+  \dc{\tval{s}{\sigma}} &= \tval{s'}{\sigma}
+    && \text{where } s' \text{ is a fresh copy of string } s \\
+  \dc{\tval{[v_1, \ldots, v_k]}{\sigma}} &= \tval{[\dc{v_1}, \ldots, \dc{v_k}]}{\sigma} \\
+  \dc{\tval{\langle \bar{x}, e, \rho \rangle}{\sigma}}
+    &= \tval{\langle \bar{x}, e, \dc{\rho} \rangle}{\sigma}
+\end{align*}
+\end{definition}
+
+\begin{definition}[Set Phase Recursively]
+$\mathsf{setphase}(\tval{v}{\sigma}, \sigma')$ produces $\tval{v}{\sigma'}$
+with all sub-values also set to phase $\sigma'$.  For compound values, the
+operation recurses into all fields, elements, and map entries.
+\end{definition}
+
+\begin{definition}[Freeze-to-Region]
+The operation $\mathsf{freeze\_region}(\tval{v}{\crystal}, \mathcal{R})$
+performs:
+\begin{enumerate}[nosep]
+  \item Allocate a fresh region $R$ with identifier $r$ in $\mathcal{R}$.
+  \item Deep-clone $v$ into $R$'s arena, producing $v'$ with all pointers
+        residing in $R$'s arena pages.
+  \item Tag $v'$ and all sub-values with region identifier $r$.
+  \item Deallocate the original fluid-heap pointers of $v$.
+  \item Return $(\tval{v'}{\crystal}, \mathcal{R}[r \mapsto R])$.
+\end{enumerate}
+\end{definition}
+
+\subsection{Expression Evaluation Rules}
+
+\subsubsection{Variables and Literals}
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Lit}]
+    {c \text{ is a literal of type } \tau}
+    {\langle \rho, \mu, c \rangle \Downarrow
+     \langle \mu, \tval{c}{\unphased} \rangle}
+
+  \inferrule*[lab=\textsc{E-Var}]
+    {\rho_{\mathrm{raw}}(x) = \tval{v}{\sigma} \\
+     \tval{v'}{\sigma} = \dc{\tval{v}{\sigma}}}
+    {\langle \rho, \mu, x \rangle \Downarrow
+     \langle \mu, \tval{v'}{\sigma} \rangle}
+\end{mathpar}
+
+\noindent
+Note that \textsc{E-Var} produces a \emph{deep clone} of the stored value.
+This is the fundamental isolation property of Lattice: every variable read
+yields an independent copy, ensuring that no aliasing exists between the
+caller's copy and the environment's copy.
+
+\subsubsection{Phase Transition: Freeze}
+
+\paragraph{Strict mode (consuming freeze on identifiers).}
+When $\mathcal{M} = \mathsf{strict}$ and $\freezekw$ is applied to a
+variable name $x$, the binding is \emph{consumed}---removed from the
+environment:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Freeze-Strict}]
+    {\mathcal{M} = \mathsf{strict} \\
+     \rho_{\mathrm{raw}}(x) = \tval{v}{\sigma} \\
+     \tval{v'}{\crystal} = \mathsf{setphase}(\tval{v}{\sigma}, \crystal) \\
+     (\tval{v''}{\crystal}, \mathcal{R}') = \mathsf{freeze\_region}(\tval{v'}{\crystal}, \mathcal{R})}
+    {\langle \rho, (\mathcal{F}, \mathcal{R}), \freezekw(x) \rangle \Downarrow
+     \langle \rho \setminus x, (\mathcal{F}, \mathcal{R}'), \tval{v''}{\crystal} \rangle}
+\end{mathpar}
+
+\paragraph{Casual mode (in-place freeze on identifiers).}
+In casual mode, freezing a variable updates it in place and returns a
+deep clone of the frozen value:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Freeze-Casual}]
+    {\mathcal{M} = \mathsf{casual} \\
+     \rho_{\mathrm{raw}}(x) = \tval{v}{\sigma} \\
+     \tval{v'}{\crystal} = \mathsf{setphase}(\tval{v}{\sigma}, \crystal) \\
+     (\tval{v''}{\crystal}, \mathcal{R}') = \mathsf{freeze\_region}(\tval{v'}{\crystal}, \mathcal{R}) \\
+     \rho' = \rho[x \mapsto \tval{v''}{\crystal}]}
+    {\langle \rho, (\mathcal{F}, \mathcal{R}), \freezekw(x) \rangle \Downarrow
+     \langle \rho', (\mathcal{F}, \mathcal{R}'), \dc{\tval{v''}{\crystal}} \rangle}
+\end{mathpar}
+
+\paragraph{Freeze on arbitrary expressions.}
+When the operand is not a bare identifier, it is evaluated first:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Freeze-Expr}]
+    {\langle \rho, \mu, e \rangle \Downarrow
+     \langle \mu_1, \tval{v}{\sigma} \rangle \\
+     \tval{v'}{\crystal} = \mathsf{setphase}(\tval{v}{\sigma}, \crystal) \\
+     (\tval{v''}{\crystal}, \mathcal{R}') = \mathsf{freeze\_region}(\tval{v'}{\crystal}, \mathcal{R}_1)}
+    {\langle \rho, \mu, \freezekw(e) \rangle \Downarrow
+     \langle (\mathcal{F}_1, \mathcal{R}'), \tval{v''}{\crystal} \rangle}
+\end{mathpar}
+
+\subsubsection{Phase Transition: Thaw}
+
+Thaw deep-clones a crystal value and sets the clone's phase to $\fluid$.
+When applied to a variable, the binding is updated in place:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Thaw-Var}]
+    {\rho_{\mathrm{raw}}(x) = \tval{v}{\sigma} \\
+     \tval{v'}{\fluid} = \dc{\tval{v}{\sigma}}[\sigma := \fluid] \\
+     \rho' = \rho[x \mapsto \tval{v'}{\fluid}]}
+    {\langle \rho, \mu, \thawkw(x) \rangle \Downarrow
+     \langle \rho', \mu, \dc{\tval{v'}{\fluid}} \rangle}
+
+  \inferrule*[lab=\textsc{E-Thaw-Expr}]
+    {\langle \rho, \mu, e \rangle \Downarrow
+     \langle \mu', \tval{v}{\sigma} \rangle \\
+     \tval{v'}{\fluid} = \dc{\tval{v}{\sigma}}[\sigma := \fluid]}
+    {\langle \rho, \mu, \thawkw(e) \rangle \Downarrow
+     \langle \mu', \tval{v'}{\fluid} \rangle}
+\end{mathpar}
+
+\noindent
+The notation $\dc{\tval{v}{\sigma}}[\sigma := \fluid]$ denotes deep-cloning
+followed by recursively setting the phase to $\fluid$ on the clone, which
+matches the implementation where \texttt{value\_thaw} calls
+\texttt{value\_deep\_clone} followed by \texttt{set\_phase\_recursive}.
+
+\subsubsection{Clone}
+
+Clone produces a deep copy preserving the original phase:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Clone}]
+    {\langle \rho, \mu, e \rangle \Downarrow
+     \langle \mu', \tval{v}{\sigma} \rangle \\
+     \tval{v'}{\sigma} = \dc{\tval{v}{\sigma}}}
+    {\langle \rho, \mu, \clonekw(e) \rangle \Downarrow
+     \langle \mu', \tval{v'}{\sigma} \rangle}
+\end{mathpar}
+
+\subsubsection{Forge Blocks}
+
+A $\forgekw$ block evaluates its body in a fresh scope and automatically
+freezes the result:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Forge}]
+    {\rho' = \rho \oplus \{\} \\
+     \langle \rho', \mu, \bar{s} \rangle \Downarrow_{\mathit{block}}
+     \langle \mu', \tval{v}{\sigma} \rangle \\
+     \tval{v'}{\crystal} = \mathsf{setphase}(\tval{v}{\sigma}, \crystal) \\
+     (\tval{v''}{\crystal}, \mathcal{R}') = \mathsf{freeze\_region}(\tval{v'}{\crystal}, \mathcal{R}')}
+    {\langle \rho, \mu, \forgekw\;\{\ \bar{s}\ \} \rangle \Downarrow
+     \langle (\mathcal{F}', \mathcal{R}'), \tval{v''}{\crystal} \rangle}
+\end{mathpar}
+
+\noindent
+Here $\rho \oplus \{\}$ denotes pushing a fresh scope frame.  The block is
+evaluated; its result (whether from the last expression or an early
+$\returnkw$) is frozen and migrated to a crystal region.  Forge blocks are
+\emph{compositional factories}: they guarantee their output is always
+$\crystal$.
+
+\subsection{Statement Evaluation Rules}
+
+\subsubsection{Binding Declarations}
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Flux}]
+    {\langle \rho, \mu, e \rangle \Downarrow
+     \langle \mu', \tval{v}{\sigma} \rangle \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \sigma \neq \crystal}
+    {\langle \rho, \mu, \flx\; x = e \rangle \Downarrow
+     \langle \rho[x \mapsto \tval{v}{\fluid}], \mu', () \rangle}
+
+  \inferrule*[lab=\textsc{E-Fix}]
+    {\langle \rho, \mu, e \rangle \Downarrow
+     \langle \mu', \tval{v}{\sigma} \rangle \\
+     \tval{v'}{\crystal} = \mathsf{setphase}(\tval{v}{\sigma}, \crystal) \\
+     (\tval{v''}{\crystal}, \mathcal{R}') = \mathsf{freeze\_region}(\tval{v'}{\crystal}, \mathcal{R}')}
+    {\langle \rho, \mu, \fixkw\; x = e \rangle \Downarrow
+     \langle \rho[x \mapsto \tval{v''}{\crystal}], (\mathcal{F}', \mathcal{R}'), () \rangle}
+
+  \inferrule*[lab=\textsc{E-Let-Casual}]
+    {\mathcal{M} = \mathsf{casual} \\
+     \langle \rho, \mu, e \rangle \Downarrow
+     \langle \mu', \tval{v}{\sigma} \rangle}
+    {\langle \rho, \mu, \letkw\; x = e \rangle \Downarrow
+     \langle \rho[x \mapsto \tval{v}{\sigma}], \mu', () \rangle}
+
+  \inferrule*[lab=\textsc{E-Let-Strict}]
+    {\mathcal{M} = \mathsf{strict}}
+    {\langle \rho, \mu, \letkw\; x = e \rangle \Downarrow
+     \mathsf{error}(\text{``use flux or fix''})}
+\end{mathpar}
+
+\subsubsection{Assignment}
+
+Assignment operates directly on the store through \emph{lvalue resolution},
+which returns a mutable pointer into the environment rather than a deep clone:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Assign}]
+    {\langle \rho, \mu, e \rangle \Downarrow
+     \langle \mu', \tval{v}{\sigma} \rangle \\
+     \rho_{\mathrm{raw}}(x) = \tval{v_0}{\sigma_0} \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \sigma_0 \neq \crystal}
+    {\langle \rho, \mu, x = e \rangle \Downarrow
+     \langle \rho[x \mapsto \tval{v}{\sigma}], \mu', () \rangle}
+
+  \inferrule*[lab=\textsc{E-Assign-Crystal-Err}]
+    {\mathcal{M} = \mathsf{strict} \\
+     \rho_{\mathrm{raw}}(x) = \tval{v_0}{\crystal}}
+    {\langle \rho, \mu, x = e \rangle \Downarrow
+     \mathsf{error}(\text{``cannot assign to crystal binding''})}
+\end{mathpar}
+
+\subsubsection{Lvalue Resolution}
+
+\emph{Lvalue resolution} $\mathsf{resolve}(\rho, l)$ walks chains of field
+accesses and index expressions to obtain a \emph{direct mutable pointer}
+into the store.  This contrasts with variable \emph{reads}, which always
+deep-clone.
+
+\begin{definition}[Lvalue Resolution]
+\begin{align*}
+  \mathsf{resolve}(\rho, x)   &= \rho_{\mathrm{ptr}}(x)
+    && \text{(direct pointer, no clone)} \\
+  \mathsf{resolve}(\rho, l.f) &= (\mathsf{resolve}(\rho, l)).\mathit{field}(f)
+    && \text{(struct field pointer)} \\
+  \mathsf{resolve}(\rho, l[e]) &= (\mathsf{resolve}(\rho, l)).\mathit{index}(\llbracket e \rrbracket)
+    && \text{(array/map element pointer)}
+\end{align*}
+This is the mechanism by which array element mutation (e.g., \texttt{a[i] = v})
+and struct field mutation operate \emph{in-place} without cloning.
+\end{definition}
+
+%% ════════════════════════════════════════════════════════════════════
+\section{Memory Model}
+\label{sec:memory}
+
+The Lattice dual-heap memory model separates mutable and immutable data
+into distinct address spaces with different management strategies.
+
+\subsection{Fluid Heap}
+
+The fluid heap $\mathcal{F}$ is a linked list of tracked allocations:
+\[
+  \mathcal{F} = \{ (p_i, n_i, m_i) \}_{i \in I}
+\]
+where $p_i$ is a pointer, $n_i$ is the allocation size, and $m_i \in
+\{0, 1\}$ is the GC mark bit.  Allocation is $O(1)$ (prepend to the list).
+The garbage collector uses a three-phase mark-sweep protocol:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Unmark}: Set all $m_i := 0$.
+  \item \textbf{Mark}: Traverse all reachable values from root environments
+        (including the current environment, saved caller environments for
+        active closures, and a shadow stack for C-stack temporaries).
+        For each reachable fluid pointer, set $m_i := 1$.
+        For each reachable crystal value with a valid region ID, record the
+        region ID in a reachable set.
+  \item \textbf{Sweep}: Free all allocations with $m_i = 0$.
+        Concurrently, pass the reachable region set to region collection.
+\end{enumerate}
+
+\noindent
+Crystal values are \emph{never} swept by the fluid collector.  If a value
+has $\sigma = \crystal$ and a valid region ID $r$, the mark phase merely
+records $r$ as reachable and returns immediately, ensuring no crystal
+pointer is erroneously freed.
+
+\subsection{Region Store and Arena Allocation}
+
+\begin{definition}[Crystal Region]
+A crystal region $R = (r, \varepsilon, P, n)$ consists of:
+\begin{itemize}[nosep]
+  \item A unique region identifier $r \in \RegId = \mathbb{N}$.
+  \item An epoch $\varepsilon \in \mathbb{N}$ (the epoch at creation time).
+  \item A linked list of arena pages $P = [P_1, P_2, \ldots]$, each of size
+        $|P_i| = 4096$ bytes (or larger for oversized allocations).
+  \item Total bytes used $n$.
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Arena Allocation]
+Given a region $R$ with head page $P_1$:
+\[
+  \mathsf{arena\_alloc}(R, k) =
+    \begin{cases}
+      P_1.\mathit{data} + P_1.\mathit{used}
+        & \text{if } P_1.\mathit{used} + \lceil k \rceil_8 \leq P_1.\mathit{cap} \\
+      P'.\mathit{data}
+        & \text{otherwise, where } P' \text{ is a fresh page prepended to } R
+    \end{cases}
+\]
+where $\lceil k \rceil_8$ denotes 8-byte alignment.  Arena allocation is
+$O(1)$ amortized (bump-pointer within a page, $O(1)$ page allocation).
+\end{definition}
+
+\begin{definition}[Region Collection]
+Given the set of reachable region IDs $\mathcal{S} \subseteq \RegId$
+collected during the mark phase:
+\[
+  \mathsf{region\_collect}(\mathcal{R}, \mathcal{S}) =
+    \{ r \mapsto R \mid (r \mapsto R) \in \mathcal{R},\; r \in \mathcal{S} \}
+\]
+All regions $r \notin \mathcal{S}$ are freed in $O(|P|)$ time
+(free each page in the linked list).  This provides bulk deallocation:
+all data in an unreachable region is freed at once without per-object
+overhead.
+\end{definition}
+
+\subsection{The Freeze Migration Protocol}
+
+The central operation linking the two heaps is the \emph{freeze migration}:
+
+\[
+  \mathsf{freeze\_region}(\tval{v}{\crystal}, (\mathcal{F}, \mathcal{R})):
+\]
+\begin{enumerate}[nosep]
+  \item Create a fresh region $R$ in $\mathcal{R}$ with $r = \mathsf{next\_id}$.
+  \item Set the global arena pointer to $R$ (so all allocation functions route
+        to $R$'s arena).
+  \item Deep-clone $v$ into $R$: $v' = \dc{v}$, where all allocations in
+        the clone go through $\mathsf{arena\_alloc}(R, \cdot)$.
+  \item Reset the arena pointer to $\mathsf{null}$.
+  \item Recursively set $\mathsf{region\_id} := r$ on $v'$ and all sub-values.
+  \item Free the original fluid-heap pointers of $v$ via
+        $\mathsf{value\_free}$.
+  \item Return $\tval{v'}{\crystal}$ with updated $\mathcal{R}$.
+\end{enumerate}
+
+\noindent
+After migration, the crystal value $v'$ has completely independent pointers
+from $\mathcal{F}$.  This is verified by the debug assertion
+\textsc{Assert-Crystal-Not-Fluid}: no pointer reachable from a crystal
+value with a valid region ID may appear in the fluid allocation list.
+
+%% ════════════════════════════════════════════════════════════════════
+\section{Properties}
+\label{sec:properties}
+
+We state the key invariants and properties of the phase system.  Complete
+proofs are provided in Sections~\ref{sec:proof-monotonicity}
+through~\ref{sec:proof:thaw}.
+
+\begin{theorem}[Phase Monotonicity]
+\label{thm:monotonicity}
+If $\tval{v}{\crystal}$ is a crystal-tagged value, then no evaluation step
+can modify $v$ or any sub-value of $v$ in place.
+
+More precisely: let $\rho_{\mathrm{raw}}(x) = \tval{v}{\crystal}$ for some $x$.
+Then for any statement $x = e'$ or lvalue assignment targeting a sub-path of $x$,
+evaluation in strict mode produces $\mathsf{error}$, and evaluation in casual mode
+is undefined behavior (rejected by the static checker when possible).
+\end{theorem}
+
+\begin{theorem}[Value Isolation]
+\label{thm:isolation}
+Variable reads produce independent copies: if $\langle \rho, \mu, x \rangle
+\Downarrow \langle \mu, \tval{v'}{\sigma} \rangle$, then $v'$ shares no
+mutable state with $\rho_{\mathrm{raw}}(x)$.
+
+Formally, for any address $a$ reachable from $v'$ and any address $b$
+reachable from $\rho_{\mathrm{raw}}(x)$: $a \neq b$ (unless $a$ is in a
+crystal region, in which case mutation is prevented by phase monotonicity).
+\end{theorem}
+
+\begin{theorem}[Consuming Freeze]
+\label{thm:consuming}
+In strict mode ($\mathcal{M} = \mathsf{strict}$), after evaluating
+$\freezekw(x)$, the variable $x$ is no longer bound in the environment:
+\[
+  \langle \rho, \mu, \freezekw(x) \rangle \Downarrow
+  \langle \rho', \mu', \tval{v}{\crystal} \rangle
+  \quad\Longrightarrow\quad
+  x \notin \dom(\rho')
+\]
+This prevents use-after-freeze of the original mutable data, providing a
+lightweight form of linear resource management.
+\end{theorem}
+
+\begin{theorem}[Forge Soundness]
+\label{thm:forge}
+The result of a $\forgekw$ block is always crystal-phased:
+\[
+  \langle \rho, \mu, \forgekw\;\{\ \bar{s}\ \} \rangle \Downarrow
+  \langle \mu', \tval{v}{\sigma} \rangle
+  \quad\Longrightarrow\quad
+  \sigma = \crystal
+\]
+\end{theorem}
+
+\begin{theorem}[Heap Separation]
+\label{thm:separation}
+No pointer reachable from a crystal value with a valid region ID
+$r \neq \bot$ appears in the fluid heap's allocation list:
+\[
+  \forall\, \tval{v}{\crystal}\text{ with region } r.\;
+  \forall\, a \in \mathsf{ptrs}(v).\;
+  a \notin \dom(\mathcal{F})
+\]
+This ensures GC safety: the fluid sweep can never free an
+arena-backed crystal pointer.
+\end{theorem}
+
+\begin{theorem}[Thaw Independence]
+\label{thm:thaw}
+The value produced by $\thawkw(e)$ is a fresh, deep-cloned copy of the
+original with phase set to $\fluid$.  It shares no state with the source:
+\[
+  \langle \rho, \mu, \thawkw(e) \rangle \Downarrow
+  \langle \mu', \tval{v'}{\fluid} \rangle
+  \quad\Longrightarrow\quad
+  \mathsf{ptrs}(v') \cap \mathsf{ptrs}(\llbracket e \rrbracket) = \emptyset
+\]
+In particular, thawing a crystal value does not invalidate the crystal
+region; the thawed copy resides in the fluid heap.
+\end{theorem}
+
+\begin{proposition}[Region Bulk Deallocation]
+\label{prop:bulk}
+When a crystal region $R$ becomes unreachable, all data within $R$ is freed
+in time $O(|P_R|)$ where $|P_R|$ is the number of arena pages, independent
+of the number of individual values stored in the region.  This provides
+constant-factor overhead per page rather than per value.
+\end{proposition}
+
+%% ════════════════════════════════════════════════════════════════════
+\section{Summary of Phase Transitions}
+\label{sec:summary}
+
+The following table summarizes the phase transition operations and their
+effects on the store:
+
+\medskip
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llll}
+\hline
+\textbf{Operation} & \textbf{Input Phase} & \textbf{Output Phase} & \textbf{Store Effect} \\
+\hline
+$\freezekw(e)$ & $\sigma$ (any) & $\crystal$ &
+  Migrate to region; free fluid ptrs \\
+$\thawkw(e)$ & $\sigma$ (any) & $\fluid$ &
+  Deep-clone into fluid heap \\
+$\clonekw(e)$ & $\sigma$ & $\sigma$ &
+  Deep-clone (same heap as source phase) \\
+$\forgekw\;\{\bar{s}\}$ & --- & $\crystal$ &
+  Eval body, freeze result, migrate to region \\
+$\flx\; x = e$ & $\sigma$ & $\fluid$ &
+  Tag as fluid \\
+$\fixkw\; x = e$ & $\sigma$ & $\crystal$ &
+  Freeze and migrate to region \\
+$\letkw\; x = e$ & $\sigma$ & $\sigma$ &
+  Preserve inferred phase (casual mode only) \\
+\hline
+\end{tabular}
+\end{center}
+
+\medskip
+\noindent
+The read/write asymmetry is a defining characteristic of Lattice's memory
+model: \emph{reads} always deep-clone (via \texttt{env\_get}), ensuring
+value-semantics isolation, while \emph{writes} resolve lvalue paths to
+direct pointers (via \texttt{resolve\_lvalue}), enabling efficient in-place
+mutation of fluid data.
+
+%% ════════════════════════════════════════════════════════════════════
+%% PROOFS
+%% ════════════════════════════════════════════════════════════════════
+
+\section{Proof of Phase Monotonicity}
+\label{sec:proof-monotonicity}
+
+We now give a complete proof of Theorem~\ref{thm:monotonicity} (Phase
+Monotonicity).  We restate it here for convenience.
+
+\begin{theorem}[Phase Monotonicity --- Theorem~\ref{thm:monotonicity} restated]
+\label{thm:monotonicity:restated}
+If\/ $\tval{v}{\crystal}$ is a crystal-tagged value, then no evaluation step
+can modify $v$ or any sub-value of $v$ in place.
+
+More precisely: let $\rho_{\mathrm{raw}}(x) = \tval{v}{\crystal}$ for some
+variable $x$.  Then for any statement $x = e'$ or lvalue assignment targeting a
+sub-path of $x$ (i.e., $x.f_1.\!\cdots\!.f_k = e'$ or
+$x[i_1]\!\cdots\![i_k] = e'$, or any mixed chain thereof), evaluation in strict
+mode ($\mathcal{M} = \mathsf{strict}$) produces $\mathsf{error}$.  In casual
+mode ($\mathcal{M} = \mathsf{casual}$), the static phase checker rejects the
+program before evaluation whenever the binding is statically known to be
+crystal.
+\end{theorem}
+
+\begin{proof}
+We proceed by exhaustive case analysis on every evaluation rule and auxiliary
+operation that could, in principle, modify a binding $\rho(x)$ or a sub-value
+thereof.  In each case we show that a crystal phase tag causes the evaluator (in
+strict mode) to produce an error, and that the static phase checker (in strict
+mode) independently rejects the offending statement at analysis time.
+
+The proof is organized into four parts: (I)~direct identifier assignment,
+(II)~compound lvalue assignment through sub-paths, (III)~mutating method calls,
+and (IV)~static phase checking.
+
+%% ──────────────────────────────────────────────────────────────────
+\medskip
+\noindent\textbf{Part I. Direct identifier assignment ($x = e'$).}
+
+\smallskip
+\noindent
+The only evaluation rules that can modify the top-level binding of a variable
+$x$ through assignment are \textsc{E-Assign} and \textsc{E-Assign-Crystal-Err}.
+We show that when $\rho_{\mathrm{raw}}(x) = \tval{v}{\crystal}$ and
+$\mathcal{M} = \mathsf{strict}$, the assignment necessarily fails.
+
+\smallskip
+\noindent\emph{Case 1: Rule \textsc{E-Assign}.}
+%
+This rule has the premises:
+\[
+  \langle \rho, \mu, e' \rangle \Downarrow
+  \langle \mu', \tval{v'}{\sigma'} \rangle
+  \qquad
+  \rho_{\mathrm{raw}}(x) = \tval{v_0}{\sigma_0}
+  \qquad
+  \mathcal{M} = \mathsf{strict} \Rightarrow \sigma_0 \neq \crystal
+\]
+The third premise is a \emph{guard}: it requires that if we are in strict mode,
+then $\sigma_0 \neq \crystal$.  By hypothesis,
+$\rho_{\mathrm{raw}}(x) = \tval{v}{\crystal}$, so $\sigma_0 = \crystal$.  In
+strict mode, the guard $\sigma_0 \neq \crystal$ fails.  Therefore rule
+\textsc{E-Assign} is \emph{not applicable}, and this case cannot produce a
+successful update.
+
+\smallskip
+\noindent\emph{Case 2: Rule \textsc{E-Assign-Crystal-Err}.}
+%
+This rule has the premises:
+\[
+  \mathcal{M} = \mathsf{strict}
+  \qquad
+  \rho_{\mathrm{raw}}(x) = \tval{v_0}{\crystal}
+\]
+Both premises are satisfied by our hypotheses ($\mathcal{M} = \mathsf{strict}$
+and $\sigma_0 = \crystal$).  The conclusion is:
+\[
+  \langle \rho, \mu, x = e' \rangle \Downarrow
+  \mathsf{error}(\text{``cannot assign to crystal binding''})
+\]
+Hence, in strict mode, any attempt at direct assignment to a crystal binding
+produces an error.
+
+\smallskip
+\noindent\emph{Implementation correspondence.}
+In the C implementation (\texttt{eval.c}, lines 1598--1611), the
+\texttt{STMT\_ASSIGN} handler for identifier targets performs exactly this
+check.  It calls \texttt{env\_get} to retrieve the existing binding, then tests
+\texttt{value\_is\_crystal(\&existing)}.  If the value's phase tag is
+\texttt{VTAG\_CRYSTAL} and the evaluator mode is \texttt{MODE\_STRICT}, the
+function returns an error via \texttt{eval\_err}, matching
+\textsc{E-Assign-Crystal-Err}.
+
+%% ──────────────────────────────────────────────────────────────────
+\medskip
+\noindent\textbf{Part II. Compound lvalue assignment ($x.f = e'$, $x[i] = e'$,
+and mixed chains).}
+
+\smallskip
+\noindent
+For assignments to sub-paths of $x$ (e.g., $x.f = e'$, $x[i] = e'$,
+$x.f[i].g = e'$), evaluation uses the $\mathsf{resolve}$ (lvalue resolution)
+mechanism defined in Section~\ref{sec:operational}.  We must show that every
+such path that terminates inside a crystal value is rejected.
+
+The evaluator handles compound lvalue assignment in two stages:
+\begin{enumerate}[nosep]
+  \item \emph{Lvalue resolution}: $\mathsf{resolve}(\rho, l)$ traverses the
+        path $l$ and returns a direct mutable pointer to the target sub-value.
+  \item \emph{Phase guard}: after resolution, the evaluator checks whether the
+        resolved target is crystal-phased, and if so (in strict mode), produces
+        an error.
+\end{enumerate}
+
+\smallskip
+\noindent\emph{Claim.}
+If $\rho_{\mathrm{raw}}(x) = \tval{v}{\crystal}$, then for any sub-path $p$
+starting at $x$, the value $\mathsf{resolve}(\rho, p)$ points to either carries
+phase $\crystal$.
+
+\smallskip
+\noindent\emph{Proof of Claim.}
+We proceed by induction on the length of the path $p$.
+
+\begin{itemize}
+  \item \emph{Base case} ($p = x$).  Then $\mathsf{resolve}(\rho, x)
+    = \rho_{\mathrm{ptr}}(x)$, which points directly to the stored value
+    $\tval{v}{\crystal}$.  The phase is $\crystal$.
+
+  \item \emph{Inductive case: field access} ($p = q.f$).  By the induction
+    hypothesis, $\mathsf{resolve}(\rho, q)$ points to a value $\tval{w}{\crystal}$.
+    Since $w$ is crystal-tagged and all sub-values of a crystal value are also
+    crystal (by the definition of $\mathsf{setphase}$ in
+    Section~\ref{sec:operational}, which recursively sets the phase on all
+    fields, elements, and map entries during the freeze operation), the field
+    $w.f$ is itself crystal-tagged.
+    Thus $\mathsf{resolve}(\rho, q.f) = (\mathsf{resolve}(\rho, q)).\mathit{field}(f)$
+    points to a crystal-phased sub-value.
+
+  \item \emph{Inductive case: index access} ($p = q[i]$).  By the same
+    reasoning as the field access case, $\mathsf{resolve}(\rho, q)$ points to
+    a crystal value, and since $\mathsf{setphase}$ recurses into array elements
+    and map entries, the element at index $i$ is also crystal-phased.
+    Thus $\mathsf{resolve}(\rho, q[i])$ points to a crystal-phased sub-value.
+\end{itemize}
+
+\noindent
+This completes the induction.  In every case, the resolved target carries phase
+$\crystal$. \hfill$\square_{\text{Claim}}$
+
+\smallskip
+\noindent
+Now, after lvalue resolution returns a pointer $\mathit{target}$ to the
+sub-value, the evaluator performs the following check (corresponding to lines
+1628--1631 of \texttt{eval.c}):
+\[
+  \mathcal{M} = \mathsf{strict} \;\wedge\;
+  \mathsf{phase}(\mathit{target}) = \crystal
+  \quad\Longrightarrow\quad
+  \mathsf{error}(\text{``cannot assign to crystal value''})
+\]
+By the Claim, whenever $\rho_{\mathrm{raw}}(x) = \tval{v}{\crystal}$ and we
+resolve any sub-path of $x$, the target is crystal-phased.  In strict mode,
+the guard fires and produces an error.  Therefore, no compound lvalue assignment
+into a crystal binding can succeed.
+
+%% ──────────────────────────────────────────────────────────────────
+\medskip
+\noindent\textbf{Part III. Mutating method calls on crystal values.}
+
+\smallskip
+\noindent
+In addition to assignment statements, in-place mutation can occur through
+method calls such as \texttt{.push()}, \texttt{.set()}, and
+\texttt{.remove()}.  We must show that these are also rejected on crystal
+values.
+
+\begin{itemize}
+  \item \emph{Array \texttt{.push()}}: The evaluator checks
+    \texttt{value\_is\_crystal(\&existing)} before performing the push
+    operation (\texttt{eval.c}, line 1078).  If the array is crystal, it
+    returns $\mathsf{error}(\text{``cannot push to a crystal array''})$.
+
+  \item \emph{Map \texttt{.set()} and \texttt{.remove()}}: These methods use
+    \texttt{resolve\_lvalue} to obtain a mutable pointer to the map.  Since the
+    map is a sub-value of a crystal binding (or is itself crystal), the
+    resolved pointer carries phase $\crystal$.  The phase system's
+    invariant is that crystal values are only produced by \texttt{fix},
+    \texttt{freeze}, or \texttt{forge}, all of which set the phase recursively,
+    so the value itself carries the crystal tag.  A well-phased program in
+    strict mode cannot hold a mutable reference to a crystal map.
+\end{itemize}
+
+%% ──────────────────────────────────────────────────────────────────
+\medskip
+\noindent\textbf{Part IV. Static phase checking rejects crystal assignment at
+analysis time.}
+
+\smallskip
+\noindent
+The runtime checks described in Parts I--III serve as a dynamic safety net.
+In strict mode, the \emph{static} phase checker provides an additional,
+\emph{earlier} line of defense by rejecting crystal assignments before
+evaluation begins.
+
+\smallskip
+\noindent\emph{Rule \textsc{PC-Assign}.}
+The static phase-checking judgment for assignment statements is:
+\[
+  \inferrule*[lab=\textsc{PC-Assign}]
+    {\phexpr{\Gamma}{e'}{\sigma_{e'}} \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \Gamma(x) \neq \crystal}
+    {\phchk{\Gamma}{x = e'}}
+\]
+The second premise requires that in strict mode, the phase context $\Gamma$
+does not map $x$ to $\crystal$.  If $x$ was declared with $\fixkw$ (which
+records $\Gamma(x) = \crystal$ per rule \textsc{PC-Fix}), then $\Gamma(x) =
+\crystal$ and the premise $\Gamma(x) \neq \crystal$ fails.  The static
+checker therefore rejects the statement $x = e'$ with a phase error.
+
+\smallskip
+\noindent\emph{Binding declarations also prevent crystal-to-fluid demotion.}
+Rule \textsc{PC-Flux} additionally prevents binding a crystal expression with
+$\flx$:
+\[
+  \inferrule*[lab=\textsc{PC-Flux}]
+    {\phexpr{\Gamma}{e}{\sigma_e} \\
+     \mathcal{M} = \mathsf{strict} \Rightarrow \sigma_e \neq \crystal}
+    {\phchk{\Gamma}{\flx\; x = e} \\
+     \Gamma' = \Gamma[x \mapsto \fluid]}
+\]
+In strict mode, if $e$ has phase $\crystal$, the premise $\sigma_e \neq
+\crystal$ fails.  This prevents the creation of a $\fluid$-tagged alias of
+crystal data, which would circumvent the monotonicity invariant.
+
+%% ──────────────────────────────────────────────────────────────────
+\medskip
+\noindent\textbf{Synthesis.}
+
+\smallskip
+\noindent
+We have shown that every mechanism by which a crystal-tagged binding or its
+sub-values could be modified in place is blocked by the Lattice phase system:
+
+\begin{enumerate}[nosep]
+  \item \emph{Direct assignment} ($x = e'$): blocked by
+    \textsc{E-Assign-Crystal-Err} at runtime and by \textsc{PC-Assign} at
+    static analysis time (Parts I and IV).
+
+  \item \emph{Compound lvalue assignment} ($x.f = e'$, $x[i] = e'$, and
+    deeper chains): blocked by the post-resolution crystal guard, which relies
+    on the recursive phase invariant established by $\mathsf{setphase}$
+    (Part II).
+
+  \item \emph{Mutating method calls} (\texttt{.push()}, etc.): blocked by
+    explicit crystal checks on the receiver value (Part III).
+
+  \item \emph{Phase demotion} ($\flx\; y = x$ where $x$ is crystal): blocked
+    by \textsc{PC-Flux} and the corresponding runtime check, preventing
+    the creation of fluid aliases that could bypass the invariant (Part IV).
+\end{enumerate}
+
+\noindent
+Since these four categories exhaust all mutation paths in the Lattice
+evaluation semantics, no evaluation step can modify a crystal-tagged value or
+any of its sub-values in place.  This completes the proof.
+\end{proof}
+
+\begin{remark}[Casual mode]
+In casual mode ($\mathcal{M} = \mathsf{casual}$), the runtime guards in
+\textsc{E-Assign} and the lvalue post-resolution check do not enforce the
+crystal constraint (the guards are conditional on $\mathcal{M} =
+\mathsf{strict}$).  Phase monotonicity in casual mode therefore relies
+entirely on programmer discipline and on partial coverage from the static
+phase checker (which still issues warnings for statically detectable crystal
+assignments).  The formal guarantee of Theorem~\ref{thm:monotonicity} is thus
+strongest in strict mode; in casual mode it holds only to the extent that the
+static checker can track phases---a deliberate design trade-off that provides a
+gentler on-ramp for new users while preserving full safety for production
+(strict-mode) code.
+\end{remark}
+
+\begin{remark}[Relationship to heap separation]
+Phase monotonicity is strengthened by the heap separation property
+(Theorem~\ref{thm:separation}).  Crystal values reside in arena-allocated
+regions with no pointers in the fluid heap.  Even if a bug were to bypass the
+phase tag check, the crystal data's arena-backed pointers are never freed by
+the fluid-heap garbage collector, providing a second line of defense against
+accidental mutation through use-after-free on the fluid heap.  The debug
+assertion \textsc{Assert-Crystal-Not-Fluid} (implemented as
+\texttt{assert\_crystal\_not\_fluid} in \texttt{eval.c}) validates this
+invariant after every garbage collection cycle.
+\end{remark}
+
+%% ════════════════════════════════════════════════════════════════════
+
+\section{Proof of Value Isolation (Theorem~\ref{thm:isolation})}
+\label{sec:proof-isolation}
+
+We now give a rigorous proof of Theorem~\ref{thm:isolation}, restated here
+for convenience.
+
+\medskip
+
+\noindent\textbf{Theorem~\ref{thm:isolation}} (Value Isolation).
+\textit{Variable reads produce independent copies: if
+$\langle \rho, \mu, x \rangle \Downarrow \langle \mu, \tval{v'}{\sigma} \rangle$,
+then $v'$ shares no mutable state with $\rho_{\mathrm{raw}}(x)$.
+Formally, for any address $a$ reachable from $v'$ and any address $b$
+reachable from $\rho_{\mathrm{raw}}(x)$: $a \neq b$ (unless $a$ resides in
+a crystal region, in which case mutation is prevented by Theorem~\ref{thm:monotonicity},
+Phase Monotonicity).}
+
+\medskip
+
+The proof proceeds in three stages.  First, we make precise the notion of
+\emph{sharing mutable state} by defining pointer reachability.  Second, we
+establish a key lemma: that $\mathsf{deepclone}$ produces structurally
+independent values, proved by structural induction on the value type.  Third,
+we combine the lemma with the \textsc{E-Var} rule and the crystal exception
+to discharge the theorem.
+
+%% ── Definitions ──
+
+\subsection{Preliminary Definitions}
+
+\begin{definition}[Heap Address]
+\label{def:address}
+A \emph{heap address} $a \in \mathsf{Addr}$ is a pointer to a contiguous
+block of memory residing either in the fluid heap $\mathcal{F}$ or in an
+arena page of some crystal region $R \in \mathcal{R}$.  In the
+implementation, addresses correspond to the pointers returned by
+\texttt{fluid\_alloc}, \texttt{arena\_alloc}, \texttt{malloc}, or their
+\texttt{calloc}/\texttt{strdup} variants.
+\end{definition}
+
+\begin{definition}[Pointer Set]
+\label{def:ptrs}
+For a raw value $v \in \Val$, the \emph{pointer set} $\mathsf{ptrs}(v)
+\subseteq \mathsf{Addr}$ is defined inductively:
+\begin{align*}
+  \mathsf{ptrs}(n)   &= \emptyset
+    && \text{($n \in \mathbb{Z}$: integer, stored inline)} \\
+  \mathsf{ptrs}(r)   &= \emptyset
+    && \text{($r \in \mathbb{R}$: float, stored inline)} \\
+  \mathsf{ptrs}(b)   &= \emptyset
+    && \text{($b \in \mathbb{B}$: boolean, stored inline)} \\
+  \mathsf{ptrs}(())  &= \emptyset
+    && \text{(unit, no payload)} \\
+  \mathsf{ptrs}(\mathit{rng}) &= \emptyset
+    && \text{(range, two inline integers)} \\[4pt]
+  \mathsf{ptrs}(s)   &= \{ \mathsf{buf}(s) \}
+    && \text{(string: address of character buffer)} \\[4pt]
+  \mathsf{ptrs}([v_1, \ldots, v_k]) &=
+    \{ \mathsf{buf}(\mathit{elems}) \}
+    \cup \bigcup_{i=1}^{k} \mathsf{ptrs}(v_i)
+    && \text{(array: element buffer $+$ recursive)} \\[4pt]
+  \mathsf{ptrs}(\{s_1\!:\!v_1, \ldots, s_k\!:\!v_k\}) &=
+    \{ \mathsf{buf}(\mathit{map}) \}
+    \cup \{ \mathsf{buf}(\mathit{entries}) \}
+    \cup \bigcup_{i=1}^{k}
+      \bigl(\{ \mathsf{buf}(s_i) \} \cup \{ \mathsf{buf}(\mathit{vbox}_i) \}
+      \cup \mathsf{ptrs}(v_i)\bigr)
+    && \text{(map)} \\[4pt]
+  \mathsf{ptrs}(S\{f_1\!:\!v_1, \ldots, f_k\!:\!v_k\}) &=
+    \{ \mathsf{buf}(\mathit{name}) \}
+    \cup \{ \mathsf{buf}(\mathit{fnames}) \}
+    \cup \{ \mathsf{buf}(\mathit{fvals}) \} \\
+    &\quad \cup \bigcup_{i=1}^{k}
+      \bigl(\{ \mathsf{buf}(f_i) \} \cup \mathsf{ptrs}(v_i)\bigr)
+    && \text{(struct)} \\[4pt]
+  \mathsf{ptrs}(\langle \bar{x}, e, \rho \rangle) &=
+    \{ \mathsf{buf}(\mathit{params}) \}
+    \cup \bigcup_{i=1}^{|\bar{x}|}
+      \{ \mathsf{buf}(x_i) \}
+    \cup \mathsf{ptrs}_{\mathsf{env}}(\rho)
+    && \text{(closure)}
+\end{align*}
+where $\mathsf{buf}(\cdot)$ denotes the address of a heap-allocated buffer,
+and $\mathsf{ptrs}_{\mathsf{env}}(\rho)$ is the union of $\mathsf{ptrs}(v)$
+for all values $v$ bound in $\rho$, together with the addresses of the
+environment's scope arrays and hash-map backing stores.
+
+Note that the AST pointer $e$ in a closure is \emph{excluded} from
+$\mathsf{ptrs}$: the body is a borrowed reference to the immutable parse
+tree, shared by all clones, and is never mutated during evaluation.
+\end{definition}
+
+\begin{definition}[Mutable Reachability]
+\label{def:mutable-reach}
+An address $a$ is \emph{mutably reachable} from a tagged value
+$\tval{v}{\sigma}$ if:
+\begin{enumerate}[nosep]
+  \item $a \in \mathsf{ptrs}(v)$, and
+  \item either $\sigma \neq \crystal$, or $a$ does not reside in a crystal
+        region (i.e., the value's $\mathsf{region\_id} = \bot$).
+\end{enumerate}
+We write $\mathsf{mreach}(\tval{v}{\sigma})$ for the set of mutably
+reachable addresses from $\tval{v}{\sigma}$.  Crystal-region addresses are
+excluded because they are protected by Phase Monotonicity
+(Theorem~\ref{thm:monotonicity}).
+\end{definition}
+
+\begin{definition}[Shares Mutable State]
+\label{def:shares}
+Two tagged values $\tval{v_1}{\sigma_1}$ and $\tval{v_2}{\sigma_2}$
+\emph{share mutable state} if and only if
+\[
+  \mathsf{mreach}(\tval{v_1}{\sigma_1}) \cap
+  \mathsf{mreach}(\tval{v_2}{\sigma_2}) \neq \emptyset.
+\]
+That is, there exists some heap address that is mutably reachable from both
+values.  If one value could write through such an address, the effect would
+be visible from the other.
+\end{definition}
+
+%% ── Key Lemma ──
+
+\subsection{Deep Clone Independence Lemma}
+
+\begin{lemma}[Deep Clone Independence]
+\label{lem:dc-indep}
+For any tagged value $\tval{v}{\sigma}$ stored in the environment, let
+$\tval{v'}{\sigma} = \dc{\tval{v}{\sigma}}$.  Then:
+\[
+  \mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) \subseteq
+  \mathsf{arena}(\mathcal{R})
+\]
+where $\mathsf{arena}(\mathcal{R})$ is the set of all addresses residing
+in crystal region arenas.  That is, every non-arena pointer in $v'$ is
+fresh---distinct from every pointer in $v$.
+
+Equivalently, $\mathsf{mreach}(\tval{v'}{\sigma}) \cap
+\mathsf{mreach}(\tval{v}{\sigma}) = \emptyset$.
+\end{lemma}
+
+\begin{proof}
+We proceed by structural induction on the type of $v$.
+
+\medskip
+
+\noindent\textbf{Base cases.}
+
+\medskip
+
+\noindent\textsc{Case} $v = n$ \textbf{(integer)}, $v = r$ \textbf{(float)},
+$v = b$ \textbf{(boolean)}, $v = ()$ \textbf{(unit)},
+$v = (s, e)$ \textbf{(range)}:
+
+These are \emph{primitive} value types stored entirely inline within the
+\texttt{LatValue} struct.
+No heap allocation is performed.
+Since $\mathsf{ptrs}(v) = \emptyset$, we have $\mathsf{ptrs}(v') = \emptyset$,
+and hence
+$\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) = \emptyset \subseteq
+\mathsf{arena}(\mathcal{R})$.
+
+\medskip
+
+\noindent\textsc{Case} $v = s$ \textbf{(string)}:
+
+The deep-clone operation invokes $\mathsf{lat\_strdup}(s)$, which
+allocates a \emph{fresh} buffer $s'$ via $\mathsf{lat\_alloc}$.
+In all cases, $\mathsf{buf}(s')$ is a freshly allocated address, distinct
+from $\mathsf{buf}(s)$.  Therefore
+$\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) = \emptyset$.
+
+\medskip
+
+\noindent\textbf{Inductive cases.}
+
+\medskip
+
+\noindent\textsc{Case} $v = [v_1, \ldots, v_k]$ \textbf{(array)}:
+
+The deep-clone operation allocates a fresh element buffer via
+$\mathsf{lat\_alloc}$.  For each $i$, $v'_i = \dc{v_i}$.
+By the inductive hypothesis on each element,
+$\mathsf{ptrs}(v'_i) \cap \mathsf{ptrs}(v_i) \subseteq
+\mathsf{arena}(\mathcal{R})$.  The fresh top-level buffer is distinct from
+the original.  Thus $\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) \subseteq
+\mathsf{arena}(\mathcal{R})$.
+
+\medskip
+
+\noindent\textsc{Case} $v = \{s_1\!:\!v_1, \ldots, s_k\!:\!v_k\}$ \textbf{(map)}:
+
+The deep-clone allocates a fresh \texttt{LatMap} structure, a fresh entries
+array, fresh key strings, and recursively clones each value.
+All top-level pointers are freshly allocated and therefore distinct from
+any pointer in $v$.  The recursive sub-value clones satisfy the inductive
+hypothesis.  Thus $\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) \subseteq
+\mathsf{arena}(\mathcal{R})$.
+
+\medskip
+
+\noindent\textsc{Case} $v = S\{f_1\!:\!v_1, \ldots, f_k\!:\!v_k\}$
+\textbf{(struct)}:
+
+The deep-clone allocates fresh buffers for the struct name, field-names
+array, field-values array, and each field name string, and recursively
+clones each field value.  Every top-level pointer is fresh by the allocator
+contract.  Each recursive clone satisfies the inductive hypothesis.
+Thus $\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) \subseteq
+\mathsf{arena}(\mathcal{R})$.
+
+\medskip
+
+\noindent\textsc{Case}
+$v = \langle \bar{x}, e, \rho_c \rangle$ \textbf{(closure)}:
+
+The deep-clone allocates a fresh parameter-name array, fresh parameter
+name strings, and clones the captured environment via
+$\mathsf{env\_clone}(\rho_c)$, which deep-clones every binding in every
+scope.  The body pointer $e$ is shared but excluded from $\mathsf{ptrs}$.
+By the inductive hypothesis applied to each value in the captured
+environment, every cloned binding has fresh pointers.  The structural
+well-foundedness is guaranteed because Lattice environments cannot contain
+cyclic references.
+Thus $\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) \subseteq
+\mathsf{arena}(\mathcal{R})$.
+
+\medskip
+
+This completes the structural induction over all value types.
+\end{proof}
+
+%% ── Main Theorem ──
+
+\subsection{Proof of Value Isolation}
+
+We additionally require the following observation about crystal addresses.
+
+\begin{lemma}[Crystal Protection]
+\label{lem:crystal-protect}
+If an address $a \in \mathsf{arena}(\mathcal{R})$ is shared between
+$\tval{v'}{\sigma}$ and $\rho_{\mathrm{raw}}(x) = \tval{v}{\sigma}$,
+then $a$ resides in a crystal region, and any attempt to mutate the value
+at $a$ is prevented by Phase Monotonicity (Theorem~\ref{thm:monotonicity}).
+\end{lemma}
+
+\begin{proof}
+Suppose $a \in \mathsf{ptrs}(v') \cap \mathsf{ptrs}(v)$ and
+$a \in \mathsf{arena}(\mathcal{R})$.  Then $a$ belongs to some crystal
+region $R$ with identifier $r$.  By the \textsc{E-Assign-Crystal-Err} rule,
+any assignment targeting a crystal-tagged value produces $\mathsf{error}$
+in strict mode.  Furthermore, the deep-clone operation sets
+$\mathsf{region\_id} := \bot$ on the cloned value,
+meaning the clone $v'$ is not tagged as belonging to any crystal region.
+If the original had $\sigma = \crystal$, then the clone inherits
+$\sigma = \crystal$ and Phase Monotonicity prevents mutation regardless.
+If the original was $\sigma \neq \crystal$, then neither value resides in
+a crystal region and Lemma~\ref{lem:dc-indep} guarantees
+$\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) = \emptyset$.
+In either case, no mutable state is shared.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:isolation}]
+Suppose $\langle \rho, \mu, x \rangle \Downarrow \langle \mu,
+\tval{v'}{\sigma} \rangle$.  By the operational semantics, only the
+\textsc{E-Var} rule applies.  The rule specifies:
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Var}]
+    {\rho_{\mathrm{raw}}(x) = \tval{v}{\sigma} \\
+     \tval{v'}{\sigma} = \dc{\tval{v}{\sigma}}}
+    {\langle \rho, \mu, x \rangle \Downarrow
+     \langle \mu, \tval{v'}{\sigma} \rangle}
+\end{mathpar}
+Thus $v' = \dc{v}$ where $\rho_{\mathrm{raw}}(x) = \tval{v}{\sigma}$.
+
+We must show: for any address $a \in \mathsf{mreach}(\tval{v'}{\sigma})$
+and $b \in \mathsf{mreach}(\tval{v}{\sigma})$, we have $a \neq b$.
+
+By Lemma~\ref{lem:dc-indep}, $\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v)
+\subseteq \mathsf{arena}(\mathcal{R})$.
+
+If $\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) = \emptyset$, then value
+isolation holds trivially.
+
+If there exists $a \in \mathsf{ptrs}(v') \cap \mathsf{ptrs}(v)$ with
+$a \in \mathsf{arena}(\mathcal{R})$, then by Lemma~\ref{lem:crystal-protect},
+$a$ is excluded from mutable reachability for both values.
+
+In all cases, $\mathsf{mreach}(\tval{v'}{\sigma}) \cap
+\mathsf{mreach}(\tval{v}{\sigma}) = \emptyset$.
+By Definition~\ref{def:shares}, the values share no mutable state.
+Furthermore, the store $\mu$ is unchanged by the \textsc{E-Var} rule,
+confirming that variable reads are pure observations with no side effects
+on memory.
+\end{proof}
+
+%% ════════════════════════════════════════════════════════════════════
+
+\section{Proof of Theorem~\ref{thm:consuming}: Consuming Freeze}
+\label{sec:proof:consuming}
+
+We restate the theorem for convenience and then provide a complete proof.
+
+\medskip
+\noindent
+\textbf{Theorem~\ref{thm:consuming}} (Consuming Freeze).
+\textit{In strict mode ($\mathcal{M} = \mathsf{strict}$), after evaluating
+$\freezekw(x)$ where $x$ is an identifier, the variable $x$ is no longer
+bound in the resulting environment:}
+\[
+  \langle \rho, \mu, \freezekw(x) \rangle \Downarrow
+  \langle \rho', \mu', \tval{v}{\crystal} \rangle
+  \quad\Longrightarrow\quad
+  x \notin \dom(\rho')
+\]
+
+\begin{proof}
+We structure the proof in four parts: (1)~a direct derivation from the
+\textsc{E-Freeze-Strict} rule; (2)~a demonstration that subsequent access
+to $x$ produces an error; (3)~a contrast with the casual-mode rule
+\textsc{E-Freeze-Casual}; and (4)~a discussion of how the static phase
+checker cooperates with the runtime semantics.
+
+\medskip
+\noindent
+\textbf{Part 1: Direct derivation from \textsc{E-Freeze-Strict}.}
+
+\smallskip
+Assume $\mathcal{M} = \mathsf{strict}$ and that we evaluate
+$\freezekw(x)$ for some identifier $x$ in configuration
+$\langle \rho, (\mathcal{F}, \mathcal{R}), \freezekw(x) \rangle$.
+The only applicable evaluation rule is \textsc{E-Freeze-Strict}, whose
+premises and conclusion are:
+
+\begin{mathpar}
+  \inferrule*[lab=\textsc{E-Freeze-Strict}]
+    {\mathcal{M} = \mathsf{strict} \\
+     \rho_{\mathrm{raw}}(x) = \tval{v}{\sigma} \\
+     \tval{v'}{\crystal} = \mathsf{setphase}(\tval{v}{\sigma}, \crystal) \\
+     (\tval{v''}{\crystal}, \mathcal{R}') =
+       \mathsf{freeze\_region}(\tval{v'}{\crystal}, \mathcal{R})}
+    {\langle \rho, (\mathcal{F}, \mathcal{R}), \freezekw(x) \rangle
+     \Downarrow
+     \langle \rho \setminus x, (\mathcal{F}, \mathcal{R}'),
+       \tval{v''}{\crystal} \rangle}
+\end{mathpar}
+
+We verify each premise: (i)~$\mathcal{M} = \mathsf{strict}$ holds by
+assumption; (ii)~$x$ is bound in $\rho$; (iii)~$\mathsf{setphase}$
+recursively sets the phase to $\crystal$; (iv)~$\mathsf{freeze\_region}$
+allocates a fresh region and deep-clones into it.
+
+The resulting environment is $\rho' = \rho \setminus x$.  By the
+definition of environment removal,
+$\dom(\rho \setminus x) = \dom(\rho) \setminus \{x\}$,
+so $x \notin \dom(\rho')$. \qed\ (for the main claim)
+
+\medskip
+\noindent
+\textbf{Part 2: Subsequent access to $x$ produces an error.}
+
+\smallskip
+The only rule for evaluating an identifier is \textsc{E-Var}, whose first
+premise requires $x \in \dom(\rho)$.  Since $x \notin \dom(\rho')$,
+\textsc{E-Var} does not apply and evaluation is stuck, manifesting as a
+runtime error: $\mathsf{error}(\texttt{"undefined variable '} x \texttt{'"})$.
+
+\medskip
+\noindent
+\textbf{Part 3: Contrast with casual mode (\textsc{E-Freeze-Casual}).}
+
+\smallskip
+In casual mode, the applicable rule is \textsc{E-Freeze-Casual}, which
+produces $\rho' = \rho[x \mapsto \tval{v''}{\crystal}]$.
+The critical difference:
+\begin{itemize}[nosep]
+  \item \textsc{E-Freeze-Strict} produces $\rho' = \rho \setminus x$
+        \quad (\emph{removal}: the binding is consumed).
+  \item \textsc{E-Freeze-Casual} produces
+        $\rho' = \rho[x \mapsto \tval{v''}{\crystal}]$
+        \quad (\emph{update}: the binding persists with crystal phase).
+\end{itemize}
+
+\medskip
+\noindent
+\textbf{Part 4: Cooperation of the static phase checker (\textsc{PC-Freeze}).}
+
+\smallskip
+The static rule \textsc{PC-Freeze} ensures that in strict mode,
+$\freezekw$ is never applied to an already-$\crystal$ value
+($\sigma \neq \crystal$).  This prevents wasteful double-freeze and
+cooperates with the runtime to maintain the invariant: \emph{in strict
+mode, freeze is applied exactly once to each fluid binding, after which
+the binding ceases to exist.}
+
+\medskip
+\noindent
+\textbf{Connection to linear type theory.}
+
+\smallskip
+Consuming freeze implements a localized form of \emph{affine resource
+management}:
+\[
+  \freezekw : \tau^{\fluid} \multimap \tau^{\crystal}
+\]
+where $\multimap$ denotes the linear function arrow.  Reads are unrestricted
+(contraction via deep clone), phase transitions are linear (the binding is
+consumed), and weakening is implicit (unused variables are garbage-collected).
+This achieves the safety benefits of linear types---\emph{no fluid alias
+survives a freeze}---without global annotation burden.
+\end{proof}
+
+%% ════════════════════════════════════════════════════════════════════
+
+\section{Proof of Forge Soundness}
+\label{sec:proof-forge}
+
+We restate the theorem and provide a complete proof.
+
+\begin{theorem}[Forge Soundness, Theorem~\ref{thm:forge} restated]
+\label{thm:forge-restated}
+The result of a $\forgekw$ block is always crystal-phased.  That is, if
+evaluation of a forge block terminates with a value, then that value carries
+the $\crystal$ phase tag:
+\[
+  \langle \rho, \mu, \forgekw\;\{\ \bar{s}\ \} \rangle \Downarrow
+  \langle \mu', \tval{v}{\sigma} \rangle
+  \quad\Longrightarrow\quad
+  \sigma = \crystal
+\]
+\end{theorem}
+
+\noindent
+Before proceeding to the main proof, we establish two supporting lemmas.
+
+\begin{lemma}[Setphase Totality]
+\label{lem:setphase}
+For any tagged value $\tval{v}{\sigma}$ and target phase $\sigma' \in \Phase$,
+the operation $\mathsf{setphase}(\tval{v}{\sigma}, \sigma')$ is total and
+produces a value $\tval{v}{\sigma'}$ with $\sigma'$ as its top-level phase
+tag.  Moreover, every sub-value reachable from $v$ also carries phase $\sigma'$.
+\end{lemma}
+
+\begin{proof}
+By structural induction on $v$.
+
+\emph{Base cases.}  If $v$ is a scalar (integer, float, boolean, string, or
+unit), then $\mathsf{setphase}$ sets $v.\mathit{phase} := \sigma'$ and
+returns.  The result has phase $\sigma'$.
+
+\emph{Inductive cases.}
+\begin{itemize}[nosep]
+  \item \emph{Array} $v = [v_1, \ldots, v_k]$.  The operation sets
+    $v.\mathit{phase} := \sigma'$ and recurses on each element $v_i$.  By the
+    induction hypothesis, each $v_i$ obtains phase $\sigma'$.
+  \item \emph{Struct} $v = S\{f_1\!:\!v_1, \ldots, f_k\!:\!v_k\}$.  As above,
+    the operation recurses on each field value.
+  \item \emph{Map} $v = \{s_1\!:\!v_1, \ldots, s_k\!:\!v_k\}$.  The operation
+    recurses on each entry value.
+  \item \emph{Closure} $v = \langle \bar{x}, e, \rho \rangle$.  The operation
+    sets $v.\mathit{phase} := \sigma'$.  (Closures are treated as opaque at
+    the phase level; the captured environment $\rho$ is not recursively
+    re-phased.)
+\end{itemize}
+In all cases, the recursion terminates on the finite structure of $v$ and sets
+$\sigma'$ at every level, so the operation is total.
+\end{proof}
+
+\begin{lemma}[Freeze-Region Phase Preservation]
+\label{lem:freeze-region}
+If $\tval{v}{\crystal}$ is a crystal-tagged value, then
+$\mathsf{freeze\_region}(\tval{v}{\crystal}, \mathcal{R})
+    = (\tval{v'}{\crystal}, \mathcal{R}')$
+where $\tval{v'}{\crystal}$ has phase $\crystal$.
+\end{lemma}
+
+\begin{proof}
+Deep cloning preserves the phase tag of the input.  Setting the region
+identifier modifies only region metadata, not the phase tag.  Therefore the
+output has phase $\crystal$.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:forge-restated}]
+We proceed by case analysis on the result of evaluating the forge block's body.
+
+\medskip
+\noindent\textbf{Case 1: Normal completion.}
+The block evaluates to $\tval{w}{\sigma_w}$.  The rule \textsc{E-Forge} applies
+$\mathsf{setphase}(\tval{w}{\sigma_w}, \crystal)$ (giving $\crystal$ by
+Lemma~\ref{lem:setphase}), then $\mathsf{freeze\_region}$ (preserving $\crystal$
+by Lemma~\ref{lem:freeze-region}).  So $\sigma = \crystal$.
+
+\medskip
+\noindent\textbf{Case 2: Early return.}
+A $\returnkw$ signal carries a value $\tval{w}{\sigma_w}$.  The forge block
+intercepts it and applies the same freeze protocol.
+By Lemmas~\ref{lem:setphase} and~\ref{lem:freeze-region}, $\sigma = \crystal$.
+
+\medskip
+\noindent\textbf{Case 3: Error.}
+The forge block propagates the error without producing a value.
+The theorem holds vacuously.
+
+\medskip
+\noindent\textbf{Case 4: Break or continue signals.}
+These propagate unchanged; no value is produced.  The theorem holds vacuously.
+
+\medskip
+Since these four cases are exhaustive and in every case where a value is
+produced it has phase $\crystal$, the theorem is proved.
+\end{proof}
+
+\begin{proposition}[Static--Dynamic Agreement for Forge]
+\label{prop:forge-static}
+The static phase-checking rule \textsc{PC-Forge} infers $\crystal$ as the
+output phase of a forge expression, which agrees with the dynamic guarantee
+of Theorem~\ref{thm:forge-restated}.
+\end{proposition}
+
+\begin{proof}
+The rule \textsc{PC-Forge} assigns phase $\crystal$ to the forge expression
+\emph{unconditionally}---the inferred phases of the body statements do not
+influence the output phase.  This mirrors the runtime behavior: the forge
+block's $\mathsf{setphase}$ step forces the result to $\crystal$.  The
+static checker's assertion can never be contradicted at runtime.
+\end{proof}
+
+\begin{corollary}[Forge Compositionality]
+\label{cor:forge-compose}
+Forge blocks compose: nested forge blocks produce a crystal value at every
+level, and the outer forge block's freeze operation on an already-crystal
+value is idempotent with respect to the phase tag.
+\end{corollary}
+
+\begin{proof}
+By induction on the nesting depth $n$.  The base case ($n = 1$) is
+Theorem~\ref{thm:forge-restated}.  For the inductive step, regardless of
+the body's output phase $\sigma_u$, the outer forge applies $\mathsf{setphase}$
+(forcing $\crystal$) and $\mathsf{freeze\_region}$ (preserving $\crystal$).
+\end{proof}
+
+%% ════════════════════════════════════════════════════════════════════
+
+\section{Proof of Heap Separation (Theorem~\ref{thm:separation})}
+\label{sec:proof:separation}
+
+We restate the theorem for convenience.
+
+\medskip
+\noindent\textbf{Theorem~\ref{thm:separation} (Heap Separation).}
+\textit{No pointer reachable from a crystal value with a valid region
+identifier $r \neq \bot$ appears in the fluid heap's allocation list:}
+\[
+  \forall\, \tval{v}{\crystal}\textit{ with region } r.\;
+  \forall\, a \in \mathsf{ptrs}(v).\;
+  a \notin \dom(\mathcal{F})
+\]
+
+\medskip
+We use the pointer set notation $\mathsf{ptrs}(v)$ from
+Definition~\ref{def:ptrs}, and establish auxiliary definitions and lemmas
+before giving the main proof.
+
+\subsection{Auxiliary Definitions}
+
+\begin{definition}[Arena pointer]
+\label{def:arena-ptr}
+A pointer $a$ is an \emph{arena pointer for region $R$} if there exists
+a page $P_j$ in $R$'s page list such that
+$P_j.\mathit{data} \leq a < P_j.\mathit{data} + P_j.\mathit{cap}$.
+We write $a \in \mathsf{arena}(R)$.
+\end{definition}
+
+\begin{definition}[Fluid-registered pointer]
+A pointer $a$ is \emph{fluid-registered} if $(a, n, m) \in \mathcal{F}$
+for some size $n$ and mark bit $m$.  We write $a \in \dom(\mathcal{F})$.
+\end{definition}
+
+\subsection{Key Lemmas}
+
+\begin{lemma}[Arena--Fluid Disjointness]
+\label{lem:arena-fluid-disjoint}
+For every region $R$ managed by $\mathcal{R}$ and every pointer
+$a \in \mathsf{arena}(R)$, we have $a \notin \dom(\mathcal{F})$.
+\end{lemma}
+
+\begin{proof}
+Arena pages are allocated by direct \texttt{malloc} calls, bypassing
+$\mathsf{fluid\_alloc}$ entirely.  The system allocator guarantees that
+distinct live allocations return non-overlapping regions, so bump-pointer
+addresses within an arena page can never coincide with any address from
+$\mathsf{fluid\_alloc}$.
+\end{proof}
+
+\begin{lemma}[Arena Routing Completeness]
+\label{lem:arena-routing}
+When the global arena pointer $g_{\mathit{arena}}$ is set to a region
+$R$, every call to $\mathsf{lat\_alloc}$, $\mathsf{lat\_calloc}$, or
+$\mathsf{lat\_strdup}$ returns a pointer in $\mathsf{arena}(R)$.
+\end{lemma}
+
+\begin{proof}
+The arena check is the first branch in each allocator function.  When
+$g_{\mathit{arena}} \neq \mathsf{null}$, execution unconditionally enters
+the arena path.  No allocation can escape to $\mathsf{fluid\_alloc}$ while
+the arena pointer is set.
+\end{proof}
+
+\begin{lemma}[Deep Clone Allocation Coverage]
+\label{lem:clone-coverage}
+$\mathsf{value\_deep\_clone}(v)$ allocates every pointer in
+$\mathsf{ptrs}(v')$ (where $v'$ is the returned clone) through calls to
+$\mathsf{lat\_alloc}$, $\mathsf{lat\_calloc}$, or
+$\mathsf{lat\_strdup}$.
+\end{lemma}
+
+\begin{proof}
+By structural induction on the value type.  Scalar types have empty pointer
+sets.  For strings, arrays, structs, maps, and closures, every heap
+allocation in the clone is performed through the $\mathsf{lat\_*}$ family.
+Environment cloning dispatches to $\mathsf{env\_clone\_arena}$ when the
+arena is active (Lemma~\ref{lem:env-clone-arena}).
+\end{proof}
+
+\begin{lemma}[Environment Arena Clone]
+\label{lem:env-clone-arena}
+When $g_{\mathit{arena}} \neq \mathsf{null}$, $\mathsf{env\_clone}$
+dispatches to $\mathsf{env\_clone\_arena}$, which allocates every
+pointer through $\mathsf{lat\_alloc\_routed}$, $\mathsf{lat\_calloc\_routed}$,
+and $\mathsf{lat\_strdup\_routed}$---all of which delegate to the
+$\mathsf{lat\_*}$ family and hence route through $\mathsf{arena\_alloc}$
+by Lemma~\ref{lem:arena-routing}.
+\end{lemma}
+
+\begin{proof}
+By inspection of the $\mathsf{env\_clone}$ implementation, which checks
+$\mathsf{value\_get\_arena}()$ and, when non-null, allocates all environment
+structures through the routed allocation functions.
+\end{proof}
+
+\begin{lemma}[Region ID Completeness]
+\label{lem:region-id-completeness}
+$\mathsf{set\_region\_id\_recursive}(v, r)$ sets $v.\mathit{region\_id}
+:= r$ on $v$ and on every sub-value reachable from $v$, including array
+elements, struct field values, map entry values, and all values stored in
+closure captured environments.
+\end{lemma}
+
+\begin{proof}
+By structural induction on the value tree.  For closures, the function
+calls $\mathsf{set\_region\_id\_env}$, which iterates all scopes and
+all bindings.
+\end{proof}
+
+\begin{lemma}[Value Free Removes Fluid Registrations]
+\label{lem:value-free}
+For a value $v$ with $v.\mathit{region\_id} = \bot$,
+$\mathsf{value\_free}(v)$ calls $\mathsf{lat\_free}$ on every pointer in
+$\mathsf{ptrs}(v)$, removing them from $\mathcal{F}$.
+For a value with $v.\mathit{region\_id} \neq \bot$,
+$\mathsf{value\_free}(v)$ is a no-op.
+\end{lemma}
+
+\begin{proof}
+By inspection of $\mathsf{value\_free}$: the early return when
+$\mathit{region\_id} \neq \bot$ prevents freeing arena-backed pointers.
+\end{proof}
+
+\subsection{Main Proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:separation}]
+We prove that after the freeze migration protocol completes, the resulting
+crystal value $v'$ (with region ID $r$) satisfies
+$\mathsf{ptrs}(v') \cap \dom(\mathcal{F}) = \emptyset$.  The proof proceeds
+by induction on the seven steps of the protocol (Section~\ref{sec:memory}).
+
+\medskip
+\noindent\textbf{Step 1: Create a fresh region.}
+$R \leftarrow \mathsf{region\_create}(\mathcal{R})$.  Arena pages are
+allocated via direct \texttt{malloc}, disjoint from the fluid heap.
+$\mathcal{F}$ is unchanged.
+
+\medskip
+\noindent\textbf{Step 2: Set the global arena pointer.}
+$g_{\mathit{arena}} \leftarrow R$.  By Lemma~\ref{lem:arena-routing}, all
+subsequent allocations go to $\mathsf{arena}(R)$.  $\mathcal{F}$ unchanged.
+
+\medskip
+\noindent\textbf{Step 3: Deep-clone into $R$.}
+$v' \leftarrow \mathsf{value\_deep\_clone}(v_0)$ with $g_{\mathit{arena}} = R$.
+By Lemma~\ref{lem:clone-coverage}, every pointer in $\mathsf{ptrs}(v')$ is
+allocated through $\mathsf{lat\_*}$.  By Lemma~\ref{lem:arena-routing},
+every such pointer is in $\mathsf{arena}(R)$.  By
+Lemma~\ref{lem:arena-fluid-disjoint}, none appear in $\dom(\mathcal{F})$.
+$\mathcal{F}$ unchanged.
+
+\medskip
+\noindent\textbf{Step 4: Reset the arena pointer.}
+$g_{\mathit{arena}} \leftarrow \mathsf{null}$.  No allocations occur.
+
+\medskip
+\noindent\textbf{Step 5: Set region ID recursively.}
+$\mathsf{set\_region\_id\_recursive}(v', r)$.  By
+Lemma~\ref{lem:region-id-completeness}, all sub-values carry region ID $r$,
+ensuring GC safety.
+
+\medskip
+\noindent\textbf{Step 6: Free the original.}
+$\mathsf{value\_free}(v_0)$.  By Lemma~\ref{lem:value-free}, the old fluid
+allocations are removed from $\mathcal{F}$.
+
+\medskip
+\noindent\textbf{Step 7: Return the arena clone.}
+The value slot is overwritten with the arena-backed clone.
+
+\medskip
+\noindent\textbf{Combining:}
+\begin{align*}
+  &\mathsf{ptrs}(v') \subseteq \mathsf{arena}(R)
+    && \text{(Step 3)} \\
+  &\mathsf{arena}(R) \cap \dom(\mathcal{F}) = \emptyset
+    && \text{(Lemma~\ref{lem:arena-fluid-disjoint})} \\
+  &\therefore\; \mathsf{ptrs}(v') \cap \dom(\mathcal{F}) = \emptyset
+\end{align*}
+
+\noindent\textbf{Persistence:}
+The invariant is preserved because: (1)~arena pages remain allocated, so no
+future $\mathsf{fluid\_alloc}$ can return an address within them;
+(2)~Phase Monotonicity prevents mutation of $\mathsf{ptrs}(v')$;
+(3)~thaw produces independent copies (Theorem~\ref{thm:thaw});
+(4)~region collection frees entire pages atomically;
+(5)~the GC mark phase respects the boundary via early return on crystal values
+with valid region IDs.  The invariant is verified at runtime by
+$\mathsf{assert\_crystal\_not\_fluid}$.
+\end{proof}
+
+%% ════════════════════════════════════════════════════════════════════
+
+\section{Proof of Thaw Independence (Theorem~\ref{thm:thaw})}
+\label{sec:proof:thaw}
+
+We restate the theorem for convenience.
+
+\begin{theorem}[Thaw Independence, restated]
+\label{thm:thaw:restated}
+The value produced by $\thawkw(e)$ is a fresh, deep-cloned copy of the
+original with phase set to $\fluid$.  It shares no state with the source:
+\[
+  \langle \rho, \mu, \thawkw(e) \rangle \Downarrow
+  \langle \mu', \tval{v'}{\fluid} \rangle
+  \quad\Longrightarrow\quad
+  \mathsf{ptrs}(v') \cap \mathsf{ptrs}(\llbracket e \rrbracket) = \emptyset
+\]
+In particular, thawing a crystal value does not invalidate the crystal
+region; the thawed copy resides in the fluid heap.
+\end{theorem}
+
+\noindent
+The proof uses the pointer set notation $\mathsf{ptrs}(v)$ from
+Definition~\ref{def:ptrs}.
+
+\subsection{Key Lemmas}
+
+\begin{lemma}[Deep Clone Produces Fresh Pointers]
+\label{lem:dc:fresh}
+Let $\tval{v}{\sigma}$ be a tagged value.  Suppose $\mathsf{g\_arena} =
+\mathsf{null}$ at the time $\dc{\tval{v}{\sigma}}$ is invoked.  Let
+$\tval{v'}{\sigma} = \dc{\tval{v}{\sigma}}$.  Then:
+\begin{enumerate}[nosep]
+  \item $\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) = \emptyset$ \quad
+        (all pointers are fresh).
+  \item Every $a' \in \mathsf{ptrs}(v')$ satisfies
+        $a' \in \dom(\mathcal{F})$ \quad (all allocations go to the
+        fluid heap).
+  \item $v'.\mathsf{region\_id} = \bot$ \quad (the clone is not
+        associated with any crystal region).
+\end{enumerate}
+\end{lemma}
+
+\begin{proof}
+By structural induction on $v$, following the same argument as
+Lemma~\ref{lem:dc-indep}.  Since $\mathsf{g\_arena} = \mathsf{null}$,
+all allocations route to $\mathsf{fluid\_alloc}$, producing fluid-heap
+pointers that are fresh by the allocator contract.
+Property~(3) holds because $\mathsf{value\_deep\_clone}$ unconditionally
+sets $\mathsf{region\_id} := \bot$.
+\end{proof}
+
+\begin{lemma}[$\mathsf{setphase}$ Operates Only on Its Argument]
+\label{lem:setphase:local}
+The function $\mathsf{setphase}(\tval{v}{\sigma}, \sigma')$ modifies
+only the phase tags of $v$ and its sub-values.  It does not allocate or
+free any memory, follow any pointer not reachable from $v$, or modify any
+value not reachable from $v$.
+\end{lemma}
+
+\begin{proof}
+By inspection: $\mathsf{set\_phase\_recursive}$ performs only
+$v.\mathit{phase} := \sigma'$ assignments and recurses into structurally
+contained sub-values.
+\end{proof}
+
+\subsection{Main Proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:thaw:restated}]
+We proceed by case analysis on the two evaluation rules for $\thawkw$.
+
+\bigskip
+\noindent
+\textbf{Case 1: \textsc{E-Thaw-Expr}.}
+Suppose $e$ is not a bare identifier.  The implementation evaluates $e$
+to obtain $\tval{v}{\sigma}$, then calls $\mathsf{value\_thaw}$, which
+deep-clones $v$ and sets the phase to $\fluid$.
+
+Since no freeze-to-region is in progress, $\mathsf{g\_arena} = \mathsf{null}$.
+By Lemma~\ref{lem:dc:fresh}, the clone $v'$ has
+$\mathsf{ptrs}(v') \cap \mathsf{ptrs}(v) = \emptyset$ and all pointers
+reside in $\dom(\mathcal{F})$.  By Lemma~\ref{lem:setphase:local}, the
+phase change does not touch the original.  If the original was crystal in
+region $R$, $R$ is unaffected.
+$\qed$ (Case~1)
+
+\bigskip
+\noindent
+\textbf{Case 2: \textsc{E-Thaw-Var}.}
+Suppose the operand is a bare identifier $x$.  Three values are in play:
+\begin{enumerate}[label=(\alph*)]
+  \item The \emph{original binding} $\tval{v}{\sigma}$ at $\rho_{\mathrm{raw}}(x)$.
+  \item The \emph{thawed value} $\tval{v'}{\fluid}$, which replaces the binding.
+  \item The \emph{returned value} $\tval{v''}{\fluid} = \dc{\tval{v'}{\fluid}}$.
+\end{enumerate}
+The implementation: (1)~$\mathsf{env\_get}$ deep-clones the binding
+(Theorem~\ref{thm:isolation} gives independence from the original);
+(2)~$\mathsf{value\_thaw}$ deep-clones again and sets phase to $\fluid$;
+(3)~a final $\mathsf{value\_deep\_clone}$ produces the return value;
+(4)~$\mathsf{env\_set}$ stores the thawed value.
+
+By Lemma~\ref{lem:dc:fresh} applied at each clone step, and by the
+transitivity of allocator freshness:
+\[
+  \mathsf{ptrs}(v'') \cap \mathsf{ptrs}(\rho_{\mathrm{raw}}(x)) = \emptyset
+  \qquad\text{and}\qquad
+  \mathsf{ptrs}(v'') \cap \mathsf{ptrs}(v') = \emptyset
+\]
+All pointers in $v''$ reside in $\dom(\mathcal{F})$.  If the original
+binding was crystal with region $r$, the region $\mathcal{R}(r)$ is
+unmodified (thaw does not create, modify, or destroy any region).
+$\qed$ (Case~2)
+
+\bigskip\noindent
+Both cases establish pointer disjointness, phase correctness, and
+non-interference with crystal regions.
+\end{proof}
+
+\begin{corollary}[Crystal Safety Under Thaw]
+\label{cor:crystal:safety}
+If $\rho_{\mathrm{raw}}(x) = \tval{v}{\crystal}$ with region $r$, then
+after evaluating $\thawkw(x)$:
+\begin{enumerate}[nosep]
+  \item The crystal region $\mathcal{R}(r)$ remains valid and unmodified.
+  \item Any other binding with $\mathsf{region\_id} = r$ remains valid.
+  \item The thawed value can be freely mutated without affecting any
+        crystal data.
+\end{enumerate}
+\end{corollary}
+
+\begin{proof}
+Properties (1) and (2) follow from the fact that thaw does not write to or
+deallocate any region.  Property (3) follows from pointer disjointness:
+$\mathsf{ptrs}(v') \cap \mathsf{pages}(R) = \emptyset$ by
+Lemma~\ref{lem:dc:fresh} and fluid heap residence.
+\end{proof}
+
+\end{document}
