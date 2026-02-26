@@ -1,0 +1,58 @@
+// Extension test: Image
+// Tests format detection, dimensions parsing, and info retrieval.
+// Uses a minimal 2x2 PNG fixture (tests/fixtures/test_2x2.png).
+
+let image = require_ext("image")
+
+let _format = image.get("format")
+let _dimensions = image.get("dimensions")
+let _info = image.get("info")
+
+let test_png = "tests/fixtures/test_2x2.png"
+
+print("=== Image Extension Tests ===")
+print("")
+
+// -- Test 1: Detect PNG format --
+let fmt = _format(test_png)
+assert(fmt == "png", "format should detect PNG, got: ${fmt}")
+print("1. Format detection: ${fmt}")
+
+// -- Test 2: Read dimensions --
+let dims = _dimensions(test_png)
+let w = dims.get("width")
+let h = dims.get("height")
+assert(w == 2, "width should be 2, got: ${w}")
+assert(h == 2, "height should be 2, got: ${h}")
+print("2. Dimensions: ${w}x${h}")
+
+// -- Test 3: Get full info --
+let info = _info(test_png)
+let info_fmt = info.get("format")
+let info_w = info.get("width")
+let info_h = info.get("height")
+let info_size = info.get("file_size")
+assert(info_fmt == "png", "info format should be png")
+assert(info_w == 2, "info width should be 2")
+assert(info_h == 2, "info height should be 2")
+assert(info_size > 0, "file_size should be positive")
+print("3. Info: format=${info_fmt}, ${info_w}x${info_h}, ${info_size} bytes")
+
+// -- Test 4: Error handling for missing file --
+let got_error = false
+try {
+    let bad_fmt = _format("nonexistent_file.png")
+} catch e {
+    got_error = true
+}
+assert(got_error == true, "missing file should produce an error")
+print("4. Missing file error handled gracefully")
+
+// -- Test 5: Unknown format for non-image file --
+// Use a known text file as input
+let txt_fmt = _format("Makefile")
+assert(txt_fmt == "unknown", "non-image file should return unknown format, got: ${txt_fmt}")
+print("5. Non-image file format: ${txt_fmt}")
+
+print("")
+print("Image extension: all tests passed")

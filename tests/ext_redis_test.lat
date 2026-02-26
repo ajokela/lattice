@@ -1,0 +1,121 @@
+// Extension test: Redis
+// Tests connect, ping, get/set, del, exists, incr, lpush, lrange, keys, expire, close.
+// Requires a running Redis server on localhost:6379.
+
+let redis = require_ext("redis")
+
+let _connect = redis.get("connect")
+let _close = redis.get("close")
+let _ping = redis.get("ping")
+let _get = redis.get("get")
+let _set = redis.get("set")
+let _del = redis.get("del")
+let _exists = redis.get("exists")
+let _incr = redis.get("incr")
+let _keys = redis.get("keys")
+let _expire = redis.get("expire")
+let _lpush = redis.get("lpush")
+let _lrange = redis.get("lrange")
+let _command = redis.get("command")
+
+print("=== Redis Extension Tests ===")
+print("")
+
+// -- Test 1: Connect --
+let conn = _connect("127.0.0.1", 6379)
+assert(typeof(conn) == "Int", "connect should return integer handle")
+print("1. Connected to Redis: handle = ${conn}")
+
+// -- Test 2: Ping --
+let pong = _ping(conn)
+assert(pong == "PONG", "ping should return PONG, got: ${pong}")
+print("2. Ping: ${pong}")
+
+// Use a unique prefix to avoid collisions
+let prefix = "lattice_test:"
+
+// -- Test 3: Set and Get --
+let set_ok = _set(conn, "${prefix}key1", "hello")
+assert(set_ok == "OK", "set should return OK")
+let val = _get(conn, "${prefix}key1")
+assert(val == "hello", "get should return 'hello', got: ${val}")
+print("3. Set/Get: ${val}")
+
+// -- Test 4: Overwrite --
+_set(conn, "${prefix}key1", "world")
+let val2 = _get(conn, "${prefix}key1")
+assert(val2 == "world", "overwritten value should be 'world'")
+print("4. Overwrite: ${val2}")
+
+// -- Test 5: Exists --
+let ex = _exists(conn, "${prefix}key1")
+assert(ex == true, "key1 should exist")
+let ex2 = _exists(conn, "${prefix}nonexistent")
+assert(ex2 == false, "nonexistent key should not exist")
+print("5. Exists: key1=${ex}, nonexistent=${ex2}")
+
+// -- Test 6: Del --
+_set(conn, "${prefix}delme", "temp")
+let del_count = _del(conn, "${prefix}delme")
+assert(del_count == 1, "del should return 1")
+let del_exists = _exists(conn, "${prefix}delme")
+assert(del_exists == false, "deleted key should not exist")
+print("6. Del: removed 1 key")
+
+// -- Test 7: Incr --
+_del(conn, "${prefix}counter")
+let c1 = _incr(conn, "${prefix}counter")
+assert(c1 == 1, "first incr should return 1")
+let c2 = _incr(conn, "${prefix}counter")
+assert(c2 == 2, "second incr should return 2")
+let c3 = _incr(conn, "${prefix}counter")
+assert(c3 == 3, "third incr should return 3")
+print("7. Incr: 1 -> 2 -> ${c3}")
+
+// -- Test 8: Get returns nil for missing key --
+_del(conn, "${prefix}missing")
+let missing = _get(conn, "${prefix}missing")
+assert(missing == nil, "get on missing key should return nil")
+print("8. Get missing key: ${missing}")
+
+// -- Test 9: Lpush and Lrange --
+_del(conn, "${prefix}mylist")
+_lpush(conn, "${prefix}mylist", "c")
+_lpush(conn, "${prefix}mylist", "b")
+_lpush(conn, "${prefix}mylist", "a")
+let items = _lrange(conn, "${prefix}mylist", 0, -1)
+assert(len(items) == 3, "list should have 3 items")
+assert(items[0] == "a", "first item should be 'a'")
+assert(items[1] == "b", "second item should be 'b'")
+assert(items[2] == "c", "third item should be 'c'")
+print("9. Lpush/Lrange: ${items}")
+
+// -- Test 10: Keys pattern --
+let found = _keys(conn, "${prefix}*")
+assert(len(found) >= 3, "should find at least 3 test keys")
+print("10. Keys matching '${prefix}*': ${len(found)} found")
+
+// -- Test 11: Expire --
+let exp = _expire(conn, "${prefix}key1", 3600)
+assert(exp == true, "expire should return true for existing key")
+let exp2 = _expire(conn, "${prefix}nonexistent", 3600)
+assert(exp2 == false, "expire should return false for missing key")
+print("11. Expire: existing=${exp}, missing=${exp2}")
+
+// -- Test 12: Raw command --
+let info_result = _command(conn, "DBSIZE")
+print("12. Raw command DBSIZE: ${info_result}")
+
+// -- Cleanup: delete all test keys --
+let test_keys = _keys(conn, "${prefix}*")
+for k in test_keys {
+    _del(conn, k)
+}
+print("    Cleaned up ${len(test_keys)} test keys")
+
+// -- Test 13: Close --
+_close(conn)
+print("13. Closed connection")
+
+print("")
+print("Redis extension: all tests passed")
