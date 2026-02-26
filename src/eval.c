@@ -7176,6 +7176,115 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_int((int64_t)ev->max_call_depth));
                 }
 
+                /// @builtin breakpoint()
+                /// @category Debugging
+                /// Pause execution and drop into an interactive REPL with access to local
+                /// variables. Similar to Ruby's binding.pry or Python's breakpoint().
+                /// @example breakpoint()
+                if (strcmp(fn_name, "breakpoint") == 0) {
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+
+                    fprintf(stderr, "\n-- breakpoint() hit --\n");
+                    fprintf(stderr, "Commands: locals, bt, p <var>, <expr>, cont\n\n");
+
+                    for (;;) {
+                        fprintf(stderr, "(breakpoint) ");
+                        fflush(stderr);
+                        char buf[2048];
+                        if (!fgets(buf, sizeof(buf), stdin)) break;
+                        size_t blen = strlen(buf);
+                        while (blen > 0 && (buf[blen - 1] == '\n' || buf[blen - 1] == '\r')) buf[--blen] = '\0';
+                        if (blen == 0) continue;
+
+                        if (strcmp(buf, "cont") == 0 || strcmp(buf, "continue") == 0 || strcmp(buf, "c") == 0) break;
+                        if (strcmp(buf, "quit") == 0 || strcmp(buf, "q") == 0 || strcmp(buf, "exit") == 0) break;
+
+                        if (strcmp(buf, "locals") == 0 || strcmp(buf, "l") == 0) {
+                            /* Print all variables in the current scope */
+                            if (ev->env && ev->env->count > 0) {
+                                Scope *top = &ev->env->scopes[ev->env->count - 1];
+                                bool found = false;
+                                for (size_t bi = 0; bi < top->cap; bi++) {
+                                    if (top->entries[bi].key) {
+                                        LatValue *vp = (LatValue *)top->entries[bi].value;
+                                        char *repr = value_repr(vp);
+                                        fprintf(stderr, "  %s = %s\n", top->entries[bi].key, repr);
+                                        free(repr);
+                                        found = true;
+                                    }
+                                }
+                                if (!found) fprintf(stderr, "(no locals in current scope)\n");
+                            }
+                            continue;
+                        }
+
+                        if (strcmp(buf, "bt") == 0 || strcmp(buf, "backtrace") == 0 || strcmp(buf, "stack") == 0) {
+                            fprintf(stderr, "Backtrace:\n");
+                            for (size_t fi = 0; fi < ev->call_depth; fi++) {
+                                fprintf(stderr, "  #%zu in %s\n", fi,
+                                        ev->call_stack[fi] ? ev->call_stack[fi] : "<script>");
+                            }
+                            continue;
+                        }
+
+                        if (strncmp(buf, "p ", 2) == 0) {
+                            const char *vname = buf + 2;
+                            while (*vname == ' ') vname++;
+                            if (*vname) {
+                                LatValue val;
+                                if (env_get(ev->env, vname, &val)) {
+                                    char *repr = value_repr(&val);
+                                    fprintf(stderr, "%s = %s\n", vname, repr);
+                                    free(repr);
+                                    value_free(&val);
+                                } else {
+                                    fprintf(stderr, "variable '%s' not found\n", vname);
+                                }
+                            }
+                            continue;
+                        }
+
+                        /* Evaluate arbitrary expression in current scope */
+                        Lexer bplex = lexer_new(buf);
+                        char *bplex_err = NULL;
+                        LatVec bptokens = lexer_tokenize(&bplex, &bplex_err);
+                        if (bplex_err) {
+                            fprintf(stderr, "error: %s\n", bplex_err);
+                            free(bplex_err);
+                            for (size_t ti = 0; ti < bptokens.len; ti++) token_free(lat_vec_get(&bptokens, ti));
+                            lat_vec_free(&bptokens);
+                            continue;
+                        }
+                        Parser bpparser = parser_new(&bptokens);
+                        char *bpparse_err = NULL;
+                        Program bpprog = parser_parse(&bpparser, &bpparse_err);
+                        if (bpparse_err) {
+                            fprintf(stderr, "error: %s\n", bpparse_err);
+                            free(bpparse_err);
+                            program_free(&bpprog);
+                            for (size_t ti = 0; ti < bptokens.len; ti++) token_free(lat_vec_get(&bptokens, ti));
+                            lat_vec_free(&bptokens);
+                            continue;
+                        }
+                        EvalResult bpres = evaluator_run_repl_result(ev, &bpprog);
+                        if (!bpres.ok) {
+                            fprintf(stderr, "error: %s\n", bpres.error ? bpres.error : "unknown");
+                            free(bpres.error);
+                        } else if (bpres.value.type != VAL_UNIT && bpres.value.type != VAL_NIL) {
+                            char *repr = value_repr(&bpres.value);
+                            fprintf(stderr, "=> %s\n", repr);
+                            free(repr);
+                        }
+                        value_free(&bpres.value);
+                        program_free(&bpprog);
+                        for (size_t ti = 0; ti < bptokens.len; ti++) token_free(lat_vec_get(&bptokens, ti));
+                        lat_vec_free(&bptokens);
+                    }
+
+                    return eval_ok(value_unit());
+                }
+
                 /* ── Named function lookup ── */
                 FnDecl *fd_head = find_fn(ev, fn_name);
                 if (fd_head) {

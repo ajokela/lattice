@@ -3162,6 +3162,190 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     return result;
 }
 
+/* ── breakpoint() builtin — drops into interactive REPL like Ruby's binding.pry ── */
+
+static void bp_print_locals_vm(StackVM *vm) {
+    if (vm->frame_count == 0) return;
+    /* Native functions don't push a frame, so frame_count-1 IS the caller */
+    size_t fi = vm->frame_count - 1;
+    StackCallFrame *frame = &vm->frames[fi];
+    Chunk *chunk = frame->chunk;
+    if (!chunk || !chunk->local_names) {
+        fprintf(stderr, "(no local variable info)\n");
+        return;
+    }
+    bool found_any = false;
+    LatValue *frame_top = vm->stack_top;
+    size_t slot_count = (size_t)(frame_top - frame->slots);
+    for (size_t i = 0; i < chunk->local_name_cap && i < slot_count; i++) {
+        if (chunk->local_names[i] && chunk->local_names[i][0] != '\0') {
+            char *repr = value_repr(&frame->slots[i]);
+            fprintf(stderr, "  %s = %s\n", chunk->local_names[i], repr);
+            free(repr);
+            found_any = true;
+        }
+    }
+    if (!found_any) fprintf(stderr, "(no named locals in current scope)\n");
+}
+
+static void bp_print_backtrace_vm(StackVM *vm) {
+    fprintf(stderr, "Backtrace:\n");
+    for (size_t i = 0; i < vm->frame_count; i++) {
+        StackCallFrame *f = &vm->frames[i];
+        if (!f->chunk) continue;
+        size_t offset = (size_t)(f->ip - f->chunk->code);
+        if (offset > 0) offset--;
+        int line = 0;
+        if (f->chunk->lines && offset < f->chunk->lines_len) line = f->chunk->lines[offset];
+        const char *name = f->chunk->name;
+        fprintf(stderr, "  #%zu [line %d] in %s%s\n", i, line, (name && name[0]) ? name : "<script>",
+                (i == vm->frame_count - 1) ? "  <-- current" : "");
+    }
+}
+
+static void bp_print_var_vm(StackVM *vm, const char *name) {
+    /* Native functions don't push a frame, so frame_count-1 IS the caller */
+    size_t fi = vm->frame_count > 0 ? vm->frame_count - 1 : 0;
+    StackCallFrame *frame = &vm->frames[fi];
+    Chunk *chunk = frame->chunk;
+    if (chunk && chunk->local_names) {
+        LatValue *frame_top = vm->stack_top;
+        size_t slot_count = (size_t)(frame_top - frame->slots);
+        for (size_t i = 0; i < chunk->local_name_cap && i < slot_count; i++) {
+            if (chunk->local_names[i] && strcmp(chunk->local_names[i], name) == 0) {
+                char *repr = value_repr(&frame->slots[i]);
+                fprintf(stderr, "%s = %s\n", name, repr);
+                free(repr);
+                return;
+            }
+        }
+    }
+    /* Try globals */
+    LatValue gval;
+    if (env_get(vm->env, name, &gval)) {
+        char *repr = value_repr(&gval);
+        fprintf(stderr, "%s = %s\n", name, repr);
+        free(repr);
+        value_free(&gval);
+        return;
+    }
+    fprintf(stderr, "variable '%s' not found\n", name);
+}
+
+static LatValue native_breakpoint(LatValue *args, int arg_count) {
+    (void)args;
+    (void)arg_count;
+
+    LatRuntime *rt = lat_runtime_current();
+    if (!rt || !rt->active_vm) return value_unit();
+
+    StackVM *vm = (StackVM *)rt->active_vm;
+
+    /* Determine current line from the caller's frame */
+    int line = 0;
+    if (vm->frame_count > 0) {
+        StackCallFrame *f = &vm->frames[vm->frame_count - 1];
+        if (f->chunk && f->chunk->lines) {
+            size_t offset = (size_t)(f->ip - f->chunk->code);
+            if (offset > 0) offset--;
+            if (offset < f->chunk->lines_len) line = f->chunk->lines[offset];
+        }
+    }
+    fprintf(stderr, "\n-- breakpoint() hit at line %d --\n", line);
+    fprintf(stderr, "Commands: locals, bt, p <var>, <expr>, cont\n\n");
+
+    /* Mini-REPL loop */
+    for (;;) {
+        fprintf(stderr, "(breakpoint) ");
+        fflush(stderr);
+        char buf[2048];
+        if (!fgets(buf, sizeof(buf), stdin)) break;
+
+        /* Strip trailing newline */
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+        if (len == 0) continue;
+
+        /* Built-in commands */
+        if (strcmp(buf, "cont") == 0 || strcmp(buf, "continue") == 0 || strcmp(buf, "c") == 0) break;
+        if (strcmp(buf, "quit") == 0 || strcmp(buf, "q") == 0 || strcmp(buf, "exit") == 0) break;
+
+        if (strcmp(buf, "locals") == 0 || strcmp(buf, "l") == 0) {
+            bp_print_locals_vm(vm);
+            continue;
+        }
+        if (strcmp(buf, "bt") == 0 || strcmp(buf, "backtrace") == 0 || strcmp(buf, "stack") == 0) {
+            bp_print_backtrace_vm(vm);
+            continue;
+        }
+        if (strncmp(buf, "p ", 2) == 0) {
+            const char *varname = buf + 2;
+            while (*varname == ' ') varname++;
+            if (*varname) bp_print_var_vm(vm, varname);
+            continue;
+        }
+
+        /* Evaluate arbitrary expression */
+        Lexer lex = lexer_new(buf);
+        char *lex_err = NULL;
+        LatVec tokens = lexer_tokenize(&lex, &lex_err);
+        if (lex_err) {
+            fprintf(stderr, "error: %s\n", lex_err);
+            free(lex_err);
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            continue;
+        }
+
+        Parser parser = parser_new(&tokens);
+        char *parse_err = NULL;
+        Program prog = parser_parse(&parser, &parse_err);
+        if (parse_err) {
+            fprintf(stderr, "error: %s\n", parse_err);
+            free(parse_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            continue;
+        }
+
+        char *comp_err = NULL;
+        Chunk *chunk = stack_compile_repl(&prog, &comp_err);
+        if (comp_err) {
+            fprintf(stderr, "error: %s\n", comp_err);
+            free(comp_err);
+            program_free(&prog);
+            for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+            lat_vec_free(&tokens);
+            continue;
+        }
+
+        LatValue result;
+        StackVMResult vm_res = stackvm_run(vm, chunk, &result);
+        if (vm_res == STACKVM_OK && result.type != VAL_UNIT) {
+            char *repr = value_repr(&result);
+            fprintf(stderr, "=> %s\n", repr);
+            free(repr);
+        } else if (vm_res != STACKVM_OK && vm->error) {
+            fprintf(stderr, "error: %s\n", vm->error);
+            free(vm->error);
+            vm->error = NULL;
+            /* Reset VM state after error */
+            for (LatValue *slot = vm->stack; slot < vm->stack_top; slot++) value_free(slot);
+            vm->stack_top = vm->stack;
+            vm->frame_count = 0;
+        }
+        value_free(&result);
+        chunk_free(chunk);
+        free(chunk);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+    }
+
+    return value_unit();
+}
+
 static LatValue native_pipe(LatValue *args, int arg_count) {
     if (arg_count < 2) return value_nil();
     (void)0; /* uses dispatch */
@@ -3919,6 +4103,9 @@ void lat_runtime_init(LatRuntime *rt) {
     /* CSV */
     rt_register_native(rt, "csv_parse", native_csv_parse, 1);
     rt_register_native(rt, "csv_stringify", native_csv_stringify, 1);
+
+    /* Debugging */
+    rt_register_native(rt, "breakpoint", native_breakpoint, 0);
 
     /* Functional */
     rt_register_native(rt, "pipe", native_pipe, -1);
