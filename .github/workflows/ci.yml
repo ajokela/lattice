@@ -92,6 +92,51 @@ jobs:
       - name: Analyze
         run: make analyze
 
+  heaptrack:
+    name: Heap Profiling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev heaptrack
+
+      - name: Build (debug)
+        run: make CFLAGS="-std=c11 -Wall -Wextra -Iinclude -g -O1 -DVM_USE_COMPUTED_GOTO -I/usr/include/editline -DLATTICE_HAS_EDITLINE -DLATTICE_HAS_TLS -D_DEFAULT_SOURCE"
+
+      - name: Profile test suite
+        run: |
+          make build/test_runner
+          heaptrack ./build/test_runner 2>&1 | tee heaptrack_output.txt || true
+
+      - name: Analyze results
+        run: |
+          # Find the heaptrack data file
+          HT_FILE=$(ls -t heaptrack.test_runner.*.zst 2>/dev/null | head -1)
+          if [ -z "$HT_FILE" ]; then
+            HT_FILE=$(ls -t heaptrack.test_runner.*.gz 2>/dev/null | head -1)
+          fi
+          if [ -n "$HT_FILE" ]; then
+            heaptrack_print "$HT_FILE" | tee heaptrack_analysis.txt
+            echo ""
+            echo "=== Summary ==="
+            grep -E "peak heap|total allocations|leaked" heaptrack_analysis.txt || true
+          else
+            echo "Heaptrack summary from inline output:"
+            grep -E "peak heap|allocations|leaked|temporary" heaptrack_output.txt || true
+          fi
+
+      - name: Upload heaptrack data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heaptrack-data
+          path: |
+            heaptrack.test_runner.*
+            heaptrack_analysis.txt
+            heaptrack_output.txt
+          retention-days: 14
+
   fuzz:
     name: Fuzz (60s smoke test)
     runs-on: ubuntu-latest
