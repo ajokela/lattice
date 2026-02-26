@@ -5,44 +5,45 @@
 #include "value.h"
 #include "env.h"
 #include "runtime.h"
+#include "gc.h"
 
-struct BumpArena;  /* forward declaration */
+struct BumpArena; /* forward declaration */
 
-#define STACKVM_STACK_MAX 4096
-#define STACKVM_FRAMES_MAX 256
+#define STACKVM_STACK_MAX   4096
+#define STACKVM_FRAMES_MAX  256
 #define STACKVM_HANDLER_MAX 64
-#define STACKVM_DEFER_MAX 256
+#define STACKVM_DEFER_MAX   256
 
 /* Upvalue representation for closed-over variables */
 typedef struct ObjUpvalue {
-    LatValue *location;        /* Points into stack when open, or &closed when closed */
-    LatValue  closed;          /* Holds the value when closed */
-    struct ObjUpvalue *next;   /* Linked list of open upvalues */
+    LatValue *location;      /* Points into stack when open, or &closed when closed */
+    LatValue closed;         /* Holds the value when closed */
+    struct ObjUpvalue *next; /* Linked list of open upvalues */
 } ObjUpvalue;
 
 typedef struct {
-    Chunk    *chunk;
-    uint8_t  *ip;      /* Instruction pointer */
-    LatValue *slots;   /* Pointer to this frame's base on the value stack */
-    ObjUpvalue **upvalues;  /* Array of upvalue pointers for closures */
-    size_t    upvalue_count;
-    LatValue *cleanup_base;  /* If non-NULL, OP_RETURN frees down to here (not slots).
-                              * Used by defer bodies that share parent frame's slots. */
+    Chunk *chunk;
+    uint8_t *ip;           /* Instruction pointer */
+    LatValue *slots;       /* Pointer to this frame's base on the value stack */
+    ObjUpvalue **upvalues; /* Array of upvalue pointers for closures */
+    size_t upvalue_count;
+    LatValue *cleanup_base; /* If non-NULL, OP_RETURN frees down to here (not slots).
+                             * Used by defer bodies that share parent frame's slots. */
 } StackCallFrame;
 
 typedef struct {
-    uint8_t  *ip;          /* Where to resume on catch */
-    Chunk    *chunk;       /* Which chunk the handler is in */
-    size_t    frame_index; /* Which call frame */
-    LatValue *stack_top;   /* Stack top at handler registration */
+    uint8_t *ip;         /* Where to resume on catch */
+    Chunk *chunk;        /* Which chunk the handler is in */
+    size_t frame_index;  /* Which call frame */
+    LatValue *stack_top; /* Stack top at handler registration */
 } StackExceptionHandler;
 
 typedef struct {
-    uint8_t  *ip;          /* Start of defer body */
-    Chunk    *chunk;       /* Which chunk */
-    size_t    frame_index; /* Which call frame */
-    LatValue *slots;       /* Frame slots */
-    uint8_t   scope_depth; /* Compiler scope depth at registration */
+    uint8_t *ip;         /* Start of defer body */
+    Chunk *chunk;        /* Which chunk */
+    size_t frame_index;  /* Which call frame */
+    LatValue *slots;     /* Frame slots */
+    uint8_t scope_depth; /* Compiler scope depth at registration */
 } StackDeferEntry;
 
 typedef enum {
@@ -52,27 +53,27 @@ typedef enum {
 } StackVMResult;
 
 typedef struct {
-    StackCallFrame  frames[STACKVM_FRAMES_MAX];
-    size_t     frame_count;
-    LatValue   stack[STACKVM_STACK_MAX];
-    LatValue  *stack_top;
-    Env       *env;        /* For global variable access */
-    char      *error;      /* Runtime error message (heap-allocated) */
+    StackCallFrame frames[STACKVM_FRAMES_MAX];
+    size_t frame_count;
+    LatValue stack[STACKVM_STACK_MAX];
+    LatValue *stack_top;
+    Env *env;                  /* For global variable access */
+    char *error;               /* Runtime error message (heap-allocated) */
     ObjUpvalue *open_upvalues; /* Linked list of open upvalues */
     /* Exception handling */
     StackExceptionHandler handlers[STACKVM_HANDLER_MAX];
-    size_t     handler_count;
+    size_t handler_count;
     /* Defer stack */
     StackDeferEntry defers[STACKVM_DEFER_MAX];
-    size_t     defer_count;
+    size_t defer_count;
     /* Struct metadata (name -> field names array) for OP_BUILD_STRUCT */
-    Env       *struct_meta;
+    Env *struct_meta;
     /* Chunks allocated for functions (freed with StackVM) */
-    Chunk    **fn_chunks;
-    size_t     fn_chunk_count;
-    size_t     fn_chunk_cap;
+    Chunk **fn_chunks;
+    size_t fn_chunk_count;
+    size_t fn_chunk_cap;
     /* Module import cache (path -> LatValue module map), per-StackVM for thread isolation */
-    LatMap     module_cache;
+    LatMap module_cache;
     /* Pre-allocated buffer for native function call args (avoids malloc per call) */
     LatValue fast_args[16];
     /* Ephemeral bump arena for short-lived string temporaries */
@@ -85,6 +86,8 @@ typedef struct {
     LatValue *next_frame_slots;
     /* Shared runtime (not owned by StackVM) */
     LatRuntime *rt;
+    /* Mark-and-sweep garbage collector (opt-in via --gc flag) */
+    GC gc;
 } StackVM;
 
 void stackvm_init(StackVM *vm, LatRuntime *rt);
