@@ -36,9 +36,7 @@ Expr *expr_bool_lit(bool val) {
     return e;
 }
 
-Expr *expr_nil_lit(void) {
-    return expr_alloc(EXPR_NIL_LIT);
-}
+Expr *expr_nil_lit(void) { return expr_alloc(EXPR_NIL_LIT); }
 
 Expr *expr_ident(char *name) {
     Expr *e = expr_alloc(EXPR_IDENT);
@@ -216,8 +214,7 @@ Expr *expr_block(Stmt **stmts, size_t count) {
     return e;
 }
 
-Expr *expr_closure(char **params, size_t param_count, Expr *body,
-                   Expr **default_values, bool has_variadic) {
+Expr *expr_closure(char **params, size_t param_count, Expr *body, Expr **default_values, bool has_variadic) {
     Expr *e = expr_alloc(EXPR_CLOSURE);
     e->as.closure.params = params;
     e->as.closure.param_count = param_count;
@@ -255,8 +252,7 @@ Expr *expr_scope(Stmt **stmts, size_t count) {
     return e;
 }
 
-Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var,
-                     Stmt **catch_stmts, size_t catch_count) {
+Expr *expr_try_catch(Stmt **try_stmts, size_t try_count, char *catch_var, Stmt **catch_stmts, size_t catch_count) {
     Expr *e = expr_alloc(EXPR_TRY_CATCH);
     e->as.try_catch.try_stmts = try_stmts;
     e->as.try_catch.try_count = try_count;
@@ -327,20 +323,46 @@ Pattern *pattern_range(Expr *start, Expr *end) {
     return p;
 }
 
+Pattern *pattern_array(ArrayPatElem *elems, size_t count) {
+    Pattern *p = calloc(1, sizeof(Pattern));
+    if (!p) return NULL;
+    p->tag = PAT_ARRAY;
+    p->phase_qualifier = PHASE_UNSPECIFIED;
+    p->as.array.elems = elems;
+    p->as.array.count = count;
+    return p;
+}
+
+Pattern *pattern_struct(StructPatField *fields, size_t count) {
+    Pattern *p = calloc(1, sizeof(Pattern));
+    if (!p) return NULL;
+    p->tag = PAT_STRUCT;
+    p->phase_qualifier = PHASE_UNSPECIFIED;
+    p->as.strct.fields = fields;
+    p->as.strct.count = count;
+    return p;
+}
+
 void pattern_free(Pattern *p) {
     if (!p) return;
     switch (p->tag) {
-        case PAT_LITERAL:
-            expr_free(p->as.literal);
-            break;
-        case PAT_WILDCARD:
-            break;
-        case PAT_BINDING:
-            free(p->as.binding_name);
-            break;
+        case PAT_LITERAL: expr_free(p->as.literal); break;
+        case PAT_WILDCARD: break;
+        case PAT_BINDING: free(p->as.binding_name); break;
         case PAT_RANGE:
             expr_free(p->as.range.start);
             expr_free(p->as.range.end);
+            break;
+        case PAT_ARRAY:
+            for (size_t i = 0; i < p->as.array.count; i++) pattern_free(p->as.array.elems[i].pattern);
+            free(p->as.array.elems);
+            break;
+        case PAT_STRUCT:
+            for (size_t i = 0; i < p->as.strct.count; i++) {
+                free(p->as.strct.fields[i].name);
+                if (p->as.strct.fields[i].value_pat) pattern_free(p->as.strct.fields[i].value_pat);
+            }
+            free(p->as.strct.fields);
             break;
     }
     free(p);
@@ -351,8 +373,7 @@ void pattern_free(Pattern *p) {
 Expr *expr_clone_ast(const Expr *e) {
     if (!e) return NULL;
     switch (e->tag) {
-        case EXPR_IDENT:
-            return expr_ident(strdup(e->as.str_val));
+        case EXPR_IDENT: return expr_ident(strdup(e->as.str_val));
         case EXPR_FIELD_ACCESS: {
             Expr *obj = expr_clone_ast(e->as.field_access.object);
             return expr_field_access(obj, strdup(e->as.field_access.field));
@@ -362,10 +383,8 @@ Expr *expr_clone_ast(const Expr *e) {
             Expr *idx = expr_clone_ast(e->as.index.index);
             return expr_index(obj, idx);
         }
-        case EXPR_INT_LIT:
-            return expr_int_lit(e->as.int_val);
-        default:
-            return NULL;
+        case EXPR_INT_LIT: return expr_int_lit(e->as.int_val);
+        default: return NULL;
     }
 }
 
@@ -434,8 +453,8 @@ Stmt *stmt_loop(Stmt **body, size_t count) {
 Stmt *stmt_break(void) { return stmt_alloc(STMT_BREAK); }
 Stmt *stmt_continue(void) { return stmt_alloc(STMT_CONTINUE); }
 
-Stmt *stmt_destructure(AstPhase phase, DestructKind kind, char **names, size_t name_count,
-                       char *rest_name, Expr *value) {
+Stmt *stmt_destructure(AstPhase phase, DestructKind kind, char **names, size_t name_count, char *rest_name,
+                       Expr *value) {
     Stmt *s = stmt_alloc(STMT_DESTRUCTURE);
     s->as.destructure.phase = phase;
     s->as.destructure.kind = kind;
@@ -479,30 +498,23 @@ void expr_free(Expr *e) {
         case EXPR_INT_LIT:
         case EXPR_FLOAT_LIT:
         case EXPR_BOOL_LIT:
-        case EXPR_NIL_LIT:
-            break;
+        case EXPR_NIL_LIT: break;
         case EXPR_STRING_LIT:
-        case EXPR_IDENT:
-            free(e->as.str_val);
-            break;
+        case EXPR_IDENT: free(e->as.str_val); break;
         case EXPR_BINOP:
             expr_free(e->as.binop.left);
             expr_free(e->as.binop.right);
             break;
-        case EXPR_UNARYOP:
-            expr_free(e->as.unaryop.operand);
-            break;
+        case EXPR_UNARYOP: expr_free(e->as.unaryop.operand); break;
         case EXPR_CALL:
             expr_free(e->as.call.func);
-            for (size_t i = 0; i < e->as.call.arg_count; i++)
-                expr_free(e->as.call.args[i]);
+            for (size_t i = 0; i < e->as.call.arg_count; i++) expr_free(e->as.call.args[i]);
             free(e->as.call.args);
             break;
         case EXPR_METHOD_CALL:
             expr_free(e->as.method_call.object);
             free(e->as.method_call.method);
-            for (size_t i = 0; i < e->as.method_call.arg_count; i++)
-                expr_free(e->as.method_call.args[i]);
+            for (size_t i = 0; i < e->as.method_call.arg_count; i++) expr_free(e->as.method_call.args[i]);
             free(e->as.method_call.args);
             break;
         case EXPR_FIELD_ACCESS:
@@ -514,8 +526,7 @@ void expr_free(Expr *e) {
             expr_free(e->as.index.index);
             break;
         case EXPR_ARRAY:
-            for (size_t i = 0; i < e->as.array.count; i++)
-                expr_free(e->as.array.elems[i]);
+            for (size_t i = 0; i < e->as.array.count; i++) expr_free(e->as.array.elems[i]);
             free(e->as.array.elems);
             break;
         case EXPR_STRUCT_LIT:
@@ -529,25 +540,20 @@ void expr_free(Expr *e) {
         case EXPR_FREEZE:
             expr_free(e->as.freeze.expr);
             if (e->as.freeze.contract) expr_free(e->as.freeze.contract);
-            for (size_t i = 0; i < e->as.freeze.except_count; i++)
-                expr_free(e->as.freeze.except_fields[i]);
+            for (size_t i = 0; i < e->as.freeze.except_count; i++) expr_free(e->as.freeze.except_fields[i]);
             free(e->as.freeze.except_fields);
             break;
         case EXPR_THAW:
         case EXPR_CLONE:
-        case EXPR_SUBLIMATE:
-            expr_free(e->as.freeze_expr);
-            break;
+        case EXPR_SUBLIMATE: expr_free(e->as.freeze_expr); break;
         case EXPR_CRYSTALLIZE:
             expr_free(e->as.crystallize.expr);
-            for (size_t i = 0; i < e->as.crystallize.body_count; i++)
-                stmt_free(e->as.crystallize.body[i]);
+            for (size_t i = 0; i < e->as.crystallize.body_count; i++) stmt_free(e->as.crystallize.body[i]);
             free(e->as.crystallize.body);
             break;
         case EXPR_BORROW:
             expr_free(e->as.borrow.expr);
-            for (size_t i = 0; i < e->as.borrow.body_count; i++)
-                stmt_free(e->as.borrow.body[i]);
+            for (size_t i = 0; i < e->as.borrow.body_count; i++) stmt_free(e->as.borrow.body[i]);
             free(e->as.borrow.body);
             break;
         case EXPR_ANNEAL:
@@ -558,27 +564,22 @@ void expr_free(Expr *e) {
         case EXPR_BLOCK:
         case EXPR_SPAWN:
         case EXPR_SCOPE:
-            for (size_t i = 0; i < e->as.block.count; i++)
-                stmt_free(e->as.block.stmts[i]);
+            for (size_t i = 0; i < e->as.block.count; i++) stmt_free(e->as.block.stmts[i]);
             free(e->as.block.stmts);
             break;
         case EXPR_IF:
             expr_free(e->as.if_expr.cond);
-            for (size_t i = 0; i < e->as.if_expr.then_count; i++)
-                stmt_free(e->as.if_expr.then_stmts[i]);
+            for (size_t i = 0; i < e->as.if_expr.then_count; i++) stmt_free(e->as.if_expr.then_stmts[i]);
             free(e->as.if_expr.then_stmts);
-            for (size_t i = 0; i < e->as.if_expr.else_count; i++)
-                stmt_free(e->as.if_expr.else_stmts[i]);
+            for (size_t i = 0; i < e->as.if_expr.else_count; i++) stmt_free(e->as.if_expr.else_stmts[i]);
             free(e->as.if_expr.else_stmts);
             break;
         case EXPR_CLOSURE:
-            for (size_t i = 0; i < e->as.closure.param_count; i++)
-                free(e->as.closure.params[i]);
+            for (size_t i = 0; i < e->as.closure.param_count; i++) free(e->as.closure.params[i]);
             free(e->as.closure.params);
             if (e->as.closure.default_values) {
                 for (size_t i = 0; i < e->as.closure.param_count; i++)
-                    if (e->as.closure.default_values[i])
-                        expr_free(e->as.closure.default_values[i]);
+                    if (e->as.closure.default_values[i]) expr_free(e->as.closure.default_values[i]);
                 free(e->as.closure.default_values);
             }
             expr_free(e->as.closure.body);
@@ -588,25 +589,20 @@ void expr_free(Expr *e) {
             expr_free(e->as.range.end);
             break;
         case EXPR_PRINT:
-            for (size_t i = 0; i < e->as.print.arg_count; i++)
-                expr_free(e->as.print.args[i]);
+            for (size_t i = 0; i < e->as.print.arg_count; i++) expr_free(e->as.print.args[i]);
             free(e->as.print.args);
             break;
         case EXPR_TRY_CATCH:
-            for (size_t i = 0; i < e->as.try_catch.try_count; i++)
-                stmt_free(e->as.try_catch.try_stmts[i]);
+            for (size_t i = 0; i < e->as.try_catch.try_count; i++) stmt_free(e->as.try_catch.try_stmts[i]);
             free(e->as.try_catch.try_stmts);
             free(e->as.try_catch.catch_var);
-            for (size_t i = 0; i < e->as.try_catch.catch_count; i++)
-                stmt_free(e->as.try_catch.catch_stmts[i]);
+            for (size_t i = 0; i < e->as.try_catch.catch_count; i++) stmt_free(e->as.try_catch.catch_stmts[i]);
             free(e->as.try_catch.catch_stmts);
             break;
         case EXPR_INTERP_STRING:
-            for (size_t i = 0; i <= e->as.interp.count; i++)
-                free(e->as.interp.parts[i]);
+            for (size_t i = 0; i <= e->as.interp.count; i++) free(e->as.interp.parts[i]);
             free(e->as.interp.parts);
-            for (size_t i = 0; i < e->as.interp.count; i++)
-                expr_free(e->as.interp.exprs[i]);
+            for (size_t i = 0; i < e->as.interp.count; i++) expr_free(e->as.interp.exprs[i]);
             free(e->as.interp.exprs);
             break;
         case EXPR_MATCH:
@@ -615,8 +611,7 @@ void expr_free(Expr *e) {
                 MatchArm *arm = &e->as.match_expr.arms[i];
                 pattern_free(arm->pattern);
                 if (arm->guard) expr_free(arm->guard);
-                for (size_t j = 0; j < arm->body_count; j++)
-                    stmt_free(arm->body[j]);
+                for (size_t j = 0; j < arm->body_count; j++) stmt_free(arm->body[j]);
                 free(arm->body);
             }
             free(e->as.match_expr.arms);
@@ -624,29 +619,22 @@ void expr_free(Expr *e) {
         case EXPR_ENUM_VARIANT:
             free(e->as.enum_variant.enum_name);
             free(e->as.enum_variant.variant_name);
-            for (size_t i = 0; i < e->as.enum_variant.arg_count; i++)
-                expr_free(e->as.enum_variant.args[i]);
+            for (size_t i = 0; i < e->as.enum_variant.arg_count; i++) expr_free(e->as.enum_variant.args[i]);
             free(e->as.enum_variant.args);
             break;
-        case EXPR_SPREAD:
-            expr_free(e->as.spread_expr);
-            break;
+        case EXPR_SPREAD: expr_free(e->as.spread_expr); break;
         case EXPR_TUPLE:
-            for (size_t i = 0; i < e->as.tuple.count; i++)
-                expr_free(e->as.tuple.elems[i]);
+            for (size_t i = 0; i < e->as.tuple.count; i++) expr_free(e->as.tuple.elems[i]);
             free(e->as.tuple.elems);
             break;
-        case EXPR_TRY_PROPAGATE:
-            expr_free(e->as.try_propagate_expr);
-            break;
+        case EXPR_TRY_PROPAGATE: expr_free(e->as.try_propagate_expr); break;
         case EXPR_SELECT:
             for (size_t i = 0; i < e->as.select_expr.arm_count; i++) {
                 SelectArm *arm = &e->as.select_expr.arms[i];
                 free(arm->binding_name);
                 if (arm->channel_expr) expr_free(arm->channel_expr);
                 if (arm->timeout_expr) expr_free(arm->timeout_expr);
-                for (size_t j = 0; j < arm->body_count; j++)
-                    stmt_free(arm->body[j]);
+                for (size_t j = 0; j < arm->body_count; j++) stmt_free(arm->body[j]);
                 free(arm->body);
             }
             free(e->as.select_expr.arms);
@@ -670,36 +658,27 @@ void stmt_free(Stmt *s) {
             expr_free(s->as.assign.target);
             expr_free(s->as.assign.value);
             break;
-        case STMT_EXPR:
-            expr_free(s->as.expr);
-            break;
-        case STMT_RETURN:
-            expr_free(s->as.return_expr);
-            break;
+        case STMT_EXPR: expr_free(s->as.expr); break;
+        case STMT_RETURN: expr_free(s->as.return_expr); break;
         case STMT_FOR:
             free(s->as.for_loop.var);
             expr_free(s->as.for_loop.iter);
-            for (size_t i = 0; i < s->as.for_loop.body_count; i++)
-                stmt_free(s->as.for_loop.body[i]);
+            for (size_t i = 0; i < s->as.for_loop.body_count; i++) stmt_free(s->as.for_loop.body[i]);
             free(s->as.for_loop.body);
             break;
         case STMT_WHILE:
             expr_free(s->as.while_loop.cond);
-            for (size_t i = 0; i < s->as.while_loop.body_count; i++)
-                stmt_free(s->as.while_loop.body[i]);
+            for (size_t i = 0; i < s->as.while_loop.body_count; i++) stmt_free(s->as.while_loop.body[i]);
             free(s->as.while_loop.body);
             break;
         case STMT_LOOP:
-            for (size_t i = 0; i < s->as.loop.body_count; i++)
-                stmt_free(s->as.loop.body[i]);
+            for (size_t i = 0; i < s->as.loop.body_count; i++) stmt_free(s->as.loop.body[i]);
             free(s->as.loop.body);
             break;
         case STMT_BREAK:
-        case STMT_CONTINUE:
-            break;
+        case STMT_CONTINUE: break;
         case STMT_DESTRUCTURE:
-            for (size_t i = 0; i < s->as.destructure.name_count; i++)
-                free(s->as.destructure.names[i]);
+            for (size_t i = 0; i < s->as.destructure.name_count; i++) free(s->as.destructure.names[i]);
             free(s->as.destructure.names);
             free(s->as.destructure.rest_name);
             expr_free(s->as.destructure.value);
@@ -708,14 +687,12 @@ void stmt_free(Stmt *s) {
             free(s->as.import.module_path);
             free(s->as.import.alias);
             if (s->as.import.selective_names) {
-                for (size_t i = 0; i < s->as.import.selective_count; i++)
-                    free(s->as.import.selective_names[i]);
+                for (size_t i = 0; i < s->as.import.selective_count; i++) free(s->as.import.selective_names[i]);
                 free(s->as.import.selective_names);
             }
             break;
         case STMT_DEFER:
-            for (size_t i = 0; i < s->as.defer.body_count; i++)
-                stmt_free(s->as.defer.body[i]);
+            for (size_t i = 0; i < s->as.defer.body_count; i++) stmt_free(s->as.defer.body[i]);
             free(s->as.defer.body);
             break;
     }
@@ -727,8 +704,7 @@ void fn_decl_free(FnDecl *f) {
     for (size_t i = 0; i < f->param_count; i++) {
         free(f->params[i].name);
         type_expr_free(&f->params[i].ty);
-        if (f->params[i].default_value)
-            expr_free(f->params[i].default_value);
+        if (f->params[i].default_value) expr_free(f->params[i].default_value);
     }
     free(f->params);
     if (f->return_type) {
@@ -742,8 +718,7 @@ void fn_decl_free(FnDecl *f) {
         }
         free(f->contracts);
     }
-    for (size_t i = 0; i < f->body_count; i++)
-        stmt_free(f->body[i]);
+    for (size_t i = 0; i < f->body_count; i++) stmt_free(f->body[i]);
     free(f->body);
     f->next_overload = NULL;
 }
@@ -759,8 +734,7 @@ void struct_decl_free(StructDecl *s) {
 
 void test_decl_free(TestDecl *t) {
     free(t->name);
-    for (size_t i = 0; i < t->body_count; i++)
-        stmt_free(t->body[i]);
+    for (size_t i = 0; i < t->body_count; i++) stmt_free(t->body[i]);
     free(t->body);
 }
 
@@ -769,8 +743,7 @@ void enum_decl_free(EnumDecl *e) {
     for (size_t i = 0; i < e->variant_count; i++) {
         free(e->variants[i].name);
         if (e->variants[i].param_types) {
-            for (size_t j = 0; j < e->variants[i].param_count; j++)
-                type_expr_free(&e->variants[i].param_types[j]);
+            for (size_t j = 0; j < e->variants[i].param_count; j++) type_expr_free(&e->variants[i].param_types[j]);
             free(e->variants[i].param_types);
         }
     }
@@ -784,8 +757,7 @@ void trait_decl_free(TraitDecl *t) {
         for (size_t j = 0; j < t->methods[i].param_count; j++) {
             free(t->methods[i].params[j].name);
             type_expr_free(&t->methods[i].params[j].ty);
-            if (t->methods[i].params[j].default_value)
-                expr_free(t->methods[i].params[j].default_value);
+            if (t->methods[i].params[j].default_value) expr_free(t->methods[i].params[j].default_value);
         }
         free(t->methods[i].params);
         if (t->methods[i].return_type) {
@@ -799,58 +771,36 @@ void trait_decl_free(TraitDecl *t) {
 void impl_block_free(ImplBlock *ib) {
     free(ib->trait_name);
     free(ib->type_name);
-    for (size_t i = 0; i < ib->method_count; i++) {
-        fn_decl_free(&ib->methods[i]);
-    }
+    for (size_t i = 0; i < ib->method_count; i++) { fn_decl_free(&ib->methods[i]); }
     free(ib->methods);
 }
 
 void item_free(Item *item) {
     switch (item->tag) {
-        case ITEM_FUNCTION:
-            fn_decl_free(&item->as.fn_decl);
-            break;
-        case ITEM_STRUCT:
-            struct_decl_free(&item->as.struct_decl);
-            break;
-        case ITEM_STMT:
-            stmt_free(item->as.stmt);
-            break;
-        case ITEM_TEST:
-            test_decl_free(&item->as.test_decl);
-            break;
-        case ITEM_ENUM:
-            enum_decl_free(&item->as.enum_decl);
-            break;
-        case ITEM_TRAIT:
-            trait_decl_free(&item->as.trait_decl);
-            break;
-        case ITEM_IMPL:
-            impl_block_free(&item->as.impl_block);
-            break;
+        case ITEM_FUNCTION: fn_decl_free(&item->as.fn_decl); break;
+        case ITEM_STRUCT: struct_decl_free(&item->as.struct_decl); break;
+        case ITEM_STMT: stmt_free(item->as.stmt); break;
+        case ITEM_TEST: test_decl_free(&item->as.test_decl); break;
+        case ITEM_ENUM: enum_decl_free(&item->as.enum_decl); break;
+        case ITEM_TRAIT: trait_decl_free(&item->as.trait_decl); break;
+        case ITEM_IMPL: impl_block_free(&item->as.impl_block); break;
     }
 }
 
 void program_free(Program *p) {
-    for (size_t i = 0; i < p->item_count; i++) {
-        item_free(&p->items[i]);
-    }
+    for (size_t i = 0; i < p->item_count; i++) { item_free(&p->items[i]); }
     free(p->items);
     if (p->export_names) {
-        for (size_t i = 0; i < p->export_count; i++)
-            free(p->export_names[i]);
+        for (size_t i = 0; i < p->export_count; i++) free(p->export_names[i]);
         free(p->export_names);
     }
 }
 
-bool module_should_export(const char *name, const char **export_names,
-                          size_t export_count, bool has_exports) {
+bool module_should_export(const char *name, const char **export_names, size_t export_count, bool has_exports) {
     /* Always skip internal metadata */
-    if ((name[0] == '_' && name[1] == '_') || strchr(name, ':'))
-        return false;
+    if ((name[0] == '_' && name[1] == '_') || strchr(name, ':')) return false;
     /* Legacy mode: no export keywords → export everything */
-    if (!has_exports)
-        return true;
+    if (!has_exports) return true;
     /* Explicit mode: only export listed names */
     for (size_t i = 0; i < export_count; i++)
         if (strcmp(export_names[i], name) == 0) return true;

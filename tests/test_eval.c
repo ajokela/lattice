@@ -3035,3 +3035,148 @@ TEST(match_exhaustive_nested_match) {
     ASSERT(strstr(warnings, "wildcard") != NULL);
     free(warnings);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Array Destructuring Patterns in Match
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(match_array_exact_bind) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let arr = [10, 20]\n"
+                "    let result = match arr {\n"
+                "        [x, y] => x + y,\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == 30, \"expected 30, got \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(match_array_empty) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let arr = []\n"
+                "    let result = match arr {\n"
+                "        [] => \"empty\",\n"
+                "        _ => \"not empty\"\n"
+                "    }\n"
+                "    assert(result == \"empty\", \"expected empty\")\n"
+                "}\n");
+}
+
+TEST(match_array_length_mismatch) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let arr = [1, 2, 3]\n"
+                "    let result = match arr {\n"
+                "        [x, y] => \"two\",\n"
+                "        _ => \"other\"\n"
+                "    }\n"
+                "    assert(result == \"other\", \"expected other\")\n"
+                "}\n");
+}
+
+TEST(match_array_rest_pattern) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let arr = [1, 2, 3, 4, 5]\n"
+                "    let result = match arr {\n"
+                "        [head, ...tail] => head,\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == 1, \"expected 1, got \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(match_array_rest_tail_length) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let arr = [1, 2, 3, 4, 5]\n"
+                "    let result = match arr {\n"
+                "        [head, ...tail] => tail.len(),\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == 4, \"expected 4, got \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(match_array_literal_element) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let arr = [0, 42]\n"
+                "    let result = match arr {\n"
+                "        [0, x] => x,\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == 42, \"expected 42, got \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(match_array_literal_no_match) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let arr = [1, 42]\n"
+                "    let result = match arr {\n"
+                "        [0, x] => x,\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == -1, \"expected -1\")\n"
+                "}\n");
+}
+
+TEST(match_array_non_array) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let x = 42\n"
+                "    let result = match x {\n"
+                "        [a, b] => \"array\",\n"
+                "        _ => \"not array\"\n"
+                "    }\n"
+                "    assert(result == \"not array\", \"expected not array\")\n"
+                "}\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Struct Destructuring Patterns in Match
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(match_struct_bind_fields) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int }\n"
+                "fn main() {\n"
+                "    let p = Point { x: 3, y: 4 }\n"
+                "    let result = match p {\n"
+                "        {x, y} => x + y,\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == 7, \"expected 7, got \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(match_struct_value_match) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int }\n"
+                "fn main() {\n"
+                "    let p = Point { x: 0, y: 5 }\n"
+                "    let result = match p {\n"
+                "        {x: 0, y} => y * 10,\n"
+                "        {x, y} => x + y,\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == 50, \"expected 50, got \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(match_struct_value_no_match) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int }\n"
+                "fn main() {\n"
+                "    let p = Point { x: 1, y: 5 }\n"
+                "    let result = match p {\n"
+                "        {x: 0, y} => y * 10,\n"
+                "        {x, y} => x + y,\n"
+                "        _ => -1\n"
+                "    }\n"
+                "    assert(result == 6, \"expected 6, got \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(match_struct_non_struct) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let x = 42\n"
+                "    let result = match x {\n"
+                "        {a, b} => \"struct\",\n"
+                "        _ => \"not struct\"\n"
+                "    }\n"
+                "    assert(result == \"not struct\", \"expected not struct\")\n"
+                "}\n");
+}
