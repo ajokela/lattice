@@ -419,6 +419,9 @@ static void handle_initialize(LspServer *srv, int id) {
     /* Rename */
     cJSON_AddBoolToObject(caps, "renameProvider", 1);
 
+    /* Code actions */
+    cJSON_AddBoolToObject(caps, "codeActionProvider", 1);
+
     cJSON_AddItemToObject(result, "capabilities", caps);
 
     /* Server info */
@@ -1839,6 +1842,444 @@ static void handle_rename(LspServer *srv, cJSON *params, int id) {
     cJSON_Delete(resp);
 }
 
+/* ── Handler: textDocument/codeAction ── */
+
+/* Levenshtein distance between two strings (simple O(m*n) implementation) */
+static int levenshtein(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    if (la == 0) return (int)lb;
+    if (lb == 0) return (int)la;
+
+    /* Use a single-row DP approach to save memory */
+    int *row = malloc((lb + 1) * sizeof(int));
+    if (!row) return (int)(la > lb ? la : lb);
+    for (size_t j = 0; j <= lb; j++) row[j] = (int)j;
+
+    for (size_t i = 1; i <= la; i++) {
+        int prev = row[0];
+        row[0] = (int)i;
+        for (size_t j = 1; j <= lb; j++) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            int del = row[j] + 1;
+            int ins = row[j - 1] + 1;
+            int sub = prev + cost;
+            prev = row[j];
+            int min_val = del < ins ? del : ins;
+            row[j] = min_val < sub ? min_val : sub;
+        }
+    }
+    int result = row[lb];
+    free(row);
+    return result;
+}
+
+/* Collect all identifier-like names from document text.
+ * Returns a malloc'd array of malloc'd strings, sets *out_count.
+ * Caller must free each string and the array. */
+static char **collect_identifiers(const char *text, size_t *out_count) {
+    size_t cap = 64, count = 0;
+    char **names = malloc(cap * sizeof(char *));
+    if (!names) {
+        *out_count = 0;
+        return NULL;
+    }
+
+    const char *p = text;
+    while (*p) {
+        if (is_ident_char(*p) && !(p > text && is_ident_char(p[-1]))) {
+            const char *start = p;
+            while (*p && is_ident_char(*p)) p++;
+            size_t len = (size_t)(p - start);
+
+            /* Skip very short identifiers and digits-only */
+            if (len >= 2 && !(start[0] >= '0' && start[0] <= '9')) {
+                /* Check for duplicates (simple linear scan) */
+                int dup = 0;
+                for (size_t i = 0; i < count; i++) {
+                    if (strlen(names[i]) == len && memcmp(names[i], start, len) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    if (count >= cap) {
+                        cap *= 2;
+                        names = realloc(names, cap * sizeof(char *));
+                        if (!names) {
+                            *out_count = 0;
+                            return NULL;
+                        }
+                    }
+                    names[count] = malloc(len + 1);
+                    if (names[count]) {
+                        memcpy(names[count], start, len);
+                        names[count][len] = '\0';
+                        count++;
+                    }
+                }
+            }
+            continue;
+        }
+        p++;
+    }
+    *out_count = count;
+    return names;
+}
+
+/* Find the closest matching identifier to 'name' in the document.
+ * Returns a malloc'd string, or NULL if no close match found.
+ * Only returns matches with distance <= max_dist. */
+static char *find_closest_identifier(const char *text, const char *name, int max_dist) {
+    size_t id_count = 0;
+    char **ids = collect_identifiers(text, &id_count);
+    if (!ids) return NULL;
+
+    char *best = NULL;
+    int best_dist = max_dist + 1;
+
+    for (size_t i = 0; i < id_count; i++) {
+        if (strcmp(ids[i], name) == 0) { /* skip exact match */
+            free(ids[i]);
+            continue;
+        }
+        int d = levenshtein(name, ids[i]);
+        if (d < best_dist) {
+            best_dist = d;
+            free(best);
+            best = strdup(ids[i]);
+        }
+        free(ids[i]);
+    }
+    free(ids);
+
+    if (best_dist > max_dist) {
+        free(best);
+        return NULL;
+    }
+    return best;
+}
+
+/* Get the text of a specific line (0-based). Returns pointer into text, sets *line_len. */
+static const char *get_line_text(const char *text, int target_line, size_t *line_len) {
+    const char *p = text;
+    int cur = 0;
+    while (cur < target_line && *p) {
+        if (*p == '\n') cur++;
+        p++;
+    }
+    const char *start = p;
+    while (*p && *p != '\n') p++;
+    *line_len = (size_t)(p - start);
+    return start;
+}
+
+/* Count total number of lines in text (0-based last line index + 1) */
+static int count_lines(const char *text) {
+    int lines = 1;
+    for (const char *p = text; *p; p++) {
+        if (*p == '\n') lines++;
+    }
+    return lines;
+}
+
+/* Create a TextEdit JSON object */
+static cJSON *make_text_edit(int start_line, int start_col, int end_line, int end_col, const char *new_text) {
+    cJSON *edit = cJSON_CreateObject();
+    cJSON *range = cJSON_CreateObject();
+    cJSON *start = cJSON_CreateObject();
+    cJSON_AddNumberToObject(start, "line", start_line);
+    cJSON_AddNumberToObject(start, "character", start_col);
+    cJSON *end = cJSON_CreateObject();
+    cJSON_AddNumberToObject(end, "line", end_line);
+    cJSON_AddNumberToObject(end, "character", end_col);
+    cJSON_AddItemToObject(range, "start", start);
+    cJSON_AddItemToObject(range, "end", end);
+    cJSON_AddItemToObject(edit, "range", range);
+    cJSON_AddStringToObject(edit, "newText", new_text);
+    return edit;
+}
+
+/* Create a CodeAction JSON object with a workspace edit */
+static cJSON *make_code_action(const char *title, const char *uri, cJSON *diagnostic, cJSON *text_edit) {
+    cJSON *action = cJSON_CreateObject();
+    cJSON_AddStringToObject(action, "title", title);
+    cJSON_AddStringToObject(action, "kind", "quickfix");
+
+    if (diagnostic) {
+        cJSON *diags = cJSON_CreateArray();
+        cJSON_AddItemToArray(diags, cJSON_Duplicate(diagnostic, 1));
+        cJSON_AddItemToObject(action, "diagnostics", diags);
+    }
+
+    cJSON *workspace_edit = cJSON_CreateObject();
+    cJSON *changes = cJSON_CreateObject();
+    cJSON *edits = cJSON_CreateArray();
+    cJSON_AddItemToArray(edits, text_edit);
+    cJSON_AddItemToObject(changes, uri, edits);
+    cJSON_AddItemToObject(workspace_edit, "changes", changes);
+    cJSON_AddItemToObject(action, "edit", workspace_edit);
+
+    return action;
+}
+
+static void handle_code_action(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    cJSON *context = cJSON_GetObjectItem(params, "context");
+    cJSON *range_node = cJSON_GetObjectItem(params, "range");
+    if (!td || !context) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    LspDocument *doc = find_document(srv, uri);
+    cJSON *actions = cJSON_CreateArray();
+
+    if (!doc || !doc->text) {
+        cJSON *resp = lsp_make_response(id, actions);
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Get the range from the request */
+    int range_start_line = 0, range_end_line = 0;
+    if (range_node) {
+        cJSON *rs = cJSON_GetObjectItem(range_node, "start");
+        cJSON *re = cJSON_GetObjectItem(range_node, "end");
+        if (rs) range_start_line = cJSON_GetObjectItem(rs, "line")->valueint;
+        if (re) range_end_line = cJSON_GetObjectItem(re, "line")->valueint;
+    }
+
+    cJSON *diagnostics = cJSON_GetObjectItem(context, "diagnostics");
+    int diag_count = diagnostics ? cJSON_GetArraySize(diagnostics) : 0;
+
+    for (int i = 0; i < diag_count; i++) {
+        cJSON *diag = cJSON_GetArrayItem(diagnostics, i);
+        cJSON *msg_node = cJSON_GetObjectItem(diag, "message");
+        if (!msg_node || !msg_node->valuestring) continue;
+        const char *msg = msg_node->valuestring;
+
+        cJSON *diag_range = cJSON_GetObjectItem(diag, "range");
+        int diag_line = 0;
+        if (diag_range) {
+            cJSON *ds = cJSON_GetObjectItem(diag_range, "start");
+            if (ds) diag_line = cJSON_GetObjectItem(ds, "line")->valueint;
+        }
+
+        /* ── Code action: phase violation → add thaw() ── */
+        if (strstr(msg, "cannot mutate") && strstr(msg, "crystal")) {
+            /* Extract the variable name from the diagnostic line */
+            size_t line_len = 0;
+            const char *line_text = get_line_text(doc->text, diag_line, &line_len);
+
+            /* Find the assignment target on this line: look for identifiers before '=' */
+            const char *eq = NULL;
+            for (const char *p = line_text; p < line_text + line_len; p++) {
+                if (*p == '=' && (p + 1 >= line_text + line_len || p[1] != '=')) {
+                    eq = p;
+                    break;
+                }
+            }
+
+            if (eq) {
+                /* Extract identifier before '=' */
+                const char *id_end = eq;
+                while (id_end > line_text && (id_end[-1] == ' ' || id_end[-1] == '\t')) id_end--;
+                const char *id_start = id_end;
+                while (id_start > line_text && is_ident_char(id_start[-1])) id_start--;
+
+                if (id_start < id_end) {
+                    size_t vlen = (size_t)(id_end - id_start);
+                    char *var_name = malloc(vlen + 1);
+                    if (var_name) {
+                        memcpy(var_name, id_start, vlen);
+                        var_name[vlen] = '\0';
+
+                        /* Build "thaw(var_name)\n" to insert before the offending line */
+                        size_t new_len = strlen(var_name) + 16;
+                        char *new_text = malloc(new_len);
+                        if (new_text) {
+                            /* Calculate indentation of the current line */
+                            const char *indent_end = line_text;
+                            while (indent_end < line_text + line_len && (*indent_end == ' ' || *indent_end == '\t'))
+                                indent_end++;
+                            size_t indent_len = (size_t)(indent_end - line_text);
+                            char *indent = malloc(indent_len + 1);
+                            if (indent) {
+                                memcpy(indent, line_text, indent_len);
+                                indent[indent_len] = '\0';
+                                free(new_text);
+                                new_len = indent_len + strlen(var_name) + 32;
+                                new_text = malloc(new_len);
+                                if (new_text) {
+                                    snprintf(new_text, new_len, "%sthaw(%s)\n", indent, var_name);
+                                    cJSON *text_edit = make_text_edit(diag_line, 0, diag_line, 0, new_text);
+                                    cJSON *action =
+                                        make_code_action("Add thaw() to make mutable", uri, diag, text_edit);
+                                    cJSON_AddItemToArray(actions, action);
+                                }
+                                free(indent);
+                            }
+                            free(new_text);
+                        }
+                        free(var_name);
+                    }
+                }
+            }
+        }
+
+        /* ── Code action: unknown identifier → suggest closest match ── */
+        if (strstr(msg, "Undefined variable") || strstr(msg, "undefined variable") ||
+            strstr(msg, "Undeclared identifier") || strstr(msg, "undeclared identifier") ||
+            strstr(msg, "not defined") || strstr(msg, "Unknown identifier") || strstr(msg, "unknown identifier")) {
+            /* Try to extract the identifier name from the error message.
+             * Common patterns: "Undefined variable 'foo'" or "Undefined variable `foo`" */
+            const char *quote = strchr(msg, '\'');
+            if (!quote) quote = strchr(msg, '`');
+            if (quote) {
+                const char *name_start = quote + 1;
+                char end_quote = (*quote == '\'') ? '\'' : '`';
+                const char *name_end = strchr(name_start, end_quote);
+                if (name_end && name_end > name_start) {
+                    size_t nlen = (size_t)(name_end - name_start);
+                    char *bad_name = malloc(nlen + 1);
+                    if (bad_name) {
+                        memcpy(bad_name, name_start, nlen);
+                        bad_name[nlen] = '\0';
+
+                        /* Find closest identifier in document */
+                        int max_dist = (int)nlen / 3;
+                        if (max_dist < 2) max_dist = 2;
+                        char *suggestion = find_closest_identifier(doc->text, bad_name, max_dist);
+                        if (suggestion) {
+                            /* Build title */
+                            size_t title_len = strlen(suggestion) + 32;
+                            char *title = malloc(title_len);
+                            if (title) {
+                                snprintf(title, title_len, "Did you mean '%s'?", suggestion);
+
+                                /* Get the range of the bad identifier from the diagnostic */
+                                int start_col = 0, end_col = 0;
+                                if (diag_range) {
+                                    cJSON *ds = cJSON_GetObjectItem(diag_range, "start");
+                                    cJSON *de = cJSON_GetObjectItem(diag_range, "end");
+                                    if (ds) start_col = cJSON_GetObjectItem(ds, "character")->valueint;
+                                    if (de) end_col = cJSON_GetObjectItem(de, "character")->valueint;
+                                }
+                                /* If range is zero-width, use the bad_name length */
+                                if (end_col <= start_col) end_col = start_col + (int)nlen;
+
+                                cJSON *text_edit = make_text_edit(diag_line, start_col, diag_line, end_col, suggestion);
+                                cJSON *action = make_code_action(title, uri, diag, text_edit);
+                                cJSON_AddItemToArray(actions, action);
+                                free(title);
+                            }
+                            free(suggestion);
+                        }
+                        free(bad_name);
+                    }
+                }
+            }
+        }
+
+        /* ── Code action: wrap in try/catch ── */
+        if (strstr(msg, "uncaught") || strstr(msg, "Uncaught") || strstr(msg, "unhandled error") ||
+            strstr(msg, "Unhandled error") || strstr(msg, "throw") || strstr(msg, "exception")) {
+            /* Wrap the line range in try/catch */
+            size_t line_len = 0;
+            const char *line_text = get_line_text(doc->text, diag_line, &line_len);
+
+            /* Calculate indentation */
+            const char *indent_end = line_text;
+            while (indent_end < line_text + line_len && (*indent_end == ' ' || *indent_end == '\t')) indent_end++;
+            size_t indent_len = (size_t)(indent_end - line_text);
+            char *indent = malloc(indent_len + 1);
+            if (!indent) continue;
+            memcpy(indent, line_text, indent_len);
+            indent[indent_len] = '\0';
+
+            /* Get the original line content (trimmed of leading whitespace) */
+            char *original = malloc(line_len - indent_len + 1);
+            if (!original) {
+                free(indent);
+                continue;
+            }
+            memcpy(original, indent_end, line_len - indent_len);
+            original[line_len - indent_len] = '\0';
+
+            /* Build try/catch wrapper */
+            size_t new_len = indent_len * 3 + strlen(original) + 64;
+            char *new_text = malloc(new_len);
+            if (new_text) {
+                snprintf(new_text, new_len, "%stry {\n%s  %s\n%s} catch (e) {\n%s  // handle error\n%s}", indent,
+                         indent, original, indent, indent, indent);
+
+                /* Determine the end of the line (including newline if present) */
+                int end_line = diag_line;
+                int end_col = (int)line_len;
+
+                cJSON *text_edit = make_text_edit(diag_line, 0, end_line, end_col, new_text);
+                cJSON *action = make_code_action("Wrap in try/catch", uri, diag, text_edit);
+                cJSON_AddItemToArray(actions, action);
+                free(new_text);
+            }
+            free(indent);
+            free(original);
+        }
+
+        /* ── Code action: add missing import ── */
+        if (strstr(msg, "module") && (strstr(msg, "not found") || strstr(msg, "could not find"))) {
+            /* Try to extract module name from the error */
+            const char *quote = strchr(msg, '\'');
+            if (!quote) quote = strchr(msg, '`');
+            if (quote) {
+                const char *name_start = quote + 1;
+                char end_quote = (*quote == '\'') ? '\'' : '`';
+                const char *name_end = strchr(name_start, end_quote);
+                if (name_end && name_end > name_start) {
+                    size_t mlen = (size_t)(name_end - name_start);
+                    char *mod_name = malloc(mlen + 1);
+                    if (mod_name) {
+                        memcpy(mod_name, name_start, mlen);
+                        mod_name[mlen] = '\0';
+
+                        /* Build import statement to insert at top of file */
+                        size_t imp_len = mlen + 32;
+                        char *import_text = malloc(imp_len);
+                        if (import_text) {
+                            snprintf(import_text, imp_len, "import \"%s\"\n", mod_name);
+
+                            size_t title_len = mlen + 32;
+                            char *title = malloc(title_len);
+                            if (title) {
+                                snprintf(title, title_len, "Add import for '%s'", mod_name);
+
+                                cJSON *text_edit = make_text_edit(0, 0, 0, 0, import_text);
+                                cJSON *action = make_code_action(title, uri, diag, text_edit);
+                                cJSON_AddItemToArray(actions, action);
+                                free(title);
+                            }
+                            free(import_text);
+                        }
+                        free(mod_name);
+                    }
+                }
+            }
+        }
+    }
+
+    (void)range_start_line;
+    (void)range_end_line;
+    (void)count_lines;
+
+    cJSON *resp = lsp_make_response(id, actions);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
 /* ── Server lifecycle ── */
 
 LspServer *lsp_server_new(void) {
@@ -1898,6 +2339,8 @@ void lsp_server_run(LspServer *srv) {
             handle_references(srv, params_node, id);
         } else if (strcmp(method, "textDocument/rename") == 0) {
             handle_rename(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/codeAction") == 0) {
+            handle_code_action(srv, params_node, id);
         } else if (strcmp(method, "shutdown") == 0) {
             cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
             lsp_write_response(resp, stdout);
