@@ -1,0 +1,172 @@
+// Test: advanced impl block compilation and method dispatch
+// Compiled via self-hosted compiler: clat compiler/latc.lat tests/latc_impl_advanced.lat out.latc
+
+struct Stack { items: any, size: any }
+
+// ============================================================================
+// Trait with multiple methods
+// ============================================================================
+
+trait Collection {
+    fn push_item(self: any, item: any) -> any
+    fn pop_item(self: any) -> any
+    fn peek_item(self: any) -> any
+    fn is_empty(self: any) -> any
+}
+
+impl Collection for Stack {
+    fn push_item(self: any, item: any) -> any {
+        flux new_items = []
+        for i in 0..self.size {
+            new_items.push(self.items[i])
+        }
+        new_items.push(item)
+        return Stack { items: new_items, size: self.size + 1 }
+    }
+
+    fn pop_item(self: any) -> any {
+        if self.size == 0 {
+            return self
+        }
+        flux new_items = []
+        for i in 0..(self.size - 1) {
+            new_items.push(self.items[i])
+        }
+        return Stack { items: new_items, size: self.size - 1 }
+    }
+
+    fn peek_item(self: any) -> any {
+        if self.size == 0 {
+            return nil
+        }
+        return self.items[self.size - 1]
+    }
+
+    fn is_empty(self: any) -> any {
+        return self.size == 0
+    }
+}
+
+// ============================================================================
+// Impl without trait (plain impl block)
+// ============================================================================
+
+struct Rect { w: any, h: any }
+
+trait Geometry {
+    fn area(self: any) -> any
+    fn perimeter(self: any) -> any
+}
+
+impl Geometry for Rect {
+    fn area(self: any) -> any {
+        return self.w * self.h
+    }
+
+    fn perimeter(self: any) -> any {
+        return 2 * (self.w + self.h)
+    }
+}
+
+// ============================================================================
+// Test: stack operations via trait methods
+// ============================================================================
+
+fn test_stack_operations() {
+    print("--- stack operations ---")
+    let s = Stack { items: [], size: 0 }
+    assert(s.is_empty() == true, "new stack is empty")
+
+    let s1 = s.push_item(10)
+    let s2 = s1.push_item(20)
+    let s3 = s2.push_item(30)
+    assert(s3.size == 3, "stack has 3 items")
+    assert(s3.peek_item() == 30, "peek returns top")
+    print(s3.peek_item())
+
+    let s4 = s3.pop_item()
+    assert(s4.size == 2, "pop decrements size")
+    assert(s4.peek_item() == 20, "peek after pop")
+    print(s4.peek_item())
+}
+
+// ============================================================================
+// Test: geometry trait
+// ============================================================================
+
+fn test_geometry() {
+    print("--- geometry ---")
+    let r = Rect { w: 5, h: 3 }
+    let a = r.area()
+    let p = r.perimeter()
+    print(a)
+    print(p)
+    assert(a == 15, "rect area")
+    assert(p == 16, "rect perimeter")
+}
+
+// ============================================================================
+// Test: methods in expressions
+// ============================================================================
+
+fn test_methods_in_expressions() {
+    print("--- methods in expressions ---")
+    let r1 = Rect { w: 4, h: 6 }
+    let r2 = Rect { w: 3, h: 8 }
+
+    let total_area = r1.area() + r2.area()
+    print(total_area)
+    assert(total_area == 48, "sum of areas")
+
+    let larger = if r1.area() > r2.area() { "r1" } else { "r2" }
+    print(larger)
+    assert(larger == "r2", "r2 is larger")
+}
+
+// ============================================================================
+// Test: method calls in loop
+// ============================================================================
+
+fn test_methods_in_loop() {
+    print("--- methods in loop ---")
+    let rects = [
+        Rect { w: 1, h: 1 },
+        Rect { w: 2, h: 2 },
+        Rect { w: 3, h: 3 }
+    ]
+    flux total = 0
+    for r in rects {
+        total = total + r.area()
+    }
+    print(total)
+    assert(total == 14, "sum of areas in loop")
+}
+
+// ============================================================================
+// Test: chained method calls
+// ============================================================================
+
+fn test_chained_methods() {
+    print("--- chained methods ---")
+    let s = Stack { items: [], size: 0 }
+    let top = s.push_item(1).push_item(2).push_item(3).peek_item()
+    print(top)
+    assert(top == 3, "chained push then peek")
+
+    let after_pop = s.push_item(10).push_item(20).pop_item().peek_item()
+    print(after_pop)
+    assert(after_pop == 10, "chained push-pop-peek")
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() {
+    test_stack_operations()
+    test_geometry()
+    test_methods_in_expressions()
+    test_methods_in_loop()
+    test_chained_methods()
+    print("ALL IMPL ADVANCED TESTS PASSED")
+}
