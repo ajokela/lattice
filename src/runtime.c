@@ -2430,25 +2430,14 @@ typedef struct {
     LatChannel *ch;        /* Channel to send values on */
     LatRuntime *parent_rt; /* Parent runtime for dispatch info */
     RTBackend backend;     /* Which backend is active */
-    void *parent_vm;       /* Parent VM for cloning */
+    void *child_vm;        /* Pre-cloned child VM (built on main thread) */
 } AsyncIterTask;
 
 static void *async_iter_thread_fn(void *arg) {
     AsyncIterTask *task = (AsyncIterTask *)arg;
 
     if (task->backend == RT_BACKEND_STACK_VM) {
-        StackVM *parent = (StackVM *)task->parent_vm;
-        StackVM *child = stackvm_clone_for_thread(parent);
-        if (!child) {
-            channel_close(task->ch);
-            channel_release(task->ch);
-            value_free(&task->closure);
-            free(task);
-            return NULL;
-        }
-
-        /* Export parent locals so the closure can access captured variables */
-        stackvm_export_locals_to_env(parent, child);
+        StackVM *child = (StackVM *)task->child_vm;
 
         /* Set up thread-local runtime and heap */
         lat_runtime_set_current(child->rt);
@@ -2477,8 +2466,7 @@ static void *async_iter_thread_fn(void *arg) {
         stackvm_free_child(child);
     } else {
         /* RT_BACKEND_REG_VM */
-        RegVM *parent = (RegVM *)task->parent_vm;
-        RegVM *child = regvm_clone_for_thread(parent);
+        RegVM *child = (RegVM *)task->child_vm;
         if (!child) {
             channel_close(task->ch);
             channel_release(task->ch);
@@ -2550,7 +2538,35 @@ static LatValue native_async_iter(LatValue *args, int ac) {
     channel_retain(ch); /* The thread keeps a reference */
     task->parent_rt = current_rt;
     task->backend = current_rt->backend;
-    task->parent_vm = current_rt->active_vm;
+
+    /* Pre-clone the child VM on the main thread to avoid data races.
+     * The child thread must NOT access the parent VM's stack. */
+    if (current_rt->backend == RT_BACKEND_STACK_VM) {
+        StackVM *parent = (StackVM *)current_rt->active_vm;
+        StackVM *child = stackvm_clone_for_thread(parent);
+        if (!child) {
+            channel_release(ch);
+            channel_release(ch);
+            value_free(&task->closure);
+            free(task);
+            current_rt->error = strdup("async_iter: failed to clone VM");
+            return value_nil();
+        }
+        stackvm_export_locals_to_env(parent, child);
+        task->child_vm = child;
+    } else {
+        RegVM *parent = (RegVM *)current_rt->active_vm;
+        RegVM *child = regvm_clone_for_thread(parent);
+        if (!child) {
+            channel_release(ch);
+            channel_release(ch);
+            value_free(&task->closure);
+            free(task);
+            current_rt->error = strdup("async_iter: failed to clone VM");
+            return value_nil();
+        }
+        task->child_vm = child;
+    }
 
     /* Spawn the producer thread */
     pthread_t thread;
