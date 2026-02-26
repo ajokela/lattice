@@ -505,11 +505,14 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
     return REGVM_RUNTIME_ERROR;
 }
 
-/* ── Set a register (free old value, then assign) ── */
+/* ── Set a register (save old, assign new, free old) ──
+ * This order prevents use-after-free when the new value aliases the old
+ * register's memory (e.g., via shallow clone or shared struct fields). */
 
 static inline void reg_set(LatValue *r, LatValue val) {
-    value_free_inline(r);
+    LatValue old = *r;
     *r = val;
+    value_free_inline(&old);
 }
 
 /* Forward declarations for recursive closure calls */

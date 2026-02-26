@@ -58,13 +58,13 @@ print("2. strlen('Hello, FFI!') = ${result}")
 assert(result == 11, "strlen should return 11")
 
 // ── Test 3: Call abs ──
-let abs_sym = _sym(libc, "abs", "c>c")
+let abs_sym = _sym(libc, "abs", "i>i")
 let abs_result = _call(abs_sym, -42)
 print("3. abs(-42) = ${abs_result}")
 assert(abs_result == 42, "abs(-42) should return 42")
 
 // ── Test 4: Call atoi ──
-let atoi_sym = _sym(libc, "atoi", "s>c")
+let atoi_sym = _sym(libc, "atoi", "s>i")
 let atoi_result = _call(atoi_sym, "12345")
 print("4. atoi('12345') = ${atoi_result}")
 assert(atoi_result == 12345, "atoi should return 12345")
