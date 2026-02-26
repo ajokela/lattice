@@ -1,0 +1,504 @@
+// Lattice Package Registry Server
+// A self-hosted HTTP package registry for the Lattice language.
+//
+// Usage:
+//   clat registry/server.lat                  # listen on port 8080
+//   clat registry/server.lat 3000             # listen on port 3000
+//
+// API Endpoints:
+//   GET  /v1/packages/<name>/versions   - List available versions
+//   GET  /v1/packages/<name>/<version>  - Download package source
+//   POST /v1/packages/<name>/<version>  - Publish a new package version
+//   GET  /v1/health                     - Health check
+//
+// The server stores packages on disk in:
+//   registry/packages/<name>/<version>/main.lat
+//   registry/packages/<name>/<version>/lattice.toml
+//   registry/packages/<name>/versions.json
+//
+// Client usage:
+//   LATTICE_REGISTRY=http://localhost:8080/v1 clat install
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+// Resolve the packages directory relative to this script.
+// We look for a "packages" directory alongside the server script.
+fn get_packages_dir() -> String {
+    return "registry/packages"
+}
+
+// ---------------------------------------------------------------------------
+// HTTP Response Helpers
+// ---------------------------------------------------------------------------
+
+fn status_text(code: Int) -> String {
+    if code == 200 { return "OK" }
+    if code == 201 { return "Created" }
+    if code == 204 { return "No Content" }
+    if code == 400 { return "Bad Request" }
+    if code == 404 { return "Not Found" }
+    if code == 405 { return "Method Not Allowed" }
+    if code == 409 { return "Conflict" }
+    if code == 500 { return "Internal Server Error" }
+    return "Unknown"
+}
+
+fn build_response(status: Int, content_type: String, body: String) -> String {
+    let reason = status_text(status)
+    flux resp = "HTTP/1.1 " + to_string(status) + " " + reason + "\r\n"
+    resp = resp + "Content-Type: " + content_type + "\r\n"
+    resp = resp + "Content-Length: " + to_string(len(body)) + "\r\n"
+    resp = resp + "Connection: close\r\n"
+    resp = resp + "Access-Control-Allow-Origin: *\r\n"
+    resp = resp + "\r\n"
+    resp = resp + body
+    return resp
+}
+
+fn json_response(status: Int, data: Any) -> String {
+    let body = json_stringify(data)
+    return build_response(status, "application/json", body)
+}
+
+fn text_response(status: Int, body: String) -> String {
+    return build_response(status, "text/plain", body)
+}
+
+fn error_response(status: Int, message: String) -> String {
+    let data = Map::new()
+    data.set("error", message)
+    return json_response(status, data)
+}
+
+// ---------------------------------------------------------------------------
+// HTTP Request Parsing
+// ---------------------------------------------------------------------------
+
+fn parse_request(raw: String) -> Map {
+    let req = Map::new()
+    req.set("method", "GET")
+    req.set("path", "/")
+    req.set("headers", Map::new())
+    req.set("body", "")
+
+    if len(raw) == 0 {
+        return req
+    }
+
+    // Split headers from body at the \r\n\r\n boundary
+    let body_sep = raw.index_of("\r\n\r\n")
+    flux header_section = raw
+    flux body = ""
+    if body_sep >= 0 {
+        header_section = raw.substring(0, body_sep)
+        body = raw.substring(body_sep + 4, len(raw))
+    }
+
+    let lines = header_section.split("\r\n")
+    if len(lines) == 0 {
+        return req
+    }
+
+    // Parse the request line: "METHOD /path HTTP/1.1"
+    let request_line = lines[0]
+    let parts = request_line.split(" ")
+    if len(parts) >= 1 {
+        req.set("method", parts[0])
+    }
+    if len(parts) >= 2 {
+        req.set("path", parts[1])
+    }
+
+    // Parse headers
+    let headers = Map::new()
+    flux i = 1
+    while i < len(lines) {
+        let line = lines[i]
+        let colon = line.index_of(":")
+        if colon > 0 {
+            let name = line.substring(0, colon).trim()
+            let value = line.substring(colon + 1, len(line)).trim()
+            headers.set(name, value)
+        }
+        i = i + 1
+    }
+    req.set("headers", headers)
+    req.set("body", body)
+
+    return req
+}
+
+// ---------------------------------------------------------------------------
+// Path Routing
+// ---------------------------------------------------------------------------
+
+// Split a URL path into segments, filtering out empty strings.
+// "/v1/packages/hello/versions" -> ["v1", "packages", "hello", "versions"]
+fn split_path(path: String) -> Array {
+    let raw_parts = path.split("/")
+    flux parts = []
+    for part in raw_parts {
+        if len(part) > 0 {
+            parts.push(part)
+        }
+    }
+    return parts
+}
+
+// ---------------------------------------------------------------------------
+// Package Storage Operations
+// ---------------------------------------------------------------------------
+
+// Ensure a directory exists, creating it if necessary.
+// Returns true if the directory exists after the call.
+fn ensure_dir(dir_path: String) -> Bool {
+    if is_dir(dir_path) {
+        return true
+    }
+    // Try to create it. mkdir may fail if parent doesn't exist,
+    // so we try creating parents too.
+    let result = try {
+        mkdir(dir_path)
+        true
+    } catch _e {
+        false
+    }
+    return result
+}
+
+// Ensure all directories in a path exist by creating each level.
+fn ensure_nested_dirs(dir_path: String) {
+    let segments = dir_path.split("/")
+    flux current = ""
+    for seg in segments {
+        if len(seg) == 0 {
+            continue
+        }
+        if len(current) == 0 {
+            current = seg
+        } else {
+            current = current + "/" + seg
+        }
+        if !is_dir(current) {
+            try {
+                mkdir(current)
+            } catch _e {
+                // Ignore errors for existing dirs
+            }
+        }
+    }
+}
+
+// Read and return the versions.json for a package, or nil if not found.
+fn read_versions(pkg_name: String) -> Any {
+    let pkg_dir = get_packages_dir()
+    let versions_path = pkg_dir + "/" + pkg_name + "/versions.json"
+    if !file_exists(versions_path) {
+        return nil
+    }
+    let content = read_file(versions_path)
+    return json_parse(content)
+}
+
+// Write versions.json for a package.
+fn write_versions(pkg_name: String, versions_data: Any) {
+    let pkg_dir = get_packages_dir()
+    let dir_path = pkg_dir + "/" + pkg_name
+    ensure_dir(dir_path)
+    let versions_path = dir_path + "/versions.json"
+    write_file(versions_path, json_stringify(versions_data))
+}
+
+// Add a version to a package's version list (if not already present).
+fn add_version(pkg_name: String, version: String) {
+    flux data = read_versions(pkg_name)
+    if data == nil {
+        data = Map::new()
+        data.set("versions", [])
+    }
+
+    // Check if version already exists
+    let versions = data.get("versions")
+    for v in versions {
+        if v == version {
+            return nil
+        }
+    }
+
+    // Add and sort (simple append for now)
+    versions.push(version)
+    data.set("versions", versions)
+    write_versions(pkg_name, data)
+}
+
+// Read the main source file for a package version.
+fn read_package_source(pkg_name: String, version: String) -> Any {
+    let pkg_dir = get_packages_dir()
+    let main_path = pkg_dir + "/" + pkg_name + "/" + version + "/main.lat"
+    if file_exists(main_path) {
+        return read_file(main_path)
+    }
+    // Try src/main.lat as alternate layout
+    let src_path = pkg_dir + "/" + pkg_name + "/" + version + "/src/main.lat"
+    if file_exists(src_path) {
+        return read_file(src_path)
+    }
+    return nil
+}
+
+// Read the lattice.toml for a package version.
+fn read_package_toml(pkg_name: String, version: String) -> Any {
+    let pkg_dir = get_packages_dir()
+    let toml_path = pkg_dir + "/" + pkg_name + "/" + version + "/lattice.toml"
+    if file_exists(toml_path) {
+        return read_file(toml_path)
+    }
+    return nil
+}
+
+// ---------------------------------------------------------------------------
+// Request Handlers
+// ---------------------------------------------------------------------------
+
+// GET /v1/health
+fn handle_health() -> String {
+    let data = Map::new()
+    data.set("status", "ok")
+    data.set("server", "lattice-registry")
+    data.set("version", "0.1.0")
+    return json_response(200, data)
+}
+
+// GET /v1/packages/<name>/versions
+fn handle_list_versions(pkg_name: String) -> String {
+    print("  -> list versions for: " + pkg_name)
+    let data = read_versions(pkg_name)
+    if data == nil {
+        return error_response(404, "package '" + pkg_name + "' not found")
+    }
+    return json_response(200, data)
+}
+
+// GET /v1/packages/<name>/<version>
+fn handle_download(pkg_name: String, version: String) -> String {
+    print("  -> download: " + pkg_name + "@" + version)
+
+    // Check that this version exists in versions.json
+    let versions_data = read_versions(pkg_name)
+    if versions_data == nil {
+        return error_response(404, "package '" + pkg_name + "' not found")
+    }
+
+    let versions = versions_data.get("versions")
+    flux found = false
+    for v in versions {
+        if v == version {
+            found = true
+        }
+    }
+    if !found {
+        return error_response(404, "version '" + version + "' not found for package '" + pkg_name + "'")
+    }
+
+    // Return the main.lat source content
+    let source = read_package_source(pkg_name, version)
+    if source == nil {
+        return error_response(404, "source not found for " + pkg_name + "@" + version)
+    }
+
+    return text_response(200, source)
+}
+
+// POST /v1/packages/<name>/<version>
+fn handle_publish(pkg_name: String, version: String, body: String) -> String {
+    print("  -> publish: " + pkg_name + "@" + version)
+
+    if len(body) == 0 {
+        return error_response(400, "request body is empty")
+    }
+
+    // Parse the published payload as JSON
+    // Expected format: {"source": "...", "toml": "..."}
+    let payload = try {
+        json_parse(body)
+    } catch _e {
+        nil
+    }
+
+    if payload == nil {
+        return error_response(400, "invalid JSON in request body")
+    }
+
+    // Extract source and toml from payload
+    flux source = ""
+    flux toml_content = ""
+
+    if typeof(payload) == "Map" {
+        if payload.has("source") {
+            source = payload.get("source")
+        }
+        if payload.has("toml") {
+            toml_content = payload.get("toml")
+        }
+    } else {
+        // If the body is just a string, treat it as the source
+        source = body
+    }
+
+    if len(source) == 0 {
+        return error_response(400, "missing 'source' field in payload")
+    }
+
+    // Check if this version already exists
+    let existing = read_versions(pkg_name)
+    if existing != nil {
+        let versions = existing.get("versions")
+        for v in versions {
+            if v == version {
+                return error_response(409, "version '" + version + "' already exists for package '" + pkg_name + "'")
+            }
+        }
+    }
+
+    // Create the package version directory
+    let pkg_dir = get_packages_dir()
+    let version_dir = pkg_dir + "/" + pkg_name + "/" + version
+    ensure_nested_dirs(version_dir)
+
+    // Write main.lat
+    let main_path = version_dir + "/main.lat"
+    write_file(main_path, source)
+
+    // Write lattice.toml
+    if len(toml_content) == 0 {
+        // Generate a minimal lattice.toml
+        toml_content = "[package]\n"
+        toml_content = toml_content + "name = \"" + pkg_name + "\"\n"
+        toml_content = toml_content + "version = \"" + version + "\"\n"
+    }
+    let toml_path = version_dir + "/lattice.toml"
+    write_file(toml_path, toml_content)
+
+    // Update versions.json
+    add_version(pkg_name, version)
+
+    let result = Map::new()
+    result.set("status", "published")
+    result.set("package", pkg_name)
+    result.set("version", version)
+    print("  -> published successfully: " + pkg_name + "@" + version)
+    return json_response(201, result)
+}
+
+// ---------------------------------------------------------------------------
+// Route Dispatcher
+// ---------------------------------------------------------------------------
+
+fn dispatch(req: Map) -> String {
+    let method = req.get("method")
+    let path = req.get("path")
+    let body = req.get("body")
+    let segments = split_path(path)
+    let seg_count = len(segments)
+
+    // GET /v1/health
+    if method == "GET" && seg_count == 2 {
+        if segments[0] == "v1" && segments[1] == "health" {
+            return handle_health()
+        }
+    }
+
+    // Check that path starts with /v1/packages/
+    if seg_count < 3 {
+        return error_response(404, "not found: " + path)
+    }
+    if segments[0] != "v1" || segments[1] != "packages" {
+        return error_response(404, "not found: " + path)
+    }
+
+    let pkg_name = segments[2]
+
+    // GET /v1/packages/<name>/versions
+    if method == "GET" && seg_count == 4 && segments[3] == "versions" {
+        return handle_list_versions(pkg_name)
+    }
+
+    // GET /v1/packages/<name>/<version>
+    if method == "GET" && seg_count == 4 {
+        let version = segments[3]
+        return handle_download(pkg_name, version)
+    }
+
+    // POST /v1/packages/<name>/<version>
+    if method == "POST" && seg_count == 4 {
+        let version = segments[3]
+        return handle_publish(pkg_name, version, body)
+    }
+
+    // Method not supported for this route
+    if seg_count >= 3 {
+        return error_response(405, "method " + method + " not allowed for " + path)
+    }
+
+    return error_response(404, "not found: " + path)
+}
+
+// ---------------------------------------------------------------------------
+// Main Server Loop
+// ---------------------------------------------------------------------------
+
+fn main() {
+    // Determine port from command-line args or default to 8080
+    flux port = 8080
+    let argv = args()
+    if len(argv) > 1 {
+        let port_arg = try {
+            parse_int(argv[1])
+        } catch _e {
+            0
+        }
+        if port_arg > 0 {
+            port = port_arg
+        }
+    }
+
+    // Ensure the packages directory exists
+    let pkg_dir = get_packages_dir()
+    ensure_dir(pkg_dir)
+
+    print("Lattice Package Registry Server")
+    print("  Packages dir: " + pkg_dir)
+    print("  Listening on: http://localhost:" + to_string(port))
+    print("  Client usage: LATTICE_REGISTRY=http://localhost:" + to_string(port) + "/v1 clat install")
+    print("")
+
+    let server_fd = tcp_listen("0.0.0.0", port)
+
+    loop {
+        let client_fd = tcp_accept(server_fd)
+        let raw = tcp_read(client_fd)
+
+        if len(raw) > 0 {
+            let req = parse_request(raw)
+            let method = req.get("method")
+            let path = req.get("path")
+
+            // Log the request
+            print("[" + to_string(time()) + "] " + method + " " + path)
+
+            // Dispatch and send response
+            let response = try {
+                dispatch(req)
+            } catch e {
+                print("  ERROR: " + to_string(e))
+                error_response(500, "internal server error")
+            }
+
+            tcp_write(client_fd, response)
+        }
+
+        tcp_close(client_fd)
+    }
+}

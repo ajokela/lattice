@@ -1,0 +1,5 @@
+[package]
+name = "math-extra"
+version = "1.0.0"
+description = "Extra math functions for Lattice"
+license = "MIT"
