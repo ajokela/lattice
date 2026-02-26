@@ -23,11 +23,13 @@ static void scope_free(Scope *s) {
 
 Env *env_new(void) {
     Env *env = malloc(sizeof(Env));
+    if (!env) return NULL;
     env->cap = INITIAL_SCOPE_CAP;
     env->count = 1;
     env->refcount = 1;
     env->arena_backed = false;
     env->scopes = malloc(env->cap * sizeof(Scope));
+    if (!env->scopes) { free(env); return NULL; }
     env->scopes[0] = scope_new();
     return env;
 }
@@ -209,11 +211,13 @@ Env *env_clone(const Env *env) {
     if (value_get_arena()) return env_clone_arena(env);
 
     Env *new_env = malloc(sizeof(Env));
+    if (!new_env) return NULL;
     new_env->cap = env->cap;
     new_env->count = env->count;
     new_env->refcount = 1;
     new_env->arena_backed = false;
     new_env->scopes = malloc(new_env->cap * sizeof(Scope));
+    if (!new_env->scopes) { free(new_env); return NULL; }
 
     CloneCtx ctx;
     ctx.dest = new_env;

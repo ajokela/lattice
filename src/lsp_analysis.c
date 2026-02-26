@@ -110,6 +110,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 for (size_t j = 0; j < fn->param_count; j++)
                     siglen += strlen(fn->params[j].name) + 16;
                 sym.signature = malloc(siglen);
+                if (!sym.signature) return;
                 char *p = sym.signature;
                 p += sprintf(p, "fn %s(", fn->name);
                 for (size_t j = 0; j < fn->param_count; j++) {
@@ -129,6 +130,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.name = strdup(sd->name);
                 sym.kind = LSP_SYM_STRUCT;
                 sym.signature = malloc(strlen(sd->name) + 16);
+                if (!sym.signature) return;
                 sprintf(sym.signature, "struct %s", sd->name);
                 find_decl_position(doc->text, "struct", sd->name,
                                    last_line, &sym.line, &sym.col);
@@ -141,6 +143,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sdef.fields = NULL;
                 if (sd->field_count > 0) {
                     sdef.fields = malloc(sd->field_count * sizeof(LspFieldInfo));
+                    if (!sdef.fields) return;
                     for (size_t j = 0; j < sd->field_count; j++) {
                         sdef.fields[j].name = strdup(sd->fields[j].name);
                         sdef.fields[j].type_name =
@@ -160,6 +163,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.name = strdup(ed->name);
                 sym.kind = LSP_SYM_ENUM;
                 sym.signature = malloc(strlen(ed->name) + 16);
+                if (!sym.signature) return;
                 sprintf(sym.signature, "enum %s", ed->name);
                 find_decl_position(doc->text, "enum", ed->name,
                                    last_line, &sym.line, &sym.col);
@@ -172,6 +176,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 edef.variants = NULL;
                 if (ed->variant_count > 0) {
                     edef.variants = malloc(ed->variant_count * sizeof(LspVariantInfo));
+                    if (!edef.variants) return;
                     for (size_t j = 0; j < ed->variant_count; j++) {
                         edef.variants[j].name = strdup(ed->variants[j].name);
                         /* Build param string for tuple variants */
@@ -184,6 +189,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                                     plen += 5; /* "Any, " */
                             }
                             char *params = malloc(plen);
+                            if (!params) return;
                             char *pp = params;
                             *pp++ = '(';
                             for (size_t k = 0; k < ed->variants[j].param_count; k++) {
@@ -225,6 +231,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                     if (stmt->as.binding.ty && stmt->as.binding.ty->name)
                         siglen += strlen(stmt->as.binding.ty->name);
                     sym.signature = malloc(siglen);
+                    if (!sym.signature) return;
 
                     if (stmt->as.binding.ty && stmt->as.binding.ty->name)
                         sprintf(sym.signature, "%s %s: %s",
@@ -250,6 +257,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 for (size_t j = 0; j < td->method_count; j++)
                     siglen += strlen(td->methods[j].name) + 8;
                 sym.signature = malloc(siglen);
+                if (!sym.signature) return;
                 char *p = sym.signature;
                 p += sprintf(p, "trait %s {", td->name);
                 for (size_t j = 0; j < td->method_count; j++) {
@@ -269,6 +277,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 if (ib->trait_name) nlen += strlen(ib->trait_name);
                 if (ib->type_name) nlen += strlen(ib->type_name);
                 sym.name = malloc(nlen);
+                if (!sym.name) return;
                 if (ib->trait_name && ib->type_name)
                     sprintf(sym.name, "%s for %s", ib->trait_name, ib->type_name);
                 else if (ib->type_name)
@@ -277,6 +286,7 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                     sprintf(sym.name, "impl");
                 sym.kind = LSP_SYM_METHOD;
                 sym.signature = malloc(strlen(sym.name) + 8);
+                if (!sym.signature) return;
                 sprintf(sym.signature, "impl %s", sym.name);
                 find_decl_position(doc->text, "impl", ib->trait_name ? ib->trait_name : ib->type_name,
                                    last_line, &sym.line, &sym.col);
@@ -367,6 +377,7 @@ void lsp_analyze_document(LspDocument *doc) {
     if (lex_err) {
         doc->diag_count = 1;
         doc->diagnostics = malloc(sizeof(LspDiagnostic));
+        if (!doc->diagnostics) return;
         doc->diagnostics[0] = parse_error(lex_err);
         free(lex_err);
         free_tokens(&tokens);
@@ -381,6 +392,7 @@ void lsp_analyze_document(LspDocument *doc) {
     if (parse_err) {
         doc->diag_count = 1;
         doc->diagnostics = malloc(sizeof(LspDiagnostic));
+        if (!doc->diagnostics) return;
         doc->diagnostics[0] = parse_error(parse_err);
         free(parse_err);
     } else {

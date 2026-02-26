@@ -94,6 +94,7 @@ static char *format_request(const HttpRequest *req, const HttpUrl *url) {
     if (req->body) cap += 64 + req->body_len;  /* Content-Length header + body */
 
     char *buf = malloc(cap);
+    if (!buf) return NULL;
     size_t pos = 0;
 
     /* Request line */
@@ -138,6 +139,7 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
     }
 
     HttpResponse *resp = calloc(1, sizeof(HttpResponse));
+    if (!resp) return NULL;
 
     /* Parse status line: HTTP/1.x STATUS REASON */
     const char *line_end = strstr(raw, "\r\n");
@@ -156,7 +158,9 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
     /* Parse headers */
     size_t hdr_cap = 16;
     resp->header_keys = malloc(hdr_cap * sizeof(char *));
+    if (!resp->header_keys) return NULL;
     resp->header_values = malloc(hdr_cap * sizeof(char *));
+    if (!resp->header_values) return NULL;
     resp->header_count = 0;
 
     const char *hdr = line_end + 2;  /* skip first \r\n */
@@ -206,6 +210,7 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
         /* Decode chunked body */
         size_t bcap = body_len > 0 ? body_len : 128;
         char *body = malloc(bcap);
+        if (!body) return NULL;
         size_t bpos = 0;
         const char *cp = body_start;
         const char *end = raw + raw_len;
@@ -238,6 +243,7 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
         resp->body_len = bpos;
     } else {
         resp->body = malloc(body_len + 1);
+        if (!resp->body) return NULL;
         memcpy(resp->body, body_start, body_len);
         resp->body[body_len] = '\0';
         resp->body_len = body_len;
@@ -304,6 +310,7 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
     size_t resp_cap = 8192;
     size_t resp_len = 0;
     char *resp_buf = malloc(resp_cap);
+    if (!resp_buf) return NULL;
 
     for (;;) {
         char *chunk;

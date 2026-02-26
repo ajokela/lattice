@@ -418,8 +418,10 @@ static void repl(void) {
     /* Keep programs/tokens alive — scope/select store Expr* pointers in chunks */
     size_t prog_cap = 16, prog_count = 0;
     Program *kept_progs = malloc(prog_cap * sizeof(Program));
+    if (!kept_progs) return;
     size_t tok_cap = 16, tok_count = 0;
     LatVec *kept_tokens = malloc(tok_cap * sizeof(LatVec));
+    if (!kept_tokens) return;
 
     char accumulated[65536];
     accumulated[0] = '\0';
@@ -571,8 +573,10 @@ static void repl_regvm(void) {
     /* Keep programs/tokens alive for struct/fn/enum lifetime */
     size_t prog_cap = 16, prog_count = 0;
     Program *kept_progs = malloc(prog_cap * sizeof(Program));
+    if (!kept_progs) return;
     size_t tok_cap = 16, tok_count = 0;
     LatVec *kept_tokens = malloc(tok_cap * sizeof(LatVec));
+    if (!kept_tokens) return;
 
     char accumulated[65536];
     accumulated[0] = '\0';
@@ -714,8 +718,10 @@ static void repl_tree_walk(void) {
     /* Keep programs alive so struct/fn/enum decl pointers stay valid */
     size_t prog_cap = 16, prog_count = 0;
     Program *kept_progs = malloc(prog_cap * sizeof(Program));
+    if (!kept_progs) return;
     size_t tok_cap = 16, tok_count = 0;
     LatVec *kept_tokens = malloc(tok_cap * sizeof(LatVec));
+    if (!kept_tokens) return;
 
     char accumulated[65536];
     accumulated[0] = '\0';
@@ -908,11 +914,13 @@ int main(int argc, char **argv) {
                 size_t base_len = ilen - 4; /* strip ".lat" */
                 size_t ext_len = strlen(ext);
                 default_output = malloc(base_len + ext_len + 1);
+                if (!default_output) return 1;
                 memcpy(default_output, input_path, base_len);
                 memcpy(default_output + base_len, ext, ext_len + 1);
             } else {
                 size_t ext_len = strlen(ext);
                 default_output = malloc(ilen + ext_len + 1);
+                if (!default_output) return 1;
                 memcpy(default_output, input_path, ilen);
                 memcpy(default_output + ilen, ext, ext_len + 1);
             }

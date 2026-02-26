@@ -298,6 +298,7 @@ char *lat_str_capitalize(const char *s) {
     s = safe_str(s);
     size_t len = strlen(s);
     char *r = malloc(len + 1);
+    if (!r) return NULL;
     if (len > 0) r[0] = (char)toupper((unsigned char)s[0]);
     for (size_t i = 1; i < len; i++) r[i] = (char)tolower((unsigned char)s[i]);
     r[len] = '\0';
@@ -308,6 +309,7 @@ char *lat_str_title_case(const char *s) {
     s = safe_str(s);
     size_t len = strlen(s);
     char *r = malloc(len + 1);
+    if (!r) return NULL;
     bool word_start = true;
     for (size_t i = 0; i < len; i++) {
         if (isspace((unsigned char)s[i]) || s[i] == '_' || s[i] == '-') {
@@ -335,6 +337,7 @@ char *lat_str_snake_case(const char *s) {
     size_t len = strlen(s);
     size_t cap = len * 2 + 1;
     char *r = malloc(cap);
+    if (!r) return NULL;
     size_t pos = 0;
     for (size_t i = 0; i < len; i++) {
         char c = s[i];
@@ -355,6 +358,7 @@ char *lat_str_camel_case(const char *s) {
     s = safe_str(s);
     size_t len = strlen(s);
     char *r = malloc(len + 1);
+    if (!r) return NULL;
     size_t pos = 0;
     bool upper_next = false;
     for (size_t i = 0; i < len; i++) {
@@ -382,6 +386,7 @@ int lat_levenshtein(const char *a, const char *b) {
     if (lb == 0) return (int)la;
     /* Use single row of DP table to save memory */
     size_t *row = malloc((lb + 1) * sizeof(size_t));
+    if (!row) return (int)(la > lb ? la : lb); /* fallback: max of lengths */
     for (size_t j = 0; j <= lb; j++) row[j] = j;
     for (size_t i = 1; i <= la; i++) {
         size_t prev = row[0];
@@ -494,6 +499,7 @@ char *lat_str_kebab_case(const char *s) {
     size_t len = strlen(s);
     size_t cap = len * 2 + 1;
     char *r = malloc(cap);
+    if (!r) return NULL;
     size_t pos = 0;
     for (size_t i = 0; i < len; i++) {
         char c = s[i];

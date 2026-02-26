@@ -23,6 +23,7 @@ typedef struct {
 static void bb_init(ByteBuf *bb) {
     bb->cap = 1024;
     bb->data = malloc(bb->cap);
+    if (!bb->data) return;
     bb->len = 0;
 }
 
@@ -301,6 +302,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                     return NULL;
                 }
                 char *s = malloc(slen + 1);
+                if (!s) return NULL;
                 if (!br_read_bytes(br, s, slen)) {
                     free(s);
                     *err = strdup("truncated: incomplete string data");
@@ -382,6 +384,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                 return NULL;
             }
             char *name = malloc(nlen + 1);
+            if (!name) return NULL;
             if (!br_read_bytes(br, name, nlen)) {
                 free(name);
                 *err = strdup("truncated: incomplete local name data");
@@ -486,6 +489,7 @@ Chunk *chunk_load(const char *path, char **err) {
 
     size_t len = (size_t)flen;
     uint8_t *data = malloc(len);
+    if (!data) return NULL;
     size_t n = fread(data, 1, len, f);
     fclose(f);
 
@@ -801,6 +805,7 @@ RegChunk *regchunk_load(const char *path, char **err) {
     if (flen < 0) { fclose(f); *err = strdup("cannot determine file size"); return NULL; }
     size_t len = (size_t)flen;
     uint8_t *data = malloc(len);
+    if (!data) return NULL;
     size_t n = fread(data, 1, len, f);
     fclose(f);
     if (n != len) { free(data); *err = strdup("failed to read file"); return NULL; }

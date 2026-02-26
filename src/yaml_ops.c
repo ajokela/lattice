@@ -112,6 +112,7 @@ static LatValue yaml_parse_flow_seq(YamlParser *p) {
     p->pos++; /* skip [ */
     size_t cap = 4, len = 0;
     LatValue *elems = malloc(cap * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
 
     while (p->src[p->pos] && p->src[p->pos] != ']') {
         while (p->src[p->pos] == ' ' || p->src[p->pos] == '\t' ||
@@ -226,6 +227,7 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
         p->pos = line_start;
         size_t arr_cap = 4, arr_len = 0;
         LatValue *arr_elems = malloc(arr_cap * sizeof(LatValue));
+        if (!arr_elems) return value_array(NULL, 0);
 
         while (p->src[p->pos]) {
             yaml_skip_blanks(p);
@@ -462,7 +464,7 @@ static void yb_init(YamlBuf *b) {
     b->cap = 256;
     b->buf = malloc(b->cap);
     b->len = 0;
-    b->buf[0] = '\0';
+    if (b->buf) b->buf[0] = '\0';
 }
 
 static void yb_append(YamlBuf *b, const char *s) {

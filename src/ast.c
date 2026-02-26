@@ -7,6 +7,7 @@
 
 static Expr *expr_alloc(ExprTag tag) {
     Expr *e = calloc(1, sizeof(Expr));
+    if (!e) return NULL;
     e->tag = tag;
     return e;
 }
@@ -292,6 +293,7 @@ Expr *expr_enum_variant(char *enum_name, char *variant_name, Expr **args, size_t
 
 Pattern *pattern_literal(Expr *lit) {
     Pattern *p = calloc(1, sizeof(Pattern));
+    if (!p) return NULL;
     p->tag = PAT_LITERAL;
     p->phase_qualifier = PHASE_UNSPECIFIED;
     p->as.literal = lit;
@@ -300,6 +302,7 @@ Pattern *pattern_literal(Expr *lit) {
 
 Pattern *pattern_wildcard(void) {
     Pattern *p = calloc(1, sizeof(Pattern));
+    if (!p) return NULL;
     p->tag = PAT_WILDCARD;
     p->phase_qualifier = PHASE_UNSPECIFIED;
     return p;
@@ -307,6 +310,7 @@ Pattern *pattern_wildcard(void) {
 
 Pattern *pattern_binding(char *name) {
     Pattern *p = calloc(1, sizeof(Pattern));
+    if (!p) return NULL;
     p->tag = PAT_BINDING;
     p->phase_qualifier = PHASE_UNSPECIFIED;
     p->as.binding_name = name;
@@ -315,6 +319,7 @@ Pattern *pattern_binding(char *name) {
 
 Pattern *pattern_range(Expr *start, Expr *end) {
     Pattern *p = calloc(1, sizeof(Pattern));
+    if (!p) return NULL;
     p->tag = PAT_RANGE;
     p->phase_qualifier = PHASE_UNSPECIFIED;
     p->as.range.start = start;
@@ -368,6 +373,7 @@ Expr *expr_clone_ast(const Expr *e) {
 
 static Stmt *stmt_alloc(StmtTag tag) {
     Stmt *s = calloc(1, sizeof(Stmt));
+    if (!s) return NULL;
     s->tag = tag;
     return s;
 }

@@ -53,6 +53,7 @@ char *builtin_read_file(const char *path) {
     if (len < 0) { fclose(f); return NULL; }
 
     char *buf = malloc((size_t)len + 1);
+    if (!buf) return NULL;
     if (buf == NULL) {
         fclose(f);
         return NULL;

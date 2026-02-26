@@ -33,6 +33,7 @@ LatValue builtin_array_enumerate(LatValue *obj, LatValue *args, int arg_count, c
     (void)args; (void)arg_count; (void)error;
     size_t len = obj->as.array.len;
     LatValue *pairs = malloc(len * sizeof(LatValue));
+    if (!pairs) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++) {
         LatValue pair_elems[2];
         pair_elems[0] = value_int((int64_t)i);
@@ -52,6 +53,7 @@ LatValue builtin_array_reverse(LatValue *obj, LatValue *args, int arg_count, cha
     (void)args; (void)arg_count; (void)error;
     size_t len = obj->as.array.len;
     LatValue *elems = malloc(len * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++)
         elems[i] = value_deep_clone(&obj->as.array.elems[len - 1 - i]);
     LatValue result = value_array(elems, len);
@@ -70,6 +72,7 @@ LatValue builtin_array_join(LatValue *obj, LatValue *args, int arg_count, char *
     size_t n = obj->as.array.len;
     char **parts = malloc(n * sizeof(char *));
     size_t *lens = malloc(n * sizeof(size_t));
+    if (!parts || !lens) { free(parts); free(lens); return value_string(""); }
     size_t total = 0;
     for (size_t i = 0; i < n; i++) {
         parts[i] = value_display(&obj->as.array.elems[i]);
@@ -78,6 +81,11 @@ LatValue builtin_array_join(LatValue *obj, LatValue *args, int arg_count, char *
     }
     if (n > 1) total += sep_len * (n - 1);
     char *buf = malloc(total + 1);
+    if (!buf) {
+        for (size_t i = 0; i < n; i++) free(parts[i]);
+        free(parts); free(lens);
+        return value_string("");
+    }
     size_t pos = 0;
     for (size_t i = 0; i < n; i++) {
         if (i > 0) { memcpy(buf + pos, sep_str, sep_len); pos += sep_len; }
@@ -97,6 +105,7 @@ LatValue builtin_array_unique(LatValue *obj, LatValue *args, int arg_count, char
     (void)args; (void)arg_count; (void)error;
     size_t n = obj->as.array.len;
     LatValue *res = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+    if (!res) return value_array(NULL, 0);
     size_t rc = 0;
     for (size_t i = 0; i < n; i++) {
         bool dup = false;
@@ -133,6 +142,7 @@ LatValue builtin_array_zip(LatValue *obj, LatValue *args, int arg_count, char **
     size_t n = obj->as.array.len < args[0].as.array.len
              ? obj->as.array.len : args[0].as.array.len;
     LatValue *pairs = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+    if (!pairs) return value_array(NULL, 0);
     for (size_t i = 0; i < n; i++) {
         LatValue pe[2];
         pe[0] = value_deep_clone(&obj->as.array.elems[i]);
@@ -250,6 +260,7 @@ LatValue builtin_array_take(LatValue *obj, LatValue *args, int arg_count, char *
     size_t take_n = (size_t)n;
     if (take_n > obj->as.array.len) take_n = obj->as.array.len;
     LatValue *elems = malloc((take_n > 0 ? take_n : 1) * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < take_n; i++)
         elems[i] = value_deep_clone(&obj->as.array.elems[i]);
     LatValue r = value_array(elems, take_n);
@@ -269,6 +280,7 @@ LatValue builtin_array_drop(LatValue *obj, LatValue *args, int arg_count, char *
     if (start >= obj->as.array.len) return value_array(NULL, 0);
     size_t cnt = obj->as.array.len - start;
     LatValue *elems = malloc(cnt * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < cnt; i++)
         elems[i] = value_deep_clone(&obj->as.array.elems[start + i]);
     LatValue r = value_array(elems, cnt);
@@ -288,11 +300,13 @@ LatValue builtin_array_chunk(LatValue *obj, LatValue *args, int arg_count, char 
     size_t n = obj->as.array.len;
     size_t nc = (n > 0) ? (n + (size_t)cs - 1) / (size_t)cs : 0;
     LatValue *chunks = malloc((nc > 0 ? nc : 1) * sizeof(LatValue));
+    if (!chunks) return value_array(NULL, 0);
     for (size_t ci = 0; ci < nc; ci++) {
         size_t s = ci * (size_t)cs, e = s + (size_t)cs;
         if (e > n) e = n;
         size_t cl = e - s;
         LatValue *ce = malloc(cl * sizeof(LatValue));
+        if (!ce) { free(chunks); return value_array(NULL, 0); }
         for (size_t j = 0; j < cl; j++)
             ce[j] = value_deep_clone(&obj->as.array.elems[s + j]);
         chunks[ci] = value_array(ce, cl);
@@ -320,6 +334,7 @@ LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, cha
     }
     if (total == 0) return value_array(NULL, 0);
     LatValue *buf = malloc(total * sizeof(LatValue));
+    if (!buf) return value_array(NULL, 0);
     size_t pos = 0;
     for (size_t i = 0; i < n; i++) {
         if (obj->as.array.elems[i].type == VAL_ARRAY) {
@@ -351,6 +366,7 @@ LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, voi
     (void)error;
     size_t len = obj->as.array.len;
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++) {
         LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
         elems[i] = cb(closure, &arg, 1, ctx);
@@ -370,6 +386,7 @@ LatValue builtin_array_filter(LatValue *obj, void *closure, BuiltinCallback cb, 
     size_t len = obj->as.array.len;
     size_t cap = len > 0 ? len : 1;
     LatValue *elems = malloc(cap * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     size_t out_len = 0;
     for (size_t i = 0; i < len; i++) {
         LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
@@ -491,6 +508,7 @@ LatValue builtin_array_flat_map(LatValue *obj, void *closure, BuiltinCallback cb
     size_t cap = n * 2;
     if (cap == 0) cap = 1;
     LatValue *buf = malloc(cap * sizeof(LatValue));
+    if (!buf) return value_array(NULL, 0);
     size_t out = 0;
     for (size_t i = 0; i < n; i++) {
         LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
@@ -520,6 +538,7 @@ LatValue builtin_array_sort_by(LatValue *obj, void *closure, BuiltinCallback cb,
     (void)error;
     size_t n = obj->as.array.len;
     LatValue *buf = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+    if (!buf) return value_array(NULL, 0);
     for (size_t i = 0; i < n; i++)
         buf[i] = value_deep_clone(&obj->as.array.elems[i]);
     /* Insertion sort using comparator: closure(a, b) < 0 means a < b */
@@ -585,6 +604,7 @@ LatValue builtin_string_split(LatValue *obj, LatValue *args, int arg_count, char
     size_t sep_len = strlen(sep);
     size_t cap = 8;
     LatValue *parts = malloc(cap * sizeof(LatValue));
+    if (!parts) return value_array(NULL, 0);
     size_t count = 0;
     if (sep_len == 0) {
         /* Split into individual characters */
@@ -689,6 +709,7 @@ LatValue builtin_string_replace(LatValue *obj, LatValue *args, int arg_count, ch
     if (from_len == 0) return value_deep_clone(obj);
     size_t cap = strlen(s) + 64;
     char *buf = malloc(cap);
+    if (!buf) return value_deep_clone(obj);
     size_t pos = 0;
     while (*s) {
         if (strncmp(s, from, from_len) == 0) {
@@ -714,6 +735,7 @@ LatValue builtin_string_chars(LatValue *obj, LatValue *args, int arg_count, char
     (void)args; (void)arg_count; (void)error;
     size_t len = strlen(obj->as.str_val);
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++) {
         char c[2] = { obj->as.str_val[i], '\0' };
         elems[i] = value_string(c);
@@ -727,6 +749,7 @@ LatValue builtin_string_bytes(LatValue *obj, LatValue *args, int arg_count, char
     (void)args; (void)arg_count; (void)error;
     size_t len = strlen(obj->as.str_val);
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++)
         elems[i] = value_int((int64_t)(unsigned char)obj->as.str_val[i]);
     LatValue r = value_array(elems, len);
@@ -738,6 +761,7 @@ LatValue builtin_string_reverse(LatValue *obj, LatValue *args, int arg_count, ch
     (void)args; (void)arg_count; (void)error;
     size_t len = strlen(obj->as.str_val);
     char *buf = malloc(len + 1);
+    if (!buf) return value_string("");
     for (size_t i = 0; i < len; i++) buf[i] = obj->as.str_val[len - 1 - i];
     buf[len] = '\0';
     return value_string_owned(buf);
@@ -750,6 +774,7 @@ LatValue builtin_string_repeat(LatValue *obj, LatValue *args, int arg_count, cha
     int64_t n = args[0].as.int_val;
     size_t slen = strlen(obj->as.str_val);
     char *buf = malloc(slen * (size_t)n + 1);
+    if (!buf) return value_string("");
     for (int64_t i = 0; i < n; i++)
         memcpy(buf + i * (int64_t)slen, obj->as.str_val, slen);
     buf[slen * (size_t)n] = '\0';
@@ -765,6 +790,7 @@ LatValue builtin_string_pad_left(LatValue *obj, LatValue *args, int arg_count, c
     if ((int64_t)slen >= n) return value_deep_clone(obj);
     size_t plen = (size_t)n - slen;
     char *buf = malloc((size_t)n + 1);
+    if (!buf) return value_deep_clone(obj);
     memset(buf, pad, plen);
     memcpy(buf + plen, obj->as.str_val, slen);
     buf[(size_t)n] = '\0';
@@ -779,6 +805,7 @@ LatValue builtin_string_pad_right(LatValue *obj, LatValue *args, int arg_count, 
     size_t slen = strlen(obj->as.str_val);
     if ((int64_t)slen >= n) return value_deep_clone(obj);
     char *buf = malloc((size_t)n + 1);
+    if (!buf) return value_deep_clone(obj);
     memcpy(buf, obj->as.str_val, slen);
     memset(buf + slen, pad, (size_t)n - slen);
     buf[(size_t)n] = '\0';
@@ -831,6 +858,7 @@ LatValue builtin_map_keys(LatValue *obj, LatValue *args, int arg_count, char **e
     (void)args; (void)arg_count; (void)error;
     size_t cap = obj->as.map.map->cap;
     LatValue *keys = malloc((cap > 0 ? cap : 1) * sizeof(LatValue));
+    if (!keys) return value_array(NULL, 0);
     size_t count = 0;
     for (size_t i = 0; i < cap; i++) {
         if (obj->as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -845,6 +873,7 @@ LatValue builtin_map_values(LatValue *obj, LatValue *args, int arg_count, char *
     (void)args; (void)arg_count; (void)error;
     size_t cap = obj->as.map.map->cap;
     LatValue *vals = malloc((cap > 0 ? cap : 1) * sizeof(LatValue));
+    if (!vals) return value_array(NULL, 0);
     size_t count = 0;
     for (size_t i = 0; i < cap; i++) {
         if (obj->as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -859,6 +888,7 @@ LatValue builtin_map_entries(LatValue *obj, LatValue *args, int arg_count, char 
     (void)args; (void)arg_count; (void)error;
     size_t cap = obj->as.map.map->cap;
     LatValue *entries = malloc((cap > 0 ? cap : 1) * sizeof(LatValue));
+    if (!entries) return value_array(NULL, 0);
     size_t count = 0;
     for (size_t i = 0; i < cap; i++) {
         if (obj->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1122,6 +1152,7 @@ LatValue builtin_buffer_resize(LatValue *obj, LatValue *args, int arg_count, cha
 LatValue builtin_buffer_to_string(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args; (void)arg_count; (void)error;
     char *s = malloc(obj->as.buffer.len + 1);
+    if (!s) return value_string("");
     memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
     s[obj->as.buffer.len] = '\0';
     return value_string_owned(s);
@@ -1131,6 +1162,7 @@ LatValue builtin_buffer_to_array(LatValue *obj, LatValue *args, int arg_count, c
     (void)args; (void)arg_count; (void)error;
     size_t len = obj->as.buffer.len;
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++)
         elems[i] = value_int((int64_t)obj->as.buffer.data[i]);
     LatValue arr = value_array(elems, len);
@@ -1142,6 +1174,7 @@ LatValue builtin_buffer_to_hex(LatValue *obj, LatValue *args, int arg_count, cha
     (void)args; (void)arg_count; (void)error;
     size_t len = obj->as.buffer.len;
     char *hex = malloc(len * 2 + 1);
+    if (!hex) return value_string("");
     for (size_t i = 0; i < len; i++)
         snprintf(hex + i * 2, 3, "%02x", obj->as.buffer.data[i]);
     hex[len * 2] = '\0';
@@ -1181,6 +1214,7 @@ LatValue builtin_set_to_array(LatValue *obj, LatValue *args, int arg_count, char
     (void)args; (void)arg_count; (void)error;
     size_t len = lat_map_len(obj->as.set.map);
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+    if (!elems) return value_array(NULL, 0);
     size_t idx = 0;
     for (size_t i = 0; i < obj->as.set.map->cap; i++) {
         if (obj->as.set.map->entries[i].state == MAP_OCCUPIED) {
@@ -1287,6 +1321,7 @@ LatValue builtin_enum_payload(LatValue *obj, LatValue *args, int arg_count, char
     (void)args; (void)arg_count; (void)error;
     if (obj->as.enm.payload_count > 0) {
         LatValue *elems = malloc(obj->as.enm.payload_count * sizeof(LatValue));
+        if (!elems) return value_array(NULL, 0);
         for (size_t pi = 0; pi < obj->as.enm.payload_count; pi++)
             elems[pi] = value_deep_clone(&obj->as.enm.payload[pi]);
         LatValue r = value_array(elems, obj->as.enm.payload_count);

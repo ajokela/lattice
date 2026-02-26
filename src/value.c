@@ -248,6 +248,7 @@ LatValue value_buffer_alloc(size_t size) {
 LatValue value_ref(LatValue inner) {
     LatValue val = { .type = VAL_REF, .phase = VTAG_UNPHASED, .region_id = (size_t)-1 };
     LatRef *r = malloc(sizeof(LatRef));
+    if (!r) return value_nil();
     r->value = value_deep_clone(&inner);
     r->refcount = 1;
     val.as.ref.ref = r;
@@ -589,6 +590,7 @@ char *value_display(const LatValue *v) {
         case VAL_ARRAY: {
             size_t cap = 64;
             buf = malloc(cap);
+            if (!buf) return strdup("[]");
             size_t pos = 0;
             buf[pos++] = '[';
             for (size_t i = 0; i < v->as.array.len; i++) {
@@ -607,6 +609,7 @@ char *value_display(const LatValue *v) {
         case VAL_STRUCT: {
             size_t cap = 64;
             buf = malloc(cap);
+            if (!buf) return strdup("<Struct>");
             size_t pos = 0;
             size_t nlen = strlen(v->as.strct.name);
             while (pos + nlen + 8 > cap) { cap *= 2; buf = realloc(buf, cap); }
@@ -638,6 +641,7 @@ char *value_display(const LatValue *v) {
         case VAL_CLOSURE: {
             size_t cap = 64;
             buf = malloc(cap);
+            if (!buf) return strdup("<closure>");
             size_t pos = 0;
             const char *prefix = "<closure|";
             size_t plen = strlen(prefix);
@@ -676,6 +680,7 @@ char *value_display(const LatValue *v) {
             } else {
                 size_t ecap = 64;
                 buf = malloc(ecap);
+                if (!buf) return strdup("<Enum>");
                 size_t epos = 0;
                 size_t enlen = strlen(v->as.enm.enum_name);
                 size_t vnlen = strlen(v->as.enm.variant_name);
@@ -700,6 +705,7 @@ char *value_display(const LatValue *v) {
         case VAL_SET: {
             size_t cap2 = 64;
             buf = malloc(cap2);
+            if (!buf) return strdup("Set{}");
             size_t pos2 = 0;
             memcpy(buf, "Set{", 4); pos2 = 4;
             bool sfirst = true;
@@ -722,6 +728,7 @@ char *value_display(const LatValue *v) {
         case VAL_TUPLE: {
             size_t tcap = 64;
             buf = malloc(tcap);
+            if (!buf) return strdup("()");
             size_t tpos = 0;
             buf[tpos++] = '(';
             for (size_t i = 0; i < v->as.tuple.len; i++) {
@@ -753,6 +760,7 @@ char *value_display(const LatValue *v) {
         case VAL_MAP: {
             size_t cap2 = 64;
             buf = malloc(cap2);
+            if (!buf) return strdup("{}");
             size_t pos2 = 0;
             buf[pos2++] = '{';
             bool first = true;
@@ -788,6 +796,7 @@ char *value_repr(const LatValue *v) {
         /* Wrap strings in double quotes */
         size_t slen = strlen(v->as.str_val);
         char *buf = malloc(slen + 3);
+        if (!buf) return strdup("\"\"");
         buf[0] = '"';
         memcpy(buf + 1, v->as.str_val, slen);
         buf[slen + 1] = '"';
@@ -799,6 +808,7 @@ char *value_repr(const LatValue *v) {
         size_t show = v->as.buffer.len < 8 ? v->as.buffer.len : 8;
         size_t cap = 64 + show * 3;
         char *buf = malloc(cap);
+        if (!buf) return strdup("Buffer<>");
         int pos = snprintf(buf, cap, "Buffer<%zu bytes:", v->as.buffer.len);
         for (size_t i = 0; i < show; i++)
             pos += snprintf(buf + pos, cap - (size_t)pos, " %02x", v->as.buffer.data[i]);

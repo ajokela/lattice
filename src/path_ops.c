@@ -68,6 +68,7 @@ char *path_dir(const char *path) {
     /* Return everything before the last '/' */
     size_t dir_len = (size_t)(last_slash - path);
     char *result = malloc(dir_len + 1);
+    if (!result) return strdup(".");
     memcpy(result, path, dir_len);
     result[dir_len] = '\0';
     return result;

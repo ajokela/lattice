@@ -47,6 +47,7 @@ static void tp_error(TomlParser *p, const char *msg) {
     if (!p->err) {
         size_t len = strlen(msg) + 64;
         p->err = malloc(len);
+        if (!p->err) { p->err = strdup("toml_parse error: out of memory"); return; }
         snprintf(p->err, len, "toml_parse error at position %zu: %s", p->pos, msg);
     }
 }
@@ -74,6 +75,7 @@ static char *tp_parse_quoted_string(TomlParser *p) {
 
     size_t cap = 64;
     char *buf = malloc(cap);
+    if (!buf) { tp_error(p, "out of memory"); return NULL; }
     size_t len = 0;
 
     if (quote == '"') {
@@ -157,6 +159,7 @@ static LatValue tp_parse_number(TomlParser *p) {
 
     size_t nlen = p->pos - start;
     char *numstr = malloc(nlen + 1);
+    if (!numstr) { tp_error(p, "out of memory"); return value_unit(); }
     size_t j = 0;
     for (size_t i = start; i < p->pos; i++) {
         if (p->src[i] != '_') numstr[j++] = p->src[i];
@@ -187,6 +190,7 @@ static LatValue tp_parse_array(TomlParser *p) {
     p->pos++; /* skip [ */
     size_t cap = 4, len = 0;
     LatValue *elems = malloc(cap * sizeof(LatValue));
+    if (!elems) { tp_error(p, "out of memory"); return value_unit(); }
 
     tp_skip_ws_and_newlines(p);
     tp_skip_comment(p);
@@ -499,7 +503,7 @@ static void tb_init(TomlBuf *b) {
     b->cap = 256;
     b->buf = malloc(b->cap);
     b->len = 0;
-    b->buf[0] = '\0';
+    if (b->buf) b->buf[0] = '\0';
 }
 
 static void tb_append(TomlBuf *b, const char *s) {
@@ -617,6 +621,7 @@ static void toml_stringify_table(TomlBuf *b, const LatValue *val, const char *pr
             if (prefix[0] != '\0') {
                 size_t flen = strlen(prefix) + strlen(key) + 2;
                 full_key = malloc(flen);
+                if (!full_key) continue;
                 snprintf(full_key, flen, "%s.%s", prefix, key);
             } else {
                 full_key = strdup(key);
@@ -636,6 +641,7 @@ static void toml_stringify_table(TomlBuf *b, const LatValue *val, const char *pr
                 if (prefix[0] != '\0') {
                     size_t flen = strlen(prefix) + strlen(key) + 2;
                     full_key = malloc(flen);
+                    if (!full_key) continue;
                     snprintf(full_key, flen, "%s.%s", prefix, key);
                 } else {
                     full_key = strdup(key);

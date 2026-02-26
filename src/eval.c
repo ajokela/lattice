@@ -1025,6 +1025,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             /* Collect remaining args into an array */
             size_t rest_count = (arg_count > i) ? arg_count - i : 0;
             LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
+            if (!rest_elems && rest_count > 0) { env_pop_scope(ev->env); stats_scope_pop(&ev->stats); return eval_err(strdup("out of memory")); }
             for (size_t j = 0; j < rest_count; j++)
                 rest_elems[j] = args[i + j];
             LatValue arr = value_array(rest_elems, rest_count);
@@ -1160,6 +1161,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
                 LatValue val;
                 if (env_get(ev->env, decl->params[i].name, &val)) {
                     writeback_out[i] = malloc(sizeof(LatValue));
+                    if (writeback_out[i])
                     *writeback_out[i] = val;
                 }
             }
@@ -1224,6 +1226,7 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
             /* Collect remaining args into an array */
             size_t rest_count = (arg_count > i) ? arg_count - i : 0;
             LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
+            if (!rest_elems && rest_count > 0) { Env *dummy; env_pop_scope(ev->env); stats_scope_pop(&ev->stats); ev->env = saved; lat_vec_pop(&ev->saved_envs, &dummy); return eval_err(strdup("out of memory")); }
             for (size_t j = 0; j < rest_count; j++)
                 rest_elems[j] = args[i + j];
             LatValue arr = value_array(rest_elems, rest_count);
@@ -1343,6 +1346,7 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
     if (lv->type == VAL_STR && rv->type == VAL_STR && op == BINOP_ADD) {
         size_t al = strlen(lv->as.str_val), bl = strlen(rv->as.str_val);
         char *buf = malloc(al + bl + 1);
+        if (!buf) return eval_err(strdup("out of memory"));
         memcpy(buf, lv->as.str_val, al);
         memcpy(buf + al, rv->as.str_val, bl);
         buf[al + bl] = '\0';
@@ -1401,6 +1405,7 @@ typedef struct {
 
 static Evaluator *create_child_evaluator(Evaluator *parent) {
     Evaluator *child = calloc(1, sizeof(Evaluator));
+    if (!child) return NULL;
     child->env = env_clone(parent->env);
     child->mode = parent->mode;
     /* Share AST pointers (borrowed, immutable after parse) */
@@ -1883,6 +1888,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             /* Evaluate arguments */
             size_t argc = expr->as.call.arg_count;
             LatValue *args = malloc(argc * sizeof(LatValue));
+            if (!args && argc > 0) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < argc; i++) {
                 EvalResult ar = eval_expr(ev, expr->as.call.args[i]);
                 if (!IS_OK(ar)) {
@@ -1987,6 +1993,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (argc != 1 || args[0].type != VAL_STRUCT) { for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args); return eval_err(strdup("struct_fields() expects 1 Struct argument")); }
                     size_t fc = args[0].as.strct.field_count;
                     LatValue *elems = malloc((fc > 0 ? fc : 1) * sizeof(LatValue));
+                    if (!elems) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     for (size_t j = 0; j < fc; j++) {
                         elems[j] = value_string(args[0].as.strct.field_names[j]);
                     }
@@ -2032,7 +2039,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     size_t fc = sd->field_count;
                     char **names = malloc(fc * sizeof(char *));
+                    if (!names) return eval_err(strdup("out of memory"));
                     LatValue *vals = malloc(fc * sizeof(LatValue));
+                    if (!vals) return eval_err(strdup("out of memory"));
+                    if ((!names || !vals) && fc > 0) { free(names); free(vals); for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     for (size_t j = 0; j < fc; j++) {
                         names[j] = sd->fields[j].name;
                         LatValue *found = (LatValue *)lat_map_get(args[1].as.map.map, sd->fields[j].name);
@@ -2148,6 +2158,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!vh || vh->count == 0) return eval_ok(value_array(NULL, 0));
                     LatValue *elems = malloc(vh->count * sizeof(LatValue));
+                    if (!elems) return eval_err(strdup("out of memory"));
                     for (size_t i = 0; i < vh->count; i++) {
                         LatValue m = value_map_new();
                         LatValue pv = value_string(vh->snapshots[i].phase_name);
@@ -2180,6 +2191,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); } free(args);
                     if (!vh || vh->count == 0) return eval_ok(value_array(NULL, 0));
                     LatValue *elems = malloc(vh->count * sizeof(LatValue));
+                    if (!elems) return eval_err(strdup("out of memory"));
                     for (size_t i = 0; i < vh->count; i++) {
                         LatValue m = value_map_new();
                         LatValue pv = value_string(vh->snapshots[i].phase_name);
@@ -2384,6 +2396,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(args);
                     if (!ld_entries) { char *e = ld_err; return eval_err(e); }
                     LatValue *elems = malloc(ld_count * sizeof(LatValue));
+                    if (!elems && ld_count > 0) { for (size_t i = 0; i < ld_count; i++) free(ld_entries[i]); free(ld_entries); return eval_err(strdup("out of memory")); }
                     for (size_t i = 0; i < ld_count; i++) {
                         elems[i] = value_string(ld_entries[i]);
                         free(ld_entries[i]);
@@ -2409,6 +2422,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     fseek(bf, 0, SEEK_SET);
                     if (bflen < 0) { fclose(bf); return eval_err(strdup("read_file_bytes: could not read file")); }
                     uint8_t *bfdata = malloc((size_t)bflen);
+                    if (!bfdata && bflen > 0) { fclose(bf); return eval_err(strdup("read_file_bytes: out of memory")); }
                     size_t bfnread = fread(bfdata, 1, (size_t)bflen, bf);
                     fclose(bf);
                     LatValue buf = value_buffer(bfdata, bfnread);
@@ -2528,6 +2542,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *elems = NULL;
                     if (gl_count > 0) {
                         elems = malloc(gl_count * sizeof(LatValue));
+                        if (!elems) { for (size_t i = 0; i < gl_count; i++) free(gl_entries[i]); free(gl_entries); return eval_err(strdup("out of memory")); }
                         for (size_t i = 0; i < gl_count; i++) {
                             elems[i] = value_string_owned(gl_entries[i]);
                         }
@@ -2660,6 +2675,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         if (args[i].type != VAL_STR) { for (size_t j = 0; j < argc; j++) { value_free(&args[j]); } free(args); return eval_err(strdup("path_join() expects String arguments")); }
                     }
                     const char **parts = malloc(argc * sizeof(char*));
+                    if (!parts) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     for (size_t i = 0; i < argc; i++) parts[i] = args[i].as.str_val;
                     char *result = path_join(parts, argc);
                     free(parts);
@@ -2718,6 +2734,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         file_path = strdup(raw_path);
                     } else {
                         file_path = malloc(plen + 5);
+                        if (!file_path) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                         memcpy(file_path, raw_path, plen);
                         memcpy(file_path + plen, ".lat", 5);
                     }
@@ -2965,6 +2982,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     size_t tok_count = toks.len > 0 ? toks.len - 1 : 0;
                     LatValue *elems = malloc((tok_count > 0 ? tok_count : 1) * sizeof(LatValue));
+                    if (!elems) { for (size_t j = 0; j < toks.len; j++) token_free(lat_vec_get(&toks, j)); lat_vec_free(&toks); for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     for (size_t j = 0; j < tok_count; j++) {
                         Token *t = lat_vec_get(&toks, j);
                         const char *type_str = token_type_name(t->type);
@@ -3077,6 +3095,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     size_t blen = args[0].as.array.len;
                     uint8_t *data = malloc(blen > 0 ? blen : 1);
+                    if (!data) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     for (size_t bi = 0; bi < blen; bi++) {
                         if (args[0].as.array.elems[bi].type == VAL_INT)
                             data[bi] = (uint8_t)(args[0].as.array.elems[bi].as.int_val & 0xFF);
@@ -3560,7 +3579,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         if (hm && hm->type == VAL_MAP) {
                             hdr_count = lat_map_len(hm->as.map.map);
                             hdr_keys = malloc(hdr_count * sizeof(char *));
+                            if (!hdr_keys) return eval_err(strdup("out of memory"));
                             hdr_vals = malloc(hdr_count * sizeof(char *));
+                            if (!hdr_vals) return eval_err(strdup("out of memory"));
+                            if ((!hdr_keys || !hdr_vals) && hdr_count > 0) { free(hdr_keys); free(hdr_vals); for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                             size_t hi = 0;
                             for (size_t i = 0; i < hm->as.map.map->cap && hi < hdr_count; i++) {
                                 if (hm->as.map.map->entries[i].state == MAP_OCCUPIED) {
@@ -3620,7 +3642,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         if (hm && hm->type == VAL_MAP) {
                             hdr_count = lat_map_len(hm->as.map.map);
                             hdr_keys = malloc(hdr_count * sizeof(char *));
+                            if (!hdr_keys) return eval_err(strdup("out of memory"));
                             hdr_vals = malloc(hdr_count * sizeof(char *));
+                            if (!hdr_vals) return eval_err(strdup("out of memory"));
+                            if ((!hdr_keys || !hdr_vals) && hdr_count > 0) { free(hdr_keys); free(hdr_vals); for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                             size_t hi = 0;
                             for (size_t i = 0; i < hm->as.map.map->cap && hi < hdr_count; i++) {
                                 if (hm->as.map.map->entries[i].state == MAP_OCCUPIED) {
@@ -4177,6 +4202,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         rcount = (size_t)((rstart - rend + (-rstep) - 1) / (-rstep));
                     }
                     LatValue *relems = malloc((rcount > 0 ? rcount : 1) * sizeof(LatValue));
+                    if (!relems) return eval_err(strdup("out of memory"));
                     int64_t rcur = rstart;
                     for (size_t ri = 0; ri < rcount; ri++) {
                         relems[ri] = value_int(rcur);
@@ -4259,6 +4285,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *elems = NULL;
                     if (key_count > 0) {
                         elems = malloc(key_count * sizeof(LatValue));
+                        if (!elems) { for (size_t i = 0; i < key_count; i++) free(keys[i]); free(keys); return eval_err(strdup("out of memory")); }
                         for (size_t i = 0; i < key_count; i++) {
                             elems[i] = value_string_owned(keys[i]);
                         }
@@ -4356,6 +4383,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue *elems = NULL;
                     if (ac > 0) {
                         elems = malloc((size_t)ac * sizeof(LatValue));
+                        if (!elems) return eval_err(strdup("out of memory"));
                         for (int i = 0; i < ac; i++)
                             elems[i] = value_string(av[i]);
                     }
@@ -4412,6 +4440,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     /* Worst case: every byte becomes %XX (3x expansion) */
                     size_t cap = slen * 3 + 1;
                     char *out = malloc(cap);
+                    if (!out) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     size_t j = 0;
                     for (size_t i = 0; i < slen; i++) {
                         unsigned char c = (unsigned char)src[i];
@@ -4438,6 +4467,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     const char *src = args[0].as.str_val;
                     size_t slen = strlen(src);
                     char *out = malloc(slen + 1);
+                    if (!out) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     size_t j = 0;
                     for (size_t i = 0; i < slen; i++) {
                         if (src[i] == '%' && i + 2 < slen) {
@@ -4478,18 +4508,21 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     size_t rows_cap = 8;
                     size_t rows_len = 0;
                     LatValue *rows = malloc(rows_cap * sizeof(LatValue));
+                    if (!rows) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
 
                     while (pos < input_len) {
                         /* Parse one row: collect fields */
                         size_t fields_cap = 8;
                         size_t fields_len = 0;
                         LatValue *fields = malloc(fields_cap * sizeof(LatValue));
+                        if (!fields) { for (size_t ri = 0; ri < rows_len; ri++) value_free(&rows[ri]); free(rows); for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
 
                         for (;;) {
                             /* Parse one field */
                             size_t field_cap = 64;
                             size_t field_len = 0;
                             char *field = malloc(field_cap);
+                            if (!field) { for (size_t fi = 0; fi < fields_len; fi++) value_free(&fields[fi]); free(fields); for (size_t ri = 0; ri < rows_len; ri++) value_free(&rows[ri]); free(rows); for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
 
                             if (pos < input_len && input[pos] == '"') {
                                 /* Quoted field */
@@ -4565,6 +4598,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     size_t out_cap = 256;
                     size_t out_len = 0;
                     char *out = malloc(out_cap);
+                    if (!out) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
 
                     for (size_t r = 0; r < data->as.array.len; r++) {
                         LatValue *row = &data->as.array.elems[r];
@@ -5646,13 +5680,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     /* AST: __compose_f(__compose_g(x))  (intentionally leaked — borrowed by closure) */
                     Expr *x_var = expr_ident(strdup("x"));
                     Expr **g_cargs = malloc(sizeof(Expr *));
+                    if (!g_cargs) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     g_cargs[0] = x_var;
                     Expr *g_call = expr_call(expr_ident(strdup("__compose_g")), g_cargs, 1);
                     Expr **f_cargs = malloc(sizeof(Expr *));
+                    if (!f_cargs) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     f_cargs[0] = g_call;
                     Expr *body = expr_call(expr_ident(strdup("__compose_f")), f_cargs, 1);
 
                     char **params = malloc(sizeof(char *));
+                    if (!params) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     params[0] = strdup("x");
                     LatValue closure = value_closure(params, 1, body, cenv, NULL, false);
 
@@ -5703,6 +5740,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     /* Allocate write-back slots for fluid parameters */
                     LatValue **writeback = calloc(argc, sizeof(LatValue *));
+                    if (!writeback && argc > 0) { for (size_t i = 0; i < argc; i++) value_free(&args[i]); free(args); return eval_err(strdup("out of memory")); }
                     EvalResult res = call_fn(ev, fd, args, argc, writeback);
                     /* Write back fluid parameters to caller's env */
                     if (IS_OK(res)) {
@@ -6356,6 +6394,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             GC_PUSH(ev, &objr.value);
             size_t argc = expr->as.method_call.arg_count;
             LatValue *args = malloc((argc < 1 ? 1 : argc) * sizeof(LatValue));
+            if (!args) { GC_POP(ev); value_free(&objr.value); return eval_err(strdup("out of memory")); }
             for (size_t i = 0; i < argc; i++) {
                 EvalResult ar = eval_expr(ev, expr->as.method_call.args[i]);
                 if (!IS_OK(ar)) {
@@ -6551,6 +6590,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             size_t cap = n > 0 ? n : 4;
             size_t out = 0;
             LatValue *elems = malloc(cap * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
             size_t gc_count = 0;
             for (size_t i = 0; i < n; i++) {
                 if (expr->as.array.elems[i]->tag == EXPR_SPREAD) {
@@ -6605,6 +6645,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         case EXPR_TUPLE: {
             size_t n = expr->as.tuple.count;
             LatValue *elems = malloc(n * sizeof(LatValue));
+            if (!elems && n > 0) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < n; i++) {
                 EvalResult er = eval_expr(ev, expr->as.tuple.elems[i]);
                 if (!IS_OK(er)) {
@@ -6644,7 +6685,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
             }
             char **names = malloc(fc * sizeof(char *));
+            if (!names) return eval_err(strdup("out of memory"));
             LatValue *vals = malloc(fc * sizeof(LatValue));
+            if (!vals) return eval_err(strdup("out of memory"));
+            if ((!names || !vals) && fc > 0) { free(names); free(vals); return eval_err(strdup("out of memory")); }
             for (size_t i = 0; i < fc; i++) {
                 names[i] = expr->as.struct_lit.fields[i].name;
                 EvalResult er = eval_expr(ev, expr->as.struct_lit.fields[i].value);
@@ -6669,6 +6713,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
                 if (has_phase_decl) {
                     st.as.strct.field_phases = calloc(st.as.strct.field_count, sizeof(PhaseTag));
+                    if (!st.as.strct.field_phases) break;
                     for (size_t i = 0; i < st.as.strct.field_count; i++) {
                         /* Find matching decl field */
                         for (size_t j = 0; j < sd->field_count; j++) {
@@ -6742,6 +6787,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /* Lazy-allocate field_phases */
                 if (!parent->as.strct.field_phases) {
                     parent->as.strct.field_phases = calloc(parent->as.strct.field_count, sizeof(PhaseTag));
+                    if (!parent->as.strct.field_phases)
+                        return eval_err(strdup("out of memory"));
                 }
                 parent->as.strct.field_phases[fi] = VTAG_CRYSTAL;
                 return eval_ok(value_deep_clone(&parent->as.strct.field_values[fi]));
@@ -6800,6 +6847,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 /* Lazy-allocate key_phases */
                 if (!parent->as.map.key_phases) {
                     parent->as.map.key_phases = calloc(1, sizeof(LatMap));
+                    if (!parent->as.map.key_phases)
+                        return eval_err(strdup("out of memory"));
                     *parent->as.map.key_phases = lat_map_new(sizeof(PhaseTag));
                 }
                 PhaseTag crystal = VTAG_CRYSTAL;
@@ -6870,6 +6919,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (expr->as.freeze.except_count > 0) {
                     /* Evaluate except field names */
                     char **except_names = malloc(expr->as.freeze.except_count * sizeof(char *));
+                    if (!except_names) { value_free(&val); return eval_err(strdup("out of memory")); }
                     for (size_t i = 0; i < expr->as.freeze.except_count; i++) {
                         EvalResult er = eval_expr(ev, expr->as.freeze.except_fields[i]);
                         if (!IS_OK(er)) {
@@ -6892,6 +6942,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         /* Lazy-allocate field_phases */
                         if (!val.as.strct.field_phases) {
                             val.as.strct.field_phases = calloc(val.as.strct.field_count, sizeof(PhaseTag));
+                            if (!val.as.strct.field_phases)
+                                return eval_err(strdup("out of memory"));
                             for (size_t i = 0; i < val.as.strct.field_count; i++)
                                 val.as.strct.field_phases[i] = val.phase;
                         }
@@ -6913,6 +6965,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         /* Lazy-allocate key_phases */
                         if (!val.as.map.key_phases) {
                             val.as.map.key_phases = calloc(1, sizeof(LatMap));
+                            if (!val.as.map.key_phases)
+                                return eval_err(strdup("out of memory"));
                             *val.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
                         }
                         for (size_t i = 0; i < val.as.map.map->cap; i++) {
@@ -7474,6 +7528,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
             /* Run non-spawn statements synchronously, spawn tasks in parallel */
             SpawnTask *tasks = calloc(spawn_count, sizeof(SpawnTask));
+            if (!tasks) { env_pop_scope(ev->env); stats_scope_pop(&ev->stats); return eval_err(strdup("out of memory")); }
             size_t task_idx = 0;
             char *first_error = NULL;
 
@@ -7544,6 +7599,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             size_t buf_cap = 64;
             size_t buf_len = 0;
             char *buf = malloc(buf_cap);
+            if (!buf) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < count; i++) {
                 /* Append string segment */
                 const char *part = expr->as.interp.parts[i];
@@ -7677,12 +7733,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 size_t ac = expr->as.enum_variant.arg_count;
                 size_t nlen = strlen(enum_name) + 2 + strlen(variant_name) + 1;
                 char *full = malloc(nlen);
+                if (!full) return eval_err(strdup("out of memory"));
                 snprintf(full, nlen, "%s::%s", enum_name, variant_name);
 
                 /* Borrow the arg expressions for the temp node */
                 Expr **arg_refs = NULL;
                 if (ac > 0) {
                     arg_refs = malloc(ac * sizeof(Expr *));
+                    if (!arg_refs) { free(full); return eval_err(strdup("out of memory")); }
                     for (size_t i = 0; i < ac; i++)
                         arg_refs[i] = expr->as.enum_variant.args[i];
                 }
@@ -7712,6 +7770,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 char *err2 = NULL;
                 /* Build NULL-terminated variant name array for suggestion */
                 const char **vcands = malloc((ed->variant_count + 1) * sizeof(const char *));
+                if (!vcands) { return eval_err(strdup("out of memory")); }
                 for (size_t vi = 0; vi < ed->variant_count; vi++)
                     vcands[vi] = ed->variants[vi].name;
                 vcands[ed->variant_count] = NULL;
@@ -7736,6 +7795,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             LatValue *payload = NULL;
             if (provided > 0) {
                 payload = malloc(provided * sizeof(LatValue));
+                if (!payload) return eval_err(strdup("out of memory"));
                 for (size_t i = 0; i < provided; i++) {
                     EvalResult er = eval_expr(ev, expr->as.enum_variant.args[i]);
                     if (!IS_OK(er)) {
@@ -7797,6 +7857,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
             /* Evaluate all channel expressions upfront */
             LatChannel **channels = calloc(arm_count, sizeof(LatChannel *));
+            if (!channels) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < arm_count; i++) {
                 if (arms[i].is_default || arms[i].is_timeout) continue;
                 EvalResult cer = eval_expr(ev, arms[i].channel_expr);
@@ -7835,6 +7896,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             /* Build shuffled index array for fairness */
             size_t ch_arm_count = 0;
             size_t *indices = malloc(arm_count * sizeof(size_t));
+            if (!indices) { for (size_t i = 0; i < arm_count; i++) if (channels[i]) channel_release(channels[i]); free(channels); return eval_err(strdup("out of memory")); }
             for (size_t i = 0; i < arm_count; i++) {
                 if (!arms[i].is_default && !arms[i].is_timeout)
                     indices[ch_arm_count++] = i;
@@ -7979,6 +8041,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
         file_path = strdup(raw_path);
     } else {
         file_path = malloc(plen + 5);
+        if (!file_path) return eval_err(strdup("out of memory"));
         memcpy(file_path, raw_path, plen);
         memcpy(file_path + plen, ".lat", 5);
     }
@@ -8141,6 +8204,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
             /* Create an expr_block wrapping the function body.
              * This borrows fn->body (kept alive via program items). */
             Expr *body = calloc(1, sizeof(Expr));
+            if (!body) continue; /* skip this export on OOM */
             body->tag = EXPR_BLOCK;
             body->as.block.stmts = fn->body;
             body->as.block.count = fn->body_count;
@@ -8152,6 +8216,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
             bool has_variadic = false;
             if (fn->param_count > 0) {
                 defaults = malloc(fn->param_count * sizeof(Expr *));
+                if (!defaults) continue; /* skip export on OOM */
                 for (size_t k = 0; k < fn->param_count; k++) {
                     defaults[k] = fn->params[k].default_value;
                     if (fn->params[k].is_variadic) has_variadic = true;
@@ -8159,6 +8224,7 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
             }
 
             char **param_names = malloc(fn->param_count * sizeof(char *));
+            if (!param_names) { free(defaults); continue; }
             for (size_t k = 0; k < fn->param_count; k++) {
                 param_names[k] = fn->params[k].name;
             }
@@ -8605,6 +8671,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 if (has_rest) {
                     size_t rest_count = arr_len - name_count;
                     LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
+                    if (!rest_elems && rest_count > 0) { value_free(&vr.value); return eval_err(strdup("out of memory")); }
                     for (size_t i = 0; i < rest_count; i++)
                         rest_elems[i] = value_deep_clone(&vr.value.as.array.elems[name_count + i]);
                     LatValue rest_arr = value_array(rest_elems, rest_count);
@@ -8787,6 +8854,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             LatValue r;
             if (obj.as.enm.payload_count > 0) {
                 LatValue *elems = malloc(obj.as.enm.payload_count * sizeof(LatValue));
+                if (!elems) return eval_err(strdup("out of memory"));
                 for (size_t i = 0; i < obj.as.enm.payload_count; i++)
                     elems[i] = value_deep_clone(&obj.as.enm.payload[i]);
                 r = value_array(elems, obj.as.enm.payload_count);
@@ -8834,6 +8902,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 0) return eval_err(strdup(".to_array() takes no arguments"));
             size_t n = lat_map_len(obj.as.set.map);
             LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
             size_t ei = 0;
             for (size_t i = 0; i < obj.as.set.map->cap; i++) {
                 if (obj.as.set.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -9140,6 +9209,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "to_string") == 0) {
             if (arg_count != 0) return eval_err(strdup(".to_string() takes no arguments"));
             char *s = malloc(obj.as.buffer.len + 1);
+            if (!s) return eval_err(strdup("out of memory"));
             memcpy(s, obj.as.buffer.data, obj.as.buffer.len);
             s[obj.as.buffer.len] = '\0';
             return eval_ok(value_string_owned(s));
@@ -9152,6 +9222,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 0) return eval_err(strdup(".to_array() takes no arguments"));
             size_t blen = obj.as.buffer.len;
             LatValue *elems = malloc((blen > 0 ? blen : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < blen; i++)
                 elems[i] = value_int(obj.as.buffer.data[i]);
             LatValue arr = value_array(elems, blen);
@@ -9166,6 +9237,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 0) return eval_err(strdup(".to_hex() takes no arguments"));
             size_t blen = obj.as.buffer.len;
             char *hex = malloc(blen * 2 + 1);
+            if (!hex) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < blen; i++)
                 snprintf(hex + i * 2, 3, "%02x", obj.as.buffer.data[i]);
             hex[blen * 2] = '\0';
@@ -9230,6 +9302,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
 
         size_t n = obj.as.array.len;
         LatValue *results = malloc(n * sizeof(LatValue));
+        if (!results) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < n; i++) {
             LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
             EvalResult r = call_closure(ev,
@@ -9266,6 +9339,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         size_t total = 0;
         char **parts = malloc(obj.as.array.len * sizeof(char *));
+        if (!parts) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < obj.as.array.len; i++) {
             parts[i] = value_display(&obj.as.array.elems[i]);
             total += strlen(parts[i]);
@@ -9273,6 +9347,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         size_t sep_len = strlen(sep);
         if (obj.as.array.len > 0) total += sep_len * (obj.as.array.len - 1);
         char *result = malloc(total + 1);
+        if (!result) return eval_err(strdup("out of memory"));
         size_t pos = 0;
         for (size_t i = 0; i < obj.as.array.len; i++) {
             if (i > 0) { memcpy(result + pos, sep, sep_len); pos += sep_len; }
@@ -9294,6 +9369,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (arg_count != 1 || args[0].type != VAL_CLOSURE) return eval_err(strdup(".filter() expects 1 closure argument"));
         size_t n = obj.as.array.len;
         LatValue *results = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        if (!results) return eval_err(strdup("out of memory"));
         size_t rcount = 0;
         for (size_t i = 0; i < n; i++) {
             LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
@@ -9390,6 +9466,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     if (strcmp(method, "reverse") == 0 && obj.type == VAL_ARRAY) {
         size_t n = obj.as.array.len;
         LatValue *reversed = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        if (!reversed) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < n; i++) {
             reversed[i] = value_deep_clone(&obj.as.array.elems[n - 1 - i]);
         }
@@ -9406,6 +9483,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (obj.type != VAL_ARRAY) return eval_err(strdup(".enumerate() is not defined on non-array"));
         size_t n = obj.as.array.len;
         LatValue *pairs = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        if (!pairs) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < n; i++) {
             LatValue pair_elems[2];
             pair_elems[0] = value_int((int64_t)i);
@@ -9493,6 +9571,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         size_t take_count = (size_t)n;
         if (take_count > obj.as.array.len) take_count = obj.as.array.len;
         LatValue *elems = malloc((take_count > 0 ? take_count : 1) * sizeof(LatValue));
+        if (!elems) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < take_count; i++) {
             elems[i] = value_deep_clone(&obj.as.array.elems[i]);
         }
@@ -9511,6 +9590,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         int64_t n = args[0].as.int_val;
         if (n <= 0) {
             LatValue *elems = malloc((obj.as.array.len > 0 ? obj.as.array.len : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < obj.as.array.len; i++) {
                 elems[i] = value_deep_clone(&obj.as.array.elems[i]);
             }
@@ -9524,6 +9604,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         size_t drop_count = obj.as.array.len - start;
         LatValue *elems = malloc(drop_count * sizeof(LatValue));
+        if (!elems) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < drop_count; i++) {
             elems[i] = value_deep_clone(&obj.as.array.elems[start + i]);
         }
@@ -9619,6 +9700,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         size_t n = obj.as.array.len < args[0].as.array.len
                  ? obj.as.array.len : args[0].as.array.len;
         LatValue *pairs = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        if (!pairs) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < n; i++) {
             LatValue pair_elems[2];
             pair_elems[0] = value_deep_clone(&obj.as.array.elems[i]);
@@ -9638,6 +9720,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (arg_count != 0) return eval_err(strdup(".unique() takes no arguments"));
         size_t n = obj.as.array.len;
         LatValue *results = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        if (!results) return eval_err(strdup("out of memory"));
         size_t rcount = 0;
         for (size_t i = 0; i < n; i++) {
             bool found = false;
@@ -9703,6 +9786,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         size_t n = obj.as.array.len;
         /* Deep-clone elements into a working buffer */
         LatValue *buf = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        if (!buf) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < n; i++) {
             buf[i] = value_deep_clone(&obj.as.array.elems[i]);
         }
@@ -9758,6 +9842,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             return eval_err(strdup(".flat_map() expects 1 closure argument"));
         size_t n = obj.as.array.len;
         LatValue *mapped = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+        if (!mapped) return eval_err(strdup("out of memory"));
         for (size_t i = 0; i < n; i++) {
             LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
             EvalResult r = call_closure(ev,
@@ -9782,6 +9867,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 total += 1;
         }
         LatValue *fm_buf = malloc((total > 0 ? total : 1) * sizeof(LatValue));
+        if (!fm_buf) return eval_err(strdup("out of memory"));
         size_t fm_pos = 0;
         for (size_t i = 0; i < n; i++) {
             if (mapped[i].type == VAL_ARRAY) {
@@ -9812,12 +9898,14 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         size_t n = obj.as.array.len;
         size_t num_chunks = (n > 0) ? (n + (size_t)chunk_size - 1) / (size_t)chunk_size : 0;
         LatValue *chunks = malloc((num_chunks > 0 ? num_chunks : 1) * sizeof(LatValue));
+        if (!chunks) return eval_err(strdup("out of memory"));
         for (size_t ci = 0; ci < num_chunks; ci++) {
             size_t cstart = ci * (size_t)chunk_size;
             size_t cend = cstart + (size_t)chunk_size;
             if (cend > n) cend = n;
             size_t clen = cend - cstart;
             LatValue *celems = malloc(clen * sizeof(LatValue));
+            if (!celems) return eval_err(strdup("out of memory"));
             for (size_t j = 0; j < clen; j++) {
                 celems[j] = value_deep_clone(&obj.as.array.elems[cstart + j]);
             }
@@ -9856,6 +9944,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (existing) {
                 size_t old_len = existing->as.array.len;
                 LatValue *new_elems = malloc((old_len + 1) * sizeof(LatValue));
+                if (!new_elems) return eval_err(strdup("out of memory"));
                 for (size_t j = 0; j < old_len; j++) {
                     new_elems[j] = value_deep_clone(&existing->as.array.elems[j]);
                 }
@@ -10010,6 +10099,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "keys") == 0) {
             size_t n = lat_map_len(obj.as.map.map);
             LatValue *keys = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            if (!keys) return eval_err(strdup("out of memory"));
             size_t ki = 0;
             for (size_t i = 0; i < obj.as.map.map->cap; i++) {
                 if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
@@ -10027,6 +10117,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "values") == 0) {
             size_t n = lat_map_len(obj.as.map.map);
             LatValue *vals = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            if (!vals) return eval_err(strdup("out of memory"));
             size_t vi = 0;
             for (size_t i = 0; i < obj.as.map.map->cap; i++) {
                 if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
@@ -10052,6 +10143,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 0) return eval_err(strdup(".entries() takes no arguments"));
             size_t n = lat_map_len(obj.as.map.map);
             LatValue *entries = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            if (!entries) return eval_err(strdup("out of memory"));
             size_t ei = 0;
             for (size_t i = 0; i < obj.as.map.map->cap; i++) {
                 if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
@@ -10267,6 +10359,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             size_t count;
             char **parts = lat_str_split(obj.as.str_val, args[0].as.str_val, &count);
             LatValue *elems = malloc(count * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < count; i++) {
                 elems[i] = value_string_owned(parts[i]);
             }
@@ -10300,6 +10393,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "chars") == 0) {
             size_t slen = strlen(obj.as.str_val);
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < slen; i++) {
                 char buf[2] = { obj.as.str_val[i], '\0' };
                 elems[i] = value_string(buf);
@@ -10315,6 +10409,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "bytes") == 0) {
             size_t slen = strlen(obj.as.str_val);
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < slen; i++) {
                 elems[i] = value_int((int64_t)(unsigned char)obj.as.str_val[i]);
             }
@@ -10349,6 +10444,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             size_t start = 0;
             while (start < len && isspace((unsigned char)s[start])) start++;
             char *result = malloc(len - start + 1);
+            if (!result) return eval_err(strdup("out of memory"));
             memcpy(result, s + start, len - start);
             result[len - start] = '\0';
             return eval_ok(value_string_owned(result));
@@ -10364,6 +10460,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             size_t end = len;
             while (end > 0 && isspace((unsigned char)s[end - 1])) end--;
             char *result = malloc(end + 1);
+            if (!result) return eval_err(strdup("out of memory"));
             memcpy(result, s, end);
             result[end] = '\0';
             return eval_ok(value_string_owned(result));
@@ -10383,6 +10480,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (slen >= target) return eval_ok(value_string(s));
             size_t pad_count = target - slen;
             char *result = malloc(target + 1);
+            if (!result) return eval_err(strdup("out of memory"));
             char ch = args[1].as.str_val[0];
             memset(result, ch, pad_count);
             memcpy(result + pad_count, s, slen);
@@ -10404,6 +10502,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (slen >= target) return eval_ok(value_string(s));
             size_t pad_count = target - slen;
             char *result = malloc(target + 1);
+            if (!result) return eval_err(strdup("out of memory"));
             memcpy(result, s, slen);
             char ch = args[1].as.str_val[0];
             memset(result + slen, ch, pad_count);
@@ -10465,6 +10564,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 /* Prepend self (the struct) as the first argument */
                 size_t total = 1 + arg_count;
                 LatValue *full_args = malloc(total * sizeof(LatValue));
+                if (!full_args) return eval_err(strdup("out of memory"));
                 full_args[0] = value_deep_clone(&obj);
                 for (size_t j = 0; j < arg_count; j++) {
                     full_args[j + 1] = value_deep_clone(&args[j]);
@@ -10563,6 +10663,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 return res;
             }
             LatValue *cloned_args = malloc(arg_count * sizeof(LatValue));
+            if (!cloned_args) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < arg_count; i++)
                 cloned_args[i] = value_deep_clone(&args[i]);
             EvalResult res = call_closure(ev,
@@ -10581,6 +10682,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 obj.as.strct.field_values[i].type == VAL_CLOSURE) {
                 LatValue *field = &obj.as.strct.field_values[i];
                 LatValue *cloned_args = malloc(arg_count * sizeof(LatValue));
+                if (!cloned_args) return eval_err(strdup("out of memory"));
                 for (size_t j = 0; j < arg_count; j++)
                     cloned_args[j] = value_deep_clone(&args[j]);
                 EvalResult res = call_closure(ev,
@@ -10621,6 +10723,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                     FnDecl *fn = &ib->methods[m];
                     size_t total = 1 + arg_count;
                     LatValue *full_args = malloc(total * sizeof(LatValue));
+                    if (!full_args) return eval_err(strdup("out of memory"));
                     full_args[0] = value_deep_clone(&obj);
                     for (size_t j = 0; j < arg_count; j++)
                         full_args[j + 1] = value_deep_clone(&args[j]);
@@ -10705,6 +10808,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (strcmp(method, "keys") == 0 && arg_count == 0) {
                 size_t n = lat_map_len(inner->as.map.map);
                 LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                if (!elems) return eval_err(strdup("out of memory"));
                 size_t ei = 0;
                 for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                     if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -10716,6 +10820,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (strcmp(method, "values") == 0 && arg_count == 0) {
                 size_t n = lat_map_len(inner->as.map.map);
                 LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                if (!elems) return eval_err(strdup("out of memory"));
                 size_t ei = 0;
                 for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                     if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -10728,6 +10833,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (strcmp(method, "entries") == 0 && arg_count == 0) {
                 size_t n = lat_map_len(inner->as.map.map);
                 LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                if (!elems) return eval_err(strdup("out of memory"));
                 size_t ei = 0;
                 for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                     if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -10779,6 +10885,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
 
 Evaluator *evaluator_new(void) {
     Evaluator *ev = calloc(1, sizeof(Evaluator));
+    if (!ev) return NULL;
     ev->env = env_new();
     ev->mode = MODE_CASUAL;
     ev->struct_defs = lat_map_new(sizeof(StructDecl *));

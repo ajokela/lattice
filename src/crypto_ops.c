@@ -12,6 +12,7 @@
 
 static char *hex_encode(const unsigned char *hash, unsigned int len) {
     char *hex = malloc(len * 2 + 1);
+    if (!hex) return NULL;
     for (unsigned int i = 0; i < len; i++) {
         snprintf(hex + i * 2, 3, "%02x", hash[i]);
     }
@@ -530,6 +531,7 @@ static const char b64_table[] =
 char *crypto_base64_encode(const char *data, size_t len) {
     size_t out_len = 4 * ((len + 2) / 3);
     char *out = malloc(out_len + 1);
+    if (!out) return NULL;
     size_t j = 0;
 
     for (size_t i = 0; i < len; i += 3) {
@@ -567,6 +569,7 @@ char *crypto_base64_decode(const char *data, size_t len, size_t *out_len, char *
 
     if (len == 0) {
         char *out = malloc(1);
+        if (!out) { *err = strdup("base64_decode: out of memory"); return NULL; }
         out[0] = '\0';
         *out_len = 0;
         return out;
@@ -579,6 +582,7 @@ char *crypto_base64_decode(const char *data, size_t len, size_t *out_len, char *
 
     size_t max_out = (len / 4) * 3;
     char *out = malloc(max_out + 1);
+    if (!out) { *err = strdup("base64_decode: out of memory"); return NULL; }
     size_t j = 0;
 
     for (size_t i = 0; i < len; i += 4) {

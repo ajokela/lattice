@@ -38,13 +38,17 @@
 
 RegChunk *regchunk_new(void) {
     RegChunk *c = calloc(1, sizeof(RegChunk));
+    if (!c) return NULL;
     c->magic = REGCHUNK_MAGIC;
     c->code_cap = 128;
     c->code = malloc(c->code_cap * sizeof(RegInstr));
+    if (!c->code) { free(c); return NULL; }
     c->const_cap = 32;
     c->constants = malloc(c->const_cap * sizeof(LatValue));
+    if (!c->constants) { free(c->code); free(c); return NULL; }
     c->lines_cap = 128;
     c->lines = malloc(c->lines_cap * sizeof(int));
+    if (!c->lines) { free(c->constants); free(c->code); free(c); return NULL; }
     c->local_name_cap = 0;
     c->local_names = NULL;
     c->name = NULL;
@@ -127,6 +131,7 @@ void regvm_init(RegVM *vm, LatRuntime *rt) {
     memset(vm, 0, sizeof(RegVM));
     vm->fn_chunk_cap = 16;
     vm->fn_chunks = malloc(vm->fn_chunk_cap * sizeof(RegChunk *));
+    if (!vm->fn_chunks) return;
     vm->module_cache = NULL;
     vm->ephemeral = bump_arena_new();
     vm->rt = rt;
@@ -201,6 +206,7 @@ typedef struct {
 static RegVM *regvm_clone_for_thread(RegVM *parent) {
     /* Create a child runtime with cloned env + fresh caches */
     LatRuntime *child_rt = calloc(1, sizeof(LatRuntime));
+    if (!child_rt) return NULL;
     child_rt->env = env_clone(parent->rt->env);
     child_rt->struct_meta = parent->rt->struct_meta; /* shared read-only */
     child_rt->script_dir = parent->rt->script_dir ? strdup(parent->rt->script_dir) : NULL;
@@ -211,6 +217,7 @@ static RegVM *regvm_clone_for_thread(RegVM *parent) {
     child_rt->loaded_extensions = lat_map_new(sizeof(LatValue));
 
     RegVM *child = calloc(1, sizeof(RegVM));
+    if (!child) return NULL;
     child->rt = child_rt;
     child->env = child_rt->env;
     child->struct_meta = child_rt->struct_meta;
@@ -375,6 +382,7 @@ static inline LatValue rvm_clone(const LatValue *src) {
                 LatValue v = *src;
                 if (src->as.closure.param_names) {
                     v.as.closure.param_names = malloc(src->as.closure.param_count * sizeof(char *));
+                    if (!v.as.closure.param_names) return value_unit();
                     for (size_t i = 0; i < src->as.closure.param_count; i++)
                         v.as.closure.param_names[i] = strdup(src->as.closure.param_names[i]);
                 }
@@ -387,6 +395,7 @@ static inline LatValue rvm_clone(const LatValue *src) {
             size_t len = src->as.array.len;
             size_t cap = src->as.array.cap > 0 ? src->as.array.cap : (len > 0 ? len : 1);
             v.as.array.elems = malloc(cap * sizeof(LatValue));
+            if (!v.as.array.elems) return value_unit();
             v.as.array.cap = cap;
             for (size_t i = 0; i < len; i++)
                 v.as.array.elems[i] = rvm_clone(&src->as.array.elems[i]);
@@ -928,6 +937,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
             size_t cap = obj->as.map.map->cap;
             LatValue *keys = malloc(cap * sizeof(LatValue));
+            if (!keys) return 0;
             size_t count = 0;
             for (size_t i = 0; i < cap; i++) {
                 if (obj->as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -940,6 +950,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
             size_t cap = obj->as.map.map->cap;
             LatValue *vals = malloc(cap * sizeof(LatValue));
+            if (!vals) return 0;
             size_t count = 0;
             for (size_t i = 0; i < cap; i++) {
                 if (obj->as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -976,6 +987,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
             size_t cap = obj->as.map.map->cap;
             LatValue *entries = malloc(cap * sizeof(LatValue));
+            if (!entries) return 0;
             size_t count = 0;
             for (size_t i = 0; i < cap; i++) {
                 if (obj->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1059,6 +1071,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_sort && strcmp(method, "sort") == 0 && arg_count <= 1) {
             size_t len = obj->as.array.len;
             LatValue *sorted = malloc(len * sizeof(LatValue));
+            if (!sorted) return false;
             for (size_t i = 0; i < len; i++)
                 sorted[i] = rvm_clone(&obj->as.array.elems[i]);
             /* Insertion sort */
@@ -1158,6 +1171,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if (start >= end) { *result = value_array(NULL, 0); return true; }
             size_t count = (size_t)(end - start);
             LatValue *elems = malloc(count * sizeof(LatValue));
+            if (!elems) return 0;
             for (size_t i = 0; i < count; i++)
                 elems[i] = rvm_clone(&obj->as.array.elems[start + (int64_t)i]);
             *result = value_array(elems, count);
@@ -1169,6 +1183,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if (n < 0) n = 0;
             if (n > (int64_t)obj->as.array.len) n = (int64_t)obj->as.array.len;
             LatValue *elems = malloc((size_t)n * sizeof(LatValue));
+            if (!elems) return 0;
             for (int64_t i = 0; i < n; i++)
                 elems[i] = rvm_clone(&obj->as.array.elems[i]);
             *result = value_array(elems, (size_t)n);
@@ -1181,6 +1196,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if (n > (int64_t)obj->as.array.len) n = (int64_t)obj->as.array.len;
             size_t count = obj->as.array.len - (size_t)n;
             LatValue *elems = malloc(count * sizeof(LatValue));
+            if (!elems) return 0;
             for (size_t i = 0; i < count; i++)
                 elems[i] = rvm_clone(&obj->as.array.elems[n + (int64_t)i]);
             *result = value_array(elems, count);
@@ -1358,6 +1374,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             size_t sep_len = strlen(sep);
             size_t cap = 8;
             LatValue *parts = malloc(cap * sizeof(LatValue));
+            if (!parts) return 0;
             size_t count = 0;
             if (sep_len == 0) {
                 for (size_t i = 0; s[i]; i++) {
@@ -1459,6 +1476,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if (from_len == 0) { *result = rvm_clone(obj); return true; }
             size_t cap = strlen(s) + 64;
             char *buf = malloc(cap);
+            if (!buf) return 0;
             size_t pos = 0;
             while (*s) {
                 if (strncmp(s, from, from_len) == 0) {
@@ -1499,6 +1517,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             int64_t n = args[0].as.int_val;
             size_t slen = strlen(obj->as.str_val);
             char *buf = malloc(slen * (size_t)n + 1);
+            if (!buf) return 0;
             for (int64_t i = 0; i < n; i++)
                 memcpy(buf + i * (int64_t)slen, obj->as.str_val, slen);
             buf[slen * (size_t)n] = '\0';
@@ -1508,6 +1527,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_chars && strcmp(method, "chars") == 0 && arg_count == 0) {
             size_t len = strlen(obj->as.str_val);
             LatValue *elems = malloc(len * sizeof(LatValue));
+            if (!elems) return false;
             for (size_t i = 0; i < len; i++) {
                 char c[2] = { obj->as.str_val[i], '\0' };
                 elems[i] = value_string(c);
@@ -1519,6 +1539,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_bytes && strcmp(method, "bytes") == 0 && arg_count == 0) {
             size_t len = strlen(obj->as.str_val);
             LatValue *elems = malloc(len * sizeof(LatValue));
+            if (!elems) return 0;
             for (size_t i = 0; i < len; i++)
                 elems[i] = value_int((int64_t)(unsigned char)obj->as.str_val[i]);
             *result = value_array(elems, len);
@@ -1528,6 +1549,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
             size_t len = strlen(obj->as.str_val);
             char *buf = malloc(len + 1);
+            if (!buf) return 0;
             for (size_t i = 0; i < len; i++) buf[i] = obj->as.str_val[len - 1 - i];
             buf[len] = '\0';
             *result = value_string_owned(buf);
@@ -1540,6 +1562,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if ((int64_t)slen >= n) { *result = rvm_clone(obj); return true; }
             size_t plen = (size_t)n - slen;
             char *buf = malloc((size_t)n + 1);
+            if (!buf) return 0;
             memset(buf, pad, plen);
             memcpy(buf + plen, obj->as.str_val, slen);
             buf[(size_t)n] = '\0';
@@ -1552,6 +1575,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             size_t slen = strlen(obj->as.str_val);
             if ((int64_t)slen >= n) { *result = rvm_clone(obj); return true; }
             char *buf = malloc((size_t)n + 1);
+            if (!buf) return 0;
             memcpy(buf, obj->as.str_val, slen);
             memset(buf + slen, pad, (size_t)n - slen);
             buf[(size_t)n] = '\0';
@@ -1573,6 +1597,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_payload && strcmp(method, "payload") == 0) {
             if (obj->as.enm.payload_count > 0) {
                 LatValue *elems = malloc(obj->as.enm.payload_count * sizeof(LatValue));
+                if (!elems) return 0;
                 for (size_t pi = 0; pi < obj->as.enm.payload_count; pi++)
                     elems[pi] = rvm_clone(&obj->as.enm.payload[pi]);
                 *result = value_array(elems, obj->as.enm.payload_count);
@@ -1648,6 +1673,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
             size_t len = lat_map_len(obj->as.set.map);
             LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+            if (!elems) return 0;
             size_t idx = 0;
             for (size_t i = 0; i < obj->as.set.map->cap; i++) {
                 if (obj->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -1970,6 +1996,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         }
         if (mhash == MHASH_to_string && strcmp(method, "to_string") == 0 && arg_count == 0) {
             char *s = malloc(obj->as.buffer.len + 1);
+            if (!s) return 0;
             memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
             s[obj->as.buffer.len] = '\0';
             *result = value_string_owned(s);
@@ -1977,6 +2004,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         }
         if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
             LatValue *elems = malloc((obj->as.buffer.len > 0 ? obj->as.buffer.len : 1) * sizeof(LatValue));
+            if (!elems) return 0;
             for (size_t i = 0; i < obj->as.buffer.len; i++)
                 elems[i] = value_int((int64_t)obj->as.buffer.data[i]);
             *result = value_array(elems, obj->as.buffer.len);
@@ -1985,6 +2013,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
         }
         if (mhash == MHASH_to_hex && strcmp(method, "to_hex") == 0 && arg_count == 0) {
             char *hex = malloc(obj->as.buffer.len * 2 + 1);
+            if (!hex) return 0;
             for (size_t i = 0; i < obj->as.buffer.len; i++)
                 snprintf(hex + i * 2, 3, "%02x", obj->as.buffer.data[i]);
             hex[obj->as.buffer.len * 2] = '\0';
@@ -2036,6 +2065,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *keys = malloc(cap * sizeof(LatValue));
+                if (!keys) return 0;
                 size_t cnt = 0;
                 for (size_t i = 0; i < cap; i++) {
                     if (ref->value.as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -2048,6 +2078,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *vals = malloc(cap * sizeof(LatValue));
+                if (!vals) return 0;
                 size_t cnt = 0;
                 for (size_t i = 0; i < cap; i++) {
                     if (ref->value.as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -2060,6 +2091,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method,
             if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *entries = malloc(cap * sizeof(LatValue));
+                if (!entries) return 0;
                 size_t cnt = 0;
                 for (size_t i = 0; i < cap; i++) {
                     if (ref->value.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2540,6 +2572,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 }
             } else {
                 char *buf = malloc(total + 1);
+                if (!buf) return REGVM_RUNTIME_ERROR;
                 memcpy(buf, R[b].as.str_val, lb);
                 memcpy(buf + lb, R[c].as.str_val, lc);
                 buf[total] = '\0';
@@ -2860,6 +2893,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         } else if (existing.type == VAL_ARRAY) {
                             size_t new_len = existing.as.array.len + 1;
                             LatValue *new_elems = malloc(new_len * sizeof(LatValue));
+                            if (!new_elems) return REGVM_RUNTIME_ERROR;
                             for (size_t i = 0; i < existing.as.array.len; i++)
                                 new_elems[i] = value_deep_clone(&existing.as.array.elems[i]);
                             new_elems[existing.as.array.len] = val;
@@ -2917,6 +2951,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             else if (strcmp(field_name, "payload") == 0) {
                 if (R[b].as.enm.payload_count > 0) {
                     LatValue *elems = malloc(R[b].as.enm.payload_count * sizeof(LatValue));
+                    if (!elems) return REGVM_RUNTIME_ERROR;
                     for (size_t pi = 0; pi < R[b].as.enm.payload_count; pi++)
                         elems[pi] = rvm_clone(&R[b].as.enm.payload[pi]);
                     reg_set(&R[a], value_array(elems, R[b].as.enm.payload_count));
@@ -3003,6 +3038,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             } else {
                 size_t slice_len = (size_t)(end - start);
                 LatValue *elems = malloc(slice_len * sizeof(LatValue));
+                if (!elems) return REGVM_RUNTIME_ERROR;
                 for (size_t i = 0; i < slice_len; i++)
                     elems[i] = rvm_clone(&R[b].as.array.elems[start + (int64_t)i]);
                 reg_set(&R[a], value_array(elems, slice_len));
@@ -3022,6 +3058,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             } else {
                 size_t slice_len = (size_t)(end - start);
                 char *slice = malloc(slice_len + 1);
+                if (!slice) return REGVM_RUNTIME_ERROR;
                 memcpy(slice, R[b].as.str_val + start, slice_len);
                 slice[slice_len] = '\0';
                 reg_set(&R[a], value_string_owned(slice));
@@ -3472,6 +3509,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Copy param_names from prototype */
         if (fn_proto.as.closure.param_names && fn_proto.as.closure.param_count > 0) {
             closure.as.closure.param_names = malloc(fn_proto.as.closure.param_count * sizeof(char *));
+            if (!closure.as.closure.param_names) return REGVM_RUNTIME_ERROR;
             for (size_t pi = 0; pi < fn_proto.as.closure.param_count; pi++)
                 closure.as.closure.param_names[pi] = fn_proto.as.closure.param_names[pi]
                     ? strdup(fn_proto.as.closure.param_names[pi]) : NULL;
@@ -3490,6 +3528,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         if (uv_count > 0) {
             upvals = malloc(uv_count * sizeof(ObjUpvalue *));
+            if (!upvals) return REGVM_RUNTIME_ERROR;
             for (size_t i = 0; i < uv_count; i++) {
                 RegInstr desc = READ_INSTR();
                 uint8_t is_local = REG_GET_A(desc);
@@ -3508,6 +3547,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         upvals[i] = existing;
                     } else {
                         ObjUpvalue *uv = malloc(sizeof(ObjUpvalue));
+                        if (!uv) return REGVM_RUNTIME_ERROR;
                         uv->location = target;
                         uv->closed = value_nil();
                         uv->next = vm->open_upvalues;
@@ -3539,6 +3579,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             reg_set(&R[a], value_array(NULL, 0));
         } else {
             LatValue *elems = malloc(c * sizeof(LatValue));
+            if (!elems) return REGVM_RUNTIME_ERROR;
             for (int i = 0; i < c; i++)
                 elems[i] = rvm_clone(&R[b + i]);
             reg_set(&R[a], value_array(elems, c));
@@ -3571,7 +3612,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Build field names array */
         char **field_names = malloc(c * sizeof(char *));
+        if (!field_names) return REGVM_RUNTIME_ERROR;
         LatValue *field_values = malloc(c * sizeof(LatValue));
+        if (!field_values) return REGVM_RUNTIME_ERROR;
         for (int i = 0; i < c; i++) {
             field_names[i] = strdup(meta.as.array.elems[i].as.str_val);
             /* Field values are in registers a+1..a+c */
@@ -3609,7 +3652,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (phase_ref &&
                 phase_ref->type == VAL_ARRAY && (int)phase_ref->as.array.len == c) {
                 strct.as.strct.field_phases = calloc(c, sizeof(PhaseTag));
-                for (int i = 0; i < c; i++) {
+                for (int i = 0; strct.as.strct.field_phases && i < c; i++) {
                     int64_t p = phase_ref->as.array.elems[i].as.int_val;
                     if (p == 1) { /* PHASE_CRYSTAL */
                         strct.as.strct.field_values[i] = value_freeze(strct.as.strct.field_values[i]);
@@ -3903,6 +3946,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             size_t cap = m->cap;
             size_t count = lat_map_len(m);
             LatValue *entries = malloc((count > 0 ? count : 1) * sizeof(LatValue));
+            if (!entries) return REGVM_RUNTIME_ERROR;
             size_t idx = 0;
             for (size_t i = 0; i < cap; i++) {
                 if (m->entries[i].state != MAP_OCCUPIED) continue;
@@ -3919,6 +3963,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             size_t cap = m->cap;
             size_t count = lat_map_len(m);
             LatValue *elems = malloc((count > 0 ? count : 1) * sizeof(LatValue));
+            if (!elems) return REGVM_RUNTIME_ERROR;
             size_t idx = 0;
             for (size_t i = 0; i < cap; i++) {
                 if (m->entries[i].state != MAP_OCCUPIED) continue;
@@ -3930,6 +3975,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* Convert string to array of characters for uniform iteration */
             size_t len = strlen(R[b].as.str_val);
             LatValue *chars = malloc((len > 0 ? len : 1) * sizeof(LatValue));
+            if (!chars) return REGVM_RUNTIME_ERROR;
             for (size_t i = 0; i < len; i++) {
                 char ch[2] = { R[b].as.str_val[i], '\0' };
                 chars[i] = value_string(ch);
@@ -4080,6 +4126,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         size_t cap = R[b].as.array.len * 2;
         if (cap == 0) cap = 1;
         LatValue *elems = malloc(cap * sizeof(LatValue));
+        if (!elems) return REGVM_RUNTIME_ERROR;
         size_t out = 0;
         for (size_t i = 0; i < R[b].as.array.len; i++) {
             if (R[b].as.array.elems[i].type == VAL_ARRAY) {
@@ -4119,6 +4166,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             reg_set(&R[dst], value_enum(enum_name, variant_name, NULL, 0));
         } else {
             LatValue *payload = malloc(argc * sizeof(LatValue));
+            if (!payload) return REGVM_RUNTIME_ERROR;
             for (int i = 0; i < argc; i++)
                 payload[i] = rvm_clone(&R[base + i]);
             reg_set(&R[dst], value_enum(enum_name, variant_name, payload, argc));
@@ -4353,6 +4401,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Collect excess args into an array */
         size_t cap = 8;
         LatValue *elems = malloc(cap * sizeof(LatValue));
+        if (!elems) return REGVM_RUNTIME_ERROR;
         size_t count = 0;
         for (int i = b; i < REGVM_REG_MAX; i++) {
             if (R[i].type == VAL_NIL || R[i].type == VAL_UNIT) break;
@@ -4726,6 +4775,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             file_path = strdup(raw_path);
         } else {
             file_path = malloc(plen + 5);
+            if (!file_path) return REGVM_RUNTIME_ERROR;
             memcpy(file_path, raw_path, plen);
             memcpy(file_path + plen, ".lat", 5);
         }
@@ -4854,6 +4904,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Cache */
         if (!vm->module_cache) {
             vm->module_cache = malloc(sizeof(LatMap));
+            if (!vm->module_cache) return REGVM_RUNTIME_ERROR;
             *vm->module_cache = lat_map_new(sizeof(LatValue));
         }
         LatValue cache_copy = value_deep_clone(&module_map);
@@ -4875,6 +4926,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             file_path = strdup(raw_path);
         } else {
             file_path = malloc(plen + 5);
+            if (!file_path) return REGVM_RUNTIME_ERROR;
             memcpy(file_path, raw_path, plen);
             memcpy(file_path + plen, ".lat", 5);
         }
@@ -4964,6 +5016,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Mark as loaded (for dedup) before execution */
         if (!vm->module_cache) {
             vm->module_cache = malloc(sizeof(LatMap));
+            if (!vm->module_cache) return REGVM_RUNTIME_ERROR;
             *vm->module_cache = lat_map_new(sizeof(LatValue));
         }
         LatValue loaded_marker = value_bool(true);
@@ -5064,6 +5117,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
             /* Create child VMs for each spawn */
             RegVMSpawnTask *tasks = calloc(spawn_count, sizeof(RegVMSpawnTask));
+            if (!tasks) return REGVM_RUNTIME_ERROR;
             for (uint8_t i = 0; i < spawn_count && !first_error; i++) {
                 RegChunk *sp_chunk = (RegChunk *)frame->chunk->constants[spawn_indices[i]].as.closure.native_fn;
                 tasks[i].chunk = sp_chunk;
@@ -5162,6 +5216,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Evaluate channel expressions */
         LatChannel **channels = calloc(arm_count, sizeof(LatChannel *));
+        if (!channels) return REGVM_RUNTIME_ERROR;
         for (uint8_t i = 0; i < arm_count; i++) {
             if (sel_arms[i].flags & 0x03) continue;  /* skip default/timeout */
             RegChunk *ch_chunk = (RegChunk *)frame->chunk->constants[sel_arms[i].chan_idx].as.closure.native_fn;
@@ -5205,6 +5260,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Build shuffled index array for fairness */
         size_t ch_arm_count = 0;
         size_t *sel_indices = malloc(arm_count * sizeof(size_t));
+        if (!sel_indices) return REGVM_RUNTIME_ERROR;
         for (uint8_t i = 0; i < arm_count; i++) {
             if (!(sel_arms[i].flags & 0x03))
                 sel_indices[ch_arm_count++] = i;
@@ -6032,14 +6088,17 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
             if (fi == (size_t)-1) RVM_ERROR("struct has no field '%s'", field_name);
             R[a].as.strct.field_values[fi] = value_freeze(R[a].as.strct.field_values[fi]);
-            if (!R[a].as.strct.field_phases)
+            if (!R[a].as.strct.field_phases) {
                 R[a].as.strct.field_phases = calloc(R[a].as.strct.field_count, sizeof(PhaseTag));
+                if (!R[a].as.strct.field_phases) RVM_ERROR("out of memory");
+            }
             R[a].as.strct.field_phases[fi] = VTAG_CRYSTAL;
         } else if (R[a].type == VAL_MAP) {
             LatValue *val_ptr = (LatValue *)lat_map_get(R[a].as.map.map, field_name);
             if (val_ptr) *val_ptr = value_freeze(*val_ptr);
             if (!R[a].as.map.key_phases) {
                 R[a].as.map.key_phases = calloc(1, sizeof(LatMap));
+                if (!R[a].as.map.key_phases) RVM_ERROR("out of memory");
                 *R[a].as.map.key_phases = lat_map_new(sizeof(PhaseTag));
             }
             PhaseTag phase = VTAG_CRYSTAL;
@@ -6057,6 +6116,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (R[a].type == VAL_STRUCT) {
             if (!R[a].as.strct.field_phases) {
                 R[a].as.strct.field_phases = calloc(R[a].as.strct.field_count, sizeof(PhaseTag));
+                if (!R[a].as.strct.field_phases) RVM_ERROR("out of memory");
                 for (size_t i = 0; i < R[a].as.strct.field_count; i++)
                     R[a].as.strct.field_phases[i] = R[a].phase;
             }
@@ -6069,6 +6129,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[a].type == VAL_MAP) {
             if (!R[a].as.map.key_phases) {
                 R[a].as.map.key_phases = calloc(1, sizeof(LatMap));
+                if (!R[a].as.map.key_phases) RVM_ERROR("out of memory");
                 *R[a].as.map.key_phases = lat_map_new(sizeof(PhaseTag));
             }
             PhaseTag phase = VTAG_FLUID;
@@ -6113,6 +6174,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (val.type == VAL_STRUCT) {
             if (!val.as.strct.field_phases) {
                 val.as.strct.field_phases = calloc(val.as.strct.field_count, sizeof(PhaseTag));
+                if (!val.as.strct.field_phases) RVM_ERROR("out of memory");
                 for (size_t fi = 0; fi < val.as.strct.field_count; fi++)
                     val.as.strct.field_phases[fi] = val.phase;
             }
@@ -6134,6 +6196,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (val.type == VAL_MAP) {
             if (!val.as.map.key_phases) {
                 val.as.map.key_phases = calloc(1, sizeof(LatMap));
+                if (!val.as.map.key_phases) RVM_ERROR("out of memory");
                 *val.as.map.key_phases = lat_map_new(sizeof(PhaseTag));
             }
             for (size_t bi = 0; bi < val.as.map.map->cap; bi++) {

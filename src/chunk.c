@@ -15,6 +15,7 @@ static size_t chunk_fnv1a(const char *key) {
 
 Chunk *chunk_new(void) {
     Chunk *c = calloc(1, sizeof(Chunk));
+    if (!c) return NULL;
     c->code_cap = 256;
     c->code = malloc(c->code_cap);
     c->const_cap = 32;
@@ -22,6 +23,11 @@ Chunk *chunk_new(void) {
     c->const_hashes = calloc(c->const_cap, sizeof(size_t));
     c->lines_cap = 256;
     c->lines = malloc(c->lines_cap * sizeof(int));
+    if (!c->code || !c->constants || !c->const_hashes || !c->lines) {
+        free(c->code); free(c->constants); free(c->const_hashes); free(c->lines);
+        free(c);
+        return NULL;
+    }
     return c;
 }
 

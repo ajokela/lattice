@@ -48,30 +48,35 @@ void lat_ext_register(LatExtContext *ctx, const char *name, LatExtFn fn) {
 
 LatExtValue *lat_ext_int(int64_t v) {
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_int(v);
     return ev;
 }
 
 LatExtValue *lat_ext_float(double v) {
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_float(v);
     return ev;
 }
 
 LatExtValue *lat_ext_bool(bool v) {
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_bool(v);
     return ev;
 }
 
 LatExtValue *lat_ext_string(const char *s) {
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_string(s);
     return ev;
 }
 
 LatExtValue *lat_ext_nil(void) {
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_nil();
     return ev;
 }
@@ -82,6 +87,7 @@ LatExtValue *lat_ext_array(LatExtValue **elems, size_t len) {
         vals[i] = value_deep_clone(&elems[i]->val);
     }
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) { free(vals); return NULL; }
     ev->val = value_array(vals, len);
     free(vals);
     return ev;
@@ -89,6 +95,7 @@ LatExtValue *lat_ext_array(LatExtValue **elems, size_t len) {
 
 LatExtValue *lat_ext_map_new(void) {
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_map_new();
     return ev;
 }
@@ -104,6 +111,7 @@ LatExtValue *lat_ext_error(const char *msg) {
     char *err = NULL;
     lat_asprintf(&err, "EVAL_ERROR:%s", msg);
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_string_owned(err);
     return ev;
 }
@@ -149,6 +157,7 @@ size_t lat_ext_array_len(const LatExtValue *v) {
 LatExtValue *lat_ext_array_get(const LatExtValue *v, size_t index) {
     if (v->val.type != VAL_ARRAY || index >= v->val.as.array.len) return NULL;
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_deep_clone(&v->val.as.array.elems[index]);
     return ev;
 }
@@ -158,6 +167,7 @@ LatExtValue *lat_ext_map_get(const LatExtValue *v, const char *key) {
     LatValue *found = (LatValue *)lat_map_get(v->val.as.map.map, key);
     if (!found) return NULL;
     LatExtValue *ev = malloc(sizeof(LatExtValue));
+    if (!ev) return NULL;
     ev->val = value_deep_clone(found);
     return ev;
 }
@@ -287,6 +297,7 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
         /* Create a native closure: no params (variadic), no body, no env */
         char *pname = strdup("args");
         char **param_names = malloc(sizeof(char *));
+        if (!param_names) return value_unit();
         param_names[0] = pname;
         LatValue closure = value_closure(param_names, 1, NULL, NULL, NULL, true);
         closure.as.closure.native_fn = (void *)ctx.reg.fns[i];

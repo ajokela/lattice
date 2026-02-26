@@ -6,6 +6,7 @@
 
 FluidHeap *fluid_heap_new(void) {
     FluidHeap *h = calloc(1, sizeof(FluidHeap));
+    if (!h) return NULL;
     h->gc_threshold = 1024 * 1024;  /* 1 MB default */
     return h;
 }
@@ -24,7 +25,9 @@ void fluid_heap_free(FluidHeap *h) {
 
 void *fluid_alloc(FluidHeap *h, size_t size) {
     void *ptr = malloc(size);
+    if (!ptr) return NULL;
     FluidAlloc *a = malloc(sizeof(FluidAlloc));
+    if (!a) { free(ptr); return NULL; }
     a->ptr = ptr;
     a->size = size;
     a->marked = false;
@@ -104,7 +107,9 @@ size_t fluid_sweep(FluidHeap *h) {
 
 static ArenaPage *arena_page_new(size_t cap) {
     ArenaPage *p = malloc(sizeof(ArenaPage));
+    if (!p) return NULL;
     p->data = malloc(cap);
+    if (!p->data) { free(p); return NULL; }
     p->used = 0;
     p->cap = cap;
     p->next = NULL;
@@ -124,7 +129,9 @@ static void arena_page_free_list(ArenaPage *p) {
 
 BumpArena *bump_arena_new(void) {
     BumpArena *ba = calloc(1, sizeof(BumpArena));
+    if (!ba) return NULL;
     ArenaPage *p = arena_page_new(ARENA_PAGE_SIZE);
+    if (!p) { free(ba); return NULL; }
     ba->pages = p;
     ba->first_page = p;
     ba->total_bytes = 0;
@@ -193,6 +200,7 @@ char *bump_strdup(BumpArena *ba, const char *s) {
 
 static CrystalRegion *crystal_region_new(RegionId id, Epoch epoch) {
     CrystalRegion *r = calloc(1, sizeof(CrystalRegion));
+    if (!r) return NULL;
     r->id = id;
     r->epoch = epoch;
     r->pages = arena_page_new(ARENA_PAGE_SIZE);
@@ -252,8 +260,10 @@ char *arena_strdup(CrystalRegion *r, const char *s) {
 
 RegionManager *region_manager_new(void) {
     RegionManager *rm = calloc(1, sizeof(RegionManager));
+    if (!rm) return NULL;
     rm->cap = 8;
     rm->regions = malloc(rm->cap * sizeof(CrystalRegion *));
+    if (!rm->regions) { free(rm); return NULL; }
     return rm;
 }
 
@@ -342,6 +352,7 @@ size_t region_live_data_bytes(const RegionManager *rm) {
 
 DualHeap *dual_heap_new(void) {
     DualHeap *dh = malloc(sizeof(DualHeap));
+    if (!dh) return NULL;
     dh->fluid = fluid_heap_new();
     dh->regions = region_manager_new();
     return dh;
