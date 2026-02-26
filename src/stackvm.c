@@ -13,6 +13,7 @@
 #include "string_ops.h"
 #include "array_ops.h"
 #include "builtin_methods.h"
+#include "iterator.h"
 #include "package.h"
 #include "debugger.h"
 #include <stdlib.h>
@@ -300,6 +301,13 @@ static inline LatValue value_clone_fast(const LatValue *src) {
             v.region_id = REGION_NONE;
             return v;
         }
+        case VAL_ITERATOR: {
+            /* Shared refcount: shallow copy, bump refcount */
+            LatValue v = *src;
+            v.region_id = REGION_NONE;
+            if (v.as.iterator.refcount) (*v.as.iterator.refcount)++;
+            return v;
+        }
         default: return value_deep_clone(src);
     }
 }
@@ -406,6 +414,11 @@ static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *a
 /* BuiltinCallback adapter for stackvm: closure is a LatValue*, ctx is a StackVM* */
 static LatValue stackvm_builtin_callback(void *closure, LatValue *args, int arg_count, void *ctx) {
     return stackvm_call_closure((StackVM *)ctx, (LatValue *)closure, args, arg_count);
+}
+
+/* Iterator callback adapter: ctx is StackVM*, closure is LatValue*, args and argc */
+static LatValue stackvm_iter_callback(void *ctx, LatValue *closure, LatValue *args, int argc) {
+    return stackvm_call_closure((StackVM *)ctx, closure, args, argc);
 }
 
 static bool stackvm_find_local_value(StackVM *vm, const char *name, LatValue *out) {
@@ -2453,6 +2466,151 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             }
         } break;
 
+        case VAL_ITERATOR: {
+            if (strcmp(method, "next") == 0 && arg_count == 0) {
+                bool done = false;
+                LatValue val = obj->as.iterator.next_fn(obj->as.iterator.state, &done);
+                if (done) {
+                    value_free(&val);
+                    push(vm, value_nil());
+                } else push(vm, val);
+                return true;
+            }
+            if ((strcmp(method, "collect") == 0 || strcmp(method, "to_array") == 0) && arg_count == 0) {
+                LatValue result = iter_collect(obj);
+                push(vm, result);
+                return true;
+            }
+            if (strcmp(method, "count") == 0 && arg_count == 0) {
+                int64_t n = iter_count(obj);
+                push(vm, value_int(n));
+                return true;
+            }
+            if (strcmp(method, "take") == 0 && arg_count == 1) {
+                LatValue n_val = pop(vm);
+                if (n_val.type != VAL_INT) {
+                    value_free(&n_val);
+                    runtime_error(vm, ".take() expects an integer");
+                    push(vm, value_nil());
+                    return true;
+                }
+                /* Move the iterator out, replacing obj with nil to prevent double free */
+                LatValue it = *obj;
+                obj->type = VAL_NIL;
+                obj->as.int_val = 0;
+                push(vm, iter_take(it, n_val.as.int_val));
+                return true;
+            }
+            if (strcmp(method, "skip") == 0 && arg_count == 1) {
+                LatValue n_val = pop(vm);
+                if (n_val.type != VAL_INT) {
+                    value_free(&n_val);
+                    runtime_error(vm, ".skip() expects an integer");
+                    push(vm, value_nil());
+                    return true;
+                }
+                LatValue it = *obj;
+                obj->type = VAL_NIL;
+                obj->as.int_val = 0;
+                push(vm, iter_skip(it, n_val.as.int_val));
+                return true;
+            }
+            if (strcmp(method, "enumerate") == 0 && arg_count == 0) {
+                LatValue it = *obj;
+                obj->type = VAL_NIL;
+                obj->as.int_val = 0;
+                push(vm, iter_enumerate(it));
+                return true;
+            }
+            if (strcmp(method, "zip") == 0 && arg_count == 1) {
+                LatValue other = pop(vm);
+                if (other.type != VAL_ITERATOR) {
+                    value_free(&other);
+                    runtime_error(vm, ".zip() expects an Iterator");
+                    push(vm, value_nil());
+                    return true;
+                }
+                LatValue left = *obj;
+                obj->type = VAL_NIL;
+                obj->as.int_val = 0;
+                push(vm, iter_zip(left, other));
+                return true;
+            }
+            if (strcmp(method, "map") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                if (closure.type != VAL_CLOSURE) {
+                    value_free(&closure);
+                    runtime_error(vm, ".map() expects a closure");
+                    push(vm, value_nil());
+                    return true;
+                }
+                LatValue it = *obj;
+                obj->type = VAL_NIL;
+                obj->as.int_val = 0;
+                push(vm, iter_map_transform(it, closure, vm, stackvm_iter_callback));
+                value_free(&closure);
+                return true;
+            }
+            if (strcmp(method, "filter") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                if (closure.type != VAL_CLOSURE) {
+                    value_free(&closure);
+                    runtime_error(vm, ".filter() expects a closure");
+                    push(vm, value_nil());
+                    return true;
+                }
+                LatValue it = *obj;
+                obj->type = VAL_NIL;
+                obj->as.int_val = 0;
+                push(vm, iter_filter(it, closure, vm, stackvm_iter_callback));
+                value_free(&closure);
+                return true;
+            }
+            if (strcmp(method, "reduce") == 0 && arg_count == 2) {
+                LatValue init = pop(vm);    /* second arg (TOS) = initial value */
+                LatValue closure = pop(vm); /* first arg = closure */
+                if (closure.type != VAL_CLOSURE) {
+                    value_free(&init);
+                    value_free(&closure);
+                    runtime_error(vm, ".reduce() expects (closure, initial_value)");
+                    push(vm, value_nil());
+                    return true;
+                }
+                LatValue result = iter_reduce(obj, init, &closure, vm, stackvm_iter_callback);
+                value_free(&init);
+                value_free(&closure);
+                push(vm, result);
+                return true;
+            }
+            if (strcmp(method, "any") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                if (closure.type != VAL_CLOSURE) {
+                    value_free(&closure);
+                    runtime_error(vm, ".any() expects a closure");
+                    push(vm, value_nil());
+                    return true;
+                }
+                bool result = iter_any(obj, &closure, vm, stackvm_iter_callback);
+                value_free(&closure);
+                push(vm, value_bool(result));
+                return true;
+            }
+            if (strcmp(method, "all") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                if (closure.type != VAL_CLOSURE) {
+                    value_free(&closure);
+                    runtime_error(vm, ".all() expects a closure");
+                    push(vm, value_nil());
+                    return true;
+                }
+                bool result = iter_all(obj, &closure, vm, stackvm_iter_callback);
+                value_free(&closure);
+                push(vm, value_bool(result));
+                return true;
+            }
+            return false;
+        }
+
         default: break;
     } /* end switch */
 
@@ -2477,6 +2635,7 @@ static bool stackvm_type_matches(const LatValue *val, const char *type_name) {
     if (strcmp(type_name, "Tuple") == 0) return val->type == VAL_TUPLE;
     if (strcmp(type_name, "Buffer") == 0) return val->type == VAL_BUFFER;
     if (strcmp(type_name, "Ref") == 0) return val->type == VAL_REF;
+    if (strcmp(type_name, "Iterator") == 0) return val->type == VAL_ITERATOR;
     if (strcmp(type_name, "Number") == 0) return val->type == VAL_INT || val->type == VAL_FLOAT;
     /* Struct name check */
     if (val->type == VAL_STRUCT && val->as.strct.name) return strcmp(val->as.strct.name, type_name) == 0;
@@ -2504,6 +2663,7 @@ static const char *stackvm_value_type_display(const LatValue *val) {
         case VAL_TUPLE: return "Tuple";
         case VAL_BUFFER: return "Buffer";
         case VAL_REF: return "Ref";
+        case VAL_ITERATOR: return "Iterator";
     }
     return "Unknown";
 }
@@ -3769,11 +3929,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         lbl_OP_ITER_INIT:
 #endif
         case OP_ITER_INIT: {
-            /* TOS is a range, array, map, or set. Push index 0 on top. */
+            /* TOS is a range, array, map, set, or iterator. Push index 0 on top. */
             LatValue *iter = stackvm_peek(vm, 0);
             if (iter->type == VAL_MAP || iter->type == VAL_SET) {
                 /* Convert map/set to array for iteration */
                 stackvm_iter_convert_to_array(iter);
+            }
+            if (iter->type == VAL_ITERATOR) {
+                /* Iterator protocol: push a sentinel index (-1) to signal iterator mode */
+                push(vm, value_int(-1));
+                break;
             }
             if (iter->type != VAL_RANGE && iter->type != VAL_ARRAY) {
                 VM_ERROR("cannot iterate over %s", value_type_name(iter));
@@ -3789,10 +3954,20 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         case OP_ITER_NEXT: {
             uint16_t offset = READ_U16();
             LatValue *idx_val = stackvm_peek(vm, 0); /* index */
-            LatValue *iter = stackvm_peek(vm, 1);    /* collection */
+            LatValue *iter = stackvm_peek(vm, 1);    /* collection/iterator */
             int64_t idx = idx_val->as.int_val;
 
-            if (iter->type == VAL_RANGE) {
+            if (idx == -1 && iter->type == VAL_ITERATOR) {
+                /* Iterator protocol */
+                bool done = false;
+                LatValue val = iter->as.iterator.next_fn(iter->as.iterator.state, &done);
+                if (done) {
+                    value_free(&val);
+                    frame->ip += offset;
+                    break;
+                }
+                push(vm, val);
+            } else if (iter->type == VAL_RANGE) {
                 if (idx >= iter->as.range.end - iter->as.range.start) {
                     /* Exhausted */
                     frame->ip += offset;

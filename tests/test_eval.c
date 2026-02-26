@@ -3326,3 +3326,219 @@ TEST(fmt_check_passes_formatted) {
 
     free(formatted);
 }
+
+/* ── Iterator Protocol Tests ── */
+
+TEST(eval_iter_from_array_collect) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = iter([1, 2, 3])\n"
+                "    let result = it.collect()\n"
+                "    assert(result == [1, 2, 3], \"iter collect should match original\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_from_range_collect) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = iter(0..5)\n"
+                "    let result = it.collect()\n"
+                "    assert(result == [0, 1, 2, 3, 4], \"range iter should produce 0..4\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_range_iter_with_step) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = range_iter(0, 10, 2)\n"
+                "    let result = it.collect()\n"
+                "    assert(result == [0, 2, 4, 6, 8], \"range_iter with step 2\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_repeat_iter) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = repeat_iter(42, 3)\n"
+                "    let result = it.collect()\n"
+                "    assert(result == [42, 42, 42], \"repeat_iter 3 times\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_map) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([1, 2, 3]).map(|x| { x * 2 }).collect()\n"
+                "    assert(result == [2, 4, 6], \"iter map should double\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_filter) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([1, 2, 3, 4, 5]).filter(|x| { x % 2 == 0 }).collect()\n"
+                "    assert(result == [2, 4], \"iter filter evens\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_take) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([1, 2, 3, 4, 5]).take(3).collect()\n"
+                "    assert(result == [1, 2, 3], \"iter take 3\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_skip) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([1, 2, 3, 4, 5]).skip(2).collect()\n"
+                "    assert(result == [3, 4, 5], \"iter skip 2\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_enumerate) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([\"a\", \"b\", \"c\"]).enumerate().collect()\n"
+                "    assert(result == [[0, \"a\"], [1, \"b\"], [2, \"c\"]], \"iter enumerate\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_zip) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let a = iter([1, 2, 3])\n"
+                "    let b = iter([\"a\", \"b\", \"c\"])\n"
+                "    let result = a.zip(b).collect()\n"
+                "    assert(result == [[1, \"a\"], [2, \"b\"], [3, \"c\"]], \"iter zip\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_reduce) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([1, 2, 3, 4]).reduce(|acc, x| { acc + x }, 0)\n"
+                "    assert(result == 10, \"iter reduce sum\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_any) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let r1 = iter([1, 2, 3]).any(|x| { x > 2 })\n"
+                "    assert(r1 == true, \"any should find 3\")\n"
+                "    let r2 = iter([1, 2, 3]).any(|x| { x > 5 })\n"
+                "    assert(r2 == false, \"any should not find > 5\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_all) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let r1 = iter([2, 4, 6]).all(|x| { x % 2 == 0 })\n"
+                "    assert(r1 == true, \"all evens\")\n"
+                "    let r2 = iter([2, 3, 6]).all(|x| { x % 2 == 0 })\n"
+                "    assert(r2 == false, \"not all evens\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_count) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let n = iter([1, 2, 3, 4, 5]).count()\n"
+                "    assert(n == 5, \"count should be 5\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_to_array) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([10, 20]).to_array()\n"
+                "    assert(result == [10, 20], \"to_array alias for collect\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_chaining) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])\n"
+                "        .filter(|x| { x % 2 == 0 })\n"
+                "        .map(|x| { x * x })\n"
+                "        .take(3)\n"
+                "        .collect()\n"
+                "    assert(result == [4, 16, 36], \"chained iterator\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_for_in) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux total = 0\n"
+                "    for x in iter([10, 20, 30]) {\n"
+                "        total = total + x\n"
+                "    }\n"
+                "    assert(total == 60, \"for-in with iterator\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_range_iter_for_in) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux sum = 0\n"
+                "    for x in range_iter(1, 6, 1) {\n"
+                "        sum = sum + x\n"
+                "    }\n"
+                "    assert(sum == 15, \"for-in with range_iter\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_next) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = iter([10, 20, 30])\n"
+                "    let a = it.next()\n"
+                "    let b = it.next()\n"
+                "    let c = it.next()\n"
+                "    let d = it.next()\n"
+                "    assert(a == 10, \"first next\")\n"
+                "    assert(b == 20, \"second next\")\n"
+                "    assert(c == 30, \"third next\")\n"
+                "    assert(d == nil, \"past end is nil\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_typeof) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = iter([1])\n"
+                "    assert(typeof(it) == \"Iterator\", \"typeof iterator\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_range_iter_no_alloc) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = range_iter(0, 1000000, 1).take(3).collect()\n"
+                "    assert(result == [0, 1, 2], \"lazy range doesn't allocate million elements\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_from_string) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter(\"abc\").collect()\n"
+                "    assert(result == [\"a\", \"b\", \"c\"], \"string iterator\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_repeat_take) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = repeat_iter(\"x\", 5).take(3).collect()\n"
+                "    assert(result == [\"x\", \"x\", \"x\"], \"repeat + take\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_zip_uneven) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let a = iter([1, 2])\n"
+                "    let b = iter([\"a\", \"b\", \"c\"])\n"
+                "    let result = a.zip(b).collect()\n"
+                "    assert(result == [[1, \"a\"], [2, \"b\"]], \"zip stops at shorter\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_skip_take) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = iter([1, 2, 3, 4, 5]).skip(1).take(3).collect()\n"
+                "    assert(result == [2, 3, 4], \"skip then take\")\n"
+                "}\n");
+}
+
+TEST(eval_iter_filter_map_chain) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = range_iter(1, 11, 1)\n"
+                "        .filter(|x| { x % 3 == 0 })\n"
+                "        .map(|x| { x * 10 })\n"
+                "        .collect()\n"
+                "    assert(result == [30, 60, 90], \"filter then map on range_iter\")\n"
+                "}\n");
+}

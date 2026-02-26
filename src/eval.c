@@ -3,6 +3,7 @@
 #include "intern.h"
 #include "string_ops.h"
 #include "builtin_methods.h"
+#include "iterator.h"
 #include "format_ops.h"
 #include "builtins.h"
 #include "array_ops.h"
@@ -770,6 +771,7 @@ static bool type_matches_value(const LatValue *val, const TypeExpr *te) {
     if (strcmp(n, "Tuple") == 0) return val->type == VAL_TUPLE;
     if (strcmp(n, "Buffer") == 0) return val->type == VAL_BUFFER;
     if (strcmp(n, "Ref") == 0) return val->type == VAL_REF;
+    if (strcmp(n, "Iterator") == 0) return val->type == VAL_ITERATOR;
     if (strcmp(n, "Number") == 0) return val->type == VAL_INT || val->type == VAL_FLOAT;
     /* Struct name check */
     if (val->type == VAL_STRUCT && val->as.strct.name) return strcmp(val->as.strct.name, n) == 0;
@@ -804,6 +806,7 @@ static const char *value_type_display(const LatValue *val) {
         case VAL_TUPLE: return "Tuple";
         case VAL_BUFFER: return "Buffer";
         case VAL_REF: return "Ref";
+        case VAL_ITERATOR: return "Iterator";
     }
     return "Unknown";
 }
@@ -4811,6 +4814,114 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue range_arr = value_array(relems, rcount);
                     free(relems);
                     return eval_ok(range_arr);
+                }
+
+                /* ── Iterator builtins ── */
+
+                /// @builtin iter(collection: Any) -> Iterator
+                /// @category Iterators
+                /// Create a lazy iterator from an array, map, set, string, or range.
+                /// @example iter([1, 2, 3]).collect()  // [1, 2, 3]
+                if (strcmp(fn_name, "iter") == 0) {
+                    if (argc != 1) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("iter() expects 1 argument"));
+                    }
+                    LatValue result;
+                    switch (args[0].type) {
+                        case VAL_ARRAY: result = iter_from_array(&args[0]); break;
+                        case VAL_MAP: result = iter_from_map(&args[0]); break;
+                        case VAL_STR: result = iter_from_string(&args[0]); break;
+                        case VAL_SET: {
+                            /* Convert set to array first, then iterate */
+                            size_t n = lat_map_len(args[0].as.set.map);
+                            LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+                            size_t ei = 0;
+                            for (size_t si = 0; si < args[0].as.set.map->cap; si++) {
+                                if (args[0].as.set.map->entries[si].state != MAP_OCCUPIED) continue;
+                                elems[ei++] = value_deep_clone((LatValue *)args[0].as.set.map->entries[si].value);
+                            }
+                            LatValue tmp = value_array(elems, ei);
+                            free(elems);
+                            result = iter_from_array(&tmp);
+                            value_free(&tmp);
+                            break;
+                        }
+                        case VAL_RANGE: result = iter_from_range(args[0].as.range.start, args[0].as.range.end); break;
+                        case VAL_ITERATOR:
+                            /* Already an iterator, just move it */
+                            result = args[0];
+                            args[0].type = VAL_NIL; /* prevent double-free */
+                            break;
+                        default: {
+                            char *err = NULL;
+                            lat_asprintf(&err, "iter() cannot iterate over %s", value_type_name(&args[0]));
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                            free(args);
+                            return eval_err(err);
+                        }
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
+                }
+
+                /// @builtin range_iter(start: Int, end: Int, step?: Int) -> Iterator
+                /// @category Iterators
+                /// Create a lazy integer range iterator (no array allocation).
+                /// @example range_iter(0, 5).collect()  // [0, 1, 2, 3, 4]
+                if (strcmp(fn_name, "range_iter") == 0) {
+                    if (argc < 2 || argc > 3) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("range_iter() expects 2 or 3 integer arguments"));
+                    }
+                    if (args[0].type != VAL_INT || args[1].type != VAL_INT) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("range_iter() start and end must be integers"));
+                    }
+                    int64_t rs = args[0].as.int_val;
+                    int64_t re = args[1].as.int_val;
+                    int64_t rstep2 = (rs <= re) ? 1 : -1;
+                    if (argc == 3) {
+                        if (args[2].type != VAL_INT) {
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                            free(args);
+                            return eval_err(strdup("range_iter() step must be an integer"));
+                        }
+                        rstep2 = args[2].as.int_val;
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (rstep2 == 0) return eval_err(strdup("range_iter() step cannot be 0"));
+                    return eval_ok(iter_range(rs, re, rstep2));
+                }
+
+                /// @builtin repeat_iter(value: Any, count?: Int) -> Iterator
+                /// @category Iterators
+                /// Create an iterator that yields a value n times (infinitely if no count).
+                /// @example repeat_iter(42, 3).collect()  // [42, 42, 42]
+                if (strcmp(fn_name, "repeat_iter") == 0) {
+                    if (argc < 1 || argc > 2) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("repeat_iter() expects 1 or 2 arguments"));
+                    }
+                    int64_t cnt = -1; /* infinite by default */
+                    if (argc == 2) {
+                        if (args[1].type != VAL_INT) {
+                            for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                            free(args);
+                            return eval_err(strdup("repeat_iter() count must be an integer"));
+                        }
+                        cnt = args[1].as.int_val;
+                    }
+                    LatValue result = iter_repeat(args[0], cnt);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(result);
                 }
 
                 /* ── Type coercion builtins ── */
@@ -10207,6 +10318,30 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 }
                 GC_POP(ev);
                 value_free(&iter_r.value);
+            } else if (iter_r.value.type == VAL_ITERATOR) {
+                /* Iterate using the iterator protocol */
+                for (;;) {
+                    bool done = false;
+                    LatValue val = iter_r.value.as.iterator.next_fn(iter_r.value.as.iterator.state, &done);
+                    if (done) {
+                        value_free(&val);
+                        break;
+                    }
+                    stats_scope_push(&ev->stats);
+                    env_push_scope(ev->env);
+                    env_define(ev->env, stmt->as.for_loop.var, val);
+                    EvalResult r = eval_block_stmts(ev, stmt->as.for_loop.body, stmt->as.for_loop.body_count);
+                    env_pop_scope(ev->env);
+                    stats_scope_pop(&ev->stats);
+                    if (IS_SIGNAL(r) && r.cf.tag == CF_BREAK) break;
+                    if (IS_SIGNAL(r) && r.cf.tag == CF_CONTINUE) continue;
+                    if (!IS_OK(r)) {
+                        value_free(&iter_r.value);
+                        return r;
+                    }
+                    value_free(&r.value);
+                }
+                value_free(&iter_r.value);
             } else {
                 char *err = NULL;
                 lat_asprintf(&err, "cannot iterate over %s", value_type_name(&iter_r.value));
@@ -10895,6 +11030,194 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (bsug) lat_asprintf(&berr2, "Buffer has no method '%s' (did you mean '%s'?)", method, bsug);
         else lat_asprintf(&berr2, "Buffer has no method '%s'", method);
         return eval_err(berr2);
+    }
+
+    /* ── Iterator methods (must precede array methods for shared names like .enumerate) ── */
+    if (obj.type == VAL_ITERATOR) {
+        if (strcmp(method, "next") == 0 && arg_count == 0) {
+            bool done = false;
+            LatValue val = obj.as.iterator.next_fn(obj.as.iterator.state, &done);
+            if (done) return eval_ok(value_nil());
+            return eval_ok(val);
+        }
+        if ((strcmp(method, "collect") == 0 || strcmp(method, "to_array") == 0) && arg_count == 0) {
+            LatValue it = obj;
+            LatValue result = iter_collect(&it);
+            return eval_ok(result);
+        }
+        if (strcmp(method, "count") == 0 && arg_count == 0) {
+            LatValue it = obj;
+            int64_t n = iter_count(&it);
+            return eval_ok(value_int(n));
+        }
+        if (strcmp(method, "take") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_INT) return eval_err(strdup(".take() expects an integer"));
+            LatValue it = obj;
+            if (it.as.iterator.refcount) (*it.as.iterator.refcount)++;
+            LatValue result = iter_take(it, args[0].as.int_val);
+            return eval_ok(result);
+        }
+        if (strcmp(method, "skip") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_INT) return eval_err(strdup(".skip() expects an integer"));
+            LatValue it = obj;
+            if (it.as.iterator.refcount) (*it.as.iterator.refcount)++;
+            LatValue result = iter_skip(it, args[0].as.int_val);
+            return eval_ok(result);
+        }
+        if (strcmp(method, "enumerate") == 0 && arg_count == 0) {
+            LatValue it = obj;
+            if (it.as.iterator.refcount) (*it.as.iterator.refcount)++;
+            LatValue result = iter_enumerate(it);
+            return eval_ok(result);
+        }
+        if (strcmp(method, "zip") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_ITERATOR) return eval_err(strdup(".zip() expects an Iterator argument"));
+            LatValue left = obj;
+            if (left.as.iterator.refcount) (*left.as.iterator.refcount)++;
+            LatValue right = args[0];
+            if (right.as.iterator.refcount) (*right.as.iterator.refcount)++;
+            LatValue result = iter_zip(left, right);
+            return eval_ok(result);
+        }
+        if (strcmp(method, "map") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".map() expects a closure argument"));
+            LatValue it = obj;
+            size_t cap = 8, len = 0;
+            LatValue *elems = malloc(cap * sizeof(LatValue));
+            for (;;) {
+                bool done = false;
+                LatValue val = it.as.iterator.next_fn(it.as.iterator.state, &done);
+                if (done) {
+                    value_free(&val);
+                    break;
+                }
+                EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                             args[0].as.closure.body, args[0].as.closure.captured_env, &val, 1,
+                                             args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                value_free(&val);
+                if (!IS_OK(cr)) {
+                    for (size_t fi = 0; fi < len; fi++) value_free(&elems[fi]);
+                    free(elems);
+                    return cr;
+                }
+                if (len >= cap) {
+                    cap *= 2;
+                    elems = realloc(elems, cap * sizeof(LatValue));
+                }
+                elems[len++] = cr.value;
+            }
+            LatValue arr = value_array(elems, len);
+            free(elems);
+            LatValue result = iter_from_array(&arr);
+            value_free(&arr);
+            return eval_ok(result);
+        }
+        if (strcmp(method, "filter") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".filter() expects a closure argument"));
+            LatValue it = obj;
+            size_t cap = 8, len = 0;
+            LatValue *elems = malloc(cap * sizeof(LatValue));
+            for (;;) {
+                bool done = false;
+                LatValue val = it.as.iterator.next_fn(it.as.iterator.state, &done);
+                if (done) {
+                    value_free(&val);
+                    break;
+                }
+                LatValue carg = value_deep_clone(&val);
+                EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                             args[0].as.closure.body, args[0].as.closure.captured_env, &carg, 1,
+                                             args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                value_free(&carg);
+                if (!IS_OK(cr)) {
+                    value_free(&val);
+                    for (size_t fi = 0; fi < len; fi++) value_free(&elems[fi]);
+                    free(elems);
+                    return cr;
+                }
+                bool passes = value_is_truthy(&cr.value);
+                value_free(&cr.value);
+                if (passes) {
+                    if (len >= cap) {
+                        cap *= 2;
+                        elems = realloc(elems, cap * sizeof(LatValue));
+                    }
+                    elems[len++] = val;
+                } else {
+                    value_free(&val);
+                }
+            }
+            LatValue arr = value_array(elems, len);
+            free(elems);
+            LatValue result = iter_from_array(&arr);
+            value_free(&arr);
+            return eval_ok(result);
+        }
+        if (strcmp(method, "reduce") == 0 && arg_count == 2) {
+            if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".reduce() expects (closure, initial_value)"));
+            LatValue it = obj;
+            LatValue acc = value_deep_clone(&args[1]);
+            for (;;) {
+                bool done = false;
+                LatValue val = it.as.iterator.next_fn(it.as.iterator.state, &done);
+                if (done) {
+                    value_free(&val);
+                    break;
+                }
+                LatValue cargs[2] = {acc, val};
+                EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                             args[0].as.closure.body, args[0].as.closure.captured_env, cargs, 2,
+                                             args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                value_free(&acc);
+                value_free(&val);
+                if (!IS_OK(cr)) return cr;
+                acc = cr.value;
+            }
+            return eval_ok(acc);
+        }
+        if (strcmp(method, "any") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".any() expects a closure argument"));
+            LatValue it = obj;
+            for (;;) {
+                bool done = false;
+                LatValue val = it.as.iterator.next_fn(it.as.iterator.state, &done);
+                if (done) {
+                    value_free(&val);
+                    return eval_ok(value_bool(false));
+                }
+                EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                             args[0].as.closure.body, args[0].as.closure.captured_env, &val, 1,
+                                             args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                value_free(&val);
+                if (!IS_OK(cr)) return cr;
+                bool truthy = value_is_truthy(&cr.value);
+                value_free(&cr.value);
+                if (truthy) return eval_ok(value_bool(true));
+            }
+        }
+        if (strcmp(method, "all") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_CLOSURE) return eval_err(strdup(".all() expects a closure argument"));
+            LatValue it = obj;
+            for (;;) {
+                bool done = false;
+                LatValue val = it.as.iterator.next_fn(it.as.iterator.state, &done);
+                if (done) {
+                    value_free(&val);
+                    return eval_ok(value_bool(true));
+                }
+                EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                             args[0].as.closure.body, args[0].as.closure.captured_env, &val, 1,
+                                             args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                value_free(&val);
+                if (!IS_OK(cr)) return cr;
+                bool truthy = value_is_truthy(&cr.value);
+                value_free(&cr.value);
+                if (!truthy) return eval_ok(value_bool(false));
+            }
+        }
+        char *ierr = NULL;
+        lat_asprintf(&ierr, "Iterator has no method '%s'", method);
+        return eval_err(ierr);
     }
 
     /// @method Array.push(val: Any) -> Unit

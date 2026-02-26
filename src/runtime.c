@@ -27,6 +27,7 @@
 #include "string_ops.h"
 #include "array_ops.h"
 #include "channel.h"
+#include "iterator.h"
 #include "ext.h"
 #include "lexer.h"
 #include "parser.h"
@@ -2294,6 +2295,86 @@ static LatValue native_range(LatValue *args, int ac) {
     free(relems);
     return r;
 }
+
+/* ── Iterator builtins ── */
+
+static LatValue native_iter(LatValue *args, int ac) {
+    if (ac != 1) {
+        current_rt->error = strdup("iter() expects 1 argument");
+        return value_nil();
+    }
+    switch (args[0].type) {
+        case VAL_ARRAY: return iter_from_array(&args[0]);
+        case VAL_MAP: return iter_from_map(&args[0]);
+        case VAL_STR: return iter_from_string(&args[0]);
+        case VAL_RANGE: return iter_from_range(args[0].as.range.start, args[0].as.range.end);
+        case VAL_SET: {
+            size_t n = lat_map_len(args[0].as.set.map);
+            LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            size_t ei = 0;
+            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
+                if (args[0].as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                elems[ei++] = value_deep_clone((LatValue *)args[0].as.set.map->entries[i].value);
+            }
+            LatValue tmp = value_array(elems, ei);
+            free(elems);
+            LatValue result = iter_from_array(&tmp);
+            value_free(&tmp);
+            return result;
+        }
+        case VAL_ITERATOR:
+            /* Already an iterator - pass through (move ownership) */
+            {
+                LatValue result = args[0];
+                args[0].type = VAL_NIL;
+                return result;
+            }
+        default: {
+            char *err = NULL;
+            lat_asprintf(&err, "iter() cannot iterate over %s", value_type_name(&args[0]));
+            current_rt->error = err;
+            return value_nil();
+        }
+    }
+}
+
+static LatValue native_range_iter(LatValue *args, int ac) {
+    if (ac < 2 || ac > 3 || args[0].type != VAL_INT || args[1].type != VAL_INT) {
+        current_rt->error = strdup("range_iter() expects (start: Int, end: Int, step?: Int)");
+        return value_nil();
+    }
+    int64_t start = args[0].as.int_val, end = args[1].as.int_val;
+    int64_t step = (start <= end) ? 1 : -1;
+    if (ac == 3) {
+        if (args[2].type != VAL_INT) {
+            current_rt->error = strdup("range_iter() step must be Int");
+            return value_nil();
+        }
+        step = args[2].as.int_val;
+    }
+    if (step == 0) {
+        current_rt->error = strdup("range_iter() step cannot be zero");
+        return value_nil();
+    }
+    return iter_range(start, end, step);
+}
+
+static LatValue native_repeat_iter(LatValue *args, int ac) {
+    if (ac < 1 || ac > 2) {
+        current_rt->error = strdup("repeat_iter() expects (value, count?)");
+        return value_nil();
+    }
+    int64_t count = -1;
+    if (ac == 2) {
+        if (args[1].type != VAL_INT) {
+            current_rt->error = strdup("repeat_iter() count must be Int");
+            return value_nil();
+        }
+        count = args[1].as.int_val;
+    }
+    return iter_repeat(args[0], count);
+}
+
 static LatValue native_print_raw(LatValue *args, int ac) {
     for (int i = 0; i < ac; i++) {
         if (i > 0) printf(" ");
@@ -3795,6 +3876,11 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "repr", native_repr, 1);
     rt_register_native(rt, "format", native_format, -1);
     rt_register_native(rt, "range", native_range, -1);
+
+    /* Iterators */
+    rt_register_native(rt, "iter", native_iter, 1);
+    rt_register_native(rt, "range_iter", native_range_iter, -1);
+    rt_register_native(rt, "repeat_iter", native_repeat_iter, -1);
     rt_register_native(rt, "print_raw", native_print_raw, -1);
     rt_register_native(rt, "eprint", native_eprint, -1);
     rt_register_native(rt, "identity", native_identity, 1);
