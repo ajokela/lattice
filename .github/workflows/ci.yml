@@ -25,10 +25,51 @@ jobs:
         run: make
 
       - name: Build extensions
-        run: make ext-sqlite
+        run: |
+          make ext-sqlite
+          make ext-ffi
 
       - name: Test
         run: make test
+
+  extensions:
+    name: Extension Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
+
+      - name: Build Lattice
+        run: make
+
+      - name: Build SQLite extension
+        run: make ext-sqlite
+
+      - name: Build FFI extension
+        run: make ext-ffi
+
+      - name: Build remaining extensions (compile check)
+        run: |
+          make ext-redis
+          make ext-image
+
+      - name: Build WebSocket extension (Linux only, needs OpenSSL)
+        if: runner.os == 'Linux'
+        run: make ext-websocket
+
+      - name: Test SQLite extension
+        run: ./clat tests/ext_sqlite_test.lat
+
+      - name: Test FFI extension
+        run: ./clat tests/ext_ffi_test.lat
 
   gcc-werror:
     name: GCC -Werror
@@ -43,7 +84,9 @@ jobs:
         run: make CC=gcc
 
       - name: Build extensions
-        run: make ext-sqlite
+        run: |
+          make ext-sqlite
+          make ext-ffi CC=gcc
 
       - name: Test
         run: make test
@@ -58,7 +101,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
 
       - name: Build extensions
-        run: make ext-sqlite
+        run: |
+          make ext-sqlite
+          make ext-ffi
 
       - name: ASan + UBSan (all backends)
         run: ulimit -s 32768 && make asan-all
@@ -75,7 +120,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
 
       - name: Build extensions
-        run: make ext-sqlite
+        run: |
+          make ext-sqlite
+          make ext-ffi
 
       - name: TSan
         run: make tsan
