@@ -8,35 +8,38 @@
 extern void register_test(const char *name, void (*fn)(void));
 extern int test_current_failed;
 
-#define ASSERT(cond) do { \
-    if (!(cond)) { \
-        fprintf(stderr, "  FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-        test_current_failed = 1; \
-        return; \
-    } \
-} while(0)
+#define ASSERT(cond)                                                           \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            fprintf(stderr, "  FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            test_current_failed = 1;                                           \
+            return;                                                            \
+        }                                                                      \
+    } while (0)
 
-#define ASSERT_EQ_INT(a, b) do { \
-    long long _a = (long long)(a), _b = (long long)(b); \
-    if (_a != _b) { \
-        fprintf(stderr, "  FAIL: %s:%d: %lld != %lld\n", __FILE__, __LINE__, _a, _b); \
-        test_current_failed = 1; \
-        return; \
-    } \
-} while(0)
+#define ASSERT_EQ_INT(a, b)                                                               \
+    do {                                                                                  \
+        long long _a = (long long)(a), _b = (long long)(b);                               \
+        if (_a != _b) {                                                                   \
+            fprintf(stderr, "  FAIL: %s:%d: %lld != %lld\n", __FILE__, __LINE__, _a, _b); \
+            test_current_failed = 1;                                                      \
+            return;                                                                       \
+        }                                                                                 \
+    } while (0)
 
-#define ASSERT_EQ_STR(a, b) do { \
-    const char *_a = (a), *_b = (b); \
-    if (strcmp(_a, _b) != 0) { \
-        fprintf(stderr, "  FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, _a, _b); \
-        test_current_failed = 1; \
-        return; \
-    } \
-} while(0)
+#define ASSERT_EQ_STR(a, b)                                                                   \
+    do {                                                                                      \
+        const char *_a = (a), *_b = (b);                                                      \
+        if (strcmp(_a, _b) != 0) {                                                            \
+            fprintf(stderr, "  FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, _a, _b); \
+            test_current_failed = 1;                                                          \
+            return;                                                                           \
+        }                                                                                     \
+    } while (0)
 
-#define TEST(name) \
-    static void name(void); \
-    static void name##_register(void) __attribute__((constructor)); \
+#define TEST(name)                                                    \
+    static void name(void);                                           \
+    static void name##_register(void) __attribute__((constructor));   \
     static void name##_register(void) { register_test(#name, name); } \
     static void name(void)
 
@@ -266,8 +269,7 @@ TEST(lsp_read_message_multiple_headers) {
 
     FILE *f = tmpfile();
     ASSERT(f != NULL);
-    fprintf(f, "Content-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
-            body_len, body);
+    fprintf(f, "Content-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s", body_len, body);
     rewind(f);
 
     cJSON *msg = lsp_read_message(f);
@@ -349,7 +351,7 @@ TEST(lsp_symbol_index_free_null) {
 TEST(lsp_symbol_index_scan_real_eval) {
     /* Test scanning the actual eval.c for builtins if it exists */
     FILE *f = fopen("src/eval.c", "r");
-    if (!f) return;  /* Skip if not in project root */
+    if (!f) return; /* Skip if not in project root */
     fclose(f);
 
     LspSymbolIndex *idx = lsp_symbol_index_new("src/eval.c");
@@ -376,7 +378,7 @@ TEST(lsp_symbol_index_scan_real_eval) {
 TEST(lsp_symbol_index_scan_methods) {
     /* Test scanning builtin_methods.c for methods */
     FILE *f = fopen("src/builtin_methods.c", "r");
-    if (!f) return;  /* Skip if not in project root */
+    if (!f) return; /* Skip if not in project root */
     fclose(f);
 
     LspSymbolIndex *idx = lsp_symbol_index_new("/nonexistent");
@@ -569,10 +571,8 @@ TEST(lsp_analyze_variable_binding) {
 TEST(lsp_analyze_multiple_functions) {
     LspDocument *doc = calloc(1, sizeof(LspDocument));
     doc->uri = strdup("file:///test.lat");
-    doc->text = strdup(
-        "fn add(a: Int, b: Int) {\n  return a + b\n}\n"
-        "fn multiply(a: Int, b: Int) {\n  return a * b\n}\n"
-    );
+    doc->text = strdup("fn add(a: Int, b: Int) {\n  return a + b\n}\n"
+                       "fn multiply(a: Int, b: Int) {\n  return a * b\n}\n");
 
     lsp_analyze_document(doc);
 
@@ -685,12 +685,10 @@ TEST(lsp_symbol_kind_values) {
 TEST(lsp_analyze_mixed_declarations) {
     LspDocument *doc = calloc(1, sizeof(LspDocument));
     doc->uri = strdup("file:///test.lat");
-    doc->text = strdup(
-        "struct Person {\n  name: String,\n  age: Int\n}\n"
-        "enum Status {\n  Active,\n  Inactive\n}\n"
-        "fn greet(p: Person) {\n  print(p.name)\n}\n"
-        "let count = 0\n"
-    );
+    doc->text = strdup("struct Person {\n  name: String,\n  age: Int\n}\n"
+                       "enum Status {\n  Active,\n  Inactive\n}\n"
+                       "fn greet(p: Person) {\n  print(p.name)\n}\n"
+                       "let count = 0\n");
 
     lsp_analyze_document(doc);
 
@@ -731,12 +729,10 @@ TEST(lsp_analyze_mixed_declarations) {
 TEST(lsp_analyze_enum_with_tuple_variants) {
     LspDocument *doc = calloc(1, sizeof(LspDocument));
     doc->uri = strdup("file:///test.lat");
-    doc->text = strdup(
-        "enum Shape {\n"
-        "  Circle(Float),\n"
-        "  Rectangle(Float, Float)\n"
-        "}\n"
-    );
+    doc->text = strdup("enum Shape {\n"
+                       "  Circle(Float),\n"
+                       "  Rectangle(Float, Float)\n"
+                       "}\n");
 
     lsp_analyze_document(doc);
 
@@ -775,4 +771,200 @@ TEST(lsp_analyze_fix_binding) {
     ASSERT(found_pi);
 
     lsp_document_free(doc);
+}
+
+/* ================================================================
+ * Hover documentation tests
+ * ================================================================ */
+
+TEST(lsp_hover_keyword_flux) {
+    const char *doc = lsp_lookup_keyword_doc("flux");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "mutable") != NULL);
+    ASSERT(strstr(doc, "fluid") != NULL);
+}
+
+TEST(lsp_hover_keyword_fix) {
+    const char *doc = lsp_lookup_keyword_doc("fix");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "immutable") != NULL);
+    ASSERT(strstr(doc, "crystal") != NULL);
+}
+
+TEST(lsp_hover_keyword_let) {
+    const char *doc = lsp_lookup_keyword_doc("let");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "inferred phase") != NULL);
+}
+
+TEST(lsp_hover_keyword_freeze) {
+    const char *doc = lsp_lookup_keyword_doc("freeze");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "crystal") != NULL);
+    ASSERT(strstr(doc, "immutable") != NULL);
+}
+
+TEST(lsp_hover_keyword_thaw) {
+    const char *doc = lsp_lookup_keyword_doc("thaw");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "fluid") != NULL);
+    ASSERT(strstr(doc, "mutable") != NULL);
+}
+
+TEST(lsp_hover_keyword_scope) {
+    const char *doc = lsp_lookup_keyword_doc("scope");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "concurrency") != NULL);
+}
+
+TEST(lsp_hover_keyword_spawn) {
+    const char *doc = lsp_lookup_keyword_doc("spawn");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "concurrent") != NULL || strstr(doc, "task") != NULL);
+}
+
+TEST(lsp_hover_keyword_match) {
+    const char *doc = lsp_lookup_keyword_doc("match");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "pattern") != NULL);
+}
+
+TEST(lsp_hover_keyword_struct) {
+    const char *doc = lsp_lookup_keyword_doc("struct");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "struct") != NULL);
+}
+
+TEST(lsp_hover_keyword_enum) {
+    const char *doc = lsp_lookup_keyword_doc("enum");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "enum") != NULL);
+    ASSERT(strstr(doc, "variant") != NULL);
+}
+
+TEST(lsp_hover_keyword_fn) {
+    const char *doc = lsp_lookup_keyword_doc("fn");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "function") != NULL);
+}
+
+TEST(lsp_hover_keyword_nil_lookup) {
+    /* "nil" should have documentation */
+    const char *doc = lsp_lookup_keyword_doc("nil");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "absence") != NULL);
+}
+
+TEST(lsp_hover_keyword_not_found) {
+    const char *doc = lsp_lookup_keyword_doc("nonexistent_keyword");
+    ASSERT(doc == NULL);
+}
+
+TEST(lsp_hover_keyword_select) {
+    const char *doc = lsp_lookup_keyword_doc("select");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "channel") != NULL);
+}
+
+TEST(lsp_hover_keyword_test) {
+    const char *doc = lsp_lookup_keyword_doc("test");
+    ASSERT(doc != NULL);
+    ASSERT(strstr(doc, "test case") != NULL);
+}
+
+TEST(lsp_hover_keyword_all_have_code_block) {
+    /* All keywords with documentation should include markdown code blocks */
+    const char *kws[] = {"fn",    "let",     "flux",   "fix",    "struct", "enum",  "trait",    "impl",
+                         "if",    "for",     "while",  "match",  "return", "break", "continue", "try",
+                         "throw", "true",    "false",  "nil",    "print",  "scope", "defer",    "select",
+                         "test",  "require", "ensure", "freeze", "thaw",   "clone", "spawn",    NULL};
+    for (int i = 0; kws[i]; i++) {
+        const char *doc = lsp_lookup_keyword_doc(kws[i]);
+        ASSERT(doc != NULL);
+        /* Every keyword doc should have a code block */
+        ASSERT(strstr(doc, "```lattice") != NULL);
+    }
+}
+
+TEST(lsp_hover_builtin_len) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("len", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(sig, "len") != NULL);
+    ASSERT(strstr(desc, "length") != NULL);
+}
+
+TEST(lsp_hover_builtin_typeof) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("typeof", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(sig, "typeof") != NULL);
+    ASSERT(strstr(sig, "Any") != NULL);
+    ASSERT(strstr(desc, "type name") != NULL);
+}
+
+TEST(lsp_hover_builtin_print) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("print", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(sig, "print") != NULL);
+    ASSERT(strstr(sig, "Any...") != NULL);
+}
+
+TEST(lsp_hover_builtin_assert_eq) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("assert_eq", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(sig, "actual") != NULL);
+    ASSERT(strstr(sig, "expected") != NULL);
+}
+
+TEST(lsp_hover_builtin_not_found) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("nonexistent_builtin", &sig);
+    ASSERT(desc == NULL);
+    ASSERT(sig == NULL);
+}
+
+TEST(lsp_hover_builtin_null_sig_out) {
+    /* Passing NULL for out_sig should not crash */
+    const char *desc = lsp_lookup_builtin_doc("len", NULL);
+    ASSERT(desc != NULL);
+}
+
+TEST(lsp_hover_builtin_range) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("range", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(sig, "start") != NULL);
+    ASSERT(strstr(sig, "end") != NULL);
+}
+
+TEST(lsp_hover_builtin_json_parse) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("json_parse", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(desc, "JSON") != NULL);
+}
+
+TEST(lsp_hover_builtin_http_get) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("http_get", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(desc, "HTTP") != NULL || strstr(desc, "GET") != NULL);
+}
+
+TEST(lsp_hover_builtin_freeze) {
+    const char *sig = NULL;
+    const char *desc = lsp_lookup_builtin_doc("freeze", &sig);
+    ASSERT(desc != NULL);
+    ASSERT(sig != NULL);
+    ASSERT(strstr(desc, "crystal") != NULL || strstr(desc, "immutable") != NULL);
 }

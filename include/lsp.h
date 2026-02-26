@@ -10,17 +10,12 @@ struct cJSON;
 
 /* ── Diagnostic ── */
 
-typedef enum {
-    LSP_DIAG_ERROR   = 1,
-    LSP_DIAG_WARNING = 2,
-    LSP_DIAG_INFO    = 3,
-    LSP_DIAG_HINT    = 4
-} LspDiagSeverity;
+typedef enum { LSP_DIAG_ERROR = 1, LSP_DIAG_WARNING = 2, LSP_DIAG_INFO = 3, LSP_DIAG_HINT = 4 } LspDiagSeverity;
 
 typedef struct {
     char *message;
-    int line;       /* 0-based (LSP convention) */
-    int col;        /* 0-based */
+    int line; /* 0-based (LSP convention) */
+    int col;  /* 0-based */
     LspDiagSeverity severity;
 } LspDiagnostic;
 
@@ -28,20 +23,20 @@ typedef struct {
 
 typedef enum {
     LSP_SYM_FUNCTION = 12,
-    LSP_SYM_STRUCT   = 23,
-    LSP_SYM_ENUM     = 10,
+    LSP_SYM_STRUCT = 23,
+    LSP_SYM_ENUM = 10,
     LSP_SYM_VARIABLE = 13,
-    LSP_SYM_KEYWORD  = 14,
-    LSP_SYM_METHOD   = 2
+    LSP_SYM_KEYWORD = 14,
+    LSP_SYM_METHOD = 2
 } LspSymbolKind;
 
 typedef struct {
     char *name;
     char *signature;
     char *doc;
-    char *owner_type;   /* for methods: "Array", "String", "Map", etc. */
+    char *owner_type; /* for methods: "Array", "String", "Map", etc. */
     LspSymbolKind kind;
-    int line;   /* 0-based, for user-defined symbols */
+    int line; /* 0-based, for user-defined symbols */
     int col;
 } LspSymbol;
 
@@ -49,14 +44,14 @@ typedef struct {
 
 typedef struct {
     char *name;
-    char *type_name;    /* nullable — type annotation if present */
+    char *type_name; /* nullable — type annotation if present */
 } LspFieldInfo;
 
 /* ── Enum variant info (for completion) ── */
 
 typedef struct {
     char *name;
-    char *params;       /* nullable — e.g. "(Int, String)" for tuple variants */
+    char *params; /* nullable — e.g. "(Int, String)" for tuple variants */
 } LspVariantInfo;
 
 /* ── Struct definition (for completion) ── */
@@ -115,7 +110,7 @@ typedef struct {
     LspSymbolIndex *index;
     bool initialized;
     bool shutdown;
-    FILE *log;  /* optional debug log (stderr) */
+    FILE *log; /* optional debug log (stderr) */
 } LspServer;
 
 /* ── Protocol ── */
@@ -142,6 +137,17 @@ void lsp_document_free(LspDocument *doc);
 LspSymbolIndex *lsp_symbol_index_new(const char *eval_path);
 void lsp_symbol_index_add_file(LspSymbolIndex *idx, const char *path);
 void lsp_symbol_index_free(LspSymbolIndex *idx);
+
+/* ── Hover documentation ── */
+
+/* Look up keyword documentation by name.
+ * Returns a static markdown string, or NULL if not a keyword. */
+const char *lsp_lookup_keyword_doc(const char *keyword);
+
+/* Look up static builtin function documentation by name.
+ * Sets *out_sig to the function signature if non-NULL.
+ * Returns a static description string, or NULL if not found. */
+const char *lsp_lookup_builtin_doc(const char *name, const char **out_sig);
 
 /* ── Utilities ── */
 
