@@ -172,12 +172,22 @@ FUZZ_LATC_SRC    = $(FUZZ_DIR)/fuzz_latc.c
 FUZZ_LATC_OBJ    = $(BUILD_DIR)/fuzz/fuzz_latc.o
 FUZZ_LATC_TARGET = $(BUILD_DIR)/fuzz_latc
 
-# VM/RegVM fuzz harness
+# VM/RegVM fuzz harness (combined)
 FUZZ_VM_SRC    = $(FUZZ_DIR)/fuzz_vm.c
 FUZZ_VM_OBJ    = $(BUILD_DIR)/fuzz/fuzz_vm.o
 FUZZ_VM_TARGET = $(BUILD_DIR)/fuzz_vm
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage
+# Stack VM fuzz harness (standalone)
+FUZZ_STACKVM_SRC    = $(FUZZ_DIR)/fuzz_stackvm.c
+FUZZ_STACKVM_OBJ    = $(BUILD_DIR)/fuzz/fuzz_stackvm.o
+FUZZ_STACKVM_TARGET = $(BUILD_DIR)/fuzz_stackvm
+
+# RegVM fuzz harness (standalone)
+FUZZ_REGVM_SRC    = $(FUZZ_DIR)/fuzz_regvm.c
+FUZZ_REGVM_OBJ    = $(BUILD_DIR)/fuzz/fuzz_regvm.o
+FUZZ_REGVM_TARGET = $(BUILD_DIR)/fuzz_regvm
+
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -372,6 +382,43 @@ fuzz-vm: clean $(LIB_OBJS) $(FUZZ_VM_OBJ)
 	@echo "\n==> VM fuzzer built: $(FUZZ_VM_TARGET)"
 	@echo "    Run:  $(FUZZ_VM_TARGET) fuzz/corpus/ -max_len=4096"
 	@echo "    Seed: make fuzz-seed"
+
+fuzz-stackvm: CC = $(FUZZ_CC)
+fuzz-stackvm: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-stackvm: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-stackvm: clean $(LIB_OBJS) $(FUZZ_STACKVM_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_STACKVM_TARGET) $(LIB_OBJS) $(FUZZ_STACKVM_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus
+	@echo "\n==> Stack VM fuzzer built: $(FUZZ_STACKVM_TARGET)"
+	@echo "    Run:  $(FUZZ_STACKVM_TARGET) fuzz/corpus/ -max_len=4096"
+	@echo "    Seed: make fuzz-seed"
+
+fuzz-regvm: CC = $(FUZZ_CC)
+fuzz-regvm: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-regvm: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-regvm: clean $(LIB_OBJS) $(FUZZ_REGVM_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_REGVM_TARGET) $(LIB_OBJS) $(FUZZ_REGVM_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus
+	@echo "\n==> RegVM fuzzer built: $(FUZZ_REGVM_TARGET)"
+	@echo "    Run:  $(FUZZ_REGVM_TARGET) fuzz/corpus/ -max_len=4096"
+	@echo "    Seed: make fuzz-seed"
+
+fuzz-all: CC = $(FUZZ_CC)
+fuzz-all: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-all: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-all: clean $(LIB_OBJS) $(FUZZ_OBJ) $(FUZZ_VM_OBJ) $(FUZZ_STACKVM_OBJ) $(FUZZ_REGVM_OBJ) $(FUZZ_LATC_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_VM_TARGET) $(LIB_OBJS) $(FUZZ_VM_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_STACKVM_TARGET) $(LIB_OBJS) $(FUZZ_STACKVM_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_REGVM_TARGET) $(LIB_OBJS) $(FUZZ_REGVM_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_LATC_TARGET) $(LIB_OBJS) $(FUZZ_LATC_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus fuzz/corpus_latc
+	@echo "\n==> All fuzzers built:"
+	@echo "    $(FUZZ_TARGET)         (tree-walk evaluator)"
+	@echo "    $(FUZZ_VM_TARGET)           (stack VM + RegVM combined)"
+	@echo "    $(FUZZ_STACKVM_TARGET)     (stack VM standalone)"
+	@echo "    $(FUZZ_REGVM_TARGET)       (RegVM standalone)"
+	@echo "    $(FUZZ_LATC_TARGET)         (bytecode deserializer)"
 
 FUZZ_EXCLUDE = http_server http_client https_client tls_client orm_demo
 fuzz-seed:

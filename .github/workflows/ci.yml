@@ -229,13 +229,13 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev clang llvm
 
-      - name: Build fuzzer
-        run: make fuzz FUZZ_CC=clang
+      - name: Build all fuzzers
+        run: make fuzz-all FUZZ_CC=clang
 
       - name: Seed corpus
         run: make fuzz-seed
 
-      - name: Run fuzzer (60s)
+      - name: Run tree-walk fuzzer (60s)
         run: |
           # Run fuzzer; stack-overflow crashes from deeply nested input are
           # expected for a recursive-descent evaluator — filter them out.
@@ -246,6 +246,46 @@ jobs:
             [ -e "$f" ] || continue
             # Reproduce to check if it's a stack overflow
             output=$(./build/fuzz_eval "$f" 2>&1 || true)
+            if echo "$output" | grep -q "stack-overflow"; then
+              echo "Ignoring stack-overflow crash: $f"
+              rm "$f"
+            else
+              echo "Real crash found: $f"
+              echo "$output"
+              has_real_crash=1
+            fi
+          done
+          exit $has_real_crash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Run stack VM fuzzer (60s)
+        run: |
+          ./build/fuzz_stackvm fuzz/corpus/ -max_len=4096 -max_total_time=60 || true
+          has_real_crash=0
+          for f in crash-* leak-* timeout-*; do
+            [ -e "$f" ] || continue
+            output=$(./build/fuzz_stackvm "$f" 2>&1 || true)
+            if echo "$output" | grep -q "stack-overflow"; then
+              echo "Ignoring stack-overflow crash: $f"
+              rm "$f"
+            else
+              echo "Real crash found: $f"
+              echo "$output"
+              has_real_crash=1
+            fi
+          done
+          exit $has_real_crash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+
+      - name: Run RegVM fuzzer (60s)
+        run: |
+          ./build/fuzz_regvm fuzz/corpus/ -max_len=4096 -max_total_time=60 || true
+          has_real_crash=0
+          for f in crash-* leak-* timeout-*; do
+            [ -e "$f" ] || continue
+            output=$(./build/fuzz_regvm "$f" 2>&1 || true)
             if echo "$output" | grep -q "stack-overflow"; then
               echo "Ignoring stack-overflow crash: $f"
               rm "$f"
