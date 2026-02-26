@@ -112,4 +112,7 @@ void stackvm_free_child(StackVM *child);
 /* Track a dynamically compiled chunk in the StackVM's fn_chunks array for cleanup. */
 void stackvm_track_chunk(StackVM *vm, Chunk *ch);
 
+/* Export parent frame locals to child env for spawn/async threads. */
+void stackvm_export_locals_to_env(StackVM *parent, StackVM *child);
+
 #endif /* STACKVM_H */

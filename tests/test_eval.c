@@ -3878,3 +3878,108 @@ TEST(gc_vm_init_state) {
     stackvm_free(&vm);
     lat_runtime_free(&rt);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Async Iterators (bytecode VM only — tree-walk returns an error)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(async_iter_basic) {
+    if (test_backend == BACKEND_TREE_WALK) {
+        ASSERT_FAILS("fn main() {\n"
+                     "    let it = async_iter(|ch| { ch.send(1) })\n"
+                     "}\n");
+        return;
+    }
+    if (test_backend == BACKEND_REG_VM) return; /* regvm threading unsupported */
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = async_iter(|ch| {\n"
+                "        ch.send(1)\n"
+                "        ch.send(2)\n"
+                "        ch.send(3)\n"
+                "    })\n"
+                "    let result = it.collect()\n"
+                "    assert(result == [1, 2, 3], \"async_iter basic: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(async_iter_for_loop) {
+    if (test_backend == BACKEND_TREE_WALK || test_backend == BACKEND_REG_VM) return;
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = async_iter(|ch| {\n"
+                "        for i in 0..5 {\n"
+                "            ch.send(i * i)\n"
+                "        }\n"
+                "    })\n"
+                "    flux sum = 0\n"
+                "    for val in it {\n"
+                "        sum = sum + val\n"
+                "    }\n"
+                "    assert(sum == 30, \"async_iter for loop sum: \" + to_string(sum))\n"
+                "}\n");
+}
+
+TEST(async_iter_channel_close) {
+    if (test_backend == BACKEND_TREE_WALK || test_backend == BACKEND_REG_VM) return;
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = async_iter(|ch| {\n"
+                "        ch.send(42)\n"
+                "    })\n"
+                "    let result = it.collect()\n"
+                "    assert(len(result) == 1, \"should have 1 element\")\n"
+                "    assert(result[0] == 42, \"element should be 42\")\n"
+                "}\n");
+}
+
+TEST(async_iter_empty) {
+    if (test_backend == BACKEND_TREE_WALK || test_backend == BACKEND_REG_VM) return;
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = async_iter(|ch| {\n"
+                "        // send nothing\n"
+                "    })\n"
+                "    let result = it.collect()\n"
+                "    assert(result == [], \"empty async_iter: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(async_iter_large) {
+    if (test_backend == BACKEND_TREE_WALK || test_backend == BACKEND_REG_VM) return;
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = async_iter(|ch| {\n"
+                "        for i in 0..100 {\n"
+                "            ch.send(i)\n"
+                "        }\n"
+                "    })\n"
+                "    let result = it.collect()\n"
+                "    assert(len(result) == 100, \"100 elements\")\n"
+                "    assert(result[0] == 0, \"first\")\n"
+                "    assert(result[99] == 99, \"last\")\n"
+                "}\n");
+}
+
+TEST(async_map_basic) {
+    if (test_backend == BACKEND_TREE_WALK || test_backend == BACKEND_REG_VM) return;
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = async_iter(|ch| {\n"
+                "        ch.send(1)\n"
+                "        ch.send(2)\n"
+                "        ch.send(3)\n"
+                "    })\n"
+                "    let mapped = async_map(it, |x| { x * 10 })\n"
+                "    let result = mapped.collect()\n"
+                "    assert(result == [10, 20, 30], \"async_map: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(async_filter_basic) {
+    if (test_backend == BACKEND_TREE_WALK || test_backend == BACKEND_REG_VM) return;
+    ASSERT_RUNS("fn main() {\n"
+                "    let it = async_iter(|ch| {\n"
+                "        for i in 0..10 {\n"
+                "            ch.send(i)\n"
+                "        }\n"
+                "    })\n"
+                "    let filtered = async_filter(it, |x| { x % 2 == 0 })\n"
+                "    let result = filtered.collect()\n"
+                "    assert(result == [0, 2, 4, 6, 8], \"async_filter: \" + to_string(result))\n"
+                "}\n");
+}

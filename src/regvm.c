@@ -206,7 +206,7 @@ typedef struct {
 } RegVMSpawnTask;
 
 /* Create an independent RegVM clone for running a spawn in its own thread. */
-static RegVM *regvm_clone_for_thread(RegVM *parent) {
+RegVM *regvm_clone_for_thread(RegVM *parent) {
     /* Create a child runtime with cloned env + fresh caches */
     LatRuntime *child_rt = calloc(1, sizeof(LatRuntime));
     if (!child_rt) return NULL;
@@ -241,7 +241,7 @@ static RegVM *regvm_clone_for_thread(RegVM *parent) {
 }
 
 /* Free a child RegVM created by regvm_clone_for_thread. */
-static void regvm_free_child(RegVM *child) {
+void regvm_free_child(RegVM *child) {
     /* Free register values */
     for (size_t i = 0; i < child->reg_stack_top; i++) value_free_inline(&child->reg_stack[i]);
     /* Free open upvalues */
