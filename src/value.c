@@ -975,6 +975,54 @@ bool value_eq(const LatValue *a, const LatValue *b) {
     return false;
 }
 
+/* ── Hash key ── */
+
+char *value_hash_key(const LatValue *v) {
+    /* For structs: produce a deterministic hash key from the struct name
+     * and data fields only (skip closure/method fields), so two struct
+     * instances with the same data hash identically regardless of methods. */
+    if (v->type == VAL_STRUCT) {
+        size_t cap = 128;
+        char *buf = malloc(cap);
+        if (!buf) return strdup("<Struct>");
+        size_t pos = 0;
+        size_t nlen = strlen(v->as.strct.name);
+        while (pos + nlen + 8 > cap) {
+            cap *= 2;
+            buf = realloc(buf, cap);
+        }
+        memcpy(buf + pos, v->as.strct.name, nlen);
+        pos += nlen;
+        buf[pos++] = '{';
+        bool first = true;
+        for (size_t i = 0; i < v->as.strct.field_count; i++) {
+            /* Skip closure fields (methods) for hashing */
+            if (v->as.strct.field_values[i].type == VAL_CLOSURE) continue;
+            if (!first) { buf[pos++] = ','; }
+            first = false;
+            const char *fname = v->as.strct.field_names[i];
+            size_t flen = strlen(fname);
+            char *fval = value_hash_key(&v->as.strct.field_values[i]);
+            size_t vlen = strlen(fval);
+            while (pos + flen + vlen + 8 > cap) {
+                cap *= 2;
+                buf = realloc(buf, cap);
+            }
+            memcpy(buf + pos, fname, flen);
+            pos += flen;
+            buf[pos++] = ':';
+            memcpy(buf + pos, fval, vlen);
+            pos += vlen;
+            free(fval);
+        }
+        buf[pos++] = '}';
+        buf[pos] = '\0';
+        return buf;
+    }
+    /* For all other types, fall back to value_display */
+    return value_display(v);
+}
+
 /* ── Free ── */
 
 static void val_dealloc(LatValue *v, void *ptr) {

@@ -1602,6 +1602,33 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 value_free(&lr.value);
                 return rr;
             }
+            /* Custom struct eq() method: if both are structs and op is == or !=,
+             * check for a callable "eq" field on the left struct. */
+            if ((expr->as.binop.op == BINOP_EQ || expr->as.binop.op == BINOP_NEQ) && lr.value.type == VAL_STRUCT &&
+                rr.value.type == VAL_STRUCT) {
+                const char *eq_interned = intern("eq");
+                for (size_t i = 0; i < lr.value.as.strct.field_count; i++) {
+                    if (lr.value.as.strct.field_names[i] == eq_interned &&
+                        lr.value.as.strct.field_values[i].type == VAL_CLOSURE) {
+                        LatValue *eq_fn = &lr.value.as.strct.field_values[i];
+                        /* Prepend self (left struct) as first arg, other (right) as second */
+                        LatValue eq_args[2];
+                        eq_args[0] = value_deep_clone(&lr.value);
+                        eq_args[1] = value_deep_clone(&rr.value);
+                        EvalResult eq_result =
+                            call_closure(ev, eq_fn->as.closure.param_names, eq_fn->as.closure.param_count,
+                                         eq_fn->as.closure.body, eq_fn->as.closure.captured_env, eq_args, 2,
+                                         eq_fn->as.closure.default_values, eq_fn->as.closure.has_variadic);
+                        value_free(&lr.value);
+                        value_free(&rr.value);
+                        if (!IS_OK(eq_result)) return eq_result;
+                        bool eq_val = value_is_truthy(&eq_result.value);
+                        value_free(&eq_result.value);
+                        if (expr->as.binop.op == BINOP_NEQ) eq_val = !eq_val;
+                        return eval_ok(value_bool(eq_val));
+                    }
+                }
+            }
             EvalResult res = eval_binop(expr->as.binop.op, &lr.value, &rr.value);
             value_free(&lr.value);
             value_free(&rr.value);
@@ -3391,7 +3418,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue set = value_set_new();
                     for (size_t i = 0; i < args[0].as.array.len; i++) {
                         LatValue *elem = &args[0].as.array.elems[i];
-                        char *key = value_display(elem);
+                        char *key = value_hash_key(elem);
                         LatValue cloned = value_deep_clone(elem);
                         lat_map_set(set.as.set.map, key, &cloned);
                         free(key);
@@ -7708,7 +7735,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (set_lv && set_lv->type == VAL_SET) {
                     EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(vr)) return vr;
-                    char *key = value_display(&vr.value);
+                    char *key = value_hash_key(&vr.value);
                     /* If key already exists, free old value */
                     LatValue *old = (LatValue *)lat_map_get(set_lv->as.set.map, key);
                     if (old) value_free(old);
@@ -7729,7 +7756,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (set_lv && set_lv->type == VAL_SET) {
                     EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(vr)) return vr;
-                    char *key = value_display(&vr.value);
+                    char *key = value_hash_key(&vr.value);
                     LatValue *old = (LatValue *)lat_map_get(set_lv->as.set.map, key);
                     if (old) value_free(old);
                     lat_map_remove(set_lv->as.set.map, key);
@@ -10786,7 +10813,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// @example s.has(42)
         if (strcmp(method, "has") == 0) {
             if (arg_count != 1) return eval_err(strdup(".has() expects 1 argument"));
-            char *key = value_display(&args[0]);
+            char *key = value_hash_key(&args[0]);
             bool result = lat_map_contains(obj.as.set.map, key);
             free(key);
             return eval_ok(value_bool(result));

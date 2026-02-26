@@ -176,6 +176,12 @@ const char *value_type_name(const LatValue *v);
 /* ── Equality ── */
 bool value_eq(const LatValue *a, const LatValue *b);
 
+/* ── Hash key ── */
+/* Returns a deterministic string for use as a hash key.
+ * For structs, this hashes only data fields (skipping closures/methods),
+ * so two struct instances with the same data hash identically. */
+char *value_hash_key(const LatValue *v);
+
 /* ── Heap integration ── */
 struct DualHeap;
 struct CrystalRegion;

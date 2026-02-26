@@ -3878,3 +3878,77 @@ TEST(gc_vm_init_state) {
     stackvm_free(&vm);
     lat_runtime_free(&rt);
 }
+
+/* ── Custom struct equality and hashing tests ── */
+
+TEST(test_struct_custom_eq) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int, eq: Fn }\n"
+                "let a = Point { x: 1, y: 2, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "let b = Point { x: 1, y: 2, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "assert(a == b, \"equal structs with custom eq should be ==\")\n");
+}
+
+TEST(test_struct_custom_eq_false) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int, eq: Fn }\n"
+                "let a = Point { x: 1, y: 2, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "let c = Point { x: 3, y: 4, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "assert(a != c, \"different structs with custom eq should be !=\")\n"
+                "assert(!(a == c), \"different structs with custom eq should not be ==\")\n");
+}
+
+TEST(test_struct_no_eq_structural) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int }\n"
+                "let a = Point { x: 1, y: 2 }\n"
+                "let b = Point { x: 1, y: 2 }\n"
+                "let c = Point { x: 3, y: 4 }\n"
+                "assert(a == b, \"structs without eq should use structural comparison\")\n"
+                "assert(a != c, \"different structs without eq should be !=\")\n");
+}
+
+TEST(test_struct_custom_eq_selective) {
+    /* Custom eq that only compares x, ignoring y */
+    ASSERT_RUNS("struct Vec { x: Int, y: Int, eq: Fn }\n"
+                "let a = Vec { x: 1, y: 2, eq: |self, other| { return self.x == other.x } }\n"
+                "let b = Vec { x: 1, y: 99, eq: |self, other| { return self.x == other.x } }\n"
+                "assert(a == b, \"custom eq should only compare x\")\n");
+}
+
+TEST(test_struct_custom_eq_neq) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int, eq: Fn }\n"
+                "let a = Point { x: 1, y: 2, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "let b = Point { x: 1, y: 2, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "let c = Point { x: 3, y: 4, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "assert(!(a != b), \"equal structs should not be !=\")\n"
+                "assert(a != c, \"different structs should be !=\")\n");
+}
+
+TEST(test_struct_value_hash_in_set) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int, eq: Fn }\n"
+                "let a = Point { x: 1, y: 2, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "let b = Point { x: 1, y: 2, eq: |self, other| { return self.x == other.x && self.y == other.y } }\n"
+                "flux s = Set::new()\n"
+                "s.add(a)\n"
+                "s.add(b)\n"
+                "assert(s.len() == 1, \"Set should deduplicate structs with same data fields\")\n"
+                "assert(s.has(a), \"Set should contain a\")\n"
+                "assert(s.has(b), \"Set should contain b\")\n");
+}
+
+TEST(test_struct_value_hash_different_in_set) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int }\n"
+                "let a = Point { x: 1, y: 2 }\n"
+                "let c = Point { x: 3, y: 4 }\n"
+                "flux s = Set::new()\n"
+                "s.add(a)\n"
+                "s.add(c)\n"
+                "assert(s.len() == 2, \"Set should keep different structs\")\n");
+}
+
+TEST(test_struct_set_from_dedup) {
+    ASSERT_RUNS("struct Point { x: Int, y: Int }\n"
+                "let a = Point { x: 1, y: 2 }\n"
+                "let b = Point { x: 1, y: 2 }\n"
+                "let c = Point { x: 3, y: 4 }\n"
+                "let s = Set::from([a, b, c])\n"
+                "assert(s.len() == 2, \"Set::from should deduplicate same-value structs\")\n");
+}

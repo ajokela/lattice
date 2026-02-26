@@ -325,7 +325,7 @@ static LatValue native_set_from(LatValue *args, int arg_count) {
     if (arg_count != 1 || args[0].type != VAL_ARRAY) return value_set_new();
     LatValue set = value_set_new();
     for (size_t i = 0; i < args[0].as.array.len; i++) {
-        char *key = value_display(&args[0].as.array.elems[i]);
+        char *key = value_hash_key(&args[0].as.array.elems[i]);
         LatValue clone = value_deep_clone(&args[0].as.array.elems[i]);
         lat_map_set(set.as.set.map, key, &clone);
         free(key);

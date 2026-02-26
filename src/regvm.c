@@ -1708,14 +1708,14 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
-            char *key = value_display(&args[0]);
+            char *key = value_hash_key(&args[0]);
             bool found = lat_map_contains(obj->as.set.map, key);
             free(key);
             *result = value_bool(found);
             return true;
         }
         if (mhash == MHASH_add && strcmp(method, "add") == 0 && arg_count == 1) {
-            char *key = value_display(&args[0]);
+            char *key = value_hash_key(&args[0]);
             LatValue val = rvm_clone(&args[0]);
             lat_map_set(obj->as.set.map, key, &val);
             free(key);
@@ -1723,7 +1723,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1) {
-            char *key = value_display(&args[0]);
+            char *key = value_hash_key(&args[0]);
             lat_map_remove(obj->as.set.map, key);
             free(key);
             *result = value_unit();
@@ -2921,7 +2921,27 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         uint8_t c = REG_GET_C(instr);
-        reg_set(&R[a], value_bool(value_eq(&R[b], &R[c])));
+        bool eq_result;
+        /* Custom struct eq() method */
+        if (R[b].type == VAL_STRUCT && R[c].type == VAL_STRUCT) {
+            const char *eq_intern = intern("eq");
+            bool found_eq = false;
+            for (size_t i = 0; i < R[b].as.strct.field_count; i++) {
+                if (R[b].as.strct.field_names[i] == eq_intern && R[b].as.strct.field_values[i].type == VAL_CLOSURE) {
+                    /* Pass self (R[b]) and other (R[c]) as args */
+                    LatValue eq_args[2] = {R[b], R[c]};
+                    LatValue res = regvm_call_closure(vm, &R[b].as.strct.field_values[i], eq_args, 2);
+                    eq_result = value_is_truthy(&res);
+                    value_free(&res);
+                    found_eq = true;
+                    break;
+                }
+            }
+            if (!found_eq) eq_result = value_eq(&R[b], &R[c]);
+        } else {
+            eq_result = value_eq(&R[b], &R[c]);
+        }
+        reg_set(&R[a], value_bool(eq_result));
         DISPATCH();
     }
 
@@ -2929,7 +2949,27 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         uint8_t c = REG_GET_C(instr);
-        reg_set(&R[a], value_bool(!value_eq(&R[b], &R[c])));
+        bool eq_result;
+        /* Custom struct eq() method */
+        if (R[b].type == VAL_STRUCT && R[c].type == VAL_STRUCT) {
+            const char *eq_intern = intern("eq");
+            bool found_eq = false;
+            for (size_t i = 0; i < R[b].as.strct.field_count; i++) {
+                if (R[b].as.strct.field_names[i] == eq_intern && R[b].as.strct.field_values[i].type == VAL_CLOSURE) {
+                    /* Pass self (R[b]) and other (R[c]) as args */
+                    LatValue eq_args[2] = {R[b], R[c]};
+                    LatValue res = regvm_call_closure(vm, &R[b].as.strct.field_values[i], eq_args, 2);
+                    eq_result = value_is_truthy(&res);
+                    value_free(&res);
+                    found_eq = true;
+                    break;
+                }
+            }
+            if (!found_eq) eq_result = value_eq(&R[b], &R[c]);
+        } else {
+            eq_result = value_eq(&R[b], &R[c]);
+        }
+        reg_set(&R[a], value_bool(!eq_result));
         DISPATCH();
     }
 
