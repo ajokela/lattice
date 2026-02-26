@@ -78,6 +78,17 @@ int pkg_cmd_add(const char *name, const char *version);
 /* `clat remove <package>` — remove a dependency. */
 int pkg_cmd_remove(const char *name);
 
+/* ── Semver utilities ── */
+
+/* Compare two semver strings.
+ * Returns <0 if a < b, 0 if a == b, >0 if a > b. */
+int pkg_semver_compare(const char *a, const char *b);
+
+/* Check if a version satisfies a constraint.
+ * Supports: "*" (any), "1.2.3" (exact), "^1.2.3" (compatible),
+ * ">=1.2.3" (minimum), "<=1.2.3" (maximum). */
+bool pkg_semver_satisfies(const char *constraint, const char *version);
+
 /* ── Module resolution ── */
 
 /* Try to resolve an import path via lat_modules/.

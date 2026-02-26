@@ -3,6 +3,7 @@
 #include "fs_ops.h"
 #include "builtins.h"
 #include "value.h"
+#include "http.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -11,6 +12,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <libgen.h>
+
+/* Default HTTP registry URL */
+#define PKG_DEFAULT_REGISTRY "https://registry.lattice-lang.org/v1"
 
 /* ========================================================================
  * Helpers
@@ -26,6 +30,481 @@ static const char *map_get_str(LatValue *map, const char *key) {
     LatValue *v = lat_map_get(map->as.map.map, key);
     if (!v || v->type != VAL_STR) return NULL;
     return v->as.str_val;
+}
+
+/* ========================================================================
+ * Semver utilities
+ * ======================================================================== */
+
+/* Parse a semver string "MAJOR.MINOR.PATCH" into components.
+ * Returns true if valid (at least major is parsed). */
+static bool parse_semver(const char *s, int *major, int *minor, int *patch) {
+    *major = *minor = *patch = 0;
+    if (!s || !*s) return false;
+
+    char *end;
+    long val = strtol(s, &end, 10);
+    if (end == s || val < 0) return false;
+    *major = (int)val;
+
+    if (*end != '.') return true;
+    s = end + 1;
+    val = strtol(s, &end, 10);
+    if (end == s || val < 0) return true;
+    *minor = (int)val;
+
+    if (*end != '.') return true;
+    s = end + 1;
+    val = strtol(s, &end, 10);
+    if (end == s || val < 0) return true;
+    *patch = (int)val;
+
+    return true;
+}
+
+/* Compare two semver strings.
+ * Returns <0 if a < b, 0 if a == b, >0 if a > b. */
+int pkg_semver_compare(const char *a, const char *b) {
+    int a_maj, a_min, a_pat;
+    int b_maj, b_min, b_pat;
+
+    if (!parse_semver(a, &a_maj, &a_min, &a_pat)) return -1;
+    if (!parse_semver(b, &b_maj, &b_min, &b_pat)) return 1;
+
+    if (a_maj != b_maj) return a_maj - b_maj;
+    if (a_min != b_min) return a_min - b_min;
+    return a_pat - b_pat;
+}
+
+/* Check if a version satisfies a constraint.
+ * Supports: "*" (any), "1.2.3" (exact), "^1.2.3" (compatible),
+ * ">=1.2.3" (minimum), "<=1.2.3" (maximum). */
+bool pkg_semver_satisfies(const char *constraint, const char *version) {
+    if (!constraint || strcmp(constraint, "*") == 0) return true;
+    if (!version) return false;
+
+    if (constraint[0] == '^') {
+        /* Caret: compatible with (same major, >= minor.patch) */
+        int c_maj, c_min, c_pat;
+        int v_maj, v_min, v_pat;
+        if (!parse_semver(constraint + 1, &c_maj, &c_min, &c_pat)) return false;
+        if (!parse_semver(version, &v_maj, &v_min, &v_pat)) return false;
+        if (v_maj != c_maj) return false;
+        if (v_min > c_min) return true;
+        if (v_min < c_min) return false;
+        return v_pat >= c_pat;
+    }
+
+    if (constraint[0] == '>' && constraint[1] == '=') {
+        return pkg_semver_compare(version, constraint + 2) >= 0;
+    }
+    if (constraint[0] == '<' && constraint[1] == '=') {
+        return pkg_semver_compare(version, constraint + 2) <= 0;
+    }
+
+    /* Exact match */
+    return strcmp(constraint, version) == 0;
+}
+
+/* ========================================================================
+ * Global cache directory (~/.lattice/packages/)
+ * ======================================================================== */
+
+/* Build the path to the global package cache directory.
+ * Returns a heap-allocated string, or NULL if HOME is unset. */
+static char *get_cache_dir(void) {
+    const char *home = getenv("HOME");
+    if (!home) return NULL;
+
+    size_t len = strlen(home) + 32;
+    char *path = malloc(len);
+    snprintf(path, len, "%s/.lattice/packages", home);
+    return path;
+}
+
+/* Ensure the cache directory hierarchy exists (~/.lattice/packages/).
+ * Returns true on success. */
+static bool ensure_cache_dir(void) {
+    const char *home = getenv("HOME");
+    if (!home) return false;
+
+    char path[PATH_MAX];
+    char *mkdir_err = NULL;
+
+    /* ~/.lattice/ */
+    snprintf(path, sizeof(path), "%s/.lattice", home);
+    if (!fs_is_dir(path)) {
+        if (!fs_mkdir(path, &mkdir_err)) {
+            free(mkdir_err);
+            return false;
+        }
+    }
+
+    /* ~/.lattice/packages/ */
+    snprintf(path, sizeof(path), "%s/.lattice/packages", home);
+    if (!fs_is_dir(path)) {
+        if (!fs_mkdir(path, &mkdir_err)) {
+            free(mkdir_err);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* Check if a package@version is already cached.
+ * Returns a heap-allocated path to the cached package directory, or NULL. */
+static char *find_cached_package(const char *name, const char *version) {
+    char *cache_dir = get_cache_dir();
+    if (!cache_dir) return NULL;
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s/%s", cache_dir, name, version);
+    free(cache_dir);
+
+    if (fs_is_dir(path)) return strdup(path);
+    return NULL;
+}
+
+/* ========================================================================
+ * HTTP registry client
+ * ======================================================================== */
+
+/* Build the registry base URL from env or default. Returned string is
+ * static or from getenv — do NOT free. */
+static const char *get_registry_url(void) {
+    const char *url = getenv("LATTICE_REGISTRY");
+    /* Only use LATTICE_REGISTRY if it looks like an HTTP(S) URL */
+    if (url && (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0))
+        return url;
+    return PKG_DEFAULT_REGISTRY;
+}
+
+/* Fetch package version list from registry.
+ * GET <registry>/packages/<name>/versions
+ * Expected JSON response: {"versions":["1.0.0","1.1.0","2.0.0"]}
+ * On success, returns a heap-allocated array of version strings (caller frees
+ * each string and the array). Sets *out_count. Returns NULL on error. */
+static char **registry_fetch_versions(const char *name, size_t *out_count, char **err) {
+    *out_count = 0;
+
+    const char *base = get_registry_url();
+    size_t url_len = strlen(base) + strlen(name) + 32;
+    char *url = malloc(url_len);
+    snprintf(url, url_len, "%s/packages/%s/versions", base, name);
+
+    HttpRequest req;
+    memset(&req, 0, sizeof(req));
+    req.method = "GET";
+    req.url = url;
+    req.timeout_ms = 15000;
+
+    /* Add Accept header */
+    char *hdr_keys[] = { "Accept" };
+    char *hdr_vals[] = { "application/json" };
+    req.header_keys = hdr_keys;
+    req.header_values = hdr_vals;
+    req.header_count = 1;
+
+    HttpResponse *resp = http_execute(&req, err);
+    free(url);
+
+    if (!resp) return NULL;
+
+    if (resp->status_code == 404) {
+        size_t elen = strlen(name) + 64;
+        *err = malloc(elen);
+        snprintf(*err, elen, "package '%s' not found in registry", name);
+        http_response_free(resp);
+        return NULL;
+    }
+
+    if (resp->status_code != 200) {
+        size_t elen = 128;
+        *err = malloc(elen);
+        snprintf(*err, elen, "registry returned HTTP %d for package '%s'",
+                 resp->status_code, name);
+        http_response_free(resp);
+        return NULL;
+    }
+
+    /* Minimal JSON parsing for {"versions":["x","y",...]}
+     * We look for the "versions" array and extract quoted strings. */
+    const char *body = resp->body;
+    const char *arr_start = strstr(body, "\"versions\"");
+    if (!arr_start) {
+        *err = strdup("registry response: missing 'versions' field");
+        http_response_free(resp);
+        return NULL;
+    }
+    arr_start = strchr(arr_start, '[');
+    if (!arr_start) {
+        *err = strdup("registry response: malformed versions array");
+        http_response_free(resp);
+        return NULL;
+    }
+    arr_start++; /* skip '[' */
+
+    const char *arr_end = strchr(arr_start, ']');
+    if (!arr_end) {
+        *err = strdup("registry response: unterminated versions array");
+        http_response_free(resp);
+        return NULL;
+    }
+
+    /* Extract quoted strings */
+    size_t cap = 8;
+    char **versions = malloc(cap * sizeof(char *));
+    size_t count = 0;
+
+    const char *p = arr_start;
+    while (p < arr_end) {
+        const char *q1 = memchr(p, '"', (size_t)(arr_end - p));
+        if (!q1) break;
+        q1++; /* skip opening quote */
+        const char *q2 = memchr(q1, '"', (size_t)(arr_end - q1));
+        if (!q2) break;
+
+        if (count >= cap) {
+            cap *= 2;
+            versions = realloc(versions, cap * sizeof(char *));
+        }
+        versions[count++] = strndup(q1, (size_t)(q2 - q1));
+        p = q2 + 1;
+    }
+
+    http_response_free(resp);
+    *out_count = count;
+    return versions;
+}
+
+/* Find the best matching version from a list given a constraint.
+ * Returns a heap-allocated copy of the best version, or NULL. */
+static char *find_best_version(char **versions, size_t count,
+                               const char *constraint) {
+    char *best = NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (!pkg_semver_satisfies(constraint, versions[i]))
+            continue;
+        if (!best || pkg_semver_compare(versions[i], best) > 0) {
+            free(best);
+            best = strdup(versions[i]);
+        }
+    }
+    return best;
+}
+
+/* Download a package tarball/source from the registry and cache it.
+ * GET <registry>/packages/<name>/<version>
+ * The response body is expected to be the contents of a lattice.toml + source
+ * files (for now we treat the body as a single main.lat file, or a tarball
+ * that we store directly). Returns true on success. */
+static bool registry_download_package(const char *name, const char *version,
+                                      const char *dest_dir, char **err) {
+    const char *base = get_registry_url();
+    size_t url_len = strlen(base) + strlen(name) + strlen(version) + 32;
+    char *url = malloc(url_len);
+    snprintf(url, url_len, "%s/packages/%s/%s", base, name, version);
+
+    HttpRequest req;
+    memset(&req, 0, sizeof(req));
+    req.method = "GET";
+    req.url = url;
+    req.timeout_ms = 30000;
+
+    HttpResponse *resp = http_execute(&req, err);
+    free(url);
+
+    if (!resp) return false;
+
+    if (resp->status_code != 200) {
+        size_t elen = 128;
+        *err = malloc(elen);
+        snprintf(*err, elen, "registry download returned HTTP %d for %s@%s",
+                 resp->status_code, name, version);
+        http_response_free(resp);
+        return false;
+    }
+
+    /* Write the response body to dest_dir.
+     * Check Content-Type to decide how to handle it.
+     * For now, we treat the body as the package source. */
+    bool is_toml_bundle = false;
+    for (size_t i = 0; i < resp->header_count; i++) {
+        if (strcmp(resp->header_keys[i], "content-type") == 0) {
+            if (strstr(resp->header_values[i], "application/toml") ||
+                strstr(resp->header_values[i], "text/toml")) {
+                is_toml_bundle = true;
+            }
+            break;
+        }
+    }
+
+    /* Create destination directory */
+    char *mkdir_err = NULL;
+    if (!fs_is_dir(dest_dir)) {
+        if (!fs_mkdir(dest_dir, &mkdir_err)) {
+            size_t elen = strlen(mkdir_err) + 64;
+            *err = malloc(elen);
+            snprintf(*err, elen, "cannot create package directory: %s", mkdir_err);
+            free(mkdir_err);
+            http_response_free(resp);
+            return false;
+        }
+    }
+
+    if (is_toml_bundle) {
+        /* If the response is a TOML manifest, write it as lattice.toml */
+        char toml_path[PATH_MAX];
+        snprintf(toml_path, sizeof(toml_path), "%s/lattice.toml", dest_dir);
+        if (!builtin_write_file(toml_path, resp->body)) {
+            *err = strdup("failed to write package lattice.toml");
+            http_response_free(resp);
+            return false;
+        }
+    } else {
+        /* Default: write body as main.lat (single-file package) */
+        char main_path[PATH_MAX];
+        snprintf(main_path, sizeof(main_path), "%s/main.lat", dest_dir);
+        if (!builtin_write_file(main_path, resp->body)) {
+            *err = strdup("failed to write package main.lat");
+            http_response_free(resp);
+            return false;
+        }
+
+        /* Also generate a minimal lattice.toml for the cached package */
+        char toml_path[PATH_MAX];
+        snprintf(toml_path, sizeof(toml_path), "%s/lattice.toml", dest_dir);
+        char toml_buf[512];
+        snprintf(toml_buf, sizeof(toml_buf),
+                 "[package]\nname = \"%s\"\nversion = \"%s\"\n",
+                 name, version);
+        builtin_write_file(toml_path, toml_buf);
+    }
+
+    http_response_free(resp);
+    return true;
+}
+
+/* High-level: fetch a package from the HTTP registry, caching in ~/.lattice/packages/.
+ * On success, copies the package into lat_modules/<name>/ and returns true. */
+static bool fetch_from_registry(const char *name, const char *version, char **err) {
+    /* Step 1: Query available versions */
+    size_t ver_count = 0;
+    char **versions = registry_fetch_versions(name, &ver_count, err);
+    if (!versions) {
+        /* err is already set by registry_fetch_versions */
+        return false;
+    }
+
+    if (ver_count == 0) {
+        free(versions);
+        size_t elen = strlen(name) + 64;
+        *err = malloc(elen);
+        snprintf(*err, elen, "package '%s' has no published versions", name);
+        return false;
+    }
+
+    /* Step 2: Find best matching version */
+    char *resolved = find_best_version(versions, ver_count, version);
+    for (size_t i = 0; i < ver_count; i++) free(versions[i]);
+    free(versions);
+
+    if (!resolved) {
+        size_t elen = strlen(name) + strlen(version) + 80;
+        *err = malloc(elen);
+        snprintf(*err, elen, "no version of '%s' satisfies constraint '%s'", name, version);
+        return false;
+    }
+
+    /* Step 3: Check local cache first */
+    char *cached = find_cached_package(name, resolved);
+    if (cached) {
+        /* Copy from cache to lat_modules/ */
+        if (!fs_is_dir("lat_modules")) {
+            char *mkdir_err = NULL;
+            if (!fs_mkdir("lat_modules", &mkdir_err)) {
+                size_t elen = strlen(mkdir_err) + 64;
+                *err = malloc(elen);
+                snprintf(*err, elen, "cannot create lat_modules/: %s", mkdir_err);
+                free(mkdir_err);
+                free(cached);
+                free(resolved);
+                return false;
+            }
+        }
+        char cmd[PATH_MAX * 2 + 32];
+        snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", cached, name);
+        int rc = system(cmd);
+        free(cached);
+        if (rc != 0) {
+            size_t elen = 256;
+            *err = malloc(elen);
+            snprintf(*err, elen, "failed to copy cached package '%s' to lat_modules/", name);
+            free(resolved);
+            return false;
+        }
+        fprintf(stderr, "  (cached %s@%s)\n", name, resolved);
+        free(resolved);
+        return true;
+    }
+
+    /* Step 4: Download from registry to cache */
+    if (!ensure_cache_dir()) {
+        size_t elen = 128;
+        *err = malloc(elen);
+        snprintf(*err, elen, "cannot create package cache directory (~/.lattice/packages/)");
+        free(resolved);
+        return false;
+    }
+
+    char *cache_dir = get_cache_dir();
+    char pkg_cache[PATH_MAX];
+    /* Create name subdirectory in cache */
+    snprintf(pkg_cache, sizeof(pkg_cache), "%s/%s", cache_dir, name);
+    if (!fs_is_dir(pkg_cache)) {
+        char *mkdir_err = NULL;
+        if (!fs_mkdir(pkg_cache, &mkdir_err)) {
+            free(mkdir_err);
+            /* Non-fatal, we can still try the version dir */
+        }
+    }
+    /* Create version subdirectory */
+    snprintf(pkg_cache, sizeof(pkg_cache), "%s/%s/%s", cache_dir, name, resolved);
+    free(cache_dir);
+
+    if (!registry_download_package(name, resolved, pkg_cache, err)) {
+        free(resolved);
+        return false;
+    }
+
+    /* Step 5: Copy from cache to lat_modules/ */
+    if (!fs_is_dir("lat_modules")) {
+        char *mkdir_err = NULL;
+        if (!fs_mkdir("lat_modules", &mkdir_err)) {
+            size_t elen = strlen(mkdir_err) + 64;
+            *err = malloc(elen);
+            snprintf(*err, elen, "cannot create lat_modules/: %s", mkdir_err);
+            free(mkdir_err);
+            free(resolved);
+            return false;
+        }
+    }
+
+    char cmd[PATH_MAX * 2 + 32];
+    snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", pkg_cache, name);
+    int rc = system(cmd);
+    if (rc != 0) {
+        size_t elen = 256;
+        *err = malloc(elen);
+        snprintf(*err, elen, "failed to copy package '%s' from cache to lat_modules/", name);
+        free(resolved);
+        return false;
+    }
+
+    fprintf(stderr, "  (downloaded %s@%s from registry)\n", name, resolved);
+    free(resolved);
+    return true;
 }
 
 /* ========================================================================
@@ -287,15 +766,16 @@ static char *read_file_str(const char *path) {
     return buf;
 }
 
-/* Simple semver check: exact match or wildcard "*" */
+/* Check if a version matches a constraint (wrapper around pkg_semver_satisfies). */
 static bool version_matches(const char *constraint, const char *actual) {
-    if (!constraint || strcmp(constraint, "*") == 0) return true;
-    if (!actual) return false;
-    return strcmp(constraint, actual) == 0;
+    return pkg_semver_satisfies(constraint, actual);
 }
 
-/* Attempt to fetch a package from the registry (stubbed for local). */
-static bool fetch_package(const char *name, const char *version, char **err) {
+/* Attempt to fetch a package. Sets *out_source to "local", "registry", or "path"
+ * to indicate how the package was resolved. Caller should not free out_source. */
+static bool fetch_package(const char *name, const char *version, char **err,
+                          const char **out_source) {
+    if (out_source) *out_source = "local";
     /* Check if the package already exists in lat_modules/ */
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "lat_modules/%s", name);
@@ -323,55 +803,74 @@ static bool fetch_package(const char *name, const char *version, char **err) {
         return true; /* already present */
     }
 
-    /* Try registry URL (env var LATTICE_REGISTRY or default). For now, we only
-     * support local file:// URLs or pre-populated lat_modules/. */
+    /* Try registry URL (env var LATTICE_REGISTRY or default). */
     const char *registry = getenv("LATTICE_REGISTRY");
-    if (registry) {
-        /* file:// URL support: copy from a local registry directory */
-        if (strncmp(registry, "file://", 7) == 0) {
-            const char *registry_dir = registry + 7;
-            char src_path[PATH_MAX];
-            snprintf(src_path, sizeof(src_path), "%s/%s", registry_dir, name);
-            if (fs_is_dir(src_path)) {
-                /* Create lat_modules/ if needed */
-                if (!fs_is_dir("lat_modules")) {
-                    char *mkdir_err = NULL;
-                    if (!fs_mkdir("lat_modules", &mkdir_err)) {
-                        if (err) {
-                            size_t elen = strlen(mkdir_err) + 64;
-                            *err = malloc(elen);
-                            if (!err) return NULL;
-                            snprintf(*err, elen, "cannot create lat_modules/: %s", mkdir_err);
-                        }
-                        free(mkdir_err);
-                        return false;
-                    }
-                }
 
-                /* Copy directory recursively using system cp */
-                char cmd[PATH_MAX * 2 + 32];
-                snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", src_path, name);
-                int rc = system(cmd);
-                if (rc != 0) {
+    /* file:// URL support: copy from a local registry directory */
+    if (registry && strncmp(registry, "file://", 7) == 0) {
+        const char *registry_dir = registry + 7;
+        char src_path[PATH_MAX];
+        snprintf(src_path, sizeof(src_path), "%s/%s", registry_dir, name);
+        if (fs_is_dir(src_path)) {
+            /* Create lat_modules/ if needed */
+            if (!fs_is_dir("lat_modules")) {
+                char *mkdir_err = NULL;
+                if (!fs_mkdir("lat_modules", &mkdir_err)) {
                     if (err) {
-                        size_t elen = 256;
+                        size_t elen = strlen(mkdir_err) + 64;
                         *err = malloc(elen);
-                        if (!err) return false;
-                        snprintf(*err, elen, "failed to copy package '%s' from registry", name);
+                        if (!*err) return false;
+                        snprintf(*err, elen, "cannot create lat_modules/: %s", mkdir_err);
                     }
+                    free(mkdir_err);
                     return false;
                 }
-                return true;
             }
+
+            /* Copy directory recursively using system cp */
+            char cmd[PATH_MAX * 2 + 32];
+            snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", src_path, name);
+            int rc = system(cmd);
+            if (rc != 0) {
+                if (err) {
+                    size_t elen = 256;
+                    *err = malloc(elen);
+                    snprintf(*err, elen, "failed to copy package '%s' from registry", name);
+                }
+                return false;
+            }
+            if (out_source) *out_source = "path";
+            return true;
         }
-        /* TODO: HTTP registry support */
+    }
+
+    /* HTTP registry support: try to fetch from remote registry.
+     * Uses LATTICE_REGISTRY env (if HTTP/HTTPS) or the default registry URL. */
+    {
+        char *fetch_err = NULL;
+        if (fetch_from_registry(name, version, &fetch_err)) {
+            if (out_source) *out_source = "registry";
+            return true;
+        }
+        /* Registry fetch failed — store error but keep going for a friendlier message */
+        if (fetch_err) {
+            if (err) {
+                size_t elen = strlen(name) + strlen(fetch_err) + 128;
+                *err = malloc(elen);
+                snprintf(*err, elen,
+                         "package '%s' not found locally; registry fetch also failed: %s",
+                         name, fetch_err);
+            }
+            free(fetch_err);
+            return false;
+        }
     }
 
     if (err) {
         size_t elen = 256;
         *err = malloc(elen);
-        if (!err) return false;
-        snprintf(*err, elen, "package '%s' not found (not in lat_modules/ and no registry configured)", name);
+        if (!*err) return false;
+        snprintf(*err, elen, "package '%s' not found (not in lat_modules/ and registry unavailable)", name);
     }
     return false;
 }
@@ -432,7 +931,8 @@ int pkg_cmd_install(void) {
         fflush(stdout);
 
         char *fetch_err = NULL;
-        if (fetch_package(dep_name, dep_ver, &fetch_err)) {
+        const char *pkg_source = "local";
+        if (fetch_package(dep_name, dep_ver, &fetch_err, &pkg_source)) {
             printf(" ok\n");
 
             /* Determine resolved version */
@@ -465,7 +965,7 @@ int pkg_cmd_install(void) {
             PkgLockEntry *le = &lock.entries[lock.entry_count++];
             le->name     = strdup(dep_name);
             le->version  = resolved_ver;
-            le->source   = strdup("local");
+            le->source   = strdup(pkg_source);
             le->checksum = strdup("");
         } else {
             printf(" FAILED\n");
