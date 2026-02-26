@@ -28,7 +28,7 @@ static char *find_eval_path(void) {
     char *dir = dirname(exe_path);
     char *path = malloc(strlen(dir) + 32);
     if (!path) return NULL;
-    sprintf(path, "%s/src/eval.c", dir);
+    snprintf(path, strlen(dir) + 32, "%s/src/eval.c", dir);
 
     FILE *f = fopen(path, "r");
     if (f) {
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
         if (last_slash) {
             size_t dir_len = (size_t)(last_slash - eval_path);
             memcpy(methods_path, eval_path, dir_len);
-            sprintf(methods_path + dir_len, "/builtin_methods.c");
+            snprintf(methods_path + dir_len, eval_len + 16 - dir_len, "/builtin_methods.c");
             lsp_symbol_index_add_file(srv->index, methods_path);
         }
         free(methods_path);
