@@ -4385,7 +4385,7 @@ TEST(async_iter_basic) {
                      "}\n");
         return;
     }
-    if (test_backend == BACKEND_REG_VM) return; /* regvm threading unsupported */
+    if (test_backend == BACKEND_REG_VM) return; /* async_iter() native is stack VM only */
     ASSERT_RUNS("fn main() {\n"
                 "    let it = async_iter(|ch| {\n"
                 "        ch.send(1)\n"
@@ -4477,4 +4477,188 @@ TEST(async_filter_basic) {
                 "    let result = filtered.collect()\n"
                 "    assert(result == [0, 2, 4, 6, 8], \"async_filter: \" + to_string(result))\n"
                 "}\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LAT-88: scope/spawn/select concurrency tests (all backends incl. RegVM)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+TEST(scope_spawn_basic_threading) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn { ch.send(freeze(42)) }\n"
+                "    }\n"
+                "    let val = ch.recv()\n"
+                "    assert(val == 42, \"expected 42, got: \" + to_string(val))\n"
+                "}\n");
+}
+
+TEST(scope_spawn_two_channels) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch1 = Channel::new()\n"
+                "    let ch2 = Channel::new()\n"
+                "    scope {\n"
+                "        spawn { ch1.send(freeze(10)) }\n"
+                "        spawn { ch2.send(freeze(20)) }\n"
+                "    }\n"
+                "    let a = ch1.recv()\n"
+                "    let b = ch2.recv()\n"
+                "    assert(a + b == 30, \"expected 30, got: \" + to_string(a + b))\n"
+                "}\n");
+}
+
+TEST(scope_no_spawns_returns_value) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let x = scope {\n"
+                "        let a = 5\n"
+                "        let b = 15\n"
+                "        a + b\n"
+                "    }\n"
+                "    assert(x == 20, \"expected 20, got: \" + to_string(x))\n"
+                "}\n");
+}
+
+TEST(scope_spawn_sync_body_executes) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    let sync_ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn { ch.send(freeze(1)) }\n"
+                "        sync_ch.send(freeze(\"ran\"))\n"
+                "    }\n"
+                "    assert(sync_ch.recv() == \"ran\", \"sync body should have run\")\n"
+                "    assert(ch.recv() == 1, \"spawn should have sent 1\")\n"
+                "}\n");
+}
+
+TEST(spawn_outside_scope_returns_value) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let x = spawn {\n"
+                "        let a = 7\n"
+                "        let b = 3\n"
+                "        return a * b\n"
+                "    }\n"
+                "    assert(x == 21, \"expected 21, got: \" + to_string(x))\n"
+                "}\n");
+}
+
+TEST(scope_spawn_captures_outer_vars) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    let factor = 10\n"
+                "    scope {\n"
+                "        spawn {\n"
+                "            let result = factor * 5\n"
+                "            ch.send(freeze(result))\n"
+                "        }\n"
+                "    }\n"
+                "    let val = ch.recv()\n"
+                "    assert(val == 50, \"expected 50, got: \" + to_string(val))\n"
+                "}\n");
+}
+
+TEST(scope_spawn_multiple_sends) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn { ch.send(freeze(1)) }\n"
+                "        spawn { ch.send(freeze(2)) }\n"
+                "        spawn { ch.send(freeze(3)) }\n"
+                "    }\n"
+                "    flux total = 0\n"
+                "    total = total + ch.recv()\n"
+                "    total = total + ch.recv()\n"
+                "    total = total + ch.recv()\n"
+                "    assert(total == 6, \"expected 6, got: \" + to_string(total))\n"
+                "}\n");
+}
+
+TEST(scope_nested_scopes) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn {\n"
+                "            let inner_ch = Channel::new()\n"
+                "            scope {\n"
+                "                spawn { inner_ch.send(freeze(7)) }\n"
+                "            }\n"
+                "            let v = inner_ch.recv()\n"
+                "            ch.send(freeze(v * 3))\n"
+                "        }\n"
+                "    }\n"
+                "    let result = ch.recv()\n"
+                "    assert(result == 21, \"expected 21, got: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(select_recv_with_binding) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    ch.send(freeze(99))\n"
+                "    let result = select {\n"
+                "        val from ch => { val + 1 }\n"
+                "    }\n"
+                "    assert(result == 100, \"expected 100, got: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(select_default_when_empty) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    let result = select {\n"
+                "        val from ch => { val }\n"
+                "        default => { -1 }\n"
+                "    }\n"
+                "    assert(result == -1, \"expected -1, got: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(select_picks_ready_channel) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch1 = Channel::new()\n"
+                "    let ch2 = Channel::new()\n"
+                "    ch1.send(freeze(\"first\"))\n"
+                "    let result = select {\n"
+                "        v from ch1 => { v }\n"
+                "        v from ch2 => { v }\n"
+                "        default => { \"none\" }\n"
+                "    }\n"
+                "    assert(result == \"first\", \"expected first, got: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(scope_spawn_with_select) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn { ch.send(freeze(42)) }\n"
+                "    }\n"
+                "    let result = select {\n"
+                "        v from ch => { v * 2 }\n"
+                "        default => { 0 }\n"
+                "    }\n"
+                "    assert(result == 84, \"expected 84, got: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(select_timeout_fires) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    let result = select {\n"
+                "        v from ch => { v }\n"
+                "        timeout(10) => { \"timed_out\" }\n"
+                "    }\n"
+                "    assert(result == \"timed_out\", \"expected timed_out, got: \" + to_string(result))\n"
+                "}\n");
+}
+
+TEST(scope_spawn_error_propagation) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    scope {\n"
+                 "        spawn {\n"
+                 "            let x = 1 / 0\n"
+                 "        }\n"
+                 "    }\n"
+                 "}\n");
 }
