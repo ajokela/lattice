@@ -86,6 +86,49 @@ static int stackvm_current_line(StackVM *vm) {
     return f->chunk->lines[offset];
 }
 
+/* Build a structured error Map from the current VM state.
+ * The Map contains: message (String), line (Int), stack (Array of Strings).
+ * Must be called BEFORE unwinding frames so the stack trace is accurate. */
+static LatValue stackvm_build_error_map(StackVM *vm, const char *message) {
+    LatValue err_map = value_map_new();
+
+    /* message */
+    LatValue msg_val = value_string(message);
+    lat_map_set(err_map.as.map.map, "message", &msg_val);
+
+    /* line — from the topmost frame */
+    int line = stackvm_current_line(vm);
+    LatValue line_val = value_int(line);
+    lat_map_set(err_map.as.map.map, "line", &line_val);
+
+    /* stack — array of strings like "fn_name at line N" */
+    size_t frame_count = vm->frame_count;
+    LatValue *stack_elems = NULL;
+    size_t stack_len = 0;
+    if (frame_count > 0) {
+        stack_elems = malloc(frame_count * sizeof(LatValue));
+        for (size_t i = frame_count; i > 0; i--) {
+            StackCallFrame *f = &vm->frames[i - 1];
+            if (!f->chunk) continue;
+            size_t offset = (size_t)(f->ip - f->chunk->code);
+            if (offset > 0) offset--;
+            int fline = 0;
+            if (f->chunk->lines && offset < f->chunk->lines_len) fline = f->chunk->lines[offset];
+            const char *name = f->chunk->name;
+            char buf[256];
+            if (name && name[0]) snprintf(buf, sizeof(buf), "%s() at line %d", name, fline);
+            else if (i == 1) snprintf(buf, sizeof(buf), "<script> at line %d", fline);
+            else snprintf(buf, sizeof(buf), "<closure> at line %d", fline);
+            stack_elems[stack_len++] = value_string(buf);
+        }
+    }
+    LatValue stack_arr = value_array(stack_elems, stack_len);
+    lat_map_set(err_map.as.map.map, "stack", &stack_arr);
+    free(stack_elems);
+
+    return err_map;
+}
+
 static StackVMResult runtime_error(StackVM *vm, const char *fmt, ...) {
     char *inner = NULL;
     va_list args;
@@ -108,14 +151,15 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
     va_end(args);
 
     if (vm->handler_count > 0) {
-        /* Caught by try/catch — pass raw error message without line prefix */
+        /* Caught by try/catch — build structured error Map before unwinding */
+        LatValue err_map = stackvm_build_error_map(vm, inner);
+        free(inner);
         StackExceptionHandler h = vm->handlers[--vm->handler_count];
         while (vm->frame_count - 1 > h.frame_index) vm->frame_count--;
         *frame_ptr = &vm->frames[vm->frame_count - 1];
         vm->stack_top = h.stack_top;
         (*frame_ptr)->ip = h.ip;
-        push(vm, value_string(inner));
-        free(inner);
+        push(vm, err_map);
         return STACKVM_OK;
     }
 
@@ -129,14 +173,16 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
  * behaviour (native errors carry their own descriptive messages). */
 static StackVMResult stackvm_handle_native_error(StackVM *vm, StackCallFrame **frame_ptr) {
     if (vm->handler_count > 0) {
+        /* Build structured error Map before unwinding */
+        LatValue err_map = stackvm_build_error_map(vm, vm->error);
+        free(vm->error);
+        vm->error = NULL;
         StackExceptionHandler h = vm->handlers[--vm->handler_count];
         while (vm->frame_count - 1 > h.frame_index) vm->frame_count--;
         *frame_ptr = &vm->frames[vm->frame_count - 1];
         vm->stack_top = h.stack_top;
         (*frame_ptr)->ip = h.ip;
-        push(vm, value_string(vm->error));
-        free(vm->error);
-        vm->error = NULL;
+        push(vm, err_map);
         return STACKVM_OK;
     }
     /* Uncaught — vm->error already set by native function, no line prefix */
@@ -5796,13 +5842,19 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         case OP_THROW: {
             LatValue err = pop(vm);
             if (vm->handler_count > 0) {
+                /* Build structured error map before unwinding */
+                const char *msg = (err.type == VAL_STR) ? err.as.str_val : NULL;
+                char *repr = msg ? NULL : value_repr(&err);
+                LatValue err_map = stackvm_build_error_map(vm, msg ? msg : repr);
+                free(repr);
+                value_free(&err);
                 StackExceptionHandler h = vm->handlers[--vm->handler_count];
                 /* Unwind stack */
                 while (vm->frame_count - 1 > h.frame_index) { vm->frame_count--; }
                 frame = &vm->frames[vm->frame_count - 1];
                 vm->stack_top = h.stack_top;
                 frame->ip = h.ip;
-                push(vm, err);
+                push(vm, err_map);
             } else {
                 StackVMResult res;
                 if (err.type == VAL_STR) {

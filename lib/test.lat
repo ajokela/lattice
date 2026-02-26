@@ -225,7 +225,7 @@ fn run(suites: Array) {
                 test_fn(nil)
                 "pass"
             } catch e {
-                e
+                e.message
             }
 
             if result == "pass" {

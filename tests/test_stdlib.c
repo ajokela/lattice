@@ -561,7 +561,7 @@ static void test_try_catch_div_zero(void) {
                   "        let x = 1 / 0\n"
                   "        x\n"
                   "    } catch e {\n"
-                  "        e\n"
+                  "        e.message\n"
                   "    }\n"
                   "    print(result)\n"
                   "}\n",
@@ -608,7 +608,7 @@ static void test_try_catch_nested(void) {
                   "        let x = 1 / 0\n"
                   "        x\n"
                   "    } catch e {\n"
-                  "        \"outer: \" + e\n"
+                  "        \"outer: \" + e.message\n"
                   "    }\n"
                   "    print(result)\n"
                   "}\n",
@@ -4416,7 +4416,7 @@ static void test_http_get_wrong_type(void) {
                   "    try {\n"
                   "        http_get(123)\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "http_get() expects (url: String)");
@@ -4427,7 +4427,7 @@ static void test_http_get_no_args(void) {
                   "    try {\n"
                   "        http_get()\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "http_get() expects (url: String)");
@@ -4438,7 +4438,7 @@ static void test_http_get_invalid_url(void) {
                   "    try {\n"
                   "        http_get(\"ftp://example.com\")\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "invalid URL: must start with http:// or https://");
@@ -4449,7 +4449,7 @@ static void test_http_post_wrong_type(void) {
                   "    try {\n"
                   "        http_post(123)\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "http_post() expects (url: String, options?: Map)");
@@ -4460,7 +4460,7 @@ static void test_http_post_invalid_url(void) {
                   "    try {\n"
                   "        http_post(\"not-a-url\")\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "invalid URL: must start with http:// or https://");
@@ -4471,7 +4471,7 @@ static void test_http_request_wrong_type(void) {
                   "    try {\n"
                   "        http_request(123, 456)\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "http_request() expects (method: String, url: String, options?: Map)");
@@ -4482,7 +4482,7 @@ static void test_http_request_too_few_args(void) {
                   "    try {\n"
                   "        http_request(\"GET\")\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "http_request() expects (method: String, url: String, options?: Map)");
@@ -4493,7 +4493,7 @@ static void test_http_request_invalid_url(void) {
                   "    try {\n"
                   "        http_request(\"PUT\", \"bad://url\")\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "invalid URL: must start with http:// or https://");
@@ -4555,7 +4555,7 @@ static void test_toml_parse_wrong_type(void) {
                   "    try {\n"
                   "        toml_parse(123)\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "toml_parse() expects (String)");
@@ -4566,7 +4566,7 @@ static void test_toml_stringify_wrong_type(void) {
                   "    try {\n"
                   "        toml_stringify(123)\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "toml_stringify: value must be a Map");
@@ -4630,7 +4630,7 @@ static void test_yaml_parse_wrong_type(void) {
                   "    try {\n"
                   "        yaml_parse(123)\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "yaml_parse() expects (String)");
@@ -4641,7 +4641,7 @@ static void test_yaml_stringify_wrong_type(void) {
                   "    try {\n"
                   "        yaml_stringify(123)\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "yaml_stringify: value must be a Map or Array");
@@ -5086,7 +5086,7 @@ static void test_bitwise_precedence(void) {
 
 static void test_bitwise_shift_range(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let result = try { 1 << 64 } catch e { e }\n"
+                  "    let result = try { 1 << 64 } catch e { e.message }\n"
                   "    print(result)\n"
                   "}\n",
                   "shift amount out of range (0..63)");
@@ -5782,8 +5782,8 @@ static void test_require_ext_double_load(void) {
      * Both attempts should produce the same error message, verifying that
      * failed loads are not cached as successes. */
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let r1 = try { require_ext(\"nonexistent_double_xyz\") } catch e { e }\n"
-                  "    let r2 = try { require_ext(\"nonexistent_double_xyz\") } catch e { e }\n"
+                  "    let r1 = try { require_ext(\"nonexistent_double_xyz\") } catch e { e.message }\n"
+                  "    let r2 = try { require_ext(\"nonexistent_double_xyz\") } catch e { e.message }\n"
                   "    print(r1 == r2)\n"
                   "}\n",
                   "true");
@@ -9042,7 +9042,7 @@ static void test_panic_message(void) {
                   "    try {\n"
                   "        panic(\"test boom\")\n"
                   "    } catch e {\n"
-                  "        print(e)\n"
+                  "        print(e.message)\n"
                   "    }\n"
                   "}\n",
                   "test boom");
@@ -11322,7 +11322,7 @@ static void test_try_catch_in_function(void) {
                   "    let result = try {\n"
                   "        risky(10, 0)\n"
                   "    } catch e {\n"
-                  "        \"caught: \" + e\n"
+                  "        \"caught: \" + e.message\n"
                   "    }\n"
                   "    print(result)\n"
                   "}\n",
@@ -11350,7 +11350,7 @@ static void test_error_multi_frame(void) {
                   "    let result = try {\n"
                   "        outer()\n"
                   "    } catch e {\n"
-                  "        e\n"
+                  "        e.message\n"
                   "    }\n"
                   "    print(result)\n"
                   "}\n",
@@ -11368,7 +11368,7 @@ static void test_try_catch_conditional_error(void) {
                   "        validate(-5)\n"
                   "        \"ok\"\n"
                   "    } catch e {\n"
-                  "        \"caught: \" + e\n"
+                  "        \"caught: \" + e.message\n"
                   "    }\n"
                   "    print(r)\n"
                   "}\n",

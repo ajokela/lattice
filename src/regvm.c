@@ -420,6 +420,55 @@ static RegVMResult rvm_error(RegVM *vm, const char *fmt, ...) {
 /* Forward declaration needed by rvm_handle_error */
 static inline void reg_set(LatValue *r, LatValue val);
 
+/* Build a structured error Map from the current RegVM state.
+ * Must be called BEFORE unwinding frames so the stack trace is accurate. */
+static LatValue regvm_build_error_map(RegVM *vm, const char *message) {
+    LatValue err_map = value_map_new();
+
+    /* message */
+    LatValue msg_val = value_string(message);
+    lat_map_set(err_map.as.map.map, "message", &msg_val);
+
+    /* line — from the topmost frame */
+    int line = 0;
+    if (vm->frame_count > 0) {
+        RegCallFrame *f = &vm->frames[vm->frame_count - 1];
+        if (f->chunk && f->chunk->lines) {
+            size_t offset = (size_t)(f->ip - f->chunk->code);
+            if (offset > 0) offset--;
+            if (offset < f->chunk->lines_len) line = f->chunk->lines[offset];
+        }
+    }
+    LatValue line_val = value_int(line);
+    lat_map_set(err_map.as.map.map, "line", &line_val);
+
+    /* stack — array of strings */
+    LatValue *stack_elems = NULL;
+    size_t stack_len = 0;
+    if (vm->frame_count > 0) {
+        stack_elems = malloc((size_t)vm->frame_count * sizeof(LatValue));
+        for (int i = vm->frame_count; i > 0; i--) {
+            RegCallFrame *f = &vm->frames[i - 1];
+            if (!f->chunk) continue;
+            size_t offset = (size_t)(f->ip - f->chunk->code);
+            if (offset > 0) offset--;
+            int fline = 0;
+            if (f->chunk->lines && offset < f->chunk->lines_len) fline = f->chunk->lines[offset];
+            const char *name = f->chunk->name;
+            char buf[256];
+            if (name && name[0]) snprintf(buf, sizeof(buf), "%s() at line %d", name, fline);
+            else if (i == 1) snprintf(buf, sizeof(buf), "<script> at line %d", fline);
+            else snprintf(buf, sizeof(buf), "<closure> at line %d", fline);
+            stack_elems[stack_len++] = value_string(buf);
+        }
+    }
+    LatValue stack_arr = value_array(stack_elems, stack_len);
+    lat_map_set(err_map.as.map.map, "stack", &stack_arr);
+    free(stack_elems);
+
+    return err_map;
+}
+
 /* Error handler that routes through exception handlers when available.
  * Used inside the dispatch loop via RVM_ERROR macro.
  * Returns REGVM_OK if handled (execution continues), error otherwise. */
@@ -430,8 +479,10 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
     lat_vasprintf(&inner, fmt, args);
     va_end(args);
 
-    /* If there's an active handler, pass raw message to catch variable */
+    /* If there's an active handler, build structured error map before unwinding */
     if (vm->handler_count > 0) {
+        LatValue err_map = regvm_build_error_map(vm, inner);
+        free(inner);
         RegHandler h = vm->handlers[--vm->handler_count];
 
         /* Unwind frames */
@@ -445,7 +496,7 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
         *frame_ptr = &vm->frames[vm->frame_count - 1];
         *R_ptr = (*frame_ptr)->regs;
         (*frame_ptr)->ip = h.ip;
-        reg_set(&(*R_ptr)[h.error_reg], value_string_owned(inner));
+        reg_set(&(*R_ptr)[h.error_reg], err_map);
         return REGVM_OK;
     }
 
@@ -4364,6 +4415,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             return REGVM_RUNTIME_ERROR;
         }
 
+        /* Build structured error map before unwinding */
+        const char *msg = (thrown.type == VAL_STR) ? thrown.as.str_val : NULL;
+        char *repr = msg ? NULL : value_repr(&thrown);
+        LatValue err_map = regvm_build_error_map(vm, msg ? msg : repr);
+        free(repr);
+        value_free(&thrown);
+
         /* Unwind to handler */
         RegHandler h = vm->handlers[--vm->handler_count];
 
@@ -4379,7 +4437,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         R = frame->regs;
         frame->ip = h.ip;
 
-        reg_set(&R[h.error_reg], thrown);
+        reg_set(&R[h.error_reg], err_map);
         DISPATCH();
     }
 

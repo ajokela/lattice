@@ -112,6 +112,37 @@ static char *ev_attach_trace(Evaluator *ev, char *msg) {
     return out;
 }
 
+/* Build a structured error Map for try/catch from the current evaluator state.
+ * Contains: message (String), line (Int), stack (Array of Strings). */
+static LatValue ev_build_error_map(Evaluator *ev, const char *message) {
+    LatValue err_map = value_map_new();
+
+    /* message */
+    LatValue msg_val = value_string(message);
+    lat_map_set(err_map.as.map.map, "message", &msg_val);
+
+    /* line — 0 for tree-walker (no precise line tracking per expression) */
+    LatValue line_val = value_int(0);
+    lat_map_set(err_map.as.map.map, "line", &line_val);
+
+    /* stack — array of strings from the call stack */
+    LatValue *stack_elems = NULL;
+    size_t stack_len = 0;
+    if (ev->call_depth > 0) {
+        stack_elems = malloc(ev->call_depth * sizeof(LatValue));
+        for (size_t i = ev->call_depth; i > 0; i--) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "in %s()", ev->call_stack[i - 1]);
+            stack_elems[stack_len++] = value_string(buf);
+        }
+    }
+    LatValue stack_arr = value_array(stack_elems, stack_len);
+    lat_map_set(err_map.as.map.map, "stack", &stack_arr);
+    free(stack_elems);
+
+    return err_map;
+}
+
 /* ── EvalResult helpers ── */
 
 static EvalResult eval_ok(LatValue v) {
@@ -1442,6 +1473,9 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
         bool eq = value_eq(lv, rv);
         return eval_ok(value_bool(op == BINOP_EQ ? eq : !eq));
     }
+    /* Cross-type equality: different types are never equal */
+    if (op == BINOP_EQ) return eval_ok(value_bool(false));
+    if (op == BINOP_NEQ) return eval_ok(value_bool(true));
 
     char *err = NULL;
     lat_asprintf(&err, "unsupported binary operation on %s and %s", value_type_name(lv), value_type_name(rv));
@@ -9081,11 +9115,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             env_pop_scope(ev->env);
             stats_scope_pop(&ev->stats);
             if (IS_ERR(tr)) {
-                /* Error: bind to catch variable and execute catch block */
+                /* Error: bind structured error map to catch variable */
+                LatValue err_map = ev_build_error_map(ev, tr.error);
+                free(tr.error);
                 stats_scope_push(&ev->stats);
                 env_push_scope(ev->env);
-                env_define(ev->env, expr->as.try_catch.catch_var, value_string(tr.error));
-                free(tr.error);
+                env_define(ev->env, expr->as.try_catch.catch_var, err_map);
                 EvalResult cr = eval_block_stmts(ev, expr->as.try_catch.catch_stmts, expr->as.try_catch.catch_count);
                 env_pop_scope(ev->env);
                 stats_scope_pop(&ev->stats);

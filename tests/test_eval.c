@@ -3878,3 +3878,118 @@ TEST(gc_vm_init_state) {
     stackvm_free(&vm);
     lat_runtime_free(&rt);
 }
+
+/* ── Structured Error Tests (LAT-73) ── */
+
+TEST(structured_error_message) {
+    /* Error caught by try/catch should have a .message field */
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = try {\n"
+                "        1 / 0\n"
+                "    } catch e {\n"
+                "        e.message\n"
+                "    }\n"
+                "    assert(result == \"division by zero\", result)\n"
+                "}\n");
+}
+
+TEST(structured_error_has_line) {
+    /* Error caught by try/catch should have a .line field (Int) */
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = try {\n"
+                "        1 / 0\n"
+                "    } catch e {\n"
+                "        e.line\n"
+                "    }\n"
+                "    assert(typeof(result) == \"Int\", \"line should be Int, got \" + typeof(result))\n"
+                "    assert(result >= 0, \"line should be >= 0\")\n"
+                "}\n");
+}
+
+TEST(structured_error_has_stack) {
+    /* Error caught by try/catch should have a .stack field (Array) */
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = try {\n"
+                "        1 / 0\n"
+                "    } catch e {\n"
+                "        e.stack\n"
+                "    }\n"
+                "    assert(typeof(result) == \"Array\", \"stack should be Array, got \" + typeof(result))\n"
+                "    assert(len(result) > 0, \"stack should be non-empty\")\n"
+                "}\n");
+}
+
+TEST(structured_error_stack_in_fn) {
+    /* Stack trace should include the function that errored */
+    ASSERT_RUNS("fn boom() -> Int {\n"
+                "    return 1 / 0\n"
+                "}\n"
+                "fn main() {\n"
+                "    let e = try {\n"
+                "        boom()\n"
+                "    } catch err {\n"
+                "        err\n"
+                "    }\n"
+                "    assert(e.message == \"division by zero\")\n"
+                "    assert(typeof(e.stack) == \"Array\")\n"
+                "    assert(len(e.stack) >= 2, \"stack should have at least 2 frames\")\n"
+                "}\n");
+}
+
+TEST(structured_error_is_map) {
+    /* Caught error should be a Map type */
+    ASSERT_RUNS("fn main() {\n"
+                "    let result = try {\n"
+                "        1 / 0\n"
+                "    } catch e {\n"
+                "        typeof(e)\n"
+                "    }\n"
+                "    assert(result == \"Map\", \"error should be Map, got \" + result)\n"
+                "}\n");
+}
+
+TEST(structured_error_throw_caught) {
+    /* Errors from require/ensure contracts should also be structured */
+    ASSERT_RUNS("fn checked(x: Int) -> Int\n"
+                "    require x > 0, \"must be positive\"\n"
+                "{\n"
+                "    return x * 2\n"
+                "}\n"
+                "fn main() {\n"
+                "    let result = try {\n"
+                "        checked(-1)\n"
+                "    } catch e {\n"
+                "        e.message\n"
+                "    }\n"
+                "    assert(result.contains(\"must be positive\"), result)\n"
+                "}\n");
+}
+
+TEST(structured_error_nested_catch) {
+    /* Nested try/catch should each get structured errors */
+    ASSERT_RUNS("fn main() {\n"
+                "    let outer = try {\n"
+                "        let inner = try {\n"
+                "            1 / 0\n"
+                "        } catch e {\n"
+                "            assert(e.message == \"division by zero\")\n"
+                "            \"inner ok\"\n"
+                "        }\n"
+                "        assert(inner == \"inner ok\")\n"
+                "        inner\n"
+                "    } catch e {\n"
+                "        \"outer: \" + e.message\n"
+                "    }\n"
+                "    assert(outer == \"inner ok\")\n"
+                "}\n");
+}
+
+TEST(structured_error_backward_compat_is_error) {
+    /* is_error() should still work for error() return values (Result pattern) */
+    ASSERT_RUNS("fn main() {\n"
+                "    let e = error(\"oops\")\n"
+                "    assert(is_error(e), \"error() should produce is_error() == true\")\n"
+                "    assert(!is_error(42), \"42 should not be an error\")\n"
+                "    assert(!is_error(\"hello\"), \"string should not be an error\")\n"
+                "}\n");
+}
