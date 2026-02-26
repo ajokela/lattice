@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, traits with `impl` blocks, expression-based control flow, pattern matching, destructuring assignments, enums, sets, tuples, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, phase borrowing, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), `@fluid`/`@crystal` annotations, composite phase constraints, bytecode compilation to `.latc` files (with both C and self-hosted compiler backends), standard libraries (test runner, validation, dotenv, functional utilities), and an interactive REPL with auto-display.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, traits with `impl` blocks, expression-based control flow, pattern matching with exhaustiveness checking and array/struct destructuring, enums, sets, tuples, lazy iterators with chainable transforms, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system with namespace isolation, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, phase borrowing, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), `@fluid`/`@crystal` annotations, composite phase constraints, bytecode compilation to `.latc` files (with both C and self-hosted compiler backends), opt-in mark-sweep garbage collector, built-in test framework with assertions, `clat fmt` source formatter, `clat doc` documentation generator, interactive debugger (`--debug`) and in-code `breakpoint()`, REPL with tab completion and auto-display, and a self-hosted package registry.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -60,6 +60,7 @@ flux copy = clone(data)     // independent deep copy
 | `Enum` | Sum type with variants (`Color::Red`) |
 | `Set` | Unordered collection of unique values (`Set::from([1, 2, 3])`) |
 | `Tuple` | Fixed-size immutable sequence (`(1, "hello", true)`) |
+| `Iterator` | Lazy sequence with chainable transforms (`iter([1,2,3])`) |
 | `Nil` | Explicit null value (`nil`) |
 | `Unit` | Absence of a meaningful value (result of statements) |
 
@@ -471,7 +472,20 @@ let result = match value {
 }
 ```
 
-Patterns support: integer/string/bool literals, ranges (`1..10`), variable bindings, guards (`if condition`), wildcards (`_`), and negative literals.
+Patterns support: integer/string/bool literals, ranges (`1..10`), variable bindings, guards (`if condition`), wildcards (`_`), negative literals, array destructuring (`[a, b, ...rest]`), and struct destructuring (`{field: pat}`). The compiler warns on non-exhaustive matches (missing enum variants, bool cases, or absent wildcard arms).
+
+```lattice
+match point {
+    [0, 0] => "origin",
+    [x, 0] => "on x-axis at ${x}",
+    [_, ...rest] => "rest: ${rest}",
+    _ => "other"
+}
+match user {
+    {role: "admin"} => "admin user",
+    {name, age} => "${name} is ${age}"
+}
+```
 
 ### Destructuring
 
@@ -530,6 +544,24 @@ print(point.0)          // 10
 print(record.1)         // 30
 print(record.len())     // 3
 print(typeof(point))    // Tuple
+```
+
+### Iterators
+
+Lazy sequences with chainable transforms. Create from arrays, ranges, or repeat values:
+
+```lattice
+let it = iter([1, 2, 3, 4, 5])
+let doubled = it.map(|x| x * 2).filter(|x| x > 4).collect()  // [6, 8, 10]
+
+let r = range_iter(1, 10).take(3).collect()   // [1, 2, 3]
+let inf = repeat_iter(42).take(5).collect()   // [42, 42, 42, 42, 42]
+
+// Chainable: map, filter, take, skip, enumerate, zip
+// Consumers: collect, reduce, any, all, count
+for val in iter([10, 20, 30]) {
+    print(val)
+}
 ```
 
 ### Nil, Nil Coalescing & Optional Chaining
@@ -1349,6 +1381,35 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `struct_to_map(val)` | Converts a struct to a `{field_name: value}` Map |
 | `struct_from_map(name, map)` | Creates a struct instance from a type name and Map of field values |
 
+### Iterators
+
+| Function | Description |
+|----------|-------------|
+| `iter(array)` | Create iterator from array |
+| `range_iter(start, end)` | Lazy range iterator (optional step: `range_iter(0, 10, 2)`) |
+| `repeat_iter(value)` | Infinite iterator repeating a value (optional count: `repeat_iter(0, 5)`) |
+
+Iterator methods: `.map(fn)`, `.filter(fn)`, `.take(n)`, `.skip(n)`, `.enumerate()`, `.zip(other)`, `.collect()`, `.reduce(init, fn)`, `.any(fn)`, `.all(fn)`, `.count()`, `.next()`
+
+### Testing
+
+| Function | Description |
+|----------|-------------|
+| `assert_eq(a, b)` | Assert two values are equal |
+| `assert_ne(a, b)` | Assert two values are not equal |
+| `assert_true(x)` | Assert value is `true` |
+| `assert_false(x)` | Assert value is `false` |
+| `assert_nil(x)` | Assert value is `nil` |
+| `assert_throws(fn)` | Assert closure throws an error |
+| `assert_contains(haystack, needle)` | Assert string/array contains value |
+| `assert_type(val, type_str)` | Assert value has the given type |
+
+### Debugging
+
+| Function | Description |
+|----------|-------------|
+| `breakpoint()` | Pause execution and drop into interactive REPL with access to locals, backtrace, and expression evaluation |
+
 ### String Interpolation
 
 Embed expressions directly inside string literals with `${...}`:
@@ -1455,6 +1516,23 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 | `.send(val)` | Send a crystal value on the channel |
 | `.recv()` | Receive a value (blocks until available, Unit if closed) |
 | `.close()` | Close the channel |
+
+### Iterator Methods
+
+| Method | Description |
+|--------|-------------|
+| `.next()` | Get next value (nil when exhausted) |
+| `.map(fn)` | Transform each element |
+| `.filter(fn)` | Keep elements where fn returns true |
+| `.take(n)` | Take first n elements |
+| `.skip(n)` | Skip first n elements |
+| `.enumerate()` | Yield `[index, value]` pairs |
+| `.zip(other)` | Pair elements with another iterator |
+| `.collect()` | Consume into array |
+| `.reduce(init, fn)` | Fold into single value |
+| `.any(fn)` | True if any element matches |
+| `.all(fn)` | True if all elements match |
+| `.count()` | Count remaining elements |
 
 ### Enum Methods
 
@@ -1587,17 +1665,27 @@ Both backends produce identical output. The self-hosted compiler supports the fu
 ```
 clat [options] [file.lat]
 clat compile <file.lat> -o <output.latc>
+clat fmt [--check] [--stdin] <file.lat>
+clat doc [--json|--html] [-o dir] <file.lat>
+clat test [--filter pat] [--verbose] [--summary] <file_or_dir>
 ```
 
 | Flag | Description |
 |------|-------------|
 | `file.lat` | Run a Lattice source file (or `.latc` bytecode file) |
-| *(no file)* | Start the interactive REPL |
+| *(no file)* | Start the interactive REPL (with tab completion) |
 | `compile file.lat -o out.latc` | Compile source to bytecode file |
+| `fmt file.lat` | Format source code (4-space indent, attached braces) |
+| `fmt --check file.lat` | Check formatting without modifying (exit 1 if unformatted) |
+| `doc file.lat` | Generate documentation from `///` doc comments |
+| `test file_or_dir` | Run tests with assertion builtins and colored output |
 | `--tree-walk` | Use the tree-walking interpreter instead of the bytecode VM |
 | `--regvm` | Use the register-based VM backend |
-| `--stats` | Print memory/GC statistics to stderr after execution (tree-walk mode) |
+| `--debug` | Run with interactive debugger (step/next/continue/breakpoints) |
+| `--break N` | Set initial breakpoint at line N (implies `--debug`) |
+| `--gc` | Enable opt-in mark-sweep garbage collector |
 | `--gc-stress` | Force garbage collection on every allocation (for testing) |
+| `--stats` | Print memory/GC statistics to stderr after execution (tree-walk mode) |
 | `--no-assertions` | Disable `debug_assert()` and `require`/`ensure` contracts |
 
 ## Building & Testing

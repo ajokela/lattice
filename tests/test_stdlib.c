@@ -1218,7 +1218,7 @@ static void test_lat_eval_version(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    print(version())\n"
                   "}\n",
-                  "0.3.25");
+                  "0.3.26");
 }
 
 /* ======================================================================
@@ -4835,7 +4835,7 @@ static void test_triple_multiline_interpolation(void) {
                   "    \"\"\"\n"
                   "    print(s)\n"
                   "}\n",
-                  "Hello, Lattice!\nVersion 0.3.25");
+                  "Hello, Lattice!\nVersion 0.3.26");
 }
 
 static void test_triple_embedded_quotes(void) {

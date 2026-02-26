@@ -1,7 +1,7 @@
 #ifndef LATTICE_H
 #define LATTICE_H
 
-#define LATTICE_VERSION "0.3.25"
+#define LATTICE_VERSION        "0.3.26"
 #define LATTICE_MAX_CALL_DEPTH 1000
 
 #include <stddef.h>
@@ -14,8 +14,7 @@
 
 /* GCC's warn_unused_result cannot be silenced by (void) casts on asprintf.
    These wrappers properly consume the return value. */
-__attribute__((format(printf, 2, 3)))
-static inline void lat_asprintf(char **strp, const char *fmt, ...) {
+__attribute__((format(printf, 2, 3))) static inline void lat_asprintf(char **strp, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     if (vasprintf(strp, fmt, ap) < 0) *strp = NULL;

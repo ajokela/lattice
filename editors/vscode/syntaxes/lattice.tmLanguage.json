@@ -232,7 +232,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.core.lattice",
-          "match": "\\b(typeof|phase_of|to_string|repr|len|assert|error|is_error|exit|version|print_raw|eprint|input|is_complete|identity|pipe|compose|format)\\b"
+          "match": "\\b(typeof|phase_of|to_string|repr|len|assert|error|is_error|exit|version|print_raw|eprint|input|is_complete|identity|pipe|compose|format|breakpoint|assert_eq|assert_ne|assert_true|assert_false|assert_nil|assert_throws|assert_contains|assert_type|iter|range_iter|repeat_iter|recursion_limit|set_recursion_limit)\\b"
         },
         {
           "name": "support.function.builtin.io.lattice",
