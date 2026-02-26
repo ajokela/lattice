@@ -18,7 +18,7 @@ typedef enum {
 
 typedef struct {
     ControlFlowTag tag;
-    LatValue       value;  /* only meaningful for CF_RETURN */
+    LatValue value; /* only meaningful for CF_RETURN */
 } ControlFlow;
 
 /* Memory statistics */
@@ -57,16 +57,16 @@ typedef struct {
 
 /* Evaluator result */
 typedef struct {
-    bool     ok;
-    LatValue value;    /* valid if ok == true */
-    char    *error;    /* heap-allocated error if ok == false */
-    ControlFlow cf;    /* control flow signal */
+    bool ok;
+    LatValue value; /* valid if ok == true */
+    char *error;    /* heap-allocated error if ok == false */
+    ControlFlow cf; /* control flow signal */
 } EvalResult;
 
 /* Bond entry: tracks variables bonded to a target for phase propagation */
 typedef struct {
-    char  *target;       /* target variable name */
-    char **deps;         /* bonded dependency variable names */
+    char *target;          /* target variable name */
+    char **deps;           /* bonded dependency variable names */
     char **dep_strategies; /* per-dep strategy: "mirror", "inverse", "gate" (parallel to deps) */
     size_t dep_count;
     size_t dep_cap;
@@ -74,106 +74,109 @@ typedef struct {
 
 /* Seed entry: pending contracts to validate on freeze */
 typedef struct {
-    char    *var_name;
-    LatValue contract;    /* closure value */
+    char *var_name;
+    LatValue contract; /* closure value */
 } SeedEntry;
 
 /* Pressure entry: soft constraints on fluid variables */
 typedef struct {
     char *var_name;
-    char *mode;           /* "no_grow", "no_shrink", "no_resize", "read_heavy" */
+    char *mode; /* "no_grow", "no_shrink", "no_resize", "read_heavy" */
 } PressureEntry;
 
 /* History snapshot for temporal values */
 typedef struct {
-    char     *phase_name;  /* "fluid", "crystal", "unphased" */
-    LatValue  value;       /* deep clone of value at this point */
-    int       line;        /* source line where change occurred */
-    char     *fn_name;     /* function name (NULL for top-level) */
+    char *phase_name; /* "fluid", "crystal", "unphased" */
+    LatValue value;   /* deep clone of value at this point */
+    int line;         /* source line where change occurred */
+    char *fn_name;    /* function name (NULL for top-level) */
 } HistorySnapshot;
 
 /* History tracking for a single variable */
 typedef struct {
     HistorySnapshot *snapshots;
-    size_t           count;
-    size_t           cap;
+    size_t count;
+    size_t cap;
 } VariableHistory;
 
 /* Tracked variable entry */
 typedef struct {
-    char            *name;
-    VariableHistory  history;
+    char *name;
+    VariableHistory history;
 } TrackedVar;
 
 /* Phase reaction entry: callbacks that fire on phase transitions */
 typedef struct {
-    char     *var_name;
-    LatValue *callbacks;   /* array of closure values */
-    size_t    cb_count;
-    size_t    cb_cap;
+    char *var_name;
+    LatValue *callbacks; /* array of closure values */
+    size_t cb_count;
+    size_t cb_cap;
 } ReactionEntry;
 
 /* Defer entry: deferred block registered at a given scope depth */
 typedef struct {
-    Stmt  **body;
-    size_t  body_count;
-    size_t  scope_depth;
+    Stmt **body;
+    size_t body_count;
+    size_t scope_depth;
 } DeferEntry;
 
 /* Evaluator state */
 typedef struct Evaluator {
-    Env        *env;
-    AstMode     mode;
-    LatMap      struct_defs;   /* char* -> StructDecl */
-    LatMap      enum_defs;     /* char* -> EnumDecl */
-    LatMap      fn_defs;       /* char* -> FnDecl */
-    LatMap      trait_defs;    /* char* -> TraitDecl* */
-    LatMap      impl_registry; /* "Type::Trait" -> ImplBlock* */
+    Env *env;
+    AstMode mode;
+    LatMap struct_defs;   /* char* -> StructDecl */
+    LatMap enum_defs;     /* char* -> EnumDecl */
+    LatMap fn_defs;       /* char* -> FnDecl */
+    LatMap trait_defs;    /* char* -> TraitDecl* */
+    LatMap impl_registry; /* "Type::Trait" -> ImplBlock* */
     MemoryStats stats;
-    DualHeap   *heap;
-    LatVec      gc_roots;      /* shadow stack of LatValue* */
-    LatVec      saved_envs;    /* stack of Env* saved during closure calls */
-    bool        gc_stress;
-    bool        no_regions;    /* baseline mode: skip region registration */
-    size_t      lat_eval_scope; /* when > 0, top-level lat_eval bindings go here */
-    LatMap      required_files; /* set of resolved paths already require()'d */
-    LatMap      module_cache;  /* char* -> LatValue (cached module Maps) */
-    LatMap      loaded_extensions; /* char* -> LatValue (cached extension Maps) */
-    LatVec      module_exprs;  /* Expr* body wrappers kept alive for module closures */
-    char       *script_dir;    /* directory of the main script (for require) */
-    int         prog_argc;     /* argc from main() for args() builtin */
-    char      **prog_argv;     /* argv from main() for args() builtin */
+    DualHeap *heap;
+    LatVec gc_roots;   /* shadow stack of LatValue* */
+    LatVec saved_envs; /* stack of Env* saved during closure calls */
+    bool gc_stress;
+    bool no_regions;          /* baseline mode: skip region registration */
+    size_t lat_eval_scope;    /* when > 0, top-level lat_eval bindings go here */
+    LatMap required_files;    /* set of resolved paths already require()'d */
+    LatMap module_cache;      /* char* -> LatValue (cached module Maps) */
+    LatMap loaded_extensions; /* char* -> LatValue (cached extension Maps) */
+    LatVec module_exprs;      /* Expr* body wrappers kept alive for module closures */
+    char *script_dir;         /* directory of the main script (for require) */
+    int prog_argc;            /* argc from main() for args() builtin */
+    char **prog_argv;         /* argv from main() for args() builtin */
     /* Phase propagation bonds */
-    BondEntry  *bonds;
-    size_t      bond_count;
-    size_t      bond_cap;
+    BondEntry *bonds;
+    size_t bond_count;
+    size_t bond_cap;
     /* Phase history / temporal values */
     TrackedVar *tracked_vars;
-    size_t      tracked_count;
-    size_t      tracked_cap;
+    size_t tracked_count;
+    size_t tracked_cap;
     /* Phase reactions */
     ReactionEntry *reactions;
-    size_t         reaction_count;
-    size_t         reaction_cap;
+    size_t reaction_count;
+    size_t reaction_cap;
     /* Seed crystals (deferred contracts) */
-    SeedEntry     *seeds;
-    size_t         seed_count;
-    size_t         seed_cap;
+    SeedEntry *seeds;
+    size_t seed_count;
+    size_t seed_cap;
     /* Phase pressure constraints */
     PressureEntry *pressures;
-    size_t         pressure_count;
-    size_t         pressure_cap;
+    size_t pressure_count;
+    size_t pressure_cap;
     /* Defer stack */
-    DeferEntry    *defer_stack;
-    size_t         defer_count;
-    size_t         defer_cap;
+    DeferEntry *defer_stack;
+    size_t defer_count;
+    size_t defer_cap;
     /* Contract/assertion control */
-    bool           assertions_enabled;
+    bool assertions_enabled;
+    /* Test runner options */
+    const char *test_filter; /* substring pattern to filter test names (NULL = run all) */
+    bool test_verbose;       /* show each test name and pass/fail */
     /* Call stack trace */
-    const char   **call_stack;
-    size_t         call_depth;
-    size_t         call_stack_cap;
-    size_t         max_call_depth;  /* configurable limit, default LATTICE_MAX_CALL_DEPTH */
+    const char **call_stack;
+    size_t call_depth;
+    size_t call_stack_cap;
+    size_t max_call_depth; /* configurable limit, default LATTICE_MAX_CALL_DEPTH */
 } Evaluator;
 
 /* Create a new evaluator */
@@ -196,6 +199,12 @@ void evaluator_set_argv(Evaluator *ev, int argc, char **argv);
 
 /* Enable/disable debug_assert() and contracts */
 void evaluator_set_assertions(Evaluator *ev, bool enabled);
+
+/* Set test filter pattern (substring match against test names). NULL = run all. */
+void evaluator_set_test_filter(Evaluator *ev, const char *pattern);
+
+/* Enable verbose test output (show each test name and result). */
+void evaluator_set_test_verbose(Evaluator *ev, bool enabled);
 
 /* Evaluate a program. Returns heap-allocated error string or NULL on success. */
 char *evaluator_run(Evaluator *ev, const Program *prog);

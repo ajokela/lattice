@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <libgen.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #ifndef __EMSCRIPTEN__
 #if defined(LATTICE_HAS_EDITLINE)
 #include <editline/readline.h>
@@ -821,7 +823,7 @@ static void repl_tree_walk(void) {
     free(kept_tokens);
 }
 
-static int run_test_file(const char *path) {
+static int run_test_file_ex(const char *path, const char *filter, bool verbose, bool print_file_header) {
     char *source = read_file(path);
     if (!source) {
         fprintf(stderr, "error: cannot read '%s'\n", path);
@@ -859,12 +861,16 @@ static int run_test_file(const char *path) {
     /* Match exhaustiveness check */
     check_match_exhaustiveness(&prog);
 
+    if (print_file_header) printf("Running tests in %s...\n", path);
+
     Evaluator *ev = evaluator_new();
     if (gc_stress_mode) evaluator_set_gc_stress(ev, true);
     if (no_regions_mode) evaluator_set_no_regions(ev, true);
     if (no_assertions_mode) evaluator_set_assertions(ev, false);
     evaluator_set_script_dir(ev, dir);
     evaluator_set_argv(ev, saved_argc, saved_argv);
+    if (filter) evaluator_set_test_filter(ev, filter);
+    if (verbose) evaluator_set_test_verbose(ev, true);
 
     int result = evaluator_run_tests(ev, &prog);
 
@@ -876,6 +882,50 @@ static int run_test_file(const char *path) {
     free(source);
     return result;
 }
+
+/* Check if a filename matches test file patterns: *_test.lat or test_*.lat */
+static bool is_test_file(const char *name) {
+    size_t len = strlen(name);
+    if (len < 5) return false;
+    /* Must end in .lat */
+    if (strcmp(name + len - 4, ".lat") != 0) return false;
+    /* Check for test_*.lat prefix */
+    if (strncmp(name, "test_", 5) == 0) return true;
+    /* Check for *_test.lat suffix */
+    if (len >= 9 && strcmp(name + len - 9, "_test.lat") == 0) return true;
+    return false;
+}
+
+/* Recursively discover test files in a directory */
+static void discover_test_files(const char *dir_path, char ***files, size_t *count, size_t *cap) {
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] == '.') continue; /* skip hidden files */
+        char full_path[4096];
+        size_t dlen = strlen(dir_path);
+        const char *sep = (dlen > 0 && dir_path[dlen - 1] == '/') ? "" : "/";
+        snprintf(full_path, sizeof(full_path), "%s%s%s", dir_path, sep, ent->d_name);
+        /* Check if directory */
+        struct stat st;
+        if (stat(full_path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            discover_test_files(full_path, files, count, cap);
+        } else if (S_ISREG(st.st_mode) && is_test_file(ent->d_name)) {
+            if (*count >= *cap) {
+                *cap = *cap ? *cap * 2 : 16;
+                *files = realloc(*files, *cap * sizeof(char *));
+            }
+            (*files)[*count] = strdup(full_path);
+            (*count)++;
+        }
+    }
+    closedir(dir);
+}
+
+/* Sort helper for qsort on string pointers */
+static int cmp_strings(const void *a, const void *b) { return strcmp(*(const char **)a, *(const char **)b); }
 
 int main(int argc, char **argv) {
     saved_argc = argc;
@@ -1042,21 +1092,75 @@ int main(int argc, char **argv) {
     /* Check for 'test' subcommand */
     if (argc >= 2 && strcmp(argv[1], "test") == 0) {
         const char *test_path = NULL;
+        const char *filter_pattern = NULL;
+        bool verbose_mode = false;
+        bool summary_mode = false;
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--gc-stress") == 0) gc_stress_mode = true;
             else if (strcmp(argv[i], "--no-regions") == 0) no_regions_mode = true;
             else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;
+            else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) verbose_mode = true;
+            else if (strcmp(argv[i], "--summary") == 0) summary_mode = true;
+            else if ((strcmp(argv[i], "--filter") == 0 || strcmp(argv[i], "-f") == 0) && i + 1 < argc)
+                filter_pattern = argv[++i];
             else if (!test_path) test_path = argv[i];
             else {
-                fprintf(stderr, "usage: clat test [file.lat]\n");
+                fprintf(stderr, "usage: clat test <file.lat|dir/> [--filter pattern] [--verbose] [--summary]\n");
                 return 1;
             }
         }
         if (!test_path) {
-            fprintf(stderr, "usage: clat test <file.lat>\n");
+            fprintf(stderr, "usage: clat test <file.lat|dir/> [--filter pattern] [--verbose] [--summary]\n");
             return 1;
         }
-        return run_test_file(test_path);
+
+        /* Check if test_path is a directory */
+        struct stat path_stat;
+        if (stat(test_path, &path_stat) != 0) {
+            fprintf(stderr, "error: cannot access '%s'\n", test_path);
+            return 1;
+        }
+
+        if (S_ISDIR(path_stat.st_mode)) {
+            /* Directory mode: discover and run test files */
+            char **test_files = NULL;
+            size_t file_count = 0, file_cap = 0;
+            discover_test_files(test_path, &test_files, &file_count, &file_cap);
+            if (file_count == 0) {
+                printf("No test files found in '%s'.\n", test_path);
+                printf("(Looking for *_test.lat or test_*.lat files)\n");
+                free(test_files);
+                return 0;
+            }
+            qsort(test_files, file_count, sizeof(char *), cmp_strings);
+
+            printf("Discovered %zu test file%s in %s\n\n", file_count, file_count == 1 ? "" : "s", test_path);
+
+            int total_exit = 0;
+            size_t files_passed = 0, files_failed = 0;
+            for (size_t i = 0; i < file_count; i++) {
+                int result = run_test_file_ex(test_files[i], filter_pattern, verbose_mode, true);
+                if (result != 0) {
+                    files_failed++;
+                    total_exit = 1;
+                } else {
+                    files_passed++;
+                }
+                if (i < file_count - 1) printf("\n");
+            }
+
+            if (summary_mode || file_count > 1) {
+                printf("\n\033[1mOverall: %zu file%s passed, %zu failed (%zu total)\033[0m\n", files_passed,
+                       files_passed == 1 ? "" : "s", files_failed, file_count);
+            }
+
+            for (size_t i = 0; i < file_count; i++) free(test_files[i]);
+            free(test_files);
+            return total_exit;
+        }
+
+        /* Single file mode */
+        return run_test_file_ex(test_path, filter_pattern, verbose_mode, false);
     }
 
     /* Check for 'init' subcommand */

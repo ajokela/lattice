@@ -6578,6 +6578,239 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_unit());
                 }
 
+                /* ── Assertion helpers ── */
+
+                /// @builtin assert_eq(actual: Any, expected: Any) -> Unit
+                /// @category Testing
+                /// Assert that actual equals expected, with descriptive diff output.
+                /// @example assert_eq(2 + 2, 4)
+                if (strcmp(fn_name, "assert_eq") == 0) {
+                    if (argc != 2) {
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
+                        free(args);
+                        return eval_err(strdup("assert_eq() expects 2 arguments"));
+                    }
+                    if (!value_eq(&args[0], &args[1])) {
+                        char *actual = value_display(&args[0]);
+                        char *expected = value_display(&args[1]);
+                        char *msg = NULL;
+                        lat_asprintf(&msg, "assert_eq: expected %s, got %s", expected, actual);
+                        free(actual);
+                        free(expected);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin assert_ne(actual: Any, expected: Any) -> Unit
+                /// @category Testing
+                /// Assert that actual does not equal expected.
+                /// @example assert_ne(1, 2)
+                if (strcmp(fn_name, "assert_ne") == 0) {
+                    if (argc != 2) {
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
+                        free(args);
+                        return eval_err(strdup("assert_ne() expects 2 arguments"));
+                    }
+                    if (value_eq(&args[0], &args[1])) {
+                        char *val = value_display(&args[0]);
+                        char *msg = NULL;
+                        lat_asprintf(&msg, "assert_ne: values are equal: %s", val);
+                        free(val);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin assert_true(val: Any) -> Unit
+                /// @category Testing
+                /// Assert that val is true.
+                /// @example assert_true(1 < 2)
+                if (strcmp(fn_name, "assert_true") == 0) {
+                    if (argc != 1) {
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
+                        free(args);
+                        return eval_err(strdup("assert_true() expects 1 argument"));
+                    }
+                    if (args[0].type != VAL_BOOL || !args[0].as.bool_val) {
+                        char *val = value_display(&args[0]);
+                        char *msg = NULL;
+                        lat_asprintf(&msg, "assert_true: expected true, got %s", val);
+                        free(val);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin assert_false(val: Any) -> Unit
+                /// @category Testing
+                /// Assert that val is false.
+                /// @example assert_false(1 > 2)
+                if (strcmp(fn_name, "assert_false") == 0) {
+                    if (argc != 1) {
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
+                        free(args);
+                        return eval_err(strdup("assert_false() expects 1 argument"));
+                    }
+                    if (args[0].type != VAL_BOOL || args[0].as.bool_val) {
+                        char *val = value_display(&args[0]);
+                        char *msg = NULL;
+                        lat_asprintf(&msg, "assert_false: expected false, got %s", val);
+                        free(val);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin assert_nil(val: Any) -> Unit
+                /// @category Testing
+                /// Assert that val is nil.
+                /// @example assert_nil(nil)
+                if (strcmp(fn_name, "assert_nil") == 0) {
+                    if (argc != 1) {
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
+                        free(args);
+                        return eval_err(strdup("assert_nil() expects 1 argument"));
+                    }
+                    if (args[0].type != VAL_NIL) {
+                        char *val = value_display(&args[0]);
+                        char *msg = NULL;
+                        lat_asprintf(&msg, "assert_nil: expected nil, got %s", val);
+                        free(val);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin assert_throws(fn: Closure) -> String
+                /// @category Testing
+                /// Assert that calling fn() throws an error. Returns the error message.
+                /// @example assert_throws(|| { error("boom") })
+                if (strcmp(fn_name, "assert_throws") == 0) {
+                    if (argc != 1 || args[0].type != VAL_CLOSURE) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("assert_throws() expects a closure argument"));
+                    }
+                    /* Call the closure — pass nil if it expects a parameter (convention from lib/test.lat) */
+                    LatValue nil_arg = value_nil();
+                    size_t call_argc = args[0].as.closure.param_count > 0 ? 1 : 0;
+                    LatValue *call_args = call_argc > 0 ? &nil_arg : NULL;
+                    EvalResult r =
+                        call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                     args[0].as.closure.body, args[0].as.closure.captured_env, call_args, call_argc,
+                                     args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                    if (IS_ERR(r)) {
+                        /* Success — it threw via eval_err (assert failures, etc.) */
+                        LatValue ret = value_string(r.error);
+                        free(r.error);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_ok(ret);
+                    }
+                    /* Also check for error() return value (EVAL_ERROR:... string) */
+                    if (IS_OK(r) && r.value.type == VAL_STR && strncmp(r.value.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                        LatValue ret = value_string(r.value.as.str_val + 11);
+                        value_free(&r.value);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_ok(ret);
+                    }
+                    value_free(&r.value);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_err(strdup("assert_throws: expected an error but none was thrown"));
+                }
+
+                /// @builtin assert_contains(haystack: Any, needle: Any) -> Unit
+                /// @category Testing
+                /// Assert that haystack (String or Array) contains needle.
+                /// @example assert_contains("hello world", "world")
+                if (strcmp(fn_name, "assert_contains") == 0) {
+                    if (argc != 2) {
+                        for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
+                        free(args);
+                        return eval_err(strdup("assert_contains() expects 2 arguments"));
+                    }
+                    bool found = false;
+                    if (args[0].type == VAL_STR && args[1].type == VAL_STR) {
+                        found = strstr(args[0].as.str_val, args[1].as.str_val) != NULL;
+                    } else if (args[0].type == VAL_ARRAY) {
+                        for (size_t i = 0; i < args[0].as.array.len; i++) {
+                            if (value_eq(&args[0].as.array.elems[i], &args[1])) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("assert_contains: first argument must be a String or Array"));
+                    }
+                    if (!found) {
+                        char *haystack = value_display(&args[0]);
+                        char *needle = value_display(&args[1]);
+                        char *msg = NULL;
+                        lat_asprintf(&msg, "assert_contains: %s does not contain %s", haystack, needle);
+                        free(haystack);
+                        free(needle);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
+                /// @builtin assert_type(val: Any, type_name: String) -> Unit
+                /// @category Testing
+                /// Assert that typeof(val) equals type_name. Also checks struct names.
+                /// @example assert_type(42, "Int")
+                if (strcmp(fn_name, "assert_type") == 0) {
+                    if (argc != 2 || args[1].type != VAL_STR) {
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(strdup("assert_type() expects (value, type_name_string)"));
+                    }
+                    const char *actual_type = builtin_typeof_str(&args[0]);
+                    const char *expected_type = args[1].as.str_val;
+                    bool match = strcmp(actual_type, expected_type) == 0;
+                    if (!match && args[0].type == VAL_STRUCT) {
+                        match = strcmp(args[0].as.strct.name, expected_type) == 0;
+                    }
+                    if (!match) {
+                        char *msg = NULL;
+                        lat_asprintf(&msg, "assert_type: expected type %s, got %s", expected_type, actual_type);
+                        for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                        free(args);
+                        return eval_err(msg);
+                    }
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    return eval_ok(value_unit());
+                }
+
                 /* ── Functional programming builtins ── */
 
                 /// @builtin identity(val: Any) -> Any
@@ -12027,6 +12260,8 @@ Evaluator *evaluator_new(void) {
     ev->defer_count = 0;
     ev->defer_cap = 0;
     ev->assertions_enabled = true;
+    ev->test_filter = NULL;
+    ev->test_verbose = false;
     ev->max_call_depth = LATTICE_MAX_CALL_DEPTH;
     value_set_heap(ev->heap);
     return ev;
@@ -12132,6 +12367,10 @@ void evaluator_set_argv(Evaluator *ev, int argc, char **argv) {
 
 void evaluator_set_assertions(Evaluator *ev, bool enabled) { ev->assertions_enabled = enabled; }
 
+void evaluator_set_test_filter(Evaluator *ev, const char *pattern) { ev->test_filter = pattern; }
+
+void evaluator_set_test_verbose(Evaluator *ev, bool enabled) { ev->test_verbose = enabled; }
+
 char *evaluator_run(Evaluator *ev, const Program *prog) {
     ev->mode = prog->mode;
 
@@ -12228,24 +12467,33 @@ int evaluator_run_tests(Evaluator *ev, const Program *prog) {
         }
     }
 
-    /* Count tests */
+    /* Count tests (respecting filter) */
     size_t test_count = 0;
+    size_t skipped = 0;
     for (size_t i = 0; i < prog->item_count; i++) {
-        if (prog->items[i].tag == ITEM_TEST) test_count++;
+        if (prog->items[i].tag == ITEM_TEST) {
+            if (ev->test_filter && !strstr(prog->items[i].as.test_decl.name, ev->test_filter)) {
+                skipped++;
+            } else {
+                test_count++;
+            }
+        }
     }
 
     if (test_count == 0) {
-        printf("No tests found.\n");
+        if (skipped > 0) printf("No tests matched filter \"%s\" (%zu skipped).\n", ev->test_filter, skipped);
+        else printf("No tests found.\n");
         return 0;
     }
-
-    printf("Running %zu test%s...\n\n", test_count, test_count == 1 ? "" : "s");
 
     /* Third pass: run tests */
     size_t passed = 0, failed = 0;
     for (size_t i = 0; i < prog->item_count; i++) {
         if (prog->items[i].tag != ITEM_TEST) continue;
         TestDecl *td = &prog->items[i].as.test_decl;
+
+        /* Apply filter */
+        if (ev->test_filter && !strstr(td->name, ev->test_filter)) continue;
 
         stats_scope_push(&ev->stats);
         env_push_scope(ev->env);
@@ -12273,18 +12521,21 @@ int evaluator_run_tests(Evaluator *ev, const Program *prog) {
 
         if (ok) {
             passed++;
-            printf("  ok: %s\n", td->name);
+            printf("  \033[32mPASS\033[0m  %s\n", td->name);
         } else {
             failed++;
-            printf("  FAIL: %s\n", td->name);
             if (errmsg) {
-                printf("        %s\n", errmsg);
+                printf("  \033[31mFAIL\033[0m  %s \033[2m\u2014 %s\033[0m\n", td->name, errmsg);
                 free(errmsg);
+            } else {
+                printf("  \033[31mFAIL\033[0m  %s\n", td->name);
             }
         }
     }
 
-    printf("\nResults: %zu passed, %zu failed, %zu total\n", passed, failed, test_count);
+    printf("\nResults: %zu passed, %zu failed", passed, failed);
+    if (skipped > 0) printf(", %zu skipped", skipped);
+    printf(" (%zu total)\n", test_count + skipped);
     return failed > 0 ? 1 : 0;
 }
 
