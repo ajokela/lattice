@@ -3183,7 +3183,10 @@ TEST(eval_recursion_depth_limit) {
     char *err = NULL;
     int rc = run_source_ok(
         "fn blow_up() { blow_up() }\n"
-        "fn main() { blow_up() }\n",
+        "fn main() {\n"
+        "    set_recursion_limit(50)\n"
+        "    blow_up()\n"
+        "}\n",
         &err);
     ASSERT(rc != 0);
     ASSERT(err != NULL);
