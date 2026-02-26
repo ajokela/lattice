@@ -10,6 +10,7 @@
 #include "regvm.h"
 #include "runtime.h"
 #include "package.h"
+#include "formatter.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1044,6 +1045,84 @@ int main(int argc, char **argv) {
             return 1;
         }
         return pkg_cmd_remove(argv[2]);
+    }
+
+    /* Check for 'fmt' subcommand */
+    if (argc >= 2 && strcmp(argv[1], "fmt") == 0) {
+        bool check_only = false;
+        bool from_stdin = false;
+        const char *fmt_path = NULL;
+
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--check") == 0) check_only = true;
+            else if (strcmp(argv[i], "--stdin") == 0) from_stdin = true;
+            else if (!fmt_path) fmt_path = argv[i];
+            else {
+                fprintf(stderr, "usage: clat fmt [--check] [--stdin] [file.lat]\n");
+                return 1;
+            }
+        }
+
+        if (from_stdin) {
+            char *fmt_err = NULL;
+            char *formatted = lat_format_stdin(&fmt_err);
+            if (!formatted) {
+                fprintf(stderr, "error: %s\n", fmt_err ? fmt_err : "format failed");
+                free(fmt_err);
+                return 1;
+            }
+            fputs(formatted, stdout);
+            free(formatted);
+            return 0;
+        }
+
+        if (!fmt_path) {
+            fprintf(stderr, "usage: clat fmt [--check] [--stdin] <file.lat>\n");
+            return 1;
+        }
+
+        char *source = read_file(fmt_path);
+        if (!source) {
+            fprintf(stderr, "error: cannot read '%s'\n", fmt_path);
+            return 1;
+        }
+
+        if (check_only) {
+            char *fmt_err = NULL;
+            bool ok = lat_format_check(source, &fmt_err);
+            free(source);
+            if (fmt_err) {
+                fprintf(stderr, "error: %s\n", fmt_err);
+                free(fmt_err);
+                return 1;
+            }
+            if (!ok) {
+                fprintf(stderr, "%s: not formatted\n", fmt_path);
+                return 1;
+            }
+            return 0;
+        }
+
+        char *fmt_err = NULL;
+        char *formatted = lat_format(source, &fmt_err);
+        free(source);
+        if (!formatted) {
+            fprintf(stderr, "error: %s\n", fmt_err ? fmt_err : "format failed");
+            free(fmt_err);
+            return 1;
+        }
+
+        /* Write back in-place */
+        FILE *out = fopen(fmt_path, "w");
+        if (!out) {
+            fprintf(stderr, "error: cannot write '%s'\n", fmt_path);
+            free(formatted);
+            return 1;
+        }
+        fputs(formatted, out);
+        fclose(out);
+        free(formatted);
+        return 0;
     }
 
     for (int i = 1; i < argc; i++) {

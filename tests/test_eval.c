@@ -3180,3 +3180,149 @@ TEST(match_struct_non_struct) {
                 "    assert(result == \"not struct\", \"expected not struct\")\n"
                 "}\n");
 }
+
+/* ── Formatter tests ── */
+
+#include "formatter.h"
+
+/* Test: formatting preserves code semantics (format -> parse -> runs OK) */
+TEST(fmt_preserves_semantics) {
+    const char *source = "fn add(a: Int, b: Int) -> Int {\n"
+                         "    return a + b\n"
+                         "}\n"
+                         "\n"
+                         "fn main() {\n"
+                         "    let x = add(1, 2)\n"
+                         "    assert(x == 3, \"1+2 should be 3\")\n"
+                         "    flux y = 10\n"
+                         "    y += 5\n"
+                         "    assert(y == 15, \"10+5 should be 15\")\n"
+                         "}\n";
+
+    char *fmt_err = NULL;
+    char *formatted = lat_format(source, &fmt_err);
+    ASSERT(formatted != NULL);
+    ASSERT(fmt_err == NULL);
+
+    /* The formatted code should still run without errors */
+    char *run_err = NULL;
+    int rc = run_source_ok(formatted, &run_err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: formatted code failed: %s\n", run_err ? run_err : "(unknown)");
+        free(run_err);
+        free(formatted);
+        test_current_failed = 1;
+        return;
+    }
+    free(formatted);
+}
+
+/* Test: formatter is idempotent (formatting twice gives same result) */
+TEST(fmt_idempotent) {
+    const char *source = "fn   greet( name:String  ){\n"
+                         "let msg=\"Hello, \"+name\n"
+                         "print( msg )\n"
+                         "}\n";
+
+    char *fmt_err = NULL;
+    char *first = lat_format(source, &fmt_err);
+    ASSERT(first != NULL);
+
+    char *second = lat_format(first, &fmt_err);
+    ASSERT(second != NULL);
+
+    ASSERT_EQ_STR(first, second);
+
+    free(first);
+    free(second);
+}
+
+/* Test: formatting normalizes operator spacing */
+TEST(fmt_operator_spacing) {
+    const char *source = "fn main() {\n    let x=1+2\n}\n";
+
+    char *fmt_err = NULL;
+    char *formatted = lat_format(source, &fmt_err);
+    ASSERT(formatted != NULL);
+
+    /* Should contain "x = 1 + 2" with spaces */
+    ASSERT(strstr(formatted, "x = 1 + 2") != NULL);
+
+    free(formatted);
+}
+
+/* Test: formatting preserves comments */
+TEST(fmt_preserves_comments) {
+    const char *source = "// Top-level comment\n"
+                         "fn main() {\n"
+                         "    // Inner comment\n"
+                         "    let x = 1\n"
+                         "}\n";
+
+    char *fmt_err = NULL;
+    char *formatted = lat_format(source, &fmt_err);
+    ASSERT(formatted != NULL);
+
+    ASSERT(strstr(formatted, "// Top-level comment") != NULL);
+    ASSERT(strstr(formatted, "// Inner comment") != NULL);
+
+    free(formatted);
+}
+
+/* Test: formatting uses 4-space indentation */
+TEST(fmt_four_space_indent) {
+    const char *source = "fn main() {\n  let x = 1\n}\n";
+
+    char *fmt_err = NULL;
+    char *formatted = lat_format(source, &fmt_err);
+    ASSERT(formatted != NULL);
+
+    /* Should be indented with 4 spaces, not 2 */
+    ASSERT(strstr(formatted, "    let x = 1") != NULL);
+
+    free(formatted);
+}
+
+/* Test: formatting adds trailing newline */
+TEST(fmt_trailing_newline) {
+    const char *source = "fn main() {\n    let x = 1\n}";
+
+    char *fmt_err = NULL;
+    char *formatted = lat_format(source, &fmt_err);
+    ASSERT(formatted != NULL);
+
+    /* Should end with exactly one newline */
+    size_t len = strlen(formatted);
+    ASSERT(len > 0);
+    ASSERT(formatted[len - 1] == '\n');
+    /* No double newline at end */
+    if (len >= 2) ASSERT(formatted[len - 2] != '\n');
+
+    free(formatted);
+}
+
+/* Test: format_check returns false for unformatted code */
+TEST(fmt_check_detects_unformatted) {
+    const char *unformatted = "fn main(){\nlet x=1+2\n}\n";
+
+    char *fmt_err = NULL;
+    bool ok = lat_format_check(unformatted, &fmt_err);
+    ASSERT(!ok);
+}
+
+/* Test: format_check returns true for already-formatted code */
+TEST(fmt_check_passes_formatted) {
+    const char *source = "fn main() {\n"
+                         "    let x = 1 + 2\n"
+                         "}\n";
+
+    char *fmt_err = NULL;
+    char *formatted = lat_format(source, &fmt_err);
+    ASSERT(formatted != NULL);
+
+    /* The formatted version should pass check */
+    bool ok = lat_format_check(formatted, &fmt_err);
+    ASSERT(ok);
+
+    free(formatted);
+}
