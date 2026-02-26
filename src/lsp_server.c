@@ -7,21 +7,263 @@
 /* ── Keywords for completion ── */
 
 static const char *lattice_keywords[] = {
-    "fn", "let", "flux", "fix", "struct", "enum", "trait", "impl",
-    "if", "else", "for", "while", "in", "match", "return", "break",
-    "continue", "import", "from", "as", "try", "catch", "throw",
-    "true", "false", "nil", "print", "scope", "defer", "select",
-    "test", "require", "ensure", "freeze", "thaw", "clone",
-    NULL
+    "fn",   "let",     "flux",   "fix",    "struct", "enum",  "trait",    "impl",   "if",    "else",
+    "for",  "while",   "in",     "match",  "return", "break", "continue", "import", "from",  "as",
+    "try",  "catch",   "throw",  "true",   "false",  "nil",   "print",    "scope",  "defer", "select",
+    "test", "require", "ensure", "freeze", "thaw",   "clone", "spawn",    NULL};
+
+/* ── Keyword hover documentation ── */
+
+typedef struct {
+    const char *keyword;
+    const char *doc;
+} LspKeywordDoc;
+
+static const LspKeywordDoc keyword_docs[] = {
+    {"fn", "```lattice\nfn name(params) { body }\n```\n"
+           "Declares a named function."},
+    {"let", "```lattice\nlet name = value\n```\n"
+            "Declares a variable with inferred phase. The variable's mutability "
+            "is determined by usage."},
+    {"flux", "```lattice\nflux name = value\n```\n"
+             "Declares a mutable variable (fluid phase). The value can be "
+             "reassigned and mutated freely."},
+    {"fix", "```lattice\nfix name = value\n```\n"
+            "Declares an immutable variable (crystal phase). The value cannot be "
+            "reassigned or mutated after initialization."},
+    {"struct", "```lattice\nstruct Name {\n  field: Type,\n  ...\n}\n```\n"
+               "Declares a struct type with named fields."},
+    {"enum", "```lattice\nenum Name {\n  Variant,\n  Variant(Type),\n  ...\n}\n"
+             "```\n"
+             "Declares an enum type with variants. Variants can be simple or "
+             "carry tuple data."},
+    {"trait", "```lattice\ntrait Name {\n  fn method()\n}\n```\n"
+              "Declares a trait (interface) that types can implement."},
+    {"impl", "```lattice\nimpl Trait for Type {\n  fn method() { ... }\n}\n```\n"
+             "Implements methods or a trait for a type."},
+    {"if", "```lattice\nif condition { ... } else { ... }\n```\n"
+           "Conditional branching. Evaluates the body if the condition is "
+           "truthy."},
+    {"else", "```lattice\nif condition { ... } else { ... }\n```\n"
+             "The alternative branch of an `if` expression."},
+    {"for", "```lattice\nfor item in collection { ... }\n```\n"
+            "Iterates over elements of a collection (Array, Map, Set, String, "
+            "Range, or Iterator)."},
+    {"while", "```lattice\nwhile condition { ... }\n```\n"
+              "Loops while the condition is truthy."},
+    {"in", "```lattice\nfor item in collection { ... }\n```\n"
+           "Used in `for` loops to separate the binding from the collection."},
+    {"match", "```lattice\nmatch value {\n  pattern => expr,\n  _ => default\n}\n"
+              "```\n"
+              "Pattern matching expression. Matches a value against one or more "
+              "patterns including literals, enum variants, and wildcards."},
+    {"return", "```lattice\nreturn value\n```\n"
+               "Returns a value from the current function."},
+    {"break", "```lattice\nbreak\n```\n"
+              "Exits the current loop."},
+    {"continue", "```lattice\ncontinue\n```\n"
+                 "Skips to the next iteration of the current loop."},
+    {"import", "```lattice\nimport \"module.lat\"\nimport { name } from "
+               "\"module.lat\"\n```\n"
+               "Imports declarations from another Lattice module."},
+    {"from", "```lattice\nimport { name } from \"module.lat\"\n```\n"
+             "Specifies the source module in a selective import."},
+    {"as", "```lattice\nimport { name as alias } from \"module.lat\"\n```\n"
+           "Creates an alias for an imported name."},
+    {"try", "```lattice\ntry { ... } catch e { ... }\n```\n"
+            "Error handling. Runs the body and catches any thrown errors."},
+    {"catch", "```lattice\ntry { ... } catch e { ... }\n```\n"
+              "Handles errors thrown in the preceding `try` block."},
+    {"throw", "```lattice\nthrow \"error message\"\n```\n"
+              "Throws an error value, transferring control to the nearest "
+              "`catch`."},
+    {"true", "```lattice\ntrue\n```\n"
+             "Boolean literal representing a truthy value."},
+    {"false", "```lattice\nfalse\n```\n"
+              "Boolean literal representing a falsy value."},
+    {"nil", "```lattice\nnil\n```\n"
+            "The absence of a value. Used as a null/none equivalent."},
+    {"print", "```lattice\nprint(args...)\n```\n"
+              "Prints values separated by spaces with a trailing newline."},
+    {"scope", "```lattice\nscope {\n  spawn { task1() }\n  spawn { task2() }\n}\n"
+              "```\n"
+              "Creates a structured concurrency scope. All spawned tasks within "
+              "the scope must complete before the scope exits."},
+    {"defer", "```lattice\ndefer { cleanup() }\n```\n"
+              "Defers a block until the enclosing scope exits."},
+    {"select", "```lattice\nselect {\n  recv ch -> val => { ... }\n  send ch val "
+               "=> { ... }\n}\n```\n"
+               "Multiplexes over multiple channel operations. Runs the first arm "
+               "that becomes ready."},
+    {"test", "```lattice\ntest \"description\" {\n  assert_eq(actual, expected)"
+             "\n}\n```\n"
+             "Declares a test case. Run tests with `clat --test file.lat`."},
+    {"require", "```lattice\nrequire condition, \"message\"\n```\n"
+                "Precondition contract. Asserts a condition that must hold at the "
+                "start of a function."},
+    {"ensure", "```lattice\nensure condition, \"message\"\n```\n"
+               "Postcondition contract. Asserts a condition that must hold at the "
+               "end of a function."},
+    {"freeze", "```lattice\nfreeze(value)\n```\n"
+               "Transitions a value to crystal (immutable) phase. Returns the "
+               "frozen value. Attempting to mutate a frozen value will produce an "
+               "error."},
+    {"thaw", "```lattice\nthaw(value)\n```\n"
+             "Transitions a value back to fluid (mutable) phase. Returns the "
+             "thawed value, allowing mutations again."},
+    {"clone", "```lattice\nclone(value)\n```\n"
+              "Creates a deep copy of a value. The clone is independent and "
+              "mutations do not affect the original."},
+    {"spawn", "```lattice\nscope {\n  spawn { task() }\n}\n```\n"
+              "Spawns a concurrent task within a `scope` block."},
+    {NULL, NULL},
 };
+
+/* ── Static builtin documentation ── */
+/* Used as fallback when source scanning is unavailable, and also
+ * to provide hover documentation for builtin functions. */
+
+typedef struct {
+    const char *name;
+    const char *signature;
+    const char *description;
+} LspBuiltinDoc;
+
+static const LspBuiltinDoc builtin_docs[] = {
+    {"print", "print(args: Any...) -> Unit", "Print values separated by spaces with a trailing newline."},
+    {"print_raw", "print_raw(args: Any...) -> Unit", "Print values separated by spaces without a trailing newline."},
+    {"eprint", "eprint(args: Any...) -> Unit", "Print values to stderr with a trailing newline."},
+    {"len", "len(val: String|Array|Map) -> Int", "Returns the length of a string, array, map, set, or buffer."},
+    {"typeof", "typeof(val: Any) -> String", "Returns the type name of a value as a string."},
+    {"to_string", "to_string(val: Any) -> String", "Converts any value to its string representation."},
+    {"repr", "repr(val: Any) -> String", "Returns the debug representation of a value."},
+    {"parse_int", "parse_int(s: String) -> Int", "Parses a string as an integer."},
+    {"parse_float", "parse_float(s: String) -> Float", "Parses a string as a float."},
+    {"to_int", "to_int(val: Any) -> Int", "Converts a value to an integer."},
+    {"to_float", "to_float(val: Any) -> Float", "Converts a value to a float."},
+    {"input", "input(prompt?: String) -> String", "Reads a line of input from stdin."},
+    {"error", "error(msg: String) -> String", "Creates an error value with the given message."},
+    {"panic", "panic(msg: String) -> Unit", "Terminates the program with an error message."},
+    {"is_error", "is_error(val: Any) -> Bool", "Returns true if the value is an error."},
+    {"assert", "assert(cond: Any, msg?: String) -> Unit", "Asserts that a condition is truthy."},
+    {"assert_eq", "assert_eq(actual: Any, expected: Any) -> Unit", "Asserts that two values are equal."},
+    {"assert_ne", "assert_ne(actual: Any, expected: Any) -> Unit", "Asserts that two values are not equal."},
+    {"assert_true", "assert_true(val: Any) -> Unit", "Asserts that a value is truthy."},
+    {"assert_false", "assert_false(val: Any) -> Unit", "Asserts that a value is falsy."},
+    {"assert_nil", "assert_nil(val: Any) -> Unit", "Asserts that a value is nil."},
+    {"assert_throws", "assert_throws(fn: Closure) -> String", "Asserts that the closure throws an error."},
+    {"assert_contains", "assert_contains(haystack: Any, needle: Any) -> Unit",
+     "Asserts that haystack contains needle."},
+    {"assert_type", "assert_type(val: Any, type_name: String) -> Unit", "Asserts that a value has the given type."},
+    {"debug_assert", "debug_assert(cond: Any, msg?: String) -> Unit", "Debug-only assertion (no-op in release mode)."},
+    {"exit", "exit(code?: Int) -> Unit", "Exits the program with the given status code (default 0)."},
+    {"version", "version() -> String", "Returns the Lattice version string."},
+    {"range", "range(start: Int, end: Int, step?: Int) -> Array",
+     "Creates an array of integers from start (inclusive) to end "
+     "(exclusive)."},
+    {"abs", "abs(x: Int|Float) -> Int|Float", "Returns the absolute value."},
+    {"floor", "floor(x: Int|Float) -> Int", "Rounds down to the nearest integer."},
+    {"ceil", "ceil(x: Int|Float) -> Int", "Rounds up to the nearest integer."},
+    {"round", "round(x: Int|Float) -> Int", "Rounds to the nearest integer."},
+    {"sqrt", "sqrt(x: Int|Float) -> Float", "Returns the square root."},
+    {"pow", "pow(base: Int|Float, exp: Int|Float) -> Float", "Returns base raised to the power of exp."},
+    {"min", "min(a: Int|Float, b: Int|Float) -> Int|Float", "Returns the smaller of two values."},
+    {"max", "max(a: Int|Float, b: Int|Float) -> Int|Float", "Returns the larger of two values."},
+    {"random", "random() -> Float", "Returns a random float between 0.0 and 1.0."},
+    {"random_int", "random_int(min: Int, max: Int) -> Int", "Returns a random integer in the range [min, max]."},
+    {"log", "log(x: Int|Float) -> Float", "Returns the natural logarithm."},
+    {"sin", "sin(x: Int|Float) -> Float", "Returns the sine of an angle in radians."},
+    {"cos", "cos(x: Int|Float) -> Float", "Returns the cosine of an angle in radians."},
+    {"tan", "tan(x: Int|Float) -> Float", "Returns the tangent of an angle in radians."},
+    {"clamp", "clamp(x: Int|Float, lo: Int|Float, hi: Int|Float) -> Int|Float",
+     "Clamps a value to the range [lo, hi]."},
+    {"math_pi", "math_pi() -> Float", "Returns the mathematical constant pi."},
+    {"math_e", "math_e() -> Float", "Returns Euler's number e."},
+    {"ord", "ord(ch: String) -> Int", "Returns the Unicode code point of the first character."},
+    {"chr", "chr(code: Int) -> String", "Returns the character for a Unicode code point."},
+    {"format", "format(fmt: String, args: Any...) -> String", "Formats a string with placeholders."},
+    {"read_file", "read_file(path: String) -> String", "Reads the entire contents of a file as a string."},
+    {"write_file", "write_file(path: String, content: String) -> Bool",
+     "Writes a string to a file, creating or overwriting it."},
+    {"file_exists", "file_exists(path: String) -> Bool", "Returns true if a file or directory exists at the path."},
+    {"delete_file", "delete_file(path: String) -> Bool", "Deletes a file at the path."},
+    {"list_dir", "list_dir(path: String) -> Array", "Lists the entries in a directory."},
+    {"mkdir", "mkdir(path: String) -> Bool", "Creates a directory (including parent directories)."},
+    {"json_parse", "json_parse(s: String) -> Any", "Parses a JSON string into a Lattice value."},
+    {"json_stringify", "json_stringify(val: Any) -> String", "Serializes a Lattice value to a JSON string."},
+    {"env", "env(name: String) -> String|Unit", "Returns the value of an environment variable, or nil if not set."},
+    {"env_set", "env_set(name: String, value: String) -> Unit", "Sets an environment variable."},
+    {"time", "time() -> Int", "Returns current time in milliseconds since the Unix epoch."},
+    {"sleep", "sleep(ms: Int) -> Unit", "Pauses for the given number of milliseconds."},
+    {"cwd", "cwd() -> String", "Returns the current working directory."},
+    {"args", "args() -> Array", "Returns the command-line arguments as an array of strings."},
+    {"platform", "platform() -> String", "Returns the platform name (e.g. \"macos\", \"linux\")."},
+    {"pid", "pid() -> Int", "Returns the current process ID."},
+    {"http_get", "http_get(url: String) -> Map", "Performs an HTTP GET request. Returns {status, headers, body}."},
+    {"http_post", "http_post(url: String, options: Map) -> Map",
+     "Performs an HTTP POST request. Returns {status, headers, body}."},
+    {"http_request", "http_request(method: String, url: String, options?: Map) -> Map",
+     "Performs an HTTP request. Returns {status, headers, body}."},
+    {"regex_match", "regex_match(pattern: String, str: String) -> Bool",
+     "Returns true if the string matches the regex pattern."},
+    {"regex_find_all", "regex_find_all(pattern: String, str: String) -> Array",
+     "Returns all matches of the regex pattern in the string."},
+    {"regex_replace",
+     "regex_replace(pattern: String, str: String, replacement: String) "
+     "-> String",
+     "Replaces all matches of the regex pattern with the replacement."},
+    {"sha256", "sha256(s: String) -> String", "Returns the SHA-256 hash of a string as a hex string."},
+    {"base64_encode", "base64_encode(s: String) -> String", "Encodes a string to Base64."},
+    {"base64_decode", "base64_decode(s: String) -> String", "Decodes a Base64 string."},
+    {"struct_name", "struct_name(val: Struct) -> String", "Returns the type name of a struct instance."},
+    {"struct_fields", "struct_fields(val: Struct) -> Array",
+     "Returns the field names of a struct as an array of strings."},
+    {"struct_to_map", "struct_to_map(val: Struct) -> Map", "Converts a struct to a map of field names to values."},
+    {"struct_from_map", "struct_from_map(name: String, map: Map) -> Struct",
+     "Creates a struct from a type name and a map of field values."},
+    {"phase_of", "phase_of(val: Any) -> String",
+     "Returns the phase of a value: \"fluid\", \"crystal\", or "
+     "\"unphased\"."},
+    {"track", "track(name: String) -> Unit", "Enables phase tracking for a named variable."},
+    {"phases", "phases(name: String) -> Array", "Returns the phase history of a tracked variable."},
+    {"history", "history(name: String) -> Array", "Returns the value history of a tracked variable."},
+    {"identity", "identity(val: Any) -> Any", "Returns its argument unchanged."},
+    {"pipe", "pipe(val: Any, fns: Closure...) -> Any", "Pipes a value through a series of functions."},
+    {"compose", "compose(f: Closure, g: Closure) -> Closure", "Returns a new function that applies f then g."},
+    {"iter", "iter(collection: Any) -> Iterator", "Creates an iterator from a collection."},
+    {"range_iter", "range_iter(start: Int, end: Int, step?: Int) -> Iterator", "Creates a lazy range iterator."},
+    {"tokenize", "tokenize(source: String) -> Array", "Tokenizes Lattice source code into an array of token maps."},
+    {"is_complete", "is_complete(source: String) -> Bool",
+     "Returns true if the source string is a complete expression."},
+    {"freeze", "freeze(val: Any) -> Any", "Transitions a value to crystal (immutable) phase."},
+    {"thaw", "thaw(val: Any) -> Any", "Transitions a value back to fluid (mutable) phase."},
+    {"clone", "clone(val: Any) -> Any", "Creates a deep copy of a value."},
+    {NULL, NULL, NULL},
+};
+
+/* ── Hover documentation lookup (public, for testing) ── */
+
+const char *lsp_lookup_keyword_doc(const char *keyword) {
+    for (int i = 0; keyword_docs[i].keyword; i++) {
+        if (strcmp(keyword_docs[i].keyword, keyword) == 0) return keyword_docs[i].doc;
+    }
+    return NULL;
+}
+
+const char *lsp_lookup_builtin_doc(const char *name, const char **out_sig) {
+    for (int i = 0; builtin_docs[i].name; i++) {
+        if (strcmp(builtin_docs[i].name, name) == 0) {
+            if (out_sig) *out_sig = builtin_docs[i].signature;
+            return builtin_docs[i].description;
+        }
+    }
+    return NULL;
+}
 
 /* ── Identifier character helpers ── */
 
 static int is_ident_char(char c) {
-    return (c == '_' ||
-            (c >= 'a' && c <= 'z') ||
-            (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9'));
+    return (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'));
 }
 
 /* Extract the identifier word at a given line:col in the document text.
@@ -42,12 +284,10 @@ static char *extract_word_at(const char *text, int line, int col, int *out_col) 
     }
 
     const char *ws = p;
-    while (ws > line_start && is_ident_char(ws[-1]))
-        ws--;
+    while (ws > line_start && is_ident_char(ws[-1])) ws--;
 
     const char *we = p;
-    while (*we && is_ident_char(*we))
-        we++;
+    while (*we && is_ident_char(*we)) we++;
 
     if (we <= ws) return NULL;
 
@@ -64,14 +304,12 @@ static char *extract_word_at(const char *text, int line, int col, int *out_col) 
 
 static LspDocument *find_document(LspServer *srv, const char *uri) {
     for (size_t i = 0; i < srv->doc_count; i++) {
-        if (strcmp(srv->documents[i]->uri, uri) == 0)
-            return srv->documents[i];
+        if (strcmp(srv->documents[i]->uri, uri) == 0) return srv->documents[i];
     }
     return NULL;
 }
 
-static LspDocument *add_document(LspServer *srv, const char *uri,
-                                  const char *text, int version) {
+static LspDocument *add_document(LspServer *srv, const char *uri, const char *text, int version) {
     LspDocument *doc = calloc(1, sizeof(LspDocument));
     if (!doc) return NULL;
     doc->uri = strdup(uri);
@@ -147,7 +385,7 @@ static void handle_initialize(LspServer *srv, int id) {
     /* Full text sync */
     cJSON *textDocSync = cJSON_CreateObject();
     cJSON_AddNumberToObject(textDocSync, "openClose", 1);
-    cJSON_AddNumberToObject(textDocSync, "change", 1);  /* Full sync */
+    cJSON_AddNumberToObject(textDocSync, "change", 1); /* Full sync */
     cJSON_AddItemToObject(caps, "textDocumentSync", textDocSync);
 
     /* Completion */
@@ -278,8 +516,7 @@ static const char *goto_line(const char *text, int target_line) {
 static char *extract_preceding_ident(const char *line_start, int col) {
     const char *end = line_start + col;
     const char *start = end;
-    while (start > line_start && is_ident_char(start[-1]))
-        start--;
+    while (start > line_start && is_ident_char(start[-1])) start--;
     if (start >= end) return NULL;
     size_t len = (size_t)(end - start);
     char *id = malloc(len + 1);
@@ -316,8 +553,7 @@ static char *detect_path_access(const char *text, int line, int col) {
     while (*line_end && *line_end != '\n') line_end++;
     int eff_col = col < (int)(line_end - line_start) ? col : (int)(line_end - line_start);
     if (eff_col < 2) return NULL;
-    if (line_start[eff_col - 1] != ':' || line_start[eff_col - 2] != ':')
-        return NULL;
+    if (line_start[eff_col - 1] != ':' || line_start[eff_col - 2] != ':') return NULL;
     return extract_preceding_ident(line_start, eff_col - 2);
 }
 
@@ -334,8 +570,7 @@ static char *detect_path_access(const char *text, int line, int col) {
  *   - let/flux/fix name = StructName { ... } -> StructName
  *   - fn params with type annotations
  * Returns a malloc'd type string, or NULL. */
-static char *infer_variable_type(const char *text, const char *var_name,
-                                  int use_line, const LspDocument *doc) {
+static char *infer_variable_type(const char *text, const char *var_name, int use_line, const LspDocument *doc) {
     /* Strategy: scan backwards from use_line for declarations of var_name */
     const char *p = text;
     int cur_line = 0;
@@ -354,17 +589,23 @@ static char *infer_variable_type(const char *text, const char *var_name,
 
             bool is_decl = false;
             const char *after_kw = NULL;
-            if (strncmp(scan, "let ", 4) == 0) { is_decl = true; after_kw = scan + 4; }
-            else if (strncmp(scan, "flux ", 5) == 0) { is_decl = true; after_kw = scan + 5; }
-            else if (strncmp(scan, "fix ", 4) == 0) { is_decl = true; after_kw = scan + 4; }
+            if (strncmp(scan, "let ", 4) == 0) {
+                is_decl = true;
+                after_kw = scan + 4;
+            } else if (strncmp(scan, "flux ", 5) == 0) {
+                is_decl = true;
+                after_kw = scan + 5;
+            } else if (strncmp(scan, "fix ", 4) == 0) {
+                is_decl = true;
+                after_kw = scan + 4;
+            }
 
             if (is_decl && after_kw) {
                 while (after_kw < p && (*after_kw == ' ' || *after_kw == '\t')) after_kw++;
                 size_t vlen = strlen(var_name);
                 if (strncmp(after_kw, var_name, vlen) == 0) {
                     char ch = after_kw[vlen];
-                    if (ch == ' ' || ch == ':' || ch == '=' || ch == '\t' ||
-                        ch == '\n' || ch == '\r' || ch == '\0') {
+                    if (ch == ' ' || ch == ':' || ch == '=' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\0') {
                         best_match = after_kw + vlen;
                         best_line = cur_line;
                     }
@@ -381,10 +622,8 @@ static char *infer_variable_type(const char *text, const char *var_name,
                     const char *search = paren + 1;
                     size_t vlen = strlen(var_name);
                     while (search < close) {
-                        while (search < close && (*search == ' ' || *search == ','))
-                            search++;
-                        if (search + vlen <= close &&
-                            strncmp(search, var_name, vlen) == 0) {
+                        while (search < close && (*search == ' ' || *search == ',')) search++;
+                        if (search + vlen <= close && strncmp(search, var_name, vlen) == 0) {
                             char nc = search[vlen];
                             if (nc == ':' || nc == ' ' || nc == ',' || nc == ')') {
                                 const char *colon = search + vlen;
@@ -393,9 +632,7 @@ static char *infer_variable_type(const char *text, const char *var_name,
                                     colon++;
                                     while (colon < close && *colon == ' ') colon++;
                                     const char *tstart = colon;
-                                    while (colon < close && *colon != ',' && *colon != ')' &&
-                                           *colon != ' ')
-                                        colon++;
+                                    while (colon < close && *colon != ',' && *colon != ')' && *colon != ' ') colon++;
                                     if (colon > tstart) {
                                         size_t tlen = (size_t)(colon - tstart);
                                         char *type = malloc(tlen + 1);
@@ -417,13 +654,11 @@ static char *infer_variable_type(const char *text, const char *var_name,
             /* Check for-in loop: for var_name in arr_expr */
             if (strncmp(scan, "for ", 4) == 0) {
                 const char *after_for = scan + 4;
-                while (after_for < p && (*after_for == ' ' || *after_for == '\t'))
-                    after_for++;
+                while (after_for < p && (*after_for == ' ' || *after_for == '\t')) after_for++;
                 size_t vlen = strlen(var_name);
                 if (strncmp(after_for, var_name, vlen) == 0) {
                     char nc = after_for[vlen];
-                    if (nc == ' ' || nc == '\t') {
-                        /* for-in loop variable - can't easily infer element type */
+                    if (nc == ' ' || nc == '\t') { /* for-in loop variable - can't easily infer element type */
                     }
                 }
             }
@@ -445,8 +680,7 @@ static char *infer_variable_type(const char *text, const char *var_name,
         q++;
         while (*q == ' ' || *q == '\t') q++;
         const char *type_start = q;
-        while (*q && *q != '=' && *q != ' ' && *q != '\t' && *q != '\n' && *q != '\r')
-            q++;
+        while (*q && *q != '=' && *q != ' ' && *q != '\t' && *q != '\n' && *q != '\r') q++;
         if (q > type_start) {
             size_t tlen = (size_t)(q - type_start);
             char *type = malloc(tlen + 1);
@@ -472,24 +706,19 @@ static char *infer_variable_type(const char *text, const char *var_name,
         if (*q >= '0' && *q <= '9') {
             /* Check for float */
             const char *num = q;
-            while (*num && ((*num >= '0' && *num <= '9') || *num == '.' || *num == '_'))
-                num++;
+            while (*num && ((*num >= '0' && *num <= '9') || *num == '.' || *num == '_')) num++;
             const char *dot = strchr(q, '.');
             if (dot && dot < num) return strdup("Float");
             return strdup("Int");
         }
 
         /* Boolean literal */
-        if (strncmp(q, "true", 4) == 0 || strncmp(q, "false", 5) == 0)
-            return strdup("Bool");
+        if (strncmp(q, "true", 4) == 0 || strncmp(q, "false", 5) == 0) return strdup("Bool");
 
         /* Type::new() constructors */
         if (strncmp(q, "Map::new", 8) == 0) return strdup("Map");
-        if (strncmp(q, "Set::new", 8) == 0 || strncmp(q, "Set::from", 9) == 0)
-            return strdup("Set");
-        if (strncmp(q, "Buffer::new", 11) == 0 ||
-            strncmp(q, "Buffer::from", 12) == 0)
-            return strdup("Buffer");
+        if (strncmp(q, "Set::new", 8) == 0 || strncmp(q, "Set::from", 9) == 0) return strdup("Set");
+        if (strncmp(q, "Buffer::new", 11) == 0 || strncmp(q, "Buffer::from", 12) == 0) return strdup("Buffer");
         if (strncmp(q, "Channel::new", 12) == 0) return strdup("Channel");
         if (strncmp(q, "Ref::new", 8) == 0) return strdup("Ref");
 
@@ -500,7 +729,7 @@ static char *infer_variable_type(const char *text, const char *var_name,
             size_t id_len = (size_t)(q - id_start);
             /* Skip whitespace */
             while (*q == ' ' || *q == '\t') q++;
-            if (*q == '{' || (*q == ':' && *(q+1) == ':')) {
+            if (*q == '{' || (*q == ':' && *(q + 1) == ':')) {
                 /* Check if this is a known struct name */
                 char *name = malloc(id_len + 1);
                 if (!name) return NULL;
@@ -508,8 +737,7 @@ static char *infer_variable_type(const char *text, const char *var_name,
                 name[id_len] = '\0';
                 if (doc) {
                     for (size_t i = 0; i < doc->struct_def_count; i++) {
-                        if (strcmp(doc->struct_defs[i].name, name) == 0)
-                            return name;  /* confirmed struct type */
+                        if (strcmp(doc->struct_defs[i].name, name) == 0) return name; /* confirmed struct type */
                     }
                 }
                 /* Could also be an enum variant assignment, but return the type anyway */
@@ -523,17 +751,14 @@ static char *infer_variable_type(const char *text, const char *var_name,
 }
 
 /* Add method completions for a given owner type */
-static void add_method_completions(cJSON *items, const LspSymbolIndex *idx,
-                                    const char *type_name) {
+static void add_method_completions(cJSON *items, const LspSymbolIndex *idx, const char *type_name) {
     if (!idx) return;
     for (size_t i = 0; i < idx->method_count; i++) {
-        if (idx->methods[i].owner_type &&
-            strcmp(idx->methods[i].owner_type, type_name) == 0) {
+        if (idx->methods[i].owner_type && strcmp(idx->methods[i].owner_type, type_name) == 0) {
             cJSON *item = cJSON_CreateObject();
             cJSON_AddStringToObject(item, "label", idx->methods[i].name);
-            cJSON_AddNumberToObject(item, "kind", 2);  /* Method */
-            if (idx->methods[i].signature)
-                cJSON_AddStringToObject(item, "detail", idx->methods[i].signature);
+            cJSON_AddNumberToObject(item, "kind", 2); /* Method */
+            if (idx->methods[i].signature) cJSON_AddStringToObject(item, "detail", idx->methods[i].signature);
             if (idx->methods[i].doc) {
                 cJSON *doc_obj = cJSON_CreateObject();
                 cJSON_AddStringToObject(doc_obj, "kind", "markdown");
@@ -546,17 +771,15 @@ static void add_method_completions(cJSON *items, const LspSymbolIndex *idx,
 }
 
 /* Add struct field completions */
-static void add_struct_field_completions(cJSON *items, const LspDocument *doc,
-                                          const char *struct_name) {
+static void add_struct_field_completions(cJSON *items, const LspDocument *doc, const char *struct_name) {
     for (size_t i = 0; i < doc->struct_def_count; i++) {
         if (strcmp(doc->struct_defs[i].name, struct_name) == 0) {
             for (size_t j = 0; j < doc->struct_defs[i].field_count; j++) {
                 LspFieldInfo *f = &doc->struct_defs[i].fields[j];
                 cJSON *item = cJSON_CreateObject();
                 cJSON_AddStringToObject(item, "label", f->name);
-                cJSON_AddNumberToObject(item, "kind", 5);  /* Field */
-                if (f->type_name)
-                    cJSON_AddStringToObject(item, "detail", f->type_name);
+                cJSON_AddNumberToObject(item, "kind", 5); /* Field */
+                if (f->type_name) cJSON_AddStringToObject(item, "detail", f->type_name);
                 cJSON_AddItemToArray(items, item);
             }
             break;
@@ -565,19 +788,17 @@ static void add_struct_field_completions(cJSON *items, const LspDocument *doc,
 }
 
 /* Add enum variant completions */
-static void add_enum_variant_completions(cJSON *items, const LspDocument *doc,
-                                          const char *enum_name) {
+static void add_enum_variant_completions(cJSON *items, const LspDocument *doc, const char *enum_name) {
     for (size_t i = 0; i < doc->enum_def_count; i++) {
         if (strcmp(doc->enum_defs[i].name, enum_name) == 0) {
             for (size_t j = 0; j < doc->enum_defs[i].variant_count; j++) {
                 LspVariantInfo *v = &doc->enum_defs[i].variants[j];
                 cJSON *item = cJSON_CreateObject();
                 cJSON_AddStringToObject(item, "label", v->name);
-                cJSON_AddNumberToObject(item, "kind", 20);  /* EnumMember */
+                cJSON_AddNumberToObject(item, "kind", 20); /* EnumMember */
                 if (v->params) {
                     char detail[256];
-                    snprintf(detail, sizeof(detail), "%s::%s%s",
-                             enum_name, v->name, v->params);
+                    snprintf(detail, sizeof(detail), "%s::%s%s", enum_name, v->name, v->params);
                     cJSON_AddStringToObject(item, "detail", detail);
                 } else {
                     char detail[256];
@@ -594,8 +815,7 @@ static void add_enum_variant_completions(cJSON *items, const LspDocument *doc,
 /* Check if a name corresponds to a known enum in the document */
 static bool is_enum_name(const LspDocument *doc, const char *name) {
     for (size_t i = 0; i < doc->enum_def_count; i++) {
-        if (strcmp(doc->enum_defs[i].name, name) == 0)
-            return true;
+        if (strcmp(doc->enum_defs[i].name, name) == 0) return true;
     }
     return false;
 }
@@ -603,8 +823,7 @@ static bool is_enum_name(const LspDocument *doc, const char *name) {
 /* Check if a name corresponds to a known struct in the document */
 static bool is_struct_name(const LspDocument *doc, const char *name) {
     for (size_t i = 0; i < doc->struct_def_count; i++) {
-        if (strcmp(doc->struct_defs[i].name, name) == 0)
-            return true;
+        if (strcmp(doc->struct_defs[i].name, name) == 0) return true;
     }
     return false;
 }
@@ -632,9 +851,7 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
 
             if (type) {
                 /* Check if this is a struct type -> suggest fields */
-                if (is_struct_name(doc, type)) {
-                    add_struct_field_completions(items, doc, type);
-                }
+                if (is_struct_name(doc, type)) { add_struct_field_completions(items, doc, type); }
                 /* Always add methods for the inferred type */
                 add_method_completions(items, srv->index, type);
                 free(type);
@@ -643,25 +860,20 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                  * by looking at the first character (capitalized = could be type) */
                 if (dot_obj[0] >= 'A' && dot_obj[0] <= 'Z') {
                     /* Might be a struct variable with capital name */
-                    if (is_struct_name(doc, dot_obj)) {
-                        add_struct_field_completions(items, doc, dot_obj);
-                    }
+                    if (is_struct_name(doc, dot_obj)) { add_struct_field_completions(items, doc, dot_obj); }
                 }
                 /* Fall back: suggest all methods */
                 if (srv->index) {
                     for (size_t i = 0; i < srv->index->method_count; i++) {
                         cJSON *item = cJSON_CreateObject();
-                        cJSON_AddStringToObject(item, "label",
-                            srv->index->methods[i].name);
-                        cJSON_AddNumberToObject(item, "kind", 2);  /* Method */
+                        cJSON_AddStringToObject(item, "label", srv->index->methods[i].name);
+                        cJSON_AddNumberToObject(item, "kind", 2); /* Method */
                         if (srv->index->methods[i].signature)
-                            cJSON_AddStringToObject(item, "detail",
-                                srv->index->methods[i].signature);
+                            cJSON_AddStringToObject(item, "detail", srv->index->methods[i].signature);
                         if (srv->index->methods[i].doc) {
                             cJSON *doc_obj = cJSON_CreateObject();
                             cJSON_AddStringToObject(doc_obj, "kind", "markdown");
-                            cJSON_AddStringToObject(doc_obj, "value",
-                                srv->index->methods[i].doc);
+                            cJSON_AddStringToObject(doc_obj, "value", srv->index->methods[i].doc);
                             cJSON_AddItemToObject(item, "documentation", doc_obj);
                         }
                         cJSON_AddItemToArray(items, item);
@@ -680,9 +892,7 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
         char *path_obj = detect_path_access(doc->text, line, col);
         if (path_obj) {
             /* Check if this is an enum name */
-            if (is_enum_name(doc, path_obj)) {
-                add_enum_variant_completions(items, doc, path_obj);
-            }
+            if (is_enum_name(doc, path_obj)) { add_enum_variant_completions(items, doc, path_obj); }
             /* Also check builtin constructors: Map::, Set::, Buffer::, etc. */
             if (srv->index) {
                 for (size_t i = 0; i < srv->index->builtin_count; i++) {
@@ -690,13 +900,11 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                     const char *sig = srv->index->builtins[i].signature;
                     if (sig) {
                         size_t plen = strlen(path_obj);
-                        if (strncmp(sig, path_obj, plen) == 0 &&
-                            sig[plen] == ':' && sig[plen + 1] == ':') {
+                        if (strncmp(sig, path_obj, plen) == 0 && sig[plen] == ':' && sig[plen + 1] == ':') {
                             /* Extract the method name after :: */
                             const char *method_start = sig + plen + 2;
                             const char *paren = strchr(method_start, '(');
-                            size_t mlen = paren ? (size_t)(paren - method_start)
-                                                : strlen(method_start);
+                            size_t mlen = paren ? (size_t)(paren - method_start) : strlen(method_start);
                             char *mname = malloc(mlen + 1);
                             if (!mname) return;
                             memcpy(mname, method_start, mlen);
@@ -709,8 +917,7 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                             if (srv->index->builtins[i].doc) {
                                 cJSON *doc_obj = cJSON_CreateObject();
                                 cJSON_AddStringToObject(doc_obj, "kind", "markdown");
-                                cJSON_AddStringToObject(doc_obj, "value",
-                                    srv->index->builtins[i].doc);
+                                cJSON_AddStringToObject(doc_obj, "value", srv->index->builtins[i].doc);
                                 cJSON_AddItemToObject(item, "documentation", doc_obj);
                             }
                             cJSON_AddItemToArray(items, item);
@@ -743,7 +950,7 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
         for (size_t i = 0; i < srv->index->builtin_count; i++) {
             cJSON *item = cJSON_CreateObject();
             cJSON_AddStringToObject(item, "label", srv->index->builtins[i].name);
-            cJSON_AddNumberToObject(item, "kind", 3);  /* Function */
+            cJSON_AddNumberToObject(item, "kind", 3); /* Function */
             if (srv->index->builtins[i].signature)
                 cJSON_AddStringToObject(item, "detail", srv->index->builtins[i].signature);
             if (srv->index->builtins[i].doc) {
@@ -762,11 +969,11 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
             cJSON *item = cJSON_CreateObject();
             cJSON_AddStringToObject(item, "label", doc->symbols[i].name);
             cJSON_AddNumberToObject(item, "kind",
-                doc->symbols[i].kind == LSP_SYM_FUNCTION ? 3 :
-                doc->symbols[i].kind == LSP_SYM_STRUCT   ? 22 :
-                doc->symbols[i].kind == LSP_SYM_ENUM     ? 13 : 6);
-            if (doc->symbols[i].signature)
-                cJSON_AddStringToObject(item, "detail", doc->symbols[i].signature);
+                                    doc->symbols[i].kind == LSP_SYM_FUNCTION ? 3
+                                    : doc->symbols[i].kind == LSP_SYM_STRUCT ? 22
+                                    : doc->symbols[i].kind == LSP_SYM_ENUM   ? 13
+                                                                             : 6);
+            if (doc->symbols[i].signature) cJSON_AddStringToObject(item, "detail", doc->symbols[i].signature);
             cJSON_AddItemToArray(items, item);
         }
     }
@@ -777,6 +984,16 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
 }
 
 /* ── Handler: textDocument/hover ── */
+
+/* Build markdown hover content for a builtin from the static docs table.
+ * Returns a malloc'd string with ```lattice signature``` + description. */
+static char *build_builtin_hover(const char *sig, const char *desc) {
+    size_t blen = strlen(sig) + strlen(desc) + 32;
+    char *buf = malloc(blen);
+    if (!buf) return NULL;
+    snprintf(buf, blen, "```lattice\n%s\n```\n%s", sig, desc);
+    return buf;
+}
 
 static void handle_hover(LspServer *srv, cJSON *params, int id) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
@@ -800,102 +1017,80 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    /* Find the word at line:col */
-    const char *p = doc->text;
-    int cur_line = 0;
-    while (cur_line < line && *p) {
-        if (*p == '\n') cur_line++;
-        p++;
-    }
-    /* p now points to start of target line */
-    const char *line_start = p;
-    int cur_col = 0;
-    while (cur_col < col && *p && *p != '\n') {
-        cur_col++;
-        p++;
-    }
+    /* Find the word at line:col using the shared helper */
+    int word_col = 0;
+    char *word = extract_word_at(doc->text, line, col, &word_col);
 
-    /* Extract identifier */
-    const char *word_start = p;
-    while (word_start > line_start &&
-           (word_start[-1] == '_' ||
-            (word_start[-1] >= 'a' && word_start[-1] <= 'z') ||
-            (word_start[-1] >= 'A' && word_start[-1] <= 'Z') ||
-            (word_start[-1] >= '0' && word_start[-1] <= '9')))
-        word_start--;
-
-    const char *word_end = p;
-    while (*word_end && (*word_end == '_' ||
-           (*word_end >= 'a' && word_end[0] <= 'z') ||
-           (*word_end >= 'A' && word_end[0] <= 'Z') ||
-           (*word_end >= '0' && word_end[0] <= '9')))
-        word_end++;
-
-    if (word_end <= word_start) {
+    if (!word) {
         cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
         lsp_write_response(resp, stdout);
         cJSON_Delete(resp);
         return;
     }
 
-    size_t word_len = (size_t)(word_end - word_start);
-    char *word = malloc(word_len + 1);
-    if (!word) return;
-    memcpy(word, word_start, word_len);
-    word[word_len] = '\0';
-
     const char *hover_text = NULL;
-    char *hover_buf = NULL;  /* dynamically built hover, freed at end */
+    char *hover_buf = NULL; /* dynamically built hover, freed at end */
 
     /* Priority 1: Document symbols (user-defined names take precedence) */
-    if (doc) {
-        for (size_t i = 0; i < doc->symbol_count; i++) {
-            if (strcmp(doc->symbols[i].name, word) == 0) {
-                if (doc->symbols[i].kind == LSP_SYM_VARIABLE) {
-                    /* For variables, try to include inferred type */
-                    char *type = doc->text ?
-                        infer_variable_type(doc->text, word, line, doc) : NULL;
-                    const char *sig = doc->symbols[i].signature;
-                    if (type) {
-                        size_t blen = (sig ? strlen(sig) : 0) + strlen(type) + 48;
-                        hover_buf = malloc(blen);
-                        if (!hover_buf) return;
-                        snprintf(hover_buf, blen, "```lattice\n%s%s%s\n```",
-                                 sig ? sig : word,
-                                 /* Append type only if sig doesn't already have it */
-                                 (sig && strchr(sig, ':')) ? "" : ": ",
-                                 (sig && strchr(sig, ':')) ? "" : type);
-                        hover_text = hover_buf;
+    for (size_t i = 0; i < doc->symbol_count; i++) {
+        if (strcmp(doc->symbols[i].name, word) == 0) {
+            if (doc->symbols[i].kind == LSP_SYM_VARIABLE) {
+                /* For variables, try to include inferred type */
+                char *type = infer_variable_type(doc->text, word, line, doc);
+                const char *sig = doc->symbols[i].signature;
+                if (type) {
+                    size_t blen = (sig ? strlen(sig) : 0) + strlen(type) + 48;
+                    hover_buf = malloc(blen);
+                    if (!hover_buf) {
                         free(type);
-                    } else {
-                        /* No inferred type — show signature as code block */
-                        if (sig) {
-                            size_t blen = strlen(sig) + 24;
-                            hover_buf = malloc(blen);
-                            if (!hover_buf) return;
-                            snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
-                            hover_text = hover_buf;
-                        }
+                        free(word);
+                        return;
                     }
-                } else {
-                    /* Functions, structs, enums, traits: show signature as code block */
-                    const char *sig = doc->symbols[i].signature;
-                    if (sig) {
-                        size_t blen = strlen(sig) + 24;
-                        hover_buf = malloc(blen);
-                        if (!hover_buf) return;
-                        snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
-                        hover_text = hover_buf;
+                    snprintf(hover_buf, blen, "```lattice\n%s%s%s\n```", sig ? sig : word,
+                             (sig && strchr(sig, ':')) ? "" : ": ", (sig && strchr(sig, ':')) ? "" : type);
+                    hover_text = hover_buf;
+                    free(type);
+                } else if (sig) {
+                    size_t blen = strlen(sig) + 24;
+                    hover_buf = malloc(blen);
+                    if (!hover_buf) {
+                        free(word);
+                        return;
                     }
-                    if (doc->symbols[i].doc)
-                        hover_text = doc->symbols[i].doc;
+                    snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                    hover_text = hover_buf;
                 }
-                break;
+            } else {
+                /* Functions, structs, enums, traits */
+                const char *sig = doc->symbols[i].signature;
+                const char *sym_doc = doc->symbols[i].doc;
+                if (sig && sym_doc) {
+                    size_t blen = strlen(sig) + strlen(sym_doc) + 32;
+                    hover_buf = malloc(blen);
+                    if (!hover_buf) {
+                        free(word);
+                        return;
+                    }
+                    snprintf(hover_buf, blen, "```lattice\n%s\n```\n%s", sig, sym_doc);
+                    hover_text = hover_buf;
+                } else if (sig) {
+                    size_t blen = strlen(sig) + 24;
+                    hover_buf = malloc(blen);
+                    if (!hover_buf) {
+                        free(word);
+                        return;
+                    }
+                    snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                    hover_text = hover_buf;
+                } else if (sym_doc) {
+                    hover_text = sym_doc;
+                }
             }
+            break;
         }
     }
 
-    /* Priority 2: Builtin functions */
+    /* Priority 2: Builtin functions from source-scanned index */
     if (!hover_text && srv->index) {
         for (size_t i = 0; i < srv->index->builtin_count; i++) {
             if (strcmp(srv->index->builtins[i].name, word) == 0) {
@@ -905,7 +1100,17 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
         }
     }
 
-    /* Priority 3: Methods (only if not found as a document symbol) */
+    /* Priority 3: Static builtin documentation fallback */
+    if (!hover_text) {
+        const char *sig = NULL;
+        const char *desc = lsp_lookup_builtin_doc(word, &sig);
+        if (desc && sig) {
+            hover_buf = build_builtin_hover(sig, desc);
+            hover_text = hover_buf;
+        }
+    }
+
+    /* Priority 4: Methods from source-scanned index */
     if (!hover_text && srv->index) {
         for (size_t i = 0; i < srv->index->method_count; i++) {
             if (strcmp(srv->index->methods[i].name, word) == 0) {
@@ -915,31 +1120,25 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
         }
     }
 
-    /* Priority 4: Try to infer type for identifiers not in symbol table */
-    if (!hover_text && doc && doc->text) {
+    /* Priority 5: Infer type for identifiers not in symbol table
+     * (e.g., local variables inside functions) */
+    if (!hover_text && doc->text) {
         char *type = infer_variable_type(doc->text, word, line, doc);
         if (type) {
             size_t blen = strlen(word) + strlen(type) + 32;
             hover_buf = malloc(blen);
-            if (!hover_buf) return;
-            snprintf(hover_buf, blen, "```lattice\n%s: %s\n```", word, type);
-            hover_text = hover_buf;
+            if (hover_buf) {
+                snprintf(hover_buf, blen, "```lattice\n%s: %s\n```", word, type);
+                hover_text = hover_buf;
+            }
             free(type);
         }
     }
 
-    /* Priority 5: Keyword documentation */
+    /* Priority 6: Keyword documentation */
     if (!hover_text) {
-        for (int i = 0; lattice_keywords[i]; i++) {
-            if (strcmp(lattice_keywords[i], word) == 0) {
-                size_t blen = strlen(word) + 32;
-                hover_buf = malloc(blen);
-                if (!hover_buf) return;
-                snprintf(hover_buf, blen, "*keyword* `%s`", word);
-                hover_text = hover_buf;
-                break;
-            }
-        }
+        const char *kw_doc = lsp_lookup_keyword_doc(word);
+        if (kw_doc) hover_text = kw_doc;
     }
 
     free(word);
@@ -1000,18 +1199,13 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
     }
 
     const char *ws = p;
-    while (ws > line_start &&
-           (ws[-1] == '_' ||
-            (ws[-1] >= 'a' && ws[-1] <= 'z') ||
-            (ws[-1] >= 'A' && ws[-1] <= 'Z') ||
-            (ws[-1] >= '0' && ws[-1] <= '9')))
+    while (ws > line_start && (ws[-1] == '_' || (ws[-1] >= 'a' && ws[-1] <= 'z') || (ws[-1] >= 'A' && ws[-1] <= 'Z') ||
+                               (ws[-1] >= '0' && ws[-1] <= '9')))
         ws--;
 
     const char *we = p;
-    while (*we && (*we == '_' ||
-           (*we >= 'a' && *we <= 'z') ||
-           (*we >= 'A' && *we <= 'Z') ||
-           (*we >= '0' && *we <= '9')))
+    while (*we &&
+           (*we == '_' || (*we >= 'a' && *we <= 'z') || (*we >= 'A' && *we <= 'Z') || (*we >= '0' && *we <= '9')))
         we++;
 
     if (we <= ws) {
@@ -1039,8 +1233,7 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
             cJSON_AddItemToObject(range, "start", start_pos);
             cJSON *end_pos = cJSON_CreateObject();
             cJSON_AddNumberToObject(end_pos, "line", doc->symbols[i].line);
-            cJSON_AddNumberToObject(end_pos, "character",
-                doc->symbols[i].col + (int)strlen(doc->symbols[i].name));
+            cJSON_AddNumberToObject(end_pos, "character", doc->symbols[i].col + (int)strlen(doc->symbols[i].name));
             cJSON_AddItemToObject(range, "end", end_pos);
             cJSON_AddItemToObject(result, "range", range);
 
@@ -1069,18 +1262,27 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
             /* Check for let/flux/fix/for keywords */
             const char *kw = NULL;
             size_t kw_len = 0;
-            if (strncmp(tp, "let ", 4) == 0) { kw = tp; kw_len = 4; }
-            else if (strncmp(tp, "flux ", 5) == 0) { kw = tp; kw_len = 5; }
-            else if (strncmp(tp, "fix ", 4) == 0) { kw = tp; kw_len = 4; }
-            else if (strncmp(tp, "for ", 4) == 0) { kw = tp; kw_len = 4; }
+            if (strncmp(tp, "let ", 4) == 0) {
+                kw = tp;
+                kw_len = 4;
+            } else if (strncmp(tp, "flux ", 5) == 0) {
+                kw = tp;
+                kw_len = 5;
+            } else if (strncmp(tp, "fix ", 4) == 0) {
+                kw = tp;
+                kw_len = 4;
+            } else if (strncmp(tp, "for ", 4) == 0) {
+                kw = tp;
+                kw_len = 4;
+            }
 
             if (kw) {
                 const char *after = kw + kw_len;
                 while (*after == ' ' || *after == '\t') after++;
                 if (strncmp(after, word, wlen2) == 0) {
                     char nc = after[wlen2];
-                    if (nc == ' ' || nc == ':' || nc == '=' || nc == '\t' ||
-                        nc == '\n' || nc == '\r' || nc == '\0' || nc == ',') {
+                    if (nc == ' ' || nc == ':' || nc == '=' || nc == '\t' || nc == '\n' || nc == '\r' || nc == '\0' ||
+                        nc == ',') {
                         /* Found a declaration — only use if before the cursor */
                         if (scan_line <= line) {
                             def_line = scan_line;
@@ -1100,10 +1302,8 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
                     /* Search for word as a parameter name */
                     const char *search = paren + 1;
                     while (search < close) {
-                        while (search < close && (*search == ' ' || *search == ','))
-                            search++;
-                        if ((size_t)(close - search) >= wlen2 &&
-                            strncmp(search, word, wlen2) == 0) {
+                        while (search < close && (*search == ' ' || *search == ',')) search++;
+                        if ((size_t)(close - search) >= wlen2 && strncmp(search, word, wlen2) == 0) {
                             char nc = search[wlen2];
                             if (nc == ':' || nc == ' ' || nc == ',' || nc == ')') {
                                 if (scan_line <= line) {
@@ -1121,7 +1321,10 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
 
             /* Advance to next line */
             while (*tp && *tp != '\n') tp++;
-            if (*tp == '\n') { tp++; scan_line++; }
+            if (*tp == '\n') {
+                tp++;
+                scan_line++;
+            }
         }
 
         if (def_line >= 0) {
@@ -1156,12 +1359,12 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
 
 static int lsp_symbol_kind(LspSymbolKind kind) {
     switch (kind) {
-        case LSP_SYM_FUNCTION: return 12;  /* Function */
-        case LSP_SYM_STRUCT:   return 23;  /* Struct */
-        case LSP_SYM_ENUM:     return 10;  /* Enum */
-        case LSP_SYM_VARIABLE: return 13;  /* Variable */
-        case LSP_SYM_METHOD:   return 6;   /* Method */
-        default:               return 13;  /* Variable as fallback */
+        case LSP_SYM_FUNCTION: return 12; /* Function */
+        case LSP_SYM_STRUCT: return 23;   /* Struct */
+        case LSP_SYM_ENUM: return 10;     /* Enum */
+        case LSP_SYM_VARIABLE: return 13; /* Variable */
+        case LSP_SYM_METHOD: return 6;    /* Method */
+        default: return 13;               /* Variable as fallback */
     }
 }
 
@@ -1194,8 +1397,7 @@ static void handle_document_symbol(LspServer *srv, cJSON *params, int id) {
             cJSON_AddNumberToObject(start, "character", s->col >= 0 ? s->col : 0);
             cJSON *end = cJSON_CreateObject();
             cJSON_AddNumberToObject(end, "line", s->line >= 0 ? s->line : 0);
-            cJSON_AddNumberToObject(end, "character",
-                (s->col >= 0 ? s->col : 0) + (int)strlen(s->name));
+            cJSON_AddNumberToObject(end, "character", (s->col >= 0 ? s->col : 0) + (int)strlen(s->name));
             cJSON_AddItemToObject(range, "start", start);
             cJSON_AddItemToObject(range, "end", end);
             cJSON_AddItemToObject(sym, "range", range);
@@ -1207,14 +1409,12 @@ static void handle_document_symbol(LspServer *srv, cJSON *params, int id) {
             cJSON_AddNumberToObject(sel_start, "character", s->col >= 0 ? s->col : 0);
             cJSON *sel_end = cJSON_CreateObject();
             cJSON_AddNumberToObject(sel_end, "line", s->line >= 0 ? s->line : 0);
-            cJSON_AddNumberToObject(sel_end, "character",
-                (s->col >= 0 ? s->col : 0) + (int)strlen(s->name));
+            cJSON_AddNumberToObject(sel_end, "character", (s->col >= 0 ? s->col : 0) + (int)strlen(s->name));
             cJSON_AddItemToObject(sel_range, "start", sel_start);
             cJSON_AddItemToObject(sel_range, "end", sel_end);
             cJSON_AddItemToObject(sym, "selectionRange", sel_range);
 
-            if (s->signature)
-                cJSON_AddStringToObject(sym, "detail", s->signature);
+            if (s->signature) cJSON_AddStringToObject(sym, "detail", s->signature);
 
             cJSON_AddItemToArray(symbols, sym);
         }
@@ -1258,8 +1458,7 @@ static int parse_signature_params(const char *sig, char **params, int max_params
 
         /* Trim trailing whitespace */
         char *trim_end = end;
-        while (trim_end > tok && (trim_end[-1] == ' ' || trim_end[-1] == '\t'))
-            trim_end--;
+        while (trim_end > tok && (trim_end[-1] == ' ' || trim_end[-1] == '\t')) trim_end--;
 
         size_t plen = (size_t)(trim_end - tok);
         if (plen > 0) {
@@ -1299,7 +1498,7 @@ static int count_active_param(const char *text, int line, int col) {
     for (const char *c = cursor - 1; c >= p; c--) {
         if (*c == ')') depth++;
         else if (*c == '(') {
-            if (depth == 0) break;  /* Found the matching open paren */
+            if (depth == 0) break; /* Found the matching open paren */
             depth--;
         } else if (*c == ',' && depth == 0) {
             commas++;
@@ -1351,7 +1550,10 @@ static void handle_signature_help(LspServer *srv, cJSON *params, int id) {
     for (const char *c = cursor - 1; c >= line_start; c--) {
         if (*c == ')') depth++;
         else if (*c == '(') {
-            if (depth == 0) { open_paren = c; break; }
+            if (depth == 0) {
+                open_paren = c;
+                break;
+            }
             depth--;
         }
     }
@@ -1365,11 +1567,9 @@ static void handle_signature_help(LspServer *srv, cJSON *params, int id) {
 
     /* Extract function name just before the open paren */
     const char *name_end = open_paren;
-    while (name_end > line_start && (name_end[-1] == ' ' || name_end[-1] == '\t'))
-        name_end--;
+    while (name_end > line_start && (name_end[-1] == ' ' || name_end[-1] == '\t')) name_end--;
     const char *name_start = name_end;
-    while (name_start > line_start && is_ident_char(name_start[-1]))
-        name_start--;
+    while (name_start > line_start && is_ident_char(name_start[-1])) name_start--;
 
     if (name_start >= name_end) {
         cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
@@ -1408,8 +1608,7 @@ static void handle_signature_help(LspServer *srv, cJSON *params, int id) {
     /* Search document symbols */
     if (!sig && doc) {
         for (size_t i = 0; i < doc->symbol_count; i++) {
-            if (doc->symbols[i].kind == LSP_SYM_FUNCTION &&
-                strcmp(doc->symbols[i].name, func_name) == 0) {
+            if (doc->symbols[i].kind == LSP_SYM_FUNCTION && strcmp(doc->symbols[i].name, func_name) == 0) {
                 sig = doc->symbols[i].signature;
                 break;
             }
@@ -1471,10 +1670,16 @@ static bool in_string_literal(const char *line_start, int col) {
     for (int i = 0; i < col && line_start[i] && line_start[i] != '\n'; i++) {
         char c = line_start[i];
         if (in_str) {
-            if (c == '\\') { i++; continue; }  /* skip escaped char */
+            if (c == '\\') {
+                i++;
+                continue;
+            } /* skip escaped char */
             if (c == quote) in_str = false;
         } else {
-            if (c == '"' || c == '\'') { in_str = true; quote = c; }
+            if (c == '"' || c == '\'') {
+                in_str = true;
+                quote = c;
+            }
         }
     }
     return in_str;
@@ -1482,8 +1687,7 @@ static bool in_string_literal(const char *line_start, int col) {
 
 /* Find all occurrences of a word (as whole identifier) in the document text.
  * Returns a cJSON array of Location objects. */
-static cJSON *find_all_references(const char *text, const char *uri,
-                                   const char *word) {
+static cJSON *find_all_references(const char *text, const char *uri, const char *word) {
     cJSON *locations = cJSON_CreateArray();
     size_t word_len = strlen(word);
     if (word_len == 0) return locations;
@@ -1521,12 +1725,15 @@ static cJSON *find_all_references(const char *text, const char *uri,
                         cJSON_AddItemToArray(locations, loc);
                     }
                 }
-                continue;  /* p already advanced past the identifier */
+                continue; /* p already advanced past the identifier */
             }
             p++;
         }
 
-        if (*p == '\n') { p++; line++; }
+        if (*p == '\n') {
+            p++;
+            line++;
+        }
     }
 
     return locations;
@@ -1643,8 +1850,7 @@ LspServer *lsp_server_new(void) {
 
 void lsp_server_free(LspServer *srv) {
     if (!srv) return;
-    for (size_t i = 0; i < srv->doc_count; i++)
-        lsp_document_free(srv->documents[i]);
+    for (size_t i = 0; i < srv->doc_count; i++) lsp_document_free(srv->documents[i]);
     free(srv->documents);
     lsp_symbol_index_free(srv->index);
     free(srv);
@@ -1654,7 +1860,7 @@ void lsp_server_free(LspServer *srv) {
 void lsp_server_run(LspServer *srv) {
     while (!srv->shutdown) {
         cJSON *msg = lsp_read_message(stdin);
-        if (!msg) break;  /* EOF */
+        if (!msg) break; /* EOF */
 
         cJSON *method_node = cJSON_GetObjectItem(msg, "method");
         cJSON *id_node = cJSON_GetObjectItem(msg, "id");
