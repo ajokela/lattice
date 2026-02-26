@@ -122,12 +122,23 @@ LSP_VND_OBJS = $(patsubst vendor/%.c,$(BUILD_DIR)/vendor/%.o,$(filter vendor/%,$
 LSP_OBJS = $(LSP_SRC_OBJS) $(LSP_VND_OBJS)
 LSP_TARGET = clat-lsp
 
+# LSP library objects (without lsp_main.c, for linking into tests)
+LSP_LIB_SRCS = $(SRC_DIR)/lsp_server.c \
+               $(SRC_DIR)/lsp_protocol.c \
+               $(SRC_DIR)/lsp_analysis.c \
+               $(SRC_DIR)/lsp_symbols.c \
+               vendor/cJSON.c
+LSP_LIB_SRC_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter $(SRC_DIR)/%,$(LSP_LIB_SRCS)))
+LSP_LIB_VND_OBJS = $(patsubst vendor/%.c,$(BUILD_DIR)/vendor/%.o,$(filter vendor/%,$(LSP_LIB_SRCS)))
+LSP_LIB_OBJS = $(LSP_LIB_SRC_OBJS) $(LSP_LIB_VND_OBJS)
+
 # Test sources
 TEST_SRCS = $(TEST_DIR)/test_main.c \
             $(TEST_DIR)/test_ds.c \
             $(TEST_DIR)/test_memory.c \
             $(TEST_DIR)/test_eval.c \
-            $(TEST_DIR)/test_stdlib.c
+            $(TEST_DIR)/test_stdlib.c \
+            $(TEST_DIR)/test_lsp.c
 
 TEST_OBJS   = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/tests/%.o)
 TEST_TARGET = $(BUILD_DIR)/test_runner
@@ -172,7 +183,7 @@ $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(TEST_TARGET): $(LIB_OBJS) $(TEST_OBJS)
+$(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test: $(TEST_TARGET)
