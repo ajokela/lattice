@@ -1433,6 +1433,8 @@ static Evaluator *create_child_evaluator(Evaluator *parent) {
     child->no_regions = parent->no_regions;
     child->required_files = lat_map_new(sizeof(bool));
     child->script_dir = parent->script_dir ? strdup(parent->script_dir) : NULL;
+    child->max_call_depth = parent->max_call_depth;
+    child->assertions_enabled = parent->assertions_enabled;
     return child;
 }
 
