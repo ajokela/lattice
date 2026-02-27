@@ -42,6 +42,16 @@ ifeq ($(TLS),0)
     TLS_CFLAGS  :=
     TLS_LDFLAGS :=
 endif
+ifneq ($(TLS),0)
+ifeq ($(TLS_AVAILABLE),no)
+    TLS_DIRECT_TEST := $(shell echo 'int main(){return 0;}' | \
+        $(CC) -x c - -lssl -lcrypto -o /dev/null 2>/dev/null && echo yes || echo no)
+    ifeq ($(TLS_DIRECT_TEST),yes)
+        TLS_CFLAGS  := -DLATTICE_HAS_TLS
+        TLS_LDFLAGS := -lssl -lcrypto
+    endif
+endif
+endif
 CFLAGS  += $(TLS_CFLAGS)
 LDFLAGS += $(TLS_LDFLAGS)
 
@@ -50,6 +60,16 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
     CFLAGS  += -D_DEFAULT_SOURCE
     LDFLAGS += -lpthread -lm -ldl -rdynamic
+endif
+ifeq ($(UNAME_S),FreeBSD)
+    LDFLAGS += -lpthread -lm
+endif
+ifeq ($(UNAME_S),OpenBSD)
+    LDFLAGS += -lpthread -lm
+endif
+ifeq ($(UNAME_S),NetBSD)
+    CFLAGS  += -I/usr/pkg/include
+    LDFLAGS += -L/usr/pkg/lib -lpthread -lm
 endif
 
 # Source files
@@ -212,7 +232,7 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -587,6 +607,28 @@ deploy-coverage: coverage
 	cd - > /dev/null; \
 	sed -i '' "s/v$$VERSION/__VERSION__/g; s/$$SRC_LINES/__SRC_LINES__/g; s/$$TEST_COUNT/__TEST_COUNT__/g" $(SITE_DIR)/dev.html; \
 	echo "    Placeholders restored in dev.html"
+
+# ── Install ──
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+
+install: $(TARGET)
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
+
+# ── Release binary (current platform) ──
+UNAME_M := $(shell uname -m)
+RELEASE_ARCH := $(if $(filter arm64,$(UNAME_M)),aarch64,$(UNAME_M))
+RELEASE_OS := $(if $(filter Darwin,$(UNAME_S)),darwin,$(if $(filter Linux,$(UNAME_S)),linux,$(if $(filter FreeBSD,$(UNAME_S)),freebsd,$(if $(filter OpenBSD,$(UNAME_S)),openbsd,$(if $(filter NetBSD,$(UNAME_S)),netbsd,unknown)))))
+RELEASE_NAME := clat-$(RELEASE_OS)-$(RELEASE_ARCH)
+
+release: clean $(TARGET)
+	strip $(TARGET)
+	cp $(TARGET) $(RELEASE_NAME)
+	@echo "Built: $(RELEASE_NAME) ($$(ls -lh $(RELEASE_NAME) | awk '{print $$5}'))"
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(LSP_TARGET)

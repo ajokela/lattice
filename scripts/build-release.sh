@@ -1,0 +1,278 @@
+#!/bin/bash
+# Build release binaries for all 10 platforms, create GitHub release, deploy to website.
+# Usage: ./scripts/build-release.sh v0.3.27
+#        ./scripts/build-release.sh --dry-run v0.3.27
+set -euo pipefail
+
+DRY_RUN=false
+VERSION=""
+SITE_DIR="../lattice-lang.org"
+BUILD_OUT="build/release"
+
+# BSD VM SSH hosts (configured in ~/.ssh/config with ProxyJump through fileserver)
+BSD_HOSTS=(
+    freebsd-amd64
+    freebsd-arm64
+    openbsd-amd64
+    openbsd-arm64
+    netbsd-amd64
+    netbsd-arm64
+)
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+say()  { printf "\033[1;34m=>\033[0m %s\n" "$*"; }
+err()  { printf "\033[1;31merror:\033[0m %s\n" "$*" >&2; exit 1; }
+warn() { printf "\033[1;33mwarn:\033[0m %s\n" "$*"; }
+ok()   { printf "\033[1;32mok:\033[0m %s\n" "$*"; }
+
+run() {
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "[dry-run] $*"
+    else
+        "$@"
+    fi
+}
+
+# ── Parse args ───────────────────────────────────────────────────────────────
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY_RUN=true; shift ;;
+        v*)        VERSION="$1"; shift ;;
+        *)         err "unknown argument: $1" ;;
+    esac
+done
+
+[ -z "$VERSION" ] && err "usage: $0 [--dry-run] v<VERSION>"
+
+# Strip leading 'v' for comparison with lattice.h
+VERSION_NUM="${VERSION#v}"
+
+# ── Phase 1: Preflight ──────────────────────────────────────────────────────
+
+say "Preflight checks for $VERSION"
+
+# Check version matches lattice.h
+HEADER_VERSION=$(grep 'LATTICE_VERSION' include/lattice.h | head -1 | sed 's/.*"\(.*\)".*/\1/')
+if [ "$HEADER_VERSION" != "$VERSION_NUM" ]; then
+    err "version mismatch: lattice.h has $HEADER_VERSION, expected $VERSION_NUM"
+fi
+ok "Version matches lattice.h"
+
+# Check git tree is clean
+if [ -n "$(git status --porcelain)" ]; then
+    warn "Git tree is dirty — untracked/modified files exist"
+    if [ "$DRY_RUN" = "false" ]; then
+        read -rp "Continue anyway? [y/N] " REPLY
+        [ "$REPLY" = "y" ] || exit 1
+    fi
+fi
+
+# Check gh auth
+if ! gh auth status >/dev/null 2>&1; then
+    err "gh is not authenticated — run 'gh auth login'"
+fi
+ok "GitHub CLI authenticated"
+
+# Check Docker
+if ! docker info >/dev/null 2>&1; then
+    err "Docker is not running"
+fi
+ok "Docker is running"
+
+# Check SSH to fileserver
+if ! ssh -o ConnectTimeout=5 alex@fileserver.localnet true 2>/dev/null; then
+    warn "Cannot reach fileserver.localnet — BSD builds will be skipped"
+    SKIP_BSD=true
+else
+    ok "SSH to fileserver.localnet"
+    SKIP_BSD=false
+fi
+
+# ── Phase 2: Build ──────────────────────────────────────────────────────────
+
+mkdir -p "$BUILD_OUT/$VERSION"
+PIDS=()
+FAILURES=()
+
+build_local() {
+    local name="$1" cmd="$2"
+    say "Building $name..."
+    if eval "$cmd"; then
+        ok "$name"
+    else
+        warn "FAILED: $name"
+        FAILURES+=("$name")
+    fi
+}
+
+build_bg() {
+    local name="$1" cmd="$2"
+    (
+        if eval "$cmd"; then
+            ok "$name"
+        else
+            warn "FAILED: $name"
+            exit 1
+        fi
+    ) &
+    PIDS+=($!)
+}
+
+# macOS arm64 (native)
+build_bg "darwin-aarch64" "
+    make release 2>&1 | tail -1 && \
+    mv clat-darwin-aarch64 $BUILD_OUT/$VERSION/
+"
+
+# macOS x86_64 (Rosetta)
+build_bg "darwin-x86_64" "
+    arch -x86_64 make release 2>&1 | tail -1 && \
+    mv clat-darwin-x86_64 $BUILD_OUT/$VERSION/
+"
+
+# Linux x86_64 (static via Alpine Docker)
+build_bg "linux-x86_64" "
+    docker run --rm --platform linux/amd64 \
+        -v \"\$(pwd):/src\" -w /src \
+        alpine:3.19 sh -c '
+            apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers &&
+            make clean &&
+            make release LDFLAGS=\"-static -lpthread -lm -ldl\" 2>&1 | tail -1
+        ' && \
+    mv clat-linux-x86_64 $BUILD_OUT/$VERSION/
+"
+
+# Linux aarch64 (static via Alpine Docker, QEMU emulation)
+build_bg "linux-aarch64" "
+    docker run --rm --platform linux/arm64 \
+        -v \"\$(pwd):/src\" -w /src \
+        alpine:3.19 sh -c '
+            apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers &&
+            make clean &&
+            make release LDFLAGS=\"-static -lpthread -lm -ldl\" 2>&1 | tail -1
+        ' && \
+    mv clat-linux-aarch64 $BUILD_OUT/$VERSION/
+"
+
+# BSD builds via SSH
+if [ "${SKIP_BSD:-false}" = "false" ]; then
+    for host in "${BSD_HOSTS[@]}"; do
+        # Derive the expected binary name from the SSH host alias
+        # e.g., freebsd-amd64 -> clat-freebsd-x86_64
+        OS_PART="${host%-*}"
+        ARCH_PART="${host##*-}"
+        case "$ARCH_PART" in
+            amd64) ARCH="x86_64"  ;;
+            arm64) ARCH="aarch64" ;;
+            *)     ARCH="$ARCH_PART" ;;
+        esac
+        BINARY="clat-${OS_PART}-${ARCH}"
+
+        build_bg "$BINARY" "
+            ssh -o ConnectTimeout=30 $host '
+                cd lattice &&
+                git fetch --all &&
+                git checkout $VERSION &&
+                gmake clean &&
+                gmake release
+            ' && \
+            scp $host:lattice/$BINARY $BUILD_OUT/$VERSION/$BINARY
+        "
+    done
+fi
+
+# Wait for all background builds
+say "Waiting for all builds to complete..."
+BUILD_FAILED=false
+for pid in "${PIDS[@]}"; do
+    if ! wait "$pid"; then
+        BUILD_FAILED=true
+    fi
+done
+
+if [ "$BUILD_FAILED" = "true" ]; then
+    warn "Some builds failed"
+fi
+
+# ── Phase 3: Checksums ──────────────────────────────────────────────────────
+
+say "Generating checksums..."
+cd "$BUILD_OUT/$VERSION"
+BINARIES=$(ls clat-* 2>/dev/null || true)
+if [ -z "$BINARIES" ]; then
+    err "no binaries found in $BUILD_OUT/$VERSION"
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum clat-* > checksums.txt
+else
+    shasum -a 256 clat-* > checksums.txt
+fi
+cd - >/dev/null
+
+ok "Checksums written to $BUILD_OUT/$VERSION/checksums.txt"
+cat "$BUILD_OUT/$VERSION/checksums.txt"
+
+# ── Phase 4: GitHub Release ─────────────────────────────────────────────────
+
+say "Creating GitHub release $VERSION..."
+NOTES="Lattice $VERSION
+
+Binaries:
+$(ls "$BUILD_OUT/$VERSION"/clat-* | while read -r f; do echo "- $(basename "$f")"; done)
+
+Install: \`curl -fsSL https://lattice-lang.org/install.sh | sh\`"
+
+run gh release create "$VERSION" \
+    --title "Lattice $VERSION" \
+    --notes "$NOTES" \
+    "$BUILD_OUT/$VERSION"/clat-* \
+    "$BUILD_OUT/$VERSION/checksums.txt"
+
+ok "GitHub release created"
+
+# ── Phase 5: Website deploy ─────────────────────────────────────────────────
+
+if [ -d "$SITE_DIR" ]; then
+    say "Deploying to website..."
+
+    # Copy binaries
+    run mkdir -p "$SITE_DIR/releases/$VERSION"
+    run cp "$BUILD_OUT/$VERSION"/clat-* "$SITE_DIR/releases/$VERSION/"
+    run cp "$BUILD_OUT/$VERSION/checksums.txt" "$SITE_DIR/releases/$VERSION/"
+
+    # Copy install script to website root
+    run cp scripts/install.sh "$SITE_DIR/install.sh"
+
+    # Write latest.json
+    DATE=$(date +%Y-%m-%d)
+    run sh -c "echo '{\"version\": \"$VERSION\", \"date\": \"$DATE\"}' > '$SITE_DIR/releases/latest.json'"
+
+    # Deploy
+    if [ "$DRY_RUN" = "false" ]; then
+        (cd "$SITE_DIR" && firebase deploy)
+    else
+        echo "[dry-run] firebase deploy in $SITE_DIR"
+    fi
+
+    ok "Website deployed"
+else
+    warn "Site directory $SITE_DIR not found — skipping website deploy"
+fi
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+echo ""
+say "Release $VERSION complete!"
+echo ""
+echo "  Binaries:  $BUILD_OUT/$VERSION/"
+echo "  GitHub:    https://github.com/alexjokela/lattice/releases/tag/$VERSION"
+echo "  Install:   curl -fsSL https://lattice-lang.org/install.sh | sh"
+echo ""
+
+if [ ${#FAILURES[@]} -gt 0 ]; then
+    warn "Failed builds: ${FAILURES[*]}"
+    exit 1
+fi
