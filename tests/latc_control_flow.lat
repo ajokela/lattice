@@ -1,0 +1,191 @@
+// Test: control flow round-trip through self-hosted compiler
+// Covers if/else, while, for, loop, break, continue, nested control flow
+
+fn test_if_else() {
+    print("--- if/else ---")
+    if true {
+        print("if-true")
+    }
+    if false {
+        print("FAIL")
+    } else {
+        print("else")
+    }
+}
+
+fn test_else_if() {
+    print("--- else if ---")
+    let n = 2
+    if n == 1 {
+        print("one")
+    } else if n == 2 {
+        print("two")
+    } else if n == 3 {
+        print("three")
+    } else {
+        print("other")
+    }
+
+    let m = 5
+    if m == 1 {
+        print("FAIL")
+    } else if m == 2 {
+        print("FAIL")
+    } else {
+        print("fallthrough")
+    }
+}
+
+fn test_while_loop() {
+    print("--- while loop ---")
+    flux i = 0
+    while i < 5 {
+        print(i)
+        i = i + 1
+    }
+}
+
+fn test_while_break() {
+    print("--- while break ---")
+    flux i = 0
+    while i < 100 {
+        if i == 3 {
+            break
+        }
+        print(i)
+        i = i + 1
+    }
+    print("done")
+}
+
+fn test_while_continue() {
+    print("--- while continue ---")
+    flux i = 0
+    while i < 6 {
+        i = i + 1
+        if i % 2 == 0 {
+            continue
+        }
+        print(i)
+    }
+}
+
+fn test_for_range() {
+    print("--- for range ---")
+    for i in 0..5 {
+        print(i)
+    }
+}
+
+fn test_for_array() {
+    print("--- for array ---")
+    let items = [10, 20, 30, 40]
+    for item in items {
+        print(item)
+    }
+}
+
+fn test_for_break() {
+    print("--- for break ---")
+    for i in 0..10 {
+        if i == 4 {
+            break
+        }
+        print(i)
+    }
+    print("done")
+}
+
+fn test_for_continue() {
+    print("--- for continue ---")
+    for i in 0..8 {
+        if i % 2 == 0 {
+            continue
+        }
+        print(i)
+    }
+}
+
+fn test_loop_stmt() {
+    print("--- loop ---")
+    flux i = 0
+    loop {
+        if i >= 4 {
+            break
+        }
+        print(i)
+        i = i + 1
+    }
+}
+
+fn test_loop_continue() {
+    print("--- loop continue ---")
+    flux i = 0
+    loop {
+        if i >= 6 {
+            break
+        }
+        i = i + 1
+        if i == 3 {
+            continue
+        }
+        print(i)
+    }
+}
+
+fn test_nested_loops() {
+    print("--- nested loops ---")
+    for i in 0..3 {
+        for j in 0..3 {
+            if i == j {
+                print(i)
+            }
+        }
+    }
+}
+
+fn test_nested_if_loops() {
+    print("--- nested if loops ---")
+    for i in 0..5 {
+        if i < 2 {
+            print("small")
+        } else if i < 4 {
+            print("medium")
+        } else {
+            print("large")
+        }
+    }
+}
+
+fn test_loop_accumulator() {
+    print("--- loop accumulator ---")
+    flux sum = 0
+    for i in 1..11 {
+        sum = sum + i
+    }
+    print(sum)
+
+    flux product = 1
+    for i in 1..6 {
+        product = product * i
+    }
+    print(product)
+}
+
+fn main() {
+    test_if_else()
+    test_else_if()
+    test_while_loop()
+    test_while_break()
+    test_while_continue()
+    test_for_range()
+    test_for_array()
+    test_for_break()
+    test_for_continue()
+    test_loop_stmt()
+    test_loop_continue()
+    test_nested_loops()
+    test_nested_if_loops()
+    test_loop_accumulator()
+    print("ALL CONTROL FLOW TESTS PASSED")
+}

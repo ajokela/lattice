@@ -1,0 +1,138 @@
+// Test: variable handling round-trip through self-hosted compiler
+// Covers local/global vars, closures, upvalues, shadowing, compound assignment
+
+fn test_local_variables() {
+    print("--- local variables ---")
+    let x = 10
+    let y = 20
+    print(x)
+    print(y)
+    print(x + y)
+
+    let z = x * y
+    print(z)
+}
+
+fn test_flux_variables() {
+    print("--- flux variables ---")
+    flux x = 1
+    print(x)
+    x = 2
+    print(x)
+    x = x + 10
+    print(x)
+}
+
+fn test_compound_assignment() {
+    print("--- compound assignment ---")
+    flux c = 10
+    c += 5
+    print(c)
+    c -= 3
+    print(c)
+    c *= 2
+    print(c)
+    c /= 6
+    print(c)
+    c %= 3
+    print(c)
+}
+
+fn test_shadowing() {
+    print("--- shadowing ---")
+    let a = 1
+    print(a)
+    if true {
+        let a = 2
+        print(a)
+        if true {
+            let a = 3
+            print(a)
+        }
+        print(a)
+    }
+    print(a)
+}
+
+fn test_fix_variables() {
+    print("--- fix variables ---")
+    fix x = 42
+    print(x)
+    fix name = "frozen"
+    print(name)
+    fix arr = [1, 2, 3]
+    print(arr)
+}
+
+fn make_adder(n: any) {
+    return |x| { return x + n }
+}
+
+fn make_counter(start: any) {
+    flux count = start
+    return |inc| {
+        count = count + inc
+        return count
+    }
+}
+
+fn test_closures_capture() {
+    print("--- closures capture ---")
+    let add5 = make_adder(5)
+    print(add5(10))
+    print(add5(20))
+
+    let add10 = make_adder(10)
+    print(add10(5))
+}
+
+fn test_counter_upvalue() {
+    print("--- counter upvalue ---")
+    let c = make_counter(0)
+    print(c(1))
+    print(c(1))
+    print(c(5))
+    print(c(10))
+}
+
+fn test_nested_closures() {
+    print("--- nested closures ---")
+    let outer = 100
+    let f = |x| {
+        let middle = outer + x
+        let g = |y| {
+            return middle + y
+        }
+        return g
+    }
+    let inner = f(10)
+    print(inner(1))
+    print(inner(5))
+}
+
+fn test_multi_variable_scope() {
+    print("--- multi variable scope ---")
+    let a = 1
+    let b = 2
+    let c = 3
+    if true {
+        let d = a + b + c
+        print(d)
+        let e = d * 2
+        print(e)
+    }
+    print(a + b + c)
+}
+
+fn main() {
+    test_local_variables()
+    test_flux_variables()
+    test_compound_assignment()
+    test_shadowing()
+    test_fix_variables()
+    test_closures_capture()
+    test_counter_upvalue()
+    test_nested_closures()
+    test_multi_variable_scope()
+    print("ALL VARIABLE TESTS PASSED")
+}

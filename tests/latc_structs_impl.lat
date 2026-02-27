@@ -1,0 +1,186 @@
+// Test: struct and impl round-trip through self-hosted compiler
+// Covers struct creation, field access, field write, destructuring, traits, impl
+
+struct Point { x: any, y: any }
+struct Rect { origin: any, width: any, height: any }
+struct Counter { value: any }
+
+trait Describable {
+    fn describe(self: any)
+}
+
+trait HasArea {
+    fn area(self: any)
+}
+
+trait Scalable {
+    fn scale(self: any, factor: any)
+}
+
+impl Describable for Point {
+    fn describe(self: any) {
+        return "Point(" + to_string(self.x) + ", " + to_string(self.y) + ")"
+    }
+}
+
+impl HasArea for Point {
+    fn area(self: any) {
+        return self.x * self.y
+    }
+}
+
+impl Scalable for Point {
+    fn scale(self: any, factor: any) {
+        return Point { x: self.x * factor, y: self.y * factor }
+    }
+}
+
+fn test_struct_create() {
+    print("--- struct create ---")
+    let p = Point { x: 10, y: 20 }
+    print(p.x)
+    print(p.y)
+}
+
+fn test_struct_nested() {
+    print("--- struct nested ---")
+    let r = Rect {
+        origin: Point { x: 5, y: 10 },
+        width: 100,
+        height: 50
+    }
+    print(r.width)
+    print(r.height)
+    print(r.origin.x)
+    print(r.origin.y)
+}
+
+fn test_struct_field_write() {
+    print("--- struct field write ---")
+    flux p = Point { x: 1, y: 2 }
+    print(p.x)
+    p.x = 99
+    print(p.x)
+    p.y = 88
+    print(p.y)
+}
+
+fn test_struct_field_compound() {
+    print("--- struct field compound ---")
+    flux p = Point { x: 10, y: 20 }
+    p.x += 5
+    print(p.x)
+    p.y -= 10
+    print(p.y)
+    p.x *= 2
+    print(p.x)
+}
+
+fn sum_point(pt: any) {
+    return pt.x + pt.y
+}
+
+fn make_point(a: any, b: any) {
+    return Point { x: a, y: b }
+}
+
+fn test_struct_as_param() {
+    print("--- struct as param ---")
+    let p = Point { x: 3, y: 4 }
+    print(sum_point(p))
+    let q = make_point(100, 200)
+    print(q.x)
+    print(q.y)
+}
+
+fn test_struct_in_array() {
+    print("--- struct in array ---")
+    let points = [
+        Point { x: 1, y: 2 },
+        Point { x: 3, y: 4 },
+        Point { x: 5, y: 6 }
+    ]
+    for pt in points {
+        print(pt.x + pt.y)
+    }
+}
+
+fn test_struct_equality() {
+    print("--- struct equality ---")
+    let a = Point { x: 1, y: 2 }
+    let b = Point { x: 1, y: 2 }
+    let c = Point { x: 3, y: 4 }
+    print(a == b)
+    print(a == c)
+    print(a != c)
+}
+
+fn test_struct_destructure() {
+    print("--- struct destructure ---")
+    let p = Point { x: 55, y: 66 }
+    let { x, y } = p
+    print(x)
+    print(y)
+}
+
+fn test_array_destructure() {
+    print("--- array destructure ---")
+    let [a, b, c] = [10, 20, 30]
+    print(a)
+    print(b)
+    print(c)
+}
+
+fn test_trait_methods() {
+    print("--- trait methods ---")
+    let p = Point { x: 3, y: 4 }
+    print(p.describe())
+    print(p.area())
+}
+
+fn test_trait_scale() {
+    print("--- trait scale ---")
+    let p = Point { x: 5, y: 10 }
+    let q = p.scale(3)
+    print(q.x)
+    print(q.y)
+}
+
+fn test_trait_in_loop() {
+    print("--- trait in loop ---")
+    let points = [
+        Point { x: 1, y: 1 },
+        Point { x: 2, y: 3 },
+        Point { x: 4, y: 5 }
+    ]
+    flux total = 0
+    for p in points {
+        total = total + p.area()
+    }
+    print(total)
+}
+
+fn test_struct_from_closure() {
+    print("--- struct from closure ---")
+    let make = |a, b| { return Point { x: a, y: b } }
+    let p = make(11, 22)
+    print(p.x)
+    print(p.y)
+}
+
+fn main() {
+    test_struct_create()
+    test_struct_nested()
+    test_struct_field_write()
+    test_struct_field_compound()
+    test_struct_as_param()
+    test_struct_in_array()
+    test_struct_equality()
+    test_struct_destructure()
+    test_array_destructure()
+    test_trait_methods()
+    test_trait_scale()
+    test_trait_in_loop()
+    test_struct_from_closure()
+    print("ALL STRUCT/IMPL TESTS PASSED")
+}

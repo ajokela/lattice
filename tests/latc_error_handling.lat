@@ -1,0 +1,115 @@
+// Test: error handling round-trip through self-hosted compiler
+// Covers try/catch, throw (via div-by-zero), nested try, try as expression
+
+fn test_basic_try_catch() {
+    print("--- basic try/catch ---")
+    try {
+        let x = 1 / 0
+        print("FAIL")
+    } catch e {
+        print("caught")
+    }
+}
+
+fn test_no_error() {
+    print("--- no error ---")
+    try {
+        let x = 10 + 20
+        print(x)
+    } catch e {
+        print("FAIL")
+    }
+}
+
+fn test_try_as_expression() {
+    print("--- try as expression ---")
+    let result = try {
+        10 / 2
+    } catch e {
+        -1
+    }
+    print(result)
+
+    let fail_result = try {
+        1 / 0
+    } catch e {
+        -1
+    }
+    print(fail_result)
+}
+
+fn test_nested_try() {
+    print("--- nested try ---")
+    try {
+        try {
+            let x = 1 / 0
+            print("FAIL inner")
+        } catch e {
+            print("inner caught")
+        }
+        print("outer continues")
+    } catch e {
+        print("FAIL outer")
+    }
+}
+
+fn might_fail(succeed: any) {
+    if !succeed {
+        let x = 1 / 0
+    }
+    return 42
+}
+
+fn test_function_error() {
+    print("--- function error ---")
+    try {
+        let r = might_fail(true)
+        print(r)
+    } catch e {
+        print("FAIL")
+    }
+
+    try {
+        let r = might_fail(false)
+        print("FAIL")
+    } catch e {
+        print("caught function error")
+    }
+}
+
+fn test_try_in_loop() {
+    print("--- try in loop ---")
+    for i in 0..5 {
+        try {
+            if i == 2 {
+                let x = 1 / 0
+            }
+            print(i)
+        } catch e {
+            print("error at " + to_string(i))
+        }
+    }
+}
+
+fn test_freeze_thaw() {
+    print("--- freeze/thaw ---")
+    flux val = [1, 2, 3]
+    freeze(val)
+    print(val)
+    thaw(val)
+    print(val)
+
+    let c = clone(val)
+    print(c)
+}
+
+fn main() {
+    test_basic_try_catch()
+    test_no_error()
+    test_try_as_expression()
+    test_nested_try()
+    test_function_error()
+    test_try_in_loop()
+    test_freeze_thaw()
+    print("ALL ERROR HANDLING TESTS PASSED")
+}
