@@ -778,6 +778,16 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_INDEX: {
+            /* Fast path: if object is a local variable (non-optional), use OP_INDEX_LOCAL
+             * to avoid cloning the entire container. */
+            if (!e->as.index.optional && e->as.index.object->tag == EXPR_IDENT) {
+                int slot = resolve_local(current, e->as.index.object->as.str_val);
+                if (slot >= 0) {
+                    compile_expr(e->as.index.index, line);
+                    emit_bytes(OP_INDEX_LOCAL, (uint8_t)slot, line);
+                    break;
+                }
+            }
             compile_expr(e->as.index.object, line);
             size_t end_jump = 0;
             if (e->as.index.optional) {

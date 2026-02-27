@@ -431,6 +431,7 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
         case OP_SET_LOCAL_POP: return byte_instruction("OP_SET_LOCAL_POP", c, offset);
         case OP_SET_SLICE: return simple_instruction("OP_SET_SLICE", offset);
         case OP_SET_SLICE_LOCAL: return byte_instruction("OP_SET_SLICE_LOCAL", c, offset);
+        case OP_INDEX_LOCAL: return byte_instruction("OP_INDEX_LOCAL", c, offset);
         case OP_HALT: return simple_instruction("OP_HALT", offset);
         default: fprintf(stderr, "Unknown opcode %d\n", op); return offset + 1;
     }

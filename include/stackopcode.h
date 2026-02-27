@@ -165,6 +165,7 @@ typedef enum {
     /* Slice assignment */
     OP_SET_SLICE,       /* Pop end, start, obj, val -> splice obj[start..end] = val, push modified obj */
     OP_SET_SLICE_LOCAL, /* operand = local slot. Pop end, start, val -> splice local[start..end] = val */
+    OP_INDEX_LOCAL,     /* operand = local slot. Pop index. Push local[index] element. */
 
     /* Fallback to tree-walker */
     OP_HALT, /* Stop execution */
