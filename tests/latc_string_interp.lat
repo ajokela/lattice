@@ -1,0 +1,85 @@
+// Test: string interpolation round-trip through self-hosted compiler
+// Covers various interpolation scenarios
+
+fn test_basic_interp() {
+    print("--- basic interp ---")
+    let name = "world"
+    print("hello ${name}")
+}
+
+fn test_numeric_interp() {
+    print("--- numeric interp ---")
+    let x = 42
+    let y = 3.14
+    print("x = ${x}")
+    print("y = ${y}")
+    print("sum = ${x + 1}")
+}
+
+fn test_multi_interp() {
+    print("--- multi interp ---")
+    let first = "John"
+    let last = "Doe"
+    let age = 30
+    print("${first} ${last}, age ${age}")
+}
+
+fn test_expression_interp() {
+    print("--- expression interp ---")
+    let a = 10
+    let b = 20
+    print("a + b = ${a + b}")
+    print("a * b = ${a * b}")
+}
+
+fn test_nested_string_interp() {
+    print("--- nested string interp ---")
+    let greeting = "hello"
+    let msg = "msg: ${greeting}"
+    print(msg)
+    print("wrapped: ${msg}!")
+}
+
+fn test_bool_interp() {
+    print("--- bool interp ---")
+    let flag = true
+    print("flag is ${flag}")
+    let other = false
+    print("other is ${other}")
+}
+
+fn test_empty_and_literal() {
+    print("--- empty and literal ---")
+    print("no interpolation here")
+    let empty = ""
+    print("empty: ${empty}.")
+}
+
+fn test_interp_in_function() {
+    print("--- interp in function ---")
+    let fmt = |name, val| {
+        return "${name}: ${val}"
+    }
+    print(fmt("count", 42))
+    print(fmt("status", "ok"))
+}
+
+fn test_interp_in_loop() {
+    print("--- interp in loop ---")
+    for i in 0..4 {
+        print("item ${i}")
+    }
+}
+
+fn main() {
+    test_basic_interp()
+    test_numeric_interp()
+    test_multi_interp()
+    test_expression_interp()
+    test_nested_string_interp()
+    test_bool_interp()
+    test_empty_and_literal()
+    test_interp_in_function()
+    test_interp_in_loop()
+    print("ALL STRING INTERP TESTS PASSED")
+}

@@ -1,0 +1,163 @@
+// Test: data structure round-trip through self-hosted compiler
+// Covers arrays, maps, tuples, nested structures
+
+fn test_array_basic() {
+    print("--- array basic ---")
+    let arr = [10, 20, 30]
+    print(arr[0])
+    print(arr[1])
+    print(arr[2])
+    print(len(arr))
+}
+
+fn test_array_push() {
+    print("--- array push ---")
+    flux arr = [1, 2, 3]
+    arr.push(4)
+    arr.push(5)
+    print(len(arr))
+    print(arr[3])
+    print(arr[4])
+}
+
+fn test_array_index_write() {
+    print("--- array index write ---")
+    flux arr = [0, 0, 0, 0]
+    arr[0] = 10
+    arr[1] = 20
+    arr[2] = 30
+    arr[3] = 40
+    for v in arr {
+        print(v)
+    }
+}
+
+fn test_array_iteration() {
+    print("--- array iteration ---")
+    let names = ["alice", "bob", "charlie"]
+    for name in names {
+        print(name)
+    }
+}
+
+fn test_array_mixed_types() {
+    print("--- array mixed types ---")
+    let mixed = [1, "two", 3.0, true, nil]
+    print(mixed[0])
+    print(mixed[1])
+    print(mixed[2])
+    print(mixed[3])
+    print(mixed[4])
+}
+
+fn test_array_nested() {
+    print("--- array nested ---")
+    let matrix = [[1, 2], [3, 4], [5, 6]]
+    print(matrix[0][0])
+    print(matrix[0][1])
+    print(matrix[1][0])
+    print(matrix[1][1])
+    print(matrix[2][0])
+    print(matrix[2][1])
+}
+
+fn test_array_in_function() {
+    print("--- array in function ---")
+    let sum_arr = |arr| {
+        flux total = 0
+        for v in arr {
+            total = total + v
+        }
+        return total
+    }
+    print(sum_arr([1, 2, 3, 4, 5]))
+    print(sum_arr([10, 20, 30]))
+}
+
+fn test_map_basic() {
+    print("--- map basic ---")
+    flux m = Map::new()
+    m["name"] = "lattice"
+    m["version"] = 1
+    m["active"] = true
+    print(m["name"])
+    print(m["version"])
+    print(m["active"])
+}
+
+fn test_map_overwrite() {
+    print("--- map overwrite ---")
+    flux m = Map::new()
+    m["key"] = "first"
+    print(m["key"])
+    m["key"] = "second"
+    print(m["key"])
+    m["key"] = "third"
+    print(m["key"])
+}
+
+fn test_map_missing_key() {
+    print("--- map missing key ---")
+    flux m = Map::new()
+    m["exists"] = 42
+    print(m["exists"])
+    print(m["missing"])
+}
+
+fn test_array_of_strings() {
+    print("--- array of strings ---")
+    let words = ["hello", "world", "foo", "bar"]
+    for w in words {
+        print(w)
+    }
+    print(len(words))
+}
+
+fn test_array_building() {
+    print("--- array building ---")
+    flux arr = []
+    for i in 0..5 {
+        arr.push(i * 10)
+    }
+    for v in arr {
+        print(v)
+    }
+}
+
+fn test_range_iteration() {
+    print("--- range iteration ---")
+    flux sum = 0
+    for i in 0..10 {
+        sum = sum + i
+    }
+    print(sum)
+}
+
+fn test_array_compound_index() {
+    print("--- array compound index ---")
+    flux arr = [10, 20, 30]
+    arr[0] += 5
+    print(arr[0])
+    arr[1] -= 5
+    print(arr[1])
+    arr[2] *= 2
+    print(arr[2])
+}
+
+fn main() {
+    test_array_basic()
+    test_array_push()
+    test_array_index_write()
+    test_array_iteration()
+    test_array_mixed_types()
+    test_array_nested()
+    test_array_in_function()
+    test_map_basic()
+    test_map_overwrite()
+    test_map_missing_key()
+    test_array_of_strings()
+    test_array_building()
+    test_range_iteration()
+    test_array_compound_index()
+    print("ALL DATA STRUCTURE TESTS PASSED")
+}

@@ -1,0 +1,171 @@
+// Test: function features round-trip through self-hosted compiler
+// Covers regular functions, recursion, higher-order, closures, multiple params
+
+fn add(a: any, b: any) {
+    return a + b
+}
+
+fn multiply(a: any, b: any) {
+    return a * b
+}
+
+fn negate(x: any) {
+    return -x
+}
+
+fn identity(x: any) {
+    return x
+}
+
+fn void_fn() {
+    // no return value
+}
+
+fn test_basic_functions() {
+    print("--- basic functions ---")
+    print(add(3, 4))
+    print(multiply(5, 6))
+    print(negate(42))
+    print(identity("hello"))
+    print(void_fn())
+}
+
+fn factorial(n: any) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn fib(n: any) {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn sum_to(n: any) {
+    if n <= 0 {
+        return 0
+    }
+    return n + sum_to(n - 1)
+}
+
+fn test_recursion() {
+    print("--- recursion ---")
+    print(factorial(1))
+    print(factorial(5))
+    print(factorial(10))
+    print(fib(0))
+    print(fib(1))
+    print(fib(10))
+    print(sum_to(10))
+}
+
+fn apply(f: any, x: any) {
+    return f(x)
+}
+
+fn compose(f: any, g: any) {
+    return |x| { return f(g(x)) }
+}
+
+fn test_higher_order() {
+    print("--- higher order ---")
+    let double = |x| x * 2
+    let inc = |x| x + 1
+    print(apply(double, 5))
+    print(apply(inc, 10))
+
+    let double_then_inc = compose(inc, double)
+    print(double_then_inc(5))
+
+    let inc_then_double = compose(double, inc)
+    print(inc_then_double(5))
+}
+
+fn make_pair(a: any, b: any) {
+    return |selector| {
+        if selector == "first" {
+            return a
+        }
+        return b
+    }
+}
+
+fn test_closure_pair() {
+    print("--- closure pair ---")
+    let p = make_pair(10, 20)
+    print(p("first"))
+    print(p("second"))
+}
+
+fn multi_return_via_array(x: any) {
+    return [x, x * 2, x * 3]
+}
+
+fn test_multi_return() {
+    print("--- multi return ---")
+    let result = multi_return_via_array(5)
+    print(result[0])
+    print(result[1])
+    print(result[2])
+}
+
+fn make_accumulator() {
+    flux total = 0
+    return |val| {
+        total = total + val
+        return total
+    }
+}
+
+fn test_stateful_closure() {
+    print("--- stateful closure ---")
+    let acc = make_accumulator()
+    print(acc(10))
+    print(acc(20))
+    print(acc(30))
+}
+
+fn three_params(a: any, b: any, c: any) {
+    return a + b + c
+}
+
+fn four_params(a: any, b: any, c: any, d: any) {
+    return a * b + c * d
+}
+
+fn test_many_params() {
+    print("--- many params ---")
+    print(three_params(1, 2, 3))
+    print(four_params(2, 3, 4, 5))
+}
+
+fn test_closures_in_array() {
+    print("--- closures in array ---")
+    let fns = [|x| x + 1, |x| x * 2, |x| x - 3]
+    for f in fns {
+        print(f(10))
+    }
+}
+
+fn test_closure_as_value() {
+    print("--- closure as value ---")
+    let square = |x| x * x
+    let result = square(7)
+    print(result)
+}
+
+fn main() {
+    test_basic_functions()
+    test_recursion()
+    test_higher_order()
+    test_closure_pair()
+    test_multi_return()
+    test_stateful_closure()
+    test_many_params()
+    test_closures_in_array()
+    test_closure_as_value()
+    print("ALL FUNCTION TESTS PASSED")
+}

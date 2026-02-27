@@ -1,0 +1,198 @@
+// Test: enum and match expression round-trip through self-hosted compiler
+// Covers enum creation, match with literals, wildcards, guards, ranges, blocks
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Rgb(any, any, any)
+}
+
+enum Shape {
+    Circle(any),
+    Square(any),
+    None
+}
+
+enum Option {
+    Some(any),
+    None
+}
+
+fn test_enum_creation() {
+    print("--- enum creation ---")
+    let r = Color::Red
+    print(r)
+    let g = Color::Green
+    print(g)
+    let b = Color::Blue
+    print(b)
+    let rgb = Color::Rgb(255, 128, 0)
+    print(rgb)
+}
+
+fn test_enum_with_data() {
+    print("--- enum with data ---")
+    let circle = Shape::Circle(10)
+    print(circle)
+    let sq = Shape::Square(5)
+    print(sq)
+    let none = Shape::None
+    print(none)
+}
+
+fn test_match_string() {
+    print("--- match string ---")
+    let op = "+"
+    match op {
+        "+" => print("add"),
+        "-" => print("sub"),
+        "*" => print("mul"),
+        _ => print("other")
+    }
+}
+
+fn test_match_integer() {
+    print("--- match integer ---")
+    let n = 3
+    match n {
+        1 => print("one"),
+        2 => print("two"),
+        3 => print("three"),
+        _ => print("many")
+    }
+}
+
+fn test_match_wildcard() {
+    print("--- match wildcard ---")
+    let x = "unknown"
+    match x {
+        "a" => print("FAIL"),
+        _ => print("wildcard")
+    }
+}
+
+fn test_match_as_expression() {
+    print("--- match as expression ---")
+    let result = match "hello" {
+        "world" => "w",
+        "hello" => "h",
+        _ => "?"
+    }
+    print(result)
+}
+
+fn test_match_block_body() {
+    print("--- match block body ---")
+    let result = match 2 {
+        1 => { "one" },
+        2 => {
+            let x = "tw"
+            let y = "o"
+            x + y
+        },
+        _ => { "other" }
+    }
+    print(result)
+}
+
+fn test_match_boolean() {
+    print("--- match boolean ---")
+    let flag = true
+    let r1 = match flag {
+        true => "yes",
+        false => "no",
+        _ => "?"
+    }
+    print(r1)
+
+    let flag2 = false
+    let r2 = match flag2 {
+        true => "yes",
+        false => "no",
+        _ => "?"
+    }
+    print(r2)
+}
+
+fn test_match_binding_guard() {
+    print("--- match binding guard ---")
+    let x = 15
+    let result = match x {
+        n if n < 0 => "negative",
+        n if n == 0 => "zero",
+        n if n <= 10 => "small",
+        n if n <= 20 => "medium",
+        _ => "large"
+    }
+    print(result)
+}
+
+fn test_match_range() {
+    print("--- match range ---")
+    let score = 85
+    let grade = match score {
+        0..59 => "F",
+        60..69 => "D",
+        70..79 => "C",
+        80..89 => "B",
+        90..100 => "A",
+        _ => "invalid"
+    }
+    print(grade)
+}
+
+fn test_option_creation() {
+    print("--- option creation ---")
+    let val = Option::Some(42)
+    print(val)
+    let none = Option::None
+    print(none)
+}
+
+fn test_match_in_loop() {
+    print("--- match in loop ---")
+    for i in 0..5 {
+        let label = match i {
+            0 => "zero",
+            1 => "one",
+            2 => "two",
+            _ => "many"
+        }
+        print(label)
+    }
+}
+
+fn make_color(kind: any) {
+    if kind == "red" {
+        return Color::Red
+    }
+    if kind == "custom" {
+        return Color::Rgb(1, 2, 3)
+    }
+    return Color::Blue
+}
+
+fn test_enum_from_function() {
+    print("--- enum from function ---")
+    print(make_color("red"))
+    print(make_color("custom"))
+    print(make_color("other"))
+}
+
+fn main() {
+    test_enum_creation()
+    test_enum_with_data()
+    test_match_string()
+    test_match_integer()
+    test_match_wildcard()
+    test_match_as_expression()
+    test_match_block_body()
+    test_match_boolean()
+    test_match_binding_guard()
+    test_match_range()
+    test_option_creation()
+    test_match_in_loop()
+    test_enum_from_function()
+    print("ALL ENUM/MATCH TESTS PASSED")
+}

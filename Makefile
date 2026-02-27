@@ -229,7 +229,10 @@ test-all-backends: $(TEST_TARGET)
 	@echo "=== tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
 	@echo "=== regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
 
-LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_traits latc_traits_codegen
+LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_traits latc_traits_codegen \
+             latc_expressions latc_variables latc_control_flow latc_functions \
+             latc_data_structures latc_enums_match latc_structs_impl latc_error_handling \
+             latc_string_interp
 
 test-latc: $(TARGET)
 	@PASS=0; FAIL=0; \
@@ -268,6 +271,24 @@ test-latc: $(TARGET)
 		fi; \
 		rm -f /tmp/$$name.latc /tmp/$$name.compiled.out /tmp/$$name.direct.out /tmp/$$name.diff; \
 	done; \
+	echo ""; \
+	echo "--- Deterministic serialization ---"; \
+	DPASS=0; DFAIL=0; \
+	for name in latc_expressions latc_variables latc_control_flow latc_functions; do \
+		printf "%-30s" "deterministic:$$name..."; \
+		./$(TARGET) compiler/latc.lat tests/$$name.lat /tmp/$$name.1.latc > /dev/null 2>&1; \
+		./$(TARGET) compiler/latc.lat tests/$$name.lat /tmp/$$name.2.latc > /dev/null 2>&1; \
+		if cmp -s /tmp/$$name.1.latc /tmp/$$name.2.latc; then \
+			echo "PASS"; \
+			DPASS=$$((DPASS + 1)); \
+		else \
+			echo "FAIL (non-deterministic)"; \
+			DFAIL=$$((DFAIL + 1)); \
+		fi; \
+		rm -f /tmp/$$name.1.latc /tmp/$$name.2.latc; \
+	done; \
+	PASS=$$((PASS + DPASS)); \
+	FAIL=$$((FAIL + DFAIL)); \
 	echo ""; \
 	echo "Results: $$PASS passed, $$FAIL failed"; \
 	if [ $$FAIL -gt 0 ]; then exit 1; fi
