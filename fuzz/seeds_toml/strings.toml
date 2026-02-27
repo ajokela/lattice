@@ -1,0 +1,8 @@
+basic = "hello"
+literal = 'no \escapes'
+multiline = """
+line one
+line two"""
+ml_literal = '''
+raw \n here'''
+empty = ""

@@ -1,0 +1,9 @@
+integer: 42
+negative: -7
+float: 3.14
+scientific: 1e10
+true_val: true
+false_val: false
+null_val: ~
+empty_string: ""
+multiword: hello world

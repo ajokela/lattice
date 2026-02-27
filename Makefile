@@ -187,7 +187,32 @@ FUZZ_REGVM_SRC    = $(FUZZ_DIR)/fuzz_regvm.c
 FUZZ_REGVM_OBJ    = $(BUILD_DIR)/fuzz/fuzz_regvm.o
 FUZZ_REGVM_TARGET = $(BUILD_DIR)/fuzz_regvm
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage
+# JSON parser fuzz harness
+FUZZ_JSON_SRC    = $(FUZZ_DIR)/fuzz_json.c
+FUZZ_JSON_OBJ    = $(BUILD_DIR)/fuzz/fuzz_json.o
+FUZZ_JSON_TARGET = $(BUILD_DIR)/fuzz_json
+
+# TOML parser fuzz harness
+FUZZ_TOML_SRC    = $(FUZZ_DIR)/fuzz_toml.c
+FUZZ_TOML_OBJ    = $(BUILD_DIR)/fuzz/fuzz_toml.o
+FUZZ_TOML_TARGET = $(BUILD_DIR)/fuzz_toml
+
+# YAML parser fuzz harness
+FUZZ_YAML_SRC    = $(FUZZ_DIR)/fuzz_yaml.c
+FUZZ_YAML_OBJ    = $(BUILD_DIR)/fuzz/fuzz_yaml.o
+FUZZ_YAML_TARGET = $(BUILD_DIR)/fuzz_yaml
+
+# Lexer-only fuzz harness
+FUZZ_LEXER_SRC    = $(FUZZ_DIR)/fuzz_lexer.c
+FUZZ_LEXER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_lexer.o
+FUZZ_LEXER_TARGET = $(BUILD_DIR)/fuzz_lexer
+
+# Formatter fuzz harness
+FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
+FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
+FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
+
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage
 
 all: $(TARGET)
 
@@ -403,31 +428,95 @@ fuzz-regvm: clean $(LIB_OBJS) $(FUZZ_REGVM_OBJ)
 	@echo "    Run:  $(FUZZ_REGVM_TARGET) fuzz/corpus/ -max_len=4096"
 	@echo "    Seed: make fuzz-seed"
 
+fuzz-json: CC = $(FUZZ_CC)
+fuzz-json: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-json: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-json: clean $(LIB_OBJS) $(FUZZ_JSON_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_JSON_TARGET) $(LIB_OBJS) $(FUZZ_JSON_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus_json
+	@echo "\n==> JSON fuzzer built: $(FUZZ_JSON_TARGET)"
+	@echo "    Run:  $(FUZZ_JSON_TARGET) fuzz/corpus_json/ -max_len=4096"
+
+fuzz-toml: CC = $(FUZZ_CC)
+fuzz-toml: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-toml: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-toml: clean $(LIB_OBJS) $(FUZZ_TOML_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_TOML_TARGET) $(LIB_OBJS) $(FUZZ_TOML_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus_toml
+	@echo "\n==> TOML fuzzer built: $(FUZZ_TOML_TARGET)"
+	@echo "    Run:  $(FUZZ_TOML_TARGET) fuzz/corpus_toml/ -max_len=4096"
+
+fuzz-yaml: CC = $(FUZZ_CC)
+fuzz-yaml: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-yaml: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-yaml: clean $(LIB_OBJS) $(FUZZ_YAML_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_YAML_TARGET) $(LIB_OBJS) $(FUZZ_YAML_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus_yaml
+	@echo "\n==> YAML fuzzer built: $(FUZZ_YAML_TARGET)"
+	@echo "    Run:  $(FUZZ_YAML_TARGET) fuzz/corpus_yaml/ -max_len=4096"
+
+fuzz-lexer: CC = $(FUZZ_CC)
+fuzz-lexer: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-lexer: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-lexer: clean $(LIB_OBJS) $(FUZZ_LEXER_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_LEXER_TARGET) $(LIB_OBJS) $(FUZZ_LEXER_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus
+	@echo "\n==> Lexer fuzzer built: $(FUZZ_LEXER_TARGET)"
+	@echo "    Run:  $(FUZZ_LEXER_TARGET) fuzz/corpus/ -max_len=4096"
+	@echo "    Seed: make fuzz-seed"
+
+fuzz-formatter: CC = $(FUZZ_CC)
+fuzz-formatter: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-formatter: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-formatter: clean $(LIB_OBJS) $(FUZZ_FORMATTER_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_FORMATTER_TARGET) $(LIB_OBJS) $(FUZZ_FORMATTER_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus
+	@echo "\n==> Formatter fuzzer built: $(FUZZ_FORMATTER_TARGET)"
+	@echo "    Run:  $(FUZZ_FORMATTER_TARGET) fuzz/corpus/ -max_len=4096"
+	@echo "    Seed: make fuzz-seed"
+
 fuzz-all: CC = $(FUZZ_CC)
 fuzz-all: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-all: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
-fuzz-all: clean $(LIB_OBJS) $(FUZZ_OBJ) $(FUZZ_VM_OBJ) $(FUZZ_STACKVM_OBJ) $(FUZZ_REGVM_OBJ) $(FUZZ_LATC_OBJ)
+fuzz-all: clean $(LIB_OBJS) $(FUZZ_OBJ) $(FUZZ_VM_OBJ) $(FUZZ_STACKVM_OBJ) $(FUZZ_REGVM_OBJ) $(FUZZ_LATC_OBJ) $(FUZZ_JSON_OBJ) $(FUZZ_TOML_OBJ) $(FUZZ_YAML_OBJ) $(FUZZ_LEXER_OBJ) $(FUZZ_FORMATTER_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ) $(LDFLAGS)
 	$(CC) $(CFLAGS) -o $(FUZZ_VM_TARGET) $(LIB_OBJS) $(FUZZ_VM_OBJ) $(LDFLAGS)
 	$(CC) $(CFLAGS) -o $(FUZZ_STACKVM_TARGET) $(LIB_OBJS) $(FUZZ_STACKVM_OBJ) $(LDFLAGS)
 	$(CC) $(CFLAGS) -o $(FUZZ_REGVM_TARGET) $(LIB_OBJS) $(FUZZ_REGVM_OBJ) $(LDFLAGS)
 	$(CC) $(CFLAGS) -o $(FUZZ_LATC_TARGET) $(LIB_OBJS) $(FUZZ_LATC_OBJ) $(LDFLAGS)
-	@mkdir -p fuzz/corpus fuzz/corpus_latc
+	$(CC) $(CFLAGS) -o $(FUZZ_JSON_TARGET) $(LIB_OBJS) $(FUZZ_JSON_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_TOML_TARGET) $(LIB_OBJS) $(FUZZ_TOML_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_YAML_TARGET) $(LIB_OBJS) $(FUZZ_YAML_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_LEXER_TARGET) $(LIB_OBJS) $(FUZZ_LEXER_OBJ) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(FUZZ_FORMATTER_TARGET) $(LIB_OBJS) $(FUZZ_FORMATTER_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus fuzz/corpus_latc fuzz/corpus_json fuzz/corpus_toml fuzz/corpus_yaml
 	@echo "\n==> All fuzzers built:"
 	@echo "    $(FUZZ_TARGET)         (tree-walk evaluator)"
 	@echo "    $(FUZZ_VM_TARGET)           (stack VM + RegVM combined)"
 	@echo "    $(FUZZ_STACKVM_TARGET)     (stack VM standalone)"
 	@echo "    $(FUZZ_REGVM_TARGET)       (RegVM standalone)"
 	@echo "    $(FUZZ_LATC_TARGET)         (bytecode deserializer)"
+	@echo "    $(FUZZ_JSON_TARGET)         (JSON parser)"
+	@echo "    $(FUZZ_TOML_TARGET)         (TOML parser)"
+	@echo "    $(FUZZ_YAML_TARGET)         (YAML parser)"
+	@echo "    $(FUZZ_LEXER_TARGET)       (lexer/tokenizer)"
+	@echo "    $(FUZZ_FORMATTER_TARGET) (source formatter)"
 
 FUZZ_EXCLUDE = http_server http_client https_client tls_client orm_demo
 fuzz-seed:
-	@mkdir -p fuzz/corpus
+	@mkdir -p fuzz/corpus fuzz/corpus_json fuzz/corpus_toml fuzz/corpus_yaml
 	@cp -v examples/*.lat fuzz/corpus/ 2>/dev/null || true
 	@cp -v benchmarks/*.lat fuzz/corpus/ 2>/dev/null || true
 	@cp -v fuzz/seeds/*.lat fuzz/corpus/ 2>/dev/null || true
 	@for f in $(FUZZ_EXCLUDE); do rm -f fuzz/corpus/$$f.lat; done
-	@echo "\n==> Corpus seeded with $$(ls fuzz/corpus/*.lat 2>/dev/null | wc -l | tr -d ' ') files (excluded: $(FUZZ_EXCLUDE))"
+	@cp -v fuzz/seeds_json/*.json fuzz/corpus_json/ 2>/dev/null || true
+	@cp -v fuzz/seeds_toml/*.toml fuzz/corpus_toml/ 2>/dev/null || true
+	@cp -v fuzz/seeds_yaml/*.yaml fuzz/corpus_yaml/ 2>/dev/null || true
+	@echo "\n==> Corpus seeded:"
+	@echo "    Lattice: $$(ls fuzz/corpus/*.lat 2>/dev/null | wc -l | tr -d ' ') files (excluded: $(FUZZ_EXCLUDE))"
+	@echo "    JSON:    $$(ls fuzz/corpus_json/* 2>/dev/null | wc -l | tr -d ' ') files"
+	@echo "    TOML:    $$(ls fuzz/corpus_toml/* 2>/dev/null | wc -l | tr -d ' ') files"
+	@echo "    YAML:    $$(ls fuzz/corpus_yaml/* 2>/dev/null | wc -l | tr -d ' ') files"
 
 wasm:
 	emcc $(WASM_FLAGS) -o $(WASM_OUT) $(WASM_SRCS)
