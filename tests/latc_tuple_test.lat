@@ -1,0 +1,67 @@
+// Test: tuple literals compiled by self-hosted compiler
+
+fn test_basic_tuple() {
+    print("--- basic tuple ---")
+    let t = (1, 2, 3)
+    print(t)          // (1, 2, 3)
+    print(t.0)        // 1
+    print(t.1)        // 2
+    print(t.2)        // 3
+}
+
+fn test_two_element_tuple() {
+    print("--- two element tuple ---")
+    let pair = (10, 20)
+    print(pair.0)     // 10
+    print(pair.1)     // 20
+}
+
+fn test_mixed_types() {
+    print("--- mixed types ---")
+    let t = ("hello", 42, true)
+    print(t.0)        // hello
+    print(t.1)        // 42
+    print(t.2)        // true
+}
+
+fn test_trailing_comma() {
+    print("--- trailing comma ---")
+    let t = (100,)
+    print(t.0)        // 100
+}
+
+fn test_nested_tuple() {
+    print("--- nested tuple ---")
+    let t = ((1, 2), (3, 4))
+    print(t.0)        // (1, 2)
+    print(t.1)        // (3, 4)
+}
+
+fn test_tuple_from_function() {
+    print("--- tuple from function ---")
+    let t = make_pair(5, 10)
+    print(t.0)        // 5
+    print(t.1)        // 10
+}
+
+fn make_pair(a: any, b: any) {
+    return (a, b)
+}
+
+fn test_grouping_regression() {
+    print("--- grouping regression ---")
+    // (expr) without comma should still work as grouping
+    let x = (1 + 2) * 3
+    print(x)          // 9
+}
+
+fn main() {
+    test_basic_tuple()
+    test_two_element_tuple()
+    test_mixed_types()
+    test_trailing_comma()
+    test_nested_tuple()
+    test_tuple_from_function()
+    test_grouping_regression()
+    print("ALL TUPLE TESTS PASSED")
+}

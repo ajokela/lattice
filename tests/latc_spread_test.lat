@@ -1,0 +1,84 @@
+// Test: array spread operator compiled by self-hosted compiler
+
+fn test_basic_spread() {
+    print("--- basic spread ---")
+    let a = [1, 2, 3]
+    let b = [...a, 4, 5]
+    print(len(b))     // 5
+    print(b[0])       // 1
+    print(b[1])       // 2
+    print(b[2])       // 3
+    print(b[3])       // 4
+    print(b[4])       // 5
+}
+
+fn test_spread_at_end() {
+    print("--- spread at end ---")
+    let a = [4, 5, 6]
+    let b = [1, 2, 3, ...a]
+    print(len(b))     // 6
+    print(b[0])       // 1
+    print(b[3])       // 4
+    print(b[5])       // 6
+}
+
+fn test_spread_in_middle() {
+    print("--- spread in middle ---")
+    let mid = [20, 30]
+    let arr = [10, ...mid, 40]
+    print(len(arr))   // 4
+    print(arr[0])     // 10
+    print(arr[1])     // 20
+    print(arr[2])     // 30
+    print(arr[3])     // 40
+}
+
+fn test_multiple_spreads() {
+    print("--- multiple spreads ---")
+    let a = [1, 2]
+    let b = [3, 4]
+    let c = [...a, ...b]
+    print(len(c))     // 4
+    print(c[0])       // 1
+    print(c[1])       // 2
+    print(c[2])       // 3
+    print(c[3])       // 4
+}
+
+fn test_empty_spread() {
+    print("--- empty spread ---")
+    let empty = []
+    let arr = [1, ...empty, 2]
+    print(len(arr))   // 2
+    print(arr[0])     // 1
+    print(arr[1])     // 2
+}
+
+fn test_spread_only() {
+    print("--- spread only ---")
+    let src = [10, 20, 30]
+    let copy = [...src]
+    print(len(copy))  // 3
+    print(copy[0])    // 10
+    print(copy[1])    // 20
+    print(copy[2])    // 30
+}
+
+fn test_no_spread() {
+    print("--- no spread (regression) ---")
+    let arr = [1, 2, 3]
+    print(len(arr))   // 3
+    print(arr[0])     // 1
+    print(arr[2])     // 3
+}
+
+fn main() {
+    test_basic_spread()
+    test_spread_at_end()
+    test_spread_in_middle()
+    test_multiple_spreads()
+    test_empty_spread()
+    test_spread_only()
+    test_no_spread()
+    print("ALL SPREAD TESTS PASSED")
+}
