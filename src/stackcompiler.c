@@ -313,6 +313,141 @@ static size_t add_chunk_constant(Chunk *ch) {
     return chunk_add_constant(current_chunk(), fn_val);
 }
 
+/* ── Recursive constant folding ──
+ * Attempts to evaluate an expression at compile time.
+ * Returns true and sets *out if the entire expression tree is constant.
+ * Returns false for non-constant expressions (fall through to normal compilation).
+ * Skips AND/OR/NIL_COALESCE (short-circuit semantics) and div-by-zero (runtime error). */
+static bool try_const_fold(const Expr *e, LatValue *out) {
+    if (!e) return false;
+    switch (e->tag) {
+        case EXPR_INT_LIT: *out = value_int(e->as.int_val); return true;
+        case EXPR_FLOAT_LIT: *out = value_float(e->as.float_val); return true;
+        case EXPR_BOOL_LIT: *out = value_bool(e->as.bool_val); return true;
+        case EXPR_STRING_LIT: *out = value_string(e->as.str_val); return true;
+        case EXPR_NIL_LIT: *out = value_nil(); return true;
+
+        case EXPR_UNARYOP: {
+            LatValue operand;
+            if (!try_const_fold(e->as.unaryop.operand, &operand)) return false;
+            switch (e->as.unaryop.op) {
+                case UNOP_NEG:
+                    if (operand.type == VAL_INT) {
+                        *out = value_int(-operand.as.int_val);
+                        return true;
+                    }
+                    if (operand.type == VAL_FLOAT) {
+                        *out = value_float(-operand.as.float_val);
+                        return true;
+                    }
+                    break;
+                case UNOP_NOT:
+                    if (operand.type == VAL_BOOL) {
+                        *out = value_bool(!operand.as.bool_val);
+                        return true;
+                    }
+                    break;
+                case UNOP_BIT_NOT:
+                    if (operand.type == VAL_INT) {
+                        *out = value_int(~operand.as.int_val);
+                        return true;
+                    }
+                    break;
+            }
+            value_free(&operand);
+            return false;
+        }
+
+        case EXPR_BINOP: {
+            /* Skip short-circuit operators */
+            if (e->as.binop.op == BINOP_AND || e->as.binop.op == BINOP_OR || e->as.binop.op == BINOP_NIL_COALESCE)
+                return false;
+
+            LatValue lv, rv;
+            if (!try_const_fold(e->as.binop.left, &lv)) return false;
+            if (!try_const_fold(e->as.binop.right, &rv)) {
+                value_free(&lv);
+                return false;
+            }
+
+            /* String concatenation */
+            if (lv.type == VAL_STR && rv.type == VAL_STR && e->as.binop.op == BINOP_ADD) {
+                size_t llen = strlen(lv.as.str_val), rlen = strlen(rv.as.str_val);
+                char *buf = malloc(llen + rlen + 1);
+                memcpy(buf, lv.as.str_val, llen);
+                memcpy(buf + llen, rv.as.str_val, rlen);
+                buf[llen + rlen] = '\0';
+                *out = value_string(buf);
+                free(buf);
+                value_free(&lv);
+                value_free(&rv);
+                return true;
+            }
+
+            /* Numeric operations */
+            if ((lv.type != VAL_INT && lv.type != VAL_FLOAT) || (rv.type != VAL_INT && rv.type != VAL_FLOAT)) {
+                value_free(&lv);
+                value_free(&rv);
+                return false;
+            }
+
+            bool both_int = (lv.type == VAL_INT && rv.type == VAL_INT);
+            int64_t li = lv.type == VAL_INT ? lv.as.int_val : 0;
+            int64_t ri = rv.type == VAL_INT ? rv.as.int_val : 0;
+            double lf = lv.type == VAL_FLOAT ? lv.as.float_val : (double)li;
+            double rf = rv.type == VAL_FLOAT ? rv.as.float_val : (double)ri;
+
+            switch (e->as.binop.op) {
+                case BINOP_ADD: *out = both_int ? value_int(li + ri) : value_float(lf + rf); return true;
+                case BINOP_SUB: *out = both_int ? value_int(li - ri) : value_float(lf - rf); return true;
+                case BINOP_MUL: *out = both_int ? value_int(li * ri) : value_float(lf * rf); return true;
+                case BINOP_DIV:
+                    if (both_int) {
+                        if (ri == 0) return false;
+                        *out = value_int(li / ri);
+                    } else {
+                        if (rf == 0.0) return false;
+                        *out = value_float(lf / rf);
+                    }
+                    return true;
+                case BINOP_MOD:
+                    if (!both_int || ri == 0) return false;
+                    *out = value_int(li % ri);
+                    return true;
+                case BINOP_LT: *out = value_bool(both_int ? li < ri : lf < rf); return true;
+                case BINOP_GT: *out = value_bool(both_int ? li > ri : lf > rf); return true;
+                case BINOP_LTEQ: *out = value_bool(both_int ? li <= ri : lf <= rf); return true;
+                case BINOP_GTEQ: *out = value_bool(both_int ? li >= ri : lf >= rf); return true;
+                case BINOP_EQ: *out = value_bool(both_int ? li == ri : lf == rf); return true;
+                case BINOP_NEQ: *out = value_bool(both_int ? li != ri : lf != rf); return true;
+                /* Bitwise: integer only */
+                case BINOP_BIT_AND:
+                    if (!both_int) return false;
+                    *out = value_int(li & ri);
+                    return true;
+                case BINOP_BIT_OR:
+                    if (!both_int) return false;
+                    *out = value_int(li | ri);
+                    return true;
+                case BINOP_BIT_XOR:
+                    if (!both_int) return false;
+                    *out = value_int(li ^ ri);
+                    return true;
+                case BINOP_LSHIFT:
+                    if (!both_int || ri < 0 || ri >= 64) return false;
+                    *out = value_int(li << ri);
+                    return true;
+                case BINOP_RSHIFT:
+                    if (!both_int || ri < 0 || ri >= 64) return false;
+                    *out = value_int(li >> ri);
+                    return true;
+                default: return false;
+            }
+        }
+        default: return false;
+    }
+}
+
 static void compile_expr(const Expr *e, int line) {
     if (compile_error) return;
     if (e->line > 0) line = e->line;
@@ -351,76 +486,22 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_BINOP: {
-            /* Constant folding: evaluate at compile time if both operands are literals */
-            if ((e->as.binop.left->tag == EXPR_INT_LIT || e->as.binop.left->tag == EXPR_FLOAT_LIT) &&
-                (e->as.binop.right->tag == EXPR_INT_LIT || e->as.binop.right->tag == EXPR_FLOAT_LIT)) {
-                bool both_int = (e->as.binop.left->tag == EXPR_INT_LIT && e->as.binop.right->tag == EXPR_INT_LIT);
-                int64_t li = e->as.binop.left->tag == EXPR_INT_LIT ? e->as.binop.left->as.int_val : 0;
-                int64_t ri = e->as.binop.right->tag == EXPR_INT_LIT ? e->as.binop.right->as.int_val : 0;
-                double lf = e->as.binop.left->tag == EXPR_FLOAT_LIT ? e->as.binop.left->as.float_val : (double)li;
-                double rf = e->as.binop.right->tag == EXPR_FLOAT_LIT ? e->as.binop.right->as.float_val : (double)ri;
-                bool folded = true;
-                switch (e->as.binop.op) {
-                    case BINOP_ADD:
-                        if (both_int) {
-                            int64_t v = li + ri;
-                            if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
-                            else emit_constant(value_int(v), line);
-                        } else emit_constant(value_float(lf + rf), line);
-                        break;
-                    case BINOP_SUB:
-                        if (both_int) {
-                            int64_t v = li - ri;
-                            if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
-                            else emit_constant(value_int(v), line);
-                        } else emit_constant(value_float(lf - rf), line);
-                        break;
-                    case BINOP_MUL:
-                        if (both_int) {
-                            int64_t v = li * ri;
-                            if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
-                            else emit_constant(value_int(v), line);
-                        } else emit_constant(value_float(lf * rf), line);
-                        break;
-                    case BINOP_DIV:
-                        if (both_int) {
-                            if (ri == 0) {
-                                folded = false;
-                                break;
-                            }
-                            int64_t v = li / ri;
-                            if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
-                            else emit_constant(value_int(v), line);
-                        } else {
-                            if (rf == 0.0) {
-                                folded = false;
-                                break;
-                            }
-                            emit_constant(value_float(lf / rf), line);
-                        }
-                        break;
-                    case BINOP_MOD:
-                        if (both_int) {
-                            if (ri == 0) {
-                                folded = false;
-                                break;
-                            }
-                            int64_t v = li % ri;
-                            if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
-                            else emit_constant(value_int(v), line);
-                        } else folded = false;
-                        break;
-                    case BINOP_LT: emit_constant(value_bool(both_int ? li < ri : lf < rf), line); break;
-                    case BINOP_GT: emit_constant(value_bool(both_int ? li > ri : lf > rf), line); break;
-                    case BINOP_LTEQ: emit_constant(value_bool(both_int ? li <= ri : lf <= rf), line); break;
-                    case BINOP_GTEQ: emit_constant(value_bool(both_int ? li >= ri : lf >= rf), line); break;
-                    case BINOP_EQ: emit_constant(value_bool(both_int ? li == ri : lf == rf), line); break;
-                    case BINOP_NEQ: emit_constant(value_bool(both_int ? li != ri : lf != rf), line); break;
-                    default: folded = false; break;
+            /* Recursive constant folding: evaluate at compile time if entire tree is constant */
+            {
+                LatValue folded;
+                if (try_const_fold(e, &folded)) {
+                    if (folded.type == VAL_INT) {
+                        int64_t v = folded.as.int_val;
+                        if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
+                        else emit_constant(value_int(v), line);
+                    } else if (folded.type == VAL_STR) {
+                        emit_constant(folded, line);
+                    } else {
+                        emit_constant(folded, line);
+                    }
+                    break;
                 }
-                if (folded) break;
             }
-            /* Unary negation of int literal (constant fold -N) handled by EXPR_UNARYOP below */
 
             /* Short-circuit AND/OR */
             if (e->as.binop.op == BINOP_AND) {
@@ -473,20 +554,17 @@ static void compile_expr(const Expr *e, int line) {
             break;
         }
 
-        case EXPR_UNARYOP:
-            /* Constant fold unary negation of literals */
-            if (e->as.unaryop.op == UNOP_NEG && e->as.unaryop.operand->tag == EXPR_INT_LIT) {
-                int64_t v = -e->as.unaryop.operand->as.int_val;
-                if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
-                else emit_constant(value_int(v), line);
-                break;
-            }
-            if (e->as.unaryop.op == UNOP_NEG && e->as.unaryop.operand->tag == EXPR_FLOAT_LIT) {
-                emit_constant(value_float(-e->as.unaryop.operand->as.float_val), line);
-                break;
-            }
-            if (e->as.unaryop.op == UNOP_NOT && e->as.unaryop.operand->tag == EXPR_BOOL_LIT) {
-                emit_constant(value_bool(!e->as.unaryop.operand->as.bool_val), line);
+        case EXPR_UNARYOP: {
+            /* Recursive constant folding for unary expressions */
+            LatValue folded;
+            if (try_const_fold(e, &folded)) {
+                if (folded.type == VAL_INT) {
+                    int64_t v = folded.as.int_val;
+                    if (v >= -128 && v <= 127) emit_bytes(OP_LOAD_INT8, (uint8_t)(int8_t)v, line);
+                    else emit_constant(value_int(v), line);
+                } else {
+                    emit_constant(folded, line);
+                }
                 break;
             }
             compile_expr(e->as.unaryop.operand, line);
@@ -496,6 +574,7 @@ static void compile_expr(const Expr *e, int line) {
                 case UNOP_BIT_NOT: emit_byte(OP_BIT_NOT, line); break;
             }
             break;
+        }
 
         case EXPR_PRINT: {
             for (size_t i = 0; i < e->as.print.arg_count; i++) compile_expr(e->as.print.args[i], line);
@@ -2580,14 +2659,9 @@ static void compile_stmt(const Stmt *s) {
 
 static LatValue const_eval_expr(Expr *e) {
     if (!e) return value_nil();
-    switch (e->tag) {
-        case EXPR_INT_LIT: return value_int(e->as.int_val);
-        case EXPR_FLOAT_LIT: return value_float(e->as.float_val);
-        case EXPR_STRING_LIT: return value_string(e->as.str_val);
-        case EXPR_BOOL_LIT: return value_bool(e->as.bool_val);
-        case EXPR_NIL_LIT: return value_nil();
-        default: return value_nil();
-    }
+    LatValue result;
+    if (try_const_fold(e, &result)) return result;
+    return value_nil();
 }
 
 /* ── Compile function body (for ITEM_FUNCTION and closures) ── */

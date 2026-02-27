@@ -1,0 +1,50 @@
+// Benchmark: Method Dispatch
+// Measures struct field access, array.map/filter, and string methods.
+
+struct Point {
+    x: Int,
+    y: Int,
+}
+
+fn make_points(n: Int) -> Array {
+    let points = []
+    for i in 0..n {
+        points.push(Point { x: i, y: i * 2 })
+    }
+    points
+}
+
+fn main() {
+    let t0 = time()
+
+    // Struct field access
+    let points = make_points(2000)
+    let sum = 0
+    for i in 0..points.len() {
+        sum = sum + points[i].x + points[i].y
+    }
+    print("field sum: ${sum}")
+
+    // Array map/filter chains
+    let data = []
+    for i in 0..2000 {
+        data.push(i)
+    }
+    let mapped = data.map(|x| x * 3)
+    let filtered = mapped.filter(|x| x % 7 == 0)
+    let reduced = filtered.map(|x| x + 1)
+    print("chain result: ${reduced.len()}")
+
+    // String method dispatch
+    let count = 0
+    for i in 0..1000 {
+        let s = "Hello, World!"
+        let upper = s.to_upper()
+        let trimmed = "  spaces  ".trim()
+        count = count + upper.len() + trimmed.len()
+    }
+    print("string ops: ${count}")
+
+    let elapsed = time() - t0
+    print("elapsed: ${elapsed}ms")
+}

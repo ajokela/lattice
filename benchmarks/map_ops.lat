@@ -1,0 +1,41 @@
+// Benchmark: Map Operations
+// Measures insert, lookup, and delete on 5000 keys.
+
+fn main() {
+    let t0 = time()
+    let n = 5000
+
+    let m = Map::new()
+
+    // Insert
+    for i in 0..n {
+        m["key_${i}"] = i * 7
+    }
+    print("inserted: ${m.len()}")
+
+    // Lookup
+    let sum = 0
+    for i in 0..n {
+        sum = sum + m["key_${i}"]
+    }
+    print("lookup sum: ${sum}")
+
+    // Overwrite
+    for i in 0..n {
+        m["key_${i}"] = i * 3
+    }
+    print("overwritten: ${m.len()}")
+
+    // Delete half
+    for i in 0..2500 {
+        m.remove("key_${i}")
+    }
+    print("after delete: ${m.len()}")
+
+    // Iterate remaining keys
+    let keys = m.keys()
+    print("keys count: ${keys.len()}")
+
+    let elapsed = time() - t0
+    print("elapsed: ${elapsed}ms")
+}

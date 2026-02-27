@@ -1,0 +1,14 @@
+// Benchmark: Recursive Fibonacci
+// Measures function call overhead (~29M calls for fib(35)).
+
+fn fib(n: Int) -> Int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() {
+    let t0 = time()
+    let result = fib(35)
+    let elapsed = time() - t0
+    print("fib(35) = ${result}")
+    print("elapsed: ${elapsed}ms")
+}

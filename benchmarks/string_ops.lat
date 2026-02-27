@@ -1,0 +1,38 @@
+// Benchmark: String Operations
+// Measures string concatenation, split, to_upper/to_lower — ephemeral arena stress.
+
+fn main() {
+    let t0 = time()
+
+    // Build a long string by concatenation
+    let s = ""
+    for i in 0..1000 {
+        s = s + "abc"
+    }
+    print("concat len: ${s.len()}")
+
+    // Split and rejoin
+    let parts = s.split("b")
+    print("split parts: ${parts.len()}")
+
+    // Case conversions on 500 strings
+    let results = []
+    for i in 0..500 {
+        let upper = "hello world".to_upper()
+        let lower = "HELLO WORLD".to_lower()
+        results.push(upper.len() + lower.len())
+    }
+    print("case ops: ${results.len()}")
+
+    // String contains / replace
+    let count = 0
+    for i in 0..500 {
+        if "the quick brown fox".contains("quick") {
+            count = count + 1
+        }
+    }
+    print("contains: ${count}")
+
+    let elapsed = time() - t0
+    print("elapsed: ${elapsed}ms")
+}
