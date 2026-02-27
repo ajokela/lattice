@@ -166,6 +166,7 @@ typedef enum {
     OP_SET_SLICE,       /* Pop end, start, obj, val -> splice obj[start..end] = val, push modified obj */
     OP_SET_SLICE_LOCAL, /* operand = local slot. Pop end, start, val -> splice local[start..end] = val */
     OP_INDEX_LOCAL,     /* operand = local slot. Pop index. Push local[index] element. */
+    OP_GET_FIELD_LOCAL, /* operand1 = local slot, operand2 = field name constant. Push local.field. */
 
     /* Fallback to tree-walker */
     OP_HALT, /* Stop execution */

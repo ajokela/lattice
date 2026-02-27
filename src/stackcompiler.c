@@ -802,6 +802,17 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_FIELD_ACCESS: {
+            /* Fast path: local variable field access without cloning container */
+            if (!e->as.field_access.optional && e->as.field_access.object->tag == EXPR_IDENT) {
+                int slot = resolve_local(current, e->as.field_access.object->as.str_val);
+                if (slot >= 0) {
+                    size_t idx = chunk_add_constant(current_chunk(), value_string(e->as.field_access.field));
+                    emit_byte(OP_GET_FIELD_LOCAL, line);
+                    emit_byte((uint8_t)slot, line);
+                    emit_byte((uint8_t)idx, line);
+                    break;
+                }
+            }
             compile_expr(e->as.field_access.object, line);
             size_t end_jump = 0;
             if (e->as.field_access.optional) {

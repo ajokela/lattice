@@ -2964,6 +2964,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_SET_SLICE] = &&lbl_OP_SET_SLICE,
         [OP_SET_SLICE_LOCAL] = &&lbl_OP_SET_SLICE_LOCAL,
         [OP_INDEX_LOCAL] = &&lbl_OP_INDEX_LOCAL,
+        [OP_GET_FIELD_LOCAL] = &&lbl_OP_GET_FIELD_LOCAL,
         [OP_HALT] = &&lbl_OP_HALT,
     };
 #endif
@@ -5968,6 +5969,68 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 const char *it = value_type_name(&idx);
                 value_free(&idx);
                 VM_ERROR("invalid index operation: %s[%s]", ot, it);
+                break;
+            }
+            break;
+        }
+
+        /* ── Field access on local (borrow, no container clone) ── */
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_GET_FIELD_LOCAL:
+#endif
+        case OP_GET_FIELD_LOCAL: {
+            uint8_t slot = READ_BYTE();
+            uint8_t name_idx = READ_BYTE();
+            const char *field_name = frame->chunk->constants[name_idx].as.str_val;
+            LatValue *obj = &frame->slots[slot]; /* Borrow directly — no clone of container */
+
+            if (obj->type == VAL_STRUCT) {
+                const char *interned_name = intern(field_name);
+                bool found = false;
+                for (size_t i = 0; i < obj->as.strct.field_count; i++) {
+                    if (obj->as.strct.field_names[i] == interned_name) {
+                        push(vm, value_clone_fast(&obj->as.strct.field_values[i]));
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    VM_ERROR("struct has no field '%s'", field_name);
+                    break;
+                }
+            } else if (obj->type == VAL_MAP) {
+                LatValue *val = lat_map_get(obj->as.map.map, field_name);
+                if (val) push(vm, value_clone_fast(val));
+                else push(vm, value_nil());
+            } else if (obj->type == VAL_TUPLE) {
+                char *end;
+                long idx = strtol(field_name, &end, 10);
+                if (*end == '\0' && idx >= 0 && (size_t)idx < obj->as.tuple.len) {
+                    push(vm, value_clone_fast(&obj->as.tuple.elems[idx]));
+                } else {
+                    VM_ERROR("tuple has no field '%s'", field_name);
+                    break;
+                }
+            } else if (obj->type == VAL_ENUM) {
+                if (strcmp(field_name, "tag") == 0) {
+                    push(vm, value_string(obj->as.enm.variant_name));
+                } else if (strcmp(field_name, "payload") == 0) {
+                    if (obj->as.enm.payload_count > 0) {
+                        LatValue *elems = malloc(obj->as.enm.payload_count * sizeof(LatValue));
+                        if (!elems) return STACKVM_RUNTIME_ERROR;
+                        for (size_t i = 0; i < obj->as.enm.payload_count; i++)
+                            elems[i] = value_deep_clone(&obj->as.enm.payload[i]);
+                        push(vm, value_array(elems, obj->as.enm.payload_count));
+                        free(elems);
+                    } else {
+                        push(vm, value_array(NULL, 0));
+                    }
+                } else {
+                    push(vm, value_nil());
+                }
+            } else {
+                const char *tn = value_type_name(obj);
+                VM_ERROR("cannot access field '%s' on %s", field_name, tn);
                 break;
             }
             break;

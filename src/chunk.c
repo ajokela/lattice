@@ -432,6 +432,18 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
         case OP_SET_SLICE: return simple_instruction("OP_SET_SLICE", offset);
         case OP_SET_SLICE_LOCAL: return byte_instruction("OP_SET_SLICE_LOCAL", c, offset);
         case OP_INDEX_LOCAL: return byte_instruction("OP_INDEX_LOCAL", c, offset);
+        case OP_GET_FIELD_LOCAL: {
+            uint8_t slot = c->code[offset + 1];
+            uint8_t field_idx = c->code[offset + 2];
+            fprintf(stderr, "%-20s slot=%d '", "OP_GET_FIELD_LOCAL", slot);
+            if (field_idx < c->const_len) {
+                char *repr = value_repr(&c->constants[field_idx]);
+                fprintf(stderr, "%s", repr);
+                free(repr);
+            }
+            fprintf(stderr, "'\n");
+            return offset + 3;
+        }
         case OP_HALT: return simple_instruction("OP_HALT", offset);
         default: fprintf(stderr, "Unknown opcode %d\n", op); return offset + 1;
     }

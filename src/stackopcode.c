@@ -114,6 +114,7 @@ static const char *names[] = {
     [OP_SET_SLICE] = "OP_SET_SLICE",
     [OP_SET_SLICE_LOCAL] = "OP_SET_SLICE_LOCAL",
     [OP_INDEX_LOCAL] = "OP_INDEX_LOCAL",
+    [OP_GET_FIELD_LOCAL] = "OP_GET_FIELD_LOCAL",
     [OP_HALT] = "OP_HALT",
 };
 
