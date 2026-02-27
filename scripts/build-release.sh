@@ -5,9 +5,10 @@
 set -euo pipefail
 
 DRY_RUN=false
+FORCE=false
 VERSION=""
 SITE_DIR="../lattice-lang.org"
-BUILD_OUT="build/release"
+BUILD_OUT="release-out"
 
 # BSD VM SSH hosts (configured in ~/.ssh/config with ProxyJump through fileserver)
 BSD_HOSTS=(
@@ -39,6 +40,7 @@ run() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
+        --force)   FORCE=true; shift ;;
         v*)        VERSION="$1"; shift ;;
         *)         err "unknown argument: $1" ;;
     esac
@@ -63,7 +65,7 @@ ok "Version matches lattice.h"
 # Check git tree is clean
 if [ -n "$(git status --porcelain)" ]; then
     warn "Git tree is dirty — untracked/modified files exist"
-    if [ "$DRY_RUN" = "false" ]; then
+    if [ "$DRY_RUN" = "false" ] && [ "$FORCE" = "false" ]; then
         read -rp "Continue anyway? [y/N] " REPLY
         [ "$REPLY" = "y" ] || exit 1
     fi
@@ -96,20 +98,10 @@ mkdir -p "$BUILD_OUT/$VERSION"
 PIDS=()
 FAILURES=()
 
-build_local() {
-    local name="$1" cmd="$2"
-    say "Building $name..."
-    if eval "$cmd"; then
-        ok "$name"
-    else
-        warn "FAILED: $name"
-        FAILURES+=("$name")
-    fi
-}
-
 build_bg() {
     local name="$1" cmd="$2"
     (
+        say "Building $name..."
         if eval "$cmd"; then
             ok "$name"
         else
@@ -120,43 +112,74 @@ build_bg() {
     PIDS+=($!)
 }
 
+# Create a source tarball for Docker builds (avoids sharing local build dir)
+SRC_TAR=$(mktemp /tmp/lattice-src-XXXXXX.tar.gz)
+git archive --format=tar.gz HEAD > "$SRC_TAR"
+trap 'rm -f "$SRC_TAR"' EXIT
+
+# Also add release-out to .gitignore awareness (it's a temp working dir)
+say "Output directory: $BUILD_OUT/$VERSION"
+
+# macOS builds run sequentially (they share the local filesystem)
+say "Building macOS binaries..."
+
 # macOS arm64 (native)
-build_bg "darwin-aarch64" "
-    make release 2>&1 | tail -1 && \
-    mv clat-darwin-aarch64 $BUILD_OUT/$VERSION/
-"
+say "Building darwin-aarch64..."
+if make release 2>&1 | tail -1; then
+    mv clat-darwin-aarch64 "$BUILD_OUT/$VERSION/"
+    ok "darwin-aarch64"
+else
+    warn "FAILED: darwin-aarch64"
+    FAILURES+=("darwin-aarch64")
+fi
 
-# macOS x86_64 (Rosetta)
-build_bg "darwin-x86_64" "
-    arch -x86_64 make release 2>&1 | tail -1 && \
-    mv clat-darwin-x86_64 $BUILD_OUT/$VERSION/
-"
+# macOS x86_64 (Rosetta — may need TLS=0 if Homebrew is arm64-only)
+say "Building darwin-x86_64..."
+if arch -x86_64 make release 2>&1 | tail -1; then
+    mv clat-darwin-x86_64 "$BUILD_OUT/$VERSION/"
+    ok "darwin-x86_64"
+else
+    warn "Retrying darwin-x86_64 with TLS=0 (Homebrew libs may be arm64-only)..."
+    if arch -x86_64 make release TLS=0 2>&1 | tail -1; then
+        mv clat-darwin-x86_64 "$BUILD_OUT/$VERSION/"
+        ok "darwin-x86_64 (no TLS)"
+    else
+        warn "FAILED: darwin-x86_64"
+        FAILURES+=("darwin-x86_64")
+    fi
+fi
 
-# Linux x86_64 (static via Alpine Docker)
+# Linux builds via Docker (parallel, using tarball copy to avoid shared state)
+# Output dir is mounted so we can extract the binary without stdout corruption
+ABSOUT="$(pwd)/$BUILD_OUT/$VERSION"
+
 build_bg "linux-x86_64" "
     docker run --rm --platform linux/amd64 \
-        -v \"\$(pwd):/src\" -w /src \
+        -v '$SRC_TAR:/tmp/src.tar.gz:ro' \
+        -v '$ABSOUT:/out' \
         alpine:3.19 sh -c '
             apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers &&
-            make clean &&
-            make release LDFLAGS=\"-static -lpthread -lm -ldl\" 2>&1 | tail -1
-        ' && \
-    mv clat-linux-x86_64 $BUILD_OUT/$VERSION/
+            mkdir /build && cd /build &&
+            tar xzf /tmp/src.tar.gz &&
+            make release STATIC=1 &&
+            cp clat-linux-x86_64 /out/
+        '
 "
 
-# Linux aarch64 (static via Alpine Docker, QEMU emulation)
 build_bg "linux-aarch64" "
     docker run --rm --platform linux/arm64 \
-        -v \"\$(pwd):/src\" -w /src \
+        -v '$SRC_TAR:/tmp/src.tar.gz:ro' \
+        -v '$ABSOUT:/out' \
         alpine:3.19 sh -c '
             apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers &&
-            make clean &&
-            make release LDFLAGS=\"-static -lpthread -lm -ldl\" 2>&1 | tail -1
-        ' && \
-    mv clat-linux-aarch64 $BUILD_OUT/$VERSION/
+            mkdir /build && cd /build &&
+            tar xzf /tmp/src.tar.gz &&
+            make release STATIC=1 &&
+            cp clat-linux-aarch64 /out/
+        '
 "
 
-# BSD builds via SSH
+# BSD builds via SSH (parallel, each on its own VM)
 if [ "${SKIP_BSD:-false}" = "false" ]; then
     for host in "${BSD_HOSTS[@]}"; do
         # Derive the expected binary name from the SSH host alias
@@ -170,21 +193,26 @@ if [ "${SKIP_BSD:-false}" = "false" ]; then
         esac
         BINARY="clat-${OS_PART}-${ARCH}"
 
-        build_bg "$BINARY" "
-            ssh -o ConnectTimeout=30 $host '
-                cd lattice &&
-                git fetch --all &&
-                git checkout $VERSION &&
-                gmake clean &&
-                gmake release
-            ' && \
-            scp $host:lattice/$BINARY $BUILD_OUT/$VERSION/$BINARY
-        "
+        # Only attempt if host is reachable
+        if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null; then
+            build_bg "$BINARY" "
+                ssh -o ConnectTimeout=30 $host '
+                    cd lattice &&
+                    git fetch --all &&
+                    git checkout $VERSION &&
+                    gmake clean &&
+                    gmake release
+                ' && \
+                scp $host:lattice/$BINARY $BUILD_OUT/$VERSION/$BINARY
+            "
+        else
+            warn "Skipping $BINARY — cannot reach $host"
+        fi
     done
 fi
 
-# Wait for all background builds
-say "Waiting for all builds to complete..."
+# Wait for all background builds (Docker + BSD)
+say "Waiting for background builds to complete..."
 BUILD_FAILED=false
 for pid in "${PIDS[@]}"; do
     if ! wait "$pid"; then

@@ -72,6 +72,11 @@ ifeq ($(UNAME_S),NetBSD)
     LDFLAGS += -L/usr/pkg/lib -lpthread -lm
 endif
 
+# Static linking (use STATIC=1 for fully static builds, e.g. in Alpine Docker)
+ifdef STATIC
+    LDFLAGS += -static
+endif
+
 # Source files
 SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/ds/str.c \
