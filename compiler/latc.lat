@@ -911,7 +911,13 @@ fn parse_postfix() {
             let optional = pt == "?."
             let receiver_code_pos = len(code)
             advance()
-            let field_name = expect("identifier", nil).text
+            // Accept identifier or integer literal for field access (e.g. t.0 for tuples)
+            flux field_name = ""
+            if peek_type() == "integer" {
+                field_name = advance().text
+            } else {
+                field_name = expect("identifier", nil).text
+            }
             if peek_type() == "(" {
                 // Method call
                 if !optional {
@@ -1157,22 +1163,34 @@ fn parse_primary() {
         return
     }
 
-    // Array literal [...]
+    // Array literal [...] with optional spread operator
     if t.text == "[" {
         advance()
         flux count = 0
+        flux has_spread = false
         if peek_text() != "]" {
+            if peek_text() == "..." {
+                advance()
+                has_spread = true
+            }
             parse_expression()
             count = count + 1
             while peek_text() == "," {
                 advance()
                 if peek_text() == "]" { break }
+                if peek_text() == "..." {
+                    advance()
+                    has_spread = true
+                }
                 parse_expression()
                 count = count + 1
             }
         }
         expect(nil, "]")
         emit_bytes(OP_BUILD_ARRAY, count, line)
+        if has_spread {
+            emit_byte(OP_ARRAY_FLATTEN, line)
+        }
         return
     }
 
@@ -1296,11 +1314,32 @@ fn parse_primary() {
         return
     }
 
-    // Parenthesized expression
+    // Parenthesized expression or tuple literal
     if t.text == "(" {
         advance()
         parse_expression()
-        expect(nil, ")")
+        if peek_text() == "," {
+            // Tuple literal: (expr, expr, ...) or (expr,)
+            advance()
+            flux count = 1
+            while peek_text() != ")" {
+                if peek() == nil {
+                    compiler_error("unexpected end of input in tuple", line)
+                }
+                parse_expression()
+                count = count + 1
+                if peek_text() == "," {
+                    advance()
+                } else {
+                    break
+                }
+            }
+            expect(nil, ")")
+            emit_bytes(OP_BUILD_TUPLE, count, line)
+        } else {
+            // Simple grouping: (expr)
+            expect(nil, ")")
+        }
         return
     }
 
