@@ -1,0 +1,15 @@
+server:
+  host: localhost
+  port: 8080
+  ssl:
+    enabled: true
+    cert: /path/to/cert
+database:
+  - name: primary
+    host: db1.example.com
+  - name: replica
+    host: db2.example.com
+empty_value:
+null_value: null
+bool_yes: yes
+bool_no: no

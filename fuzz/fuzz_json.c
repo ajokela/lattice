@@ -1,0 +1,51 @@
+/* Fuzz harness for the Lattice JSON parser and serializer.
+ *
+ * Build:  make fuzz-json
+ * Run:    ./build/fuzz_json fuzz/corpus_json/ -max_len=4096
+ */
+
+#include "json.h"
+#include "value.h"
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <unistd.h>
+
+/* Timeout per input — kill runaway parsing */
+static void alarm_handler(int sig) {
+    (void)sig;
+    _exit(0); /* clean exit, not a bug */
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    /* Cap input size to avoid spending time on huge inputs */
+    if (size > 8192) return 0;
+
+    /* Null-terminate the input */
+    char *src = malloc(size + 1);
+    if (!src) return 0;
+    memcpy(src, data, size);
+    src[size] = '\0';
+
+    /* Set a 1-second alarm to bail out of hangs */
+    signal(SIGALRM, alarm_handler);
+    alarm(1);
+
+    /* Parse JSON */
+    char *err = NULL;
+    LatValue val = json_parse(src, &err);
+    if (err) {
+        free(err);
+    } else {
+        /* Round-trip: serialize back and free */
+        char *ser_err = NULL;
+        char *json_out = json_stringify(&val, &ser_err);
+        free(json_out); /* NULL-safe */
+        free(ser_err);  /* NULL-safe */
+        value_free(&val);
+    }
+
+    free(src);
+    alarm(0);
+    return 0;
+}

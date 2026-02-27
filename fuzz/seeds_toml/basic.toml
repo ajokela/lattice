@@ -1,0 +1,12 @@
+[server]
+host = "localhost"
+port = 8080
+enabled = true
+
+[database]
+name = "mydb"
+timeout = 30.5
+
+[nested.section]
+key = "value"
+array = [1, 2, 3]

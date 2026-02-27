@@ -1,0 +1,10 @@
+name: Lattice
+version: 1.0
+features:
+  - lexer
+  - parser
+  - vm
+config:
+  debug: true
+  timeout: 30
+  ratio: 1.5
