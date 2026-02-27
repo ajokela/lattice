@@ -417,8 +417,10 @@ static void handle_initialize(LspServer *srv, int id) {
     /* References */
     cJSON_AddBoolToObject(caps, "referencesProvider", 1);
 
-    /* Rename */
-    cJSON_AddBoolToObject(caps, "renameProvider", 1);
+    /* Rename (with prepare support) */
+    cJSON *renameOpts = cJSON_CreateObject();
+    cJSON_AddBoolToObject(renameOpts, "prepareProvider", 1);
+    cJSON_AddItemToObject(caps, "renameProvider", renameOpts);
 
     /* Formatting */
     cJSON_AddBoolToObject(caps, "documentFormattingProvider", 1);
@@ -1667,11 +1669,30 @@ static void handle_signature_help(LspServer *srv, cJSON *params, int id) {
     cJSON_Delete(resp);
 }
 
+/* ── Rename validation helpers ── */
+
+/* Check if a word is a language keyword (not renameable) */
+static bool is_keyword(const char *word) {
+    for (int i = 0; lattice_keywords[i]; i++) {
+        if (strcmp(lattice_keywords[i], word) == 0) return true;
+    }
+    return false;
+}
+
+/* Check if a word is a builtin function (not renameable) */
+static bool is_builtin_name(const char *word) {
+    for (int i = 0; builtin_docs[i].name; i++) {
+        if (strcmp(builtin_docs[i].name, word) == 0) return true;
+    }
+    return false;
+}
+
 /* ── Handler: textDocument/references ── */
 
-/* Check if position is inside a string literal (simple heuristic).
- * Counts unescaped quotes from line start to the given column. */
-static bool in_string_literal(const char *line_start, int col) {
+/* Check if position is inside a string literal or comment (simple heuristic).
+ * Counts unescaped quotes and detects // line comments from line start to the
+ * given column. */
+static bool in_string_or_comment(const char *line_start, int col) {
     bool in_str = false;
     char quote = 0;
     for (int i = 0; i < col && line_start[i] && line_start[i] != '\n'; i++) {
@@ -1686,6 +1707,8 @@ static bool in_string_literal(const char *line_start, int col) {
             if (c == '"' || c == '\'') {
                 in_str = true;
                 quote = c;
+            } else if (c == '/' && line_start[i + 1] == '/') {
+                return true; /* rest of line is a comment */
             }
         }
     }
@@ -1715,8 +1738,8 @@ static cJSON *find_all_references(const char *text, const char *uri, const char 
 
                 if (ident_len == word_len && memcmp(start, word, word_len) == 0) {
                     int col = (int)(start - line_start);
-                    /* Skip if inside a string literal */
-                    if (!in_string_literal(line_start, col)) {
+                    /* Skip if inside a string literal or comment */
+                    if (!in_string_or_comment(line_start, col)) {
                         cJSON *loc = cJSON_CreateObject();
                         cJSON_AddStringToObject(loc, "uri", uri);
                         cJSON *range = cJSON_CreateObject();
@@ -1784,6 +1807,78 @@ static void handle_references(LspServer *srv, cJSON *params, int id) {
     cJSON_Delete(resp);
 }
 
+/* ── Handler: textDocument/prepareRename ── */
+
+static void handle_prepare_rename(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    cJSON *pos = cJSON_GetObjectItem(params, "position");
+    if (!td || !pos) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    int line = cJSON_GetObjectItem(pos, "line")->valueint;
+    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+
+    LspDocument *doc = find_document(srv, uri);
+    if (!doc || !doc->text) {
+        cJSON *resp = lsp_make_error(id, -32602, "Document not found");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    int word_col = 0;
+    char *word = extract_word_at(doc->text, line, col, &word_col);
+    if (!word) {
+        cJSON *resp = lsp_make_error(id, -32602, "No identifier at position");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Reject rename of keywords */
+    if (is_keyword(word)) {
+        free(word);
+        cJSON *resp = lsp_make_error(id, -32602, "Cannot rename a keyword");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Reject rename of builtin functions */
+    if (is_builtin_name(word)) {
+        free(word);
+        cJSON *resp = lsp_make_error(id, -32602, "Cannot rename a built-in function");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Return the range and placeholder text for the identifier */
+    cJSON *result = cJSON_CreateObject();
+    cJSON *range = cJSON_CreateObject();
+    cJSON *start = cJSON_CreateObject();
+    cJSON_AddNumberToObject(start, "line", line);
+    cJSON_AddNumberToObject(start, "character", word_col);
+    cJSON *end = cJSON_CreateObject();
+    cJSON_AddNumberToObject(end, "line", line);
+    cJSON_AddNumberToObject(end, "character", word_col + (int)strlen(word));
+    cJSON_AddItemToObject(range, "start", start);
+    cJSON_AddItemToObject(range, "end", end);
+    cJSON_AddItemToObject(result, "range", range);
+    cJSON_AddStringToObject(result, "placeholder", word);
+
+    free(word);
+
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
 /* ── Handler: textDocument/rename ── */
 
 static void handle_rename(LspServer *srv, cJSON *params, int id) {
@@ -1813,6 +1908,33 @@ static void handle_rename(LspServer *srv, cJSON *params, int id) {
     char *word = extract_word_at(doc->text, line, col, NULL);
     if (!word) {
         cJSON *resp = lsp_make_error(id, -32602, "No identifier at position");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Reject rename of keywords and builtins */
+    if (is_keyword(word) || is_builtin_name(word)) {
+        free(word);
+        cJSON *resp = lsp_make_error(id, -32602, "Cannot rename keywords or built-in functions");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Validate the new name is a valid identifier */
+    if (!new_name || !*new_name || !is_ident_char(new_name[0]) || (new_name[0] >= '0' && new_name[0] <= '9')) {
+        free(word);
+        cJSON *resp = lsp_make_error(id, -32602, "Invalid identifier name");
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Reject renaming to a keyword */
+    if (is_keyword(new_name)) {
+        free(word);
+        cJSON *resp = lsp_make_error(id, -32602, "Cannot rename to a keyword");
         lsp_write_response(resp, stdout);
         cJSON_Delete(resp);
         return;
@@ -2419,6 +2541,8 @@ void lsp_server_run(LspServer *srv) {
             handle_signature_help(srv, params_node, id);
         } else if (strcmp(method, "textDocument/references") == 0) {
             handle_references(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/prepareRename") == 0) {
+            handle_prepare_rename(srv, params_node, id);
         } else if (strcmp(method, "textDocument/rename") == 0) {
             handle_rename(srv, params_node, id);
         } else if (strcmp(method, "textDocument/formatting") == 0) {
