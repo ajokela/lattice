@@ -11,7 +11,7 @@ struct BumpArena; /* forward declaration */
 struct Debugger;  /* forward declaration */
 
 #define STACKVM_STACK_MAX   4096
-#define STACKVM_FRAMES_MAX  256
+#define STACKVM_FRAMES_MAX  512
 #define STACKVM_HANDLER_MAX 64
 #define STACKVM_DEFER_MAX   256
 

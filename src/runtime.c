@@ -2,7 +2,6 @@
 #include "stackvm.h" /* For StackVM, StackCallFrame, ObjUpvalue, stackvm_run, stackvm_track_chunk, Chunk types */
 #include "regvm.h"   /* For RegVM, RegChunk, regvm_run, regvm_track_chunk */
 #include "stackopcode.h"
-#include "stackcompiler.h"
 #include "intern.h"
 #include "builtins.h"
 #include "lattice.h"

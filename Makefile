@@ -162,6 +162,52 @@ ifndef WINDOWS
 TARGET = clat
 endif
 
+# Thin bytecode runtime (clat-run): VM + stdlib + bytecode loader + stubs.
+# Excludes: lexer, parser, ast, eval, compilers, regvm, lsp, formatter,
+#           debugger, completion, doc_gen, package, phase_check, match_check.
+RUNTIME_SRCS = $(SRC_DIR)/runtime_main.c \
+               $(SRC_DIR)/runtime_stubs.c \
+               $(SRC_DIR)/ds/str.c \
+               $(SRC_DIR)/ds/vec.c \
+               $(SRC_DIR)/ds/hashmap.c \
+               $(SRC_DIR)/value.c \
+               $(SRC_DIR)/env.c \
+               $(SRC_DIR)/memory.c \
+               $(SRC_DIR)/string_ops.c \
+               $(SRC_DIR)/builtins.c \
+               $(SRC_DIR)/net.c \
+               $(SRC_DIR)/tls.c \
+               $(SRC_DIR)/json.c \
+               $(SRC_DIR)/math_ops.c \
+               $(SRC_DIR)/env_ops.c \
+               $(SRC_DIR)/time_ops.c \
+               $(SRC_DIR)/fs_ops.c \
+               $(SRC_DIR)/process_ops.c \
+               $(SRC_DIR)/type_ops.c \
+               $(SRC_DIR)/datetime_ops.c \
+               $(SRC_DIR)/regex_ops.c \
+               $(SRC_DIR)/format_ops.c \
+               $(SRC_DIR)/path_ops.c \
+               $(SRC_DIR)/crypto_ops.c \
+               $(SRC_DIR)/array_ops.c \
+               $(SRC_DIR)/channel.c \
+               $(SRC_DIR)/http.c \
+               $(SRC_DIR)/toml_ops.c \
+               $(SRC_DIR)/yaml_ops.c \
+               $(SRC_DIR)/ext.c \
+               $(SRC_DIR)/stackopcode.c \
+               $(SRC_DIR)/chunk.c \
+               $(SRC_DIR)/stackvm.c \
+               $(SRC_DIR)/runtime.c \
+               $(SRC_DIR)/intern.c \
+               $(SRC_DIR)/latc.c \
+               $(SRC_DIR)/builtin_methods.c \
+               $(SRC_DIR)/iterator.c \
+               $(SRC_DIR)/gc.c
+
+RUNTIME_OBJS = $(RUNTIME_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+RUNTIME_TARGET = clat-run
+
 # LSP server sources
 LSP_SRCS = $(SRC_DIR)/lsp_main.c \
            $(SRC_DIR)/lsp_server.c \
@@ -258,7 +304,7 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -274,6 +320,16 @@ lsp: $(LSP_TARGET)
 
 $(LSP_TARGET): $(LIB_OBJS) $(LSP_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# Thin bytecode runtime
+runtime: $(RUNTIME_TARGET)
+
+$(RUNTIME_TARGET): $(RUNTIME_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+runtime-release: clean $(RUNTIME_TARGET)
+	$(STRIP) $(RUNTIME_TARGET)
+	@echo "Built: $(RUNTIME_TARGET) ($$(ls -lh $(RUNTIME_TARGET) | awk '{print $$5}'))"
 
 $(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
@@ -665,5 +721,5 @@ release: clean $(TARGET)
 	@echo "Built: $(RELEASE_NAME) ($$(ls -lh $(RELEASE_NAME) | awk '{print $$5}'))"
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(LSP_TARGET)
+	rm -rf $(BUILD_DIR) $(TARGET) $(LSP_TARGET) $(RUNTIME_TARGET)
 	rm -f *.plist src/*.plist

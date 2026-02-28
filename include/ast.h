@@ -5,8 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Phase annotation */
-typedef enum { PHASE_FLUID, PHASE_CRYSTAL, PHASE_UNSPECIFIED } AstPhase;
+#include "phase.h"
 
 /* Composite phase constraint bitmask */
 typedef uint8_t PhaseConstraint;

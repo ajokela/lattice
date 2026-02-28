@@ -135,7 +135,12 @@ let OP_IS_CRYSTAL     = 104
 let OP_IS_FLUID       = 105
 let OP_FREEZE_EXCEPT  = 106
 let OP_FREEZE_FIELD   = 107
-let OP_HALT           = 108
+let OP_APPEND_STR_LOCAL = 108
+let OP_SET_SLICE      = 109
+let OP_SET_SLICE_LOCAL = 110
+let OP_INDEX_LOCAL    = 111
+let OP_GET_FIELD_LOCAL = 112
+let OP_HALT           = 113
 
 // .latc constant tags
 let TAG_INT     = 0
@@ -272,13 +277,17 @@ flux ensure_messages = []
 flux ensure_count = 0
 flux current_func_name = ""
 
+// Return type tracking for runtime validation
+flux current_return_type = ""
+
 // Compiler stack for save/restore during function compilation
 // Each entry is an array: [code, c_lines, constants, local_names,
 //   local_name_arr, local_depth_arr, local_captured_arr, local_count,
 //   scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
 //   func_type, break_jumps, break_count, loop_start_pos, loop_depth,
 //   loop_break_local_count, loop_continue_local_count, string_intern_map,
-//   ensure_slots, ensure_messages, ensure_count, current_func_name]
+//   ensure_slots, ensure_messages, ensure_count, current_func_name,
+//   current_return_type]
 flux compiler_stack = []
 
 fn save_compiler() {
@@ -289,7 +298,8 @@ fn save_compiler() {
         scope_depth, upvalue_index_arr, upvalue_islocal_arr, upvalue_count,
         func_type, break_jumps, break_count, loop_start_pos, loop_depth,
         loop_break_local_count, loop_continue_local_count, string_intern_map,
-        ensure_slots, ensure_messages, ensure_count, current_func_name
+        ensure_slots, ensure_messages, ensure_count, current_func_name,
+        current_return_type
     ]
     compiler_stack.push(state)
 }
@@ -320,6 +330,7 @@ fn restore_compiler() {
     ensure_messages = state[21]
     ensure_count = state[22]
     current_func_name = state[23]
+    current_return_type = state[24]
 }
 
 // Snapshot the current chunk into an array for serialization
@@ -674,6 +685,24 @@ fn emit_ensure_checks(line: any) {
 }
 
 // ============================================================================
+// Section 7c: Return type check emission
+// ============================================================================
+
+// Emit return type check before OP_RETURN (if current_return_type is set).
+// Expects the return value on TOS. Leaves it on TOS unchanged.
+// Mirrors emit_return_type_check() in src/stackcompiler.c.
+fn emit_return_type_check(line: any) {
+    if current_return_type == "" { return }
+    if current_return_type == "any" || current_return_type == "Any" { return }
+    let err_msg = "function '" + current_func_name + "' return type expects " + current_return_type + ", got %s"
+    let type_idx = add_constant(make_string_const(current_return_type))
+    let err_idx = add_constant(make_string_const(err_msg))
+    emit_byte(OP_CHECK_RETURN_TYPE, line)
+    emit_byte(type_idx, line)
+    emit_byte(err_idx, line)
+}
+
+// ============================================================================
 // Section 8: Expression parsing — precedence climbing
 // ============================================================================
 
@@ -893,6 +922,7 @@ fn parse_postfix() {
             emit_bytes(OP_CALL, arg_count, line)
         } else { if pt == "[" || pt == "?[" {
             let optional = pt == "?["
+            let idx_code_pos = len(code)
             advance()
             flux end_jump = 0
             if optional {
@@ -901,9 +931,24 @@ fn parse_postfix() {
                 end_jump = emit_jump(OP_JUMP, line)
                 patch_jump(skip)
             }
+            // Fast path: local[expr] -> OP_INDEX_LOCAL
+            let is_local_obj = !optional && idx_code_pos >= 2 && code[idx_code_pos - 2] == OP_GET_LOCAL
+            flux local_slot = 0
+            if is_local_obj {
+                local_slot = code[idx_code_pos - 1]
+                // Remove the GET_LOCAL we already emitted
+                code.pop()
+                code.pop()
+                c_lines.pop()
+                c_lines.pop()
+            }
             parse_expression()
             expect(nil, "]")
-            emit_byte(OP_INDEX, line)
+            if is_local_obj {
+                emit_bytes(OP_INDEX_LOCAL, local_slot, line)
+            } else {
+                emit_byte(OP_INDEX, line)
+            }
             if optional {
                 patch_jump(end_jump)
             }
@@ -1018,8 +1063,22 @@ fn parse_postfix() {
                     emit_bytes(OP_GET_FIELD, name_idx, line)
                     patch_jump(end_jump)
                 } else {
+                    // Fast path: local.field -> OP_GET_FIELD_LOCAL
                     let name_idx = string_constant(field_name)
-                    emit_bytes(OP_GET_FIELD, name_idx, line)
+                    let is_local_field = name_idx <= 255 && receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_LOCAL
+                    if is_local_field {
+                        let field_slot = code[receiver_code_pos - 1]
+                        // Remove the GET_LOCAL we already emitted
+                        code.pop()
+                        code.pop()
+                        c_lines.pop()
+                        c_lines.pop()
+                        emit_byte(OP_GET_FIELD_LOCAL, line)
+                        emit_byte(field_slot, line)
+                        emit_byte(name_idx, line)
+                    } else {
+                        emit_bytes(OP_GET_FIELD, name_idx, line)
+                    }
                 }
             }
         } else { if pt == "?" {
@@ -2443,6 +2502,7 @@ fn parse_closure_literal() {
     loop_start_pos = 0
     loop_depth = 0
     string_intern_map = Map::new()
+    current_return_type = ""
 
     // Reserve slot 0 for the closure itself (VM convention)
     add_local("")
@@ -2539,6 +2599,7 @@ fn init_sub_compiler() {
     ensure_messages = []
     ensure_count = 0
     current_func_name = ""
+    current_return_type = ""
     return saved_stack
 }
 
@@ -3208,10 +3269,11 @@ fn parse_fn_declaration() {
     }
     expect(nil, ")")
 
-    // Skip optional return type annotation
+    // Parse optional return type annotation
+    flux fn_return_type = ""
     if peek_text() == "->" {
         advance()
-        expect("identifier", nil)
+        fn_return_type = expect("identifier", nil).text
     }
 
     // Collect require/ensure contract token positions.
@@ -3332,6 +3394,7 @@ fn parse_fn_declaration() {
     ensure_messages = []
     ensure_count = 0
     current_func_name = name
+    current_return_type = fn_return_type
 
     // Reserve slot 0 for the function itself (VM convention)
     add_local("")
@@ -3379,6 +3442,7 @@ fn parse_fn_declaration() {
     expect(nil, "}")
 
     emit_byte(OP_UNIT, line)
+    emit_return_type_check(line)
     emit_ensure_checks(line)
     emit_byte(OP_DEFER_RUN, line)
     emit_byte(0, line)  // scope_depth 0 = run all defers
@@ -3434,6 +3498,7 @@ fn parse_return() {
     } else {
         parse_expression()
     }
+    emit_return_type_check(line)
     emit_ensure_checks(line)
     emit_byte(OP_DEFER_RUN, line)
     emit_byte(0, line)  // scope_depth 0 = run all defers
@@ -3661,6 +3726,15 @@ fn parse_assignment() {
         parse_expression()
         emit_variable_set_pop(name, line)
     } else {
+        // Fast path: local += expr -> OP_APPEND_STR_LOCAL (string append in-place)
+        if op == "+=" {
+            let slot = resolve_local(name)
+            if slot >= 0 {
+                parse_expression()
+                emit_bytes(OP_APPEND_STR_LOCAL, slot, line)
+                return
+            }
+        }
         emit_variable_get(name, line)
         parse_expression()
         match op {
@@ -3672,6 +3746,28 @@ fn parse_assignment() {
         }
         emit_variable_set_pop(name, line)
     }
+}
+
+fn is_slice_in_brackets() {
+    // Scan forward from current pos to see if there's a ".." at depth 0
+    // inside [...] (called right after "[" was consumed).
+    flux scan_pos = pos
+    flux depth = 0
+    while scan_pos < len(tokens) {
+        let tok = tokens[scan_pos]
+        if tok.text == "[" || tok.text == "(" {
+            depth = depth + 1
+        } else { if tok.text == "]" || tok.text == ")" {
+            if depth == 0 {
+                return false
+            }
+            depth = depth - 1
+        } else { if tok.type == ".." && depth == 0 {
+            return true
+        } } }
+        scan_pos = scan_pos + 1
+    }
+    return false
 }
 
 fn parse_compound_assignment_target(name: any, line: any) {
@@ -3710,76 +3806,129 @@ fn parse_compound_assignment_target(name: any, line: any) {
         emit_variable_set_pop(name, line)
     } else { if peek_text() == "[" {
         advance()
-        let slot = resolve_local(name)
-        if slot >= 0 {
-            // Local array: use OP_SET_INDEX_LOCAL for in-place mutation
-            // C compiler order: push value, push index, SET_INDEX_LOCAL slot
-            // But source is: name[index] = value — so parse index first, then value, then swap
+        if is_slice_in_brackets() {
+            // Slice assignment: name[start..end] = value
+            // Save position at start of the index expression
+            let slice_start_pos = pos
+            // Scan forward to find the matching ']' at depth 0
+            flux scan_depth = 0
+            while pos < len(tokens) {
+                let t = tokens[pos]
+                if t.text == "[" || t.text == "(" {
+                    scan_depth = scan_depth + 1
+                } else { if t.text == "]" || t.text == ")" {
+                    if scan_depth == 0 { break }
+                    scan_depth = scan_depth - 1
+                } }
+                pos = pos + 1
+            }
+            expect(nil, "]")  // consume ']'
+            expect(nil, "=")  // consume '='
+            // Parse value expression first => stack: [val]
             parse_expression()
-            expect(nil, "]")
-            let op = advance().text
-            if op == "=" {
-                parse_expression()
-                // Stack: [index, value]. Need [value, index].
-                emit_byte(OP_SWAP, line)
-                emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
+            let after_val_pos = pos
+
+            let slot = resolve_local(name)
+            if slot >= 0 {
+                // Local: VM expects stack [val, start, end], operand = slot
+                // Go back and parse start..end
+                pos = slice_start_pos
+                parse_concat()  // parse start (stops before '..')
+                expect(nil, "..")
+                parse_concat()  // parse end
+                // Stack: [val, start, end]
+                pos = after_val_pos
+                emit_bytes(OP_SET_SLICE_LOCAL, slot, line)
             } else {
-                // Compound assignment: arr[i] += expr
-                // Stack so far: [index]. Get current value first.
-                emit_byte(OP_DUP, line)          // [index, index]
-                emit_bytes(OP_GET_LOCAL, slot, line) // [index, index, arr]
-                emit_byte(OP_SWAP, line)          // [index, arr, index]
-                emit_byte(OP_INDEX, line)         // [index, current_val]
-                parse_expression()                // [index, current_val, rhs]
-                match op {
-                    "+=" => emit_byte(OP_ADD, line),
-                    "-=" => emit_byte(OP_SUB, line),
-                    "*=" => emit_byte(OP_MUL, line),
-                    "/=" => emit_byte(OP_DIV, line),
-                    _ => emit_byte(OP_MOD, line)
-                }
-                // Stack: [index, new_val]. Need [new_val, index].
-                emit_byte(OP_SWAP, line)
-                emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
+                // Non-local: VM expects stack [val, obj, start, end]
+                // Push object after value
+                emit_variable_get(name, line)
+                // Stack: [val, obj]
+                // Go back and parse start..end
+                pos = slice_start_pos
+                parse_concat()  // parse start
+                expect(nil, "..")
+                parse_concat()  // parse end
+                // Stack: [val, obj, start, end]
+                pos = after_val_pos
+                emit_byte(OP_SET_SLICE, line)
+                // OP_SET_SLICE pushes modified obj — write it back
+                emit_variable_set(name, line)
+                emit_byte(OP_POP, line)
             }
         } else {
-            // Non-local: use OP_SET_INDEX
-            // VM expects stack: [value, object, index] (value deepest)
-            // Parse index, then ], =, then value. Then push object and index.
-            parse_expression()
-            expect(nil, "]")
-            let op = advance().text
-            if op == "=" {
+            // Normal index assignment (not a slice)
+            let slot = resolve_local(name)
+            if slot >= 0 {
+                // Local array: use OP_SET_INDEX_LOCAL for in-place mutation
+                // C compiler order: push value, push index, SET_INDEX_LOCAL slot
+                // But source is: name[index] = value — so parse index first, then value, then swap
                 parse_expression()
-                // Stack: [index, value]. Need [value, object, index].
-                emit_byte(OP_SWAP, line)
-                // Stack: [value, index]. Now push object and reorder.
-                emit_variable_get(name, line)
-                emit_byte(OP_SWAP, line)
-                // Stack: [value, object, index]. Correct!
-                emit_byte(OP_SET_INDEX, line)
-            } else {
-                // Compound assignment: map[key] += expr (non-local)
-                // Stack so far: [index]. Get current value first.
-                emit_byte(OP_DUP, line)              // [index, index]
-                emit_variable_get(name, line)         // [index, index, obj]
-                emit_byte(OP_SWAP, line)              // [index, obj, index]
-                emit_byte(OP_INDEX, line)             // [index, current_val]
-                parse_expression()                    // [index, current_val, rhs]
-                match op {
-                    "+=" => emit_byte(OP_ADD, line),
-                    "-=" => emit_byte(OP_SUB, line),
-                    "*=" => emit_byte(OP_MUL, line),
-                    "/=" => emit_byte(OP_DIV, line),
-                    _ => emit_byte(OP_MOD, line)
+                expect(nil, "]")
+                let op = advance().text
+                if op == "=" {
+                    parse_expression()
+                    // Stack: [index, value]. Need [value, index].
+                    emit_byte(OP_SWAP, line)
+                    emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
+                } else {
+                    // Compound assignment: arr[i] += expr
+                    // Stack so far: [index]. Get current value first.
+                    emit_byte(OP_DUP, line)          // [index, index]
+                    emit_bytes(OP_GET_LOCAL, slot, line) // [index, index, arr]
+                    emit_byte(OP_SWAP, line)          // [index, arr, index]
+                    emit_byte(OP_INDEX, line)         // [index, current_val]
+                    parse_expression()                // [index, current_val, rhs]
+                    match op {
+                        "+=" => emit_byte(OP_ADD, line),
+                        "-=" => emit_byte(OP_SUB, line),
+                        "*=" => emit_byte(OP_MUL, line),
+                        "/=" => emit_byte(OP_DIV, line),
+                        _ => emit_byte(OP_MOD, line)
+                    }
+                    // Stack: [index, new_val]. Need [new_val, index].
+                    emit_byte(OP_SWAP, line)
+                    emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
                 }
-                // Stack: [index, new_val]. Need [new_val, obj, index].
-                emit_byte(OP_SWAP, line)              // [new_val, index]
-                emit_variable_get(name, line)         // [new_val, index, obj]
-                emit_byte(OP_SWAP, line)              // [new_val, obj, index]
-                emit_byte(OP_SET_INDEX, line)
+            } else {
+                // Non-local: use OP_SET_INDEX
+                // VM expects stack: [value, object, index] (value deepest)
+                // Parse index, then ], =, then value. Then push object and index.
+                parse_expression()
+                expect(nil, "]")
+                let op = advance().text
+                if op == "=" {
+                    parse_expression()
+                    // Stack: [index, value]. Need [value, object, index].
+                    emit_byte(OP_SWAP, line)
+                    // Stack: [value, index]. Now push object and reorder.
+                    emit_variable_get(name, line)
+                    emit_byte(OP_SWAP, line)
+                    // Stack: [value, object, index]. Correct!
+                    emit_byte(OP_SET_INDEX, line)
+                } else {
+                    // Compound assignment: map[key] += expr (non-local)
+                    // Stack so far: [index]. Get current value first.
+                    emit_byte(OP_DUP, line)              // [index, index]
+                    emit_variable_get(name, line)         // [index, index, obj]
+                    emit_byte(OP_SWAP, line)              // [index, obj, index]
+                    emit_byte(OP_INDEX, line)             // [index, current_val]
+                    parse_expression()                    // [index, current_val, rhs]
+                    match op {
+                        "+=" => emit_byte(OP_ADD, line),
+                        "-=" => emit_byte(OP_SUB, line),
+                        "*=" => emit_byte(OP_MUL, line),
+                        "/=" => emit_byte(OP_DIV, line),
+                        _ => emit_byte(OP_MOD, line)
+                    }
+                    // Stack: [index, new_val]. Need [new_val, obj, index].
+                    emit_byte(OP_SWAP, line)              // [new_val, index]
+                    emit_variable_get(name, line)         // [new_val, index, obj]
+                    emit_byte(OP_SWAP, line)              // [new_val, obj, index]
+                    emit_byte(OP_SET_INDEX, line)
+                }
+                emit_byte(OP_POP, line)
             }
-            emit_byte(OP_POP, line)
         }
     } }
 }
@@ -4194,9 +4343,11 @@ fn parse_impl_block() {
         }
         expect(nil, ")")
 
+        // Parse optional return type annotation
+        flux m_return_type = ""
         if peek_text() == "->" {
             advance()
-            expect("identifier", nil)
+            m_return_type = expect("identifier", nil).text
         }
 
         // Parse require/ensure contracts for impl methods (same approach as fn)
@@ -4313,6 +4464,7 @@ fn parse_impl_block() {
         ensure_messages = []
         ensure_count = 0
         current_func_name = full_name
+        current_return_type = m_return_type
 
         if first_param == 1 {
             // self occupies slot 0
@@ -4362,6 +4514,7 @@ fn parse_impl_block() {
         expect(nil, "}")
 
         emit_byte(OP_UNIT, line)
+        emit_return_type_check(line)
         emit_ensure_checks(line)
         emit_byte(OP_DEFER_RUN, line)
         emit_byte(0, line)

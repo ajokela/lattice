@@ -1,7 +1,8 @@
 #include "stackvm.h"
 #include "runtime.h"
 #include "stackopcode.h"
-#include "stackcompiler.h" /* for AstPhase (PHASE_FLUID, PHASE_CRYSTAL, PHASE_UNSPECIFIED) */
+#include "phase.h"         /* AstPhase (PHASE_FLUID, PHASE_CRYSTAL, PHASE_UNSPECIFIED) */
+#include "stackcompiler.h" /* stack_compile_module (used by require) */
 #include "intern.h"
 #include "builtins.h"
 #include "lattice.h"
