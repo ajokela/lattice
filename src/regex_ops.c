@@ -1,9 +1,51 @@
 #include "lattice.h"
 #include "regex_ops.h"
-#include <regex.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#ifndef _WIN32
+#include <regex.h>
+#endif
+
+#ifdef _WIN32
+
+/* Windows: MinGW lacks POSIX regex — provide stub implementations
+ * that return errors. A future version could use PCRE2 or a bundled regex lib. */
+
+int parse_regex_flags(const char *flags, int *out_flags, char **err) {
+    (void)flags;
+    (void)out_flags;
+    *err = strdup("regex: not available on Windows (no POSIX regex)");
+    return -1;
+}
+
+LatValue regex_match(const char *pattern, const char *str, int extra_flags, char **err) {
+    (void)pattern;
+    (void)str;
+    (void)extra_flags;
+    *err = strdup("regex: not available on Windows (no POSIX regex)");
+    return value_unit();
+}
+
+LatValue regex_find_all(const char *pattern, const char *str, int extra_flags, char **err) {
+    (void)pattern;
+    (void)str;
+    (void)extra_flags;
+    *err = strdup("regex: not available on Windows (no POSIX regex)");
+    return value_unit();
+}
+
+char *regex_replace(const char *pattern, const char *str, const char *replacement, int extra_flags, char **err) {
+    (void)pattern;
+    (void)str;
+    (void)replacement;
+    (void)extra_flags;
+    *err = strdup("regex: not available on Windows (no POSIX regex)");
+    return NULL;
+}
+
+#else /* !_WIN32 */
 
 /* Parse a flags string into POSIX regex flags.
  * Returns 0 on success, -1 on error (sets *err). */
@@ -166,3 +208,5 @@ char *regex_replace(const char *pattern, const char *str, const char *replacemen
     regfree(&re);
     return result;
 }
+
+#endif /* !_WIN32 */

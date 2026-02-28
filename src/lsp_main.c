@@ -2,7 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#include "win32_compat.h"
+#else
 #include <libgen.h>
+#endif
 #include <limits.h>
 
 #ifdef __APPLE__
@@ -20,6 +25,9 @@ static char *find_eval_path(void) {
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len <= 0) return NULL;
     exe_path[len] = '\0';
+#elif defined(_WIN32)
+    DWORD len = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
+    if (len == 0 || len >= sizeof(exe_path)) return NULL;
 #else
     return NULL;
 #endif

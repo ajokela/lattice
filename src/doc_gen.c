@@ -6,7 +6,11 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <libgen.h>
+#endif
 
 /* ── Internal helpers ───────────────────────────────────────────────────── */
 

@@ -12,7 +12,11 @@ char *envvar_get(const char *name) {
 }
 
 bool envvar_set(const char *name, const char *value, char **err) {
+#ifdef _WIN32
+    if (_putenv_s(name, value) != 0) {
+#else
     if (setenv(name, value, 1) != 0) {
+#endif
         char buf[256];
         snprintf(buf, sizeof(buf), "envvar_set: failed to set '%s'", name);
         *err = strdup(buf);
@@ -21,13 +25,17 @@ bool envvar_set(const char *name, const char *value, char **err) {
     return true;
 }
 
+#ifdef _WIN32
+#define ENVIRON _environ
+#else
 extern char **environ;
+#define ENVIRON environ
+#endif
 
 void envvar_keys(char ***out_keys, size_t *out_count) {
     size_t count = 0;
-    if (environ) {
-        for (char **e = environ; *e; e++)
-            count++;
+    if (ENVIRON) {
+        for (char **e = ENVIRON; *e; e++) count++;
     }
 
     char **keys = malloc(count * sizeof(char *));
@@ -38,15 +46,18 @@ void envvar_keys(char ***out_keys, size_t *out_count) {
     }
 
     for (size_t i = 0; i < count; i++) {
-        const char *eq = strchr(environ[i], '=');
+        const char *eq = strchr(ENVIRON[i], '=');
         if (eq) {
-            size_t klen = (size_t)(eq - environ[i]);
+            size_t klen = (size_t)(eq - ENVIRON[i]);
             keys[i] = malloc(klen + 1);
-            if (!keys[i]) { keys[i] = strdup(""); continue; }
-            memcpy(keys[i], environ[i], klen);
+            if (!keys[i]) {
+                keys[i] = strdup("");
+                continue;
+            }
+            memcpy(keys[i], ENVIRON[i], klen);
             keys[i][klen] = '\0';
         } else {
-            keys[i] = strdup(environ[i]);
+            keys[i] = strdup(ENVIRON[i]);
         }
     }
 
@@ -62,7 +73,8 @@ char *envvar_get(const char *name) {
 }
 
 bool envvar_set(const char *name, const char *value, char **err) {
-    (void)name; (void)value;
+    (void)name;
+    (void)value;
     *err = strdup("env_set: not available in browser");
     return false;
 }

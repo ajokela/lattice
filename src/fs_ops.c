@@ -7,11 +7,17 @@
 #ifndef __EMSCRIPTEN__
 
 #include <sys/stat.h>
-#include <unistd.h>
-#include <dirent.h>
 #include <errno.h>
-#include <glob.h>
 #include <limits.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include "win32_compat.h"
+#else
+#include <unistd.h>
+#include <glob.h>
+#endif
+#include <dirent.h>
 
 bool fs_file_exists(const char *path) {
     struct stat st;
@@ -50,8 +56,7 @@ char **fs_list_dir(const char *path, size_t *count, char **err) {
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-            continue;
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
         if (len >= cap) {
             cap *= 2;
             char **tmp = realloc(entries, cap * sizeof(char *));
@@ -93,7 +98,11 @@ bool fs_append_file(const char *path, const char *data, char **err) {
 }
 
 bool fs_mkdir(const char *path, char **err) {
+#ifdef _WIN32
+    if (_mkdir(path) != 0) {
+#else
     if (mkdir(path, 0755) != 0) {
+#endif
         char buf[512];
         snprintf(buf, sizeof(buf), "mkdir: %s: %s", path, strerror(errno));
         *err = strdup(buf);
@@ -134,6 +143,57 @@ bool fs_rmdir(const char *path, char **err) {
     return true;
 }
 
+#ifdef _WIN32
+char **fs_glob(const char *pattern, size_t *count, char **err) {
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        *count = 0;
+        return NULL; /* no matches, not an error */
+    }
+
+    /* Extract directory prefix from pattern */
+    const char *last_sep = strrchr(pattern, '/');
+    const char *last_bsep = strrchr(pattern, '\\');
+    if (last_bsep && (!last_sep || last_bsep > last_sep)) last_sep = last_bsep;
+    size_t prefix_len = last_sep ? (size_t)(last_sep - pattern + 1) : 0;
+
+    size_t cap = 16, len = 0;
+    char **results = malloc(cap * sizeof(char *));
+    if (!results) {
+        FindClose(hFind);
+        *err = strdup("glob: out of memory");
+        *count = 0;
+        return NULL;
+    }
+
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (len >= cap) {
+            cap *= 2;
+            char **tmp = realloc(results, cap * sizeof(char *));
+            if (!tmp) {
+                for (size_t i = 0; i < len; i++) free(results[i]);
+                free(results);
+                FindClose(hFind);
+                *err = strdup("glob: out of memory");
+                *count = 0;
+                return NULL;
+            }
+            results = tmp;
+        }
+        size_t name_len = strlen(fd.cFileName);
+        results[len] = malloc(prefix_len + name_len + 1);
+        if (prefix_len > 0) memcpy(results[len], pattern, prefix_len);
+        memcpy(results[len] + prefix_len, fd.cFileName, name_len + 1);
+        len++;
+    } while (FindNextFileA(hFind, &fd));
+    FindClose(hFind);
+
+    *count = len;
+    return results;
+}
+#else
 char **fs_glob(const char *pattern, size_t *count, char **err) {
     glob_t gl;
     int flags = GLOB_TILDE;
@@ -162,18 +222,21 @@ char **fs_glob(const char *pattern, size_t *count, char **err) {
         *count = 0;
         return NULL;
     }
-    for (size_t i = 0; i < n; i++) {
-        results[i] = strdup(gl.gl_pathv[i]);
-    }
+    for (size_t i = 0; i < n; i++) { results[i] = strdup(gl.gl_pathv[i]); }
     globfree(&gl);
     *count = n;
     return results;
 }
+#endif
 
-bool fs_stat(const char *path, int64_t *size_out, int64_t *mtime_out,
-             int64_t *mode_out, const char **type_out, char **err) {
+bool fs_stat(const char *path, int64_t *size_out, int64_t *mtime_out, int64_t *mode_out, const char **type_out,
+             char **err) {
     struct stat st;
+#ifdef _WIN32
+    if (stat(path, &st) != 0) {
+#else
     if (lstat(path, &st) != 0) {
+#endif
         char buf[512];
         snprintf(buf, sizeof(buf), "stat: %s: %s", path, strerror(errno));
         *err = strdup(buf);
@@ -182,10 +245,12 @@ bool fs_stat(const char *path, int64_t *size_out, int64_t *mtime_out,
     *size_out = (int64_t)st.st_size;
     *mtime_out = (int64_t)st.st_mtime * 1000;
     *mode_out = (int64_t)(st.st_mode & 07777);
-    if (S_ISREG(st.st_mode))       *type_out = "file";
-    else if (S_ISDIR(st.st_mode))  *type_out = "dir";
-    else if (S_ISLNK(st.st_mode))  *type_out = "symlink";
-    else                            *type_out = "other";
+    if (S_ISREG(st.st_mode)) *type_out = "file";
+    else if (S_ISDIR(st.st_mode)) *type_out = "dir";
+#ifndef _WIN32
+    else if (S_ISLNK(st.st_mode)) *type_out = "symlink";
+#endif
+    else *type_out = "other";
     return true;
 }
 
@@ -243,7 +308,14 @@ char *fs_realpath(const char *path, char **err) {
 }
 
 char *fs_tempdir(char **err) {
+#ifdef _WIN32
+    char tmp[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmp);
+    char tmpl[MAX_PATH + 32];
+    snprintf(tmpl, sizeof(tmpl), "%slattice_XXXXXX", tmp);
+#else
     char tmpl[] = "/tmp/lattice_XXXXXX";
+#endif
     char *result = mkdtemp(tmpl);
     if (!result) {
         char buf[512];
@@ -255,7 +327,14 @@ char *fs_tempdir(char **err) {
 }
 
 char *fs_tempfile(char **err) {
+#ifdef _WIN32
+    char tmp[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmp);
+    char tmpl[MAX_PATH + 32];
+    snprintf(tmpl, sizeof(tmpl), "%slattice_XXXXXX", tmp);
+#else
     char tmpl[] = "/tmp/lattice_XXXXXX";
+#endif
     int fd = mkstemp(tmpl);
     if (fd < 0) {
         char buf[512];
@@ -263,12 +342,20 @@ char *fs_tempfile(char **err) {
         *err = strdup(buf);
         return NULL;
     }
+#ifdef _WIN32
+    _close(fd);
+#else
     close(fd);
+#endif
     return strdup(tmpl);
 }
 
 bool fs_chmod(const char *path, int mode, char **err) {
+#ifdef _WIN32
+    if (_chmod(path, mode) != 0) {
+#else
     if (chmod(path, (mode_t)mode) != 0) {
+#endif
         char buf[512];
         snprintf(buf, sizeof(buf), "chmod: %s: %s", path, strerror(errno));
         *err = strdup(buf);
@@ -309,7 +396,8 @@ char **fs_list_dir(const char *path, size_t *count, char **err) {
 }
 
 bool fs_append_file(const char *path, const char *data, char **err) {
-    (void)path; (void)data;
+    (void)path;
+    (void)data;
     *err = strdup("append_file: not available in browser");
     return false;
 }
@@ -321,7 +409,8 @@ bool fs_mkdir(const char *path, char **err) {
 }
 
 bool fs_rename(const char *oldpath, const char *newpath, char **err) {
-    (void)oldpath; (void)newpath;
+    (void)oldpath;
+    (void)newpath;
     *err = strdup("rename: not available in browser");
     return false;
 }
@@ -349,15 +438,20 @@ char **fs_glob(const char *pattern, size_t *count, char **err) {
     return NULL;
 }
 
-bool fs_stat(const char *path, int64_t *size_out, int64_t *mtime_out,
-             int64_t *mode_out, const char **type_out, char **err) {
-    (void)path; (void)size_out; (void)mtime_out; (void)mode_out; (void)type_out;
+bool fs_stat(const char *path, int64_t *size_out, int64_t *mtime_out, int64_t *mode_out, const char **type_out,
+             char **err) {
+    (void)path;
+    (void)size_out;
+    (void)mtime_out;
+    (void)mode_out;
+    (void)type_out;
     *err = strdup("stat: not available in browser");
     return false;
 }
 
 bool fs_copy_file(const char *src, const char *dst, char **err) {
-    (void)src; (void)dst;
+    (void)src;
+    (void)dst;
     *err = strdup("copy_file: not available in browser");
     return false;
 }
@@ -379,7 +473,8 @@ char *fs_tempfile(char **err) {
 }
 
 bool fs_chmod(const char *path, int mode, char **err) {
-    (void)path; (void)mode;
+    (void)path;
+    (void)mode;
     *err = strdup("chmod: not available in browser");
     return false;
 }

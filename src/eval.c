@@ -36,9 +36,15 @@
 #include <time.h>
 #include <limits.h>
 #include <ctype.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <libgen.h>
+#endif
 #ifndef __EMSCRIPTEN__
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 #include <pthread.h>
 #endif
 
@@ -13631,7 +13637,7 @@ const MemoryStats *evaluator_stats(const Evaluator *ev) {
     s->region_live_count = ev->heap->regions->count;
     s->region_live_data_bytes = region_live_data_bytes(ev->heap->regions);
     s->region_cumulative_data_bytes = ev->heap->regions->cumulative_data_bytes;
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) == 0) {
 #ifdef __linux__

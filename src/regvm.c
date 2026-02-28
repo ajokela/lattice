@@ -22,6 +22,9 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#endif
 #ifndef __EMSCRIPTEN__
 #include <pthread.h>
 #endif

@@ -1,9 +1,12 @@
-#define _XOPEN_SOURCE 700  /* for strptime */
+#define _XOPEN_SOURCE 700 /* for strptime */
 #include "datetime_ops.h"
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#endif
 
 /* Portable timegm: convert struct tm (UTC) to time_t without timezone adjustment.
  * Uses the trick of setting TZ=UTC, calling mktime, then restoring TZ.
@@ -43,14 +46,12 @@ char *datetime_format(int64_t epoch_ms, const char *fmt, char **err) {
 int64_t datetime_parse(const char *str, const char *fmt, char **err) {
     struct tm tm;
     memset(&tm, 0, sizeof(tm));
-    tm.tm_isdst = -1;  /* let mktime determine DST */
+    tm.tm_isdst = -1; /* let mktime determine DST */
 
     char *rest = strptime(str, fmt, &tm);
     if (rest == NULL) {
         char msg[256];
-        snprintf(msg, sizeof(msg),
-                 "time_parse: failed to parse \"%s\" with format \"%s\"",
-                 str, fmt);
+        snprintf(msg, sizeof(msg), "time_parse: failed to parse \"%s\" with format \"%s\"", str, fmt);
         *err = strdup(msg);
         return 0;
     }
@@ -73,33 +74,29 @@ static struct tm epoch_to_tm(int64_t epoch_ms) {
     return tm;
 }
 
-int datetime_year(int64_t epoch_ms)    { return epoch_to_tm(epoch_ms).tm_year + 1900; }
-int datetime_month(int64_t epoch_ms)   { return epoch_to_tm(epoch_ms).tm_mon + 1; }
-int datetime_day(int64_t epoch_ms)     { return epoch_to_tm(epoch_ms).tm_mday; }
-int datetime_hour(int64_t epoch_ms)    { return epoch_to_tm(epoch_ms).tm_hour; }
-int datetime_minute(int64_t epoch_ms)  { return epoch_to_tm(epoch_ms).tm_min; }
-int datetime_second(int64_t epoch_ms)  { return epoch_to_tm(epoch_ms).tm_sec; }
+int datetime_year(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_year + 1900; }
+int datetime_month(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_mon + 1; }
+int datetime_day(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_mday; }
+int datetime_hour(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_hour; }
+int datetime_minute(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_min; }
+int datetime_second(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_sec; }
 int datetime_weekday(int64_t epoch_ms) { return epoch_to_tm(epoch_ms).tm_wday; }
 
-int64_t datetime_add(int64_t epoch_ms, int64_t delta_ms) {
-    return epoch_ms + delta_ms;
-}
+int64_t datetime_add(int64_t epoch_ms, int64_t delta_ms) { return epoch_ms + delta_ms; }
 
-bool datetime_is_leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-}
+bool datetime_is_leap_year(int year) { return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0); }
 
 /* ── Calendar utilities ── */
 
 int datetime_days_in_month(int year, int month) {
-    static const int days[] = { 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    static const int days[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     if (month < 1 || month > 12) return -1;
     if (month == 2 && datetime_is_leap_year(year)) return 29;
     return days[month];
 }
 
 int datetime_day_of_year(int year, int month, int day) {
-    static const int cum[] = { 0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+    static const int cum[] = {0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
     if (month < 1 || month > 12) return -1;
     int doy = cum[month] + day;
     if (month > 2 && datetime_is_leap_year(year)) doy++;
@@ -108,10 +105,10 @@ int datetime_day_of_year(int year, int month, int day) {
 
 int datetime_day_of_week(int year, int month, int day) {
     /* Tomohiko Sakamoto's algorithm: returns 0=Sunday..6=Saturday */
-    static const int t[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
     int y = year;
     if (month < 3) y--;
-    return (y + y/4 - y/100 + y/400 + t[month - 1] + day) % 7;
+    return (y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7;
 }
 
 /* ── Timezone ── */
@@ -123,14 +120,14 @@ int datetime_tz_offset_seconds(void) {
     gmtime_r(&now, &utc_tm);
 
     /* Convert both to approximate seconds-since-epoch for comparison */
-    int64_t local_sec = (int64_t)local_tm.tm_hour * 3600 + (int64_t)local_tm.tm_min * 60 + local_tm.tm_sec
-                        + (int64_t)local_tm.tm_yday * 86400;
-    int64_t utc_sec   = (int64_t)utc_tm.tm_hour * 3600   + (int64_t)utc_tm.tm_min * 60   + utc_tm.tm_sec
-                        + (int64_t)utc_tm.tm_yday * 86400;
+    int64_t local_sec = (int64_t)local_tm.tm_hour * 3600 + (int64_t)local_tm.tm_min * 60 + local_tm.tm_sec +
+                        (int64_t)local_tm.tm_yday * 86400;
+    int64_t utc_sec =
+        (int64_t)utc_tm.tm_hour * 3600 + (int64_t)utc_tm.tm_min * 60 + utc_tm.tm_sec + (int64_t)utc_tm.tm_yday * 86400;
 
     /* Handle year boundary (e.g. Dec 31 UTC vs Jan 1 local) */
     if (local_tm.tm_year > utc_tm.tm_year) {
-        local_sec += 365 * 86400;  /* approximate */
+        local_sec += 365 * 86400; /* approximate */
     } else if (utc_tm.tm_year > local_tm.tm_year) {
         utc_sec += 365 * 86400;
     }
@@ -155,7 +152,7 @@ int64_t datetime_parse_iso(const char *str, char **err) {
         /* Look for timezone suffix */
         const char *p = str;
         while (*p && *p != 'Z' && *p != '+') {
-            if (*p == '-' && p > str + 10) break;  /* timezone minus (not date minus) */
+            if (*p == '-' && p > str + 10) break; /* timezone minus (not date minus) */
             p++;
         }
         if (*p == 'Z') {
@@ -172,8 +169,8 @@ int64_t datetime_parse_iso(const char *str, char **err) {
     }
 
     /* Validate ranges */
-    if (month < 1 || month > 12 || day < 1 || day > 31 ||
-        hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        second < 0 || second > 59) {
         *err = strdup("datetime_from_iso: date/time components out of range");
         return 0;
     }
@@ -193,35 +190,33 @@ char *datetime_to_iso(int64_t epoch_sec) {
     int year, month, day, hour, minute, second;
     datetime_to_utc_components(epoch_sec, &year, &month, &day, &hour, &minute, &second);
     char buf[64];
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
-             year, month, day, hour, minute, second);
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", year, month, day, hour, minute, second);
     return strdup(buf);
 }
 
-void datetime_to_utc_components(int64_t epoch_sec, int *year, int *month, int *day,
-                                int *hour, int *minute, int *second) {
+void datetime_to_utc_components(int64_t epoch_sec, int *year, int *month, int *day, int *hour, int *minute,
+                                int *second) {
     time_t t = (time_t)epoch_sec;
     struct tm tm;
     gmtime_r(&t, &tm);
-    *year   = tm.tm_year + 1900;
-    *month  = tm.tm_mon + 1;
-    *day    = tm.tm_mday;
-    *hour   = tm.tm_hour;
+    *year = tm.tm_year + 1900;
+    *month = tm.tm_mon + 1;
+    *day = tm.tm_mday;
+    *hour = tm.tm_hour;
     *minute = tm.tm_min;
     *second = tm.tm_sec;
 }
 
-int64_t datetime_from_components(int year, int month, int day,
-                                 int hour, int minute, int second, int tz_offset_sec) {
+int64_t datetime_from_components(int year, int month, int day, int hour, int minute, int second, int tz_offset_sec) {
     struct tm tm;
     memset(&tm, 0, sizeof(tm));
-    tm.tm_year  = year - 1900;
-    tm.tm_mon   = month - 1;
-    tm.tm_mday  = day;
-    tm.tm_hour  = hour;
-    tm.tm_min   = minute;
-    tm.tm_sec   = second;
-    tm.tm_isdst = 0;  /* no DST adjustment for explicit timezone */
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+    tm.tm_isdst = 0; /* no DST adjustment for explicit timezone */
 
     /* Use portable_timegm to get UTC epoch, then subtract the tz offset */
     time_t utc = portable_timegm(&tm);

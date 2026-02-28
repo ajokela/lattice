@@ -5,6 +5,11 @@
 
 #ifndef __EMSCRIPTEN__
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include "win32_compat.h"
+#else
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netinet/in.h>
@@ -13,6 +18,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#endif
 
 /* ── Socket tracking ── */
 
@@ -21,32 +27,38 @@
 #endif
 
 static bool tracked_sockets[FD_SETSIZE];
+#ifndef _WIN32
 static bool sigpipe_suppressed = false;
+#endif
 
 static void ensure_sigpipe_suppressed(void) {
+#ifdef _WIN32
+    win32_net_init();
+#else
     if (!sigpipe_suppressed) {
         signal(SIGPIPE, SIG_IGN);
         sigpipe_suppressed = true;
     }
+#endif
 }
 
 static void track_socket(int fd) {
-    if (fd >= 0 && fd < FD_SETSIZE)
-        tracked_sockets[fd] = true;
+    if (fd >= 0 && fd < FD_SETSIZE) tracked_sockets[fd] = true;
 }
 
 static void untrack_socket(int fd) {
-    if (fd >= 0 && fd < FD_SETSIZE)
-        tracked_sockets[fd] = false;
+    if (fd >= 0 && fd < FD_SETSIZE) tracked_sockets[fd] = false;
 }
 
-static bool is_tracked(int fd) {
-    return fd >= 0 && fd < FD_SETSIZE && tracked_sockets[fd];
-}
+static bool is_tracked(int fd) { return fd >= 0 && fd < FD_SETSIZE && tracked_sockets[fd]; }
 
 static char *make_err(const char *prefix) {
     char buf[512];
+#ifdef _WIN32
+    snprintf(buf, sizeof(buf), "%s: error %d", prefix, WSAGetLastError());
+#else
     snprintf(buf, sizeof(buf), "%s: %s", prefix, strerror(errno));
+#endif
     return strdup(buf);
 }
 
@@ -56,10 +68,17 @@ int net_tcp_listen(const char *host, int port, char **err) {
     ensure_sigpipe_suppressed();
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { *err = make_err("tcp_listen: socket"); return -1; }
+    if (fd < 0) {
+        *err = make_err("tcp_listen: socket");
+        return -1;
+    }
 
     int opt = 1;
+#ifdef _WIN32
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+#else
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -67,20 +86,32 @@ int net_tcp_listen(const char *host, int port, char **err) {
     addr.sin_port = htons((uint16_t)port);
 
     if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+#ifdef _WIN32
+        closesocket(fd);
+#else
         close(fd);
+#endif
         *err = strdup("tcp_listen: invalid host address");
         return -1;
     }
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         *err = make_err("tcp_listen: bind");
+#ifdef _WIN32
+        closesocket(fd);
+#else
         close(fd);
+#endif
         return -1;
     }
 
     if (listen(fd, SOMAXCONN) < 0) {
         *err = make_err("tcp_listen: listen");
+#ifdef _WIN32
+        closesocket(fd);
+#else
         close(fd);
+#endif
         return -1;
     }
 
@@ -136,9 +167,13 @@ int net_tcp_connect(const char *host, int port, char **err) {
         return -1;
     }
 
-    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+    if (connect(fd, res->ai_addr, (int)res->ai_addrlen) < 0) {
         *err = make_err("tcp_connect: connect");
+#ifdef _WIN32
+        closesocket(fd);
+#else
         close(fd);
+#endif
         freeaddrinfo(res);
         return -1;
     }
@@ -159,7 +194,10 @@ char *net_tcp_read(int fd, char **err) {
     }
 
     char *buf = malloc(TCP_READ_BUF + 1);
-    if (!buf) { *err = strdup("tcp_read: out of memory"); return NULL; }
+    if (!buf) {
+        *err = strdup("tcp_read: out of memory");
+        return NULL;
+    }
 
     ssize_t n = recv(fd, buf, TCP_READ_BUF, 0);
     if (n < 0) {
@@ -181,12 +219,15 @@ char *net_tcp_read_bytes(int fd, size_t count, char **err) {
     }
 
     char *buf = malloc(count + 1);
-    if (!buf) { *err = strdup("tcp_read_bytes: out of memory"); return NULL; }
+    if (!buf) {
+        *err = strdup("tcp_read_bytes: out of memory");
+        return NULL;
+    }
 
     size_t total = 0;
     while (total < count) {
         ssize_t n = recv(fd, buf + total, count - total, 0);
-        if (n <= 0) break;  /* EOF or error */
+        if (n <= 0) break; /* EOF or error */
         total += (size_t)n;
     }
 
@@ -219,7 +260,11 @@ bool net_tcp_write(int fd, const char *data, size_t len, char **err) {
 void net_tcp_close(int fd) {
     if (is_tracked(fd)) {
         untrack_socket(fd);
+#ifdef _WIN32
+        closesocket(fd);
+#else
         close(fd);
+#endif
     }
 }
 
@@ -254,6 +299,17 @@ bool net_tcp_set_timeout(int fd, int secs, char **err) {
         return false;
     }
 
+#ifdef _WIN32
+    DWORD timeout_ms = (DWORD)(secs * 1000);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms, sizeof(timeout_ms)) < 0) {
+        *err = make_err("tcp_set_timeout: SO_RCVTIMEO");
+        return false;
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout_ms, sizeof(timeout_ms)) < 0) {
+        *err = make_err("tcp_set_timeout: SO_SNDTIMEO");
+        return false;
+    }
+#else
     struct timeval tv;
     tv.tv_sec = secs;
     tv.tv_usec = 0;
@@ -266,6 +322,7 @@ bool net_tcp_set_timeout(int fd, int secs, char **err) {
         *err = make_err("tcp_set_timeout: SO_SNDTIMEO");
         return false;
     }
+#endif
     return true;
 }
 
@@ -273,12 +330,11 @@ bool net_tcp_set_timeout(int fd, int secs, char **err) {
 
 /* ── WASM stubs ── */
 
-static char *wasm_err(void) {
-    return strdup("networking not available in WASM");
-}
+static char *wasm_err(void) { return strdup("networking not available in WASM"); }
 
 int net_tcp_listen(const char *host, int port, char **err) {
-    (void)host; (void)port;
+    (void)host;
+    (void)port;
     *err = wasm_err();
     return -1;
 }
@@ -290,7 +346,8 @@ int net_tcp_accept(int server_fd, char **err) {
 }
 
 int net_tcp_connect(const char *host, int port, char **err) {
-    (void)host; (void)port;
+    (void)host;
+    (void)port;
     *err = wasm_err();
     return -1;
 }
@@ -302,20 +359,21 @@ char *net_tcp_read(int fd, char **err) {
 }
 
 char *net_tcp_read_bytes(int fd, size_t count, char **err) {
-    (void)fd; (void)count;
+    (void)fd;
+    (void)count;
     *err = wasm_err();
     return NULL;
 }
 
 bool net_tcp_write(int fd, const char *data, size_t len, char **err) {
-    (void)fd; (void)data; (void)len;
+    (void)fd;
+    (void)data;
+    (void)len;
     *err = wasm_err();
     return false;
 }
 
-void net_tcp_close(int fd) {
-    (void)fd;
-}
+void net_tcp_close(int fd) { (void)fd; }
 
 char *net_tcp_peer_addr(int fd, char **err) {
     (void)fd;
@@ -324,7 +382,8 @@ char *net_tcp_peer_addr(int fd, char **err) {
 }
 
 bool net_tcp_set_timeout(int fd, int secs, char **err) {
-    (void)fd; (void)secs;
+    (void)fd;
+    (void)secs;
     *err = wasm_err();
     return false;
 }

@@ -68,6 +68,7 @@ detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64)  echo "x86_64"  ;;
         aarch64|arm64) echo "aarch64" ;;
+        riscv64)       echo "riscv64" ;;
         *)             err "unsupported architecture: $(uname -m)" ;;
     esac
 }

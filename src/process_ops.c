@@ -6,10 +6,19 @@
 #ifndef __EMSCRIPTEN__
 
 #include "ds/hashmap.h"
-#include <unistd.h>
-#include <sys/wait.h>
 #include <errno.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#include "win32_compat.h"
+#include <process.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
+
+#ifndef _WIN32
 /* Read all data from a file descriptor into a heap-allocated string.
  * Returns NULL on allocation failure. */
 static char *read_all_fd(int fd) {
@@ -29,16 +38,24 @@ static char *read_all_fd(int fd) {
         if (len == cap) {
             cap *= 2;
             char *tmp = realloc(buf, cap);
-            if (!tmp) { free(buf); return NULL; }
+            if (!tmp) {
+                free(buf);
+                return NULL;
+            }
             buf = tmp;
         }
     }
     buf[len] = '\0';
     return buf;
 }
+#endif
 
 LatValue process_exec(const char *cmd, char **err) {
+#ifdef _WIN32
+    FILE *fp = _popen(cmd, "r");
+#else
     FILE *fp = popen(cmd, "r");
+#endif
     if (!fp) {
         char msg[256];
         snprintf(msg, sizeof(msg), "exec: failed to run command: %s", strerror(errno));
@@ -50,7 +67,11 @@ LatValue process_exec(const char *cmd, char **err) {
     size_t len = 0;
     char *buf = malloc(cap);
     if (!buf) {
+#ifdef _WIN32
+        _pclose(fp);
+#else
         pclose(fp);
+#endif
         *err = strdup("exec: out of memory");
         return value_unit();
     }
@@ -62,14 +83,27 @@ LatValue process_exec(const char *cmd, char **err) {
         if (len == cap) {
             cap *= 2;
             char *tmp = realloc(buf, cap);
-            if (!tmp) { free(buf); pclose(fp); *err = strdup("exec: out of memory"); return value_unit(); }
+            if (!tmp) {
+                free(buf);
+#ifdef _WIN32
+                _pclose(fp);
+#else
+                pclose(fp);
+#endif
+                *err = strdup("exec: out of memory");
+                return value_unit();
+            }
             buf = tmp;
         }
     }
     buf[len] = '\0';
 
+#ifdef _WIN32
+    int exit_code = _pclose(fp);
+#else
     int status = pclose(fp);
     int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
 
     if (exit_code != 0) {
         char msg[256];
@@ -83,6 +117,91 @@ LatValue process_exec(const char *cmd, char **err) {
 }
 
 LatValue process_shell(const char *cmd, char **err) {
+#ifdef _WIN32
+    /* Windows: use CreateProcess with pipe redirection */
+    HANDLE stdout_rd = NULL, stdout_wr = NULL;
+    HANDLE stderr_rd = NULL, stderr_wr = NULL;
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    if (!CreatePipe(&stdout_rd, &stdout_wr, &sa, 0) || !CreatePipe(&stderr_rd, &stderr_wr, &sa, 0)) {
+        *err = strdup("shell: failed to create pipes");
+        return value_unit();
+    }
+    SetHandleInformation(stdout_rd, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(stderr_rd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.hStdOutput = stdout_wr;
+    si.hStdError = stderr_wr;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    ZeroMemory(&pi, sizeof(pi));
+
+    /* Build command line: cmd.exe /c <cmd> */
+    size_t cmd_len = strlen(cmd) + 16;
+    char *cmdline = malloc(cmd_len);
+    snprintf(cmdline, cmd_len, "cmd.exe /c %s", cmd);
+
+    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    free(cmdline);
+
+    CloseHandle(stdout_wr);
+    CloseHandle(stderr_wr);
+
+    if (!ok) {
+        CloseHandle(stdout_rd);
+        CloseHandle(stderr_rd);
+        *err = strdup("shell: CreateProcess failed");
+        return value_unit();
+    }
+
+    /* Read stdout */
+    size_t out_cap = 1024, out_len = 0;
+    char *stdout_buf = malloc(out_cap);
+    DWORD nr;
+    while (ReadFile(stdout_rd, stdout_buf + out_len, (DWORD)(out_cap - out_len), &nr, NULL) && nr > 0) {
+        out_len += nr;
+        if (out_len == out_cap) {
+            out_cap *= 2;
+            stdout_buf = realloc(stdout_buf, out_cap);
+        }
+    }
+    stdout_buf[out_len] = '\0';
+    CloseHandle(stdout_rd);
+
+    /* Read stderr */
+    size_t err_cap = 1024, err_len = 0;
+    char *stderr_buf = malloc(err_cap);
+    while (ReadFile(stderr_rd, stderr_buf + err_len, (DWORD)(err_cap - err_len), &nr, NULL) && nr > 0) {
+        err_len += nr;
+        if (err_len == err_cap) {
+            err_cap *= 2;
+            stderr_buf = realloc(stderr_buf, err_cap);
+        }
+    }
+    stderr_buf[err_len] = '\0';
+    CloseHandle(stderr_rd);
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code_dw;
+    GetExitCodeProcess(pi.hProcess, &exit_code_dw);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    LatValue map = value_map_new();
+    LatValue exit_code_val = value_int((int64_t)exit_code_dw);
+    lat_map_set(map.as.map.map, "exit_code", &exit_code_val);
+    LatValue stdout_val = value_string_owned(stdout_buf);
+    lat_map_set(map.as.map.map, "stdout", &stdout_val);
+    LatValue stderr_val = value_string_owned(stderr_buf);
+    lat_map_set(map.as.map.map, "stderr", &stderr_val);
+    return map;
+#else
     int stdout_pipe[2];
     int stderr_pipe[2];
 
@@ -99,8 +218,10 @@ LatValue process_shell(const char *cmd, char **err) {
 
     pid_t pid = fork();
     if (pid < 0) {
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
-        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[0]);
+        close(stderr_pipe[1]);
         *err = strdup("shell: fork failed");
         return value_unit();
     }
@@ -147,10 +268,15 @@ LatValue process_shell(const char *cmd, char **err) {
     lat_map_set(map.as.map.map, "stderr", &stderr_val);
 
     return map;
+#endif
 }
 
 char *process_cwd(char **err) {
+#ifdef _WIN32
+    char *buf = _getcwd(NULL, 0);
+#else
     char *buf = getcwd(NULL, 0);
+#endif
     if (!buf) {
         char msg[256];
         snprintf(msg, sizeof(msg), "cwd: %s", strerror(errno));
@@ -162,6 +288,9 @@ char *process_cwd(char **err) {
 
 char *process_hostname(char **err) {
     char buf[256];
+#ifdef _WIN32
+    win32_net_init();
+#endif
     if (gethostname(buf, sizeof(buf)) != 0) {
         *err = strdup("hostname: failed to get hostname");
         return NULL;
@@ -170,7 +299,11 @@ char *process_hostname(char **err) {
 }
 
 int process_pid(void) {
+#ifdef _WIN32
+    return (int)_getpid();
+#else
     return (int)getpid();
+#endif
 }
 
 #else /* __EMSCRIPTEN__ */
@@ -197,9 +330,7 @@ char *process_hostname(char **err) {
     return NULL;
 }
 
-int process_pid(void) {
-    return 0;
-}
+int process_pid(void) { return 0; }
 
 #endif /* __EMSCRIPTEN__ */
 

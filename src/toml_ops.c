@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <ctype.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#endif
 
 /* ========================================================================
  * Internal: TOML Parser
@@ -11,25 +14,22 @@
 
 typedef struct {
     const char *src;
-    size_t      pos;
-    char       *err;
+    size_t pos;
+    char *err;
 } TomlParser;
 
 static void tp_skip_ws(TomlParser *p) {
-    while (p->src[p->pos] == ' ' || p->src[p->pos] == '\t')
-        p->pos++;
+    while (p->src[p->pos] == ' ' || p->src[p->pos] == '\t') p->pos++;
 }
 
 static void tp_skip_ws_and_newlines(TomlParser *p) {
-    while (p->src[p->pos] == ' ' || p->src[p->pos] == '\t' ||
-           p->src[p->pos] == '\n' || p->src[p->pos] == '\r')
+    while (p->src[p->pos] == ' ' || p->src[p->pos] == '\t' || p->src[p->pos] == '\n' || p->src[p->pos] == '\r')
         p->pos++;
 }
 
 static void tp_skip_comment(TomlParser *p) {
     if (p->src[p->pos] == '#') {
-        while (p->src[p->pos] && p->src[p->pos] != '\n')
-            p->pos++;
+        while (p->src[p->pos] && p->src[p->pos] != '\n') p->pos++;
     }
 }
 
@@ -47,7 +47,10 @@ static void tp_error(TomlParser *p, const char *msg) {
     if (!p->err) {
         size_t len = strlen(msg) + 64;
         p->err = malloc(len);
-        if (!p->err) { p->err = strdup("toml_parse error: out of memory"); return; }
+        if (!p->err) {
+            p->err = strdup("toml_parse error: out of memory");
+            return;
+        }
         snprintf(p->err, len, "toml_parse error at position %zu: %s", p->pos, msg);
     }
 }
@@ -58,9 +61,7 @@ static LatValue tp_parse_value(TomlParser *p);
 /* ── Parse bare key ── */
 static char *tp_parse_bare_key(TomlParser *p) {
     size_t start = p->pos;
-    while (isalnum((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_' ||
-           p->src[p->pos] == '-')
-        p->pos++;
+    while (isalnum((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_' || p->src[p->pos] == '-') p->pos++;
     if (p->pos == start) {
         tp_error(p, "expected key");
         return NULL;
@@ -75,7 +76,10 @@ static char *tp_parse_quoted_string(TomlParser *p) {
 
     size_t cap = 64;
     char *buf = malloc(cap);
-    if (!buf) { tp_error(p, "out of memory"); return NULL; }
+    if (!buf) {
+        tp_error(p, "out of memory");
+        return NULL;
+    }
     size_t len = 0;
 
     if (quote == '"') {
@@ -95,16 +99,25 @@ static char *tp_parse_quoted_string(TomlParser *p) {
                         free(buf);
                         return NULL;
                 }
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) {
+                    cap *= 2;
+                    buf = realloc(buf, cap);
+                }
                 buf[len++] = esc;
             } else {
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) {
+                    cap *= 2;
+                    buf = realloc(buf, cap);
+                }
                 buf[len++] = p->src[p->pos++];
             }
         }
     } else {
         while (p->src[p->pos] && p->src[p->pos] != '\'') {
-            if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+            if (len + 1 >= cap) {
+                cap *= 2;
+                buf = realloc(buf, cap);
+            }
             buf[len++] = p->src[p->pos++];
         }
     }
@@ -121,8 +134,7 @@ static char *tp_parse_quoted_string(TomlParser *p) {
 
 /* ── Parse a key (bare or quoted) ── */
 static char *tp_parse_key(TomlParser *p) {
-    if (p->src[p->pos] == '"' || p->src[p->pos] == '\'')
-        return tp_parse_quoted_string(p);
+    if (p->src[p->pos] == '"' || p->src[p->pos] == '\'') return tp_parse_quoted_string(p);
     return tp_parse_bare_key(p);
 }
 
@@ -138,17 +150,14 @@ static LatValue tp_parse_string_value(TomlParser *p) {
 /* ── Parse number ── */
 static LatValue tp_parse_number(TomlParser *p) {
     size_t start = p->pos;
-    if (p->src[p->pos] == '-' || p->src[p->pos] == '+')
-        p->pos++;
+    if (p->src[p->pos] == '-' || p->src[p->pos] == '+') p->pos++;
     bool is_float = false;
 
-    while (isdigit((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_')
-        p->pos++;
+    while (isdigit((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_') p->pos++;
     if (p->src[p->pos] == '.') {
         is_float = true;
         p->pos++;
-        while (isdigit((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_')
-            p->pos++;
+        while (isdigit((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_') p->pos++;
     }
     if (p->src[p->pos] == 'e' || p->src[p->pos] == 'E') {
         is_float = true;
@@ -159,7 +168,10 @@ static LatValue tp_parse_number(TomlParser *p) {
 
     size_t nlen = p->pos - start;
     char *numstr = malloc(nlen + 1);
-    if (!numstr) { tp_error(p, "out of memory"); return value_unit(); }
+    if (!numstr) {
+        tp_error(p, "out of memory");
+        return value_unit();
+    }
     size_t j = 0;
     for (size_t i = start; i < p->pos; i++) {
         if (p->src[i] != '_') numstr[j++] = p->src[i];
@@ -190,7 +202,10 @@ static LatValue tp_parse_array(TomlParser *p) {
     p->pos++; /* skip [ */
     size_t cap = 4, len = 0;
     LatValue *elems = malloc(cap * sizeof(LatValue));
-    if (!elems) { tp_error(p, "out of memory"); return value_unit(); }
+    if (!elems) {
+        tp_error(p, "out of memory");
+        return value_unit();
+    }
 
     tp_skip_ws_and_newlines(p);
     tp_skip_comment(p);
@@ -243,21 +258,35 @@ static LatValue tp_parse_inline_table(TomlParser *p) {
 
     tp_skip_ws(p);
     while (p->src[p->pos] != '}' && p->src[p->pos] != '\0') {
-        if (p->err) { value_free(&map); return value_unit(); }
+        if (p->err) {
+            value_free(&map);
+            return value_unit();
+        }
 
         char *key = tp_parse_key(p);
-        if (!key || p->err) { free(key); value_free(&map); return value_unit(); }
+        if (!key || p->err) {
+            free(key);
+            value_free(&map);
+            return value_unit();
+        }
 
         tp_skip_ws(p);
         if (p->src[p->pos] != '=') {
             tp_error(p, "expected '=' after key");
-            free(key); value_free(&map); return value_unit();
+            free(key);
+            value_free(&map);
+            return value_unit();
         }
         p->pos++;
         tp_skip_ws(p);
 
         LatValue val = tp_parse_value(p);
-        if (p->err) { free(key); value_free(&val); value_free(&map); return value_unit(); }
+        if (p->err) {
+            free(key);
+            value_free(&val);
+            value_free(&map);
+            return value_unit();
+        }
 
         lat_map_set(map.as.map.map, key, &val);
         free(key);
@@ -284,18 +313,15 @@ static LatValue tp_parse_value(TomlParser *p) {
     if (c == '"' || c == '\'') return tp_parse_string_value(p);
     if (c == '[') return tp_parse_array(p);
     if (c == '{') return tp_parse_inline_table(p);
-    if (c == 't' && strncmp(p->src + p->pos, "true", 4) == 0 &&
-        !isalnum((unsigned char)p->src[p->pos + 4])) {
+    if (c == 't' && strncmp(p->src + p->pos, "true", 4) == 0 && !isalnum((unsigned char)p->src[p->pos + 4])) {
         p->pos += 4;
         return value_bool(true);
     }
-    if (c == 'f' && strncmp(p->src + p->pos, "false", 5) == 0 &&
-        !isalnum((unsigned char)p->src[p->pos + 5])) {
+    if (c == 'f' && strncmp(p->src + p->pos, "false", 5) == 0 && !isalnum((unsigned char)p->src[p->pos + 5])) {
         p->pos += 5;
         return value_bool(false);
     }
-    if (isdigit((unsigned char)c) || c == '-' || c == '+')
-        return tp_parse_number(p);
+    if (isdigit((unsigned char)c) || c == '-' || c == '+') return tp_parse_number(p);
 
     tp_error(p, "unexpected character");
     return value_unit();
@@ -339,7 +365,7 @@ static size_t tp_parse_dotted_key(TomlParser *p, char **parts, size_t max_parts)
 
 /* ── Main TOML parse function ── */
 LatValue toml_ops_parse(const char *toml_str, char **err) {
-    TomlParser p = { .src = toml_str, .pos = 0, .err = NULL };
+    TomlParser p = {.src = toml_str, .pos = 0, .err = NULL};
     LatValue root = value_map_new();
     LatMap *current_table = root.as.map.map;
 
@@ -347,7 +373,10 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
         tp_skip_ws_and_newlines(&p);
         tp_skip_comment(&p);
         if (p.src[p.pos] == '\0') break;
-        if (p.src[p.pos] == '\n' || p.src[p.pos] == '\r') { p.pos++; continue; }
+        if (p.src[p.pos] == '\n' || p.src[p.pos] == '\r') {
+            p.pos++;
+            continue;
+        }
 
         if (p.err) break;
 
@@ -404,8 +433,8 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
                 if (arr_val->as.array.len >= arr_val->as.array.cap) {
                     size_t old_cap = arr_val->as.array.cap;
                     arr_val->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
-                    arr_val->as.array.elems = realloc(arr_val->as.array.elems,
-                        arr_val->as.array.cap * sizeof(LatValue));
+                    arr_val->as.array.elems =
+                        realloc(arr_val->as.array.elems, arr_val->as.array.cap * sizeof(LatValue));
                 }
                 arr_val->as.array.elems[arr_val->as.array.len] = new_entry;
                 current_table = arr_val->as.array.elems[arr_val->as.array.len].as.map.map;
@@ -426,8 +455,8 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
         }
 
         /* Key = Value */
-        if (isalnum((unsigned char)p.src[p.pos]) || p.src[p.pos] == '"' ||
-            p.src[p.pos] == '\'' || p.src[p.pos] == '_' || p.src[p.pos] == '-') {
+        if (isalnum((unsigned char)p.src[p.pos]) || p.src[p.pos] == '"' || p.src[p.pos] == '\'' ||
+            p.src[p.pos] == '_' || p.src[p.pos] == '-') {
 
             char *parts[32];
             size_t count = tp_parse_dotted_key(&p, parts, 32);
@@ -473,8 +502,14 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
             continue;
         }
 
-        if (p.src[p.pos] == '#') { tp_skip_comment(&p); continue; }
-        if (p.src[p.pos] == '\n' || p.src[p.pos] == '\r') { p.pos++; continue; }
+        if (p.src[p.pos] == '#') {
+            tp_skip_comment(&p);
+            continue;
+        }
+        if (p.src[p.pos] == '\n' || p.src[p.pos] == '\r') {
+            p.pos++;
+            continue;
+        }
 
         tp_error(&p, "unexpected character");
         break;
@@ -494,7 +529,7 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
  * ======================================================================== */
 
 typedef struct {
-    char  *buf;
+    char *buf;
     size_t len;
     size_t cap;
 } TomlBuf;
@@ -508,7 +543,10 @@ static void tb_init(TomlBuf *b) {
 
 static void tb_append(TomlBuf *b, const char *s) {
     size_t slen = strlen(s);
-    while (b->len + slen + 1 > b->cap) { b->cap *= 2; b->buf = realloc(b->buf, b->cap); }
+    while (b->len + slen + 1 > b->cap) {
+        b->cap *= 2;
+        b->buf = realloc(b->buf, b->cap);
+    }
     memcpy(b->buf + b->len, s, slen);
     b->len += slen;
     b->buf[b->len] = '\0';
@@ -534,7 +572,7 @@ static void tb_append_escaped(TomlBuf *b, const char *s) {
             case '\t': tb_append(b, "\\t"); break;
             case '\r': tb_append(b, "\\r"); break;
             default: {
-                char c[2] = { *s, '\0' };
+                char c[2] = {*s, '\0'};
                 tb_append(b, c);
             }
         }
@@ -547,18 +585,10 @@ static void toml_stringify_value(TomlBuf *b, const LatValue *val);
 
 static void toml_stringify_value(TomlBuf *b, const LatValue *val) {
     switch (val->type) {
-        case VAL_STR:
-            tb_append_escaped(b, val->as.str_val);
-            break;
-        case VAL_INT:
-            tb_appendf(b, "%lld", (long long)val->as.int_val);
-            break;
-        case VAL_FLOAT:
-            tb_appendf(b, "%g", val->as.float_val);
-            break;
-        case VAL_BOOL:
-            tb_append(b, val->as.bool_val ? "true" : "false");
-            break;
+        case VAL_STR: tb_append_escaped(b, val->as.str_val); break;
+        case VAL_INT: tb_appendf(b, "%lld", (long long)val->as.int_val); break;
+        case VAL_FLOAT: tb_appendf(b, "%g", val->as.float_val); break;
+        case VAL_BOOL: tb_append(b, val->as.bool_val ? "true" : "false"); break;
         case VAL_ARRAY: {
             tb_append(b, "[");
             for (size_t i = 0; i < val->as.array.len; i++) {
@@ -582,9 +612,7 @@ static void toml_stringify_value(TomlBuf *b, const LatValue *val) {
             tb_append(b, "}");
             break;
         }
-        default:
-            tb_append(b, "\"\"");
-            break;
+        default: tb_append(b, "\"\""); break;
     }
 }
 
@@ -600,7 +628,10 @@ static void toml_stringify_table(TomlBuf *b, const LatValue *val, const char *pr
         if (v->type == VAL_ARRAY && v->as.array.len > 0) {
             bool all_maps = true;
             for (size_t j = 0; j < v->as.array.len; j++) {
-                if (v->as.array.elems[j].type != VAL_MAP) { all_maps = false; break; }
+                if (v->as.array.elems[j].type != VAL_MAP) {
+                    all_maps = false;
+                    break;
+                }
             }
             if (all_maps) continue;
         }
@@ -634,7 +665,10 @@ static void toml_stringify_table(TomlBuf *b, const LatValue *val, const char *pr
         } else if (v->type == VAL_ARRAY && v->as.array.len > 0) {
             bool all_maps = true;
             for (size_t j = 0; j < v->as.array.len; j++) {
-                if (v->as.array.elems[j].type != VAL_MAP) { all_maps = false; break; }
+                if (v->as.array.elems[j].type != VAL_MAP) {
+                    all_maps = false;
+                    break;
+                }
             }
             if (all_maps) {
                 char *full_key;

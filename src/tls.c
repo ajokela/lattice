@@ -9,7 +9,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #ifndef FD_SETSIZE
 #define FD_SETSIZE 1024
@@ -86,8 +88,7 @@ int net_tls_connect(const char *host, int port, char **err) {
         return -1;
     }
 
-    if (fd >= 0 && fd < FD_SETSIZE)
-        tls_sessions[fd] = ssl;
+    if (fd >= 0 && fd < FD_SETSIZE) tls_sessions[fd] = ssl;
 
     return fd;
 }
@@ -103,7 +104,10 @@ char *net_tls_read(int fd, char **err) {
     }
 
     char *buf = malloc(TLS_READ_BUF + 1);
-    if (!buf) { *err = strdup("tls_read: out of memory"); return NULL; }
+    if (!buf) {
+        *err = strdup("tls_read: out of memory");
+        return NULL;
+    }
 
     int n = SSL_read(tls_sessions[fd], buf, TLS_READ_BUF);
     if (n < 0) {
@@ -125,12 +129,15 @@ char *net_tls_read_bytes(int fd, size_t count, char **err) {
     }
 
     char *buf = malloc(count + 1);
-    if (!buf) { *err = strdup("tls_read_bytes: out of memory"); return NULL; }
+    if (!buf) {
+        *err = strdup("tls_read_bytes: out of memory");
+        return NULL;
+    }
 
     size_t total = 0;
     while (total < count) {
         int n = SSL_read(tls_sessions[fd], buf + total, (int)(count - total));
-        if (n <= 0) break;  /* EOF or error */
+        if (n <= 0) break; /* EOF or error */
         total += (size_t)n;
     }
 
@@ -171,9 +178,7 @@ void net_tls_close(int fd) {
 
 /* ── tls_available ── */
 
-bool net_tls_available(void) {
-    return true;
-}
+bool net_tls_available(void) { return true; }
 
 /* ── tls_cleanup ── */
 
@@ -198,12 +203,11 @@ void net_tls_cleanup(void) {
 #include <stdlib.h>
 #include <string.h>
 
-static char *no_tls_err(void) {
-    return strdup("TLS not available (built without OpenSSL)");
-}
+static char *no_tls_err(void) { return strdup("TLS not available (built without OpenSSL)"); }
 
 int net_tls_connect(const char *host, int port, char **err) {
-    (void)host; (void)port;
+    (void)host;
+    (void)port;
     *err = no_tls_err();
     return -1;
 }
@@ -215,27 +219,24 @@ char *net_tls_read(int fd, char **err) {
 }
 
 char *net_tls_read_bytes(int fd, size_t count, char **err) {
-    (void)fd; (void)count;
+    (void)fd;
+    (void)count;
     *err = no_tls_err();
     return NULL;
 }
 
 bool net_tls_write(int fd, const char *data, size_t len, char **err) {
-    (void)fd; (void)data; (void)len;
+    (void)fd;
+    (void)data;
+    (void)len;
     *err = no_tls_err();
     return false;
 }
 
-void net_tls_close(int fd) {
-    (void)fd;
-}
+void net_tls_close(int fd) { (void)fd; }
 
-bool net_tls_available(void) {
-    return false;
-}
+bool net_tls_available(void) { return false; }
 
-void net_tls_cleanup(void) {
-    /* nothing to do */
-}
+void net_tls_cleanup(void) { /* nothing to do */ }
 
 #endif /* LATTICE_HAS_TLS */

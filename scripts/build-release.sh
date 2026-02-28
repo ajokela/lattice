@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build release binaries for all 10 platforms, create GitHub release, deploy to website.
+# Build release binaries for all platforms, create GitHub release, deploy to website.
 # Usage: ./scripts/build-release.sh v0.3.27
 #        ./scripts/build-release.sh --dry-run v0.3.27
 set -euo pipefail
@@ -92,6 +92,16 @@ else
     SKIP_BSD=false
 fi
 
+# Check SSH to RISC-V host
+RISCV_HOST="root@10.1.1.26"
+if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$RISCV_HOST" true 2>/dev/null; then
+    warn "Cannot reach $RISCV_HOST — RISC-V build will be skipped"
+    SKIP_RISCV=true
+else
+    ok "SSH to $RISCV_HOST (linux-riscv64)"
+    SKIP_RISCV=false
+fi
+
 # ── Phase 2: Build ──────────────────────────────────────────────────────────
 
 mkdir -p "$BUILD_OUT/$VERSION"
@@ -149,6 +159,16 @@ else
     fi
 fi
 
+# Windows build (cross-compile from macOS using MinGW)
+say "Building windows-x86_64..."
+if make clean && make WINDOWS=1 release 2>&1 | tail -1; then
+    mv clat-windows-x86_64.exe "$BUILD_OUT/$VERSION/"
+    ok "windows-x86_64"
+else
+    warn "FAILED: windows-x86_64"
+    FAILURES+=("windows-x86_64")
+fi
+
 # Linux builds via Docker (parallel, using tarball copy to avoid shared state)
 # Output dir is mounted so we can extract the binary without stdout corruption
 ABSOUT="$(pwd)/$BUILD_OUT/$VERSION"
@@ -178,6 +198,17 @@ build_bg "linux-aarch64" "
             cp clat-linux-aarch64 /out/
         '
 "
+
+# RISC-V Linux build via SSH (has make, builds directly)
+if [ "${SKIP_RISCV:-false}" = "false" ]; then
+    build_bg "linux-riscv64" "
+        ssh $RISCV_HOST 'rm -rf /tmp/lattice-build && mkdir -p /tmp/lattice-build' && \
+        scp '$SRC_TAR' $RISCV_HOST:/tmp/lattice-build/src.tar.gz && \
+        ssh $RISCV_HOST 'cd /tmp/lattice-build && tar xzf src.tar.gz && make release STATIC=1' && \
+        scp $RISCV_HOST:/tmp/lattice-build/clat-linux-riscv64 $ABSOUT/clat-linux-riscv64 && \
+        ssh $RISCV_HOST 'rm -rf /tmp/lattice-build'
+    "
+fi
 
 # BSD builds via SSH (parallel, each on its own VM)
 # Uses build-bsd.sh — no gmake or git required on the VM, just cc + base system

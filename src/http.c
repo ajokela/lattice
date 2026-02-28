@@ -5,11 +5,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#endif
 
 #ifdef __EMSCRIPTEN__
 
 bool http_parse_url(const char *url, HttpUrl *out, char **err) {
-    (void)url; (void)out;
+    (void)url;
+    (void)out;
     *err = strdup("HTTP not available in WASM");
     return false;
 }
@@ -91,7 +95,7 @@ static char *format_request(const HttpRequest *req, const HttpUrl *url) {
     cap += strlen(req->method) + strlen(url->path) + strlen(url->host);
     for (size_t i = 0; i < req->header_count; i++)
         cap += strlen(req->header_keys[i]) + strlen(req->header_values[i]) + 8;
-    if (req->body) cap += 64 + req->body_len;  /* Content-Length header + body */
+    if (req->body) cap += 64 + req->body_len; /* Content-Length header + body */
 
     char *buf = malloc(cap);
     if (!buf) return NULL;
@@ -152,7 +156,7 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
     /* Find status code (skip "HTTP/x.x ") */
     const char *p = raw;
     while (p < line_end && *p != ' ') p++;
-    if (p < line_end) p++;  /* skip space */
+    if (p < line_end) p++; /* skip space */
     resp->status_code = atoi(p);
 
     /* Parse headers */
@@ -163,7 +167,7 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
     if (!resp->header_values) return NULL;
     resp->header_count = 0;
 
-    const char *hdr = line_end + 2;  /* skip first \r\n */
+    const char *hdr = line_end + 2; /* skip first \r\n */
     while (hdr < hdr_end) {
         const char *next = strstr(hdr, "\r\n");
         if (!next || next == hdr) break;
@@ -199,8 +203,7 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
     /* Check for chunked transfer encoding */
     bool chunked = false;
     for (size_t i = 0; i < resp->header_count; i++) {
-        if (strcmp(resp->header_keys[i], "transfer-encoding") == 0 &&
-            strstr(resp->header_values[i], "chunked")) {
+        if (strcmp(resp->header_keys[i], "transfer-encoding") == 0 && strstr(resp->header_values[i], "chunked")) {
             chunked = true;
             break;
         }
@@ -226,9 +229,12 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
             if (!cp) break;
             cp += 2;
 
-            if (chunk_size == 0) break;  /* Final chunk */
+            if (chunk_size == 0) break; /* Final chunk */
 
-            while (bpos + chunk_size + 1 > bcap) { bcap *= 2; body = realloc(body, bcap); }
+            while (bpos + chunk_size + 1 > bcap) {
+                bcap *= 2;
+                body = realloc(body, bcap);
+            }
             size_t avail = (size_t)(end - cp);
             size_t to_copy = chunk_size < avail ? chunk_size : avail;
             memcpy(body + bpos, cp, to_copy);
@@ -268,8 +274,7 @@ void http_response_free(HttpResponse *resp) {
 
 HttpResponse *http_execute(const HttpRequest *req, char **err) {
     HttpUrl url;
-    if (!http_parse_url(req->url, &url, err))
-        return NULL;
+    if (!http_parse_url(req->url, &url, err)) return NULL;
 
     bool use_tls = (strcmp(url.scheme, "https") == 0);
 
@@ -301,7 +306,8 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
     free(raw_req);
 
     if (!ok) {
-        if (use_tls) net_tls_close(fd); else net_tcp_close(fd);
+        if (use_tls) net_tls_close(fd);
+        else net_tcp_close(fd);
         http_url_free(&url);
         return NULL;
     }
@@ -321,16 +327,27 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
         }
         if (!chunk) {
             /* Read error — but if we already have data, try to parse it */
-            if (resp_len > 0) { free(*err); *err = NULL; break; }
+            if (resp_len > 0) {
+                free(*err);
+                *err = NULL;
+                break;
+            }
             free(resp_buf);
-            if (use_tls) net_tls_close(fd); else net_tcp_close(fd);
+            if (use_tls) net_tls_close(fd);
+            else net_tcp_close(fd);
             http_url_free(&url);
             return NULL;
         }
         size_t clen = strlen(chunk);
-        if (clen == 0) { free(chunk); break; }  /* EOF */
+        if (clen == 0) {
+            free(chunk);
+            break;
+        } /* EOF */
 
-        while (resp_len + clen + 1 > resp_cap) { resp_cap *= 2; resp_buf = realloc(resp_buf, resp_cap); }
+        while (resp_len + clen + 1 > resp_cap) {
+            resp_cap *= 2;
+            resp_buf = realloc(resp_buf, resp_cap);
+        }
         memcpy(resp_buf + resp_len, chunk, clen);
         resp_len += clen;
         resp_buf[resp_len] = '\0';
@@ -338,7 +355,8 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
     }
 
     /* Close connection */
-    if (use_tls) net_tls_close(fd); else net_tcp_close(fd);
+    if (use_tls) net_tls_close(fd);
+    else net_tcp_close(fd);
     http_url_free(&url);
 
     /* Parse response */

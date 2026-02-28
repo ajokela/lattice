@@ -6,6 +6,25 @@ SRC_DIR    = src
 BUILD_DIR  = build
 TEST_DIR   = tests
 
+# ── Windows cross-compilation (MinGW) ──
+ifdef WINDOWS
+    CC       = x86_64-w64-mingw32-gcc
+    CFLAGS   = -std=c11 -Wall -Wextra -Werror -Wno-implicit-fallthrough -Iinclude -O3 -D_WIN32_WINNT=0x0600
+    LDFLAGS  = -lws2_32 -lpthread -static
+    TARGET   = clat.exe
+    RELEASE_NAME = clat-windows-x86_64.exe
+    # Skip editline, TLS, and computed goto on Windows
+    EDIT_CFLAGS  =
+    EDIT_LDFLAGS =
+    TLS_CFLAGS   =
+    TLS_LDFLAGS  =
+    SKIP_AUTODETECT = 1
+endif
+
+# UNAME_S is needed for release naming even with WINDOWS=1
+UNAME_S := $(shell uname -s)
+
+ifndef SKIP_AUTODETECT
 # ── Optional libedit / readline ──
 EDIT_AVAILABLE := $(shell pkg-config --exists libedit 2>/dev/null && echo yes || echo no)
 ifeq ($(EDIT_AVAILABLE),yes)
@@ -56,9 +75,8 @@ CFLAGS  += $(TLS_CFLAGS)
 LDFLAGS += $(TLS_LDFLAGS)
 
 # ── pthreads and dlopen (Linux needs explicit linking) ──
-UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-    CFLAGS  += -D_DEFAULT_SOURCE
+    CFLAGS  += -D_GNU_SOURCE
     LDFLAGS += -lpthread -lm -ldl -rdynamic
 endif
 ifeq ($(UNAME_S),FreeBSD)
@@ -76,6 +94,7 @@ endif
 ifdef STATIC
     LDFLAGS += -static
 endif
+endif # SKIP_AUTODETECT
 
 # Source files
 SRCS = $(SRC_DIR)/main.c \
@@ -139,7 +158,9 @@ LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
+ifndef WINDOWS
 TARGET = clat
+endif
 
 # LSP server sources
 LSP_SRCS = $(SRC_DIR)/lsp_main.c \
@@ -413,7 +434,7 @@ clang-tidy:
 	@echo "==> Running clang-tidy on source files..."
 	@FAIL=0; \
 	for f in $(LIB_SRCS); do \
-		clang-tidy $$f -- -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -D_DEFAULT_SOURCE 2>&1 || FAIL=1; \
+		clang-tidy $$f -- -std=c11 -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -D_GNU_SOURCE 2>&1 || FAIL=1; \
 	done; \
 	if [ $$FAIL -eq 0 ]; then echo "==> clang-tidy: all clean"; \
 	else echo "==> clang-tidy: issues found"; exit 1; fi
@@ -426,7 +447,7 @@ $(BUILD_DIR)/fuzz/%.o: $(FUZZ_DIR)/%.c
 # Override FUZZ_CC to point to your LLVM installation if not at the default path.
 FUZZ_CC ?= $(shell [ -x /opt/homebrew/opt/llvm/bin/clang ] && echo /opt/homebrew/opt/llvm/bin/clang || echo clang)
 fuzz: CC = $(FUZZ_CC)
-fuzz: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz: clean $(LIB_OBJS) $(FUZZ_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ) $(LDFLAGS)
@@ -436,7 +457,7 @@ fuzz: clean $(LIB_OBJS) $(FUZZ_OBJ)
 	@echo "    Seed: cp examples/*.lat benchmarks/*.lat fuzz/corpus/"
 
 fuzz-latc: CC = $(FUZZ_CC)
-fuzz-latc: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-latc: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-latc: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-latc: clean $(LIB_OBJS) $(FUZZ_LATC_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_LATC_TARGET) $(LIB_OBJS) $(FUZZ_LATC_OBJ) $(LDFLAGS)
@@ -445,7 +466,7 @@ fuzz-latc: clean $(LIB_OBJS) $(FUZZ_LATC_OBJ)
 	@echo "    Run:  $(FUZZ_LATC_TARGET) fuzz/corpus_latc/ -max_len=65536"
 
 fuzz-vm: CC = $(FUZZ_CC)
-fuzz-vm: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-vm: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-vm: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-vm: clean $(LIB_OBJS) $(FUZZ_VM_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_VM_TARGET) $(LIB_OBJS) $(FUZZ_VM_OBJ) $(LDFLAGS)
@@ -455,7 +476,7 @@ fuzz-vm: clean $(LIB_OBJS) $(FUZZ_VM_OBJ)
 	@echo "    Seed: make fuzz-seed"
 
 fuzz-stackvm: CC = $(FUZZ_CC)
-fuzz-stackvm: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-stackvm: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-stackvm: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-stackvm: clean $(LIB_OBJS) $(FUZZ_STACKVM_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_STACKVM_TARGET) $(LIB_OBJS) $(FUZZ_STACKVM_OBJ) $(LDFLAGS)
@@ -465,7 +486,7 @@ fuzz-stackvm: clean $(LIB_OBJS) $(FUZZ_STACKVM_OBJ)
 	@echo "    Seed: make fuzz-seed"
 
 fuzz-regvm: CC = $(FUZZ_CC)
-fuzz-regvm: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-regvm: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-regvm: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-regvm: clean $(LIB_OBJS) $(FUZZ_REGVM_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_REGVM_TARGET) $(LIB_OBJS) $(FUZZ_REGVM_OBJ) $(LDFLAGS)
@@ -475,7 +496,7 @@ fuzz-regvm: clean $(LIB_OBJS) $(FUZZ_REGVM_OBJ)
 	@echo "    Seed: make fuzz-seed"
 
 fuzz-json: CC = $(FUZZ_CC)
-fuzz-json: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-json: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-json: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-json: clean $(LIB_OBJS) $(FUZZ_JSON_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_JSON_TARGET) $(LIB_OBJS) $(FUZZ_JSON_OBJ) $(LDFLAGS)
@@ -484,7 +505,7 @@ fuzz-json: clean $(LIB_OBJS) $(FUZZ_JSON_OBJ)
 	@echo "    Run:  $(FUZZ_JSON_TARGET) fuzz/corpus_json/ -max_len=4096"
 
 fuzz-toml: CC = $(FUZZ_CC)
-fuzz-toml: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-toml: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-toml: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-toml: clean $(LIB_OBJS) $(FUZZ_TOML_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_TOML_TARGET) $(LIB_OBJS) $(FUZZ_TOML_OBJ) $(LDFLAGS)
@@ -493,7 +514,7 @@ fuzz-toml: clean $(LIB_OBJS) $(FUZZ_TOML_OBJ)
 	@echo "    Run:  $(FUZZ_TOML_TARGET) fuzz/corpus_toml/ -max_len=4096"
 
 fuzz-yaml: CC = $(FUZZ_CC)
-fuzz-yaml: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-yaml: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-yaml: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-yaml: clean $(LIB_OBJS) $(FUZZ_YAML_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_YAML_TARGET) $(LIB_OBJS) $(FUZZ_YAML_OBJ) $(LDFLAGS)
@@ -502,7 +523,7 @@ fuzz-yaml: clean $(LIB_OBJS) $(FUZZ_YAML_OBJ)
 	@echo "    Run:  $(FUZZ_YAML_TARGET) fuzz/corpus_yaml/ -max_len=4096"
 
 fuzz-lexer: CC = $(FUZZ_CC)
-fuzz-lexer: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-lexer: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-lexer: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-lexer: clean $(LIB_OBJS) $(FUZZ_LEXER_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_LEXER_TARGET) $(LIB_OBJS) $(FUZZ_LEXER_OBJ) $(LDFLAGS)
@@ -512,7 +533,7 @@ fuzz-lexer: clean $(LIB_OBJS) $(FUZZ_LEXER_OBJ)
 	@echo "    Seed: make fuzz-seed"
 
 fuzz-formatter: CC = $(FUZZ_CC)
-fuzz-formatter: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-formatter: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-formatter: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-formatter: clean $(LIB_OBJS) $(FUZZ_FORMATTER_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_FORMATTER_TARGET) $(LIB_OBJS) $(FUZZ_FORMATTER_OBJ) $(LDFLAGS)
@@ -522,7 +543,7 @@ fuzz-formatter: clean $(LIB_OBJS) $(FUZZ_FORMATTER_OBJ)
 	@echo "    Seed: make fuzz-seed"
 
 fuzz-all: CC = $(FUZZ_CC)
-fuzz-all: CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-all: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
 fuzz-all: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
 fuzz-all: clean $(LIB_OBJS) $(FUZZ_OBJ) $(FUZZ_VM_OBJ) $(FUZZ_STACKVM_OBJ) $(FUZZ_REGVM_OBJ) $(FUZZ_LATC_OBJ) $(FUZZ_JSON_OBJ) $(FUZZ_TOML_OBJ) $(FUZZ_YAML_OBJ) $(FUZZ_LEXER_OBJ) $(FUZZ_FORMATTER_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_TARGET) $(LIB_OBJS) $(FUZZ_OBJ) $(LDFLAGS)
@@ -625,13 +646,21 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
 
 # ── Release binary (current platform) ──
+ifndef WINDOWS
 UNAME_M := $(shell uname -m)
 RELEASE_ARCH := $(if $(filter arm64,$(UNAME_M)),aarch64,$(UNAME_M))
 RELEASE_OS := $(if $(filter Darwin,$(UNAME_S)),darwin,$(if $(filter Linux,$(UNAME_S)),linux,$(if $(filter FreeBSD,$(UNAME_S)),freebsd,$(if $(filter OpenBSD,$(UNAME_S)),openbsd,$(if $(filter NetBSD,$(UNAME_S)),netbsd,unknown)))))
 RELEASE_NAME := clat-$(RELEASE_OS)-$(RELEASE_ARCH)
+endif
+
+ifdef WINDOWS
+STRIP = x86_64-w64-mingw32-strip
+else
+STRIP = strip
+endif
 
 release: clean $(TARGET)
-	strip $(TARGET)
+	$(STRIP) $(TARGET)
 	cp $(TARGET) $(RELEASE_NAME)
 	@echo "Built: $(RELEASE_NAME) ($$(ls -lh $(RELEASE_NAME) | awk '{print $$5}'))"
 

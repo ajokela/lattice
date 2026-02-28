@@ -9,7 +9,12 @@
 #include <string.h>
 
 #ifndef __EMSCRIPTEN__
+#ifdef _WIN32
+#include <windows.h>
+#include "win32_compat.h"
+#else
 #include <dlfcn.h>
+#endif
 #endif
 
 /* ── LatExtValue: thin wrapper around LatValue ── */
@@ -21,10 +26,10 @@ struct LatExtValue {
 /* ── LatExtContext: collects registered functions during init ── */
 
 typedef struct {
-    char    **names;
+    char **names;
     LatExtFn *fns;
-    size_t    count;
-    size_t    cap;
+    size_t count;
+    size_t cap;
 } ExtRegistry;
 
 struct LatExtContext {
@@ -83,11 +88,12 @@ LatExtValue *lat_ext_nil(void) {
 
 LatExtValue *lat_ext_array(LatExtValue **elems, size_t len) {
     LatValue *vals = len > 0 ? malloc(len * sizeof(LatValue)) : NULL;
-    for (size_t i = 0; i < len; i++) {
-        vals[i] = value_deep_clone(&elems[i]->val);
-    }
+    for (size_t i = 0; i < len; i++) { vals[i] = value_deep_clone(&elems[i]->val); }
     LatExtValue *ev = malloc(sizeof(LatExtValue));
-    if (!ev) { free(vals); return NULL; }
+    if (!ev) {
+        free(vals);
+        return NULL;
+    }
     ev->val = value_array(vals, len);
     free(vals);
     return ev;
@@ -120,34 +126,26 @@ LatExtValue *lat_ext_error(const char *msg) {
 
 LatExtType lat_ext_type(const LatExtValue *v) {
     switch (v->val.type) {
-        case VAL_INT:    return LAT_EXT_INT;
-        case VAL_FLOAT:  return LAT_EXT_FLOAT;
-        case VAL_BOOL:   return LAT_EXT_BOOL;
-        case VAL_STR:    return LAT_EXT_STRING;
-        case VAL_ARRAY:  return LAT_EXT_ARRAY;
-        case VAL_MAP:    return LAT_EXT_MAP;
-        case VAL_NIL:    return LAT_EXT_NIL;
-        default:         return LAT_EXT_OTHER;
+        case VAL_INT: return LAT_EXT_INT;
+        case VAL_FLOAT: return LAT_EXT_FLOAT;
+        case VAL_BOOL: return LAT_EXT_BOOL;
+        case VAL_STR: return LAT_EXT_STRING;
+        case VAL_ARRAY: return LAT_EXT_ARRAY;
+        case VAL_MAP: return LAT_EXT_MAP;
+        case VAL_NIL: return LAT_EXT_NIL;
+        default: return LAT_EXT_OTHER;
     }
 }
 
 /* ── Accessors ── */
 
-int64_t lat_ext_as_int(const LatExtValue *v) {
-    return v->val.as.int_val;
-}
+int64_t lat_ext_as_int(const LatExtValue *v) { return v->val.as.int_val; }
 
-double lat_ext_as_float(const LatExtValue *v) {
-    return v->val.as.float_val;
-}
+double lat_ext_as_float(const LatExtValue *v) { return v->val.as.float_val; }
 
-bool lat_ext_as_bool(const LatExtValue *v) {
-    return v->val.as.bool_val;
-}
+bool lat_ext_as_bool(const LatExtValue *v) { return v->val.as.bool_val; }
 
-const char *lat_ext_as_string(const LatExtValue *v) {
-    return v->val.as.str_val;
-}
+const char *lat_ext_as_string(const LatExtValue *v) { return v->val.as.str_val; }
 
 size_t lat_ext_array_len(const LatExtValue *v) {
     if (v->val.type != VAL_ARRAY) return 0;
@@ -217,7 +215,7 @@ LatValue ext_call_native(void *fn_ptr, LatValue *args, size_t argc) {
 #ifndef __EMSCRIPTEN__
 
 LatValue ext_load(Evaluator *ev, const char *name, char **err) {
-    (void)ev;  /* for future use (e.g., passing evaluator context) */
+    (void)ev; /* for future use (e.g., passing evaluator context) */
 
     /* Validate extension name */
     if (!name || name[0] == '\0') {
@@ -232,7 +230,9 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     }
 
     /* Determine library suffix */
-#ifdef __APPLE__
+#ifdef _WIN32
+    const char *suffix = ".dll";
+#elif defined(__APPLE__)
     const char *suffix = ".dylib";
 #else
     const char *suffix = ".so";
@@ -243,48 +243,63 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     int path_count = 0;
 
     /* 1. ./extensions/<name><suffix> */
-    snprintf(paths[path_count++], sizeof(paths[0]),
-             "./extensions/%s%s", name, suffix);
+    snprintf(paths[path_count++], sizeof(paths[0]), "./extensions/%s%s", name, suffix);
 
     /* 2. ./extensions/<name>/<name><suffix> */
-    snprintf(paths[path_count++], sizeof(paths[0]),
-             "./extensions/%s/%s%s", name, name, suffix);
+    snprintf(paths[path_count++], sizeof(paths[0]), "./extensions/%s/%s%s", name, name, suffix);
 
     /* 3. ~/.lattice/ext/<name><suffix> */
+#ifdef _WIN32
+    const char *home = win32_home_dir();
+#else
     const char *home = getenv("HOME");
-    if (home) {
-        snprintf(paths[path_count++], sizeof(paths[0]),
-                 "%s/.lattice/ext/%s%s", home, name, suffix);
-    }
+#endif
+    if (home) { snprintf(paths[path_count++], sizeof(paths[0]), "%s/.lattice/ext/%s%s", home, name, suffix); }
 
     /* 4. $LATTICE_EXT_PATH/<name><suffix> */
     const char *ext_path = getenv("LATTICE_EXT_PATH");
-    if (ext_path) {
-        snprintf(paths[path_count++], sizeof(paths[0]),
-                 "%s/%s%s", ext_path, name, suffix);
-    }
+    if (ext_path) { snprintf(paths[path_count++], sizeof(paths[0]), "%s/%s%s", ext_path, name, suffix); }
 
     /* Try each path */
+#ifdef _WIN32
+    HMODULE handle = NULL;
+    for (int i = 0; i < path_count; i++) {
+        handle = LoadLibraryA(paths[i]);
+        if (handle) break;
+    }
+#else
     void *handle = NULL;
     for (int i = 0; i < path_count; i++) {
         handle = dlopen(paths[i], RTLD_NOW);
         if (handle) break;
     }
+#endif
 
     if (!handle) {
-        lat_asprintf(err, "require_ext: cannot find extension '%s' "
-                       "(searched ./extensions/, ./extensions/%s/, ~/.lattice/ext/, $LATTICE_EXT_PATH)",
-                       name, name);
+        lat_asprintf(err,
+                     "require_ext: cannot find extension '%s' "
+                     "(searched ./extensions/, ./extensions/%s/, ~/.lattice/ext/, $LATTICE_EXT_PATH)",
+                     name, name);
         return value_nil();
     }
 
     /* Look up init function */
+#ifdef _WIN32
+    FARPROC raw_fn = GetProcAddress(handle, "lat_ext_init");
+    LatExtInitFn init_fn = (LatExtInitFn)(void *)raw_fn;
+    if (!init_fn) {
+        lat_asprintf(err, "require_ext: extension '%s' has no lat_ext_init()", name);
+        FreeLibrary(handle);
+        return value_nil();
+    }
+#else
     LatExtInitFn init_fn = (LatExtInitFn)dlsym(handle, "lat_ext_init");
     if (!init_fn) {
         lat_asprintf(err, "require_ext: extension '%s' has no lat_ext_init()", name);
         dlclose(handle);
         return value_nil();
     }
+#endif
 
     /* Create context and call init */
     LatExtContext ctx;

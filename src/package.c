@@ -10,8 +10,12 @@
 #include <limits.h>
 #include <errno.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "win32_compat.h"
+#else
 #include <unistd.h>
 #include <libgen.h>
+#endif
 
 /* Default HTTP registry URL */
 #define PKG_DEFAULT_REGISTRY "https://registry.lattice-lang.org/v1"
