@@ -1,36 +1,33 @@
 // Benchmark: Loop Computation
-// Measures raw VM dispatch: tight loops, nested loops, conditionals, bitwise ops.
+// Measures raw dispatch: tight counting loops, nested loops, conditionals, arithmetic.
+// Tests the core instruction dispatch speed of each backend.
 
 fn main() {
     let t0 = time()
 
-    // 1M iteration tight loop with arithmetic
-    let sum = 0
-    for i in 0..1000000 {
+    // 5M iteration tight loop with arithmetic
+    flux sum = 0
+    flux i = 0
+    while i < 5000000 {
         sum = sum + i
+        i = i + 1
     }
     print("tight loop sum: ${sum}")
 
-    // Nested loop with conditionals
-    let count = 0
-    for i in 0..1000 {
-        for j in 0..1000 {
-            if (i + j) % 3 == 0 {
+    // Nested loop (2000x2000 = 4M iterations) with conditionals
+    flux count = 0
+    flux a = 0
+    while a < 2000 {
+        flux b = 0
+        while b < 2000 {
+            if (a + b) % 3 == 0 {
                 count = count + 1
             }
+            b = b + 1
         }
+        a = a + 1
     }
     print("nested loop count: ${count}")
-
-    // Bitwise operations
-    let bits = 0
-    for i in 0..100000 {
-        bits = (bits ^ i) & 0xFFFF
-        bits = bits | (i & 0xFF)
-        bits = bits << 1
-        bits = bits & 0xFFFF
-    }
-    print("bitwise result: ${bits}")
 
     let elapsed = time() - t0
     print("elapsed: ${elapsed}ms")

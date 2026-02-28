@@ -1,40 +1,53 @@
 // Benchmark: Map Operations
-// Measures insert, lookup, and delete on 5000 keys.
+// Measures map insert, lookup, overwrite, delete, and key iteration.
+// Tests hash table performance under load.
 
 fn main() {
     let t0 = time()
-    let n = 5000
+    let n = 10000
 
-    let m = Map::new()
+    flux m = Map::new()
 
-    // Insert
-    for i in 0..n {
+    // Insert n keys
+    flux i = 0
+    while i < n {
         m["key_${i}"] = i * 7
+        i = i + 1
     }
     print("inserted: ${m.len()}")
 
-    // Lookup
-    let sum = 0
-    for i in 0..n {
-        sum = sum + m["key_${i}"]
+    // Lookup all keys and sum values
+    flux sum = 0
+    flux j = 0
+    while j < n {
+        sum = sum + m["key_${j}"]
+        j = j + 1
     }
     print("lookup sum: ${sum}")
 
-    // Overwrite
-    for i in 0..n {
-        m["key_${i}"] = i * 3
+    // Overwrite all keys
+    flux k = 0
+    while k < n {
+        m["key_${k}"] = k * 3
+        k = k + 1
     }
     print("overwritten: ${m.len()}")
 
     // Delete half
-    for i in 0..2500 {
-        m.remove("key_${i}")
+    flux d = 0
+    while d < n / 2 {
+        m.remove("key_${d}")
+        d = d + 1
     }
     print("after delete: ${m.len()}")
 
     // Iterate remaining keys
     let keys = m.keys()
-    print("keys count: ${keys.len()}")
+    flux key_sum = 0
+    for key in keys {
+        key_sum = key_sum + m[key]
+    }
+    print("remaining sum: ${key_sum}")
 
     let elapsed = time() - t0
     print("elapsed: ${elapsed}ms")

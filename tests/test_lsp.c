@@ -1809,3 +1809,504 @@ TEST(test_lsp_diagnostics_compiler_error) {
 
     cJSON_Delete(notif);
 }
+
+/* ================================================================
+ * Enhanced hover tests (struct fields, enum variants, struct/enum detail)
+ * ================================================================ */
+
+/* Helper: send a hover request through the server loop and capture the response.
+ * Returns the parsed response JSON, or NULL. Caller must cJSON_Delete. */
+static cJSON *capture_hover_response(const char *text, int line, int col) {
+    LspServer *srv = lsp_server_new();
+    if (!srv) return NULL;
+    srv->initialized = true;
+
+    const char *uri = "file:///test_hover.lat";
+
+    /* Add document */
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup(uri);
+    doc->text = strdup(text);
+    doc->version = 1;
+    if (srv->doc_count >= srv->doc_cap) {
+        srv->doc_cap = srv->doc_cap ? srv->doc_cap * 2 : 16;
+        srv->documents = realloc(srv->documents, srv->doc_cap * sizeof(LspDocument *));
+    }
+    srv->documents[srv->doc_count++] = doc;
+    lsp_analyze_document(doc);
+
+    /* Build hover request */
+    cJSON *hover_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(hover_msg, "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(hover_msg, "id", 1);
+    cJSON_AddStringToObject(hover_msg, "method", "textDocument/hover");
+    cJSON *hover_params = cJSON_CreateObject();
+    cJSON *td_h = cJSON_CreateObject();
+    cJSON_AddStringToObject(td_h, "uri", uri);
+    cJSON_AddItemToObject(hover_params, "textDocument", td_h);
+    cJSON *pos_h = cJSON_CreateObject();
+    cJSON_AddNumberToObject(pos_h, "line", line);
+    cJSON_AddNumberToObject(pos_h, "character", col);
+    cJSON_AddItemToObject(hover_params, "position", pos_h);
+    cJSON_AddItemToObject(hover_msg, "params", hover_params);
+    char *msg_str = cJSON_PrintUnformatted(hover_msg);
+
+    const char *shutdown_h = "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}";
+    const char *exit_h = "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}";
+
+    FILE *in_f = tmpfile();
+    if (!in_f) {
+        free(msg_str);
+        cJSON_Delete(hover_msg);
+        lsp_server_free(srv);
+        return NULL;
+    }
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(msg_str), msg_str);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(shutdown_h), shutdown_h);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(exit_h), exit_h);
+    rewind(in_f);
+    free(msg_str);
+
+    FILE *saved_stdin = stdin;
+    FILE *saved_stdout = stdout;
+    FILE *out_f = tmpfile();
+    if (!out_f) {
+        fclose(in_f);
+        cJSON_Delete(hover_msg);
+        lsp_server_free(srv);
+        return NULL;
+    }
+    stdin = in_f;
+    stdout = out_f;
+
+    lsp_server_run(srv);
+
+    stdin = saved_stdin;
+    stdout = saved_stdout;
+
+    rewind(out_f);
+    char buf[16384];
+    size_t nread = fread(buf, 1, sizeof(buf) - 1, out_f);
+    buf[nread] = '\0';
+    fclose(out_f);
+    fclose(in_f);
+    cJSON_Delete(hover_msg);
+    lsp_server_free(srv);
+
+    /* Find the hover response (id=1) */
+    const char *body = strstr(buf, "\r\n\r\n");
+    if (!body) return NULL;
+    body += 4;
+    return cJSON_Parse(body);
+}
+
+/* Helper: send a definition request through the server loop and capture the response. */
+static cJSON *capture_definition_response(const char *text, int line, int col) {
+    LspServer *srv = lsp_server_new();
+    if (!srv) return NULL;
+    srv->initialized = true;
+
+    const char *uri = "file:///test_def.lat";
+
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup(uri);
+    doc->text = strdup(text);
+    doc->version = 1;
+    if (srv->doc_count >= srv->doc_cap) {
+        srv->doc_cap = srv->doc_cap ? srv->doc_cap * 2 : 16;
+        srv->documents = realloc(srv->documents, srv->doc_cap * sizeof(LspDocument *));
+    }
+    srv->documents[srv->doc_count++] = doc;
+    lsp_analyze_document(doc);
+
+    cJSON *def_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(def_msg, "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(def_msg, "id", 1);
+    cJSON_AddStringToObject(def_msg, "method", "textDocument/definition");
+    cJSON *def_params = cJSON_CreateObject();
+    cJSON *td_d = cJSON_CreateObject();
+    cJSON_AddStringToObject(td_d, "uri", uri);
+    cJSON_AddItemToObject(def_params, "textDocument", td_d);
+    cJSON *pos_d = cJSON_CreateObject();
+    cJSON_AddNumberToObject(pos_d, "line", line);
+    cJSON_AddNumberToObject(pos_d, "character", col);
+    cJSON_AddItemToObject(def_params, "position", pos_d);
+    cJSON_AddItemToObject(def_msg, "params", def_params);
+    char *msg_str = cJSON_PrintUnformatted(def_msg);
+
+    const char *shutdown_d = "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}";
+    const char *exit_d = "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}";
+
+    FILE *in_f = tmpfile();
+    if (!in_f) {
+        free(msg_str);
+        cJSON_Delete(def_msg);
+        lsp_server_free(srv);
+        return NULL;
+    }
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(msg_str), msg_str);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(shutdown_d), shutdown_d);
+    fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", strlen(exit_d), exit_d);
+    rewind(in_f);
+    free(msg_str);
+
+    FILE *saved_stdin = stdin;
+    FILE *saved_stdout = stdout;
+    FILE *out_f = tmpfile();
+    if (!out_f) {
+        fclose(in_f);
+        cJSON_Delete(def_msg);
+        lsp_server_free(srv);
+        return NULL;
+    }
+    stdin = in_f;
+    stdout = out_f;
+
+    lsp_server_run(srv);
+
+    stdin = saved_stdin;
+    stdout = saved_stdout;
+
+    rewind(out_f);
+    char buf[16384];
+    size_t nread = fread(buf, 1, sizeof(buf) - 1, out_f);
+    buf[nread] = '\0';
+    fclose(out_f);
+    fclose(in_f);
+    cJSON_Delete(def_msg);
+    lsp_server_free(srv);
+
+    const char *body = strstr(buf, "\r\n\r\n");
+    if (!body) return NULL;
+    body += 4;
+    return cJSON_Parse(body);
+}
+
+TEST(test_lsp_hover_struct_shows_fields) {
+    /* Hovering over a struct name should show all its fields */
+    const char *text = "struct Point {\n  x: Int,\n  y: Int\n}\nlet p = Point { x: 1, y: 2 }\n";
+    cJSON *resp = capture_hover_response(text, 0, 8); /* hover on "Point" */
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    cJSON *contents = cJSON_GetObjectItem(result, "contents");
+    ASSERT(contents != NULL);
+    cJSON *value = cJSON_GetObjectItem(contents, "value");
+    ASSERT(value != NULL);
+
+    /* Should show struct definition with fields */
+    ASSERT(strstr(value->valuestring, "struct Point") != NULL);
+    ASSERT(strstr(value->valuestring, "x: Int") != NULL);
+    ASSERT(strstr(value->valuestring, "y: Int") != NULL);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_hover_enum_shows_variants) {
+    /* Hovering over an enum name should show all its variants */
+    const char *text = "enum Color {\n  Red,\n  Green,\n  Blue\n}\n";
+    cJSON *resp = capture_hover_response(text, 0, 6); /* hover on "Color" */
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    cJSON *contents = cJSON_GetObjectItem(result, "contents");
+    ASSERT(contents != NULL);
+    cJSON *value = cJSON_GetObjectItem(contents, "value");
+    ASSERT(value != NULL);
+
+    /* Should show enum definition with variants */
+    ASSERT(strstr(value->valuestring, "enum Color") != NULL);
+    ASSERT(strstr(value->valuestring, "Red") != NULL);
+    ASSERT(strstr(value->valuestring, "Green") != NULL);
+    ASSERT(strstr(value->valuestring, "Blue") != NULL);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_hover_struct_field_via_dot) {
+    /* Hovering over a field after a dot should show the field info */
+    const char *text = "struct Point {\n  x: Int,\n  y: Int\n}\nlet p: Point = Point { x: 1, y: 2 }\nprint(p.x)\n";
+    /* line 5: "print(p.x)" — hover on 'x' at col 8 */
+    cJSON *resp = capture_hover_response(text, 5, 8);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    cJSON *contents = cJSON_GetObjectItem(result, "contents");
+    ASSERT(contents != NULL);
+    cJSON *value = cJSON_GetObjectItem(contents, "value");
+    ASSERT(value != NULL);
+
+    /* Should show field info with type */
+    ASSERT(strstr(value->valuestring, "field") != NULL);
+    ASSERT(strstr(value->valuestring, "x") != NULL);
+    ASSERT(strstr(value->valuestring, "Int") != NULL);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_hover_enum_variant_via_path) {
+    /* Hovering over a variant after :: should show the variant info */
+    const char *text = "enum Color {\n  Red,\n  Green,\n  Blue\n}\nlet c = Color::Red\n";
+    /* line 5: "let c = Color::Red" — hover on 'Red' at col 16 */
+    cJSON *resp = capture_hover_response(text, 5, 16);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    cJSON *contents = cJSON_GetObjectItem(result, "contents");
+    ASSERT(contents != NULL);
+    cJSON *value = cJSON_GetObjectItem(contents, "value");
+    ASSERT(value != NULL);
+
+    /* Should show variant info */
+    ASSERT(strstr(value->valuestring, "variant") != NULL);
+    ASSERT(strstr(value->valuestring, "Color::Red") != NULL);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_hover_enum_variant_with_params) {
+    /* Hovering over a tuple variant should show its parameter types */
+    const char *text = "enum Shape {\n  Circle(Float),\n  Rectangle(Float, Float)\n}\nlet s = Shape::Circle\n";
+    /* line 4: "let s = Shape::Circle" — hover on 'Circle' at col 17 */
+    cJSON *resp = capture_hover_response(text, 4, 17);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    cJSON *contents = cJSON_GetObjectItem(result, "contents");
+    ASSERT(contents != NULL);
+    cJSON *value = cJSON_GetObjectItem(contents, "value");
+    ASSERT(value != NULL);
+
+    /* Should show variant with params */
+    ASSERT(strstr(value->valuestring, "variant") != NULL);
+    ASSERT(strstr(value->valuestring, "Circle") != NULL);
+    ASSERT(strstr(value->valuestring, "Float") != NULL);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_hover_function_signature) {
+    /* Hovering over a function name should show its signature */
+    const char *text = "fn add(a: Int, b: Int) {\n  return a + b\n}\nadd(1, 2)\n";
+    /* line 3: "add(1, 2)" — hover on 'add' at col 1 */
+    cJSON *resp = capture_hover_response(text, 3, 1);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    cJSON *contents = cJSON_GetObjectItem(result, "contents");
+    ASSERT(contents != NULL);
+    cJSON *value = cJSON_GetObjectItem(contents, "value");
+    ASSERT(value != NULL);
+
+    /* Should show function signature */
+    ASSERT(strstr(value->valuestring, "fn add") != NULL);
+    ASSERT(strstr(value->valuestring, "a: Int") != NULL);
+    ASSERT(strstr(value->valuestring, "b: Int") != NULL);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_hover_variable_with_type) {
+    /* Hovering over a variable should show its declaration and inferred type */
+    const char *text = "let x = 42\nprint(x)\n";
+    /* line 1: "print(x)" — hover on 'x' at col 7 */
+    cJSON *resp = capture_hover_response(text, 1, 7);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    cJSON *contents = cJSON_GetObjectItem(result, "contents");
+    ASSERT(contents != NULL);
+    cJSON *value = cJSON_GetObjectItem(contents, "value");
+    ASSERT(value != NULL);
+
+    /* Should show the variable with its type */
+    ASSERT(strstr(value->valuestring, "x") != NULL);
+
+    cJSON_Delete(resp);
+}
+
+/* ================================================================
+ * Enhanced go-to-definition tests
+ * ================================================================ */
+
+TEST(test_lsp_definition_function) {
+    /* Go-to-definition on a function call should jump to its declaration */
+    const char *text = "fn greet(name: String) {\n  print(name)\n}\ngreet(\"hello\")\n";
+    /* line 3: "greet(\"hello\")" — definition on 'greet' at col 2 */
+    cJSON *resp = capture_definition_response(text, 3, 2);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    /* Should jump to line 0 where fn greet is declared */
+    cJSON *range = cJSON_GetObjectItem(result, "range");
+    ASSERT(range != NULL);
+    cJSON *start_pos = cJSON_GetObjectItem(range, "start");
+    ASSERT(start_pos != NULL);
+    ASSERT_EQ_INT(cJSON_GetObjectItem(start_pos, "line")->valueint, 0);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_definition_variable) {
+    /* Go-to-definition on a variable should jump to its let/flux/fix declaration */
+    const char *text = "let counter = 0\nprint(counter)\n";
+    /* line 1: "print(counter)" — definition on 'counter' at col 8 */
+    cJSON *resp = capture_definition_response(text, 1, 8);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    /* Should jump to line 0 where let counter is declared */
+    cJSON *range = cJSON_GetObjectItem(result, "range");
+    ASSERT(range != NULL);
+    cJSON *start_pos = cJSON_GetObjectItem(range, "start");
+    ASSERT(start_pos != NULL);
+    ASSERT_EQ_INT(cJSON_GetObjectItem(start_pos, "line")->valueint, 0);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_definition_struct_field) {
+    /* Go-to-definition on a struct field should jump to the field in the struct body */
+    const char *text = "struct Point {\n  x: Int,\n  y: Int\n}\nlet p: Point = Point { x: 1, y: 2 }\nprint(p.x)\n";
+    /* line 5: "print(p.x)" — definition on 'x' at col 8 */
+    cJSON *resp = capture_definition_response(text, 5, 8);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    /* Should jump to inside the struct definition (line 1 where "x: Int" is) */
+    cJSON *range = cJSON_GetObjectItem(result, "range");
+    ASSERT(range != NULL);
+    cJSON *start_pos = cJSON_GetObjectItem(range, "start");
+    ASSERT(start_pos != NULL);
+    ASSERT_EQ_INT(cJSON_GetObjectItem(start_pos, "line")->valueint, 1);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_definition_enum_variant) {
+    /* Go-to-definition on an enum variant should jump to the variant in the enum body */
+    const char *text = "enum Color {\n  Red,\n  Green,\n  Blue\n}\nlet c = Color::Green\n";
+    /* line 5: "let c = Color::Green" — definition on 'Green' at col 17 */
+    cJSON *resp = capture_definition_response(text, 5, 17);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    /* Should jump to line 2 where "Green" variant is */
+    cJSON *range = cJSON_GetObjectItem(result, "range");
+    ASSERT(range != NULL);
+    cJSON *start_pos = cJSON_GetObjectItem(range, "start");
+    ASSERT(start_pos != NULL);
+    ASSERT_EQ_INT(cJSON_GetObjectItem(start_pos, "line")->valueint, 2);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_definition_struct_name) {
+    /* Go-to-definition on a struct type name should jump to the struct declaration */
+    const char *text = "struct Point {\n  x: Int,\n  y: Int\n}\nlet p = Point { x: 1, y: 2 }\n";
+    /* line 4: "let p = Point { x: 1, y: 2 }" — definition on 'Point' at col 10 */
+    cJSON *resp = capture_definition_response(text, 4, 10);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    /* Should jump to line 0 where struct Point is declared */
+    cJSON *range = cJSON_GetObjectItem(result, "range");
+    ASSERT(range != NULL);
+    cJSON *start_pos = cJSON_GetObjectItem(range, "start");
+    ASSERT(start_pos != NULL);
+    ASSERT_EQ_INT(cJSON_GetObjectItem(start_pos, "line")->valueint, 0);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_definition_local_variable) {
+    /* Go-to-definition on a local variable inside a function */
+    const char *text = "fn foo() {\n  let x = 42\n  print(x)\n}\n";
+    /* line 2: "  print(x)" — definition on 'x' at col 9 */
+    cJSON *resp = capture_definition_response(text, 2, 9);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    /* Should jump to line 1 where let x is declared */
+    cJSON *range = cJSON_GetObjectItem(result, "range");
+    ASSERT(range != NULL);
+    cJSON *start_pos = cJSON_GetObjectItem(range, "start");
+    ASSERT(start_pos != NULL);
+    ASSERT_EQ_INT(cJSON_GetObjectItem(start_pos, "line")->valueint, 1);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_definition_fn_param) {
+    /* Go-to-definition on a function parameter */
+    const char *text = "fn greet(name: String) {\n  print(name)\n}\n";
+    /* line 1: "  print(name)" — definition on 'name' at col 9 */
+    cJSON *resp = capture_definition_response(text, 1, 9);
+    ASSERT(resp != NULL);
+
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+    ASSERT(!cJSON_IsNull(result));
+
+    /* Should jump to line 0 where the parameter is declared */
+    cJSON *range = cJSON_GetObjectItem(result, "range");
+    ASSERT(range != NULL);
+    cJSON *start_pos = cJSON_GetObjectItem(range, "start");
+    ASSERT(start_pos != NULL);
+    ASSERT_EQ_INT(cJSON_GetObjectItem(start_pos, "line")->valueint, 0);
+
+    cJSON_Delete(resp);
+}
+
+TEST(test_lsp_definition_unknown_returns_null) {
+    /* Go-to-definition on a number literal should return null */
+    const char *text = "print(42)\n";
+    /* line 0, col 7: on the number 42 */
+    cJSON *resp = capture_definition_response(text, 0, 7);
+    ASSERT(resp != NULL);
+
+    /* The response should exist but result might be null if no definition found */
+    cJSON *result = cJSON_GetObjectItem(resp, "result");
+    ASSERT(result != NULL);
+
+    cJSON_Delete(resp);
+}

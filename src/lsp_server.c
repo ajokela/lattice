@@ -1004,6 +1004,144 @@ static char *build_builtin_hover(const char *sig, const char *desc) {
     return buf;
 }
 
+/* Detect if the cursor is on a field after a dot: "obj.field" pattern.
+ * If the cursor is on 'field', extracts the object identifier before the dot.
+ * Returns a malloc'd string for the owner object, or NULL. */
+static char *detect_dot_hover(const char *text, int line, int col) {
+    const char *p = text;
+    int cur_line = 0;
+    while (cur_line < line && *p) {
+        if (*p == '\n') cur_line++;
+        p++;
+    }
+    const char *line_start = p;
+    int cur_col = 0;
+    while (cur_col < col && *p && *p != '\n') {
+        cur_col++;
+        p++;
+    }
+
+    /* Walk backward to start of the identifier the cursor is on */
+    const char *ws = p;
+    while (ws > line_start && is_ident_char(ws[-1])) ws--;
+
+    /* Check if there's a dot before this identifier */
+    if (ws <= line_start || ws[-1] != '.') return NULL;
+
+    /* Extract the identifier before the dot */
+    const char *dot_pos = ws - 1;
+    const char *obj_end = dot_pos;
+    const char *obj_start = obj_end;
+    while (obj_start > line_start && is_ident_char(obj_start[-1])) obj_start--;
+    if (obj_start >= obj_end) return NULL;
+
+    size_t olen = (size_t)(obj_end - obj_start);
+    char *owner = malloc(olen + 1);
+    if (!owner) return NULL;
+    memcpy(owner, obj_start, olen);
+    owner[olen] = '\0';
+    return owner;
+}
+
+/* Detect if the cursor is on a variant after '::': "Enum::Variant" pattern.
+ * If the cursor is on 'Variant', extracts the type name before '::'.
+ * Returns a malloc'd string for the type name, or NULL. */
+static char *detect_path_hover(const char *text, int line, int col) {
+    const char *p = text;
+    int cur_line = 0;
+    while (cur_line < line && *p) {
+        if (*p == '\n') cur_line++;
+        p++;
+    }
+    const char *line_start = p;
+    int cur_col = 0;
+    while (cur_col < col && *p && *p != '\n') {
+        cur_col++;
+        p++;
+    }
+
+    /* Walk backward to start of the identifier the cursor is on */
+    const char *ws = p;
+    while (ws > line_start && is_ident_char(ws[-1])) ws--;
+
+    /* Check if there's '::' before this identifier */
+    if (ws < line_start + 2 || ws[-1] != ':' || ws[-2] != ':') return NULL;
+
+    /* Extract the identifier before '::' */
+    const char *type_end = ws - 2;
+    const char *type_start = type_end;
+    while (type_start > line_start && is_ident_char(type_start[-1])) type_start--;
+    if (type_start >= type_end) return NULL;
+
+    size_t tlen = (size_t)(type_end - type_start);
+    char *type_name = malloc(tlen + 1);
+    if (!type_name) return NULL;
+    memcpy(type_name, type_start, tlen);
+    type_name[tlen] = '\0';
+    return type_name;
+}
+
+/* Build hover markdown for a struct definition including its fields. */
+static char *build_struct_hover(const LspDocument *doc, const char *name) {
+    for (size_t i = 0; i < doc->struct_def_count; i++) {
+        if (strcmp(doc->struct_defs[i].name, name) != 0) continue;
+        LspStructDef *sd = &doc->struct_defs[i];
+
+        /* Calculate buffer size */
+        size_t blen = strlen(name) + 64;
+        for (size_t j = 0; j < sd->field_count; j++) {
+            blen += strlen(sd->fields[j].name) + 16;
+            if (sd->fields[j].type_name) blen += strlen(sd->fields[j].type_name);
+        }
+
+        char *buf = malloc(blen);
+        if (!buf) return NULL;
+        char *p = buf;
+        char *end = buf + blen;
+        p += snprintf(p, (size_t)(end - p), "```lattice\nstruct %s {\n", name);
+        for (size_t j = 0; j < sd->field_count; j++) {
+            if (sd->fields[j].type_name)
+                p += snprintf(p, (size_t)(end - p), "  %s: %s", sd->fields[j].name, sd->fields[j].type_name);
+            else p += snprintf(p, (size_t)(end - p), "  %s", sd->fields[j].name);
+            if (j + 1 < sd->field_count) p += snprintf(p, (size_t)(end - p), ",");
+            p += snprintf(p, (size_t)(end - p), "\n");
+        }
+        snprintf(p, (size_t)(end - p), "}\n```");
+        return buf;
+    }
+    return NULL;
+}
+
+/* Build hover markdown for an enum definition including its variants. */
+static char *build_enum_hover(const LspDocument *doc, const char *name) {
+    for (size_t i = 0; i < doc->enum_def_count; i++) {
+        if (strcmp(doc->enum_defs[i].name, name) != 0) continue;
+        LspEnumDef *ed = &doc->enum_defs[i];
+
+        /* Calculate buffer size */
+        size_t blen = strlen(name) + 64;
+        for (size_t j = 0; j < ed->variant_count; j++) {
+            blen += strlen(ed->variants[j].name) + 16;
+            if (ed->variants[j].params) blen += strlen(ed->variants[j].params);
+        }
+
+        char *buf = malloc(blen);
+        if (!buf) return NULL;
+        char *p = buf;
+        char *end = buf + blen;
+        p += snprintf(p, (size_t)(end - p), "```lattice\nenum %s {\n", name);
+        for (size_t j = 0; j < ed->variant_count; j++) {
+            p += snprintf(p, (size_t)(end - p), "  %s", ed->variants[j].name);
+            if (ed->variants[j].params) p += snprintf(p, (size_t)(end - p), "%s", ed->variants[j].params);
+            if (j + 1 < ed->variant_count) p += snprintf(p, (size_t)(end - p), ",");
+            p += snprintf(p, (size_t)(end - p), "\n");
+        }
+        snprintf(p, (size_t)(end - p), "}\n```");
+        return buf;
+    }
+    return NULL;
+}
+
 static void handle_hover(LspServer *srv, cJSON *params, int id) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
     cJSON *pos = cJSON_GetObjectItem(params, "position");
@@ -1040,62 +1178,171 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
     const char *hover_text = NULL;
     char *hover_buf = NULL; /* dynamically built hover, freed at end */
 
-    /* Priority 1: Document symbols (user-defined names take precedence) */
-    for (size_t i = 0; i < doc->symbol_count; i++) {
-        if (strcmp(doc->symbols[i].name, word) == 0) {
-            if (doc->symbols[i].kind == LSP_SYM_VARIABLE) {
-                /* For variables, try to include inferred type */
-                char *type = infer_variable_type(doc->text, word, line, doc);
-                const char *sig = doc->symbols[i].signature;
-                if (type) {
-                    size_t blen = (sig ? strlen(sig) : 0) + strlen(type) + 48;
-                    hover_buf = malloc(blen);
-                    if (!hover_buf) {
-                        free(type);
-                        free(word);
-                        return;
+    /* Priority 0a: Struct field hover (obj.field context) */
+    if (!hover_text) {
+        char *owner = detect_dot_hover(doc->text, line, col);
+        if (owner) {
+            /* Infer the type of the owner */
+            char *owner_type = infer_variable_type(doc->text, owner, line, doc);
+            /* If no inferred type but the owner itself is a known struct name
+             * (e.g., for static field access), use the owner name directly */
+            const char *struct_type = owner_type;
+            if (!struct_type && is_struct_name(doc, owner)) struct_type = owner;
+
+            if (struct_type) {
+                /* Look up the field in the struct definition */
+                for (size_t i = 0; i < doc->struct_def_count; i++) {
+                    if (strcmp(doc->struct_defs[i].name, struct_type) != 0) continue;
+                    for (size_t j = 0; j < doc->struct_defs[i].field_count; j++) {
+                        if (strcmp(doc->struct_defs[i].fields[j].name, word) == 0) {
+                            const char *field_type = doc->struct_defs[i].fields[j].type_name;
+                            size_t blen =
+                                strlen(struct_type) + strlen(word) + (field_type ? strlen(field_type) : 0) + 48;
+                            hover_buf = malloc(blen);
+                            if (hover_buf) {
+                                if (field_type)
+                                    snprintf(hover_buf, blen, "```lattice\n(field) %s.%s: %s\n```", struct_type, word,
+                                             field_type);
+                                else snprintf(hover_buf, blen, "```lattice\n(field) %s.%s\n```", struct_type, word);
+                                hover_text = hover_buf;
+                            }
+                            break;
+                        }
                     }
-                    snprintf(hover_buf, blen, "```lattice\n%s%s%s\n```", sig ? sig : word,
-                             (sig && strchr(sig, ':')) ? "" : ": ", (sig && strchr(sig, ':')) ? "" : type);
-                    hover_text = hover_buf;
-                    free(type);
-                } else if (sig) {
-                    size_t blen = strlen(sig) + 24;
-                    hover_buf = malloc(blen);
-                    if (!hover_buf) {
-                        free(word);
-                        return;
-                    }
-                    snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
-                    hover_text = hover_buf;
-                }
-            } else {
-                /* Functions, structs, enums, traits */
-                const char *sig = doc->symbols[i].signature;
-                const char *sym_doc = doc->symbols[i].doc;
-                if (sig && sym_doc) {
-                    size_t blen = strlen(sig) + strlen(sym_doc) + 32;
-                    hover_buf = malloc(blen);
-                    if (!hover_buf) {
-                        free(word);
-                        return;
-                    }
-                    snprintf(hover_buf, blen, "```lattice\n%s\n```\n%s", sig, sym_doc);
-                    hover_text = hover_buf;
-                } else if (sig) {
-                    size_t blen = strlen(sig) + 24;
-                    hover_buf = malloc(blen);
-                    if (!hover_buf) {
-                        free(word);
-                        return;
-                    }
-                    snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
-                    hover_text = hover_buf;
-                } else if (sym_doc) {
-                    hover_text = sym_doc;
+                    break;
                 }
             }
-            break;
+            /* If the field is a method, check the method index */
+            if (!hover_text && struct_type && srv->index) {
+                for (size_t i = 0; i < srv->index->method_count; i++) {
+                    if (srv->index->methods[i].owner_type &&
+                        strcmp(srv->index->methods[i].owner_type, struct_type) == 0 &&
+                        strcmp(srv->index->methods[i].name, word) == 0) {
+                        hover_text = srv->index->methods[i].doc;
+                        break;
+                    }
+                }
+            }
+            free(owner_type);
+            free(owner);
+        }
+    }
+
+    /* Priority 0b: Enum variant hover (Enum::Variant context) */
+    if (!hover_text) {
+        char *type_name = detect_path_hover(doc->text, line, col);
+        if (type_name) {
+            for (size_t i = 0; i < doc->enum_def_count; i++) {
+                if (strcmp(doc->enum_defs[i].name, type_name) != 0) continue;
+                for (size_t j = 0; j < doc->enum_defs[i].variant_count; j++) {
+                    if (strcmp(doc->enum_defs[i].variants[j].name, word) == 0) {
+                        const char *vparams = doc->enum_defs[i].variants[j].params;
+                        size_t blen = strlen(type_name) + strlen(word) + (vparams ? strlen(vparams) : 0) + 48;
+                        hover_buf = malloc(blen);
+                        if (hover_buf) {
+                            if (vparams)
+                                snprintf(hover_buf, blen, "```lattice\n(variant) %s::%s%s\n```", type_name, word,
+                                         vparams);
+                            else snprintf(hover_buf, blen, "```lattice\n(variant) %s::%s\n```", type_name, word);
+                            hover_text = hover_buf;
+                        }
+                        break;
+                    }
+                }
+                break;
+            }
+            free(type_name);
+        }
+    }
+
+    /* Priority 1: Document symbols (user-defined names take precedence) */
+    if (!hover_text) {
+        for (size_t i = 0; i < doc->symbol_count; i++) {
+            if (strcmp(doc->symbols[i].name, word) == 0) {
+                if (doc->symbols[i].kind == LSP_SYM_VARIABLE) {
+                    /* For variables, try to include inferred type */
+                    char *type = infer_variable_type(doc->text, word, line, doc);
+                    const char *sig = doc->symbols[i].signature;
+                    if (type) {
+                        size_t blen = (sig ? strlen(sig) : 0) + strlen(type) + 48;
+                        hover_buf = malloc(blen);
+                        if (!hover_buf) {
+                            free(type);
+                            free(word);
+                            return;
+                        }
+                        snprintf(hover_buf, blen, "```lattice\n%s%s%s\n```", sig ? sig : word,
+                                 (sig && strchr(sig, ':')) ? "" : ": ", (sig && strchr(sig, ':')) ? "" : type);
+                        hover_text = hover_buf;
+                        free(type);
+                    } else if (sig) {
+                        size_t blen = strlen(sig) + 24;
+                        hover_buf = malloc(blen);
+                        if (!hover_buf) {
+                            free(word);
+                            return;
+                        }
+                        snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                        hover_text = hover_buf;
+                    }
+                } else if (doc->symbols[i].kind == LSP_SYM_STRUCT) {
+                    /* For structs, show full definition with fields */
+                    hover_buf = build_struct_hover(doc, word);
+                    if (hover_buf) hover_text = hover_buf;
+                    else {
+                        const char *sig = doc->symbols[i].signature;
+                        if (sig) {
+                            size_t blen = strlen(sig) + 24;
+                            hover_buf = malloc(blen);
+                            if (hover_buf) {
+                                snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                                hover_text = hover_buf;
+                            }
+                        }
+                    }
+                } else if (doc->symbols[i].kind == LSP_SYM_ENUM) {
+                    /* For enums, show full definition with variants */
+                    hover_buf = build_enum_hover(doc, word);
+                    if (hover_buf) hover_text = hover_buf;
+                    else {
+                        const char *sig = doc->symbols[i].signature;
+                        if (sig) {
+                            size_t blen = strlen(sig) + 24;
+                            hover_buf = malloc(blen);
+                            if (hover_buf) {
+                                snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                                hover_text = hover_buf;
+                            }
+                        }
+                    }
+                } else {
+                    /* Functions, traits, impls */
+                    const char *sig = doc->symbols[i].signature;
+                    const char *sym_doc = doc->symbols[i].doc;
+                    if (sig && sym_doc) {
+                        size_t blen = strlen(sig) + strlen(sym_doc) + 32;
+                        hover_buf = malloc(blen);
+                        if (!hover_buf) {
+                            free(word);
+                            return;
+                        }
+                        snprintf(hover_buf, blen, "```lattice\n%s\n```\n%s", sig, sym_doc);
+                        hover_text = hover_buf;
+                    } else if (sig) {
+                        size_t blen = strlen(sig) + 24;
+                        hover_buf = malloc(blen);
+                        if (!hover_buf) {
+                            free(word);
+                            return;
+                        }
+                        snprintf(hover_buf, blen, "```lattice\n%s\n```", sig);
+                        hover_text = hover_buf;
+                    } else if (sym_doc) {
+                        hover_text = sym_doc;
+                    }
+                }
+                break;
+            }
         }
     }
 
@@ -1171,6 +1418,147 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
 
 /* ── Handler: textDocument/definition ── */
 
+/* Helper: send a Location response and free the word. */
+static void send_definition_location(int id, const char *uri, int def_line, int def_col, int name_len) {
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddStringToObject(result, "uri", uri);
+    cJSON *range = cJSON_CreateObject();
+    cJSON *start_pos = cJSON_CreateObject();
+    cJSON_AddNumberToObject(start_pos, "line", def_line);
+    cJSON_AddNumberToObject(start_pos, "character", def_col);
+    cJSON_AddItemToObject(range, "start", start_pos);
+    cJSON *end_pos = cJSON_CreateObject();
+    cJSON_AddNumberToObject(end_pos, "line", def_line);
+    cJSON_AddNumberToObject(end_pos, "character", def_col + name_len);
+    cJSON_AddItemToObject(range, "end", end_pos);
+    cJSON_AddItemToObject(result, "range", range);
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
+/* Find the 0-based line and column of a field name inside a struct body.
+ * Searches the struct body (from struct_line downward) for a line containing
+ * "field_name" as a field definition (preceded by whitespace, followed by : or ,).
+ * Returns true if found, setting out_line/out_col. */
+static bool find_struct_field_position(const char *text, int struct_line, const char *field_name, int *out_line,
+                                       int *out_col) {
+    const char *p = text;
+    int cur_line = 0;
+    /* Advance to the struct definition line */
+    while (cur_line < struct_line && *p) {
+        if (*p == '\n') cur_line++;
+        p++;
+    }
+    /* Skip to the opening brace */
+    while (*p && *p != '{') p++;
+    if (*p == '{') p++;
+
+    size_t fname_len = strlen(field_name);
+    int brace_depth = 1;
+
+    while (*p && brace_depth > 0) {
+        if (*p == '\n') {
+            cur_line++;
+            p++;
+            continue;
+        }
+        if (*p == '{') {
+            brace_depth++;
+            p++;
+            continue;
+        }
+        if (*p == '}') {
+            brace_depth--;
+            p++;
+            continue;
+        }
+
+        /* Look for field_name as an identifier on this line */
+        if (is_ident_char(*p)) {
+            const char *id_start = p;
+            while (*p && is_ident_char(*p)) p++;
+            size_t id_len = (size_t)(p - id_start);
+            if (id_len == fname_len && memcmp(id_start, field_name, fname_len) == 0) {
+                /* Check that what follows is : or , or whitespace — confirms it's a field */
+                const char *after = p;
+                while (*after == ' ' || *after == '\t') after++;
+                if (*after == ':' || *after == ',' || *after == '\n' || *after == '}') {
+                    /* Find line start to compute column */
+                    const char *ls = id_start;
+                    while (ls > text && ls[-1] != '\n') ls--;
+                    *out_line = cur_line;
+                    *out_col = (int)(id_start - ls);
+                    return true;
+                }
+            }
+            continue;
+        }
+        p++;
+    }
+    return false;
+}
+
+/* Find the 0-based line and column of a variant name inside an enum body.
+ * Searches the enum body (from enum_line downward) for the variant name.
+ * Returns true if found, setting out_line/out_col. */
+static bool find_enum_variant_position(const char *text, int enum_line, const char *variant_name, int *out_line,
+                                       int *out_col) {
+    const char *p = text;
+    int cur_line = 0;
+    /* Advance to the enum definition line */
+    while (cur_line < enum_line && *p) {
+        if (*p == '\n') cur_line++;
+        p++;
+    }
+    /* Skip to the opening brace */
+    while (*p && *p != '{') p++;
+    if (*p == '{') p++;
+
+    size_t vname_len = strlen(variant_name);
+    int brace_depth = 1;
+
+    while (*p && brace_depth > 0) {
+        if (*p == '\n') {
+            cur_line++;
+            p++;
+            continue;
+        }
+        if (*p == '{') {
+            brace_depth++;
+            p++;
+            continue;
+        }
+        if (*p == '}') {
+            brace_depth--;
+            p++;
+            continue;
+        }
+
+        /* Look for variant_name as an identifier */
+        if (is_ident_char(*p)) {
+            const char *id_start = p;
+            while (*p && is_ident_char(*p)) p++;
+            size_t id_len = (size_t)(p - id_start);
+            if (id_len == vname_len && memcmp(id_start, variant_name, vname_len) == 0) {
+                /* Check what follows — variant is followed by comma, paren, newline, or } */
+                const char *after = p;
+                while (*after == ' ' || *after == '\t') after++;
+                if (*after == ',' || *after == '(' || *after == '\n' || *after == '\r' || *after == '}') {
+                    const char *ls = id_start;
+                    while (ls > text && ls[-1] != '\n') ls--;
+                    *out_line = cur_line;
+                    *out_col = (int)(id_start - ls);
+                    return true;
+                }
+            }
+            continue;
+        }
+        p++;
+    }
+    return false;
+}
+
 static void handle_definition(LspServer *srv, cJSON *params, int id) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
     cJSON *pos = cJSON_GetObjectItem(params, "position");
@@ -1193,63 +1581,79 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    /* Find word at cursor (same logic as hover) */
-    const char *p = doc->text;
-    int cur_line = 0;
-    while (cur_line < line && *p) {
-        if (*p == '\n') cur_line++;
-        p++;
-    }
-    const char *line_start = p;
-    int cur_col = 0;
-    while (cur_col < col && *p && *p != '\n') {
-        cur_col++;
-        p++;
-    }
+    /* Find word at cursor using shared helper */
+    int word_col = 0;
+    char *word = extract_word_at(doc->text, line, col, &word_col);
 
-    const char *ws = p;
-    while (ws > line_start && (ws[-1] == '_' || (ws[-1] >= 'a' && ws[-1] <= 'z') || (ws[-1] >= 'A' && ws[-1] <= 'Z') ||
-                               (ws[-1] >= '0' && ws[-1] <= '9')))
-        ws--;
-
-    const char *we = p;
-    while (*we &&
-           (*we == '_' || (*we >= 'a' && *we <= 'z') || (*we >= 'A' && *we <= 'Z') || (*we >= '0' && *we <= '9')))
-        we++;
-
-    if (we <= ws) {
+    if (!word) {
         cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
         lsp_write_response(resp, stdout);
         cJSON_Delete(resp);
         return;
     }
 
-    size_t wlen = (size_t)(we - ws);
-    char *word = malloc(wlen + 1);
-    if (!word) return;
-    memcpy(word, ws, wlen);
-    word[wlen] = '\0';
+    /* Priority 0a: Struct field go-to-definition (obj.field context) */
+    {
+        char *owner = detect_dot_hover(doc->text, line, col);
+        if (owner) {
+            char *owner_type = infer_variable_type(doc->text, owner, line, doc);
+            const char *struct_type = owner_type;
+            if (!struct_type && is_struct_name(doc, owner)) struct_type = owner;
+
+            if (struct_type) {
+                for (size_t i = 0; i < doc->struct_def_count; i++) {
+                    if (strcmp(doc->struct_defs[i].name, struct_type) != 0) continue;
+                    /* Check if word is a field of this struct */
+                    for (size_t j = 0; j < doc->struct_defs[i].field_count; j++) {
+                        if (strcmp(doc->struct_defs[i].fields[j].name, word) == 0) {
+                            int f_line = 0, f_col = 0;
+                            if (find_struct_field_position(doc->text, doc->struct_defs[i].line, word, &f_line,
+                                                           &f_col)) {
+                                free(owner_type);
+                                free(owner);
+                                send_definition_location(id, uri, f_line, f_col, (int)strlen(word));
+                                free(word);
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            free(owner_type);
+            free(owner);
+        }
+    }
+
+    /* Priority 0b: Enum variant go-to-definition (Enum::Variant context) */
+    {
+        char *type_name = detect_path_hover(doc->text, line, col);
+        if (type_name) {
+            for (size_t i = 0; i < doc->enum_def_count; i++) {
+                if (strcmp(doc->enum_defs[i].name, type_name) != 0) continue;
+                for (size_t j = 0; j < doc->enum_defs[i].variant_count; j++) {
+                    if (strcmp(doc->enum_defs[i].variants[j].name, word) == 0) {
+                        int v_line = 0, v_col = 0;
+                        if (find_enum_variant_position(doc->text, doc->enum_defs[i].line, word, &v_line, &v_col)) {
+                            free(type_name);
+                            send_definition_location(id, uri, v_line, v_col, (int)strlen(word));
+                            free(word);
+                            return;
+                        }
+                    }
+                }
+                break;
+            }
+            free(type_name);
+        }
+    }
 
     /* Search document symbols (fn, struct, enum, trait, impl, variables) */
     for (size_t i = 0; i < doc->symbol_count; i++) {
         if (strcmp(doc->symbols[i].name, word) == 0 && doc->symbols[i].line >= 0) {
-            cJSON *result = cJSON_CreateObject();
-            cJSON_AddStringToObject(result, "uri", uri);
-            cJSON *range = cJSON_CreateObject();
-            cJSON *start_pos = cJSON_CreateObject();
-            cJSON_AddNumberToObject(start_pos, "line", doc->symbols[i].line);
-            cJSON_AddNumberToObject(start_pos, "character", doc->symbols[i].col);
-            cJSON_AddItemToObject(range, "start", start_pos);
-            cJSON *end_pos = cJSON_CreateObject();
-            cJSON_AddNumberToObject(end_pos, "line", doc->symbols[i].line);
-            cJSON_AddNumberToObject(end_pos, "character", doc->symbols[i].col + (int)strlen(doc->symbols[i].name));
-            cJSON_AddItemToObject(range, "end", end_pos);
-            cJSON_AddItemToObject(result, "range", range);
-
+            send_definition_location(id, uri, doc->symbols[i].line, doc->symbols[i].col,
+                                     (int)strlen(doc->symbols[i].name));
             free(word);
-            cJSON *resp = lsp_make_response(id, result);
-            lsp_write_response(resp, stdout);
-            cJSON_Delete(resp);
             return;
         }
     }
@@ -1337,23 +1741,8 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
         }
 
         if (def_line >= 0) {
-            cJSON *result = cJSON_CreateObject();
-            cJSON_AddStringToObject(result, "uri", uri);
-            cJSON *range = cJSON_CreateObject();
-            cJSON *start_pos = cJSON_CreateObject();
-            cJSON_AddNumberToObject(start_pos, "line", def_line);
-            cJSON_AddNumberToObject(start_pos, "character", def_col);
-            cJSON_AddItemToObject(range, "start", start_pos);
-            cJSON *end_pos = cJSON_CreateObject();
-            cJSON_AddNumberToObject(end_pos, "line", def_line);
-            cJSON_AddNumberToObject(end_pos, "character", def_col + (int)wlen2);
-            cJSON_AddItemToObject(range, "end", end_pos);
-            cJSON_AddItemToObject(result, "range", range);
-
+            send_definition_location(id, uri, def_line, def_col, (int)wlen2);
             free(word);
-            cJSON *resp = lsp_make_response(id, result);
-            lsp_write_response(resp, stdout);
-            cJSON_Delete(resp);
             return;
         }
     }

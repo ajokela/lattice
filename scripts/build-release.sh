@@ -143,6 +143,15 @@ else
     FAILURES+=("darwin-aarch64")
 fi
 
+say "Building clat-run darwin-aarch64..."
+if make runtime-release 2>&1 | tail -1; then
+    mv clat-run-darwin-aarch64 "$BUILD_OUT/$VERSION/"
+    ok "clat-run darwin-aarch64"
+else
+    warn "FAILED: clat-run darwin-aarch64"
+    FAILURES+=("clat-run-darwin-aarch64")
+fi
+
 # macOS x86_64 (Rosetta — may need TLS=0 if Homebrew is arm64-only)
 say "Building darwin-x86_64..."
 if arch -x86_64 make release 2>&1 | tail -1; then
@@ -159,6 +168,21 @@ else
     fi
 fi
 
+say "Building clat-run darwin-x86_64..."
+if arch -x86_64 make runtime-release 2>&1 | tail -1; then
+    mv clat-run-darwin-x86_64 "$BUILD_OUT/$VERSION/"
+    ok "clat-run darwin-x86_64"
+else
+    warn "Retrying clat-run darwin-x86_64 with TLS=0..."
+    if arch -x86_64 make runtime-release TLS=0 2>&1 | tail -1; then
+        mv clat-run-darwin-x86_64 "$BUILD_OUT/$VERSION/"
+        ok "clat-run darwin-x86_64 (no TLS)"
+    else
+        warn "FAILED: clat-run darwin-x86_64"
+        FAILURES+=("clat-run-darwin-x86_64")
+    fi
+fi
+
 # Windows build (cross-compile from macOS using MinGW)
 say "Building windows-x86_64..."
 if make clean && make WINDOWS=1 release 2>&1 | tail -1; then
@@ -167,6 +191,15 @@ if make clean && make WINDOWS=1 release 2>&1 | tail -1; then
 else
     warn "FAILED: windows-x86_64"
     FAILURES+=("windows-x86_64")
+fi
+
+say "Building clat-run windows-x86_64..."
+if make WINDOWS=1 runtime-release 2>&1 | tail -1; then
+    mv clat-run-windows-x86_64.exe "$BUILD_OUT/$VERSION/"
+    ok "clat-run windows-x86_64"
+else
+    warn "FAILED: clat-run windows-x86_64"
+    FAILURES+=("clat-run-windows-x86_64")
 fi
 
 # Linux builds via Docker (parallel, using tarball copy to avoid shared state)
@@ -182,7 +215,9 @@ build_bg "linux-x86_64" "
             mkdir /build && cd /build &&
             tar xzf /tmp/src.tar.gz &&
             make release STATIC=1 &&
-            cp clat-linux-x86_64 /out/
+            cp clat-linux-x86_64 /out/ &&
+            make runtime-release STATIC=1 &&
+            cp clat-run-linux-x86_64 /out/
         '
 "
 
@@ -195,7 +230,9 @@ build_bg "linux-aarch64" "
             mkdir /build && cd /build &&
             tar xzf /tmp/src.tar.gz &&
             make release STATIC=1 &&
-            cp clat-linux-aarch64 /out/
+            cp clat-linux-aarch64 /out/ &&
+            make runtime-release STATIC=1 &&
+            cp clat-run-linux-aarch64 /out/
         '
 "
 
@@ -204,8 +241,9 @@ if [ "${SKIP_RISCV:-false}" = "false" ]; then
     build_bg "linux-riscv64" "
         ssh $RISCV_HOST 'rm -rf /tmp/lattice-build && mkdir -p /tmp/lattice-build' && \
         scp '$SRC_TAR' $RISCV_HOST:/tmp/lattice-build/src.tar.gz && \
-        ssh $RISCV_HOST 'cd /tmp/lattice-build && tar xzf src.tar.gz && make release STATIC=1' && \
+        ssh $RISCV_HOST 'cd /tmp/lattice-build && tar xzf src.tar.gz && make release STATIC=1 && make runtime-release STATIC=1' && \
         scp $RISCV_HOST:/tmp/lattice-build/clat-linux-riscv64 $ABSOUT/clat-linux-riscv64 && \
+        scp $RISCV_HOST:/tmp/lattice-build/clat-run-linux-riscv64 $ABSOUT/clat-run-linux-riscv64 && \
         ssh $RISCV_HOST 'rm -rf /tmp/lattice-build'
     "
 fi
@@ -223,6 +261,7 @@ if [ "${SKIP_BSD:-false}" = "false" ]; then
         esac
         BINARY="clat-${OS_PART}-${ARCH}"
 
+        RUNTIME_BINARY="clat-run-${OS_PART}-${ARCH}"
         if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null; then
             build_bg "$BINARY" "
                 ssh $host 'rm -rf /tmp/lattice-build && mkdir -p /tmp/lattice-build' && \
@@ -230,6 +269,7 @@ if [ "${SKIP_BSD:-false}" = "false" ]; then
                 scp scripts/build-bsd.sh $host:/tmp/lattice-build/build-bsd.sh && \
                 ssh $host 'cd /tmp/lattice-build && tar xzf src.tar.gz && sh build-bsd.sh' && \
                 scp $host:/tmp/lattice-build/$BINARY $ABSOUT/$BINARY && \
+                scp $host:/tmp/lattice-build/$RUNTIME_BINARY $ABSOUT/$RUNTIME_BINARY && \
                 ssh $host 'rm -rf /tmp/lattice-build'
             "
         else

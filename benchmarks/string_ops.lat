@@ -1,37 +1,54 @@
 // Benchmark: String Operations
-// Measures string concatenation, split, to_upper/to_lower — ephemeral arena stress.
+// Measures string concatenation, split/rejoin, case conversion, and search.
+// Exercises the ephemeral arena and string interning.
 
 fn main() {
     let t0 = time()
 
-    // Build a long string by concatenation
-    let s = ""
-    for i in 0..1000 {
+    // Build a long string by concatenation (10K appends)
+    flux s = ""
+    flux i = 0
+    while i < 10000 {
         s = s + "abc"
+        i = i + 1
     }
     print("concat len: ${s.len()}")
 
-    // Split and rejoin
+    // Split and count parts
     let parts = s.split("b")
     print("split parts: ${parts.len()}")
 
-    // Case conversions on 500 strings
-    let results = []
-    for i in 0..500 {
-        let upper = "hello world".to_upper()
-        let lower = "HELLO WORLD".to_lower()
-        results.push(upper.len() + lower.len())
+    // Case conversions (10K iterations)
+    flux case_sum = 0
+    flux j = 0
+    while j < 10000 {
+        let upper = "hello world lattice benchmark".to_upper()
+        let lower = "HELLO WORLD LATTICE BENCHMARK".to_lower()
+        case_sum = case_sum + upper.len() + lower.len()
+        j = j + 1
     }
-    print("case ops: ${results.len()}")
+    print("case ops sum: ${case_sum}")
 
-    // String contains / replace
-    let count = 0
-    for i in 0..500 {
-        if "the quick brown fox".contains("quick") {
-            count = count + 1
+    // String contains (10K iterations)
+    flux found = 0
+    flux k = 0
+    while k < 10000 {
+        if "the quick brown fox jumps over the lazy dog".contains("fox") {
+            found = found + 1
         }
+        k = k + 1
     }
-    print("contains: ${count}")
+    print("contains: ${found}")
+
+    // String repeat and length (5K iterations)
+    flux repeat_sum = 0
+    flux m = 0
+    while m < 5000 {
+        let r = "ab".repeat(50)
+        repeat_sum = repeat_sum + r.len()
+        m = m + 1
+    }
+    print("repeat sum: ${repeat_sum}")
 
     let elapsed = time() - t0
     print("elapsed: ${elapsed}ms")

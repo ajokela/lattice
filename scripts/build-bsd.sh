@@ -93,3 +93,45 @@ cp clat "$RELEASE_NAME"
 
 SIZE=$(ls -lh "$RELEASE_NAME" | awk '{print $5}')
 echo "==> Built: $RELEASE_NAME ($SIZE)"
+
+# ── Thin bytecode runtime (clat-run) ──
+RUNTIME_RELEASE_NAME="clat-run-${RELEASE_OS}-${RELEASE_ARCH}"
+echo ""
+echo "==> Building $RUNTIME_RELEASE_NAME on $OS $ARCH"
+
+RUNTIME_SRCS=""
+for f in \
+    src/runtime_main.c src/runtime_stubs.c \
+    src/ds/str.c src/ds/vec.c src/ds/hashmap.c \
+    src/value.c src/env.c src/memory.c src/string_ops.c src/builtins.c \
+    src/net.c src/tls.c src/json.c src/math_ops.c src/env_ops.c src/time_ops.c \
+    src/fs_ops.c src/process_ops.c src/type_ops.c src/datetime_ops.c \
+    src/regex_ops.c src/format_ops.c src/path_ops.c src/crypto_ops.c \
+    src/array_ops.c src/channel.c src/http.c src/toml_ops.c src/yaml_ops.c \
+    src/ext.c src/stackopcode.c src/chunk.c src/stackvm.c \
+    src/runtime.c src/intern.c src/latc.c src/builtin_methods.c \
+    src/iterator.c src/gc.c; do
+    RUNTIME_SRCS="$RUNTIME_SRCS $f"
+done
+
+rm -rf build clat-run
+mkdir -p build/ds
+
+echo "==> Compiling runtime..."
+RUNTIME_OBJS=""
+for f in $RUNTIME_SRCS; do
+    obj="build/$(echo "$f" | sed 's|^src/||; s|\.c$|.o|')"
+    mkdir -p "$(dirname "$obj")"
+    $CC $CFLAGS -c -o "$obj" "$f"
+    RUNTIME_OBJS="$RUNTIME_OBJS $obj"
+done
+
+echo "==> Linking runtime..."
+$CC $CFLAGS -o clat-run $RUNTIME_OBJS $LDFLAGS
+
+echo "==> Stripping runtime..."
+strip clat-run
+cp clat-run "$RUNTIME_RELEASE_NAME"
+
+RUNTIME_SIZE=$(ls -lh "$RUNTIME_RELEASE_NAME" | awk '{print $5}')
+echo "==> Built: $RUNTIME_RELEASE_NAME ($RUNTIME_SIZE)"

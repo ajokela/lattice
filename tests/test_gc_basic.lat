@@ -1,0 +1,212 @@
+// Test: GC basic allocation, collection, and correctness
+// Verifies objects are collected without crashes and values survive correctly
+
+// -- Primitive values survive GC --
+fn test_primitives() {
+    print("--- primitives ---")
+    let a = 42
+    let b = 3.14
+    let c = true
+    let d = false
+    let e = nil
+    let f = "hello"
+    print(a)
+    print(b)
+    print(c)
+    print(d)
+    print(e)
+    print(f)
+}
+
+// -- Strings created in a loop survive while referenced --
+fn test_string_allocation() {
+    print("--- string allocation ---")
+    flux last = ""
+    for i in 0..50 {
+        last = "string_" + to_string(i)
+    }
+    print(last)
+
+    // Build up a long string
+    flux acc = ""
+    for i in 0..20 {
+        acc = acc + "x"
+    }
+    print(len(acc))
+}
+
+// -- Arrays survive GC --
+fn test_array_allocation() {
+    print("--- array allocation ---")
+    flux arr = []
+    for i in 0..100 {
+        arr.push(i * 2)
+    }
+    print(len(arr))
+    print(arr[0])
+    print(arr[50])
+    print(arr[99])
+}
+
+// -- Maps survive GC --
+fn test_map_allocation() {
+    print("--- map allocation ---")
+    flux m = Map::new()
+    for i in 0..50 {
+        m[to_string(i)] = i * 10
+    }
+    print(m["0"])
+    print(m["25"])
+    print(m["49"])
+}
+
+// -- Nested arrays --
+fn test_nested_arrays() {
+    print("--- nested arrays ---")
+    flux outer = []
+    for i in 0..20 {
+        flux inner = []
+        for j in 0..5 {
+            inner.push(i * 5 + j)
+        }
+        outer.push(inner)
+    }
+    print(len(outer))
+    print(outer[0][0])
+    print(outer[0][4])
+    print(outer[19][0])
+    print(outer[19][4])
+}
+
+// -- Struct allocation --
+struct Point { x: any, y: any }
+
+fn test_struct_allocation() {
+    print("--- struct allocation ---")
+    flux points = []
+    for i in 0..30 {
+        points.push(Point { x: i, y: i * 2 })
+    }
+    print(len(points))
+    print(points[0].x)
+    print(points[0].y)
+    print(points[29].x)
+    print(points[29].y)
+}
+
+// -- Enum allocation --
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Rgb(any, any, any)
+}
+
+fn test_enum_allocation() {
+    print("--- enum allocation ---")
+    flux colors = []
+    for i in 0..20 {
+        colors.push(Color::Rgb(i, i + 1, i + 2))
+    }
+    print(len(colors))
+    print(colors[0])
+    print(colors[19])
+
+    let r = Color::Red
+    let g = Color::Green
+    let b = Color::Blue
+    print(r)
+    print(g)
+    print(b)
+}
+
+// -- Tuple allocation --
+fn test_tuple_allocation() {
+    print("--- tuple allocation ---")
+    let t1 = (1, "two", 3.0)
+    let t2 = (true, nil, 42)
+    let t3 = ("nested", (1, 2), "end")
+    print(t1.0)
+    print(t1.1)
+    print(t1.2)
+    print(t2.0)
+    print(t2.1)
+    print(t2.2)
+    print(t3.0)
+    print(t3.2)
+}
+
+// -- Buffer allocation --
+fn test_buffer_allocation() {
+    print("--- buffer allocation ---")
+    flux buf = Buffer::new(256)
+    for i in 0..256 {
+        buf.write_u8(i, i % 128)
+    }
+    print(buf.read_u8(0))
+    print(buf.read_u8(127))
+    print(buf.read_u8(255))
+    print(buf.len())
+}
+
+// -- Set allocation --
+fn test_set_allocation() {
+    print("--- set allocation ---")
+    flux s = Set::new()
+    for i in 0..100 {
+        s.add(i)
+    }
+    print(s.len())
+    print(s.has(0))
+    print(s.has(50))
+    print(s.has(99))
+    print(s.has(100))
+}
+
+// -- Short-lived objects (should be collected) --
+fn test_short_lived() {
+    print("--- short lived ---")
+    for i in 0..200 {
+        // These are created and immediately discarded
+        let s = "temp_" + to_string(i) + "_value"
+        let x = len(s)
+        // x is used but s should be collectible after each iteration
+    }
+    print("survived 200 iterations")
+
+    for i in 0..100 {
+        flux m = Map::new()
+        m["key"] = i
+        // m goes out of scope each iteration
+    }
+    print("survived 100 map iterations")
+}
+
+// -- Empty collections --
+fn test_empty_collections() {
+    print("--- empty collections ---")
+    let a = []
+    print(len(a))
+    flux m = Map::new()
+    print(typeof(m))
+    flux s = Set::new()
+    print(s.len())
+    let t = (1, 2)
+    print(typeof(t))
+}
+
+fn main() {
+    test_primitives()
+    test_string_allocation()
+    test_array_allocation()
+    test_map_allocation()
+    test_nested_arrays()
+    test_struct_allocation()
+    test_enum_allocation()
+    test_tuple_allocation()
+    test_buffer_allocation()
+    test_set_allocation()
+    test_short_lived()
+    test_empty_collections()
+    print("ALL GC BASIC TESTS PASSED")
+}

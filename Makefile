@@ -252,8 +252,10 @@ TEST_SRCS = $(TEST_DIR)/test_main.c \
 TEST_OBJS   = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/tests/%.o)
 TEST_TARGET = $(BUILD_DIR)/test_runner
 
-# WASM build
-WASM_SRCS   = $(LIB_SRCS) $(SRC_DIR)/wasm_api.c
+# WASM build — exclude tree-walk evaluator and CLI-only modules to reduce binary size
+WASM_EXCLUDE = $(SRC_DIR)/eval.c $(SRC_DIR)/phase_check.c $(SRC_DIR)/match_check.c \
+               $(SRC_DIR)/completion.c $(SRC_DIR)/doc_gen.c $(SRC_DIR)/formatter.c
+WASM_SRCS   = $(filter-out $(WASM_EXCLUDE), $(LIB_SRCS)) $(SRC_DIR)/wasm_api.c
 WASM_OUT    = lattice-lang.org/lattice.js
 WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinclude -O2 \
               -sEXPORTED_FUNCTIONS=_lat_init,_lat_run_line,_lat_is_complete,_lat_destroy,_lat_init_regvm,_lat_run_line_regvm,_lat_destroy_regvm,_lat_get_error,_lat_clear_error,_lat_heap_bytes,_free \
@@ -312,7 +314,7 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -334,10 +336,6 @@ runtime: $(RUNTIME_TARGET)
 
 $(RUNTIME_TARGET): $(RUNTIME_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-runtime-release: clean $(RUNTIME_TARGET)
-	$(STRIP) $(RUNTIME_TARGET)
-	@echo "Built: $(RUNTIME_TARGET) ($$(ls -lh $(RUNTIME_TARGET) | awk '{print $$5}'))"
 
 $(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
@@ -661,6 +659,9 @@ bench-regvm: $(TARGET)
 bench-stress: $(TARGET)
 	@for f in benchmarks/*.lat; do echo "--- $$f ---"; ./clat --gc-stress --stats "$$f"; done
 
+bench-all: $(TARGET)
+	@bash scripts/run-benchmarks.sh
+
 ext-pg:
 	$(MAKE) -C extensions/pg
 
@@ -719,8 +720,10 @@ endif
 
 ifdef WINDOWS
 STRIP = x86_64-w64-mingw32-strip
+RUNTIME_RELEASE_NAME = clat-run-windows-x86_64.exe
 else
 STRIP = strip
+RUNTIME_RELEASE_NAME = clat-run-$(RELEASE_OS)-$(RELEASE_ARCH)
 endif
 
 release: clean $(TARGET)
@@ -728,6 +731,11 @@ release: clean $(TARGET)
 	cp $(TARGET) $(RELEASE_NAME)
 	@echo "Built: $(RELEASE_NAME) ($$(ls -lh $(RELEASE_NAME) | awk '{print $$5}'))"
 
+runtime-release: clean $(RUNTIME_TARGET)
+	$(STRIP) $(RUNTIME_TARGET)
+	cp $(RUNTIME_TARGET) $(RUNTIME_RELEASE_NAME)
+	@echo "Built: $(RUNTIME_RELEASE_NAME) ($$(ls -lh $(RUNTIME_RELEASE_NAME) | awk '{print $$5}'))"
+
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(LSP_TARGET) $(RUNTIME_TARGET)
-	rm -f *.plist src/*.plist
+	rm -f clat-run-* *.plist src/*.plist

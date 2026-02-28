@@ -1,0 +1,274 @@
+// Test: GC with closures — captured values must survive collection,
+// uncaptured values should be collectible
+
+// -- Basic closure capturing --
+fn test_basic_capture() {
+    print("--- basic capture ---")
+    let x = 42
+    let f = | | { return x }
+    // x is captured; must survive GC
+    print(f())
+
+    let name = "lattice"
+    let greet = | | { return "hello " + name }
+    print(greet())
+}
+
+// -- Closure factory: returned closures keep captured values alive --
+fn make_adder(n: any) {
+    return |x| { return x + n }
+}
+
+fn make_multiplier(n: any) {
+    return |x| { return x * n }
+}
+
+fn test_closure_factory() {
+    print("--- closure factory ---")
+    let add5 = make_adder(5)
+    let add10 = make_adder(10)
+    let mul3 = make_multiplier(3)
+
+    print(add5(100))
+    print(add10(100))
+    print(mul3(7))
+
+    // Create many closures — earlier ones should still work
+    flux adders = []
+    for i in 0..20 {
+        adders.push(make_adder(i))
+    }
+    // Verify closures via temp variable (direct index call not supported)
+    let f0 = adders[0]
+    print(f0(100))
+    let f10 = adders[10]
+    print(f10(100))
+    let f19 = adders[19]
+    print(f19(100))
+}
+
+// -- Nested closures: inner closure captures from outer --
+fn make_nested(a: any) {
+    let outer = |b| {
+        let inner = |c| {
+            return a + b + c
+        }
+        return inner
+    }
+    return outer
+}
+
+fn test_nested_closures() {
+    print("--- nested closures ---")
+    let f = make_nested(100)
+    let g = f(20)
+    print(g(3))
+
+    // Chain of nested closures
+    let step1 = make_nested(1000)
+    let step2 = step1(200)
+    let h = step2(30)
+    print(h)
+}
+
+// -- Closure capturing mutable state --
+fn make_counter() {
+    flux count = 0
+    let inc = | | {
+        count = count + 1
+        return count
+    }
+    return inc
+}
+
+fn test_counter_closure() {
+    print("--- counter closure ---")
+    let c1 = make_counter()
+    let c2 = make_counter()
+
+    print(c1())
+    print(c1())
+    print(c1())
+    // c2 has its own state
+    print(c2())
+    print(c2())
+    // c1 continues from where it was
+    print(c1())
+}
+
+// -- Closure capturing strings --
+fn make_greeter(greeting: any) {
+    return |name| {
+        return greeting + ", " + name + "!"
+    }
+}
+
+fn test_string_capture() {
+    print("--- string capture ---")
+    let hello = make_greeter("Hello")
+    let hi = make_greeter("Hi")
+
+    print(hello("Alice"))
+    print(hello("Bob"))
+    print(hi("Charlie"))
+
+    // Create many greeters to pressure GC
+    flux greeters = []
+    for i in 0..30 {
+        greeters.push(make_greeter("Greeting_" + to_string(i)))
+    }
+    let g0 = greeters[0]
+    print(g0("X"))
+    let g29 = greeters[29]
+    print(g29("Y"))
+}
+
+// -- Higher-order closures --
+fn compose(f: any, g: any) {
+    return |x| { return f(g(x)) }
+}
+
+fn test_higher_order() {
+    print("--- higher order ---")
+    let double = |x| { return x * 2 }
+    let inc = |x| { return x + 1 }
+
+    let double_then_inc = compose(inc, double)
+    let inc_then_double = compose(double, inc)
+
+    print(double_then_inc(5))
+    print(inc_then_double(5))
+
+    // Deep composition chain
+    flux f = |x| { return x }
+    for i in 0..10 {
+        f = compose(make_adder(1), f)
+    }
+    print(f(0))
+}
+
+// -- Closures capturing arrays --
+fn test_capture_array() {
+    print("--- capture array ---")
+    let data = [10, 20, 30, 40, 50]
+    let sum_data = | | {
+        flux total = 0
+        for v in data {
+            total = total + v
+        }
+        return total
+    }
+    print(sum_data())
+
+    // Create a function that returns element at index
+    let get_elem = |idx| { return data[idx] }
+    print(get_elem(0))
+    print(get_elem(4))
+}
+
+// -- Many closures created in a loop (stress test) --
+fn test_many_closures() {
+    print("--- many closures ---")
+    flux fns = []
+    for i in 0..100 {
+        let val = i * 3
+        fns.push(| | { return val })
+    }
+
+    // Verify first, middle, and last via temp variables
+    let fn0 = fns[0]
+    print(fn0())
+    let fn50 = fns[50]
+    print(fn50())
+    let fn99 = fns[99]
+    print(fn99())
+
+    // Call all of them to ensure nothing was collected
+    flux sum = 0
+    for i in 0..100 {
+        let cur = fns[i]
+        sum = sum + cur()
+    }
+    print(sum)
+}
+
+// -- Closure escaping scope --
+fn test_escape() {
+    print("--- escape ---")
+
+    // Closure created in inner block escapes
+    let make = | | {
+        let secret = "hidden_value"
+        return | | { return secret }
+    }
+
+    let getter = make()
+    // The string "hidden_value" must survive even though make() returned
+    print(getter())
+}
+
+// -- Recursive function under GC pressure --
+fn fib(n: any) {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn test_recursive() {
+    print("--- recursive ---")
+    print(fib(10))
+    print(fib(15))
+}
+
+// -- Closure with struct capture --
+struct Pair { first: any, second: any }
+
+fn make_pair_getter(p: any) {
+    let get_first = | | { return p.first }
+    let get_second = | | { return p.second }
+    return |which| {
+        if which == "first" {
+            return get_first()
+        }
+        return get_second()
+    }
+}
+
+fn test_struct_capture() {
+    print("--- struct capture ---")
+    let p = Pair { first: "hello", second: 42 }
+    let getter = make_pair_getter(p)
+    print(getter("first"))
+    print(getter("second"))
+}
+
+// -- Closure chain: each captures the previous --
+fn test_closure_chain() {
+    print("--- closure chain ---")
+    flux f = |x| { return x }
+    for i in 0..20 {
+        let prev = f
+        let offset = i
+        f = |x| { return prev(x) + offset }
+    }
+    // Sum of 0..19 = 190, plus initial x=0
+    print(f(0))
+    print(f(10))
+}
+
+fn main() {
+    test_basic_capture()
+    test_closure_factory()
+    test_nested_closures()
+    test_counter_closure()
+    test_string_capture()
+    test_higher_order()
+    test_capture_array()
+    test_many_closures()
+    test_escape()
+    test_recursive()
+    test_struct_capture()
+    test_closure_chain()
+    print("ALL GC CLOSURE TESTS PASSED")
+}

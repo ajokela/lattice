@@ -2961,9 +2961,11 @@ fn is_statement_start() {
     if txt == "enum" { return true }
     if txt == "defer" { return true }
     if txt == "import" { return true }
+    if txt == "use" { return true }
     if t.type == "from" { return true }
     if txt == "impl" { return true }
     if txt == "trait" { return true }
+    if txt == "throw" { return true }
     if t.type == "scope" { return true }
     // @fluid / @crystal annotations before fn/struct
     if t.type == "@" || txt == "@" { return true }
@@ -3064,6 +3066,11 @@ fn parse_statement() {
         return
     }
 
+    if txt == "use" {
+        parse_use()
+        return
+    }
+
     if t.type == "from" {
         parse_from_import()
         return
@@ -3076,6 +3083,11 @@ fn parse_statement() {
 
     if txt == "trait" {
         parse_trait_declaration()
+        return
+    }
+
+    if txt == "throw" {
+        parse_throw()
         return
     }
 
@@ -3503,6 +3515,15 @@ fn parse_return() {
     emit_byte(OP_DEFER_RUN, line)
     emit_byte(0, line)  // scope_depth 0 = run all defers
     emit_byte(OP_RETURN, line)
+}
+
+fn parse_throw() {
+    let line = current_line()
+    advance()  // consume 'throw'
+    // throw requires an expression to throw
+    // Support both throw expr and throw(expr) — the latter is just a parenthesized expression
+    parse_expression()
+    emit_byte(OP_THROW, line)
 }
 
 fn parse_while() {
@@ -4095,6 +4116,7 @@ fn parse_defer() {
     }
     expect(nil, "}")
     end_scope(line)
+    emit_byte(OP_UNIT, line)   // implicit return value for defer block
     emit_byte(OP_RETURN, line)
     patch_jump(jump)
 }
@@ -4218,6 +4240,93 @@ fn parse_from_import() {
         }
     }
     emit_byte(OP_POP, line)  // pop original module map
+}
+
+// Extract module name from a path string.
+// "/tmp/test_mod" -> "test_mod", "foo/bar.lat" -> "bar", "mymod" -> "mymod"
+fn path_basename(path: any) {
+    // Find the last '/' to get the filename part
+    flux last_slash = -1
+    let plen = len(path)
+    for i in 0..plen {
+        if path[i] == "/" {
+            last_slash = i
+        }
+    }
+    flux name = path
+    if last_slash >= 0 {
+        name = path.substring(last_slash + 1, plen)
+    }
+    // Strip .lat extension if present
+    let nlen = len(name)
+    if nlen > 4 {
+        if name.substring(nlen - 4, nlen) == ".lat" {
+            name = name.substring(0, nlen - 4)
+        }
+    }
+    return name
+}
+
+// Parse `use` statement:
+//   use "path/to/module"              -> import module, define as basename global
+//   use "path/to/module" { a, b, c }  -> selective import of named exports
+fn parse_use() {
+    let line = current_line()
+    advance()  // consume 'use'
+
+    let path = expect("string", nil).text
+    let path_idx = string_constant(path)
+    emit_bytes(OP_IMPORT, path_idx, line)
+
+    if peek_text() == "{" {
+        // Selective import: use "path" { name1, name2 }
+        advance()  // consume '{'
+        flux sel_names = []
+        while peek_text() != "}" {
+            if peek() == nil {
+                compiler_error("unexpected end of input in use statement", line)
+            }
+            sel_names.push(expect("identifier", nil).text)
+            if peek_text() == "," { advance() }
+        }
+        expect(nil, "}")
+
+        // For each selective name: DUP module map, GET_FIELD, check not nil, DEFINE
+        let sel_count = len(sel_names)
+        for i in 0..sel_count {
+            emit_byte(OP_DUP, line)
+            let field_idx = string_constant(sel_names[i])
+            emit_bytes(OP_GET_FIELD, field_idx, line)
+            // Check that the export exists (not nil)
+            emit_byte(OP_DUP, line)
+            let import_ok = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+            // nil -> error: module does not export this name
+            emit_byte(OP_POP, line)  // pop nil dup
+            emit_byte(OP_POP, line)  // pop nil val
+            emit_byte(OP_POP, line)  // pop module map
+            let err_msg = "module '" + path + "' does not export '" + sel_names[i] + "'"
+            emit_constant(make_string_const(err_msg), line)
+            emit_byte(OP_THROW, line)
+            patch_jump(import_ok)
+            emit_byte(OP_POP, line)  // pop non-nil dup
+            if scope_depth > 0 {
+                add_local(sel_names[i])
+            } else {
+                let name_idx = string_constant(sel_names[i])
+                emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line)
+            }
+        }
+        emit_byte(OP_POP, line)  // pop original module map
+    } else {
+        // Whole-module import: use "path/to/module" -> define as basename
+        let mod_name = path_basename(path)
+        if scope_depth > 0 {
+            add_local(mod_name)
+        } else {
+            let name_idx = string_constant(mod_name)
+            emit_wide_op(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line)
+        }
+    }
 }
 
 fn parse_annotation() {

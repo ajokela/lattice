@@ -1,0 +1,49 @@
+// Benchmark: Array Operations
+// Measures array push, index access, mutation, and iteration.
+// Tests dynamic array growth, random access, and sequential scan.
+
+fn main() {
+    let t0 = time()
+
+    // Push 50K elements
+    flux arr = []
+    flux i = 0
+    while i < 50000 {
+        arr.push(i)
+        i = i + 1
+    }
+    print("pushed: ${arr.len()}")
+
+    // Index access: sum all elements
+    flux sum = 0
+    flux j = 0
+    while j < arr.len() {
+        sum = sum + arr[j]
+        j = j + 1
+    }
+    print("sum: ${sum}")
+
+    // Overwrite every element
+    flux k = 0
+    while k < arr.len() {
+        arr[k] = arr[k] * 2
+        k = k + 1
+    }
+    print("doubled[0]: ${arr[0]}, doubled[last]: ${arr[49999]}")
+
+    // Build a second array and sum with for-in
+    flux arr2 = []
+    flux m = 0
+    while m < 25000 {
+        arr2.push(m * 3)
+        m = m + 1
+    }
+    flux total = 0
+    for val in arr2 {
+        total = total + val
+    }
+    print("arr2 sum: ${total}")
+
+    let elapsed = time() - t0
+    print("elapsed: ${elapsed}ms")
+}

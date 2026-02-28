@@ -1,0 +1,319 @@
+// Test: GC stress — allocate thousands of objects in loops,
+// forcing multiple GC cycles, verifying correctness and no crashes
+
+// -- Thousands of string allocations --
+fn test_string_storm() {
+    print("--- string storm ---")
+    flux count = 0
+    for i in 0..2000 {
+        let s = "item_" + to_string(i) + "_data_" + to_string(i * 3)
+        count = count + 1
+    }
+    print(count)
+}
+
+// -- Thousands of array allocations --
+fn test_array_storm() {
+    print("--- array storm ---")
+    flux total_len = 0
+    for i in 0..500 {
+        flux arr = []
+        for j in 0..10 {
+            arr.push(i * 10 + j)
+        }
+        total_len = total_len + len(arr)
+    }
+    print(total_len)
+}
+
+// -- Thousands of map allocations --
+fn test_map_storm() {
+    print("--- map storm ---")
+    flux total = 0
+    for i in 0..500 {
+        flux m = Map::new()
+        m["a"] = i
+        m["b"] = i * 2
+        m["c"] = i * 3
+        total = total + m["a"] + m["b"] + m["c"]
+    }
+    print(total)
+}
+
+// -- Struct allocation storm --
+struct DataPoint { x: any, y: any, label: any }
+
+fn test_struct_storm() {
+    print("--- struct storm ---")
+    flux last_label = ""
+    for i in 0..1000 {
+        let dp = DataPoint {
+            x: i,
+            y: i * 2,
+            label: "point_" + to_string(i)
+        }
+        last_label = dp.label
+    }
+    print(last_label)
+}
+
+// -- Mixed allocation storm --
+fn test_mixed_storm() {
+    print("--- mixed storm ---")
+    flux total = 0
+    for i in 0..500 {
+        // String
+        let s = "val_" + to_string(i)
+        total = total + len(s)
+
+        // Array
+        let arr = [i, i + 1, i + 2]
+        total = total + arr[0]
+
+        // Map
+        flux m = Map::new()
+        m["k"] = i
+        total = total + m["k"]
+
+        // Struct
+        let dp = DataPoint { x: i, y: 0, label: "" }
+        total = total + dp.x
+    }
+    print(total)
+}
+
+// -- Long-lived vs short-lived objects --
+fn test_generational_pressure() {
+    print("--- generational pressure ---")
+    // Long-lived: an array that persists the entire test
+    flux survivors = []
+    for i in 0..20 {
+        survivors.push("survivor_" + to_string(i))
+    }
+
+    // Short-lived: thousands of temporaries created and discarded
+    for i in 0..1000 {
+        let temp_str = "temp_" + to_string(i) + "_" + to_string(i * 7)
+        let temp_arr = [i, i + 1, i + 2, i + 3]
+        flux temp_map = Map::new()
+        temp_map["x"] = i
+        // All temps become garbage each iteration
+    }
+
+    // Verify long-lived objects survived
+    print(len(survivors))
+    print(survivors[0])
+    print(survivors[19])
+}
+
+// -- Fibonacci with heavy allocation (creates many intermediate values) --
+fn test_fib_stress() {
+    print("--- fib stress ---")
+    // Iterative fib with string logging (allocation-heavy)
+    flux a = 0
+    flux b = 1
+    flux log = ""
+    for i in 0..30 {
+        let temp = a + b
+        a = b
+        b = temp
+        log = log + to_string(a) + ","
+    }
+    print(a)
+    print(len(log))
+}
+
+// -- Repeated tree construction and destruction --
+struct TNode { val: any, left: any, right: any }
+
+fn build_tree(depth: any) {
+    if depth <= 0 {
+        return TNode { val: 1, left: nil, right: nil }
+    }
+    return TNode {
+        val: depth,
+        left: build_tree(depth - 1),
+        right: build_tree(depth - 1)
+    }
+}
+
+fn sum_tree(node: any) {
+    if node == nil {
+        return 0
+    }
+    return node.val + sum_tree(node.left) + sum_tree(node.right)
+}
+
+fn test_tree_churn() {
+    print("--- tree churn ---")
+    flux total = 0
+    for round in 0..100 {
+        let t = build_tree(5)
+        total = total + sum_tree(t)
+        // Tree becomes garbage after each iteration
+    }
+    print(total)
+}
+
+// -- Linked list churn --
+struct LNode { val: any, next: any }
+
+fn build_list(n: any) {
+    flux head = nil
+    for i in 0..n {
+        head = LNode { val: i, next: head }
+    }
+    return head
+}
+
+fn sum_list(node: any) {
+    flux total = 0
+    flux cur = node
+    while cur != nil {
+        total = total + cur.val
+        cur = cur.next
+    }
+    return total
+}
+
+fn test_list_churn() {
+    print("--- list churn ---")
+    flux total = 0
+    for round in 0..200 {
+        let list = build_list(50)
+        total = total + sum_list(list)
+    }
+    print(total)
+}
+
+// -- String concatenation storm --
+fn test_string_concat_storm() {
+    print("--- string concat storm ---")
+    flux result = ""
+    for i in 0..200 {
+        result = result + "x"
+    }
+    print(len(result))
+
+    // Many independent string concats
+    flux total_len = 0
+    for i in 0..500 {
+        let s = to_string(i) + "_" + to_string(i * 2) + "_end"
+        total_len = total_len + len(s)
+    }
+    print(total_len)
+}
+
+// -- Closure allocation storm --
+fn test_closure_storm() {
+    print("--- closure storm ---")
+    flux total = 0
+    for i in 0..500 {
+        let val = i
+        let f = | | { return val * 2 }
+        total = total + f()
+    }
+    print(total)
+}
+
+// -- Tuple allocation storm --
+fn test_tuple_storm() {
+    print("--- tuple storm ---")
+    flux total = 0
+    for i in 0..1000 {
+        let t = (i, i + 1, i + 2)
+        total = total + t.0 + t.1 + t.2
+    }
+    print(total)
+}
+
+// -- Buffer allocation storm --
+fn test_buffer_storm() {
+    print("--- buffer storm ---")
+    flux total = 0
+    for i in 0..200 {
+        flux buf = Buffer::new(32)
+        buf.write_u8(0, i % 128)
+        total = total + buf.read_u8(0)
+    }
+    print(total)
+}
+
+// -- Set allocation storm --
+fn test_set_storm() {
+    print("--- set storm ---")
+    flux total_size = 0
+    for i in 0..200 {
+        flux s = Set::new()
+        for j in 0..10 {
+            s.add(j)
+        }
+        total_size = total_size + s.len()
+    }
+    print(total_size)
+}
+
+// -- Enum allocation storm --
+enum Status {
+    Active(any),
+    Inactive,
+    Pending(any, any)
+}
+
+fn test_enum_storm() {
+    print("--- enum storm ---")
+    flux count = 0
+    for i in 0..1000 {
+        let s = Status::Active(i)
+        let p = Status::Pending(i, i + 1)
+        count = count + 2
+    }
+    print(count)
+}
+
+// -- Combined mega-stress --
+fn test_mega_stress() {
+    print("--- mega stress ---")
+    flux total = 0
+    for i in 0..300 {
+        // String
+        let s = "mega_" + to_string(i)
+        // Array
+        let arr = [i, i * 2]
+        // Map
+        flux m = Map::new()
+        m["v"] = i
+        // Struct
+        let dp = DataPoint { x: i, y: i, label: s }
+        // Tuple
+        let t = (i, s)
+        // Closure
+        let val = i
+        let f = | | { return val }
+        // Enum
+        let st = Status::Active(i)
+
+        total = total + arr[0] + m["v"] + dp.x + t.0 + f()
+    }
+    print(total)
+}
+
+fn main() {
+    test_string_storm()
+    test_array_storm()
+    test_map_storm()
+    test_struct_storm()
+    test_mixed_storm()
+    test_generational_pressure()
+    test_fib_stress()
+    test_tree_churn()
+    test_list_churn()
+    test_string_concat_storm()
+    test_closure_storm()
+    test_tuple_storm()
+    test_buffer_storm()
+    test_set_storm()
+    test_enum_storm()
+    test_mega_stress()
+    print("ALL GC STRESS TESTS PASSED")
+}

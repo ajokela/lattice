@@ -1,0 +1,235 @@
+// Test: GC with concurrent scope/spawn
+// Verifies GC handles multiple spawned tasks creating objects simultaneously
+// Note: arrays inside spawn and heavy string concat in 3+ spawns
+// are avoided due to known concurrency issues
+
+// -- Basic spawns with string allocation --
+fn test_basic_spawn_alloc() {
+    print("--- basic spawn alloc ---")
+    scope {
+        spawn {
+            let s = "spawn_A_" + to_string(100)
+            print(s)
+        }
+        spawn {
+            let s = "spawn_B_" + to_string(200)
+            print(s)
+        }
+    }
+    print("basic done")
+}
+
+// -- Multiple spawns with pure computation --
+fn test_compute_spawns() {
+    print("--- compute spawns ---")
+    scope {
+        spawn {
+            flux sum = 0
+            for i in 0..100 {
+                sum = sum + i
+            }
+            print(sum)
+        }
+        spawn {
+            flux product = 1
+            for i in 1..11 {
+                product = product * i
+            }
+            print(product)
+        }
+    }
+    print("compute done")
+}
+
+// -- Spawns with modest string building --
+fn test_string_spawn() {
+    print("--- string spawn ---")
+    scope {
+        spawn {
+            flux s = ""
+            for i in 0..20 {
+                s = s + to_string(i) + ","
+            }
+            print(len(s))
+        }
+        spawn {
+            flux s = ""
+            for i in 0..20 {
+                s = s + "x"
+            }
+            print(len(s))
+        }
+    }
+    print("string spawn done")
+}
+
+// -- Several small spawns --
+fn test_many_spawns() {
+    print("--- many spawns ---")
+    scope {
+        spawn {
+            let a = 1 + 2 + 3
+            print(a)
+        }
+        spawn {
+            let b = 10 * 5
+            print(b)
+        }
+        spawn {
+            let c = "hello" + " " + "world"
+            print(c)
+        }
+    }
+    print("many spawns done")
+}
+
+// -- Nested scope/spawn --
+fn test_nested_scope() {
+    print("--- nested scope ---")
+    scope {
+        spawn {
+            scope {
+                spawn {
+                    print("inner A")
+                }
+                spawn {
+                    print("inner B")
+                }
+            }
+            print("outer done")
+        }
+    }
+    print("nested scope done")
+}
+
+// -- Scope inside a loop --
+fn test_scope_in_loop() {
+    print("--- scope in loop ---")
+    flux total = 0
+    for round in 0..5 {
+        scope {
+            spawn {
+                flux sum = 0
+                for i in 0..10 {
+                    sum = sum + i
+                }
+            }
+        }
+        total = total + 1
+    }
+    print(total)
+}
+
+// -- Scope with function calls --
+fn compute_value(n: any) {
+    flux result = 0
+    for i in 0..n {
+        result = result + i
+    }
+    return result
+}
+
+fn test_scope_with_functions() {
+    print("--- scope with functions ---")
+    scope {
+        spawn {
+            let v = compute_value(20)
+            print(v)
+        }
+        spawn {
+            let v = compute_value(10)
+            print(v)
+        }
+    }
+    print("scope functions done")
+}
+
+// -- Scope with closures --
+fn test_scope_with_closures() {
+    print("--- scope with closures ---")
+    let mul = |a, b| { return a * b }
+    let add = |a, b| { return a + b }
+
+    scope {
+        spawn {
+            let r = mul(6, 7)
+            print(r)
+        }
+        spawn {
+            let r = add(100, 200)
+            print(r)
+        }
+    }
+    print("scope closures done")
+}
+
+// -- Sequential scopes creating garbage --
+fn test_sequential_scopes() {
+    print("--- sequential scopes ---")
+    for round in 0..10 {
+        scope {
+            spawn {
+                let s = "round_" + to_string(round)
+            }
+        }
+    }
+    print("10 sequential scopes done")
+}
+
+// -- Scope with try/catch --
+fn test_scope_try() {
+    print("--- scope try ---")
+    try {
+        scope {
+            spawn {
+                let x = 1 + 2
+                print(x)
+            }
+            spawn {
+                let y = "safe"
+                print(y)
+            }
+        }
+        print("try scope ok")
+    } catch e {
+        print("unexpected error")
+    }
+}
+
+// -- Scope after heavy non-concurrent allocation --
+fn test_scope_after_alloc() {
+    print("--- scope after alloc ---")
+    // Allocate heavily before spawning
+    flux data = ""
+    for i in 0..200 {
+        data = data + to_string(i) + ","
+    }
+    let data_len = len(data)
+
+    scope {
+        spawn {
+            // Use the pre-computed value
+            print(data_len)
+        }
+        spawn {
+            let x = 42 * 2
+            print(x)
+        }
+    }
+    print("scope after alloc done")
+}
+
+fn main() {
+    test_basic_spawn_alloc()
+    test_compute_spawns()
+    test_string_spawn()
+    test_many_spawns()
+    test_nested_scope()
+    test_scope_in_loop()
+    test_scope_with_functions()
+    test_scope_with_closures()
+    test_sequential_scopes()
+    test_scope_try()
+    test_scope_after_alloc()
+    print("ALL GC CONCURRENT TESTS PASSED")
+}

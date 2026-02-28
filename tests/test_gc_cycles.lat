@@ -1,0 +1,295 @@
+// Test: GC with complex/cyclic-like data structures
+// Arrays containing arrays, maps containing maps, deep nesting,
+// and structures that create graph-like reference patterns
+
+// -- Deeply nested arrays --
+fn test_deep_array_nesting() {
+    print("--- deep array nesting ---")
+    // Build a 10-level deep nested array
+    flux val = [42]
+    for i in 0..10 {
+        val = [val, i]
+    }
+    // Navigate to the deepest value
+    flux cur = val
+    for i in 0..10 {
+        cur = cur[0]
+    }
+    print(cur[0])
+}
+
+// -- Arrays of arrays (matrix-like) --
+fn test_matrix() {
+    print("--- matrix ---")
+    flux matrix = []
+    for i in 0..20 {
+        flux row = []
+        for j in 0..20 {
+            row.push(i * 20 + j)
+        }
+        matrix.push(row)
+    }
+    print(matrix[0][0])
+    print(matrix[10][10])
+    print(matrix[19][19])
+    print(len(matrix))
+}
+
+// -- Maps containing maps --
+fn test_nested_maps() {
+    print("--- nested maps ---")
+    flux outer = Map::new()
+    for i in 0..10 {
+        flux inner = Map::new()
+        for j in 0..10 {
+            inner[to_string(j)] = i * 10 + j
+        }
+        outer[to_string(i)] = inner
+    }
+
+    let m0 = outer["0"]
+    print(m0["0"])
+    let m5 = outer["5"]
+    print(m5["5"])
+    let m9 = outer["9"]
+    print(m9["9"])
+}
+
+// -- Struct tree (binary tree via structs) --
+struct TreeNode { value: any, left: any, right: any }
+
+fn make_tree(depth: any) {
+    if depth <= 0 {
+        return TreeNode { value: depth, left: nil, right: nil }
+    }
+    let l = make_tree(depth - 1)
+    let r = make_tree(depth - 1)
+    return TreeNode { value: depth, left: l, right: r }
+}
+
+fn tree_sum(node: any) {
+    if node == nil {
+        return 0
+    }
+    return node.value + tree_sum(node.left) + tree_sum(node.right)
+}
+
+fn tree_depth(node: any) {
+    if node == nil {
+        return 0
+    }
+    let ld = tree_depth(node.left)
+    let rd = tree_depth(node.right)
+    if ld > rd {
+        return 1 + ld
+    }
+    return 1 + rd
+}
+
+fn tree_count(node: any) {
+    if node == nil {
+        return 0
+    }
+    return 1 + tree_count(node.left) + tree_count(node.right)
+}
+
+fn test_struct_tree() {
+    print("--- struct tree ---")
+    let t = make_tree(6)
+    print(tree_count(t))
+    print(tree_depth(t))
+    print(tree_sum(t))
+}
+
+// -- Linked list via structs --
+struct ListNode { value: any, next: any }
+
+fn make_list(n: any) {
+    flux head = nil
+    for i in 0..n {
+        head = ListNode { value: n - 1 - i, next: head }
+    }
+    return head
+}
+
+fn list_sum(node: any) {
+    flux total = 0
+    flux cur = node
+    while cur != nil {
+        total = total + cur.value
+        cur = cur.next
+    }
+    return total
+}
+
+fn list_len(node: any) {
+    flux count = 0
+    flux cur = node
+    while cur != nil {
+        count = count + 1
+        cur = cur.next
+    }
+    return count
+}
+
+fn test_linked_list() {
+    print("--- linked list ---")
+    let list = make_list(100)
+    print(list_len(list))
+    print(list_sum(list))
+    // First and last values
+    print(list.value)
+}
+
+// -- Graph-like structure via maps of arrays --
+fn test_adjacency_list() {
+    print("--- adjacency list ---")
+    flux graph = Map::new()
+    // Build a graph with 20 nodes, each with edges to a few others
+    for i in 0..20 {
+        flux edges = []
+        // Connect to next 3 nodes (wrapping)
+        for j in 1..4 {
+            edges.push((i + j) % 20)
+        }
+        graph[to_string(i)] = edges
+    }
+
+    // Verify structure
+    let e0 = graph["0"]
+    print(len(e0))
+    print(e0[0])
+    print(e0[1])
+    print(e0[2])
+    let e19 = graph["19"]
+    print(e19[0])
+}
+
+// -- Array of structs with cross-references --
+struct Person { name: any, friend_idx: any }
+
+fn test_cross_references() {
+    print("--- cross references ---")
+    flux people = []
+    for i in 0..50 {
+        people.push(Person {
+            name: "person_" + to_string(i),
+            friend_idx: (i + 7) % 50
+        })
+    }
+
+    // Follow the friend chain for a few hops
+    flux idx = 0
+    for hop in 0..5 {
+        idx = people[idx].friend_idx
+    }
+    print(people[idx].name)
+    print(len(people))
+}
+
+// -- Deeply nested structs --
+struct Wrapper { inner: any, label: any }
+
+fn test_deep_structs() {
+    print("--- deep structs ---")
+    flux w = Wrapper { inner: 42, label: "base" }
+    for i in 0..15 {
+        w = Wrapper { inner: w, label: "level_" + to_string(i) }
+    }
+    print(w.label)
+
+    // Unwrap to the bottom
+    flux cur = w
+    flux depth = 0
+    while typeof(cur) == "Struct" {
+        cur = cur.inner
+        depth = depth + 1
+    }
+    print(depth)
+    print(cur)
+}
+
+// -- Map of arrays of maps (3-level deep) --
+fn test_three_level_nesting() {
+    print("--- three level nesting ---")
+    flux db = Map::new()
+    for i in 0..5 {
+        flux records = []
+        for j in 0..5 {
+            flux record = Map::new()
+            record["id"] = i * 5 + j
+            record["data"] = "item_" + to_string(i) + "_" + to_string(j)
+            records.push(record)
+        }
+        db[to_string(i)] = records
+    }
+
+    let t0 = db["0"]
+    let r0 = t0[0]
+    print(r0["id"])
+    print(r0["data"])
+    let t4 = db["4"]
+    let r4 = t4[4]
+    print(r4["id"])
+    print(r4["data"])
+}
+
+// -- Create and discard many complex structures (GC pressure) --
+fn test_complex_churn() {
+    print("--- complex churn ---")
+    flux last_sum = 0
+    for round in 0..50 {
+        // Build a tree, compute sum, then discard
+        let t = make_tree(4)
+        last_sum = tree_sum(t)
+    }
+    print(last_sum)
+
+    // Build and discard linked lists
+    for round in 0..50 {
+        let list = make_list(30)
+        last_sum = list_sum(list)
+    }
+    print(last_sum)
+    print("churn survived")
+}
+
+// -- Mixed container types --
+fn test_mixed_containers() {
+    print("--- mixed containers ---")
+    flux items = []
+    for i in 0..20 {
+        if i % 3 == 0 {
+            flux m = Map::new()
+            m["type"] = "map"
+            m["value"] = i
+            items.push(m)
+        } else if i % 3 == 1 {
+            items.push([i, i * 2, i * 3])
+        } else {
+            items.push(Wrapper { inner: i, label: "wrap" })
+        }
+    }
+    print(len(items))
+
+    // Verify a few entries
+    let m0 = items[0]
+    print(m0["type"])
+    print(items[1][0])
+    print(items[2].inner)
+}
+
+fn main() {
+    test_deep_array_nesting()
+    test_matrix()
+    test_nested_maps()
+    test_struct_tree()
+    test_linked_list()
+    test_adjacency_list()
+    test_cross_references()
+    test_deep_structs()
+    test_three_level_nesting()
+    test_complex_churn()
+    test_mixed_containers()
+    print("ALL GC CYCLE TESTS PASSED")
+}

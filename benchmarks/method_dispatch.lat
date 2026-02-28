@@ -1,49 +1,64 @@
-// Benchmark: Method Dispatch
-// Measures struct field access, array.map/filter, and string methods.
+// Benchmark: Struct Method Dispatch
+// Measures struct creation, field access, and method-style callable field invocation.
+// Tests struct allocation and field lookup performance.
 
 struct Point {
     x: Int,
     y: Int,
 }
 
-fn make_points(n: Int) -> Array {
-    let points = []
-    for i in 0..n {
-        points.push(Point { x: i, y: i * 2 })
+struct Counter {
+    value: Int,
+    increment: Fn,
+    get_value: Fn,
+}
+
+fn make_counter(start: Int) -> Counter {
+    return Counter {
+        value: start,
+        increment: |self, n| {
+            self.value + n
+        },
+        get_value: |self| {
+            self.value
+        },
     }
-    points
 }
 
 fn main() {
     let t0 = time()
 
-    // Struct field access
-    let points = make_points(2000)
-    let sum = 0
-    for i in 0..points.len() {
-        sum = sum + points[i].x + points[i].y
+    // Struct creation and field access (100K iterations)
+    flux field_sum = 0
+    flux i = 0
+    while i < 100000 {
+        let p = Point { x: i, y: i * 2 }
+        field_sum = field_sum + p.x + p.y
+        i = i + 1
     }
-    print("field sum: ${sum}")
+    print("field sum: ${field_sum}")
 
-    // Array map/filter chains
-    let data = []
-    for i in 0..2000 {
-        data.push(i)
+    // Callable struct fields (50K iterations)
+    flux counter_sum = 0
+    flux j = 0
+    while j < 50000 {
+        let c = make_counter(j)
+        let val = c.increment(10)
+        counter_sum = counter_sum + val
+        j = j + 1
     }
-    let mapped = data.map(|x| x * 3)
-    let filtered = mapped.filter(|x| x % 7 == 0)
-    let reduced = filtered.map(|x| x + 1)
-    print("chain result: ${reduced.len()}")
+    print("counter sum: ${counter_sum}")
 
-    // String method dispatch
-    let count = 0
-    for i in 0..1000 {
-        let s = "Hello, World!"
-        let upper = s.to_upper()
-        let trimmed = "  spaces  ".trim()
-        count = count + upper.len() + trimmed.len()
+    // Nested struct field access
+    flux nested_sum = 0
+    flux k = 0
+    while k < 50000 {
+        let p1 = Point { x: k, y: k + 1 }
+        let p2 = Point { x: p1.x * 2, y: p1.y * 2 }
+        nested_sum = nested_sum + p2.x + p2.y
+        k = k + 1
     }
-    print("string ops: ${count}")
+    print("nested sum: ${nested_sum}")
 
     let elapsed = time() - t0
     print("elapsed: ${elapsed}ms")

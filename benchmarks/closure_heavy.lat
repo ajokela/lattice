@@ -1,31 +1,57 @@
-// Benchmark: Closure-heavy computation
-// Deep closure nesting with map/filter chains to stress shadow stack depth.
+// Benchmark: Closure Creation and Invocation
+// Measures closure allocation, captured variable access, and higher-order function chains.
+// Stresses the closure/upvalue machinery of each backend.
+
+fn apply(f: Fn, x: Int) -> Int {
+    return f(x)
+}
+
+fn make_adder(n: Int) -> Fn {
+    return |x| x + n
+}
+
+fn compose(f: Fn, g: Fn) -> Fn {
+    return |x| f(g(x))
+}
 
 fn main() {
-    let data = []
-    for i in 0..500 {
-        data.push(i)
+    let t0 = time()
+
+    // Create and invoke 100K closures with captured variables
+    flux sum = 0
+    flux i = 0
+    while i < 100000 {
+        let adder = make_adder(i)
+        sum = sum + apply(adder, 1)
+        i = i + 1
     }
+    print("adder sum: ${sum}")
 
-    // Chain of map/filter operations
-    let step1 = data.map(|x| x * 2)
-    let step2 = step1.filter(|x| x % 3 == 0)
-    let step3 = step2.map(|x| x + 1)
-    let step4 = step3.filter(|x| x < 500)
-    let step5 = step4.map(|x| x * x)
+    // Compose closures and invoke them
+    flux comp_sum = 0
+    flux j = 0
+    while j < 50000 {
+        let double = |x| x * 2
+        let inc = |x| x + 1
+        let f = compose(double, inc)
+        comp_sum = comp_sum + f(j)
+        j = j + 1
+    }
+    print("compose sum: ${comp_sum}")
 
-    // Nested closures with captured variables
-    let base = 10
-    let transformed = data.map(|x| {
-        let inner = x + base
-        inner * 2
-    })
+    // Closure capturing loop variable (deep nesting)
+    flux nested_sum = 0
+    flux k = 0
+    while k < 50000 {
+        let a = k
+        let f1 = |x| x + a
+        let b = f1(1)
+        let f2 = |x| x + b
+        nested_sum = nested_sum + f2(1)
+        k = k + 1
+    }
+    print("nested sum: ${nested_sum}")
 
-    let filtered = transformed.filter(|x| {
-        let threshold = 100
-        x > threshold
-    })
-
-    print(step5.len())
-    print(filtered.len())
+    let elapsed = time() - t0
+    print("elapsed: ${elapsed}ms")
 }

@@ -1,5 +1,6 @@
 // Benchmark: Recursive Fibonacci
-// Measures function call overhead (~29M calls for fib(35)).
+// Measures function call overhead and recursion. fib(30) produces ~2.7M calls.
+// Expected result: fib(30) = 832040
 
 fn fib(n: Int) -> Int {
     if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
@@ -7,8 +8,8 @@ fn fib(n: Int) -> Int {
 
 fn main() {
     let t0 = time()
-    let result = fib(35)
+    let result = fib(30)
     let elapsed = time() - t0
-    print("fib(35) = ${result}")
+    print("fib(30) = ${result}")
     print("elapsed: ${elapsed}ms")
 }
