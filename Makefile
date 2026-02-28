@@ -29,7 +29,11 @@ ifndef SKIP_AUTODETECT
 EDIT_AVAILABLE := $(shell pkg-config --exists libedit 2>/dev/null && echo yes || echo no)
 ifeq ($(EDIT_AVAILABLE),yes)
     EDIT_CFLAGS  := $(shell pkg-config --cflags libedit) -DLATTICE_HAS_EDITLINE
-    EDIT_LDFLAGS := $(shell pkg-config --libs libedit)
+    ifdef STATIC
+        EDIT_LDFLAGS := $(shell pkg-config --libs --static libedit)
+    else
+        EDIT_LDFLAGS := $(shell pkg-config --libs libedit)
+    endif
 else
     # Try linking -ledit directly (macOS ships it without pkg-config on some setups)
     EDIT_TEST := $(shell echo 'int main(){return 0;}' | $(CC) -x c - -ledit -o /dev/null 2>/dev/null && echo yes || echo no)
@@ -55,7 +59,11 @@ LDFLAGS += $(EDIT_LDFLAGS)
 TLS_AVAILABLE := $(shell pkg-config --exists openssl 2>/dev/null && echo yes || echo no)
 ifeq ($(TLS_AVAILABLE),yes)
     TLS_CFLAGS  := $(shell pkg-config --cflags openssl) -DLATTICE_HAS_TLS
-    TLS_LDFLAGS := $(shell pkg-config --libs openssl)
+    ifdef STATIC
+        TLS_LDFLAGS := $(shell pkg-config --libs --static openssl)
+    else
+        TLS_LDFLAGS := $(shell pkg-config --libs openssl)
+    endif
 endif
 ifeq ($(TLS),0)
     TLS_CFLAGS  :=
