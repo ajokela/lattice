@@ -27,6 +27,7 @@
 #include "array_ops.h"
 #include "channel.h"
 #include "iterator.h"
+#include "progress.h"
 #include "ext.h"
 #include "lexer.h"
 #include "parser.h"
@@ -3774,6 +3775,73 @@ static LatValue native_load_bytecode(LatValue *args, int ac) {
     return result;
 }
 
+/* ── Progress bar native functions ── */
+
+static LatValue native_progress_new(LatValue *args, int ac) {
+    if (ac < 1 || ac > 2 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("progress::new() expects (total: Int, desc?: String)");
+        return value_int(-1);
+    }
+    const char *desc = (ac >= 2 && args[1].type == VAL_STR) ? args[1].as.str_val : "Progress";
+    int h = progress_new(args[0].as.int_val, desc);
+    if (h < 0) {
+        current_rt->error = strdup("progress::new(): too many active progress bars");
+        return value_int(-1);
+    }
+    return value_int(h);
+}
+
+static LatValue native_progress_update(LatValue *args, int ac) {
+    if (ac < 1 || ac > 2 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("progress::update() expects (handle: Int, n?: Int)");
+        return value_unit();
+    }
+    int64_t n = (ac >= 2 && args[1].type == VAL_INT) ? args[1].as.int_val : 1;
+    progress_update((int)args[0].as.int_val, n);
+    return value_unit();
+}
+
+static LatValue native_progress_finish(LatValue *args, int ac) {
+    if (ac != 1 || args[0].type != VAL_INT) {
+        current_rt->error = strdup("progress::finish() expects (handle: Int)");
+        return value_unit();
+    }
+    progress_finish((int)args[0].as.int_val);
+    return value_unit();
+}
+
+static LatValue native_progress_each(LatValue *args, int ac) {
+    if (ac != 3 || args[0].type != VAL_ARRAY || args[1].type != VAL_STR || args[2].type != VAL_CLOSURE) {
+        current_rt->error = strdup("progress::each() expects (array: Array, desc: String, callback: Closure)");
+        return value_unit();
+    }
+    int64_t total = (int64_t)args[0].as.array.len;
+    int h = progress_new(total, args[1].as.str_val);
+    if (h < 0) {
+        current_rt->error = strdup("progress::each(): too many active progress bars");
+        return value_unit();
+    }
+    for (size_t i = 0; i < args[0].as.array.len; i++) {
+        LatValue item = value_deep_clone(&args[0].as.array.elems[i]);
+        LatValue result = current_rt->call_closure(current_rt->active_vm, &args[2], &item, 1);
+        value_free(&item);
+        value_free(&result);
+        if (current_rt->error) {
+            progress_finish(h);
+            return value_unit();
+        }
+        progress_update(h, 1);
+    }
+    progress_finish(h);
+    return value_unit();
+}
+
+static LatValue native_progress_term_width(LatValue *args, int ac) {
+    (void)args;
+    (void)ac;
+    return value_int(progress_term_width());
+}
+
 /* ── Built-in module helpers ── */
 
 static void mod_set_native(LatValue *mod, const char *name, VMNativeFn fn) {
@@ -4001,6 +4069,16 @@ static LatValue build_regex_module(void) {
     return m;
 }
 
+static LatValue build_progress_module(void) {
+    LatValue m = value_map_new();
+    mod_set_native(&m, "new", native_progress_new);
+    mod_set_native(&m, "update", native_progress_update);
+    mod_set_native(&m, "finish", native_progress_finish);
+    mod_set_native(&m, "each", native_progress_each);
+    mod_set_native(&m, "term_width", native_progress_term_width);
+    return m;
+}
+
 bool rt_try_builtin_import(const char *name, LatValue *out) {
     /* Paths with directory separators or leading dot are never built-in */
     if (strchr(name, '/') || strchr(name, '\\') || name[0] == '.') return false;
@@ -4051,6 +4129,10 @@ bool rt_try_builtin_import(const char *name, LatValue *out) {
     }
     if (strcmp(name, "regex") == 0) {
         *out = build_regex_module();
+        return true;
+    }
+    if (strcmp(name, "progress") == 0) {
+        *out = build_progress_module();
         return true;
     }
     return false;

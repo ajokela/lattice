@@ -158,7 +158,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/completion.c \
        $(SRC_DIR)/doc_gen.c \
        $(SRC_DIR)/iterator.c \
-       $(SRC_DIR)/gc.c
+       $(SRC_DIR)/gc.c \
+       $(SRC_DIR)/progress.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
@@ -211,7 +212,8 @@ RUNTIME_SRCS = $(SRC_DIR)/runtime_main.c \
                $(SRC_DIR)/latc.c \
                $(SRC_DIR)/builtin_methods.c \
                $(SRC_DIR)/iterator.c \
-               $(SRC_DIR)/gc.c
+               $(SRC_DIR)/gc.c \
+               $(SRC_DIR)/progress.c
 
 RUNTIME_OBJS = $(RUNTIME_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RUNTIME_TARGET = clat-run

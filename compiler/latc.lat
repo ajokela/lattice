@@ -4,6 +4,8 @@
 // Usage: clat compiler/latc.lat input.lat output.latc
 // ============================================================================
 
+import "progress" as progress
+
 // ============================================================================
 // Section 1: Opcode constants
 // ============================================================================
@@ -1213,6 +1215,12 @@ fn parse_primary() {
     // select expression
     if t.type == "identifier" && t.text == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
         parse_select()
+        return
+    }
+
+    // Block expression: { ... }
+    if t.text == "{" {
+        parse_block_expression()
         return
     }
 
@@ -3445,15 +3453,28 @@ fn parse_fn_declaration() {
     pos = body_start_pos  // restore to where '{' is
 
     expect(nil, "{")
+    flux last_was_expr = false
     while peek_text() != "}" {
         if peek() == nil {
             compiler_error("unexpected end of input in function body", line)
         }
-        parse_statement_or_expression()
+        if last_was_expr {
+            emit_byte(OP_POP, line)
+        }
+        last_was_expr = false
+        if is_statement_start() {
+            parse_statement()
+        } else {
+            parse_expression()
+            last_was_expr = true
+        }
+        emit_byte(OP_RESET_EPHEMERAL, line)
     }
     expect(nil, "}")
 
-    emit_byte(OP_UNIT, line)
+    if !last_was_expr {
+        emit_byte(OP_UNIT, line)
+    }
     emit_return_type_check(line)
     emit_ensure_checks(line)
     emit_byte(OP_DEFER_RUN, line)
@@ -3927,6 +3948,8 @@ fn parse_compound_assignment_target(name: any, line: any) {
                     emit_byte(OP_SWAP, line)
                     // Stack: [value, object, index]. Correct!
                     emit_byte(OP_SET_INDEX, line)
+                    // Write back modified object to the variable (maps are pass-by-value)
+                    emit_variable_set(name, line)
                 } else {
                     // Compound assignment: map[key] += expr (non-local)
                     // Stack so far: [index]. Get current value first.
@@ -3947,6 +3970,8 @@ fn parse_compound_assignment_target(name: any, line: any) {
                     emit_variable_get(name, line)         // [new_val, index, obj]
                     emit_byte(OP_SWAP, line)              // [new_val, obj, index]
                     emit_byte(OP_SET_INDEX, line)
+                    // Write back modified object to the variable (maps are pass-by-value)
+                    emit_variable_set(name, line)
                 }
                 emit_byte(OP_POP, line)
             }
@@ -4675,9 +4700,14 @@ fn parse_impl_block() {
 
 fn compile_program() {
     let total_tokens = len(tokens)
+    let bar = progress.new(total_tokens, "Compiling")
+    let last_pos = 0
     while pos < total_tokens {
         parse_statement_or_expression()
+        progress.update(bar, pos - last_pos)
+        last_pos = pos
     }
+    progress.finish(bar)
     let line = current_line()
     // Auto-call main() if defined (matches C compiler behavior)
     if has_main_fn {
@@ -4851,7 +4881,10 @@ fn main() {
     compile_program()
 
     let ch_snap = snapshot_chunk()
+    let ser_bar = progress.new(1, "Serializing")
     let buf = serialize_latc(ch_snap)
+    progress.update(ser_bar, 1)
+    progress.finish(ser_bar)
 
     let ok = write_file_bytes(output_path, buf)
     if !ok {
