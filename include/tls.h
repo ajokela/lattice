@@ -5,9 +5,9 @@
 #include <stddef.h>
 
 /*
- * TLS client primitives for Lattice (backed by OpenSSL).
- *
- * Same fd-based API as the TCP layer.  When built without OpenSSL
+ * TLS client primitives for Lattice.
+ * Backend: OpenSSL on Unix, Schannel on Windows (LATTICE_TLS_SCHANNEL).
+ * Same fd-based API as the TCP layer.  When built without TLS support
  * (LATTICE_HAS_TLS not defined) every function returns a stub error.
  */
 
