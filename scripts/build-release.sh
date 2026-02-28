@@ -15,7 +15,6 @@ BSD_HOSTS=(
     freebsd-amd64
     freebsd-arm64
     openbsd-amd64
-    openbsd-arm64
     netbsd-amd64
     netbsd-arm64
 )
