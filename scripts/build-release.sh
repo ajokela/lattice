@@ -180,10 +180,9 @@ build_bg "linux-aarch64" "
 "
 
 # BSD builds via SSH (parallel, each on its own VM)
+# Uses build-bsd.sh — no gmake or git required on the VM, just cc + base system
 if [ "${SKIP_BSD:-false}" = "false" ]; then
     for host in "${BSD_HOSTS[@]}"; do
-        # Derive the expected binary name from the SSH host alias
-        # e.g., freebsd-amd64 -> clat-freebsd-x86_64
         OS_PART="${host%-*}"
         ARCH_PART="${host##*-}"
         case "$ARCH_PART" in
@@ -193,17 +192,14 @@ if [ "${SKIP_BSD:-false}" = "false" ]; then
         esac
         BINARY="clat-${OS_PART}-${ARCH}"
 
-        # Only attempt if host is reachable
         if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null; then
             build_bg "$BINARY" "
-                ssh -o ConnectTimeout=30 $host '
-                    cd lattice &&
-                    git fetch --all &&
-                    git checkout $VERSION &&
-                    gmake clean &&
-                    gmake release
-                ' && \
-                scp $host:lattice/$BINARY $BUILD_OUT/$VERSION/$BINARY
+                ssh $host 'rm -rf /tmp/lattice-build && mkdir -p /tmp/lattice-build' && \
+                scp '$SRC_TAR' $host:/tmp/lattice-build/src.tar.gz && \
+                scp scripts/build-bsd.sh $host:/tmp/lattice-build/build-bsd.sh && \
+                ssh $host 'cd /tmp/lattice-build && tar xzf src.tar.gz && sh build-bsd.sh' && \
+                scp $host:/tmp/lattice-build/$BINARY $ABSOUT/$BINARY && \
+                ssh $host 'rm -rf /tmp/lattice-build'
             "
         else
             warn "Skipping $BINARY — cannot reach $host"
