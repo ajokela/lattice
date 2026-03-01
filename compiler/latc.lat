@@ -265,6 +265,7 @@ flux loop_continue_local_count = 0
 
 // Auto-call main() tracking
 flux has_main_fn = false
+flux main_fn_line = 0
 
 // Known enum names for BUILD_ENUM codegen
 flux known_enums = []
@@ -282,6 +283,9 @@ flux current_func_name = ""
 // Return type tracking for runtime validation
 flux current_return_type = ""
 
+// Chunk name tracking for debug info (stack traces)
+flux current_chunk_name = nil
+
 // Compiler stack for save/restore during function compilation
 // Each entry is an array: [code, c_lines, constants, local_names,
 //   local_name_arr, local_depth_arr, local_captured_arr, local_count,
@@ -289,7 +293,7 @@ flux current_return_type = ""
 //   func_type, break_jumps, break_count, loop_start_pos, loop_depth,
 //   loop_break_local_count, loop_continue_local_count, string_intern_map,
 //   ensure_slots, ensure_messages, ensure_count, current_func_name,
-//   current_return_type]
+//   current_return_type, current_chunk_name]
 flux compiler_stack = []
 
 fn save_compiler() {
@@ -301,7 +305,7 @@ fn save_compiler() {
         func_type, break_jumps, break_count, loop_start_pos, loop_depth,
         loop_break_local_count, loop_continue_local_count, string_intern_map,
         ensure_slots, ensure_messages, ensure_count, current_func_name,
-        current_return_type
+        current_return_type, current_chunk_name
     ]
     compiler_stack.push(state)
 }
@@ -333,12 +337,13 @@ fn restore_compiler() {
     ensure_count = state[22]
     current_func_name = state[23]
     current_return_type = state[24]
+    current_chunk_name = state[25]
 }
 
 // Snapshot the current chunk into an array for serialization
-// Returns [code, c_lines, constants, local_names]
+// Returns [code, c_lines, constants, local_names, chunk_name]
 fn snapshot_chunk() {
-    return [code, c_lines, constants, local_names]
+    return [code, c_lines, constants, local_names, current_chunk_name]
 }
 
 // ============================================================================
@@ -2511,6 +2516,7 @@ fn parse_closure_literal() {
     loop_depth = 0
     string_intern_map = Map::new()
     current_return_type = ""
+    current_chunk_name = nil
 
     // Reserve slot 0 for the closure itself (VM convention)
     add_local("")
@@ -3253,7 +3259,7 @@ fn parse_fn_declaration() {
     let line = current_line()
     expect("fn", nil)
     let name = expect("identifier", nil).text
-    if name == "main" { has_main_fn = true }
+    if name == "main" { has_main_fn = true; main_fn_line = line }
     expect(nil, "(")
 
     flux param_names_arr = []
@@ -3415,6 +3421,7 @@ fn parse_fn_declaration() {
     ensure_count = 0
     current_func_name = name
     current_return_type = fn_return_type
+    current_chunk_name = name
 
     // Reserve slot 0 for the function itself (VM convention)
     add_local("")
@@ -4599,6 +4606,7 @@ fn parse_impl_block() {
         ensure_count = 0
         current_func_name = full_name
         current_return_type = m_return_type
+        current_chunk_name = method_name
 
         if first_param == 1 {
             // self occupies slot 0
@@ -4712,9 +4720,9 @@ fn compile_program() {
     // Auto-call main() if defined (matches C compiler behavior)
     if has_main_fn {
         let idx = string_constant("main")
-        emit_wide_op(OP_GET_GLOBAL, OP_GET_GLOBAL_16, idx, line)
-        emit_bytes(OP_CALL, 0, line)
-        emit_byte(OP_POP, line)
+        emit_wide_op(OP_GET_GLOBAL, OP_GET_GLOBAL_16, idx, main_fn_line)
+        emit_bytes(OP_CALL, 0, main_fn_line)
+        emit_byte(OP_POP, main_fn_line)
     }
     emit_byte(OP_UNIT, line)
     emit_byte(OP_RETURN, line)
@@ -4800,11 +4808,15 @@ fn serialize_constant(c: any) {
 }
 
 fn serialize_chunk(ch: any) {
-    // ch = [code_arr, lines_arr, constants_arr, local_names_arr]
+    // ch = [code_arr, lines_arr, constants_arr, local_names_arr, chunk_name]
     let ch_code = ch[0]
     let ch_lines = ch[1]
     let ch_constants = ch[2]
     let ch_local_names = ch[3]
+    flux ch_name = nil
+    if len(ch) > 4 {
+        ch_name = ch[4]
+    }
 
     // Code
     let code_len = len(ch_code)
@@ -4837,6 +4849,14 @@ fn serialize_chunk(ch: any) {
             write_u8(1)
             write_string(ch_local_names[i])
         }
+    }
+
+    // Chunk name (debug info for stack traces)
+    if ch_name != nil {
+        write_u8(1)
+        write_string(ch_name)
+    } else {
+        write_u8(0)
     }
 }
 

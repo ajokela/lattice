@@ -367,7 +367,8 @@ test-all-backends: $(TEST_TARGET)
 LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_traits latc_traits_codegen \
              latc_expressions latc_variables latc_control_flow latc_functions \
              latc_data_structures latc_enums_match latc_structs_impl latc_error_handling \
-             latc_string_interp
+             latc_string_interp latc_spread_test latc_tuple_test \
+             latc_impl_test latc_impl_advanced latc_import_test
 
 test-latc: $(TARGET)
 	@PASS=0; FAIL=0; \
@@ -380,7 +381,7 @@ test-latc: $(TARGET)
 			FAIL=$$((FAIL + 1)); \
 			continue; \
 		fi; \
-		./$(TARGET) /tmp/$$name.latc > /tmp/$$name.compiled.out 2>&1; \
+		./$(TARGET) /tmp/$$name.latc > /tmp/$$name.compiled.out 2>/dev/null; \
 		if [ $$? -ne 0 ]; then \
 			echo "FAIL (run .latc)"; \
 			cat /tmp/$$name.compiled.out; \
@@ -388,7 +389,7 @@ test-latc: $(TARGET)
 			rm -f /tmp/$$name.latc /tmp/$$name.compiled.out; \
 			continue; \
 		fi; \
-		./$(TARGET) tests/$$name.lat > /tmp/$$name.direct.out 2>&1; \
+		./$(TARGET) tests/$$name.lat > /tmp/$$name.direct.out 2>/dev/null; \
 		if [ $$? -ne 0 ]; then \
 			echo "FAIL (run .lat)"; \
 			cat /tmp/$$name.direct.out; \

@@ -2360,7 +2360,7 @@ static void compile_stmt(const Stmt *s) {
             if (s->as.return_expr) compile_expr(s->as.return_expr, line);
             else emit_byte(OP_UNIT, line);
             emit_return_type_check(line);
-            emit_ensure_checks(0);
+            emit_ensure_checks(line);
             emit_byte(OP_DEFER_RUN, line);
             emit_byte(0, line); /* scope_depth 0 = run all defers */
             emit_byte(OP_RETURN, line);
@@ -2861,17 +2861,25 @@ Chunk *stack_compile(const Program *prog, char **error) {
     *error = NULL;
 
     /* Compile top-level items */
+    int last_line = 0;
     for (size_t i = 0; i < prog->item_count; i++) {
         switch (prog->items[i].tag) {
-            case ITEM_STMT: compile_stmt_reset(prog->items[i].as.stmt); break;
+            case ITEM_STMT: {
+                Stmt *s = prog->items[i].as.stmt;
+                if (s && s->line > 0) last_line = s->line;
+                compile_stmt_reset(s);
+                break;
+            }
 
             case ITEM_FUNCTION: {
                 FnDecl *fn = &prog->items[i].as.fn_decl;
+                int fn_line = fn->line;
                 compile_function_body(FUNC_FUNCTION, fn->name, fn->params, fn->param_count, fn->body, fn->body_count,
-                                      fn->contracts, fn->contract_count, fn->return_type, 0);
+                                      fn->contracts, fn->contract_count, fn->return_type, fn_line);
                 /* Define the function as a global */
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
-                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, fn_line);
+                last_line = fn_line;
                 break;
             }
 
@@ -2935,14 +2943,16 @@ Chunk *stack_compile(const Program *prog, char **error) {
                 ImplBlock *ib = &prog->items[i].as.impl_block;
                 for (size_t j = 0; j < ib->method_count; j++) {
                     FnDecl *method = &ib->methods[j];
+                    int m_line = method->line;
                     compile_function_body(FUNC_FUNCTION, method->name, method->params, method->param_count,
                                           method->body, method->body_count, method->contracts, method->contract_count,
-                                          method->return_type, 0);
+                                          method->return_type, m_line);
                     /* Register as "TypeName::method" global */
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
-                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, m_line);
+                    last_line = m_line;
                 }
                 break;
             }
@@ -2974,13 +2984,13 @@ Chunk *stack_compile(const Program *prog, char **error) {
     }
     if (has_main) {
         size_t main_idx = chunk_add_constant(current_chunk(), value_string("main"));
-        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16, main_idx, 0);
-        emit_bytes(OP_CALL, 0, 0);
-        emit_byte(OP_POP, 0);
+        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16, main_idx, last_line);
+        emit_bytes(OP_CALL, 0, last_line);
+        emit_byte(OP_POP, last_line);
     }
 
-    emit_byte(OP_UNIT, 0);
-    emit_byte(OP_RETURN, 0);
+    emit_byte(OP_UNIT, last_line);
+    emit_byte(OP_RETURN, last_line);
 
     Chunk *result = top.chunk;
     compiler_cleanup(&top);
@@ -2999,10 +3009,11 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
             case ITEM_STMT: compile_stmt_reset(prog->items[i].as.stmt); break;
             case ITEM_FUNCTION: {
                 FnDecl *fn = &prog->items[i].as.fn_decl;
+                int fn_line = fn->line;
                 compile_function_body(FUNC_FUNCTION, fn->name, fn->params, fn->param_count, fn->body, fn->body_count,
-                                      fn->contracts, fn->contract_count, fn->return_type, 0);
+                                      fn->contracts, fn->contract_count, fn->return_type, fn_line);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
-                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, fn_line);
                 break;
             }
             case ITEM_STRUCT: {
@@ -3058,13 +3069,14 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
                 ImplBlock *ib = &prog->items[i].as.impl_block;
                 for (size_t j = 0; j < ib->method_count; j++) {
                     FnDecl *method = &ib->methods[j];
+                    int m_line = method->line;
                     compile_function_body(FUNC_FUNCTION, method->name, method->params, method->param_count,
                                           method->body, method->body_count, method->contracts, method->contract_count,
-                                          method->return_type, 0);
+                                          method->return_type, m_line);
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
-                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, m_line);
                 }
                 break;
             }
@@ -3128,10 +3140,11 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
             }
             case ITEM_FUNCTION: {
                 FnDecl *fn = &prog->items[i].as.fn_decl;
+                int fn_line = fn->line;
                 compile_function_body(FUNC_FUNCTION, fn->name, fn->params, fn->param_count, fn->body, fn->body_count,
-                                      fn->contracts, fn->contract_count, fn->return_type, 0);
+                                      fn->contracts, fn->contract_count, fn->return_type, fn_line);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(fn->name));
-                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, fn_line);
                 break;
             }
             case ITEM_STRUCT: {
@@ -3186,13 +3199,14 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
                 ImplBlock *ib = &prog->items[i].as.impl_block;
                 for (size_t j = 0; j < ib->method_count; j++) {
                     FnDecl *method = &ib->methods[j];
+                    int m_line = method->line;
                     compile_function_body(FUNC_FUNCTION, method->name, method->params, method->param_count,
                                           method->body, method->body_count, method->contracts, method->contract_count,
-                                          method->return_type, 0);
+                                          method->return_type, m_line);
                     char key[256];
                     snprintf(key, sizeof(key), "%s::%s", ib->type_name, method->name);
                     size_t key_idx = chunk_add_constant(current_chunk(), value_string(key));
-                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, 0);
+                    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, key_idx, m_line);
                 }
                 break;
             }

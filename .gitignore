@@ -9,3 +9,5 @@ scripts/jira_*.py
 .env
 extensions/**/*.dylib
 extensions/**/*.so
+benchmarks/results.csv
+benchmarks/results.json

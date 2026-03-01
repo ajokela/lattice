@@ -202,18 +202,19 @@ if $SAVE_JSON; then
         first=true
         for row in "${RESULT_ROWS[@]}"; do
             IFS=',' read -r name bytecode treewalk regvm <<< "$row"
-            if $first; then first=false; else echo "    ,"; fi
+            if $first; then first=false; else printf ",\n"; fi
             # Quote non-numeric values
             bq="$bytecode"; [[ "$bytecode" =~ ^[0-9]+$ ]] || bq="\"$bytecode\""
             tq="$treewalk"; [[ "$treewalk" =~ ^[0-9]+$ ]] || tq="\"$treewalk\""
             rq="$regvm";    [[ "$regvm" =~ ^[0-9]+$ ]]    || rq="\"$regvm\""
-            echo "    {"
-            echo "      \"name\": \"$name\","
-            echo "      \"bytecode_ms\": $bq,"
-            echo "      \"tree_walk_ms\": $tq,"
-            echo "      \"regvm_ms\": $rq"
-            echo "    }"
+            printf '    {\n'
+            printf '      "name": "%s",\n' "$name"
+            printf '      "bytecode_ms": %s,\n' "$bq"
+            printf '      "tree_walk_ms": %s,\n' "$tq"
+            printf '      "regvm_ms": %s\n' "$rq"
+            printf '    }'
         done
+        echo ""
         echo "  ]"
         echo "}"
     } > "$JSON_FILE"

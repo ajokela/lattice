@@ -408,6 +408,7 @@ struct FnDecl {
     size_t body_count;
     FnDecl *next_overload;     /* phase-dispatch chain, NULL if none */
     AstPhase phase_annotation; /* @fluid/@crystal annotation (PHASE_UNSPECIFIED = none) */
+    int line;                  /* Source line of the 'fn' keyword */
 };
 
 /* Struct field declaration */

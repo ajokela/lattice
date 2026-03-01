@@ -2403,6 +2403,7 @@ static bool parse_fn_decl(Parser *p, FnDecl *out, char **err) {
     out->next_overload = NULL;
     out->contracts = NULL;
     out->contract_count = 0;
+    out->line = (int)peek(p)->line;
     if (!expect(p, TOK_FN, err)) return false;
     out->name = expect_ident(p, err);
     if (!out->name) return false;
