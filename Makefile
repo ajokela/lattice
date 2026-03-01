@@ -155,17 +155,21 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/package.c \
        $(SRC_DIR)/formatter.c \
        $(SRC_DIR)/debugger.c \
+       $(SRC_DIR)/dap.c \
        $(SRC_DIR)/completion.c \
        $(SRC_DIR)/doc_gen.c \
        $(SRC_DIR)/iterator.c \
        $(SRC_DIR)/gc.c \
-       $(SRC_DIR)/progress.c
+       $(SRC_DIR)/progress.c \
+       vendor/cJSON.c
 
 # All source files except main.c (for tests)
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c, $(SRCS))
 
-OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
-LIB_OBJS = $(LIB_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+OBJS     = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter $(SRC_DIR)/%,$(SRCS))) \
+           $(patsubst vendor/%.c,$(BUILD_DIR)/vendor/%.o,$(filter vendor/%,$(SRCS)))
+LIB_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter $(SRC_DIR)/%,$(LIB_SRCS))) \
+           $(patsubst vendor/%.c,$(BUILD_DIR)/vendor/%.o,$(filter vendor/%,$(LIB_SRCS)))
 
 ifndef WINDOWS
 TARGET = clat
@@ -256,7 +260,8 @@ TEST_TARGET = $(BUILD_DIR)/test_runner
 
 # WASM build — exclude tree-walk evaluator and CLI-only modules to reduce binary size
 WASM_EXCLUDE = $(SRC_DIR)/eval.c $(SRC_DIR)/phase_check.c $(SRC_DIR)/match_check.c \
-               $(SRC_DIR)/completion.c $(SRC_DIR)/doc_gen.c $(SRC_DIR)/formatter.c
+               $(SRC_DIR)/completion.c $(SRC_DIR)/doc_gen.c $(SRC_DIR)/formatter.c \
+               $(SRC_DIR)/dap.c vendor/cJSON.c
 WASM_SRCS   = $(filter-out $(WASM_EXCLUDE), $(LIB_SRCS)) $(SRC_DIR)/wasm_api.c
 WASM_OUT    = lattice-lang.org/lattice.js
 WASM_FLAGS  = -std=gnu11 -Wall -Wextra -Wno-error -Wno-constant-conversion -Iinclude -O2 \
@@ -341,7 +346,7 @@ $(RUNTIME_TARGET): $(RUNTIME_OBJS)
 
 $(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Wno-unused-parameter -c -o $@ $<
+	$(CC) $(CFLAGS) -Wno-unused-parameter -Wno-deprecated-declarations -c -o $@ $<
 
 $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 	@mkdir -p $(dir $@)

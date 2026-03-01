@@ -6955,18 +6955,47 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             LatValue *vals = malloc(argc * sizeof(LatValue));
             if (!vals) return STACKVM_RUNTIME_ERROR;
             for (int i = argc - 1; i >= 0; i--) vals[i] = pop(vm);
-            for (uint8_t i = 0; i < argc; i++) {
-                if (i > 0) printf(" ");
-                if (vals[i].type == VAL_STR) {
-                    printf("%s", vals[i].as.str_val);
-                } else {
-                    char *repr = value_repr(&vals[i]);
-                    printf("%s", repr);
-                    free(repr);
+            /* Check for DAP output redirection */
+            Debugger *_dbg = vm->debugger;
+            if (_dbg && _dbg->print_callback) {
+                /* Build output string and send via callback */
+                size_t total_len = 0;
+                char **parts = malloc(argc * sizeof(char *));
+                for (uint8_t i = 0; i < argc; i++) {
+                    if (vals[i].type == VAL_STR) {
+                        parts[i] = strdup(vals[i].as.str_val);
+                    } else {
+                        parts[i] = value_repr(&vals[i]);
+                    }
+                    total_len += strlen(parts[i]);
+                    if (i > 0) total_len++; /* space separator */
                 }
-                value_free(&vals[i]);
+                total_len++; /* newline */
+                char *buf = malloc(total_len + 1);
+                buf[0] = '\0';
+                for (uint8_t i = 0; i < argc; i++) {
+                    if (i > 0) strcat(buf, " ");
+                    strcat(buf, parts[i]);
+                    free(parts[i]);
+                }
+                strcat(buf, "\n");
+                free(parts);
+                _dbg->print_callback(buf, _dbg->print_userdata);
+                free(buf);
+            } else {
+                for (uint8_t i = 0; i < argc; i++) {
+                    if (i > 0) printf(" ");
+                    if (vals[i].type == VAL_STR) {
+                        printf("%s", vals[i].as.str_val);
+                    } else {
+                        char *repr = value_repr(&vals[i]);
+                        printf("%s", repr);
+                        free(repr);
+                    }
+                }
+                printf("\n");
             }
-            printf("\n");
+            for (uint8_t i = 0; i < argc; i++) value_free(&vals[i]);
             free(vals);
             push(vm, value_unit());
             break;

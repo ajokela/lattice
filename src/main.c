@@ -77,6 +77,7 @@ static bool no_assertions_mode = false;
 static bool tree_walk_mode = false;
 static bool regvm_mode = false;
 static bool debug_mode = false;
+static bool dap_mode = false;
 static int debug_break_line = -1; /* Initial breakpoint line (-1 = none) */
 static int saved_argc = 0;
 static char **saved_argv = NULL;
@@ -107,6 +108,7 @@ static void print_help(void) {
     printf("  --no-assertions   Disable runtime assertions\n");
     printf("  --debug           Attach debugger\n");
     printf("  --break <line>    Set breakpoint at line (implies --debug)\n");
+    printf("  --dap             Start Debug Adapter Protocol server\n");
     printf("  -h, --help        Show this help message\n");
     printf("  -V, --version     Show version\n");
     printf("\nWhen no file is given, starts an interactive REPL.\n");
@@ -327,9 +329,28 @@ static int run_source(const char *source, bool show_stats, const char *script_di
     StackVM vm;
     stackvm_init(&vm, &rt);
 
-    /* Attach debugger if --debug mode */
+    /* Attach debugger if --debug or --dap mode */
     Debugger *dbg = NULL;
-    if (debug_mode) {
+    if (dap_mode) {
+        dbg = debugger_new_dap(stdin, stdout);
+        if (dbg) {
+            if (source_path) debugger_load_source(dbg, source_path);
+            vm.debugger = dbg;
+            /* DAP handshake happens before execution starts */
+            extern bool dap_handshake(Debugger * dbg, const char *source_path);
+            if (!dap_handshake(dbg, source_path)) {
+                debugger_free(dbg);
+                stackvm_free(&vm);
+                lat_runtime_free(&rt);
+                chunk_free(chunk);
+                evaluator_free(ev);
+                program_free(&prog);
+                for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+                lat_vec_free(&tokens);
+                return 1;
+            }
+        }
+    } else if (debug_mode) {
         dbg = debugger_new();
         if (dbg) {
             if (source_path) debugger_load_source(dbg, source_path);
@@ -343,7 +364,10 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             fprintf(stderr, "Lattice debugger attached.\n");
             if (dbg->bp_count > 0) {
                 fprintf(stderr, "Breakpoints:");
-                for (size_t i = 0; i < dbg->bp_count; i++) fprintf(stderr, " line %d", dbg->breakpoints_line[i]);
+                for (size_t i = 0; i < dbg->bp_count; i++) {
+                    Breakpoint *bp = &dbg->breakpoints[i];
+                    if (bp->type == BP_LINE) fprintf(stderr, " line %d", bp->line);
+                }
                 fprintf(stderr, "\n");
             } else {
                 fprintf(stderr, "Stepping from first instruction. Type 'help' for commands.\n");
@@ -371,6 +395,13 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 1;
     }
     value_free(&result);
+    /* Send DAP terminated event and wait for disconnect */
+    if (dbg && dbg->mode == DBG_MODE_DAP) {
+        extern void dap_send_terminated(Debugger * dbg);
+        extern void dap_wait_disconnect(Debugger * dbg);
+        dap_send_terminated(dbg);
+        dap_wait_disconnect(dbg);
+    }
     debugger_free(dbg);
     stackvm_free(&vm);
     lat_runtime_free(&rt);
@@ -1421,7 +1452,10 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;
         else if (strcmp(argv[i], "--tree-walk") == 0) tree_walk_mode = true;
         else if (strcmp(argv[i], "--regvm") == 0) regvm_mode = true;
-        else if (strcmp(argv[i], "--debug") == 0) debug_mode = true;
+        else if (strcmp(argv[i], "--dap") == 0) {
+            dap_mode = true;
+            debug_mode = true;
+        } else if (strcmp(argv[i], "--debug") == 0) debug_mode = true;
         else if (strcmp(argv[i], "--break") == 0) {
             if (i + 1 < argc) {
                 debug_break_line = atoi(argv[++i]);
