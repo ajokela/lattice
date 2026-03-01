@@ -954,30 +954,40 @@ static const char *stackvm_find_pressure(StackVM *vm, const char *name) {
 #define MHASH_deref      0x0f49e72bu
 #define MHASH_inner_type 0xdf644222u
 /* Buffer methods */
-#define MHASH_push_u16   0x1aaf75a0u
-#define MHASH_push_u32   0x1aaf75deu
-#define MHASH_read_u8    0x3ddb750du
-#define MHASH_write_u8   0x931616bcu
-#define MHASH_read_u16   0xf94a15fcu
-#define MHASH_write_u16  0xf5d8ed8bu
-#define MHASH_read_u32   0xf94a163au
-#define MHASH_write_u32  0xf5d8edc9u
-#define MHASH_capitalize 0xee09978bu
-#define MHASH_title_case 0x4b7027c2u
-#define MHASH_snake_case 0xb7f6c232u
-#define MHASH_camel_case 0xe2889d82u
-#define MHASH_kebab_case 0x62be3b95u
-#define MHASH_read_i8    0x3ddb7381u
-#define MHASH_read_i16   0xf949e2f0u
-#define MHASH_read_i32   0xf949e32eu
-#define MHASH_read_f32   0xf949d66bu
-#define MHASH_read_f64   0xf949d6d0u
-#define MHASH_clear      0x0f3b6d8cu
-#define MHASH_fill       0x7c96cb2cu
-#define MHASH_resize     0x192fa5b7u
-#define MHASH_to_string  0xd09c437eu
-#define MHASH_to_hex     0x1e83ed8cu
-#define MHASH_capacity   0x104ec913u
+#define MHASH_push_u16        0x1aaf75a0u
+#define MHASH_push_u32        0x1aaf75deu
+#define MHASH_read_u8         0x3ddb750du
+#define MHASH_write_u8        0x931616bcu
+#define MHASH_read_u16        0xf94a15fcu
+#define MHASH_write_u16       0xf5d8ed8bu
+#define MHASH_read_u32        0xf94a163au
+#define MHASH_write_u32       0xf5d8edc9u
+#define MHASH_capitalize      0xee09978bu
+#define MHASH_title_case      0x4b7027c2u
+#define MHASH_snake_case      0xb7f6c232u
+#define MHASH_camel_case      0xe2889d82u
+#define MHASH_kebab_case      0x62be3b95u
+#define MHASH_read_i8         0x3ddb7381u
+#define MHASH_read_i16        0xf949e2f0u
+#define MHASH_read_i32        0xf949e32eu
+#define MHASH_read_f32        0xf949d66bu
+#define MHASH_read_f64        0xf949d6d0u
+#define MHASH_clear           0x0f3b6d8cu
+#define MHASH_fill            0x7c96cb2cu
+#define MHASH_resize          0x192fa5b7u
+#define MHASH_to_string       0xd09c437eu
+#define MHASH_to_hex          0x1e83ed8cu
+#define MHASH_capacity        0x104ec913u
+#define MHASH_find_index      0x143b691du
+#define MHASH_partition       0xcb32917fu
+#define MHASH_last_index_of   0x58183d24u
+#define MHASH_is_alpha        0xdbcf64c6u
+#define MHASH_is_digit        0xdc03e311u
+#define MHASH_is_alphanumeric 0x3b60fa99u
+#define MHASH_read_u64        0xf94a169fu
+#define MHASH_write_u64       0xf5d8ee2eu
+#define MHASH_read_i64        0xf949e393u
+#define MHASH_write_i64       0xf5d8bb22u
 
 static inline uint32_t method_hash(const char *s) {
     uint32_t h = 5381;
@@ -989,7 +999,8 @@ static inline uint32_t method_hash(const char *s) {
  * safe for direct-pointer mutation without clone-mutate-writeback. */
 static inline bool stackvm_invoke_builtin_is_simple(uint32_t mhash) {
     return !(mhash == MHASH_map || mhash == MHASH_filter || mhash == MHASH_reduce || mhash == MHASH_each ||
-             mhash == MHASH_sort || mhash == MHASH_find || mhash == MHASH_any || mhash == MHASH_all);
+             mhash == MHASH_sort || mhash == MHASH_find || mhash == MHASH_any || mhash == MHASH_all ||
+             mhash == MHASH_find_index || mhash == MHASH_partition);
 }
 
 /* Resolve the PIC handler ID for a given (type, method_hash) pair.
@@ -1034,6 +1045,8 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_flat_map) return PIC_ARRAY_FLAT_MAP;
             if (mhash == MHASH_sort_by) return PIC_ARRAY_SORT_BY;
             if (mhash == MHASH_group_by) return PIC_ARRAY_GROUP_BY;
+            if (mhash == MHASH_find_index) return PIC_ARRAY_FIND_INDEX;
+            if (mhash == MHASH_partition) return PIC_ARRAY_PARTITION;
             break;
         case VAL_STR:
             if (mhash == MHASH_len) return PIC_STRING_LEN;
@@ -1063,6 +1076,10 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_snake_case) return PIC_STRING_SNAKE_CASE;
             if (mhash == MHASH_camel_case) return PIC_STRING_CAMEL_CASE;
             if (mhash == MHASH_kebab_case) return PIC_STRING_KEBAB_CASE;
+            if (mhash == MHASH_last_index_of) return PIC_STRING_LAST_INDEX_OF;
+            if (mhash == MHASH_is_alpha) return PIC_STRING_IS_ALPHA;
+            if (mhash == MHASH_is_digit) return PIC_STRING_IS_DIGIT;
+            if (mhash == MHASH_is_alphanumeric) return PIC_STRING_IS_ALPHANUMERIC;
             break;
         case VAL_MAP:
             if (mhash == MHASH_len) return PIC_MAP_LEN;
@@ -1079,6 +1096,8 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_for_each) return PIC_ARRAY_FOR_EACH;
             if (mhash == MHASH_filter) return PIC_ARRAY_FILTER;
             if (mhash == MHASH_map) return PIC_ARRAY_MAP;
+            if (mhash == MHASH_any) return PIC_MAP_ANY;
+            if (mhash == MHASH_all) return PIC_MAP_ALL;
             break;
         case VAL_SET:
             if (mhash == MHASH_has) return PIC_SET_HAS;
@@ -1094,6 +1113,7 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_is_subset) return PIC_SET_IS_SUBSET;
             if (mhash == MHASH_is_superset) return PIC_SET_IS_SUPERSET;
             if (mhash == MHASH_contains) return PIC_SET_CONTAINS;
+            if (mhash == MHASH_clear) return PIC_SET_CLEAR;
             break;
         case VAL_ENUM:
             if (mhash == MHASH_tag) return PIC_ENUM_TAG;
@@ -1132,6 +1152,10 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_read_i32) return PIC_BUFFER_READ_I32;
             if (mhash == MHASH_read_f32) return PIC_BUFFER_READ_F32;
             if (mhash == MHASH_read_f64) return PIC_BUFFER_READ_F64;
+            if (mhash == MHASH_read_u64) return PIC_BUFFER_READ_U64;
+            if (mhash == MHASH_write_u64) return PIC_BUFFER_WRITE_U64;
+            if (mhash == MHASH_read_i64) return PIC_BUFFER_READ_I64;
+            if (mhash == MHASH_write_i64) return PIC_BUFFER_WRITE_I64;
             break;
         case VAL_RANGE:
             if (mhash == MHASH_len) return PIC_RANGE_CONTAINS;
@@ -1381,6 +1405,22 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 LatValue closure = pop(vm);
                 char *err = NULL;
                 LatValue result = builtin_array_all(obj, &closure, stackvm_builtin_callback, vm, &err);
+                value_free(&closure);
+                push(vm, result);
+                return true;
+            }
+            if (mhash == MHASH_find_index && strcmp(method, "find_index") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                char *err = NULL;
+                LatValue result = builtin_array_find_index(obj, &closure, stackvm_builtin_callback, vm, &err);
+                value_free(&closure);
+                push(vm, result);
+                return true;
+            }
+            if (mhash == MHASH_partition && strcmp(method, "partition") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                char *err = NULL;
+                LatValue result = builtin_array_partition(obj, &closure, stackvm_builtin_callback, vm, &err);
                 value_free(&closure);
                 push(vm, result);
                 return true;
@@ -1688,6 +1728,30 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 push(vm, r);
                 return true;
             }
+            if (mhash == MHASH_last_index_of && strcmp(method, "last_index_of") == 0 && arg_count == 1) {
+                LatValue args[1];
+                args[0] = pop(vm);
+                char *err = NULL;
+                LatValue r = builtin_string_last_index_of(obj, args, 1, &err);
+                value_free(&args[0]);
+                push(vm, r);
+                return true;
+            }
+            if (mhash == MHASH_is_alpha && strcmp(method, "is_alpha") == 0 && arg_count == 0) {
+                char *err = NULL;
+                push(vm, builtin_string_is_alpha(obj, NULL, 0, &err));
+                return true;
+            }
+            if (mhash == MHASH_is_digit && strcmp(method, "is_digit") == 0 && arg_count == 0) {
+                char *err = NULL;
+                push(vm, builtin_string_is_digit(obj, NULL, 0, &err));
+                return true;
+            }
+            if (mhash == MHASH_is_alphanumeric && strcmp(method, "is_alphanumeric") == 0 && arg_count == 0) {
+                char *err = NULL;
+                push(vm, builtin_string_is_alphanumeric(obj, NULL, 0, &err));
+                return true;
+            }
             if (mhash == MHASH_chars && strcmp(method, "chars") == 0 && arg_count == 0) {
                 char *err = NULL;
                 push(vm, builtin_string_chars(obj, NULL, 0, &err));
@@ -1914,6 +1978,52 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 push(vm, result);
                 return true;
             }
+            if (mhash == MHASH_any && strcmp(method, "any") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                bool found = false;
+                for (size_t i = 0; i < obj->as.map.map->cap; i++) {
+                    if (obj->as.map.map->entries[i].state == MAP_OCCUPIED) {
+                        LatValue ca[2];
+                        ca[0] = value_string(obj->as.map.map->entries[i].key);
+                        ca[1] = value_deep_clone((LatValue *)obj->as.map.map->entries[i].value);
+                        LatValue r = stackvm_call_closure(vm, &closure, ca, 2);
+                        value_free(&ca[0]);
+                        value_free(&ca[1]);
+                        if (r.type == VAL_BOOL && r.as.bool_val) {
+                            found = true;
+                            value_free(&r);
+                            break;
+                        }
+                        value_free(&r);
+                    }
+                }
+                value_free(&closure);
+                push(vm, value_bool(found));
+                return true;
+            }
+            if (mhash == MHASH_all && strcmp(method, "all") == 0 && arg_count == 1) {
+                LatValue closure = pop(vm);
+                bool all_match = true;
+                for (size_t i = 0; i < obj->as.map.map->cap; i++) {
+                    if (obj->as.map.map->entries[i].state == MAP_OCCUPIED) {
+                        LatValue ca[2];
+                        ca[0] = value_string(obj->as.map.map->entries[i].key);
+                        ca[1] = value_deep_clone((LatValue *)obj->as.map.map->entries[i].value);
+                        LatValue r = stackvm_call_closure(vm, &closure, ca, 2);
+                        value_free(&ca[0]);
+                        value_free(&ca[1]);
+                        if (!(r.type == VAL_BOOL && r.as.bool_val)) {
+                            all_match = false;
+                            value_free(&r);
+                            break;
+                        }
+                        value_free(&r);
+                    }
+                }
+                value_free(&closure);
+                push(vm, value_bool(all_match));
+                return true;
+            }
         } break;
 
         /* Struct methods */
@@ -2108,6 +2218,11 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 push(vm, r);
                 return true;
             }
+            if (mhash == MHASH_clear && strcmp(method, "clear") == 0 && arg_count == 0) {
+                char *err = NULL;
+                push(vm, builtin_set_clear(obj, NULL, 0, &err));
+                return true;
+            }
         } break;
 
         /* ── Channel methods ── */
@@ -2269,6 +2384,44 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 args[0] = pop(vm);
                 char *err = NULL;
                 LatValue r = builtin_buffer_read_f64(obj, args, 1, &err);
+                if (err) vm->error = err;
+                push(vm, r);
+                return true;
+            }
+            if (mhash == MHASH_read_u64 && strcmp(method, "read_u64") == 0 && arg_count == 1) {
+                LatValue args[1];
+                args[0] = pop(vm);
+                char *err = NULL;
+                LatValue r = builtin_buffer_read_u64(obj, args, 1, &err);
+                if (err) vm->error = err;
+                push(vm, r);
+                return true;
+            }
+            if (mhash == MHASH_write_u64 && strcmp(method, "write_u64") == 0 && arg_count == 2) {
+                LatValue args[2];
+                args[1] = pop(vm);
+                args[0] = pop(vm);
+                char *err = NULL;
+                LatValue r = builtin_buffer_write_u64(obj, args, 2, &err);
+                if (err) vm->error = err;
+                push(vm, r);
+                return true;
+            }
+            if (mhash == MHASH_read_i64 && strcmp(method, "read_i64") == 0 && arg_count == 1) {
+                LatValue args[1];
+                args[0] = pop(vm);
+                char *err = NULL;
+                LatValue r = builtin_buffer_read_i64(obj, args, 1, &err);
+                if (err) vm->error = err;
+                push(vm, r);
+                return true;
+            }
+            if (mhash == MHASH_write_i64 && strcmp(method, "write_i64") == 0 && arg_count == 2) {
+                LatValue args[2];
+                args[1] = pop(vm);
+                args[0] = pop(vm);
+                char *err = NULL;
+                LatValue r = builtin_buffer_write_i64(obj, args, 2, &err);
                 if (err) vm->error = err;
                 push(vm, r);
                 return true;

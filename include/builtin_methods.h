@@ -66,6 +66,8 @@ LatValue builtin_array_all(LatValue *obj, void *closure, BuiltinCallback cb, voi
 LatValue builtin_array_flat_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 LatValue builtin_array_sort_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 LatValue builtin_array_group_by(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_find_index(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_partition(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 
 /* ── String methods ── */
 
@@ -89,6 +91,10 @@ LatValue builtin_string_count(LatValue *obj, LatValue *args, int arg_count, char
 LatValue builtin_string_is_empty(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_string_index_of(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_string_substring(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_string_last_index_of(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_string_is_alpha(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_string_is_digit(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_string_is_alphanumeric(LatValue *obj, LatValue *args, int arg_count, char **error);
 
 /* ── Map methods (no closures) ── */
 
@@ -123,6 +129,10 @@ LatValue builtin_buffer_resize(LatValue *obj, LatValue *args, int arg_count, cha
 LatValue builtin_buffer_to_string(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_buffer_to_array(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_buffer_to_hex(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_buffer_read_u64(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_buffer_write_u64(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_buffer_read_i64(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_buffer_write_i64(LatValue *obj, LatValue *args, int arg_count, char **error);
 
 /* ── Set methods ── */
 
@@ -136,6 +146,7 @@ LatValue builtin_set_difference(LatValue *obj, LatValue *args, int arg_count, ch
 LatValue builtin_set_symmetric_difference(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_set_is_subset(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_set_is_superset(LatValue *obj, LatValue *args, int arg_count, char **error);
+LatValue builtin_set_clear(LatValue *obj, LatValue *args, int arg_count, char **error);
 
 /* ── Enum methods ── */
 

@@ -626,6 +626,48 @@ LatValue builtin_array_group_by(LatValue *obj, void *closure, BuiltinCallback cb
     return grp;
 }
 
+LatValue builtin_array_find_index(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    for (size_t i = 0; i < obj->as.array.len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue pred = cb(closure, &arg, 1, ctx);
+        bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
+        value_free(&arg);
+        value_free(&pred);
+        if (match) return value_int((int64_t)i);
+    }
+    return value_int(-1);
+}
+
+LatValue builtin_array_partition(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+    (void)error;
+    size_t len = obj->as.array.len;
+    size_t cap = len > 0 ? len : 1;
+    LatValue *yes = malloc(cap * sizeof(LatValue));
+    LatValue *no = malloc(cap * sizeof(LatValue));
+    if (!yes || !no) {
+        free(yes);
+        free(no);
+        return value_array(NULL, 0);
+    }
+    size_t yes_len = 0, no_len = 0;
+    for (size_t i = 0; i < len; i++) {
+        LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
+        LatValue pred = cb(closure, &arg, 1, ctx);
+        bool match = (pred.type == VAL_BOOL && pred.as.bool_val);
+        value_free(&pred);
+        if (match) yes[yes_len++] = arg;
+        else no[no_len++] = arg;
+    }
+    LatValue yes_arr = value_array(yes, yes_len);
+    LatValue no_arr = value_array(no, no_len);
+    LatValue pair[2] = {yes_arr, no_arr};
+    LatValue result = value_array(pair, 2);
+    free(yes);
+    free(no);
+    return result;
+}
+
 /* ========================================================================
  * String methods
  * ======================================================================== */
@@ -926,6 +968,57 @@ LatValue builtin_string_substring(LatValue *obj, LatValue *args, int arg_count, 
     return value_string_owned(strndup(obj->as.str_val + start, (size_t)(end - start)));
 }
 
+LatValue builtin_string_last_index_of(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)arg_count;
+    (void)error;
+    if (args[0].type != VAL_STR) return value_int(-1);
+    const char *haystack = obj->as.str_val;
+    const char *needle = args[0].as.str_val;
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return value_int((int64_t)strlen(haystack));
+    const char *last = NULL;
+    const char *p = haystack;
+    while ((p = strstr(p, needle)) != NULL) {
+        last = p;
+        p++;
+    }
+    return last ? value_int((int64_t)(last - haystack)) : value_int(-1);
+}
+
+LatValue builtin_string_is_alpha(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)args;
+    (void)arg_count;
+    (void)error;
+    const char *s = obj->as.str_val;
+    if (!s || *s == '\0') return value_bool(false);
+    for (; *s; s++)
+        if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z'))) return value_bool(false);
+    return value_bool(true);
+}
+
+LatValue builtin_string_is_digit(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)args;
+    (void)arg_count;
+    (void)error;
+    const char *s = obj->as.str_val;
+    if (!s || *s == '\0') return value_bool(false);
+    for (; *s; s++)
+        if (*s < '0' || *s > '9') return value_bool(false);
+    return value_bool(true);
+}
+
+LatValue builtin_string_is_alphanumeric(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)args;
+    (void)arg_count;
+    (void)error;
+    const char *s = obj->as.str_val;
+    if (!s || *s == '\0') return value_bool(false);
+    for (; *s; s++)
+        if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9')))
+            return value_bool(false);
+    return value_bool(true);
+}
+
 /* ========================================================================
  * Map methods (no closures)
  * ======================================================================== */
@@ -1197,6 +1290,63 @@ LatValue builtin_buffer_read_f64(LatValue *obj, LatValue *args, int arg_count, c
     return value_float(v);
 }
 
+LatValue builtin_buffer_read_u64(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)arg_count;
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+        *error = strdup("Buffer.read_u64: index out of bounds");
+        return value_int(0);
+    }
+    size_t i = (size_t)args[0].as.int_val;
+    uint64_t v = (uint64_t)obj->as.buffer.data[i] | ((uint64_t)obj->as.buffer.data[i + 1] << 8) |
+                 ((uint64_t)obj->as.buffer.data[i + 2] << 16) | ((uint64_t)obj->as.buffer.data[i + 3] << 24) |
+                 ((uint64_t)obj->as.buffer.data[i + 4] << 32) | ((uint64_t)obj->as.buffer.data[i + 5] << 40) |
+                 ((uint64_t)obj->as.buffer.data[i + 6] << 48) | ((uint64_t)obj->as.buffer.data[i + 7] << 56);
+    return value_int((int64_t)v);
+}
+
+LatValue builtin_buffer_write_u64(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)arg_count;
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+        *error = strdup("Buffer.write_u64: index out of bounds");
+        return value_unit();
+    }
+    size_t i = (size_t)args[0].as.int_val;
+    uint64_t v = (uint64_t)args[1].as.int_val;
+    obj->as.buffer.data[i] = (uint8_t)(v & 0xFF);
+    obj->as.buffer.data[i + 1] = (uint8_t)((v >> 8) & 0xFF);
+    obj->as.buffer.data[i + 2] = (uint8_t)((v >> 16) & 0xFF);
+    obj->as.buffer.data[i + 3] = (uint8_t)((v >> 24) & 0xFF);
+    obj->as.buffer.data[i + 4] = (uint8_t)((v >> 32) & 0xFF);
+    obj->as.buffer.data[i + 5] = (uint8_t)((v >> 40) & 0xFF);
+    obj->as.buffer.data[i + 6] = (uint8_t)((v >> 48) & 0xFF);
+    obj->as.buffer.data[i + 7] = (uint8_t)((v >> 56) & 0xFF);
+    return value_unit();
+}
+
+LatValue builtin_buffer_read_i64(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)arg_count;
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+        *error = strdup("Buffer.read_i64: index out of bounds");
+        return value_int(0);
+    }
+    size_t i = (size_t)args[0].as.int_val;
+    int64_t v;
+    memcpy(&v, obj->as.buffer.data + i, 8);
+    return value_int(v);
+}
+
+LatValue builtin_buffer_write_i64(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)arg_count;
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+        *error = strdup("Buffer.write_i64: index out of bounds");
+        return value_unit();
+    }
+    size_t i = (size_t)args[0].as.int_val;
+    int64_t v = args[1].as.int_val;
+    memcpy(obj->as.buffer.data + i, &v, 8);
+    return value_unit();
+}
+
 LatValue builtin_buffer_slice(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)error;
     int64_t start = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
@@ -1432,6 +1582,15 @@ LatValue builtin_set_is_superset(LatValue *obj, LatValue *args, int arg_count, c
     return value_bool(true);
 }
 
+LatValue builtin_set_clear(LatValue *obj, LatValue *args, int arg_count, char **error) {
+    (void)args;
+    (void)arg_count;
+    (void)error;
+    lat_map_free(obj->as.set.map);
+    *obj->as.set.map = lat_map_new(sizeof(LatValue));
+    return value_unit();
+}
+
 /* ========================================================================
  * Enum methods
  * ======================================================================== */
@@ -1477,28 +1636,40 @@ LatValue builtin_enum_is_variant(LatValue *obj, LatValue *args, int arg_count, c
  * Method name suggestions for typo errors
  * ======================================================================== */
 
-static const char *array_methods[] = {"len",      "length", "push",   "pop",      "contains",  "enumerate", "reverse",
-                                      "join",     "map",    "filter", "reduce",   "each",      "sort",      "sort_by",
-                                      "find",     "any",    "all",    "flat_map", "flatten",   "group_by",  "unique",
-                                      "index_of", "zip",    "sum",    "min",      "max",       "first",     "last",
-                                      "take",     "drop",   "chunk",  "insert",   "remove_at", "slice",     NULL};
+static const char *array_methods[] = {
+    "len",       "length",   "push",       "pop",       "contains", "enumerate", "reverse", "join",
+    "map",       "filter",   "reduce",     "each",      "sort",     "sort_by",   "find",    "any",
+    "all",       "flat_map", "flatten",    "group_by",  "unique",   "index_of",  "zip",     "sum",
+    "min",       "max",      "first",      "last",      "take",     "drop",      "chunk",   "insert",
+    "remove_at", "slice",    "find_index", "partition", NULL};
 
-static const char *string_methods[] = {"len",      "length",   "split",       "trim",      "trim_start", "trim_end",
-                                       "to_upper", "to_lower", "starts_with", "ends_with", "replace",    "contains",
-                                       "chars",    "bytes",    "reverse",     "repeat",    "pad_left",   "pad_right",
-                                       "count",    "is_empty", "index_of",    "substring", NULL};
+static const char *string_methods[] = {
+    "len",       "length",        "split",     "trim",      "trim_start",      "trim_end", "to_upper",
+    "to_lower",  "starts_with",   "ends_with", "replace",   "contains",        "chars",    "bytes",
+    "reverse",   "repeat",        "pad_left",  "pad_right", "count",           "is_empty", "index_of",
+    "substring", "last_index_of", "is_alpha",  "is_digit",  "is_alphanumeric", NULL};
 
-static const char *map_methods[] = {"len", "keys", "values", "entries", "get", "has", "set", "remove", "merge", NULL};
+static const char *map_methods[] = {"len",   "keys", "values", "entries",  "get", "has", "set", "remove",
+                                    "merge", "map",  "filter", "for_each", "any", "all", NULL};
 
-static const char *buffer_methods[] = {"len",      "push",      "push_u16", "push_u32",  "read_u8", "write_u8",
-                                       "read_u16", "write_u16", "read_u32", "write_u32", "read_i8", "read_i16",
-                                       "read_i32", "read_f32",  "read_f64", "slice",     "clear",   "fill",
-                                       "resize",   "to_string", "to_array", "to_hex",    NULL};
+static const char *buffer_methods[] = {
+    "len",       "push",      "push_u16", "push_u32", "read_u8",  "write_u8",  "read_u16", "write_u16", "read_u32",
+    "write_u32", "read_i8",   "read_i16", "read_i32", "read_f32", "read_f64",  "slice",    "clear",     "fill",
+    "resize",    "to_string", "to_array", "to_hex",   "read_u64", "write_u64", "read_i64", "write_i64", NULL};
 
-static const char *set_methods[] = {"len",          "has",         "add",
-                                    "remove",       "to_array",    "union",
-                                    "intersection", "difference",  "symmetric_difference",
-                                    "is_subset",    "is_superset", NULL};
+static const char *set_methods[] = {"len",
+                                    "has",
+                                    "add",
+                                    "remove",
+                                    "to_array",
+                                    "union",
+                                    "intersection",
+                                    "difference",
+                                    "symmetric_difference",
+                                    "is_subset",
+                                    "is_superset",
+                                    "clear",
+                                    NULL};
 
 static const char *enum_methods[] = {"tag", "enum_name", "payload", "is_variant", NULL};
 

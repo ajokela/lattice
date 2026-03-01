@@ -7921,6 +7921,17 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (lv_err) free(lv_err);
             }
 
+            if (strcmp(expr->as.method_call.method, "clear") == 0 && expr->as.method_call.arg_count == 0) {
+                char *lv_err = NULL;
+                LatValue *set_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (set_lv && set_lv->type == VAL_SET) {
+                    lat_map_free(set_lv->as.set.map);
+                    *set_lv->as.set.map = lat_map_new(sizeof(LatValue));
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+
         /* ── Buffer mutating methods ── */
         buffer_mutating_methods:
             if (strcmp(expr->as.method_call.method, "push") == 0 && expr->as.method_call.arg_count == 1) {
@@ -8065,6 +8076,56 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     buf_lv->as.buffer.data[idx + 1] = (uint8_t)((v >> 8) & 0xFF);
                     buf_lv->as.buffer.data[idx + 2] = (uint8_t)((v >> 16) & 0xFF);
                     buf_lv->as.buffer.data[idx + 3] = (uint8_t)((v >> 24) & 0xFF);
+                    value_free(&ir.value);
+                    value_free(&vr.value);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "write_u64") == 0 && expr->as.method_call.arg_count == 2) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ir)) return ir;
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[1]);
+                    if (!IS_OK(vr)) {
+                        value_free(&ir.value);
+                        return vr;
+                    }
+                    size_t idx = (size_t)ir.value.as.int_val;
+                    if (ir.value.type != VAL_INT || idx + 8 > buf_lv->as.buffer.len) {
+                        value_free(&ir.value);
+                        value_free(&vr.value);
+                        return eval_err(strdup("Buffer.write_u64: index out of bounds"));
+                    }
+                    uint64_t v = (vr.value.type == VAL_INT) ? (uint64_t)vr.value.as.int_val : 0;
+                    for (int b = 0; b < 8; b++) buf_lv->as.buffer.data[idx + b] = (uint8_t)((v >> (b * 8)) & 0xFF);
+                    value_free(&ir.value);
+                    value_free(&vr.value);
+                    return eval_ok(value_unit());
+                }
+                if (lv_err) free(lv_err);
+            }
+            if (strcmp(expr->as.method_call.method, "write_i64") == 0 && expr->as.method_call.arg_count == 2) {
+                char *lv_err = NULL;
+                LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                if (buf_lv && buf_lv->type == VAL_BUFFER) {
+                    EvalResult ir = eval_expr(ev, expr->as.method_call.args[0]);
+                    if (!IS_OK(ir)) return ir;
+                    EvalResult vr = eval_expr(ev, expr->as.method_call.args[1]);
+                    if (!IS_OK(vr)) {
+                        value_free(&ir.value);
+                        return vr;
+                    }
+                    size_t idx = (size_t)ir.value.as.int_val;
+                    if (ir.value.type != VAL_INT || idx + 8 > buf_lv->as.buffer.len) {
+                        value_free(&ir.value);
+                        value_free(&vr.value);
+                        return eval_err(strdup("Buffer.write_i64: index out of bounds"));
+                    }
+                    int64_t v = (vr.value.type == VAL_INT) ? vr.value.as.int_val : 0;
+                    memcpy(buf_lv->as.buffer.data + idx, &v, 8);
                     value_free(&ir.value);
                     value_free(&vr.value);
                     return eval_ok(value_unit());
@@ -11264,6 +11325,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(value_bool(true));
         }
+        if (strcmp(method, "clear") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".clear() takes no arguments"));
+            return eval_ok(value_unit());
+        }
         char *err2 = NULL;
         const char *ssug = builtin_find_similar_method(VAL_SET, method);
         if (ssug) lat_asprintf(&err2, "Set has no method '%s' (did you mean '%s'?)", method, ssug);
@@ -11359,6 +11424,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// Write a 32-bit value (little-endian) at the given index.
         /// @example buf.write_u32(0, 0x12345678)
         if (strcmp(method, "write_u32") == 0) { return eval_ok(value_unit()); }
+        if (strcmp(method, "write_u64") == 0) { return eval_ok(value_unit()); }
+        if (strcmp(method, "write_i64") == 0) { return eval_ok(value_unit()); }
         /// @method Buffer.read_i8(idx: Int) -> Int
         /// @category Buffer Methods
         /// Read a signed 8-bit integer at the given index.
@@ -11416,6 +11483,24 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             double v;
             memcpy(&v, obj.as.buffer.data + i, 8);
             return eval_ok(value_float(v));
+        }
+        if (strcmp(method, "read_u64") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT)
+                return eval_err(strdup("Buffer.read_u64() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 8 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_u64: index out of bounds"));
+            uint64_t v = 0;
+            for (int b = 0; b < 8; b++) v |= (uint64_t)obj.as.buffer.data[i + b] << (b * 8);
+            return eval_ok(value_int((int64_t)v));
+        }
+        if (strcmp(method, "read_i64") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_INT)
+                return eval_err(strdup("Buffer.read_i64() expects 1 Int argument"));
+            size_t i = (size_t)args[0].as.int_val;
+            if (i + 8 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_i64: index out of bounds"));
+            int64_t v;
+            memcpy(&v, obj.as.buffer.data + i, 8);
+            return eval_ok(value_int(v));
         }
         /// @method Buffer.slice(start: Int, end: Int) -> Buffer
         /// @category Buffer Methods
@@ -12320,6 +12405,64 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         return eval_ok(grp_map);
     }
+    if (strcmp(method, "find_index") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+            return eval_err(strdup(".find_index() expects 1 closure argument"));
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
+            EvalResult r = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                        args[0].as.closure.body, args[0].as.closure.captured_env, &elem, 1,
+                                        args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+            if (!IS_OK(r)) return r;
+            bool match = value_is_truthy(&r.value);
+            value_free(&r.value);
+            if (match) return eval_ok(value_int((int64_t)i));
+        }
+        return eval_ok(value_int(-1));
+    }
+    if (strcmp(method, "partition") == 0 && obj.type == VAL_ARRAY) {
+        if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+            return eval_err(strdup(".partition() expects 1 closure argument"));
+        size_t cap_t = 4, cap_f = 4, len_t = 0, len_f = 0;
+        LatValue *trues = malloc(cap_t * sizeof(LatValue));
+        LatValue *falses = malloc(cap_f * sizeof(LatValue));
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            LatValue elem = value_deep_clone(&obj.as.array.elems[i]);
+            EvalResult r = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                        args[0].as.closure.body, args[0].as.closure.captured_env, &elem, 1,
+                                        args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+            if (!IS_OK(r)) {
+                for (size_t j = 0; j < len_t; j++) value_free(&trues[j]);
+                for (size_t j = 0; j < len_f; j++) value_free(&falses[j]);
+                free(trues);
+                free(falses);
+                return r;
+            }
+            LatValue cloned = value_deep_clone(&obj.as.array.elems[i]);
+            if (value_is_truthy(&r.value)) {
+                if (len_t >= cap_t) {
+                    cap_t *= 2;
+                    trues = realloc(trues, cap_t * sizeof(LatValue));
+                }
+                trues[len_t++] = cloned;
+            } else {
+                if (len_f >= cap_f) {
+                    cap_f *= 2;
+                    falses = realloc(falses, cap_f * sizeof(LatValue));
+                }
+                falses[len_f++] = cloned;
+            }
+            value_free(&r.value);
+        }
+        LatValue arr_t = value_array(trues, len_t);
+        LatValue arr_f = value_array(falses, len_f);
+        free(trues);
+        free(falses);
+        LatValue pair[2] = {arr_t, arr_f};
+        /* value_array does a shallow memcpy, so result's inner elements share
+         * the same backing arrays as arr_t/arr_f.  Don't free arr_t/arr_f. */
+        return eval_ok(value_array(pair, 2));
+    }
     /// @method Array.sum() -> Int|Float
     /// @category Array Methods
     /// Return the sum of all numeric elements.
@@ -12599,6 +12742,48 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(result);
         }
+        if (strcmp(method, "any") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+                return eval_err(strdup(".any() expects 1 closure argument"));
+            for (size_t i = 0; i < obj.as.map.map->cap; i++) {
+                if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
+                    LatValue call_args[2];
+                    call_args[0] = value_string(obj.as.map.map->entries[i].key);
+                    call_args[1] = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
+                    EvalResult r = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                                args[0].as.closure.body, args[0].as.closure.captured_env, call_args, 2,
+                                                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                    if (!IS_OK(r)) return r;
+                    if (value_is_truthy(&r.value)) {
+                        value_free(&r.value);
+                        return eval_ok(value_bool(true));
+                    }
+                    value_free(&r.value);
+                }
+            }
+            return eval_ok(value_bool(false));
+        }
+        if (strcmp(method, "all") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_CLOSURE)
+                return eval_err(strdup(".all() expects 1 closure argument"));
+            for (size_t i = 0; i < obj.as.map.map->cap; i++) {
+                if (obj.as.map.map->entries[i].state == MAP_OCCUPIED) {
+                    LatValue call_args[2];
+                    call_args[0] = value_string(obj.as.map.map->entries[i].key);
+                    call_args[1] = value_deep_clone((LatValue *)obj.as.map.map->entries[i].value);
+                    EvalResult r = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
+                                                args[0].as.closure.body, args[0].as.closure.captured_env, call_args, 2,
+                                                args[0].as.closure.default_values, args[0].as.closure.has_variadic);
+                    if (!IS_OK(r)) return r;
+                    if (!value_is_truthy(&r.value)) {
+                        value_free(&r.value);
+                        return eval_ok(value_bool(false));
+                    }
+                    value_free(&r.value);
+                }
+            }
+            return eval_ok(value_bool(true));
+        }
     }
     /* ── String methods ── */
     if (obj.type == VAL_STR) {
@@ -12723,6 +12908,29 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 return eval_err(strdup(".substring() expects 2 integer arguments"));
             return eval_ok(
                 value_string_owned(lat_str_substring(obj.as.str_val, args[0].as.int_val, args[1].as.int_val)));
+        }
+        if (strcmp(method, "last_index_of") == 0) {
+            if (arg_count != 1 || args[0].type != VAL_STR)
+                return eval_err(strdup(".last_index_of() expects 1 string argument"));
+            char *err = NULL;
+            LatValue r = builtin_string_last_index_of((LatValue *)&obj, (LatValue *)args, 1, &err);
+            if (err) return eval_err(err);
+            return eval_ok(r);
+        }
+        if (strcmp(method, "is_alpha") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".is_alpha() takes no arguments"));
+            char *err = NULL;
+            return eval_ok(builtin_string_is_alpha((LatValue *)&obj, NULL, 0, &err));
+        }
+        if (strcmp(method, "is_digit") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".is_digit() takes no arguments"));
+            char *err = NULL;
+            return eval_ok(builtin_string_is_digit((LatValue *)&obj, NULL, 0, &err));
+        }
+        if (strcmp(method, "is_alphanumeric") == 0) {
+            if (arg_count != 0) return eval_err(strdup(".is_alphanumeric() takes no arguments"));
+            char *err = NULL;
+            return eval_ok(builtin_string_is_alphanumeric((LatValue *)&obj, NULL, 0, &err));
         }
         /// @method String.chars() -> Array
         /// @category String Methods

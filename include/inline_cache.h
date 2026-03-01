@@ -145,47 +145,53 @@ static inline void pic_update(PICSlot *slot, uint8_t type_tag, uint32_t mhash, u
 #define PIC_ARRAY_LENGTH    24
 
 /* Array methods (closure) */
-#define PIC_ARRAY_MAP      128
-#define PIC_ARRAY_FILTER   129
-#define PIC_ARRAY_REDUCE   130
-#define PIC_ARRAY_EACH     131
-#define PIC_ARRAY_SORT     132
-#define PIC_ARRAY_FOR_EACH 133
-#define PIC_ARRAY_FIND     134
-#define PIC_ARRAY_ANY      135
-#define PIC_ARRAY_ALL      136
-#define PIC_ARRAY_FLAT_MAP 137
-#define PIC_ARRAY_SORT_BY  138
-#define PIC_ARRAY_GROUP_BY 139
+#define PIC_ARRAY_MAP        128
+#define PIC_ARRAY_FILTER     129
+#define PIC_ARRAY_REDUCE     130
+#define PIC_ARRAY_EACH       131
+#define PIC_ARRAY_SORT       132
+#define PIC_ARRAY_FOR_EACH   133
+#define PIC_ARRAY_FIND       134
+#define PIC_ARRAY_ANY        135
+#define PIC_ARRAY_ALL        136
+#define PIC_ARRAY_FLAT_MAP   137
+#define PIC_ARRAY_SORT_BY    138
+#define PIC_ARRAY_GROUP_BY   139
+#define PIC_ARRAY_FIND_INDEX 140
+#define PIC_ARRAY_PARTITION  141
 
 /* String methods */
-#define PIC_STRING_LEN         30
-#define PIC_STRING_LENGTH      31
-#define PIC_STRING_SPLIT       32
-#define PIC_STRING_TRIM        33
-#define PIC_STRING_TO_UPPER    34
-#define PIC_STRING_TO_LOWER    35
-#define PIC_STRING_STARTS_WITH 36
-#define PIC_STRING_ENDS_WITH   37
-#define PIC_STRING_REPLACE     38
-#define PIC_STRING_CONTAINS    39
-#define PIC_STRING_CHARS       40
-#define PIC_STRING_BYTES       41
-#define PIC_STRING_REVERSE     42
-#define PIC_STRING_REPEAT      43
-#define PIC_STRING_PAD_LEFT    44
-#define PIC_STRING_PAD_RIGHT   45
-#define PIC_STRING_COUNT       46
-#define PIC_STRING_IS_EMPTY    47
-#define PIC_STRING_INDEX_OF    48
-#define PIC_STRING_SUBSTRING   49
-#define PIC_STRING_TRIM_START  50
-#define PIC_STRING_TRIM_END    51
-#define PIC_STRING_CAPITALIZE  52
-#define PIC_STRING_TITLE_CASE  53
-#define PIC_STRING_SNAKE_CASE  54
-#define PIC_STRING_CAMEL_CASE  55
-#define PIC_STRING_KEBAB_CASE  56
+#define PIC_STRING_LEN             30
+#define PIC_STRING_LENGTH          31
+#define PIC_STRING_SPLIT           32
+#define PIC_STRING_TRIM            33
+#define PIC_STRING_TO_UPPER        34
+#define PIC_STRING_TO_LOWER        35
+#define PIC_STRING_STARTS_WITH     36
+#define PIC_STRING_ENDS_WITH       37
+#define PIC_STRING_REPLACE         38
+#define PIC_STRING_CONTAINS        39
+#define PIC_STRING_CHARS           40
+#define PIC_STRING_BYTES           41
+#define PIC_STRING_REVERSE         42
+#define PIC_STRING_REPEAT          43
+#define PIC_STRING_PAD_LEFT        44
+#define PIC_STRING_PAD_RIGHT       45
+#define PIC_STRING_COUNT           46
+#define PIC_STRING_IS_EMPTY        47
+#define PIC_STRING_INDEX_OF        48
+#define PIC_STRING_SUBSTRING       49
+#define PIC_STRING_TRIM_START      50
+#define PIC_STRING_TRIM_END        51
+#define PIC_STRING_CAPITALIZE      52
+#define PIC_STRING_TITLE_CASE      53
+#define PIC_STRING_SNAKE_CASE      54
+#define PIC_STRING_CAMEL_CASE      55
+#define PIC_STRING_KEBAB_CASE      56
+#define PIC_STRING_LAST_INDEX_OF   57
+#define PIC_STRING_IS_ALPHA        58
+#define PIC_STRING_IS_DIGIT        59
+#define PIC_STRING_IS_ALPHANUMERIC 25
 
 /* Map methods */
 #define PIC_MAP_LEN      60
@@ -199,6 +205,8 @@ static inline void pic_update(PICSlot *slot, uint8_t type_tag, uint32_t mhash, u
 #define PIC_MAP_SET      68
 #define PIC_MAP_CONTAINS 69
 #define PIC_MAP_LENGTH   70
+#define PIC_MAP_ANY      142
+#define PIC_MAP_ALL      143
 
 /* Buffer methods */
 #define PIC_BUFFER_LEN       75
@@ -225,6 +233,10 @@ static inline void pic_update(PICSlot *slot, uint8_t type_tag, uint32_t mhash, u
 #define PIC_BUFFER_READ_F32  96
 #define PIC_BUFFER_READ_F64  97
 #define PIC_BUFFER_CAPACITY  98
+#define PIC_BUFFER_READ_U64  71
+#define PIC_BUFFER_WRITE_U64 72
+#define PIC_BUFFER_READ_I64  73
+#define PIC_BUFFER_WRITE_I64 74
 
 /* Set methods */
 #define PIC_SET_LEN                  100
@@ -240,6 +252,7 @@ static inline void pic_update(PICSlot *slot, uint8_t type_tag, uint32_t mhash, u
 #define PIC_SET_LENGTH               110
 #define PIC_SET_CONTAINS             111
 #define PIC_SET_SYMMETRIC_DIFFERENCE 112
+#define PIC_SET_CLEAR                113
 
 /* Enum methods */
 #define PIC_ENUM_TAG          115

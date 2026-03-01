@@ -697,6 +697,16 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
 #define MHASH_write_u16            0xf5d8ed8bu
 #define MHASH_write_u32            0xf5d8edc9u
 #define MHASH_zip                  0x0b88c7d8u
+#define MHASH_find_index           0x143b691du
+#define MHASH_partition            0xcb32917fu
+#define MHASH_last_index_of        0x58183d24u
+#define MHASH_is_alpha             0xdbcf64c6u
+#define MHASH_is_digit             0xdc03e311u
+#define MHASH_is_alphanumeric      0x3b60fa99u
+#define MHASH_read_u64             0xf94a169fu
+#define MHASH_write_u64            0xf5d8ee2eu
+#define MHASH_read_i64             0xf949e393u
+#define MHASH_write_i64            0xf5d8bb22u
 
 static inline uint32_t method_hash(const char *s) {
     uint32_t h = 5381;
@@ -745,6 +755,8 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_flat_map) return PIC_ARRAY_FLAT_MAP;
             if (mhash == MHASH_sort_by) return PIC_ARRAY_SORT_BY;
             if (mhash == MHASH_group_by) return PIC_ARRAY_GROUP_BY;
+            if (mhash == MHASH_find_index) return PIC_ARRAY_FIND_INDEX;
+            if (mhash == MHASH_partition) return PIC_ARRAY_PARTITION;
             break;
         case VAL_STR:
             if (mhash == MHASH_len) return PIC_STRING_LEN;
@@ -774,6 +786,10 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_snake_case) return PIC_STRING_SNAKE_CASE;
             if (mhash == MHASH_camel_case) return PIC_STRING_CAMEL_CASE;
             if (mhash == MHASH_kebab_case) return PIC_STRING_KEBAB_CASE;
+            if (mhash == MHASH_last_index_of) return PIC_STRING_LAST_INDEX_OF;
+            if (mhash == MHASH_is_alpha) return PIC_STRING_IS_ALPHA;
+            if (mhash == MHASH_is_digit) return PIC_STRING_IS_DIGIT;
+            if (mhash == MHASH_is_alphanumeric) return PIC_STRING_IS_ALPHANUMERIC;
             break;
         case VAL_MAP:
             if (mhash == MHASH_len) return PIC_MAP_LEN;
@@ -787,6 +803,8 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_merge) return PIC_MAP_MERGE;
             if (mhash == MHASH_set) return PIC_MAP_SET;
             if (mhash == MHASH_contains) return PIC_MAP_CONTAINS;
+            if (mhash == MHASH_any) return PIC_MAP_ANY;
+            if (mhash == MHASH_all) return PIC_MAP_ALL;
             break;
         case VAL_SET:
             if (mhash == MHASH_has) return PIC_SET_HAS;
@@ -802,6 +820,7 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_is_subset) return PIC_SET_IS_SUBSET;
             if (mhash == MHASH_is_superset) return PIC_SET_IS_SUPERSET;
             if (mhash == MHASH_contains) return PIC_SET_CONTAINS;
+            if (mhash == MHASH_clear) return PIC_SET_CLEAR;
             break;
         case VAL_ENUM:
             if (mhash == MHASH_tag) return PIC_ENUM_TAG;
@@ -840,6 +859,10 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
             if (mhash == MHASH_read_i32) return PIC_BUFFER_READ_I32;
             if (mhash == MHASH_read_f32) return PIC_BUFFER_READ_F32;
             if (mhash == MHASH_read_f64) return PIC_BUFFER_READ_F64;
+            if (mhash == MHASH_read_u64) return PIC_BUFFER_READ_U64;
+            if (mhash == MHASH_write_u64) return PIC_BUFFER_WRITE_U64;
+            if (mhash == MHASH_read_i64) return PIC_BUFFER_READ_I64;
+            if (mhash == MHASH_write_i64) return PIC_BUFFER_WRITE_I64;
             break;
         case VAL_RANGE:
             if (mhash == MHASH_len) return PIC_RANGE_CONTAINS;
@@ -1427,6 +1450,16 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             *result = builtin_array_group_by(obj, &args[0], regvm_builtin_callback, vm, &err);
             return true;
         }
+        if (mhash == MHASH_find_index && strcmp(method, "find_index") == 0 && arg_count == 1) {
+            char *err = NULL;
+            *result = builtin_array_find_index(obj, &args[0], regvm_builtin_callback, vm, &err);
+            return true;
+        }
+        if (mhash == MHASH_partition && strcmp(method, "partition") == 0 && arg_count == 1) {
+            char *err = NULL;
+            *result = builtin_array_partition(obj, &args[0], regvm_builtin_callback, vm, &err);
+            return true;
+        }
     }
 
     /* ── Array additional methods ── */
@@ -1654,6 +1687,26 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             for (int64_t i = 0; i < n; i++) memcpy(buf + i * (int64_t)slen, obj->as.str_val, slen);
             buf[slen * (size_t)n] = '\0';
             *result = value_string_owned(buf);
+            return true;
+        }
+        if (mhash == MHASH_last_index_of && strcmp(method, "last_index_of") == 0 && arg_count == 1) {
+            char *err = NULL;
+            *result = builtin_string_last_index_of(obj, args, 1, &err);
+            return true;
+        }
+        if (mhash == MHASH_is_alpha && strcmp(method, "is_alpha") == 0 && arg_count == 0) {
+            char *err = NULL;
+            *result = builtin_string_is_alpha(obj, NULL, 0, &err);
+            return true;
+        }
+        if (mhash == MHASH_is_digit && strcmp(method, "is_digit") == 0 && arg_count == 0) {
+            char *err = NULL;
+            *result = builtin_string_is_digit(obj, NULL, 0, &err);
+            return true;
+        }
+        if (mhash == MHASH_is_alphanumeric && strcmp(method, "is_alphanumeric") == 0 && arg_count == 0) {
+            char *err = NULL;
+            *result = builtin_string_is_alphanumeric(obj, NULL, 0, &err);
             return true;
         }
         if (mhash == MHASH_chars && strcmp(method, "chars") == 0 && arg_count == 0) {
@@ -1917,6 +1970,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             *result = value_bool(is);
             return true;
         }
+        if (mhash == MHASH_clear && strcmp(method, "clear") == 0 && arg_count == 0) {
+            char *err = NULL;
+            *result = builtin_set_clear(obj, NULL, 0, &err);
+            return true;
+        }
     }
 
     /* ── String additional: count, is_empty ── */
@@ -1963,6 +2021,48 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 value_free(&cb_args[1]);
             }
             *result = mapped;
+            return true;
+        }
+        if (mhash == MHASH_any && strcmp(method, "any") == 0 && arg_count == 1) {
+            LatValue *closure = &args[0];
+            bool found = false;
+            for (size_t i = 0; i < obj->as.map.map->cap; i++) {
+                if (obj->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue cb_args[2];
+                cb_args[0] = value_string(obj->as.map.map->entries[i].key);
+                cb_args[1] = rvm_clone((LatValue *)obj->as.map.map->entries[i].value);
+                LatValue ret = regvm_call_closure(vm, closure, cb_args, 2);
+                value_free(&cb_args[0]);
+                value_free(&cb_args[1]);
+                if (ret.type == VAL_BOOL && ret.as.bool_val) {
+                    found = true;
+                    value_free(&ret);
+                    break;
+                }
+                value_free(&ret);
+            }
+            *result = value_bool(found);
+            return true;
+        }
+        if (mhash == MHASH_all && strcmp(method, "all") == 0 && arg_count == 1) {
+            LatValue *closure = &args[0];
+            bool all_match = true;
+            for (size_t i = 0; i < obj->as.map.map->cap; i++) {
+                if (obj->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue cb_args[2];
+                cb_args[0] = value_string(obj->as.map.map->entries[i].key);
+                cb_args[1] = rvm_clone((LatValue *)obj->as.map.map->entries[i].value);
+                LatValue ret = regvm_call_closure(vm, closure, cb_args, 2);
+                value_free(&cb_args[0]);
+                value_free(&cb_args[1]);
+                if (!(ret.type == VAL_BOOL && ret.as.bool_val)) {
+                    all_match = false;
+                    value_free(&ret);
+                    break;
+                }
+                value_free(&ret);
+            }
+            *result = value_bool(all_match);
             return true;
         }
     }
@@ -2168,6 +2268,30 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             } else {
                 *result = value_nil();
             }
+            return true;
+        }
+        if (mhash == MHASH_read_u64 && strcmp(method, "read_u64") == 0 && arg_count == 1) {
+            char *err = NULL;
+            *result = builtin_buffer_read_u64(obj, args, 1, &err);
+            if (err) vm->error = err;
+            return true;
+        }
+        if (mhash == MHASH_write_u64 && strcmp(method, "write_u64") == 0 && arg_count == 2) {
+            char *err = NULL;
+            *result = builtin_buffer_write_u64(obj, args, 2, &err);
+            if (err) vm->error = err;
+            return true;
+        }
+        if (mhash == MHASH_read_i64 && strcmp(method, "read_i64") == 0 && arg_count == 1) {
+            char *err = NULL;
+            *result = builtin_buffer_read_i64(obj, args, 1, &err);
+            if (err) vm->error = err;
+            return true;
+        }
+        if (mhash == MHASH_write_i64 && strcmp(method, "write_i64") == 0 && arg_count == 2) {
+            char *err = NULL;
+            *result = builtin_buffer_write_i64(obj, args, 2, &err);
+            if (err) vm->error = err;
             return true;
         }
         if (mhash == MHASH_slice && strcmp(method, "slice") == 0 && (arg_count == 1 || arg_count == 2)) {
