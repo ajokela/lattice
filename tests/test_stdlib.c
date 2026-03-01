@@ -1,11 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#endif
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
@@ -1234,6 +1238,7 @@ static void test_tcp_listen_close(void) {
     net_tcp_close(fd);
 }
 
+#ifndef _WIN32
 /* 81. test_tcp_connect_write_read - full loopback send/receive */
 static void test_tcp_connect_write_read(void) {
     char *err = NULL;
@@ -1279,7 +1284,9 @@ static void test_tcp_connect_write_read(void) {
     waitpid(pid, &status, 0);
     ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
+#endif /* !_WIN32 */
 
+#ifndef _WIN32
 /* 82. test_tcp_peer_addr - verify peer address string format */
 static void test_tcp_peer_addr(void) {
     char *err = NULL;
@@ -1320,6 +1327,7 @@ static void test_tcp_peer_addr(void) {
     int status;
     waitpid(pid, &status, 0);
 }
+#endif /* !_WIN32 */
 
 /* 83. test_tcp_set_timeout - set timeout on a socket */
 static void test_tcp_set_timeout(void) {
@@ -4044,6 +4052,7 @@ static void test_set_typeof(void) {
                   "Set");
 }
 
+#ifndef _WIN32
 /* ── HTTP mock server + integration tests ── */
 
 /* Helper: run a mock HTTP server in a forked child.
@@ -4429,6 +4438,7 @@ static void test_http_execute_non_standard_port(void) {
     int status;
     waitpid(pid, &status, 0);
 }
+#endif /* !_WIN32 */
 
 static void test_http_execute_connect_refused(void) {
     /* Use a port that nothing is listening on */
@@ -4443,6 +4453,7 @@ static void test_http_execute_connect_refused(void) {
     free(err);
 }
 
+#ifndef _WIN32
 static void test_http_execute_lattice_get(void) {
     int port;
     int server = mock_listen(&port);
@@ -4510,6 +4521,7 @@ static void test_http_execute_lattice_post(void) {
     int status;
     waitpid(pid, &status, 0);
 }
+#endif /* !_WIN32 */
 
 /* ── HTTP client error tests ── */
 
@@ -12236,8 +12248,10 @@ void register_stdlib_tests(void) {
 
     /* TCP networking */
     register_test("test_tcp_listen_close", test_tcp_listen_close);
+#ifndef _WIN32
     register_test("test_tcp_connect_write_read", test_tcp_connect_write_read);
     register_test("test_tcp_peer_addr", test_tcp_peer_addr);
+#endif
     register_test("test_tcp_set_timeout", test_tcp_set_timeout);
     register_test("test_tcp_invalid_fd", test_tcp_invalid_fd);
     register_test("test_tcp_lattice_integration", test_tcp_lattice_integration);
@@ -12578,15 +12592,19 @@ void register_stdlib_tests(void) {
     register_test("test_http_url_parse_basic", test_http_url_parse_basic);
     register_test("test_http_url_parse_custom_port", test_http_url_parse_custom_port);
     register_test("test_http_url_parse_errors", test_http_url_parse_errors);
+#ifndef _WIN32
     register_test("test_http_execute_get", test_http_execute_get);
     register_test("test_http_execute_post_body", test_http_execute_post_body);
     register_test("test_http_execute_custom_headers", test_http_execute_custom_headers);
     register_test("test_http_execute_chunked", test_http_execute_chunked);
     register_test("test_http_execute_multi_headers", test_http_execute_multi_headers);
     register_test("test_http_execute_non_standard_port", test_http_execute_non_standard_port);
+#endif
     register_test("test_http_execute_connect_refused", test_http_execute_connect_refused);
+#ifndef _WIN32
     register_test("test_http_execute_lattice_get", test_http_execute_lattice_get);
     register_test("test_http_execute_lattice_post", test_http_execute_lattice_post);
+#endif
 
     /* HTTP client error tests */
     register_test("test_http_get_wrong_type", test_http_get_wrong_type);
