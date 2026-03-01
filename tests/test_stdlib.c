@@ -4053,7 +4053,7 @@ static void test_set_typeof(void) {
 }
 
 #ifndef _WIN32
-/* ── HTTP mock server + integration tests ── */
+/* ── HTTP mock server helpers (require fork) ── */
 
 /* Helper: run a mock HTTP server in a forked child.
  * Accepts one connection on server_fd, reads the request, writes `response`, closes. */
@@ -4084,6 +4084,9 @@ static int mock_listen(int *port_out) {
     *port_out = ntohs(addr.sin_port);
     return server;
 }
+#endif /* !_WIN32 */
+
+/* ── HTTP URL parsing tests (no fork needed) ── */
 
 static void test_http_url_parse_basic(void) {
     char *err = NULL;
@@ -4151,6 +4154,7 @@ static void test_http_url_parse_errors(void) {
     free(err);
 }
 
+#ifndef _WIN32
 static void test_http_execute_get(void) {
     int port;
     int server = mock_listen(&port);
@@ -12338,10 +12342,12 @@ void register_stdlib_tests(void) {
     register_test("test_format_error_non_string_fmt", test_format_error_non_string_fmt);
 
     /* Crypto / Base64 */
+#ifdef LATTICE_HAS_TLS
     register_test("test_sha256_empty", test_sha256_empty);
     register_test("test_sha256_hello", test_sha256_hello);
     register_test("test_md5_empty", test_md5_empty);
     register_test("test_md5_hello", test_md5_hello);
+#endif
     register_test("test_sha256_error_handling", test_sha256_error_handling);
     register_test("test_md5_error_handling", test_md5_error_handling);
     register_test("test_base64_encode_hello", test_base64_encode_hello);
