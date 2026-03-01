@@ -81,6 +81,96 @@ static int debug_break_line = -1; /* Initial breakpoint line (-1 = none) */
 static int saved_argc = 0;
 static char **saved_argv = NULL;
 
+static void print_version(void) { printf("Lattice v%s\n", LATTICE_VERSION); }
+
+static void print_help(void) {
+    print_version();
+    printf("\nUsage: clat [options] [file.lat] [args...]\n");
+    printf("       clat <command> [options]\n");
+    printf("\nCommands:\n");
+    printf("  compile     Compile source to bytecode (.latc)\n");
+    printf("  test        Run test blocks\n");
+    printf("  fmt         Format source code\n");
+    printf("  doc         Generate documentation\n");
+    printf("  init        Initialize a new package\n");
+    printf("  install     Install package dependencies\n");
+    printf("  add         Add a package dependency\n");
+    printf("  remove      Remove a package dependency\n");
+    printf("\nOptions:\n");
+    printf("  --tree-walk       Use tree-walk interpreter\n");
+    printf("  --regvm           Use register VM backend\n");
+    printf("  --stats           Show memory statistics after execution\n");
+    printf("  --gc              Enable garbage collector\n");
+    printf("  --no-gc           Disable garbage collector\n");
+    printf("  --gc-stress       GC stress testing mode\n");
+    printf("  --no-regions      Disable region-based memory\n");
+    printf("  --no-assertions   Disable runtime assertions\n");
+    printf("  --debug           Attach debugger\n");
+    printf("  --break <line>    Set breakpoint at line (implies --debug)\n");
+    printf("  -h, --help        Show this help message\n");
+    printf("  -V, --version     Show version\n");
+    printf("\nWhen no file is given, starts an interactive REPL.\n");
+    printf("Files ending in .latc or .rlat are executed as pre-compiled bytecode.\n");
+    printf("Arguments after the filename are passed to the script via args().\n");
+    printf("\nRun 'clat <command> --help' for command-specific help.\n");
+}
+
+static void print_compile_help(void) {
+    printf("Usage: clat compile [options] <file.lat> [-o output]\n");
+    printf("\nCompile Lattice source to bytecode.\n");
+    printf("\nOptions:\n");
+    printf("  --regvm           Compile for register VM (output: .rlat)\n");
+    printf("  -o <path>         Set output file path\n");
+    printf("  -h, --help        Show this help\n");
+    printf("\nBy default, compiles for the stack VM (output: .latc).\n");
+    printf("\nExamples:\n");
+    printf("  clat compile main.lat              Compile to main.latc\n");
+    printf("  clat compile main.lat -o out.latc  Compile with custom output\n");
+    printf("  clat compile --regvm main.lat      Compile for register VM\n");
+}
+
+static void print_test_help(void) {
+    printf("Usage: clat test [options] <file.lat|dir/>\n");
+    printf("\nRun test blocks in Lattice source files.\n");
+    printf("\nOptions:\n");
+    printf("  -f, --filter <pattern>  Only run tests matching pattern\n");
+    printf("  -v, --verbose           Verbose output\n");
+    printf("  --summary               Show summary after run\n");
+    printf("  --gc-stress             GC stress testing mode\n");
+    printf("  --no-regions            Disable region-based memory\n");
+    printf("  --no-assertions         Disable runtime assertions\n");
+    printf("  -h, --help              Show this help\n");
+    printf("\nWhen given a directory, discovers *_test.lat and test_*.lat files.\n");
+    printf("\nExamples:\n");
+    printf("  clat test tests/                  Run all tests in directory\n");
+    printf("  clat test test_math.lat           Run a single test file\n");
+    printf("  clat test tests/ -f arithmetic    Filter tests by name\n");
+}
+
+static void print_fmt_help(void) {
+    printf("Usage: clat fmt [options] <file.lat>\n");
+    printf("\nFormat Lattice source code.\n");
+    printf("\nOptions:\n");
+    printf("  --check           Check formatting without modifying\n");
+    printf("  --stdin           Read from stdin, write to stdout\n");
+    printf("  -h, --help        Show this help\n");
+    printf("\nExamples:\n");
+    printf("  clat fmt main.lat           Format file in place\n");
+    printf("  clat fmt --check main.lat   Check if file is formatted\n");
+    printf("  clat fmt --stdin            Format stdin to stdout\n");
+}
+
+static void print_package_help(void) {
+    printf("Usage: clat <command> [args]\n");
+    printf("\nPackage management commands:\n");
+    printf("\n  clat init                   Initialize a new package\n");
+    printf("  clat install                Install package dependencies\n");
+    printf("  clat add <pkg> [version]    Add a package dependency\n");
+    printf("  clat remove <pkg>           Remove a package dependency\n");
+    printf("\nOptions:\n");
+    printf("  -h, --help                  Show this help\n");
+}
+
 static int run_source(const char *source, bool show_stats, const char *script_dir, const char *source_path) {
     /* Lex */
     Lexer lex = lexer_new(source);
@@ -943,13 +1033,28 @@ int main(int argc, char **argv) {
     bool show_stats = false;
     const char *file = NULL;
 
+    /* Handle --version / -V and --help / -h */
+    if (argc >= 2) {
+        if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0) {
+            print_version();
+            return 0;
+        }
+        if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+            print_help();
+            return 0;
+        }
+    }
+
     /* Check for 'compile' subcommand */
     if (argc >= 2 && strcmp(argv[1], "compile") == 0) {
         const char *input_path = NULL;
         const char *output_path = NULL;
         bool compile_regvm = false;
         for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "-o") == 0) {
+            if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+                print_compile_help();
+                return 0;
+            } else if (strcmp(argv[i], "-o") == 0) {
                 if (i + 1 >= argc) {
                     fprintf(stderr, "error: -o requires an argument\n");
                     return 1;
@@ -1106,7 +1211,10 @@ int main(int argc, char **argv) {
         bool verbose_mode = false;
         bool summary_mode = false;
         for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "--gc-stress") == 0) gc_stress_mode = true;
+            if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+                print_test_help();
+                return 0;
+            } else if (strcmp(argv[i], "--gc-stress") == 0) gc_stress_mode = true;
             else if (strcmp(argv[i], "--no-regions") == 0) no_regions_mode = true;
             else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;
             else if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) verbose_mode = true;
@@ -1174,13 +1282,29 @@ int main(int argc, char **argv) {
     }
 
     /* Check for 'init' subcommand */
-    if (argc >= 2 && strcmp(argv[1], "init") == 0) { return pkg_cmd_init(); }
+    if (argc >= 2 && strcmp(argv[1], "init") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--help") == 0 || strcmp(argv[2], "-h") == 0)) {
+            print_package_help();
+            return 0;
+        }
+        return pkg_cmd_init();
+    }
 
     /* Check for 'install' subcommand */
-    if (argc >= 2 && strcmp(argv[1], "install") == 0) { return pkg_cmd_install(); }
+    if (argc >= 2 && strcmp(argv[1], "install") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--help") == 0 || strcmp(argv[2], "-h") == 0)) {
+            print_package_help();
+            return 0;
+        }
+        return pkg_cmd_install();
+    }
 
     /* Check for 'add' subcommand */
     if (argc >= 2 && strcmp(argv[1], "add") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--help") == 0 || strcmp(argv[2], "-h") == 0)) {
+            print_package_help();
+            return 0;
+        }
         if (argc < 3) {
             fprintf(stderr, "usage: clat add <package> [version]\n");
             return 1;
@@ -1191,6 +1315,10 @@ int main(int argc, char **argv) {
 
     /* Check for 'remove' subcommand */
     if (argc >= 2 && strcmp(argv[1], "remove") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--help") == 0 || strcmp(argv[2], "-h") == 0)) {
+            print_package_help();
+            return 0;
+        }
         if (argc < 3) {
             fprintf(stderr, "usage: clat remove <package>\n");
             return 1;
@@ -1205,7 +1333,10 @@ int main(int argc, char **argv) {
         const char *fmt_path = NULL;
 
         for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "--check") == 0) check_only = true;
+            if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+                print_fmt_help();
+                return 0;
+            } else if (strcmp(argv[i], "--check") == 0) check_only = true;
             else if (strcmp(argv[i], "--stdin") == 0) from_stdin = true;
             else if (!fmt_path) fmt_path = argv[i];
             else {
