@@ -1138,6 +1138,10 @@ TEST(test_lsp_code_action_capability) {
     lsp_server_free(srv);
 }
 
+/* The remaining LSP tests use direct stdin/stdout assignment which is not
+ * supported on Windows (MinGW defines them as macros, not lvalues). */
+#ifndef _WIN32
+
 /* Helper to create a diagnostic cJSON object */
 static cJSON *make_test_diagnostic(const char *message, int line, int start_col, int end_col) {
     cJSON *diag = cJSON_CreateObject();
@@ -2810,3 +2814,5 @@ TEST(lsp_semantic_tokens_cleaned_on_reanalyze) {
 
     lsp_document_free(doc);
 }
+
+#endif /* !_WIN32 */
