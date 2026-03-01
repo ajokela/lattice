@@ -80,6 +80,7 @@ static const char *names[] = {
     [ROP_FREEZE_VAR] = "FREEZE_VAR",
     [ROP_THAW_VAR] = "THAW_VAR",
     [ROP_SUBLIMATE_VAR] = "SUBLIMATE_VAR",
+    [ROP_SUBLIMATE] = "SUBLIMATE",
     [ROP_REACT] = "REACT",
     [ROP_UNREACT] = "UNREACT",
     [ROP_BOND] = "BOND",

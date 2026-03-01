@@ -150,6 +150,7 @@ typedef enum {
     ROP_FREEZE_VAR,    /* A, B, C   : freeze var K[A], loc B:C          */
     ROP_THAW_VAR,      /* A, B, C   : thaw var K[A], loc B:C            */
     ROP_SUBLIMATE_VAR, /* A, B, C   : sublimate var K[A], loc B:C       */
+    ROP_SUBLIMATE,     /* A         : R[A].phase = SUBLIMATED           */
     ROP_REACT,         /* A, B      : register reaction R[A] on R[B]    */
     ROP_UNREACT,       /* A         : remove reaction R[A]              */
     ROP_BOND,          /* A, B      : bond R[A] depends on R[B]         */

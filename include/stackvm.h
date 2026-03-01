@@ -6,6 +6,7 @@
 #include "env.h"
 #include "runtime.h"
 #include "gc.h"
+#include <setjmp.h>
 
 struct BumpArena; /* forward declaration */
 struct Debugger;  /* forward declaration */
@@ -91,6 +92,9 @@ typedef struct {
     struct Debugger *debugger;
     /* Mark-and-sweep garbage collector (opt-in via --gc flag) */
     GC gc;
+    /* Recovery point for stack overflow (avoids exit(1) in push()) */
+    jmp_buf overflow_jmp;
+    bool overflow_jmp_set;
 } StackVM;
 
 void stackvm_init(StackVM *vm, LatRuntime *rt);

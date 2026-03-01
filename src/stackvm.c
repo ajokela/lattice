@@ -65,8 +65,12 @@ static inline LatValue stackvm_try_intern(LatValue v) {
 
 static void push(StackVM *vm, LatValue val) {
     if (vm->stack_top - vm->stack >= STACKVM_STACK_MAX) {
-        fprintf(stderr, "fatal: StackVM stack overflow\n");
-        exit(1);
+        if (!vm->error) vm->error = strdup("stack overflow");
+        if (vm->overflow_jmp_set) {
+            vm->overflow_jmp_set = false;
+            longjmp(vm->overflow_jmp, 1);
+        }
+        return;
     }
     *vm->stack_top = val;
     vm->stack_top++;
@@ -2830,6 +2834,13 @@ static LatValue stackvm_dispatch_call_closure(void *vm_ptr, LatValue *closure, L
 }
 
 StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
+    /* Set up stack overflow recovery */
+    if (setjmp(vm->overflow_jmp) != 0) {
+        /* Returned here via longjmp from push() on stack overflow */
+        return STACKVM_RUNTIME_ERROR;
+    }
+    vm->overflow_jmp_set = true;
+
     /* Set up runtime dispatch pointers so native functions can call back */
     vm->rt->backend = RT_BACKEND_STACK_VM;
     vm->rt->active_vm = vm;

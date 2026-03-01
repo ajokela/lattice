@@ -123,6 +123,28 @@ size_t regchunk_write(RegChunk *c, RegInstr instr, int line) {
 }
 
 size_t regchunk_add_constant(RegChunk *c, LatValue val) {
+    /* Deduplicate string constants */
+    if (val.type == VAL_STR && val.as.str_val) {
+        for (size_t i = 0; i < c->const_len; i++) {
+            if (c->constants[i].type == VAL_STR && c->constants[i].as.str_val &&
+                strcmp(c->constants[i].as.str_val, val.as.str_val) == 0) {
+                free(val.as.str_val);
+                return i;
+            }
+        }
+    }
+    /* Deduplicate integer constants */
+    if (val.type == VAL_INT) {
+        for (size_t i = 0; i < c->const_len; i++) {
+            if (c->constants[i].type == VAL_INT && c->constants[i].as.int_val == val.as.int_val) { return i; }
+        }
+    }
+    /* Deduplicate float constants */
+    if (val.type == VAL_FLOAT) {
+        for (size_t i = 0; i < c->const_len; i++) {
+            if (c->constants[i].type == VAL_FLOAT && c->constants[i].as.float_val == val.as.float_val) { return i; }
+        }
+    }
     if (c->const_len >= c->const_cap) {
         c->const_cap *= 2;
         c->constants = realloc(c->constants, c->const_cap * sizeof(LatValue));
@@ -2672,6 +2694,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_FREEZE_VAR] = &&L_FREEZE_VAR,
         [ROP_THAW_VAR] = &&L_THAW_VAR,
         [ROP_SUBLIMATE_VAR] = &&L_SUBLIMATE_VAR,
+        [ROP_SUBLIMATE] = &&L_SUBLIMATE,
         [ROP_REACT] = &&L_REACT,
         [ROP_UNREACT] = &&L_UNREACT,
         [ROP_BOND] = &&L_BOND,
@@ -4839,6 +4862,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
             rt_fire_reactions(vm->rt, var_name, "sublimated");
         }
+        DISPATCH();
+    }
+
+    CASE(SUBLIMATE) {
+        uint8_t a = REG_GET_A(instr);
+        R[a].phase = VTAG_SUBLIMATED;
         DISPATCH();
     }
 

@@ -143,6 +143,7 @@ static void rc_cleanup(RegCompiler *comp) {
 /* ── Register management ── */
 
 static uint8_t alloc_reg(void) {
+    if (rc_error) return 0;
     if (rc->next_reg >= REGVM_REG_MAX - 1) {
         rc_error = strdup("register overflow (>256 registers)");
         return 0;
@@ -168,7 +169,10 @@ static void free_regs_to(uint8_t target) {
 
 static RegChunk *current_chunk(void) { return rc->chunk; }
 
-static size_t emit(RegInstr instr, int line) { return regchunk_write(current_chunk(), instr, line); }
+static size_t emit(RegInstr instr, int line) {
+    if (rc_error) return 0;
+    return regchunk_write(current_chunk(), instr, line);
+}
 
 static size_t emit_ABx(uint8_t op, uint8_t a, uint16_t bx, int line) { return emit(REG_ENCODE_ABx(op, a, bx), line); }
 
@@ -187,6 +191,7 @@ static size_t emit_jmp_placeholder(int line) { return emit(REG_ENCODE_sBx(ROP_JM
 
 /* Patch a conditional jump (AsBx format) */
 static void patch_jump(size_t instr_idx) {
+    if (rc_error) return;
     int16_t offset = (int16_t)(current_chunk()->code_len - instr_idx - 1);
     RegInstr old = current_chunk()->code[instr_idx];
     uint8_t op = REG_GET_OP(old);
@@ -196,6 +201,7 @@ static void patch_jump(size_t instr_idx) {
 
 /* Patch an unconditional jump (sBx24 format) */
 static void patch_jmp(size_t instr_idx) {
+    if (rc_error) return;
     int32_t offset = (int32_t)(current_chunk()->code_len - instr_idx - 1);
     /* Preserve original opcode (may be ROP_JMP, ROP_DEFER_PUSH, etc.) */
     uint8_t op = REG_GET_OP(current_chunk()->code[instr_idx]);
@@ -220,6 +226,7 @@ static void emit_postconditions(uint8_t reg, int line);
 /* ── Constant pool ── */
 
 static uint16_t add_constant(LatValue val) {
+    if (rc_error) return 0;
     size_t idx = regchunk_add_constant(current_chunk(), val);
     if (idx >= REGVM_CONST_MAX) {
         rc_error = strdup("too many constants in one chunk (>65535)");
@@ -2068,8 +2075,8 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     }
                 }
             }
-            /* For non-ident expressions, the value in dst already has VTAG_SUBLIMATED
-             * handled at the value level — no writeback needed */
+            /* For non-ident expressions, set the phase on the register value */
+            emit_ABC(ROP_SUBLIMATE, dst, 0, 0, line);
             break;
         }
 

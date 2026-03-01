@@ -622,7 +622,6 @@ static LatValue native_assert(LatValue *args, int arg_count) {
             current_rt->error = err;
         } else {
             fprintf(stderr, "assertion failed: %s\n", msg);
-            exit(1);
         }
     }
     return value_unit();
@@ -2683,7 +2682,6 @@ static LatValue native_debug_assert(LatValue *args, int ac) {
             current_rt->error = err;
         } else {
             fprintf(stderr, "debug assertion failed: %s\n", msg);
-            exit(1);
         }
     }
     return value_unit();
