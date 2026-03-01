@@ -375,6 +375,639 @@ static void free_enum_defs(LspEnumDef *defs, size_t count) {
     free(defs);
 }
 
+/* ── Folding Ranges ── */
+
+/* Extract folding ranges by scanning for brace blocks and block comments.
+ * Handles string literals (including triple-quoted and interpolated) to
+ * avoid counting braces inside strings. */
+static void extract_folding_ranges(LspDocument *doc) {
+    if (!doc->text) return;
+
+    /* Brace stack: track the line number where each '{' was found */
+    int brace_stack[256];
+    int brace_depth = 0;
+
+    const char *p = doc->text;
+    int line = 0;
+
+    while (*p) {
+        /* Skip string literals */
+        if (*p == '"') {
+            /* Check for triple-quoted string """ */
+            if (p[1] == '"' && p[2] == '"') {
+                p += 3;
+                while (*p) {
+                    if (*p == '"' && p[1] == '"' && p[2] == '"') {
+                        p += 3;
+                        break;
+                    }
+                    if (*p == '\n') line++;
+                    p++;
+                }
+                continue;
+            }
+            /* Regular string — handle ${...} interpolation */
+            p++;
+            while (*p && *p != '"' && *p != '\n') {
+                if (*p == '\\') {
+                    p++;
+                    if (*p) p++;
+                    continue;
+                }
+                if (*p == '$' && p[1] == '{') {
+                    /* Skip interpolation — track nested braces */
+                    p += 2;
+                    int depth = 1;
+                    while (*p && depth > 0) {
+                        if (*p == '{') depth++;
+                        else if (*p == '}') depth--;
+                        if (*p == '\n') line++;
+                        if (depth > 0) p++;
+                    }
+                    if (*p == '}') p++;
+                    continue;
+                }
+                p++;
+            }
+            if (*p == '"') p++;
+            continue;
+        }
+
+        /* Skip line comments */
+        if (*p == '/' && p[1] == '/') {
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+
+        /* Block comments — potential folding range */
+        if (*p == '/' && p[1] == '*') {
+            int start_line = line;
+            p += 2;
+            while (*p) {
+                if (*p == '*' && p[1] == '/') {
+                    p += 2;
+                    break;
+                }
+                if (*p == '\n') line++;
+                p++;
+            }
+            /* Emit folding range if multi-line */
+            if (line > start_line) {
+                doc->folding_range_count++;
+                doc->folding_ranges = realloc(doc->folding_ranges, doc->folding_range_count * sizeof(LspFoldingRange));
+                LspFoldingRange *fr = &doc->folding_ranges[doc->folding_range_count - 1];
+                fr->start_line = start_line;
+                fr->end_line = line;
+                fr->kind = "comment";
+            }
+            continue;
+        }
+
+        if (*p == '{') {
+            if (brace_depth < 256) {
+                brace_stack[brace_depth] = line;
+                brace_depth++;
+            }
+        } else if (*p == '}') {
+            if (brace_depth > 0) {
+                brace_depth--;
+                int start_line = brace_stack[brace_depth];
+                if (line > start_line) {
+                    doc->folding_range_count++;
+                    doc->folding_ranges =
+                        realloc(doc->folding_ranges, doc->folding_range_count * sizeof(LspFoldingRange));
+                    LspFoldingRange *fr = &doc->folding_ranges[doc->folding_range_count - 1];
+                    fr->start_line = start_line;
+                    fr->end_line = line;
+                    fr->kind = "region";
+                }
+            }
+        }
+
+        if (*p == '\n') line++;
+        p++;
+    }
+}
+
+/* ── Semantic Tokens ── */
+
+/* Check if a token type is a keyword */
+static bool is_keyword_token(TokenType type) {
+    switch (type) {
+        case TOK_FLUX:
+        case TOK_FIX:
+        case TOK_LET:
+        case TOK_FREEZE:
+        case TOK_THAW:
+        case TOK_FORGE:
+        case TOK_FN:
+        case TOK_STRUCT:
+        case TOK_IF:
+        case TOK_ELSE:
+        case TOK_FOR:
+        case TOK_IN:
+        case TOK_WHILE:
+        case TOK_LOOP:
+        case TOK_RETURN:
+        case TOK_BREAK:
+        case TOK_CONTINUE:
+        case TOK_SPAWN:
+        case TOK_TRUE:
+        case TOK_FALSE:
+        case TOK_NIL:
+        case TOK_CLONE:
+        case TOK_ANNEAL:
+        case TOK_PRINT:
+        case TOK_TRY:
+        case TOK_CATCH:
+        case TOK_SCOPE:
+        case TOK_TEST:
+        case TOK_MATCH:
+        case TOK_ENUM:
+        case TOK_IMPORT:
+        case TOK_FROM:
+        case TOK_AS:
+        case TOK_CRYSTALLIZE:
+        case TOK_BORROW:
+        case TOK_SUBLIMATE:
+        case TOK_DEFER:
+        case TOK_SELECT:
+        case TOK_TRAIT:
+        case TOK_IMPL:
+        case TOK_EXPORT: return true;
+        default: return false;
+    }
+}
+
+/* Get the text length of a keyword token */
+static int keyword_token_length(TokenType type) {
+    switch (type) {
+        case TOK_FN: return 2;
+        case TOK_IF:
+        case TOK_IN:
+        case TOK_AS: return 2;
+        case TOK_FIX:
+        case TOK_LET:
+        case TOK_FOR:
+        case TOK_NIL:
+        case TOK_TRY: return 3;
+        case TOK_FLUX:
+        case TOK_THAW:
+        case TOK_ELSE:
+        case TOK_LOOP:
+        case TOK_FROM:
+        case TOK_IMPL:
+        case TOK_ENUM:
+        case TOK_TRUE:
+        case TOK_TEST: return 4;
+        case TOK_FORGE:
+        case TOK_WHILE:
+        case TOK_BREAK:
+        case TOK_CLONE:
+        case TOK_CATCH:
+        case TOK_SCOPE:
+        case TOK_MATCH:
+        case TOK_PRINT:
+        case TOK_SPAWN:
+        case TOK_DEFER:
+        case TOK_TRAIT:
+        case TOK_FALSE: return 5;
+        case TOK_STRUCT:
+        case TOK_RETURN:
+        case TOK_FREEZE:
+        case TOK_IMPORT:
+        case TOK_SELECT:
+        case TOK_ANNEAL:
+        case TOK_BORROW:
+        case TOK_EXPORT: return 6;
+        case TOK_CONTINUE: return 8;
+        case TOK_SUBLIMATE: return 10;
+        case TOK_CRYSTALLIZE: return 12;
+        default: return 0;
+    }
+}
+
+/* Check if a token type is an operator */
+static bool is_operator_token(TokenType type) {
+    switch (type) {
+        case TOK_PLUS:
+        case TOK_MINUS:
+        case TOK_STAR:
+        case TOK_SLASH:
+        case TOK_PERCENT:
+        case TOK_EQ:
+        case TOK_EQEQ:
+        case TOK_BANGEQ:
+        case TOK_LT:
+        case TOK_GT:
+        case TOK_LTEQ:
+        case TOK_GTEQ:
+        case TOK_AND:
+        case TOK_OR:
+        case TOK_BANG:
+        case TOK_DOTDOT:
+        case TOK_ARROW:
+        case TOK_FATARROW:
+        case TOK_PIPE:
+        case TOK_AMPERSAND:
+        case TOK_CARET:
+        case TOK_LSHIFT:
+        case TOK_RSHIFT:
+        case TOK_PLUS_EQ:
+        case TOK_MINUS_EQ:
+        case TOK_STAR_EQ:
+        case TOK_SLASH_EQ:
+        case TOK_PERCENT_EQ:
+        case TOK_AMP_EQ:
+        case TOK_PIPE_EQ:
+        case TOK_CARET_EQ:
+        case TOK_LSHIFT_EQ:
+        case TOK_RSHIFT_EQ:
+        case TOK_QUESTION:
+        case TOK_QUESTION_QUESTION: return true;
+        default: return false;
+    }
+}
+
+/* Operator token text length */
+static int operator_token_length(TokenType type) {
+    switch (type) {
+        case TOK_PLUS:
+        case TOK_MINUS:
+        case TOK_STAR:
+        case TOK_SLASH:
+        case TOK_PERCENT:
+        case TOK_EQ:
+        case TOK_LT:
+        case TOK_GT:
+        case TOK_BANG:
+        case TOK_PIPE:
+        case TOK_AMPERSAND:
+        case TOK_CARET:
+        case TOK_QUESTION: return 1;
+        case TOK_EQEQ:
+        case TOK_BANGEQ:
+        case TOK_LTEQ:
+        case TOK_GTEQ:
+        case TOK_AND:
+        case TOK_OR:
+        case TOK_DOTDOT:
+        case TOK_ARROW:
+        case TOK_FATARROW:
+        case TOK_LSHIFT:
+        case TOK_RSHIFT:
+        case TOK_PLUS_EQ:
+        case TOK_MINUS_EQ:
+        case TOK_STAR_EQ:
+        case TOK_SLASH_EQ:
+        case TOK_PERCENT_EQ:
+        case TOK_AMP_EQ:
+        case TOK_PIPE_EQ:
+        case TOK_CARET_EQ:
+        case TOK_QUESTION_QUESTION: return 2;
+        case TOK_LSHIFT_EQ:
+        case TOK_RSHIFT_EQ: return 3;
+        default: return 1;
+    }
+}
+
+/* A semantic token entry before delta encoding */
+typedef struct {
+    int line; /* 0-based */
+    int col;  /* 0-based */
+    int length;
+    int type; /* LSP_SEMTOK_* */
+} SemTokEntry;
+
+/* Compare semantic token entries by position */
+static int semtok_cmp(const void *a, const void *b) {
+    const SemTokEntry *sa = a, *sb = b;
+    if (sa->line != sb->line) return sa->line - sb->line;
+    return sa->col - sb->col;
+}
+
+/* Extract semantic tokens by re-lexing and classifying tokens, plus scanning for comments. */
+static void extract_semantic_tokens(LspDocument *doc) {
+    if (!doc->text || !*doc->text) return;
+
+    /* Phase 1: Scan for comments and record them as entries */
+    size_t entry_cap = 256;
+    size_t entry_count = 0;
+    SemTokEntry *entries = malloc(entry_cap * sizeof(SemTokEntry));
+    if (!entries) return;
+
+    const char *p = doc->text;
+    int line = 0, col = 0;
+
+    while (*p) {
+        if (*p == '"') {
+            /* Skip strings */
+            if (p[1] == '"' && p[2] == '"') {
+                p += 3;
+                col += 3;
+                while (*p) {
+                    if (*p == '"' && p[1] == '"' && p[2] == '"') {
+                        p += 3;
+                        col += 3;
+                        break;
+                    }
+                    if (*p == '\n') {
+                        line++;
+                        col = 0;
+                    } else col++;
+                    p++;
+                }
+                continue;
+            }
+            p++;
+            col++;
+            while (*p && *p != '"' && *p != '\n') {
+                if (*p == '\\') {
+                    p++;
+                    col++;
+                    if (*p) {
+                        p++;
+                        col++;
+                    }
+                    continue;
+                }
+                if (*p == '$' && p[1] == '{') {
+                    p += 2;
+                    col += 2;
+                    int depth = 1;
+                    while (*p && depth > 0) {
+                        if (*p == '{') depth++;
+                        else if (*p == '}') depth--;
+                        if (*p == '\n') {
+                            line++;
+                            col = 0;
+                        } else col++;
+                        if (depth > 0) p++;
+                    }
+                    if (*p == '}') {
+                        p++;
+                        col++;
+                    }
+                    continue;
+                }
+                p++;
+                col++;
+            }
+            if (*p == '"') {
+                p++;
+                col++;
+            }
+            continue;
+        }
+
+        if (*p == '/' && p[1] == '/') {
+            int start_col = col;
+            int len = 0;
+            while (*p && *p != '\n') {
+                p++;
+                col++;
+                len++;
+            }
+            if (entry_count >= entry_cap) {
+                entry_cap *= 2;
+                entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
+            }
+            entries[entry_count++] = (SemTokEntry){line, start_col, len, LSP_SEMTOK_COMMENT};
+            continue;
+        }
+
+        if (*p == '/' && p[1] == '*') {
+            int start_line = line, start_col = col;
+            p += 2;
+            col += 2;
+            while (*p) {
+                if (*p == '*' && p[1] == '/') {
+                    p += 2;
+                    col += 2;
+                    break;
+                }
+                if (*p == '\n') {
+                    line++;
+                    col = 0;
+                } else col++;
+                p++;
+            }
+            /* For multi-line comments, emit one token per line */
+            if (line > start_line) {
+                /* First line: from start_col to end of line */
+                const char *scan = doc->text;
+                int sl = 0;
+                while (sl < start_line && *scan) {
+                    if (*scan == '\n') sl++;
+                    scan++;
+                }
+                int first_len = 0;
+                const char *ls = scan;
+                while (*ls && *ls != '\n') {
+                    ls++;
+                    first_len++;
+                }
+                first_len -= start_col;
+                if (first_len > 0) {
+                    if (entry_count >= entry_cap) {
+                        entry_cap *= 2;
+                        entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
+                    }
+                    entries[entry_count++] = (SemTokEntry){start_line, start_col, first_len, LSP_SEMTOK_COMMENT};
+                }
+                /* Middle + last lines */
+                for (int cl = start_line + 1; cl <= line; cl++) {
+                    if (*scan == '\n') scan++;
+                    const char *le = scan;
+                    int ll = 0;
+                    while (*le && *le != '\n') {
+                        le++;
+                        ll++;
+                    }
+                    if (ll > 0) {
+                        if (entry_count >= entry_cap) {
+                            entry_cap *= 2;
+                            entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
+                        }
+                        entries[entry_count++] = (SemTokEntry){cl, 0, ll, LSP_SEMTOK_COMMENT};
+                    }
+                    scan = le;
+                }
+            } else {
+                /* Single-line block comment */
+                int len = col - start_col;
+                if (len > 0) {
+                    if (entry_count >= entry_cap) {
+                        entry_cap *= 2;
+                        entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
+                    }
+                    entries[entry_count++] = (SemTokEntry){start_line, start_col, len, LSP_SEMTOK_COMMENT};
+                }
+            }
+            continue;
+        }
+
+        if (*p == '\n') {
+            line++;
+            col = 0;
+        } else col++;
+        p++;
+    }
+
+    /* Phase 2: Lex tokens and classify */
+    Lexer lex = lexer_new(doc->text);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        free(lex_err);
+        /* Still process what we can */
+    }
+
+    for (size_t i = 0; i < tokens.len; i++) {
+        Token *tok = lat_vec_get(&tokens, i);
+        if (tok->type == TOK_EOF) break;
+
+        int tok_line = (int)tok->line - 1; /* Convert 1-based to 0-based */
+        int tok_col = (int)tok->col - 1;
+        int tok_len = 0;
+        int tok_type = -1;
+
+        if (is_keyword_token(tok->type)) {
+            tok_type = LSP_SEMTOK_KEYWORD;
+            tok_len = keyword_token_length(tok->type);
+        } else if (tok->type == TOK_INT_LIT || tok->type == TOK_FLOAT_LIT) {
+            tok_type = LSP_SEMTOK_NUMBER;
+            /* Scan source text from position to find length */
+            const char *s = doc->text;
+            int sl = 0;
+            while (sl < (int)tok->line - 1 && *s) {
+                if (*s == '\n') sl++;
+                s++;
+            }
+            s += tok->col - 1;
+            const char *start = s;
+            if (*s == '-') s++;
+            if (*s == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                s += 2;
+                while ((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'f') || (*s >= 'A' && *s <= 'F') || *s == '_')
+                    s++;
+            } else if (*s == '0' && (s[1] == 'b' || s[1] == 'B')) {
+                s += 2;
+                while (*s == '0' || *s == '1' || *s == '_') s++;
+            } else {
+                while ((*s >= '0' && *s <= '9') || *s == '_') s++;
+                if (*s == '.') {
+                    s++;
+                    while ((*s >= '0' && *s <= '9') || *s == '_') s++;
+                }
+                if (*s == 'e' || *s == 'E') {
+                    s++;
+                    if (*s == '+' || *s == '-') s++;
+                    while (*s >= '0' && *s <= '9') s++;
+                }
+            }
+            tok_len = (int)(s - start);
+            if (tok_len <= 0) tok_len = 1;
+        } else if (tok->type == TOK_STRING_LIT || tok->type == TOK_INTERP_START || tok->type == TOK_INTERP_MID ||
+                   tok->type == TOK_INTERP_END) {
+            tok_type = LSP_SEMTOK_STRING;
+            /* String token length: scan source text for the quoted string */
+            const char *s = doc->text;
+            int sl = 0;
+            while (sl < (int)tok->line - 1 && *s) {
+                if (*s == '\n') sl++;
+                s++;
+            }
+            s += tok->col - 1;
+            if (*s == '"') {
+                const char *start = s;
+                s++;
+                while (*s && *s != '"' && *s != '\n') {
+                    if (*s == '\\') {
+                        s++;
+                        if (*s) s++;
+                        continue;
+                    }
+                    if (*s == '$' && s[1] == '{') break; /* interpolation start */
+                    s++;
+                }
+                if (*s == '"') s++;
+                tok_len = (int)(s - start);
+            } else {
+                tok_len = tok->as.str_val ? (int)strlen(tok->as.str_val) : 1;
+            }
+        } else if (tok->type == TOK_IDENT) {
+            /* Look up in doc symbols */
+            tok_type = LSP_SEMTOK_VARIABLE;
+            if (tok->as.str_val) {
+                tok_len = (int)strlen(tok->as.str_val);
+                for (size_t s = 0; s < doc->symbol_count; s++) {
+                    if (strcmp(doc->symbols[s].name, tok->as.str_val) == 0) {
+                        if (doc->symbols[s].kind == LSP_SYM_FUNCTION) tok_type = LSP_SEMTOK_FUNCTION;
+                        else if (doc->symbols[s].kind == LSP_SYM_STRUCT || doc->symbols[s].kind == LSP_SYM_ENUM)
+                            tok_type = LSP_SEMTOK_TYPE;
+                        break;
+                    }
+                }
+            }
+        } else if (is_operator_token(tok->type)) {
+            tok_type = LSP_SEMTOK_OPERATOR;
+            tok_len = operator_token_length(tok->type);
+        }
+
+        if (tok_type >= 0 && tok_len > 0 && tok_line >= 0 && tok_col >= 0) {
+            if (entry_count >= entry_cap) {
+                entry_cap *= 2;
+                entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
+            }
+            entries[entry_count++] = (SemTokEntry){tok_line, tok_col, tok_len, tok_type};
+        }
+    }
+
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+
+    if (entry_count == 0) {
+        free(entries);
+        return;
+    }
+
+    /* Sort by position */
+    qsort(entries, entry_count, sizeof(SemTokEntry), semtok_cmp);
+
+    /* Remove duplicates at same position (keep first, which is comment if present) */
+    size_t dedup_count = 0;
+    for (size_t i = 0; i < entry_count; i++) {
+        if (i > 0 && entries[i].line == entries[i - 1].line && entries[i].col == entries[i - 1].col) continue;
+        entries[dedup_count++] = entries[i];
+    }
+    entry_count = dedup_count;
+
+    /* Delta-encode */
+    doc->semantic_tokens.count = entry_count * 5;
+    doc->semantic_tokens.data = malloc(doc->semantic_tokens.count * sizeof(int));
+    if (!doc->semantic_tokens.data) {
+        doc->semantic_tokens.count = 0;
+        free(entries);
+        return;
+    }
+
+    int prev_line = 0, prev_col = 0;
+    for (size_t i = 0; i < entry_count; i++) {
+        int dl = entries[i].line - prev_line;
+        int dc = (dl == 0) ? entries[i].col - prev_col : entries[i].col;
+        doc->semantic_tokens.data[i * 5 + 0] = dl;
+        doc->semantic_tokens.data[i * 5 + 1] = dc;
+        doc->semantic_tokens.data[i * 5 + 2] = entries[i].length;
+        doc->semantic_tokens.data[i * 5 + 3] = entries[i].type;
+        doc->semantic_tokens.data[i * 5 + 4] = 0; /* modifiers */
+        prev_line = entries[i].line;
+        prev_col = entries[i].col;
+    }
+
+    free(entries);
+}
+
 /* Analyze a document: lex, parse, extract diagnostics and symbols */
 void lsp_analyze_document(LspDocument *doc) {
     /* Free previous results */
@@ -404,6 +1037,14 @@ void lsp_analyze_document(LspDocument *doc) {
     free_impl_methods(doc->impl_methods, doc->impl_method_count);
     doc->impl_methods = NULL;
     doc->impl_method_count = 0;
+
+    free(doc->folding_ranges);
+    doc->folding_ranges = NULL;
+    doc->folding_range_count = 0;
+
+    free(doc->semantic_tokens.data);
+    doc->semantic_tokens.data = NULL;
+    doc->semantic_tokens.count = 0;
 
     if (!doc->text) return;
 
@@ -453,10 +1094,14 @@ void lsp_analyze_document(LspDocument *doc) {
         if (chunk) chunk_free(chunk);
     }
 
-    /* Clean up */
+    /* Clean up AST and tokens */
     for (size_t i = 0; i < prog.item_count; i++) item_free(&prog.items[i]);
     free(prog.items);
     free_tokens(&tokens);
+
+    /* Extract folding ranges and semantic tokens (text-based, run after symbols) */
+    extract_folding_ranges(doc);
+    extract_semantic_tokens(doc);
 }
 
 void lsp_document_free(LspDocument *doc) {
@@ -475,5 +1120,7 @@ void lsp_document_free(LspDocument *doc) {
     free_struct_defs(doc->struct_defs, doc->struct_def_count);
     free_enum_defs(doc->enum_defs, doc->enum_def_count);
     free_impl_methods(doc->impl_methods, doc->impl_method_count);
+    free(doc->folding_ranges);
+    free(doc->semantic_tokens.data);
     free(doc);
 }

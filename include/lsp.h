@@ -81,6 +81,34 @@ typedef struct {
     int line;        /* 0-based */
 } LspImplMethod;
 
+/* ── Folding Range ── */
+
+typedef struct {
+    int start_line;   /* 0-based */
+    int end_line;     /* 0-based */
+    const char *kind; /* "region" or "comment" (static string, not owned) */
+} LspFoldingRange;
+
+/* ── Semantic Tokens ── */
+
+#define LSP_SEMTOK_KEYWORD     0
+#define LSP_SEMTOK_TYPE        1
+#define LSP_SEMTOK_FUNCTION    2
+#define LSP_SEMTOK_VARIABLE    3
+#define LSP_SEMTOK_NUMBER      4
+#define LSP_SEMTOK_STRING      5
+#define LSP_SEMTOK_COMMENT     6
+#define LSP_SEMTOK_OPERATOR    7
+#define LSP_SEMTOK_PARAMETER   8
+#define LSP_SEMTOK_PROPERTY    9
+#define LSP_SEMTOK_ENUM_MEMBER 10
+#define LSP_SEMTOK_NAMESPACE   11
+
+typedef struct {
+    int *data;    /* delta-encoded array: [deltaLine, deltaStart, length, type, modifiers] * N */
+    size_t count; /* number of ints in data (N * 5) */
+} LspSemanticTokens;
+
 /* ── Document ── */
 
 typedef struct {
@@ -100,6 +128,11 @@ typedef struct {
     /* Impl method definitions for completion */
     LspImplMethod *impl_methods;
     size_t impl_method_count;
+    /* Folding ranges */
+    LspFoldingRange *folding_ranges;
+    size_t folding_range_count;
+    /* Semantic tokens */
+    LspSemanticTokens semantic_tokens;
 } LspDocument;
 
 /* ── Symbol Index (builtins + methods) ── */

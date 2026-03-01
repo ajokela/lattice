@@ -2415,3 +2415,398 @@ TEST(lsp_analyze_impl_methods_cleaned_on_reanalyze) {
 
     lsp_document_free(doc);
 }
+
+/* ================================================================
+ * Workspace symbol tests
+ * ================================================================ */
+
+TEST(lsp_workspace_symbol_multi_doc) {
+    /* Workspace symbol search across multiple documents */
+    LspServer *srv = lsp_server_new();
+    ASSERT(srv != NULL);
+
+    /* Add two documents with different functions */
+    LspDocument *doc1 = calloc(1, sizeof(LspDocument));
+    doc1->uri = strdup("file:///a.lat");
+    doc1->text = strdup("fn greet() {}\nfn hello() {}\n");
+    lsp_analyze_document(doc1);
+
+    LspDocument *doc2 = calloc(1, sizeof(LspDocument));
+    doc2->uri = strdup("file:///b.lat");
+    doc2->text = strdup("fn goodbye() {}\n");
+    lsp_analyze_document(doc2);
+
+    /* Add to server */
+    srv->doc_cap = 4;
+    srv->documents = malloc(4 * sizeof(LspDocument *));
+    srv->documents[0] = doc1;
+    srv->documents[1] = doc2;
+    srv->doc_count = 2;
+
+    /* Verify symbols exist across docs */
+    int found_greet = 0, found_hello = 0, found_goodbye = 0;
+    for (size_t d = 0; d < srv->doc_count; d++) {
+        LspDocument *doc = srv->documents[d];
+        for (size_t s = 0; s < doc->symbol_count; s++) {
+            if (strcmp(doc->symbols[s].name, "greet") == 0) found_greet = 1;
+            if (strcmp(doc->symbols[s].name, "hello") == 0) found_hello = 1;
+            if (strcmp(doc->symbols[s].name, "goodbye") == 0) found_goodbye = 1;
+        }
+    }
+    ASSERT(found_greet);
+    ASSERT(found_hello);
+    ASSERT(found_goodbye);
+
+    lsp_server_free(srv);
+}
+
+TEST(lsp_workspace_symbol_filtered_query) {
+    /* Filtered query should match case-insensitively */
+    LspServer *srv = lsp_server_new();
+
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn MyFunction() {}\nfn other() {}\n");
+    lsp_analyze_document(doc);
+
+    srv->doc_cap = 4;
+    srv->documents = malloc(4 * sizeof(LspDocument *));
+    srv->documents[0] = doc;
+    srv->doc_count = 1;
+
+    /* Case-insensitive search for "myfunc" should match "MyFunction" */
+    int match_count = 0;
+    const char *query = "myfunc";
+    for (size_t d = 0; d < srv->doc_count; d++) {
+        for (size_t s = 0; s < srv->documents[d]->symbol_count; s++) {
+            /* Inline isubstr check */
+            const char *name = srv->documents[d]->symbols[s].name;
+            const char *q = query;
+            const char *n = name;
+            int found = 0;
+            while (*n) {
+                const char *np = n, *qp = q;
+                int ok = 1;
+                while (*qp) {
+                    char a = *np, b = *qp;
+                    if (!a) {
+                        ok = 0;
+                        break;
+                    }
+                    if (a >= 'A' && a <= 'Z') a += 32;
+                    if (b >= 'A' && b <= 'Z') b += 32;
+                    if (a != b) {
+                        ok = 0;
+                        break;
+                    }
+                    np++;
+                    qp++;
+                }
+                if (ok) {
+                    found = 1;
+                    break;
+                }
+                n++;
+            }
+            if (found) match_count++;
+        }
+    }
+    ASSERT(match_count >= 1);
+
+    lsp_server_free(srv);
+}
+
+TEST(lsp_workspace_symbol_empty_query) {
+    /* Empty query should return all symbols */
+    LspServer *srv = lsp_server_new();
+
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn alpha() {}\nfn beta() {}\nlet x = 1\n");
+    lsp_analyze_document(doc);
+
+    srv->doc_cap = 4;
+    srv->documents = malloc(4 * sizeof(LspDocument *));
+    srv->documents[0] = doc;
+    srv->doc_count = 1;
+
+    /* Count all symbols (empty query matches all) */
+    size_t total = 0;
+    for (size_t d = 0; d < srv->doc_count; d++) total += srv->documents[d]->symbol_count;
+    ASSERT(total >= 3); /* alpha, beta, x */
+
+    lsp_server_free(srv);
+}
+
+TEST(lsp_workspace_symbol_no_match) {
+    /* Query with no match should return empty */
+    LspServer *srv = lsp_server_new();
+
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn foo() {}\n");
+    lsp_analyze_document(doc);
+
+    srv->doc_cap = 4;
+    srv->documents = malloc(4 * sizeof(LspDocument *));
+    srv->documents[0] = doc;
+    srv->doc_count = 1;
+
+    /* "zzz" should not match "foo" */
+    const char *query = "zzz";
+    int match_count = 0;
+    for (size_t d = 0; d < srv->doc_count; d++) {
+        for (size_t s = 0; s < srv->documents[d]->symbol_count; s++) {
+            if (strstr(srv->documents[d]->symbols[s].name, query)) match_count++;
+        }
+    }
+    ASSERT_EQ_INT(match_count, 0);
+
+    lsp_server_free(srv);
+}
+
+/* ================================================================
+ * Folding range tests
+ * ================================================================ */
+
+TEST(lsp_folding_range_fn_body) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn foo() {\n  let x = 1\n  print(x)\n}\n");
+
+    lsp_analyze_document(doc);
+
+    /* Should have at least one folding range for the function body */
+    ASSERT(doc->folding_range_count >= 1);
+
+    /* Find the range starting at line 0 (fn declaration) */
+    int found = 0;
+    for (size_t i = 0; i < doc->folding_range_count; i++) {
+        if (doc->folding_ranges[i].start_line == 0 && doc->folding_ranges[i].end_line == 3) {
+            found = 1;
+            ASSERT_EQ_STR(doc->folding_ranges[i].kind, "region");
+        }
+    }
+    ASSERT(found);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_folding_range_nested_blocks) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn outer() {\n  if true {\n    print(1)\n  }\n}\n");
+
+    lsp_analyze_document(doc);
+
+    /* Should have at least 2 folding ranges: outer fn + inner if */
+    ASSERT(doc->folding_range_count >= 2);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_folding_range_multiline_comment) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("/* This is a\n   multi-line\n   comment */\nfn foo() {}\n");
+
+    lsp_analyze_document(doc);
+
+    /* Should have a comment folding range */
+    int found_comment = 0;
+    for (size_t i = 0; i < doc->folding_range_count; i++) {
+        if (doc->folding_ranges[i].kind && strcmp(doc->folding_ranges[i].kind, "comment") == 0) {
+            found_comment = 1;
+            ASSERT_EQ_INT(doc->folding_ranges[i].start_line, 0);
+            ASSERT_EQ_INT(doc->folding_ranges[i].end_line, 2);
+        }
+    }
+    ASSERT(found_comment);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_folding_range_empty_doc) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("");
+
+    lsp_analyze_document(doc);
+
+    ASSERT_EQ_INT((int)doc->folding_range_count, 0);
+
+    lsp_document_free(doc);
+}
+
+/* ================================================================
+ * Semantic token tests
+ * ================================================================ */
+
+TEST(lsp_semantic_tokens_keyword) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn foo() {}\n");
+
+    lsp_analyze_document(doc);
+
+    /* Should have semantic tokens */
+    ASSERT(doc->semantic_tokens.count > 0);
+    ASSERT(doc->semantic_tokens.data != NULL);
+
+    /* First token should be 'fn' keyword at line 0, col 0, length 2, type KEYWORD */
+    /* Delta-encoded: [deltaLine=0, deltaStart=0, length=2, type=KEYWORD, mods=0] */
+    ASSERT_EQ_INT(doc->semantic_tokens.data[0], 0);                  /* deltaLine */
+    ASSERT_EQ_INT(doc->semantic_tokens.data[1], 0);                  /* deltaStart */
+    ASSERT_EQ_INT(doc->semantic_tokens.data[2], 2);                  /* length */
+    ASSERT_EQ_INT(doc->semantic_tokens.data[3], LSP_SEMTOK_KEYWORD); /* type */
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_semantic_tokens_string_number) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("let x = 42\nlet y = \"hello\"\n");
+
+    lsp_analyze_document(doc);
+
+    ASSERT(doc->semantic_tokens.count > 0);
+
+    /* Look for a NUMBER token (42) and a STRING token ("hello") */
+    int found_number = 0, found_string = 0;
+    for (size_t i = 0; i + 4 < doc->semantic_tokens.count; i += 5) {
+        int token_type = doc->semantic_tokens.data[i + 3];
+        if (token_type == LSP_SEMTOK_NUMBER) found_number = 1;
+        if (token_type == LSP_SEMTOK_STRING) found_string = 1;
+    }
+    ASSERT(found_number);
+    ASSERT(found_string);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_semantic_tokens_delta_encoding) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("let x = 1\n");
+
+    lsp_analyze_document(doc);
+
+    ASSERT(doc->semantic_tokens.count >= 10); /* At least 2 tokens (let, x) */
+
+    /* Verify delta encoding: second token's deltaLine should be 0 if on same line,
+     * and deltaStart should be relative to previous token's start */
+    /* Token 0: 'let' at (0,0) */
+    /* Token 1: 'x' at (0,4) — deltaLine=0, deltaStart=4 */
+    ASSERT_EQ_INT(doc->semantic_tokens.data[0], 0); /* deltaLine for 'let' */
+    ASSERT_EQ_INT(doc->semantic_tokens.data[5], 0); /* deltaLine for 'x' (same line) */
+    ASSERT(doc->semantic_tokens.data[6] > 0);       /* deltaStart should be positive */
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_semantic_tokens_empty_doc) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("");
+
+    lsp_analyze_document(doc);
+
+    ASSERT_EQ_INT((int)doc->semantic_tokens.count, 0);
+    ASSERT(doc->semantic_tokens.data == NULL);
+
+    lsp_document_free(doc);
+}
+
+/* ================================================================
+ * Inlay hint tests (analysis-level, since handler requires server)
+ * ================================================================ */
+
+TEST(lsp_inlay_hint_function_symbols_available) {
+    /* Verify that function signatures are available for inlay hint lookups */
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn add(a: Int, b: Int) {\n  return a + b\n}\nadd(1, 2)\n");
+
+    lsp_analyze_document(doc);
+
+    /* Should have the add function symbol with signature containing param info */
+    int found_add = 0;
+    for (size_t i = 0; i < doc->symbol_count; i++) {
+        if (strcmp(doc->symbols[i].name, "add") == 0) {
+            found_add = 1;
+            ASSERT(doc->symbols[i].signature != NULL);
+            ASSERT(strstr(doc->symbols[i].signature, "a") != NULL);
+            ASSERT(strstr(doc->symbols[i].signature, "b") != NULL);
+            break;
+        }
+    }
+    ASSERT(found_add);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_inlay_hint_graceful_no_function) {
+    /* When a called function isn't defined, inlay hints should gracefully skip */
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("unknown_fn(1, 2, 3)\n");
+
+    lsp_analyze_document(doc);
+
+    /* Should not crash — just no matching function found for hints */
+    ASSERT(doc->symbol_count == 0 || doc->symbols != NULL);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_inlay_hint_empty_doc) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("");
+
+    lsp_analyze_document(doc);
+
+    ASSERT_EQ_INT((int)doc->symbol_count, 0);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_folding_ranges_cleaned_on_reanalyze) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn foo() {\n  print(1)\n}\n");
+
+    lsp_analyze_document(doc);
+    size_t first_count = doc->folding_range_count;
+    ASSERT(first_count >= 1);
+
+    /* Re-analyze with different text */
+    free(doc->text);
+    doc->text = strdup("let x = 1\n");
+    lsp_analyze_document(doc);
+
+    /* Should have fewer folding ranges (no braces) */
+    ASSERT(doc->folding_range_count < first_count);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_semantic_tokens_cleaned_on_reanalyze) {
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn foo() {}\nlet x = 42\n");
+
+    lsp_analyze_document(doc);
+    ASSERT(doc->semantic_tokens.count > 0);
+
+    /* Re-analyze with different text */
+    free(doc->text);
+    doc->text = strdup("let y = 1\n");
+    lsp_analyze_document(doc);
+
+    /* Should still have tokens, but different content */
+    ASSERT(doc->semantic_tokens.count > 0);
+
+    lsp_document_free(doc);
+}

@@ -1,9 +1,15 @@
 #include "lsp.h"
 #include "formatter.h"
+#include "lexer.h"
+#include "parser.h"
+#include "ast.h"
+#include "token.h"
+#include "ds/vec.h"
 #include "../vendor/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 #include <dirent.h>
 
 /* ── Keywords for completion ── */
@@ -442,6 +448,37 @@ static void handle_initialize(LspServer *srv, int id) {
 
     /* Code actions */
     cJSON_AddBoolToObject(caps, "codeActionProvider", 1);
+
+    /* Workspace symbol search */
+    cJSON_AddBoolToObject(caps, "workspaceSymbolProvider", 1);
+
+    /* Folding ranges */
+    cJSON_AddBoolToObject(caps, "foldingRangeProvider", 1);
+
+    /* Semantic tokens */
+    cJSON *semTokOpts = cJSON_CreateObject();
+    cJSON *legend = cJSON_CreateObject();
+    cJSON *tokenTypes = cJSON_CreateArray();
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("keyword"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("type"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("function"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("variable"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("number"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("string"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("comment"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("operator"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("parameter"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("property"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("enumMember"));
+    cJSON_AddItemToArray(tokenTypes, cJSON_CreateString("namespace"));
+    cJSON_AddItemToObject(legend, "tokenTypes", tokenTypes);
+    cJSON_AddItemToObject(legend, "tokenModifiers", cJSON_CreateArray());
+    cJSON_AddItemToObject(semTokOpts, "legend", legend);
+    cJSON_AddBoolToObject(semTokOpts, "full", 1);
+    cJSON_AddItemToObject(caps, "semanticTokensProvider", semTokOpts);
+
+    /* Inlay hints */
+    cJSON_AddBoolToObject(caps, "inlayHintProvider", 1);
 
     cJSON_AddItemToObject(result, "capabilities", caps);
 
@@ -3013,6 +3050,349 @@ static void handle_code_action(LspServer *srv, cJSON *params, int id) {
     cJSON_Delete(resp);
 }
 
+/* ── Portable case-insensitive substring search ── */
+
+static const char *isubstr(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !*needle) return haystack;
+    size_t nlen = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        bool match = true;
+        for (size_t i = 0; i < nlen; i++) {
+            char a = p[i], b = needle[i];
+            if (!a) return NULL;
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return p;
+    }
+    return NULL;
+}
+
+/* ── Handler: workspace/symbol ── */
+
+static void handle_workspace_symbol(LspServer *srv, cJSON *params, int id) {
+    const char *query = "";
+    if (params) {
+        cJSON *q = cJSON_GetObjectItem(params, "query");
+        if (q && q->valuestring) query = q->valuestring;
+    }
+
+    cJSON *result = cJSON_CreateArray();
+
+    for (size_t d = 0; d < srv->doc_count; d++) {
+        LspDocument *doc = srv->documents[d];
+        for (size_t s = 0; s < doc->symbol_count; s++) {
+            LspSymbol *sym = &doc->symbols[s];
+            /* Filter by query (empty query returns all) */
+            if (*query && !isubstr(sym->name, query)) continue;
+
+            cJSON *info = cJSON_CreateObject();
+            cJSON_AddStringToObject(info, "name", sym->name);
+            cJSON_AddNumberToObject(info, "kind", sym->kind);
+
+            /* Location */
+            cJSON *location = cJSON_CreateObject();
+            cJSON_AddStringToObject(location, "uri", doc->uri);
+            cJSON *range = cJSON_CreateObject();
+            cJSON *start = cJSON_CreateObject();
+            cJSON_AddNumberToObject(start, "line", sym->line);
+            cJSON_AddNumberToObject(start, "character", sym->col);
+            cJSON *end = cJSON_CreateObject();
+            cJSON_AddNumberToObject(end, "line", sym->line);
+            cJSON_AddNumberToObject(end, "character", sym->col + (int)strlen(sym->name));
+            cJSON_AddItemToObject(range, "start", start);
+            cJSON_AddItemToObject(range, "end", end);
+            cJSON_AddItemToObject(location, "range", range);
+            cJSON_AddItemToObject(info, "location", location);
+
+            cJSON_AddItemToArray(result, info);
+        }
+    }
+
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
+/* ── Handler: textDocument/foldingRange ── */
+
+static void handle_folding_range(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    if (!td) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    LspDocument *doc = find_document(srv, uri);
+    cJSON *result = cJSON_CreateArray();
+
+    if (doc) {
+        for (size_t i = 0; i < doc->folding_range_count; i++) {
+            LspFoldingRange *fr = &doc->folding_ranges[i];
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "startLine", fr->start_line);
+            cJSON_AddNumberToObject(item, "endLine", fr->end_line);
+            if (fr->kind) cJSON_AddStringToObject(item, "kind", fr->kind);
+            cJSON_AddItemToArray(result, item);
+        }
+    }
+
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
+/* ── Handler: textDocument/semanticTokens/full ── */
+
+static void handle_semantic_tokens_full(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    if (!td) {
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddItemToObject(result, "data", cJSON_CreateArray());
+        cJSON *resp = lsp_make_response(id, result);
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    LspDocument *doc = find_document(srv, uri);
+
+    cJSON *result = cJSON_CreateObject();
+    cJSON *data_arr = cJSON_CreateArray();
+
+    if (doc && doc->semantic_tokens.data) {
+        for (size_t i = 0; i < doc->semantic_tokens.count; i++) {
+            cJSON_AddItemToArray(data_arr, cJSON_CreateNumber(doc->semantic_tokens.data[i]));
+        }
+    }
+
+    cJSON_AddItemToObject(result, "data", data_arr);
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
+/* ── Handler: textDocument/inlayHint ── */
+
+static void handle_inlay_hint(LspServer *srv, cJSON *params, int id) {
+    cJSON *td = cJSON_GetObjectItem(params, "textDocument");
+    cJSON *range_node = cJSON_GetObjectItem(params, "range");
+    if (!td) {
+        cJSON *resp = lsp_make_response(id, cJSON_CreateArray());
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    LspDocument *doc = find_document(srv, uri);
+    cJSON *result = cJSON_CreateArray();
+
+    if (!doc || !doc->text || !*doc->text) {
+        cJSON *resp = lsp_make_response(id, result);
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    /* Get requested line range */
+    int range_start = 0, range_end = INT_MAX;
+    if (range_node) {
+        cJSON *rs = cJSON_GetObjectItem(range_node, "start");
+        cJSON *re = cJSON_GetObjectItem(range_node, "end");
+        if (rs) range_start = cJSON_GetObjectItem(rs, "line")->valueint;
+        if (re) range_end = cJSON_GetObjectItem(re, "line")->valueint;
+    }
+
+    /* Re-lex and re-parse to get AST */
+    Lexer lex = lexer_new(doc->text);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        free(lex_err);
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        cJSON *resp = lsp_make_response(id, result);
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
+    }
+
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    free(parse_err);
+
+    /* Walk AST items looking for call expressions in statements */
+    for (size_t i = 0; i < prog.item_count; i++) {
+        const Item *item = &prog.items[i];
+        /* Collect call expressions from function bodies and top-level statements */
+        /* We need a stack-based walk. For simplicity, look at ITEM_FUNCTION bodies
+         * and ITEM_STMT statements for EXPR_CALL. */
+
+        /* Visitor: collect (func_name, arg_exprs, arg_count) tuples */
+        /* We'll scan through all statements looking for calls */
+        Stmt **stmts = NULL;
+        size_t stmt_count = 0;
+
+        if (item->tag == ITEM_FUNCTION) {
+            stmts = item->as.fn_decl.body;
+            stmt_count = item->as.fn_decl.body_count;
+        } else if (item->tag == ITEM_STMT && item->as.stmt) {
+            stmts = (Stmt **)&item->as.stmt;
+            stmt_count = 1;
+        } else {
+            continue;
+        }
+
+        for (size_t si = 0; si < stmt_count; si++) {
+            Stmt *stmt = stmts[si];
+            if (!stmt) continue;
+
+            /* Find call expressions within the statement */
+            Expr *call_expr = NULL;
+            if (stmt->tag == STMT_EXPR && stmt->as.expr) call_expr = stmt->as.expr;
+            else if (stmt->tag == STMT_BINDING && stmt->as.binding.value) call_expr = stmt->as.binding.value;
+            else if (stmt->tag == STMT_RETURN && stmt->as.return_expr) call_expr = stmt->as.return_expr;
+            else continue;
+
+            /* Process call expression (only direct calls with ident callee) */
+            if (!call_expr || call_expr->tag != EXPR_CALL) continue;
+            if (!call_expr->as.call.func || call_expr->as.call.func->tag != EXPR_IDENT) continue;
+            if (call_expr->as.call.arg_count == 0) continue;
+
+            const char *func_name = call_expr->as.call.func->as.str_val;
+            int call_line = call_expr->line > 0 ? call_expr->line - 1 : 0;
+
+            /* Filter by line range */
+            if (call_line < range_start || call_line > range_end) continue;
+
+            /* Look up function in doc symbols to get signature */
+            const char *sig = NULL;
+            for (size_t ds = 0; ds < doc->symbol_count; ds++) {
+                if (doc->symbols[ds].kind == LSP_SYM_FUNCTION && strcmp(doc->symbols[ds].name, func_name) == 0) {
+                    sig = doc->symbols[ds].signature;
+                    break;
+                }
+            }
+            /* Also check builtins */
+            if (!sig && srv->index) {
+                for (size_t bi = 0; bi < srv->index->builtin_count; bi++) {
+                    if (strcmp(srv->index->builtins[bi].name, func_name) == 0) {
+                        sig = srv->index->builtins[bi].signature;
+                        break;
+                    }
+                }
+            }
+            if (!sig) continue;
+
+            /* Parse param names from signature */
+            char *param_labels[32];
+            int param_count = parse_signature_params(sig, param_labels, 32);
+            if (param_count == 0) continue;
+
+            /* Extract just the parameter names (strip ": Type" annotations) */
+            char *param_names[32];
+            for (int pi = 0; pi < param_count; pi++) {
+                char *colon = strchr(param_labels[pi], ':');
+                if (colon) {
+                    size_t nlen = (size_t)(colon - param_labels[pi]);
+                    while (nlen > 0 && param_labels[pi][nlen - 1] == ' ') nlen--;
+                    param_names[pi] = malloc(nlen + 1);
+                    memcpy(param_names[pi], param_labels[pi], nlen);
+                    param_names[pi][nlen] = '\0';
+                } else {
+                    param_names[pi] = strdup(param_labels[pi]);
+                }
+                free(param_labels[pi]);
+            }
+
+            /* For each arg, find its position in the token stream and emit hint */
+            for (size_t ai = 0; ai < call_expr->as.call.arg_count && (int)ai < param_count; ai++) {
+                Expr *arg = call_expr->as.call.args[ai];
+                if (!arg) continue;
+
+                /* Skip hint when arg is ident matching param name (redundant) */
+                if (arg->tag == EXPR_IDENT && arg->as.str_val && strcmp(arg->as.str_val, param_names[ai]) == 0)
+                    continue;
+
+                /* Find token position for this argument expression.
+                 * arg->line is 1-based. We find the first token at or after this line. */
+                int arg_line_0 = arg->line > 0 ? arg->line - 1 : call_line;
+
+                /* Search tokens for argument position */
+                int arg_col = 0;
+                for (size_t ti = 0; ti < tokens.len; ti++) {
+                    Token *tok = lat_vec_get(&tokens, ti);
+                    if ((int)tok->line - 1 == arg_line_0) {
+                        /* For the first arg, skip past the '(' */
+                        /* Match by scanning: find tokens that could start this arg */
+                        if (arg->tag == EXPR_IDENT && arg->as.str_val && tok->type == TOK_IDENT && tok->as.str_val &&
+                            strcmp(tok->as.str_val, arg->as.str_val) == 0) {
+                            arg_col = (int)tok->col;
+                            break;
+                        }
+                        if (arg->tag == EXPR_INT_LIT && tok->type == TOK_INT_LIT &&
+                            tok->as.int_val == arg->as.int_val) {
+                            arg_col = (int)tok->col;
+                            break;
+                        }
+                        if (arg->tag == EXPR_FLOAT_LIT && tok->type == TOK_FLOAT_LIT) {
+                            arg_col = (int)tok->col;
+                            break;
+                        }
+                        if (arg->tag == EXPR_STRING_LIT && tok->type == TOK_STRING_LIT) {
+                            arg_col = (int)tok->col;
+                            break;
+                        }
+                        if (arg->tag == EXPR_BOOL_LIT && (tok->type == TOK_TRUE || tok->type == TOK_FALSE)) {
+                            arg_col = (int)tok->col;
+                            break;
+                        }
+                    }
+                }
+
+                /* Build hint label */
+                size_t label_len = strlen(param_names[ai]) + 2;
+                char *label = malloc(label_len);
+                snprintf(label, label_len, "%s:", param_names[ai]);
+
+                cJSON *hint = cJSON_CreateObject();
+                cJSON *pos_obj = cJSON_CreateObject();
+                cJSON_AddNumberToObject(pos_obj, "line", arg_line_0);
+                cJSON_AddNumberToObject(pos_obj, "character", arg_col);
+                cJSON_AddItemToObject(hint, "position", pos_obj);
+                cJSON_AddStringToObject(hint, "label", label);
+                cJSON_AddNumberToObject(hint, "kind", 2); /* Parameter */
+                cJSON_AddBoolToObject(hint, "paddingRight", 1);
+
+                cJSON_AddItemToArray(result, hint);
+                free(label);
+            }
+
+            for (int pi = 0; pi < param_count; pi++) free(param_names[pi]);
+        }
+    }
+
+    /* Clean up AST and tokens */
+    for (size_t i = 0; i < prog.item_count; i++) item_free(&prog.items[i]);
+    free(prog.items);
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+
+    cJSON *resp = lsp_make_response(id, result);
+    lsp_write_response(resp, stdout);
+    cJSON_Delete(resp);
+}
+
 /* ── Server lifecycle ── */
 
 LspServer *lsp_server_new(void) {
@@ -3078,6 +3458,14 @@ void lsp_server_run(LspServer *srv) {
             handle_formatting(srv, params_node, id);
         } else if (strcmp(method, "textDocument/codeAction") == 0) {
             handle_code_action(srv, params_node, id);
+        } else if (strcmp(method, "workspace/symbol") == 0) {
+            handle_workspace_symbol(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/foldingRange") == 0) {
+            handle_folding_range(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/semanticTokens/full") == 0) {
+            handle_semantic_tokens_full(srv, params_node, id);
+        } else if (strcmp(method, "textDocument/inlayHint") == 0) {
+            handle_inlay_hint(srv, params_node, id);
         } else if (strcmp(method, "shutdown") == 0) {
             cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
             lsp_write_response(resp, stdout);
