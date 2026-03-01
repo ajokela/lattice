@@ -1106,8 +1106,9 @@ static void compile_expr(const Expr *e, int line) {
                     /* JUMP_IF_FALSE doesn't pop: [S, n, false] */
                     emit_byte(OP_POP, line); /* pop false: [S, n] */
                     emit_byte(OP_POP, line); /* pop n: [S] */
-                } else if (arm->pattern->tag == PAT_ARRAY || arm->pattern->tag == PAT_STRUCT) {
-                    /* Array/Struct destructuring patterns.
+                } else if (arm->pattern->tag == PAT_ARRAY || arm->pattern->tag == PAT_STRUCT ||
+                           arm->pattern->tag == PAT_ENUM_VARIANT) {
+                    /* Array/Struct/EnumVariant destructuring patterns.
                      * Two-phase approach:
                      * Phase 1: DUP S -> [S, S']. Run structural checks (type, length, literal values)
                      *          producing a single bool on the stack: [S, S', bool].
@@ -1117,7 +1118,68 @@ static void compile_expr(const Expr *e, int line) {
                     emit_byte(OP_DUP, line); /* [S, S'] */
 
                     /* Phase 1: check pattern — leave [S, S', bool] on stack */
-                    if (arm->pattern->tag == PAT_ARRAY) {
+                    if (arm->pattern->tag == PAT_ENUM_VARIANT) {
+                        /* Check typeof(S') == "Enum" */
+                        emit_byte(OP_DUP, line);
+                        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16,
+                                          chunk_add_constant(current_chunk(), value_string("typeof")), line);
+                        emit_byte(OP_SWAP, line);
+                        emit_bytes(OP_CALL, 1, line);
+                        emit_constant(value_string("Enum"), line);
+                        emit_byte(OP_EQ, line); /* [S, S', bool] */
+
+                        /* Check enum_name via .enum_name() */
+                        size_t skip_name = emit_jump(OP_JUMP_IF_FALSE, line);
+                        emit_byte(OP_POP, line);
+                        emit_byte(OP_DUP, line);
+                        {
+                            size_t nci = chunk_add_constant(current_chunk(), value_string("enum_name"));
+                            emit_bytes(OP_INVOKE, (uint8_t)nci, line);
+                            emit_byte(0, line);
+                        }
+                        emit_constant(value_string(arm->pattern->as.enum_variant.enum_name), line);
+                        emit_byte(OP_EQ, line);
+                        size_t name_done = emit_jump(OP_JUMP, line);
+                        patch_jump(skip_name);
+                        patch_jump(name_done);
+
+                        /* Check variant_name via .variant_name() */
+                        size_t skip_var = emit_jump(OP_JUMP_IF_FALSE, line);
+                        emit_byte(OP_POP, line);
+                        emit_byte(OP_DUP, line);
+                        {
+                            size_t vci = chunk_add_constant(current_chunk(), value_string("variant_name"));
+                            emit_bytes(OP_INVOKE, (uint8_t)vci, line);
+                            emit_byte(0, line);
+                        }
+                        emit_constant(value_string(arm->pattern->as.enum_variant.variant_name), line);
+                        emit_byte(OP_EQ, line);
+                        size_t var_done = emit_jump(OP_JUMP, line);
+                        patch_jump(skip_var);
+                        patch_jump(var_done);
+
+                        /* Check literal payload elements if any */
+                        size_t evpc = arm->pattern->as.enum_variant.payload_count;
+                        for (size_t k = 0; k < evpc; k++) {
+                            Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
+                            if (sub->tag != PAT_LITERAL) continue;
+                            size_t skip_pl = emit_jump(OP_JUMP_IF_FALSE, line);
+                            emit_byte(OP_POP, line);
+                            emit_byte(OP_DUP, line);
+                            {
+                                size_t pci = chunk_add_constant(current_chunk(), value_string("payload"));
+                                emit_bytes(OP_INVOKE, (uint8_t)pci, line);
+                                emit_byte(0, line);
+                            }
+                            emit_constant(value_int((int64_t)k), line);
+                            emit_byte(OP_INDEX, line);
+                            compile_expr(sub->as.literal, line);
+                            emit_byte(OP_EQ, line);
+                            size_t pl_done = emit_jump(OP_JUMP, line);
+                            patch_jump(skip_pl);
+                            patch_jump(pl_done);
+                        }
+                    } else if (arm->pattern->tag == PAT_ARRAY) {
                         ArrayPatElem *pelems = arm->pattern->as.array.elems;
                         size_t pat_count = arm->pattern->as.array.count;
                         int rest_idx = -1;
@@ -1226,7 +1288,26 @@ static void compile_expr(const Expr *e, int line) {
                     begin_scope();
                     add_local(""); /* dummy for S */
 
-                    if (arm->pattern->tag == PAT_ARRAY) {
+                    if (arm->pattern->tag == PAT_ENUM_VARIANT) {
+                        /* Extract payload bindings */
+                        size_t evpc = arm->pattern->as.enum_variant.payload_count;
+                        size_t s_slot = current->local_count - 1;
+                        for (size_t k = 0; k < evpc; k++) {
+                            Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
+                            /* Get S.payload()[k] */
+                            emit_byte(OP_GET_LOCAL, line);
+                            emit_byte((uint8_t)s_slot, line);
+                            {
+                                size_t pci = chunk_add_constant(current_chunk(), value_string("payload"));
+                                emit_bytes(OP_INVOKE, (uint8_t)pci, line);
+                                emit_byte(0, line);
+                            }
+                            emit_constant(value_int((int64_t)k), line);
+                            emit_byte(OP_INDEX, line);
+                            if (sub->tag == PAT_BINDING) add_local(sub->as.binding_name);
+                            else add_local("");
+                        }
+                    } else if (arm->pattern->tag == PAT_ARRAY) {
                         ArrayPatElem *pelems = arm->pattern->as.array.elems;
                         size_t pat_count = arm->pattern->as.array.count;
                         int rest_idx = -1;

@@ -345,6 +345,18 @@ Pattern *pattern_struct(StructPatField *fields, size_t count) {
     return p;
 }
 
+Pattern *pattern_enum_variant(char *enum_name, char *variant_name, Pattern **payload_pats, size_t payload_count) {
+    Pattern *p = calloc(1, sizeof(Pattern));
+    if (!p) return NULL;
+    p->tag = PAT_ENUM_VARIANT;
+    p->phase_qualifier = PHASE_UNSPECIFIED;
+    p->as.enum_variant.enum_name = enum_name;
+    p->as.enum_variant.variant_name = variant_name;
+    p->as.enum_variant.payload_pats = payload_pats;
+    p->as.enum_variant.payload_count = payload_count;
+    return p;
+}
+
 void pattern_free(Pattern *p) {
     if (!p) return;
     switch (p->tag) {
@@ -365,6 +377,13 @@ void pattern_free(Pattern *p) {
                 if (p->as.strct.fields[i].value_pat) pattern_free(p->as.strct.fields[i].value_pat);
             }
             free(p->as.strct.fields);
+            break;
+        case PAT_ENUM_VARIANT:
+            free(p->as.enum_variant.enum_name);
+            free(p->as.enum_variant.variant_name);
+            for (size_t i = 0; i < p->as.enum_variant.payload_count; i++)
+                pattern_free(p->as.enum_variant.payload_pats[i]);
+            free(p->as.enum_variant.payload_pats);
             break;
     }
     free(p);
@@ -491,6 +510,26 @@ void type_expr_free(TypeExpr *t) {
     if (t->inner) {
         type_expr_free(t->inner);
         free(t->inner);
+    }
+    /* TYPE_FN: free param types and return type */
+    if (t->fn_params) {
+        for (size_t i = 0; i < t->fn_param_count; i++) {
+            type_expr_free(t->fn_params[i]);
+            free(t->fn_params[i]);
+        }
+        free(t->fn_params);
+    }
+    if (t->fn_return) {
+        type_expr_free(t->fn_return);
+        free(t->fn_return);
+    }
+    /* TYPE_NAMED: free generic type arguments */
+    if (t->type_args) {
+        for (size_t i = 0; i < t->type_arg_count; i++) {
+            type_expr_free(t->type_args[i]);
+            free(t->type_args[i]);
+        }
+        free(t->type_args);
     }
 }
 
@@ -724,6 +763,8 @@ void fn_decl_free(FnDecl *f) {
     }
     for (size_t i = 0; i < f->body_count; i++) stmt_free(f->body[i]);
     free(f->body);
+    for (size_t i = 0; i < f->type_param_count; i++) free(f->type_params[i]);
+    free(f->type_params);
     f->next_overload = NULL;
 }
 
@@ -734,6 +775,8 @@ void struct_decl_free(StructDecl *s) {
         type_expr_free(&s->fields[i].ty);
     }
     free(s->fields);
+    for (size_t i = 0; i < s->type_param_count; i++) free(s->type_params[i]);
+    free(s->type_params);
 }
 
 void test_decl_free(TestDecl *t) {
@@ -752,6 +795,8 @@ void enum_decl_free(EnumDecl *e) {
         }
     }
     free(e->variants);
+    for (size_t i = 0; i < e->type_param_count; i++) free(e->type_params[i]);
+    free(e->type_params);
 }
 
 void trait_decl_free(TraitDecl *t) {

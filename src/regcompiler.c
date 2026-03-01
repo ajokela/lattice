@@ -1986,6 +1986,144 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     for (size_t fj = 0; fj < fail_count; fj++) patch_jump(fail_jumps_arr[fj]);
                     free(fail_jumps_arr);
                     continue; /* skip the normal body compilation below */
+                } else if (arm->pattern->tag == PAT_ENUM_VARIANT) {
+                    /* Enum variant destructuring pattern: Enum::Variant(x, y) */
+                    size_t fail_cap = 8, fail_count = 0;
+                    size_t *fail_jumps_arr = malloc(fail_cap * sizeof(size_t));
+
+                    /* Type check: typeof(scrutinee) == "Enum" */
+                    {
+                        uint8_t fn_reg = alloc_reg();
+                        emit_ABx(ROP_GETGLOBAL, fn_reg, add_constant(value_string("typeof")), line);
+                        uint8_t arg_reg = alloc_reg();
+                        emit_ABC(ROP_MOVE, arg_reg, scrutinee, 0, line);
+                        emit_ABC(ROP_CALL, fn_reg, 1, 1, line);
+                        uint8_t type_str = alloc_reg();
+                        emit_ABx(ROP_LOADK, type_str, add_constant(value_string("Enum")), line);
+                        uint8_t tc_cmp = alloc_reg();
+                        emit_ABC(ROP_EQ, tc_cmp, fn_reg, type_str, line);
+                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, tc_cmp, line);
+                        free_reg(tc_cmp);
+                        free_reg(type_str);
+                        free_reg(arg_reg);
+                        free_reg(fn_reg);
+                    }
+
+                    /* Check enum name via .enum_name() */
+                    {
+                        uint8_t name_reg = alloc_reg();
+                        uint8_t args_base = alloc_reg();
+                        uint16_t name_ki = add_constant(value_string("enum_name"));
+                        emit_ABC(ROP_INVOKE, name_reg, (uint8_t)(name_ki & 0xFF), 0, line);
+                        emit_ABC(ROP_MOVE, scrutinee, args_base, 0, line); /* data word */
+                        free_reg(args_base);
+                        uint8_t expected = alloc_reg();
+                        emit_ABx(ROP_LOADK, expected,
+                                 add_constant(value_string(arm->pattern->as.enum_variant.enum_name)), line);
+                        uint8_t cmp = alloc_reg();
+                        emit_ABC(ROP_EQ, cmp, name_reg, expected, line);
+                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, cmp, line);
+                        free_reg(cmp);
+                        free_reg(expected);
+                        free_reg(name_reg);
+                    }
+
+                    /* Check variant name via .variant_name() */
+                    {
+                        uint8_t vname_reg = alloc_reg();
+                        uint8_t args_base = alloc_reg();
+                        uint16_t vname_ki = add_constant(value_string("variant_name"));
+                        emit_ABC(ROP_INVOKE, vname_reg, (uint8_t)(vname_ki & 0xFF), 0, line);
+                        emit_ABC(ROP_MOVE, scrutinee, args_base, 0, line); /* data word */
+                        free_reg(args_base);
+                        uint8_t expected = alloc_reg();
+                        emit_ABx(ROP_LOADK, expected,
+                                 add_constant(value_string(arm->pattern->as.enum_variant.variant_name)), line);
+                        uint8_t cmp = alloc_reg();
+                        emit_ABC(ROP_EQ, cmp, vname_reg, expected, line);
+                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, cmp, line);
+                        free_reg(cmp);
+                        free_reg(expected);
+                        free_reg(vname_reg);
+                    }
+
+                    /* Extract payload elements */
+                    size_t evpc = arm->pattern->as.enum_variant.payload_count;
+                    uint8_t payload_reg = 0;
+                    if (evpc > 0) {
+                        /* Get payload array once via .payload() */
+                        payload_reg = alloc_reg();
+                        uint8_t args_base = alloc_reg();
+                        uint16_t payload_ki = add_constant(value_string("payload"));
+                        emit_ABC(ROP_INVOKE, payload_reg, (uint8_t)(payload_ki & 0xFF), 0, line);
+                        emit_ABC(ROP_MOVE, scrutinee, args_base, 0, line); /* data word */
+                        free_reg(args_base);
+                    }
+
+                    for (size_t k = 0; k < evpc; k++) {
+                        Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
+                        uint8_t idx_r = alloc_reg();
+                        emit_AsBx(ROP_LOADI, idx_r, (int16_t)k, line);
+
+                        if (sub->tag == PAT_BINDING) {
+                            uint8_t bind_r = add_local(sub->as.binding_name);
+                            emit_ABC(ROP_GETINDEX, bind_r, payload_reg, idx_r, line);
+                        } else if (sub->tag == PAT_WILDCARD) {
+                            uint8_t tmp_r = add_local("");
+                            emit_ABC(ROP_GETINDEX, tmp_r, payload_reg, idx_r, line);
+                        } else if (sub->tag == PAT_LITERAL) {
+                            uint8_t elem_r = alloc_reg();
+                            emit_ABC(ROP_GETINDEX, elem_r, payload_reg, idx_r, line);
+                            uint8_t pat_r = alloc_reg();
+                            compile_expr(sub->as.literal, pat_r, line);
+                            uint8_t eq_r = alloc_reg();
+                            emit_ABC(ROP_EQ, eq_r, elem_r, pat_r, line);
+                            if (fail_count >= fail_cap) {
+                                fail_cap *= 2;
+                                fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
+                            }
+                            fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, eq_r, line);
+                            free_reg(eq_r);
+                            free_reg(pat_r);
+                            free_reg(elem_r);
+                        } else {
+                            uint8_t tmp_r = add_local("");
+                            emit_ABC(ROP_GETINDEX, tmp_r, payload_reg, idx_r, line);
+                        }
+                        free_reg(idx_r);
+                    }
+                    if (evpc > 0) free_reg(payload_reg);
+
+                    /* Guard */
+                    if (arm->guard) {
+                        uint8_t guard_reg = alloc_reg();
+                        compile_expr(arm->guard, guard_reg, line);
+                        if (fail_count >= fail_cap) {
+                            fail_cap *= 2;
+                            fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
+                        }
+                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, guard_reg, line);
+                        free_reg(guard_reg);
+                    }
+
+                    /* Compile arm body */
+                    begin_scope();
+                    if (arm->body_count > 0) {
+                        for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt(arm->body[j]);
+                        Stmt *last = arm->body[arm->body_count - 1];
+                        if (last->tag == STMT_EXPR) compile_expr(last->as.expr, dst, line);
+                        else {
+                            compile_stmt(last);
+                            emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+                        }
+                    } else {
+                        emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+                    }
+                    end_scope(line);
+                    end_jumps[end_count++] = emit_jmp_placeholder(line);
+                    for (size_t fj = 0; fj < fail_count; fj++) patch_jump(fail_jumps_arr[fj]);
+                    free(fail_jumps_arr);
+                    continue; /* skip the normal body compilation below */
                 }
 
                 /* Compile arm body */

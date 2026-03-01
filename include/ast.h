@@ -44,7 +44,7 @@ typedef enum {
 typedef enum { UNOP_NEG, UNOP_NOT, UNOP_BIT_NOT } UnaryOpKind;
 
 /* Type expression kind */
-typedef enum { TYPE_NAMED, TYPE_ARRAY } TypeKindTag;
+typedef enum { TYPE_NAMED, TYPE_ARRAY, TYPE_FN } TypeKindTag;
 
 typedef struct TypeExpr TypeExpr;
 struct TypeExpr {
@@ -53,6 +53,13 @@ struct TypeExpr {
     TypeKindTag kind;
     char *name;      /* TYPE_NAMED: type name */
     TypeExpr *inner; /* TYPE_ARRAY: element type */
+    /* TYPE_FN: function type Fn(A, B) -> R */
+    TypeExpr **fn_params; /* param types (owned) */
+    size_t fn_param_count;
+    TypeExpr *fn_return; /* return type (nullable, owned) */
+    /* TYPE_NAMED: generic type arguments e.g. Map<String, Int> */
+    TypeExpr **type_args;
+    size_t type_arg_count;
 };
 
 /* Forward declare */
@@ -63,12 +70,13 @@ typedef struct FnDecl FnDecl;
 
 /* Pattern types for match expressions */
 typedef enum {
-    PAT_LITERAL,  /* 0, "hello", true */
-    PAT_WILDCARD, /* _ */
-    PAT_BINDING,  /* x (binds value to name) */
-    PAT_RANGE,    /* 1..10 */
-    PAT_ARRAY,    /* [x, y, ...rest] */
-    PAT_STRUCT,   /* {x: 0, y} */
+    PAT_LITERAL,      /* 0, "hello", true */
+    PAT_WILDCARD,     /* _ */
+    PAT_BINDING,      /* x (binds value to name) */
+    PAT_RANGE,        /* 1..10 */
+    PAT_ARRAY,        /* [x, y, ...rest] */
+    PAT_STRUCT,       /* {x: 0, y} */
+    PAT_ENUM_VARIANT, /* Enum::Variant(pat1, pat2) */
 } PatternTag;
 
 /* Array pattern element */
@@ -101,6 +109,12 @@ struct Pattern {
             StructPatField *fields;
             size_t count;
         } strct; /* PAT_STRUCT */
+        struct {
+            char *enum_name;
+            char *variant_name;
+            Pattern **payload_pats; /* sub-patterns for each payload element */
+            size_t payload_count;
+        } enum_variant; /* PAT_ENUM_VARIANT */
     } as;
 };
 
@@ -409,6 +423,8 @@ struct FnDecl {
     FnDecl *next_overload;     /* phase-dispatch chain, NULL if none */
     AstPhase phase_annotation; /* @fluid/@crystal annotation (PHASE_UNSPECIFIED = none) */
     int line;                  /* Source line of the 'fn' keyword */
+    char **type_params;        /* generic type parameters e.g. <T, U> */
+    size_t type_param_count;
 };
 
 /* Struct field declaration */
@@ -422,6 +438,8 @@ typedef struct {
     char *name;
     FieldDecl *fields;
     size_t field_count;
+    char **type_params; /* generic type parameters e.g. <T, U> */
+    size_t type_param_count;
 } StructDecl;
 
 /* Test declaration */
@@ -443,6 +461,8 @@ typedef struct {
     char *name;
     VariantDecl *variants;
     size_t variant_count;
+    char **type_params; /* generic type parameters e.g. <T> */
+    size_t type_param_count;
 } EnumDecl;
 
 /* Trait method signature (no body) */
@@ -543,6 +563,7 @@ Pattern *pattern_binding(char *name);
 Pattern *pattern_range(Expr *start, Expr *end);
 Pattern *pattern_array(ArrayPatElem *elems, size_t count);
 Pattern *pattern_struct(StructPatField *fields, size_t count);
+Pattern *pattern_enum_variant(char *enum_name, char *variant_name, Pattern **payload_pats, size_t payload_count);
 
 /* Pattern destructor */
 void pattern_free(Pattern *p);

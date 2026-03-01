@@ -11942,6 +11942,164 @@ static void test_err_type_suggestion_bool(void) {
     free(out);
 }
 
+/* ── LAT-124: Enum variant pattern matching ── */
+
+static void test_match_enum_variant_basic(void) {
+    ASSERT_OUTPUT("enum Shape { Circle(Number), Rect(Number, Number) }\n"
+                  "fn main() {\n"
+                  "    let s = Shape::Circle(42)\n"
+                  "    let r = match s {\n"
+                  "        Shape::Circle(radius) => radius,\n"
+                  "        Shape::Rect(w, h) => w * h,\n"
+                  "        _ => 0\n"
+                  "    }\n"
+                  "    print(r)\n"
+                  "}\n",
+                  "42");
+}
+
+static void test_match_enum_variant_rect(void) {
+    ASSERT_OUTPUT("enum Shape { Circle(Number), Rect(Number, Number) }\n"
+                  "fn main() {\n"
+                  "    let s = Shape::Rect(3, 4)\n"
+                  "    let r = match s {\n"
+                  "        Shape::Circle(radius) => radius,\n"
+                  "        Shape::Rect(w, h) => w * h,\n"
+                  "        _ => 0\n"
+                  "    }\n"
+                  "    print(r)\n"
+                  "}\n",
+                  "12");
+}
+
+static void test_match_enum_variant_wildcard_payload(void) {
+    ASSERT_OUTPUT("enum Shape { Circle(Number), Rect(Number, Number) }\n"
+                  "fn main() {\n"
+                  "    let s = Shape::Rect(3, 4)\n"
+                  "    let r = match s {\n"
+                  "        Shape::Rect(_, h) => h,\n"
+                  "        _ => 0\n"
+                  "    }\n"
+                  "    print(r)\n"
+                  "}\n",
+                  "4");
+}
+
+static void test_match_enum_variant_unit(void) {
+    ASSERT_OUTPUT("enum Color { Red, Green, Blue }\n"
+                  "fn main() {\n"
+                  "    let c = Color::Green\n"
+                  "    let r = match c {\n"
+                  "        Color::Red => \"red\",\n"
+                  "        Color::Green => \"green\",\n"
+                  "        Color::Blue => \"blue\",\n"
+                  "        _ => \"unknown\"\n"
+                  "    }\n"
+                  "    print(r)\n"
+                  "}\n",
+                  "green");
+}
+
+static void test_match_enum_variant_literal_payload(void) {
+    ASSERT_OUTPUT("enum Msg { Val(Number) }\n"
+                  "fn main() {\n"
+                  "    let m = Msg::Val(42)\n"
+                  "    let r = match m {\n"
+                  "        Msg::Val(42) => \"found it\",\n"
+                  "        Msg::Val(_) => \"other\",\n"
+                  "        _ => \"nope\"\n"
+                  "    }\n"
+                  "    print(r)\n"
+                  "}\n",
+                  "found it");
+}
+
+static void test_match_enum_variant_no_match(void) {
+    ASSERT_OUTPUT("enum Shape { Circle(Number), Rect(Number, Number) }\n"
+                  "fn main() {\n"
+                  "    let s = Shape::Circle(5)\n"
+                  "    let r = match s {\n"
+                  "        Shape::Rect(w, h) => w * h,\n"
+                  "        _ => -1\n"
+                  "    }\n"
+                  "    print(r)\n"
+                  "}\n",
+                  "-1");
+}
+
+/* ── LAT-122: Parser multi-error recovery ── */
+
+static void test_parser_multi_error_recovery(void) {
+    char *out = run_capture("fn foo() { let x = }\n"
+                            "fn bar() { let y = 42\n"
+                            "    print(y)\n"
+                            "}\n"
+                            "fn main() { print(1) }");
+    ASSERT(strstr(out, "PARSE_ERROR:") != NULL);
+    free(out);
+}
+
+static void test_parser_recovery_still_finds_later_errors(void) {
+    char *out = run_capture("fn a() { let = }\n"
+                            "fn b() { let = }\n"
+                            "fn main() { print(1) }");
+    ASSERT(strstr(out, "PARSE_ERROR:") != NULL);
+    free(out);
+}
+
+/* ── LAT-123: Function type annotations ── */
+
+static void test_fn_type_annotation_param(void) {
+    ASSERT_OUTPUT("fn apply(f: Fn(Int) -> Int, x: Int) -> Int {\n"
+                  "    return f(x)\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let double = |n| { return n * 2 }\n"
+                  "    print(apply(double, 5))\n"
+                  "}\n",
+                  "10");
+}
+
+static void test_fn_type_annotation_multi_param(void) {
+    ASSERT_OUTPUT("fn apply(f: Fn(Int, Int) -> Int, a: Int, b: Int) -> Int {\n"
+                  "    return f(a, b)\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let add = |x, y| { return x + y }\n"
+                  "    print(apply(add, 3, 4))\n"
+                  "}\n",
+                  "7");
+}
+
+/* ── LAT-125: Generic type syntax (parsing only) ── */
+
+static void test_generic_struct_syntax(void) {
+    ASSERT_OUTPUT("struct Box<T> { value: T }\n"
+                  "fn main() {\n"
+                  "    let b = Box { value: 42 }\n"
+                  "    print(b.value)\n"
+                  "}\n",
+                  "42");
+}
+
+static void test_generic_enum_syntax(void) {
+    ASSERT_OUTPUT("enum Option<T> { Some(T), None }\n"
+                  "fn main() {\n"
+                  "    let s = Option::Some(10)\n"
+                  "    print(s)\n"
+                  "}\n",
+                  "Option::Some(10)");
+}
+
+static void test_generic_fn_syntax(void) {
+    /* Generic type params parse without error; use 'any' for runtime compat */
+    ASSERT_OUTPUT("fn identity<T>(x: any) -> any { return x }\n"
+                  "fn main() {\n"
+                  "    print(identity(42))\n"
+                  "}\n",
+                  "42");
+}
+
 void register_stdlib_tests(void) {
     /* String methods */
     register_test("test_str_len", test_str_len);
@@ -13358,4 +13516,25 @@ void register_stdlib_tests(void) {
     register_test("test_annotation_parse_error", test_annotation_parse_error);
     /* Feature 3: composite phase constraints */
     register_test("test_composite_fluid_or_crystal", test_composite_fluid_or_crystal);
+
+    /* LAT-124: Enum variant pattern matching */
+    register_test("test_match_enum_variant_basic", test_match_enum_variant_basic);
+    register_test("test_match_enum_variant_rect", test_match_enum_variant_rect);
+    register_test("test_match_enum_variant_wildcard_payload", test_match_enum_variant_wildcard_payload);
+    register_test("test_match_enum_variant_unit", test_match_enum_variant_unit);
+    register_test("test_match_enum_variant_literal_payload", test_match_enum_variant_literal_payload);
+    register_test("test_match_enum_variant_no_match", test_match_enum_variant_no_match);
+
+    /* LAT-122: Parser multi-error recovery */
+    register_test("test_parser_multi_error_recovery", test_parser_multi_error_recovery);
+    register_test("test_parser_recovery_still_finds_later_errors", test_parser_recovery_still_finds_later_errors);
+
+    /* LAT-123: Function type annotations */
+    register_test("test_fn_type_annotation_param", test_fn_type_annotation_param);
+    register_test("test_fn_type_annotation_multi_param", test_fn_type_annotation_multi_param);
+
+    /* LAT-125: Generic type syntax */
+    register_test("test_generic_struct_syntax", test_generic_struct_syntax);
+    register_test("test_generic_enum_syntax", test_generic_enum_syntax);
+    register_test("test_generic_fn_syntax", test_generic_fn_syntax);
 }

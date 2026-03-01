@@ -9725,6 +9725,59 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         }
                         break;
                     }
+                    case PAT_ENUM_VARIANT: {
+                        if (scr.value.type != VAL_ENUM) {
+                            matched = false;
+                            break;
+                        }
+                        const char *pat_enum = arm->pattern->as.enum_variant.enum_name;
+                        const char *pat_var = arm->pattern->as.enum_variant.variant_name;
+                        /* Check enum name and variant name */
+                        if (strcmp(scr.value.as.enm.enum_name, pat_enum) != 0 ||
+                            strcmp(scr.value.as.enm.variant_name, pat_var) != 0) {
+                            matched = false;
+                            break;
+                        }
+                        /* Check payload count matches */
+                        size_t evpc = arm->pattern->as.enum_variant.payload_count;
+                        if (evpc > 0 && evpc != scr.value.as.enm.payload_count) {
+                            matched = false;
+                            break;
+                        }
+                        /* Match and extract payload sub-patterns */
+                        matched = true;
+                        for (size_t k = 0; k < evpc && matched; k++) {
+                            Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
+                            LatValue *pval = &scr.value.as.enm.payload[k];
+                            if (sub->tag == PAT_WILDCARD) {
+                                /* matches anything */
+                            } else if (sub->tag == PAT_BINDING) {
+                                if (bind_count >= bind_cap) {
+                                    bind_cap *= 2;
+                                    bind_names = realloc(bind_names, bind_cap * sizeof(char *));
+                                    bind_vals = realloc(bind_vals, bind_cap * sizeof(LatValue));
+                                }
+                                bind_names[bind_count] = sub->as.binding_name;
+                                bind_vals[bind_count] = value_deep_clone(pval);
+                                bind_count++;
+                            } else if (sub->tag == PAT_LITERAL) {
+                                EvalResult pr = eval_expr(ev, sub->as.literal);
+                                if (!IS_OK(pr)) {
+                                    for (size_t b = 0; b < bind_count; b++) value_free(&bind_vals[b]);
+                                    free(bind_names);
+                                    free(bind_vals);
+                                    GC_POP(ev);
+                                    value_free(&scr.value);
+                                    return pr;
+                                }
+                                matched = value_equal(pval, &pr.value);
+                                value_free(&pr.value);
+                            } else {
+                                matched = false;
+                            }
+                        }
+                        break;
+                    }
                 }
 
                 /* Check phase qualifier */
