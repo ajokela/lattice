@@ -2310,3 +2310,108 @@ TEST(test_lsp_definition_unknown_returns_null) {
 
     cJSON_Delete(resp);
 }
+
+/* ================================================================
+ * LAT-101 + LAT-104: Smart completions & diagnostics tests
+ * ================================================================ */
+
+TEST(lsp_analyze_impl_block_methods) {
+    /* Impl block methods should be extracted into impl_methods */
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("struct Point {\n  x: Int,\n  y: Int\n}\n"
+                       "trait Movable {\n  fn distance()\n  fn translate()\n}\n"
+                       "impl Movable for Point {\n  fn distance(self: Point) {\n    return self.x\n  }\n"
+                       "  fn translate(self: Point, dx: Int) {\n    return self.x + dx\n  }\n}\n");
+
+    lsp_analyze_document(doc);
+
+    ASSERT_EQ_INT(doc->diag_count, 0);
+    /* Should have impl methods extracted */
+    ASSERT(doc->impl_method_count >= 2);
+
+    int found_distance = 0, found_translate = 0;
+    for (size_t i = 0; i < doc->impl_method_count; i++) {
+        ASSERT_EQ_STR(doc->impl_methods[i].type_name, "Point");
+        if (strcmp(doc->impl_methods[i].method_name, "distance") == 0) {
+            found_distance = 1;
+            ASSERT(doc->impl_methods[i].signature != NULL);
+            ASSERT(strstr(doc->impl_methods[i].signature, "distance") != NULL);
+        }
+        if (strcmp(doc->impl_methods[i].method_name, "translate") == 0) {
+            found_translate = 1;
+            ASSERT(doc->impl_methods[i].signature != NULL);
+            ASSERT(strstr(doc->impl_methods[i].signature, "translate") != NULL);
+        }
+    }
+    ASSERT(found_distance);
+    ASSERT(found_translate);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_analyze_break_outside_loop) {
+    /* break outside of loop should produce a diagnostic with line info */
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn foo() {\n  break\n}\n");
+
+    lsp_analyze_document(doc);
+
+    ASSERT_EQ_INT(doc->diag_count, 1);
+    ASSERT(doc->diagnostics[0].message != NULL);
+    ASSERT(strstr(doc->diagnostics[0].message, "break outside of loop") != NULL);
+    /* The error should have line info (line 1, 0-based, since break is on line 2 1-based) */
+    ASSERT(doc->diagnostics[0].line > 0 || doc->diagnostics[0].col >= 0);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_analyze_partial_parse_still_extracts_symbols) {
+    /* When a parse error occurs, symbols from successfully-parsed items
+     * should still be extracted */
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("fn good_func() {\n  return 42\n}\n"
+                       "struct Valid {\n  x: Int\n}\n"
+                       "fn broken( {\n}\n");
+
+    lsp_analyze_document(doc);
+
+    /* Should have a parse error */
+    ASSERT(doc->diag_count >= 1);
+    ASSERT_EQ_INT(doc->diagnostics[0].severity, LSP_DIAG_ERROR);
+
+    /* Should still have symbols from the successfully-parsed items */
+    int found_good = 0, found_valid = 0;
+    for (size_t i = 0; i < doc->symbol_count; i++) {
+        if (strcmp(doc->symbols[i].name, "good_func") == 0) found_good = 1;
+        if (strcmp(doc->symbols[i].name, "Valid") == 0) found_valid = 1;
+    }
+    ASSERT(found_good);
+    ASSERT(found_valid);
+
+    lsp_document_free(doc);
+}
+
+TEST(lsp_analyze_impl_methods_cleaned_on_reanalyze) {
+    /* Impl methods should be properly cleaned up and re-extracted on re-analysis */
+    LspDocument *doc = calloc(1, sizeof(LspDocument));
+    doc->uri = strdup("file:///test.lat");
+    doc->text = strdup("struct Foo {}\ntrait T1 { fn bar() }\nimpl T1 for Foo {\n  fn bar(self: Foo) {}\n}\n");
+
+    lsp_analyze_document(doc);
+    ASSERT(doc->impl_method_count >= 1);
+
+    /* Re-analyze with different text */
+    free(doc->text);
+    doc->text = strdup("struct Baz {}\ntrait T2 { fn qux() }\nimpl T2 for Baz {\n  fn qux(self: Baz) {}\n}\n");
+    lsp_analyze_document(doc);
+
+    ASSERT(doc->impl_method_count >= 1);
+    /* Should have the new method, not the old one */
+    ASSERT_EQ_STR(doc->impl_methods[0].type_name, "Baz");
+    ASSERT_EQ_STR(doc->impl_methods[0].method_name, "qux");
+
+    lsp_document_free(doc);
+}

@@ -72,6 +72,15 @@ typedef struct {
     int line;
 } LspEnumDef;
 
+/* ── Impl method info (for completion) ── */
+
+typedef struct {
+    char *type_name; /* struct/type this method belongs to */
+    char *method_name;
+    char *signature; /* e.g. "fn distance(self: Point)" */
+    int line;        /* 0-based */
+} LspImplMethod;
+
 /* ── Document ── */
 
 typedef struct {
@@ -88,6 +97,9 @@ typedef struct {
     size_t struct_def_count;
     LspEnumDef *enum_defs;
     size_t enum_def_count;
+    /* Impl method definitions for completion */
+    LspImplMethod *impl_methods;
+    size_t impl_method_count;
 } LspDocument;
 
 /* ── Symbol Index (builtins + methods) ── */

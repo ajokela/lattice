@@ -9,6 +9,14 @@
 static Compiler *current = NULL;
 static char *compile_error = NULL;
 
+/* Set a compile error with line info in "line:1: message" format.
+ * The line parameter is 1-based (from AST s->line). */
+static void set_compile_error(int line, const char *msg) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%d:1: %s", line, msg);
+    compile_error = strdup(buf);
+}
+
 /* Track declared enums so EXPR_ENUM_VARIANT can fall back to function call */
 static char **known_enums = NULL;
 static size_t known_enum_count = 0;
@@ -2495,7 +2503,7 @@ static void compile_stmt(const Stmt *s) {
 
         case STMT_BREAK: {
             if (current->loop_depth == 0) {
-                compile_error = strdup("break outside of loop");
+                set_compile_error(s->line, "break outside of loop");
                 return;
             }
             /* Pop locals declared inside the loop before jumping out */
@@ -2513,7 +2521,7 @@ static void compile_stmt(const Stmt *s) {
 
         case STMT_CONTINUE: {
             if (current->loop_depth == 0) {
-                compile_error = strdup("continue outside of loop");
+                set_compile_error(s->line, "continue outside of loop");
                 return;
             }
             /* Pop locals declared inside the loop before jumping back */

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <dirent.h>
 
 /* ── Keywords for completion ── */
 
@@ -261,6 +262,9 @@ const char *lsp_lookup_builtin_doc(const char *name, const char **out_sig) {
     return NULL;
 }
 
+/* Forward declarations */
+static const char *goto_line(const char *text, int target_line);
+
 /* ── Identifier character helpers ── */
 
 static int is_ident_char(char c) {
@@ -347,14 +351,24 @@ static void publish_diagnostics(LspServer *srv, LspDocument *doc) {
         LspDiagnostic *d = &doc->diagnostics[i];
         cJSON *diag = cJSON_CreateObject();
 
-        /* Range */
+        /* Range — scan forward from error column to find end of token */
+        int end_col = d->col + 1;
+        if (doc->text) {
+            const char *line_start = goto_line(doc->text, d->line);
+            const char *p = line_start + d->col;
+            if (*p && is_ident_char(*p)) {
+                while (*p && is_ident_char(*p)) p++;
+                end_col = (int)(p - line_start);
+            }
+        }
+
         cJSON *range = cJSON_CreateObject();
         cJSON *start = cJSON_CreateObject();
         cJSON_AddNumberToObject(start, "line", d->line);
         cJSON_AddNumberToObject(start, "character", d->col);
         cJSON *end = cJSON_CreateObject();
         cJSON_AddNumberToObject(end, "line", d->line);
-        cJSON_AddNumberToObject(end, "character", d->col + 1);
+        cJSON_AddNumberToObject(end, "character", end_col);
         cJSON_AddItemToObject(range, "start", start);
         cJSON_AddItemToObject(range, "end", end);
         cJSON_AddItemToObject(diag, "range", range);
@@ -394,6 +408,7 @@ static void handle_initialize(LspServer *srv, int id) {
     cJSON *triggers = cJSON_CreateArray();
     cJSON_AddItemToArray(triggers, cJSON_CreateString("."));
     cJSON_AddItemToArray(triggers, cJSON_CreateString(":"));
+    cJSON_AddItemToArray(triggers, cJSON_CreateString("\""));
     cJSON_AddItemToObject(compOpts, "triggerCharacters", triggers);
     cJSON_AddItemToObject(caps, "completionProvider", compOpts);
 
@@ -564,6 +579,36 @@ static char *detect_path_access(const char *text, int line, int col) {
     if (eff_col < 2) return NULL;
     if (line_start[eff_col - 1] != ':' || line_start[eff_col - 2] != ':') return NULL;
     return extract_preceding_ident(line_start, eff_col - 2);
+}
+
+/* Detect if cursor is inside an import/from string context.
+ * Checks for patterns like: import "...|  or  from "...|
+ * Returns true if the cursor is in an import string position. */
+static bool detect_import_context(const char *text, int line, int col) {
+    const char *line_start = goto_line(text, line);
+    const char *line_end = line_start;
+    while (*line_end && *line_end != '\n') line_end++;
+    int eff_col = col < (int)(line_end - line_start) ? col : (int)(line_end - line_start);
+
+    /* Scan back to the start of the line, skipping whitespace */
+    const char *scan = line_start;
+    while (scan < line_end && (*scan == ' ' || *scan == '\t')) scan++;
+
+    /* Check for 'import "' or 'from "' pattern */
+    bool is_import = (strncmp(scan, "import ", 7) == 0);
+    bool is_from = (strncmp(scan, "from ", 5) == 0);
+    if (!is_import && !is_from) return false;
+
+    /* Check if cursor is after an opening quote */
+    const char *cursor = line_start + eff_col;
+    const char *quote = NULL;
+    for (const char *p = scan; p < cursor; p++) {
+        if (*p == '"') {
+            if (!quote) quote = p;
+            else quote = NULL; /* closing quote — no longer in string */
+        }
+    }
+    return quote != NULL;
 }
 
 /* Infer the type of a variable by scanning the document text for its declaration.
@@ -774,6 +819,37 @@ static void add_method_completions(cJSON *items, const LspSymbolIndex *idx, cons
                 cJSON_AddStringToObject(doc_obj, "value", idx->methods[i].doc);
                 cJSON_AddItemToObject(item, "documentation", doc_obj);
             }
+            /* Snippet insertText */
+            size_t slen = strlen(idx->methods[i].name) + 8;
+            char *snippet = malloc(slen);
+            if (snippet) {
+                snprintf(snippet, slen, "%s($0)", idx->methods[i].name);
+                cJSON_AddStringToObject(item, "insertText", snippet);
+                cJSON_AddNumberToObject(item, "insertTextFormat", 2); /* Snippet */
+                free(snippet);
+            }
+            cJSON_AddItemToArray(items, item);
+        }
+    }
+}
+
+/* Add impl method completions for a given type */
+static void add_impl_method_completions(cJSON *items, const LspDocument *doc, const char *type_name) {
+    for (size_t i = 0; i < doc->impl_method_count; i++) {
+        if (strcmp(doc->impl_methods[i].type_name, type_name) == 0) {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "label", doc->impl_methods[i].method_name);
+            cJSON_AddNumberToObject(item, "kind", 2); /* Method */
+            if (doc->impl_methods[i].signature) cJSON_AddStringToObject(item, "detail", doc->impl_methods[i].signature);
+            /* Snippet insertText */
+            size_t slen = strlen(doc->impl_methods[i].method_name) + 8;
+            char *snippet = malloc(slen);
+            if (snippet) {
+                snprintf(snippet, slen, "%s($0)", doc->impl_methods[i].method_name);
+                cJSON_AddStringToObject(item, "insertText", snippet);
+                cJSON_AddNumberToObject(item, "insertTextFormat", 2); /* Snippet */
+                free(snippet);
+            }
             cJSON_AddItemToArray(items, item);
         }
     }
@@ -809,6 +885,15 @@ static void add_enum_variant_completions(cJSON *items, const LspDocument *doc, c
                     char detail[256];
                     snprintf(detail, sizeof(detail), "%s::%s%s", enum_name, v->name, v->params);
                     cJSON_AddStringToObject(item, "detail", detail);
+                    /* Snippet insertText for tuple variants */
+                    size_t slen = strlen(v->name) + 8;
+                    char *snippet = malloc(slen);
+                    if (snippet) {
+                        snprintf(snippet, slen, "%s($0)", v->name);
+                        cJSON_AddStringToObject(item, "insertText", snippet);
+                        cJSON_AddNumberToObject(item, "insertTextFormat", 2); /* Snippet */
+                        free(snippet);
+                    }
                 } else {
                     char detail[256];
                     snprintf(detail, sizeof(detail), "%s::%s", enum_name, v->name);
@@ -863,6 +948,8 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                 if (is_struct_name(doc, type)) { add_struct_field_completions(items, doc, type); }
                 /* Always add methods for the inferred type */
                 add_method_completions(items, srv->index, type);
+                /* Add impl block methods for the inferred type */
+                add_impl_method_completions(items, doc, type);
                 free(type);
             } else {
                 /* Could not infer type — check if the name itself is a builtin type
@@ -870,6 +957,8 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                 if (dot_obj[0] >= 'A' && dot_obj[0] <= 'Z') {
                     /* Might be a struct variable with capital name */
                     if (is_struct_name(doc, dot_obj)) { add_struct_field_completions(items, doc, dot_obj); }
+                    /* Add impl block methods for this type name */
+                    add_impl_method_completions(items, doc, dot_obj);
                 }
                 /* Fall back: suggest all methods */
                 if (srv->index) {
@@ -929,6 +1018,15 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                                 cJSON_AddStringToObject(doc_obj, "value", srv->index->builtins[i].doc);
                                 cJSON_AddItemToObject(item, "documentation", doc_obj);
                             }
+                            /* Snippet insertText */
+                            size_t slen2 = mlen + 8;
+                            char *snippet2 = malloc(slen2);
+                            if (snippet2) {
+                                snprintf(snippet2, slen2, "%s($0)", mname);
+                                cJSON_AddStringToObject(item, "insertText", snippet2);
+                                cJSON_AddNumberToObject(item, "insertTextFormat", 2);
+                                free(snippet2);
+                            }
                             cJSON_AddItemToArray(items, item);
                             free(mname);
                         }
@@ -942,6 +1040,39 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
             cJSON_Delete(resp);
             return;
         }
+    }
+
+    /* ── Check for import path completion (import "..." or from "...") ── */
+    if (doc && doc->text && detect_import_context(doc->text, line, col)) {
+        /* List .lat files from the document's directory */
+        char *doc_path = lsp_uri_to_path(doc->uri);
+        if (doc_path) {
+            /* Get directory part */
+            char *last_sep = strrchr(doc_path, '/');
+            if (last_sep) {
+                *last_sep = '\0'; /* truncate to directory */
+                DIR *dir = opendir(doc_path);
+                if (dir) {
+                    struct dirent *ent;
+                    while ((ent = readdir(dir)) != NULL) {
+                        size_t nlen = strlen(ent->d_name);
+                        if (nlen > 4 && strcmp(ent->d_name + nlen - 4, ".lat") == 0) {
+                            cJSON *item = cJSON_CreateObject();
+                            cJSON_AddStringToObject(item, "label", ent->d_name);
+                            cJSON_AddNumberToObject(item, "kind", 17); /* File */
+                            cJSON_AddItemToArray(items, item);
+                        }
+                    }
+                    closedir(dir);
+                }
+            }
+            free(doc_path);
+        }
+
+        cJSON *resp = lsp_make_response(id, items);
+        lsp_write_response(resp, stdout);
+        cJSON_Delete(resp);
+        return;
     }
 
     /* ── Default completion: keywords + builtins + document symbols ── */
@@ -967,6 +1098,15 @@ static void handle_completion(LspServer *srv, cJSON *params, int id) {
                 cJSON_AddStringToObject(doc_obj, "kind", "markdown");
                 cJSON_AddStringToObject(doc_obj, "value", srv->index->builtins[i].doc);
                 cJSON_AddItemToObject(item, "documentation", doc_obj);
+            }
+            /* Snippet insertText */
+            size_t slen = strlen(srv->index->builtins[i].name) + 8;
+            char *snippet = malloc(slen);
+            if (snippet) {
+                snprintf(snippet, slen, "%s($0)", srv->index->builtins[i].name);
+                cJSON_AddStringToObject(item, "insertText", snippet);
+                cJSON_AddNumberToObject(item, "insertTextFormat", 2); /* Snippet */
+                free(snippet);
             }
             cJSON_AddItemToArray(items, item);
         }

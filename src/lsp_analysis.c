@@ -282,6 +282,41 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 snprintf(sym.signature, sig_size, "impl %s", sym.name);
                 find_decl_position(doc->text, "impl", ib->trait_name ? ib->trait_name : ib->type_name, last_line,
                                    &sym.line, &sym.col);
+
+                /* Extract individual methods from the impl block */
+                if (ib->type_name && ib->method_count > 0) {
+                    for (size_t j = 0; j < ib->method_count; j++) {
+                        const FnDecl *fn = &ib->methods[j];
+                        LspImplMethod im;
+                        im.type_name = strdup(ib->type_name);
+                        im.method_name = strdup(fn->name);
+
+                        /* Build signature like "fn distance(self: Point, other: Point)" */
+                        size_t msiglen = strlen(fn->name) + 32;
+                        for (size_t k = 0; k < fn->param_count; k++) msiglen += strlen(fn->params[k].name) + 16;
+                        im.signature = malloc(msiglen);
+                        if (im.signature) {
+                            char *p = im.signature;
+                            char *end = im.signature + msiglen;
+                            p += snprintf(p, (size_t)(end - p), "fn %s(", fn->name);
+                            for (size_t k = 0; k < fn->param_count; k++) {
+                                if (k > 0) p += snprintf(p, (size_t)(end - p), ", ");
+                                p += snprintf(p, (size_t)(end - p), "%s", fn->params[k].name);
+                                if (fn->params[k].ty.name)
+                                    p += snprintf(p, (size_t)(end - p), ": %s", fn->params[k].ty.name);
+                            }
+                            snprintf(p, (size_t)(end - p), ")");
+                        }
+
+                        /* Find method position in text */
+                        find_decl_position(doc->text, "fn", fn->name, sym.line, &im.line, &(int){0});
+
+                        doc->impl_method_count++;
+                        doc->impl_methods = realloc(doc->impl_methods, doc->impl_method_count * sizeof(LspImplMethod));
+                        doc->impl_methods[doc->impl_method_count - 1] = im;
+                    }
+                }
+
                 found = true;
                 break;
             }
@@ -315,6 +350,16 @@ static void free_struct_defs(LspStructDef *defs, size_t count) {
         free(defs[i].fields);
     }
     free(defs);
+}
+
+/* Free impl method info */
+static void free_impl_methods(LspImplMethod *methods, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        free(methods[i].type_name);
+        free(methods[i].method_name);
+        free(methods[i].signature);
+    }
+    free(methods);
 }
 
 /* Free enum def info */
@@ -356,6 +401,10 @@ void lsp_analyze_document(LspDocument *doc) {
     doc->enum_defs = NULL;
     doc->enum_def_count = 0;
 
+    free_impl_methods(doc->impl_methods, doc->impl_method_count);
+    doc->impl_methods = NULL;
+    doc->impl_method_count = 0;
+
     if (!doc->text) return;
 
     /* Lex */
@@ -384,6 +433,10 @@ void lsp_analyze_document(LspDocument *doc) {
         if (!doc->diagnostics) return;
         doc->diagnostics[0] = parse_error(parse_err);
         free(parse_err);
+
+        /* Extract symbols from partial AST — gives completions for
+         * successfully parsed items even when there's a syntax error */
+        if (prog.item_count > 0) extract_symbols(doc, &prog);
     } else {
         /* Extract symbols */
         extract_symbols(doc, &prog);
@@ -421,5 +474,6 @@ void lsp_document_free(LspDocument *doc) {
     free(doc->symbols);
     free_struct_defs(doc->struct_defs, doc->struct_def_count);
     free_enum_defs(doc->enum_defs, doc->enum_def_count);
+    free_impl_methods(doc->impl_methods, doc->impl_method_count);
     free(doc);
 }
