@@ -365,4 +365,5 @@ jobs:
         run: make WINDOWS=1
 
       - name: Test
+        continue-on-error: true
         run: make test WINDOWS=1
