@@ -1,14 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <io.h>
-#define unlink _unlink
-#define getpid _getpid
-#else
-#include <unistd.h>
-#endif
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
@@ -18,6 +10,14 @@
 #include "latc.h"
 #include "runtime.h"
 #include "value.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define unlink _unlink
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 
 /* Import test macros from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));

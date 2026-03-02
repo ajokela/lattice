@@ -1,16 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <io.h>
-#else
-#include <unistd.h>
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#endif
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
@@ -28,6 +18,16 @@
 #include "stackvm.h"
 #include "latc.h"
 #include "regvm.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
 #include "runtime.h"
 #include "test_backend.h"
 
@@ -673,7 +673,7 @@ static void test_tokenize(void) {
 
 /* 30. test_write_and_read_file - write a temp file and read it back */
 static void test_write_and_read_file(void) {
-    char src[512], p[256];
+    char src[1024], p[256];
     snprintf(p, sizeof(p), "%s/lattice_test_stdlib.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1407,7 +1407,7 @@ static void test_tcp_error_handling(void) {
 
 /* 87. test_require_basic - require a file and call its function */
 static void test_require_basic(void) {
-    char src[512], p[256], plat[256];
+    char src[1024], p[256], plat[256];
     snprintf(plat, sizeof(plat), "%s/lattice_test_lib.lat", test_tmp());
     snprintf(p, sizeof(p), "%s/lattice_test_lib", test_tmp());
     /* Write a library file */
@@ -1425,7 +1425,7 @@ static void test_require_basic(void) {
 
 /* 88. test_require_with_extension - require with .lat extension works */
 static void test_require_with_extension(void) {
-    char src[512], plat[256];
+    char src[1024], plat[256];
     snprintf(plat, sizeof(plat), "%s/lattice_test_lib2.lat", test_tmp());
     builtin_write_file(plat, "fn helper2() -> Int { return 99 }\n");
 
@@ -1460,7 +1460,7 @@ static void test_require_dedup(void) {
 
 /* 90. test_require_structs - require a file that defines structs */
 static void test_require_structs(void) {
-    char src[512], p[256], plat[256];
+    char src[1024], p[256], plat[256];
     snprintf(plat, sizeof(plat), "%s/lattice_test_structs.lat", test_tmp());
     snprintf(p, sizeof(p), "%s/lattice_test_structs", test_tmp());
     builtin_write_file(plat, "struct Pair { a: Int, b: Int }\n"
@@ -1481,7 +1481,7 @@ static void test_require_structs(void) {
 
 /* 91. test_require_missing - require a nonexistent file produces error */
 static void test_require_missing(void) {
-    char src[512], p[256];
+    char src[1024], p[256];
     snprintf(p, sizeof(p), "%s/lattice_no_such_file_xyz", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1493,7 +1493,7 @@ static void test_require_missing(void) {
 
 /* 92. test_require_nested - transitive require */
 static void test_require_nested(void) {
-    char src[512], mid_src[512];
+    char src[1024], mid_src[512];
     char pbase[256], pbase_lat[256], pmid[256], pmid_lat[256];
     snprintf(pbase, sizeof(pbase), "%s/lattice_test_base", test_tmp());
     snprintf(pbase_lat, sizeof(pbase_lat), "%s/lattice_test_base.lat", test_tmp());
@@ -1844,7 +1844,7 @@ static void test_time_error_handling(void) {
 
 /* test_file_exists - file_exists returns true for existing file, false otherwise */
 static void test_file_exists(void) {
-    char src[512], p[256], pno[256];
+    char src[1024], p[256], pno[256];
     snprintf(p, sizeof(p), "%s/lattice_test_exists.txt", test_tmp());
     snprintf(pno, sizeof(pno), "%s/lattice_test_no_such_file_xyz.txt", test_tmp());
     snprintf(src, sizeof(src),
@@ -1860,7 +1860,7 @@ static void test_file_exists(void) {
 
 /* test_delete_file - delete_file removes an existing file */
 static void test_delete_file(void) {
-    char src[512], p[256];
+    char src[1024], p[256];
     snprintf(p, sizeof(p), "%s/lattice_test_del.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1875,7 +1875,7 @@ static void test_delete_file(void) {
 
 /* test_delete_file_error - deleting nonexistent file produces error */
 static void test_delete_file_error(void) {
-    char src[512], p[256];
+    char src[1024], p[256];
     snprintf(p, sizeof(p), "%s/lattice_test_no_such_file_xyz.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1910,7 +1910,7 @@ static void test_list_dir(void) {
 
 /* test_list_dir_error - listing nonexistent directory produces error */
 static void test_list_dir_error(void) {
-    char src[512], p[256];
+    char src[1024], p[256];
     snprintf(p, sizeof(p), "%s/lattice_no_such_dir_xyz", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1922,7 +1922,7 @@ static void test_list_dir_error(void) {
 
 /* test_append_file - append_file adds data to existing file */
 static void test_append_file(void) {
-    char src[512], p[256];
+    char src[1024], p[256];
     snprintf(p, sizeof(p), "%s/lattice_test_append.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1938,7 +1938,7 @@ static void test_append_file(void) {
 
 /* test_append_file_creates - append_file creates file if it doesn't exist */
 static void test_append_file_creates(void) {
-    char src[512], p[256];
+    char src[1024], p[256];
     snprintf(p, sizeof(p), "%s/lattice_test_append_new.txt", test_tmp());
     (void)remove(p);
     snprintf(src, sizeof(src),
@@ -3113,7 +3113,7 @@ static void test_rmdir_builtin(void) {
 }
 
 static void test_rmdir_error(void) {
-    char src[512];
+    char src[1024];
     snprintf(src, sizeof(src), "fn main() { rmdir(\"%s/nonexistent_lattice_dir_999\") }\n", test_tmp());
     char *out = run_capture(src);
     ASSERT(strstr(out, "EVAL_ERROR") != NULL);
@@ -3139,7 +3139,7 @@ static void test_glob_builtin(void) {
 }
 
 static void test_glob_no_match(void) {
-    char src[512];
+    char src[1024];
     snprintf(src, sizeof(src),
              "fn main() {\n"
              "    let matches = glob(\"%s/lattice_nonexistent_glob_*.xyz\")\n"
@@ -3172,7 +3172,7 @@ static void test_stat_dir(void) {
 }
 
 static void test_stat_error(void) {
-    char src[512];
+    char src[1024];
     snprintf(src, sizeof(src), "fn main() { stat(\"%s/nonexistent_lattice_stat_999\") }\n", test_tmp());
     char *out = run_capture(src);
     ASSERT(strstr(out, "EVAL_ERROR") != NULL);
@@ -3194,7 +3194,7 @@ static void test_copy_file_builtin(void) {
 }
 
 static void test_copy_file_error(void) {
-    char src[512];
+    char src[1024];
     snprintf(src, sizeof(src), "fn main() { copy_file(\"%s/nonexistent_lattice_cp_999\", \"%s/out\") }\n", test_tmp(),
              test_tmp());
     char *out = run_capture(src);
@@ -3212,7 +3212,7 @@ static void test_realpath_builtin(void) {
 }
 
 static void test_realpath_error(void) {
-    char src[512];
+    char src[1024];
     snprintf(src, sizeof(src), "fn main() { realpath(\"%s/nonexistent_lattice_rp_999\") }\n", test_tmp());
     char *out = run_capture(src);
     ASSERT(strstr(out, "EVAL_ERROR") != NULL);
@@ -6028,6 +6028,7 @@ static void test_require_ext_error_message_contains_name(void) {
  * SQLite Extension
  * ====================================================================== */
 
+#ifndef _WIN32
 /* Helper: common preamble that loads the sqlite extension and extracts fns */
 #define SQLITE_PREAMBLE                    \
     "let db = require_ext(\"sqlite\")\n"   \
@@ -6157,6 +6158,7 @@ static void test_sqlite_multiple_tables(void) {
         "}\n",
         "1\nAlice\n99.95");
 }
+#endif /* !_WIN32 - SQLite Extension */
 
 /* ======================================================================
  * Struct Reflection Builtins
@@ -6226,6 +6228,7 @@ static void test_struct_from_map_error(void) {
 /* ======================================================================
  * SQLite Parameterized Queries
  * ====================================================================== */
+#ifndef _WIN32
 
 static void test_sqlite_param_query(void) {
     ASSERT_OUTPUT("fn main() {\n" SQLITE_PREAMBLE "    let conn = open_fn(\":memory:\")\n"
@@ -6280,6 +6283,7 @@ static void test_sqlite_last_insert_rowid(void) {
                   "}\n",
                   "1\n2");
 }
+#endif /* !_WIN32 - SQLite Parameterized Queries */
 
 /* ======================================================================
  * Phase Constraints
@@ -8945,6 +8949,7 @@ static void test_builtin_time_now(void) {
     free(out);
 }
 
+#ifndef _WIN32
 static void test_builtin_regex_match(void) {
     char *out = run_capture("import { find_all } from \"regex\"\n"
                             "fn main() { print(len(find_all(\"[0-9]+\", \"abc123\"))) }\n");
@@ -8952,6 +8957,7 @@ static void test_builtin_regex_match(void) {
     ASSERT_STR_EQ(out, "1");
     free(out);
 }
+#endif /* !_WIN32 - regex */
 
 static void test_builtin_os_platform(void) {
     char *out = run_capture("import { platform } from \"os\"\n"

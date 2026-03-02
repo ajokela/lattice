@@ -1,14 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <io.h>
-#define STDOUT_FILENO 1
-#else
-#include <unistd.h>
-#include <fcntl.h>
-#endif
 #include "debugger.h"
 #include "dap.h"
 #include "lexer.h"
@@ -18,6 +10,14 @@
 #include "runtime.h"
 #include "value.h"
 #include "test_backend.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define STDOUT_FILENO 1
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 #include "../vendor/cJSON.h"
 
 /* Import test macros from test_main.c */
