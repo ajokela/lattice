@@ -617,9 +617,15 @@ TEST(test_dbg_print_callback_redirect) {
     /* Suppress stdout so test runner doesn't see it */
     fflush(stdout);
     int saved_stdout = dup(STDOUT_FILENO);
+#ifdef _WIN32
+    int devnull = open("NUL", O_WRONLY);
+#else
     int devnull = open("/dev/null", O_WRONLY);
-    dup2(devnull, STDOUT_FILENO);
-    close(devnull);
+#endif
+    if (devnull >= 0) {
+        dup2(devnull, STDOUT_FILENO);
+        close(devnull);
+    }
 
     LatValue result;
     stackvm_run(&t.vm, t.chunk, &result);
@@ -657,9 +663,15 @@ TEST(test_dbg_print_callback_multi_arg) {
 
     fflush(stdout);
     int saved_stdout = dup(STDOUT_FILENO);
-    int devnull2 = open("/dev/null", 1);
-    dup2(devnull2, STDOUT_FILENO);
-    close(devnull2);
+#ifdef _WIN32
+    int devnull2 = open("NUL", O_WRONLY);
+#else
+    int devnull2 = open("/dev/null", O_WRONLY);
+#endif
+    if (devnull2 >= 0) {
+        dup2(devnull2, STDOUT_FILENO);
+        close(devnull2);
+    }
 
     LatValue result;
     stackvm_run(&t.vm, t.chunk, &result);
