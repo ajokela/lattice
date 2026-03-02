@@ -3076,8 +3076,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t b = REG_GET_B(instr);
         uint8_t c = REG_GET_C(instr);
         if (R[b].type == VAL_INT && R[c].type == VAL_INT) {
-            if (R[c].as.int_val == 0) RVM_ERROR("division by zero");
-            reg_set(&R[a], value_int(R[b].as.int_val / R[c].as.int_val));
+            if (R[c].as.int_val == 0) {
+                RVM_ERROR("division by zero");
+            } else {
+                reg_set(&R[a], value_int(R[b].as.int_val / R[c].as.int_val));
+            }
         } else if (R[b].type == VAL_FLOAT || R[c].type == VAL_FLOAT) {
             double rv = R[c].type == VAL_FLOAT ? R[c].as.float_val : (double)R[c].as.int_val;
             double lv = R[b].type == VAL_FLOAT ? R[b].as.float_val : (double)R[b].as.int_val;
@@ -3093,8 +3096,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t b = REG_GET_B(instr);
         uint8_t c = REG_GET_C(instr);
         if (R[b].type == VAL_INT && R[c].type == VAL_INT) {
-            if (R[c].as.int_val == 0) RVM_ERROR("modulo by zero");
-            reg_set(&R[a], value_int(R[b].as.int_val % R[c].as.int_val));
+            if (R[c].as.int_val == 0) {
+                RVM_ERROR("modulo by zero");
+            } else {
+                reg_set(&R[a], value_int(R[b].as.int_val % R[c].as.int_val));
+            }
         } else {
             RVM_ERROR("cannot modulo %s by %s", value_type_name(&R[b]), value_type_name(&R[c]));
         }
