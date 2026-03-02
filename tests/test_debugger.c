@@ -1,8 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define STDOUT_FILENO 1
+#else
 #include <unistd.h>
 #include <fcntl.h>
+#endif
 #include "debugger.h"
 #include "dap.h"
 #include "lexer.h"
@@ -52,6 +58,21 @@ extern int test_current_failed;
     static void name##_register(void) __attribute__((constructor));   \
     static void name##_register(void) { register_test(#name, name); } \
     static void name(void)
+
+/* ── Helper: platform temp directory ── */
+static const char *test_tmp(void) {
+#ifdef _WIN32
+    static char buf[MAX_PATH];
+    if (!buf[0]) {
+        GetTempPathA(MAX_PATH, buf);
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
+    }
+    return buf;
+#else
+    return "/tmp";
+#endif
+}
 
 /* ── Helper: compile source and set up a StackVM for debugger testing ── */
 
@@ -399,13 +420,16 @@ TEST(test_dbg_watch_ids_increment) {
 
 TEST(test_dbg_load_source_nonexistent) {
     Debugger *dbg = debugger_new();
-    ASSERT(!debugger_load_source(dbg, "/tmp/nonexistent_debugger_test_file.lat"));
+    char ne_path[256];
+    snprintf(ne_path, sizeof(ne_path), "%s/nonexistent_debugger_test_file.lat", test_tmp());
+    ASSERT(!debugger_load_source(dbg, ne_path));
     ASSERT_EQ_INT(dbg->source_line_count, 0);
     debugger_free(dbg);
 }
 
 TEST(test_dbg_load_source_real) {
-    const char *tmppath = "/tmp/debugger_test_source.lat";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/debugger_test_source.lat", test_tmp());
     FILE *f = fopen(tmppath, "w");
     ASSERT(f != NULL);
     fprintf(f, "let x = 1\n");
@@ -612,9 +636,18 @@ TEST(test_dbg_print_callback_redirect) {
     /* Suppress stdout so test runner doesn't see it */
     fflush(stdout);
     int saved_stdout = dup(STDOUT_FILENO);
+#ifdef _WIN32
+    FILE *devnull_f = fopen("NUL", "w");
+    int devnull = fileno(devnull_f);
+#else
     int devnull = open("/dev/null", O_WRONLY);
+#endif
     dup2(devnull, STDOUT_FILENO);
+#ifdef _WIN32
+    fclose(devnull_f);
+#else
     close(devnull);
+#endif
 
     LatValue result;
     stackvm_run(&t.vm, t.chunk, &result);
@@ -652,9 +685,18 @@ TEST(test_dbg_print_callback_multi_arg) {
 
     fflush(stdout);
     int saved_stdout = dup(STDOUT_FILENO);
-    int devnull = open("/dev/null", 1);
-    dup2(devnull, STDOUT_FILENO);
-    close(devnull);
+#ifdef _WIN32
+    FILE *devnull_f2 = fopen("NUL", "w");
+    int devnull2 = fileno(devnull_f2);
+#else
+    int devnull2 = open("/dev/null", 1);
+#endif
+    dup2(devnull2, STDOUT_FILENO);
+#ifdef _WIN32
+    fclose(devnull_f2);
+#else
+    close(devnull2);
+#endif
 
     LatValue result;
     stackvm_run(&t.vm, t.chunk, &result);
@@ -674,7 +716,8 @@ TEST(test_dbg_print_callback_multi_arg) {
 
 TEST(test_dap_message_roundtrip) {
     /* Write a DAP message to a temp file, read it back */
-    const char *tmppath = "/tmp/dap_msg_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_msg_test.bin", test_tmp());
     FILE *out = fopen(tmppath, "w+");
     ASSERT(out != NULL);
 
@@ -706,7 +749,8 @@ TEST(test_dap_message_roundtrip) {
 
 TEST(test_dap_message_multiple) {
     /* Write multiple messages, read them in order */
-    const char *tmppath = "/tmp/dap_multi_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_multi_test.bin", test_tmp());
     FILE *out = fopen(tmppath, "w+");
     ASSERT(out != NULL);
 
@@ -738,7 +782,8 @@ TEST(test_dap_message_multiple) {
 /* ── DAP response/event helpers ── */
 
 TEST(test_dap_send_response) {
-    const char *tmppath = "/tmp/dap_resp_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_resp_test.bin", test_tmp());
     FILE *out = fopen(tmppath, "w+");
     ASSERT(out != NULL);
 
@@ -771,7 +816,8 @@ TEST(test_dap_send_response) {
 }
 
 TEST(test_dap_send_event) {
-    const char *tmppath = "/tmp/dap_event_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_event_test.bin", test_tmp());
     FILE *out = fopen(tmppath, "w+");
     ASSERT(out != NULL);
 
@@ -801,7 +847,8 @@ TEST(test_dap_send_event) {
 }
 
 TEST(test_dap_send_error) {
-    const char *tmppath = "/tmp/dap_err_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_err_test.bin", test_tmp());
     FILE *out = fopen(tmppath, "w+");
     ASSERT(out != NULL);
 
@@ -828,7 +875,8 @@ TEST(test_dap_send_error) {
 /* ── DAP seq counter increments ── */
 
 TEST(test_dap_seq_counter) {
-    const char *tmppath = "/tmp/dap_seq_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_seq_test.bin", test_tmp());
     FILE *out = fopen(tmppath, "w+");
     ASSERT(out != NULL);
 
@@ -849,7 +897,8 @@ TEST(test_dap_seq_counter) {
 /* ── DAP read returns NULL on empty/invalid input ── */
 
 TEST(test_dap_read_eof) {
-    const char *tmppath = "/tmp/dap_eof_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_eof_test.bin", test_tmp());
     FILE *f = fopen(tmppath, "w+");
     ASSERT(f != NULL);
     /* Empty file */
@@ -861,7 +910,8 @@ TEST(test_dap_read_eof) {
 }
 
 TEST(test_dap_read_bad_content_length) {
-    const char *tmppath = "/tmp/dap_bad_cl_test.bin";
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/dap_bad_cl_test.bin", test_tmp());
     FILE *f = fopen(tmppath, "w+");
     ASSERT(f != NULL);
     /* Content-Length of 100 but only 5 bytes of body */

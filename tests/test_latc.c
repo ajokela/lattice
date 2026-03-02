@@ -1,7 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define unlink _unlink
+#define getpid _getpid
+#else
 #include <unistd.h>
+#endif
 #include "lattice.h"
 #include "lexer.h"
 #include "parser.h"
@@ -51,11 +58,26 @@ extern int test_current_failed;
     static void name##_register(void) { register_test(#name, name); } \
     static void name(void)
 
+/* ── Helper: platform temp directory ── */
+static const char *test_tmp(void) {
+#ifdef _WIN32
+    static char buf[MAX_PATH];
+    if (!buf[0]) {
+        GetTempPathA(MAX_PATH, buf);
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
+    }
+    return buf;
+#else
+    return "/tmp";
+#endif
+}
+
 /* ── Helper: generate a unique temp file path, write nothing ── */
 static char *make_temp_path(const char *suffix) {
     static int counter = 0;
     char *path = malloc(256);
-    snprintf(path, 256, "/tmp/test_latc_%d_%d%s", (int)getpid(), counter++, suffix);
+    snprintf(path, 256, "%s/test_latc_%d_%d%s", test_tmp(), (int)getpid(), counter++, suffix);
     return path;
 }
 
@@ -919,7 +941,9 @@ TEST(latc_reg_many_constants) {
 
 TEST(latc_stack_load_nonexistent_file) {
     char *err = NULL;
-    Chunk *c = chunk_load("/tmp/nonexistent_test_file_42.latc", &err);
+    char nonexist_path[256];
+    snprintf(nonexist_path, sizeof(nonexist_path), "%s/nonexistent_test_file_42.latc", test_tmp());
+    Chunk *c = chunk_load(nonexist_path, &err);
     ASSERT(c == NULL);
     ASSERT(err != NULL);
     free(err);
@@ -990,7 +1014,9 @@ TEST(latc_stack_deserialize_bad_version) {
 
 TEST(latc_reg_load_nonexistent_file) {
     char *err = NULL;
-    RegChunk *c = regchunk_load("/tmp/nonexistent_test_file_42.rlatc", &err);
+    char nonexist_rpath[256];
+    snprintf(nonexist_rpath, sizeof(nonexist_rpath), "%s/nonexistent_test_file_42.rlatc", test_tmp());
+    RegChunk *c = regchunk_load(nonexist_rpath, &err);
     ASSERT(c == NULL);
     ASSERT(err != NULL);
     free(err);

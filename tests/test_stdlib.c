@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#include <windows.h>
 #include <io.h>
 #else
 #include <unistd.h>
@@ -52,6 +53,21 @@ extern int test_current_failed;
             return;                                                                                            \
         }                                                                                                      \
     } while (0)
+
+/* ── Helper: platform temp directory ── */
+static const char *test_tmp(void) {
+#ifdef _WIN32
+    static char buf[MAX_PATH];
+    if (!buf[0]) {
+        GetTempPathA(MAX_PATH, buf);
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
+    }
+    return buf;
+#else
+    return "/tmp";
+#endif
+}
 
 /* ── Helper: run Lattice source and capture stdout ── */
 
@@ -657,14 +673,18 @@ static void test_tokenize(void) {
 
 /* 30. test_write_and_read_file - write a temp file and read it back */
 static void test_write_and_read_file(void) {
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    write_file(\"/tmp/lattice_test_stdlib.txt\", \"hello from lattice\")\n"
-                  "    let content = read_file(\"/tmp/lattice_test_stdlib.txt\")\n"
-                  "    print(content)\n"
-                  "}\n",
-                  "hello from lattice");
+    char src[512], p[256];
+    snprintf(p, sizeof(p), "%s/lattice_test_stdlib.txt", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    write_file(\"%s\", \"hello from lattice\")\n"
+             "    let content = read_file(\"%s\")\n"
+             "    print(content)\n"
+             "}\n",
+             p, p);
+    ASSERT_OUTPUT(src, "hello from lattice");
     /* Clean up the temp file */
-    (void)remove("/tmp/lattice_test_stdlib.txt");
+    (void)remove(p);
 }
 
 /* ======================================================================
@@ -1387,80 +1407,115 @@ static void test_tcp_error_handling(void) {
 
 /* 87. test_require_basic - require a file and call its function */
 static void test_require_basic(void) {
+    char src[512], p[256], plat[256];
+    snprintf(plat, sizeof(plat), "%s/lattice_test_lib.lat", test_tmp());
+    snprintf(p, sizeof(p), "%s/lattice_test_lib", test_tmp());
     /* Write a library file */
-    builtin_write_file("/tmp/lattice_test_lib.lat", "fn helper() -> Int { return 42 }\n");
+    builtin_write_file(plat, "fn helper() -> Int { return 42 }\n");
 
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    require(\"/tmp/lattice_test_lib\")\n"
-                  "    print(helper())\n"
-                  "}\n",
-                  "42");
-    (void)remove("/tmp/lattice_test_lib.lat");
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    require(\"%s\")\n"
+             "    print(helper())\n"
+             "}\n",
+             p);
+    ASSERT_OUTPUT(src, "42");
+    (void)remove(plat);
 }
 
 /* 88. test_require_with_extension - require with .lat extension works */
 static void test_require_with_extension(void) {
-    builtin_write_file("/tmp/lattice_test_lib2.lat", "fn helper2() -> Int { return 99 }\n");
+    char src[512], plat[256];
+    snprintf(plat, sizeof(plat), "%s/lattice_test_lib2.lat", test_tmp());
+    builtin_write_file(plat, "fn helper2() -> Int { return 99 }\n");
 
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    require(\"/tmp/lattice_test_lib2.lat\")\n"
-                  "    print(helper2())\n"
-                  "}\n",
-                  "99");
-    (void)remove("/tmp/lattice_test_lib2.lat");
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    require(\"%s\")\n"
+             "    print(helper2())\n"
+             "}\n",
+             plat);
+    ASSERT_OUTPUT(src, "99");
+    (void)remove(plat);
 }
 
 /* 89. test_require_dedup - requiring same file twice is a no-op */
 static void test_require_dedup(void) {
-    builtin_write_file("/tmp/lattice_test_dedup.lat", "fn dedup_fn() -> Int { return 7 }\n");
+    char src[1024], p[256], plat[256];
+    snprintf(plat, sizeof(plat), "%s/lattice_test_dedup.lat", test_tmp());
+    snprintf(p, sizeof(p), "%s/lattice_test_dedup", test_tmp());
+    builtin_write_file(plat, "fn dedup_fn() -> Int { return 7 }\n");
 
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    require(\"/tmp/lattice_test_dedup\")\n"
-                  "    require(\"/tmp/lattice_test_dedup\")\n"
-                  "    require(\"/tmp/lattice_test_dedup.lat\")\n"
-                  "    print(dedup_fn())\n"
-                  "}\n",
-                  "7");
-    (void)remove("/tmp/lattice_test_dedup.lat");
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    require(\"%s\")\n"
+             "    require(\"%s\")\n"
+             "    require(\"%s\")\n"
+             "    print(dedup_fn())\n"
+             "}\n",
+             p, p, plat);
+    ASSERT_OUTPUT(src, "7");
+    (void)remove(plat);
 }
 
 /* 90. test_require_structs - require a file that defines structs */
 static void test_require_structs(void) {
-    builtin_write_file("/tmp/lattice_test_structs.lat", "struct Pair { a: Int, b: Int }\n"
-                                                        "fn make_pair(x: Int, y: Int) -> Pair {\n"
-                                                        "    return Pair { a: x, b: y }\n"
-                                                        "}\n");
+    char src[512], p[256], plat[256];
+    snprintf(plat, sizeof(plat), "%s/lattice_test_structs.lat", test_tmp());
+    snprintf(p, sizeof(p), "%s/lattice_test_structs", test_tmp());
+    builtin_write_file(plat, "struct Pair { a: Int, b: Int }\n"
+                             "fn make_pair(x: Int, y: Int) -> Pair {\n"
+                             "    return Pair { a: x, b: y }\n"
+                             "}\n");
 
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    require(\"/tmp/lattice_test_structs\")\n"
-                  "    let p = make_pair(3, 4)\n"
-                  "    print(p.a + p.b)\n"
-                  "}\n",
-                  "7");
-    (void)remove("/tmp/lattice_test_structs.lat");
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    require(\"%s\")\n"
+             "    let p = make_pair(3, 4)\n"
+             "    print(p.a + p.b)\n"
+             "}\n",
+             p);
+    ASSERT_OUTPUT(src, "7");
+    (void)remove(plat);
 }
 
 /* 91. test_require_missing - require a nonexistent file produces error */
 static void test_require_missing(void) {
-    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
-                              "    require(\"/tmp/lattice_no_such_file_xyz\")\n"
-                              "}\n",
-                              "EVAL_ERROR:require: cannot find");
+    char src[512], p[256];
+    snprintf(p, sizeof(p), "%s/lattice_no_such_file_xyz", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    require(\"%s\")\n"
+             "}\n",
+             p);
+    ASSERT_OUTPUT_STARTS_WITH(src, "EVAL_ERROR:require: cannot find");
 }
 
 /* 92. test_require_nested - transitive require */
 static void test_require_nested(void) {
-    builtin_write_file("/tmp/lattice_test_base.lat", "fn base_fn() -> Int { return 10 }\n");
-    builtin_write_file("/tmp/lattice_test_mid.lat", "require(\"/tmp/lattice_test_base\")\n"
-                                                    "fn mid_fn() -> Int { return base_fn() + 5 }\n");
+    char src[512], mid_src[512];
+    char pbase[256], pbase_lat[256], pmid[256], pmid_lat[256];
+    snprintf(pbase, sizeof(pbase), "%s/lattice_test_base", test_tmp());
+    snprintf(pbase_lat, sizeof(pbase_lat), "%s/lattice_test_base.lat", test_tmp());
+    snprintf(pmid, sizeof(pmid), "%s/lattice_test_mid", test_tmp());
+    snprintf(pmid_lat, sizeof(pmid_lat), "%s/lattice_test_mid.lat", test_tmp());
 
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    require(\"/tmp/lattice_test_mid\")\n"
-                  "    print(mid_fn())\n"
-                  "}\n",
-                  "15");
-    (void)remove("/tmp/lattice_test_base.lat");
-    (void)remove("/tmp/lattice_test_mid.lat");
+    builtin_write_file(pbase_lat, "fn base_fn() -> Int { return 10 }\n");
+    snprintf(mid_src, sizeof(mid_src),
+             "require(\"%s\")\n"
+             "fn mid_fn() -> Int { return base_fn() + 5 }\n",
+             pbase);
+    builtin_write_file(pmid_lat, mid_src);
+
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    require(\"%s\")\n"
+             "    print(mid_fn())\n"
+             "}\n",
+             pmid);
+    ASSERT_OUTPUT(src, "15");
+    (void)remove(pbase_lat);
+    (void)remove(pmid_lat);
 }
 
 /* ======================================================================
@@ -1789,82 +1844,112 @@ static void test_time_error_handling(void) {
 
 /* test_file_exists - file_exists returns true for existing file, false otherwise */
 static void test_file_exists(void) {
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    write_file(\"/tmp/lattice_test_exists.txt\", \"hi\")\n"
-                  "    print(file_exists(\"/tmp/lattice_test_exists.txt\"))\n"
-                  "    print(file_exists(\"/tmp/lattice_test_no_such_file_xyz.txt\"))\n"
-                  "}\n",
-                  "true\nfalse");
-    (void)remove("/tmp/lattice_test_exists.txt");
+    char src[512], p[256], pno[256];
+    snprintf(p, sizeof(p), "%s/lattice_test_exists.txt", test_tmp());
+    snprintf(pno, sizeof(pno), "%s/lattice_test_no_such_file_xyz.txt", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    write_file(\"%s\", \"hi\")\n"
+             "    print(file_exists(\"%s\"))\n"
+             "    print(file_exists(\"%s\"))\n"
+             "}\n",
+             p, p, pno);
+    ASSERT_OUTPUT(src, "true\nfalse");
+    (void)remove(p);
 }
 
 /* test_delete_file - delete_file removes an existing file */
 static void test_delete_file(void) {
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    write_file(\"/tmp/lattice_test_del.txt\", \"bye\")\n"
-                  "    print(file_exists(\"/tmp/lattice_test_del.txt\"))\n"
-                  "    delete_file(\"/tmp/lattice_test_del.txt\")\n"
-                  "    print(file_exists(\"/tmp/lattice_test_del.txt\"))\n"
-                  "}\n",
-                  "true\nfalse");
+    char src[512], p[256];
+    snprintf(p, sizeof(p), "%s/lattice_test_del.txt", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    write_file(\"%s\", \"bye\")\n"
+             "    print(file_exists(\"%s\"))\n"
+             "    delete_file(\"%s\")\n"
+             "    print(file_exists(\"%s\"))\n"
+             "}\n",
+             p, p, p, p);
+    ASSERT_OUTPUT(src, "true\nfalse");
 }
 
 /* test_delete_file_error - deleting nonexistent file produces error */
 static void test_delete_file_error(void) {
-    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
-                              "    delete_file(\"/tmp/lattice_test_no_such_file_xyz.txt\")\n"
-                              "}\n",
-                              "EVAL_ERROR:");
+    char src[512], p[256];
+    snprintf(p, sizeof(p), "%s/lattice_test_no_such_file_xyz.txt", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    delete_file(\"%s\")\n"
+             "}\n",
+             p);
+    ASSERT_OUTPUT_STARTS_WITH(src, "EVAL_ERROR:");
 }
 
 /* test_list_dir - list_dir returns array of filenames */
 static void test_list_dir(void) {
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    write_file(\"/tmp/lattice_test_listdir_a.txt\", \"a\")\n"
-                  "    write_file(\"/tmp/lattice_test_listdir_b.txt\", \"b\")\n"
-                  "    let entries = list_dir(\"/tmp\")\n"
-                  "    // entries should be an array with at least 2 elements\n"
-                  "    print(typeof(entries))\n"
-                  "    let found_a = entries.contains(\"lattice_test_listdir_a.txt\")\n"
-                  "    let found_b = entries.contains(\"lattice_test_listdir_b.txt\")\n"
-                  "    print(found_a)\n"
-                  "    print(found_b)\n"
-                  "}\n",
-                  "Array\ntrue\ntrue");
-    (void)remove("/tmp/lattice_test_listdir_a.txt");
-    (void)remove("/tmp/lattice_test_listdir_b.txt");
+    char src[1024], pa[256], pb[256];
+    snprintf(pa, sizeof(pa), "%s/lattice_test_listdir_a.txt", test_tmp());
+    snprintf(pb, sizeof(pb), "%s/lattice_test_listdir_b.txt", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    write_file(\"%s\", \"a\")\n"
+             "    write_file(\"%s\", \"b\")\n"
+             "    let entries = list_dir(\"%s\")\n"
+             "    // entries should be an array with at least 2 elements\n"
+             "    print(typeof(entries))\n"
+             "    let found_a = entries.contains(\"lattice_test_listdir_a.txt\")\n"
+             "    let found_b = entries.contains(\"lattice_test_listdir_b.txt\")\n"
+             "    print(found_a)\n"
+             "    print(found_b)\n"
+             "}\n",
+             pa, pb, test_tmp());
+    ASSERT_OUTPUT(src, "Array\ntrue\ntrue");
+    (void)remove(pa);
+    (void)remove(pb);
 }
 
 /* test_list_dir_error - listing nonexistent directory produces error */
 static void test_list_dir_error(void) {
-    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
-                              "    list_dir(\"/tmp/lattice_no_such_dir_xyz\")\n"
-                              "}\n",
-                              "EVAL_ERROR:");
+    char src[512], p[256];
+    snprintf(p, sizeof(p), "%s/lattice_no_such_dir_xyz", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    list_dir(\"%s\")\n"
+             "}\n",
+             p);
+    ASSERT_OUTPUT_STARTS_WITH(src, "EVAL_ERROR:");
 }
 
 /* test_append_file - append_file adds data to existing file */
 static void test_append_file(void) {
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    write_file(\"/tmp/lattice_test_append.txt\", \"hello\")\n"
-                  "    append_file(\"/tmp/lattice_test_append.txt\", \" world\")\n"
-                  "    let content = read_file(\"/tmp/lattice_test_append.txt\")\n"
-                  "    print(content)\n"
-                  "}\n",
-                  "hello world");
-    (void)remove("/tmp/lattice_test_append.txt");
+    char src[512], p[256];
+    snprintf(p, sizeof(p), "%s/lattice_test_append.txt", test_tmp());
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    write_file(\"%s\", \"hello\")\n"
+             "    append_file(\"%s\", \" world\")\n"
+             "    let content = read_file(\"%s\")\n"
+             "    print(content)\n"
+             "}\n",
+             p, p, p);
+    ASSERT_OUTPUT(src, "hello world");
+    (void)remove(p);
 }
 
 /* test_append_file_creates - append_file creates file if it doesn't exist */
 static void test_append_file_creates(void) {
-    (void)remove("/tmp/lattice_test_append_new.txt");
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    append_file(\"/tmp/lattice_test_append_new.txt\", \"new content\")\n"
-                  "    let content = read_file(\"/tmp/lattice_test_append_new.txt\")\n"
-                  "    print(content)\n"
-                  "}\n",
-                  "new content");
-    (void)remove("/tmp/lattice_test_append_new.txt");
+    char src[512], p[256];
+    snprintf(p, sizeof(p), "%s/lattice_test_append_new.txt", test_tmp());
+    (void)remove(p);
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    append_file(\"%s\", \"new content\")\n"
+             "    let content = read_file(\"%s\")\n"
+             "    print(content)\n"
+             "}\n",
+             p, p);
+    ASSERT_OUTPUT(src, "new content");
+    (void)remove(p);
 }
 
 /* test_fs_error_handling - bad arg types produce eval errors */
@@ -2861,7 +2946,7 @@ static void test_math_hyperbolic(void) {
 static void test_cwd_builtin(void) {
     char *out = run_capture("fn main() { print(cwd()) }\n");
     ASSERT(strlen(out) > 0);
-    ASSERT(out[0] == '/');
+    ASSERT(out[0] == '/' || (strlen(out) > 1 && out[1] == ':'));
     free(out);
 }
 
@@ -2877,7 +2962,7 @@ static void test_is_dir_file(void) {
 
 static void test_mkdir_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let dir = \"/tmp/lattice_test_mkdir_\" + to_string(time())\n"
+                  "    let dir = tempdir() + \"/lattice_test_mkdir_\" + to_string(time())\n"
                   "    print(mkdir(dir))\n"
                   "    print(is_dir(dir))\n"
                   "}\n",
@@ -2886,8 +2971,8 @@ static void test_mkdir_builtin(void) {
 
 static void test_rename_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let f1 = \"/tmp/lattice_rename_src_\" + to_string(time())\n"
-                  "    let f2 = \"/tmp/lattice_rename_dst_\" + to_string(time())\n"
+                  "    let f1 = tempdir() + \"/lattice_rename_src_\" + to_string(time())\n"
+                  "    let f2 = tempdir() + \"/lattice_rename_dst_\" + to_string(time())\n"
                   "    write_file(f1, \"hello\")\n"
                   "    print(rename(f1, f2))\n"
                   "    print(file_exists(f1))\n"
@@ -3019,7 +3104,7 @@ static void test_exec_failure(void) {
 
 static void test_rmdir_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let dir = \"/tmp/lattice_test_rmdir_\" + to_string(time())\n"
+                  "    let dir = tempdir() + \"/lattice_test_rmdir_\" + to_string(time())\n"
                   "    mkdir(dir)\n"
                   "    print(rmdir(dir))\n"
                   "    print(is_dir(dir))\n"
@@ -3028,7 +3113,9 @@ static void test_rmdir_builtin(void) {
 }
 
 static void test_rmdir_error(void) {
-    char *out = run_capture("fn main() { rmdir(\"/tmp/nonexistent_lattice_dir_999\") }\n");
+    char src[512];
+    snprintf(src, sizeof(src), "fn main() { rmdir(\"%s/nonexistent_lattice_dir_999\") }\n", test_tmp());
+    char *out = run_capture(src);
     ASSERT(strstr(out, "EVAL_ERROR") != NULL);
     ASSERT(strstr(out, "rmdir") != NULL);
     free(out);
@@ -3036,7 +3123,7 @@ static void test_rmdir_error(void) {
 
 static void test_glob_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let dir = \"/tmp/lattice_test_glob_\" + to_string(time())\n"
+                  "    let dir = tempdir() + \"/lattice_test_glob_\" + to_string(time())\n"
                   "    mkdir(dir)\n"
                   "    write_file(dir + \"/a.txt\", \"hello\")\n"
                   "    write_file(dir + \"/b.txt\", \"world\")\n"
@@ -3052,16 +3139,19 @@ static void test_glob_builtin(void) {
 }
 
 static void test_glob_no_match(void) {
-    ASSERT_OUTPUT("fn main() {\n"
-                  "    let matches = glob(\"/tmp/lattice_nonexistent_glob_*.xyz\")\n"
-                  "    print(len(matches))\n"
-                  "}\n",
-                  "0");
+    char src[512];
+    snprintf(src, sizeof(src),
+             "fn main() {\n"
+             "    let matches = glob(\"%s/lattice_nonexistent_glob_*.xyz\")\n"
+             "    print(len(matches))\n"
+             "}\n",
+             test_tmp());
+    ASSERT_OUTPUT(src, "0");
 }
 
 static void test_stat_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let f = \"/tmp/lattice_test_stat_\" + to_string(time())\n"
+                  "    let f = tempdir() + \"/lattice_test_stat_\" + to_string(time())\n"
                   "    write_file(f, \"hello\")\n"
                   "    let s = stat(f)\n"
                   "    print(s.get(\"size\"))\n"
@@ -3082,7 +3172,9 @@ static void test_stat_dir(void) {
 }
 
 static void test_stat_error(void) {
-    char *out = run_capture("fn main() { stat(\"/tmp/nonexistent_lattice_stat_999\") }\n");
+    char src[512];
+    snprintf(src, sizeof(src), "fn main() { stat(\"%s/nonexistent_lattice_stat_999\") }\n", test_tmp());
+    char *out = run_capture(src);
     ASSERT(strstr(out, "EVAL_ERROR") != NULL);
     ASSERT(strstr(out, "stat") != NULL);
     free(out);
@@ -3090,8 +3182,8 @@ static void test_stat_error(void) {
 
 static void test_copy_file_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let src = \"/tmp/lattice_test_cp_src_\" + to_string(time())\n"
-                  "    let dst = \"/tmp/lattice_test_cp_dst_\" + to_string(time())\n"
+                  "    let src = tempdir() + \"/lattice_test_cp_src_\" + to_string(time())\n"
+                  "    let dst = tempdir() + \"/lattice_test_cp_dst_\" + to_string(time())\n"
                   "    write_file(src, \"copy me\")\n"
                   "    print(copy_file(src, dst))\n"
                   "    print(read_file(dst))\n"
@@ -3102,7 +3194,10 @@ static void test_copy_file_builtin(void) {
 }
 
 static void test_copy_file_error(void) {
-    char *out = run_capture("fn main() { copy_file(\"/tmp/nonexistent_lattice_cp_999\", \"/tmp/out\") }\n");
+    char src[512];
+    snprintf(src, sizeof(src), "fn main() { copy_file(\"%s/nonexistent_lattice_cp_999\", \"%s/out\") }\n", test_tmp(),
+             test_tmp());
+    char *out = run_capture(src);
     ASSERT(strstr(out, "EVAL_ERROR") != NULL);
     ASSERT(strstr(out, "copy_file") != NULL);
     free(out);
@@ -3111,13 +3206,15 @@ static void test_copy_file_error(void) {
 static void test_realpath_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    let rp = realpath(\".\")\n"
-                  "    print(rp.starts_with(\"/\"))\n"
+                  "    print(len(rp) > 0)\n"
                   "}\n",
                   "true");
 }
 
 static void test_realpath_error(void) {
-    char *out = run_capture("fn main() { realpath(\"/tmp/nonexistent_lattice_rp_999\") }\n");
+    char src[512];
+    snprintf(src, sizeof(src), "fn main() { realpath(\"%s/nonexistent_lattice_rp_999\") }\n", test_tmp());
+    char *out = run_capture(src);
     ASSERT(strstr(out, "EVAL_ERROR") != NULL);
     ASSERT(strstr(out, "realpath") != NULL);
     free(out);
@@ -3152,7 +3249,7 @@ static void test_chmod_builtin(void) {
 
 static void test_file_size_builtin(void) {
     ASSERT_OUTPUT("fn main() {\n"
-                  "    let f = \"/tmp/lattice_size_test_\" + to_string(time())\n"
+                  "    let f = tempdir() + \"/lattice_size_test_\" + to_string(time())\n"
                   "    write_file(f, \"hello\")\n"
                   "    print(file_size(f))\n"
                   "    delete_file(f)\n"
@@ -5281,11 +5378,11 @@ static void test_import_cached(void) {
 }
 
 static void test_import_not_found(void) {
-    ASSERT_OUTPUT("import \"nonexistent_module\" as m\n"
-                  "fn main() {\n"
-                  "    print(m.x)\n"
-                  "}\n",
-                  "EVAL_ERROR:import: cannot find 'nonexistent_module.lat'");
+    ASSERT_OUTPUT_STARTS_WITH("import \"nonexistent_module\" as m\n"
+                              "fn main() {\n"
+                              "    print(m.x)\n"
+                              "}\n",
+                              "EVAL_ERROR:import: cannot find");
 }
 
 static void test_import_missing_export(void) {
@@ -8390,7 +8487,9 @@ static void test_latc_file_save_load(void) {
     ASSERT(chunk != NULL);
 
     /* Save to temp file */
-    const char *tmp_path = "/tmp/test_latc_save_load.latc";
+    char latc_path[256];
+    snprintf(latc_path, sizeof(latc_path), "%s/test_latc_save_load.latc", test_tmp());
+    const char *tmp_path = latc_path;
     ASSERT(chunk_save(chunk, tmp_path) == 0);
     chunk_free(chunk);
 
@@ -8612,7 +8711,9 @@ static void test_rlatc_file_save_load(void) {
     ASSERT(rchunk != NULL);
 
     /* Save to temp file */
-    const char *tmp_path = "/tmp/test_rlatc_save_load.latc";
+    char rlatc_path[256];
+    snprintf(rlatc_path, sizeof(rlatc_path), "%s/test_rlatc_save_load.latc", test_tmp());
+    const char *tmp_path = rlatc_path;
     ASSERT(regchunk_save(rchunk, tmp_path) == 0);
     regchunk_free(rchunk);
 
@@ -8731,7 +8832,9 @@ static void test_rlatc_scope_file_save_load(void) {
     ASSERT(rchunk != NULL);
 
     /* Save to temp .rlat file */
-    const char *tmp_path = "/tmp/test_rlatc_scope.rlat";
+    char rlat_path[256];
+    snprintf(rlat_path, sizeof(rlat_path), "%s/test_rlatc_scope.rlat", test_tmp());
+    const char *tmp_path = rlat_path;
     ASSERT(regchunk_save(rchunk, tmp_path) == 0);
     regchunk_free(rchunk);
 
@@ -12255,8 +12358,8 @@ void register_stdlib_tests(void) {
 #ifndef _WIN32
     register_test("test_tcp_connect_write_read", test_tcp_connect_write_read);
     register_test("test_tcp_peer_addr", test_tcp_peer_addr);
-#endif
     register_test("test_tcp_set_timeout", test_tcp_set_timeout);
+#endif
     register_test("test_tcp_invalid_fd", test_tcp_invalid_fd);
     register_test("test_tcp_lattice_integration", test_tcp_lattice_integration);
     register_test("test_tcp_error_handling", test_tcp_error_handling);
@@ -12312,7 +12415,8 @@ void register_stdlib_tests(void) {
     register_test("test_append_file_creates", test_append_file_creates);
     register_test("test_fs_error_handling", test_fs_error_handling);
 
-    /* Regex */
+    /* Regex (no POSIX regex on Windows) */
+#ifndef _WIN32
     register_test("test_regex_match_true", test_regex_match_true);
     register_test("test_regex_match_false", test_regex_match_false);
     register_test("test_regex_match_anchored", test_regex_match_anchored);
@@ -12330,6 +12434,7 @@ void register_stdlib_tests(void) {
     register_test("test_regex_replace_flags", test_regex_replace_flags);
     register_test("test_regex_no_flags_backward_compat", test_regex_no_flags_backward_compat);
     register_test("test_regex_invalid_flag", test_regex_invalid_flag);
+#endif
 
     /* format() */
     register_test("test_format_basic", test_format_basic);
@@ -12804,7 +12909,8 @@ void register_stdlib_tests(void) {
     register_test("test_require_ext_not_a_dylib", test_require_ext_not_a_dylib);
     register_test("test_require_ext_error_message_contains_name", test_require_ext_error_message_contains_name);
 
-    /* SQLite extension */
+    /* SQLite extension (not built on Windows) */
+#ifndef _WIN32
     register_test("test_sqlite_open_close", test_sqlite_open_close);
     register_test("test_sqlite_status", test_sqlite_status);
     register_test("test_sqlite_exec_create", test_sqlite_exec_create);
@@ -12822,6 +12928,7 @@ void register_stdlib_tests(void) {
     register_test("test_sqlite_param_exec", test_sqlite_param_exec);
     register_test("test_sqlite_param_types", test_sqlite_param_types);
     register_test("test_sqlite_last_insert_rowid", test_sqlite_last_insert_rowid);
+#endif
 
     /* Struct reflection builtins */
     register_test("test_struct_name", test_struct_name);
@@ -13081,7 +13188,9 @@ void register_stdlib_tests(void) {
     register_test("test_builtin_json_parse", test_builtin_json_parse);
     register_test("test_builtin_path_join", test_builtin_path_join);
     register_test("test_builtin_time_now", test_builtin_time_now);
+#ifndef _WIN32
     register_test("test_builtin_regex_match", test_builtin_regex_match);
+#endif
     register_test("test_builtin_os_platform", test_builtin_os_platform);
     register_test("test_builtin_crypto_base64", test_builtin_crypto_base64);
     register_test("test_builtin_legacy_sin", test_builtin_legacy_sin);

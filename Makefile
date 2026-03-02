@@ -10,7 +10,7 @@ TEST_DIR   = tests
 ifdef WINDOWS
     CC       = x86_64-w64-mingw32-gcc
     CFLAGS   = -std=c11 -Wall -Wextra -Werror -Wno-implicit-fallthrough -Iinclude -O3 -D_WIN32_WINNT=0x0600
-    LDFLAGS  = -lws2_32 -lpthread -lsecur32 -lcrypt32 -static
+    LDFLAGS  = -lws2_32 -lpthread -lsecur32 -lcrypt32 -lbcrypt -static
     TARGET   = clat.exe
     RELEASE_NAME = clat-windows-x86_64.exe
     # Skip editline and computed goto on Windows; use Schannel for TLS
