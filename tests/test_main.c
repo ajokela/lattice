@@ -97,8 +97,6 @@ int main(int argc, char *argv[]) {
         test_current_failed = 0;
         tests_run++;
         current_test_name = all_tests[i].name;
-        fprintf(stderr, "[%d/%d] %s\n", i + 1, test_count, all_tests[i].name);
-        fflush(stderr);
         all_tests[i].fn();
         if (test_current_failed) {
             tests_failed++;
