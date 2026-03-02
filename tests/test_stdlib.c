@@ -19,7 +19,6 @@
 #include "latc.h"
 #include "regvm.h"
 #ifdef _WIN32
-#include <windows.h>
 #include <io.h>
 #else
 #include <unistd.h>
@@ -57,9 +56,12 @@ extern int test_current_failed;
 /* ── Helper: platform temp directory ── */
 static const char *test_tmp(void) {
 #ifdef _WIN32
-    static char buf[MAX_PATH];
+    static char buf[260];
     if (!buf[0]) {
-        GetTempPathA(MAX_PATH, buf);
+        const char *t = getenv("TEMP");
+        if (!t) t = getenv("TMP");
+        if (!t) t = ".";
+        snprintf(buf, sizeof(buf), "%s", t);
         size_t len = strlen(buf);
         while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
     }
@@ -673,7 +675,7 @@ static void test_tokenize(void) {
 
 /* 30. test_write_and_read_file - write a temp file and read it back */
 static void test_write_and_read_file(void) {
-    char src[1024], p[256];
+    char src[1024], p[128];
     snprintf(p, sizeof(p), "%s/lattice_test_stdlib.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1349,6 +1351,7 @@ static void test_tcp_peer_addr(void) {
 }
 #endif /* !_WIN32 */
 
+#ifndef _WIN32
 /* 83. test_tcp_set_timeout - set timeout on a socket */
 static void test_tcp_set_timeout(void) {
     char *err = NULL;
@@ -1361,6 +1364,7 @@ static void test_tcp_set_timeout(void) {
 
     net_tcp_close(fd);
 }
+#endif /* !_WIN32 */
 
 /* 84. test_tcp_invalid_fd - operations on non-tracked fd produce errors */
 static void test_tcp_invalid_fd(void) {
@@ -1407,7 +1411,7 @@ static void test_tcp_error_handling(void) {
 
 /* 87. test_require_basic - require a file and call its function */
 static void test_require_basic(void) {
-    char src[1024], p[256], plat[256];
+    char src[1024], p[128], plat[128];
     snprintf(plat, sizeof(plat), "%s/lattice_test_lib.lat", test_tmp());
     snprintf(p, sizeof(p), "%s/lattice_test_lib", test_tmp());
     /* Write a library file */
@@ -1425,7 +1429,7 @@ static void test_require_basic(void) {
 
 /* 88. test_require_with_extension - require with .lat extension works */
 static void test_require_with_extension(void) {
-    char src[1024], plat[256];
+    char src[1024], plat[128];
     snprintf(plat, sizeof(plat), "%s/lattice_test_lib2.lat", test_tmp());
     builtin_write_file(plat, "fn helper2() -> Int { return 99 }\n");
 
@@ -1441,7 +1445,7 @@ static void test_require_with_extension(void) {
 
 /* 89. test_require_dedup - requiring same file twice is a no-op */
 static void test_require_dedup(void) {
-    char src[1024], p[256], plat[256];
+    char src[1024], p[128], plat[128];
     snprintf(plat, sizeof(plat), "%s/lattice_test_dedup.lat", test_tmp());
     snprintf(p, sizeof(p), "%s/lattice_test_dedup", test_tmp());
     builtin_write_file(plat, "fn dedup_fn() -> Int { return 7 }\n");
@@ -1460,7 +1464,7 @@ static void test_require_dedup(void) {
 
 /* 90. test_require_structs - require a file that defines structs */
 static void test_require_structs(void) {
-    char src[1024], p[256], plat[256];
+    char src[1024], p[128], plat[128];
     snprintf(plat, sizeof(plat), "%s/lattice_test_structs.lat", test_tmp());
     snprintf(p, sizeof(p), "%s/lattice_test_structs", test_tmp());
     builtin_write_file(plat, "struct Pair { a: Int, b: Int }\n"
@@ -1481,7 +1485,7 @@ static void test_require_structs(void) {
 
 /* 91. test_require_missing - require a nonexistent file produces error */
 static void test_require_missing(void) {
-    char src[1024], p[256];
+    char src[1024], p[128];
     snprintf(p, sizeof(p), "%s/lattice_no_such_file_xyz", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1844,7 +1848,7 @@ static void test_time_error_handling(void) {
 
 /* test_file_exists - file_exists returns true for existing file, false otherwise */
 static void test_file_exists(void) {
-    char src[1024], p[256], pno[256];
+    char src[1024], p[128], pno[128];
     snprintf(p, sizeof(p), "%s/lattice_test_exists.txt", test_tmp());
     snprintf(pno, sizeof(pno), "%s/lattice_test_no_such_file_xyz.txt", test_tmp());
     snprintf(src, sizeof(src),
@@ -1860,7 +1864,7 @@ static void test_file_exists(void) {
 
 /* test_delete_file - delete_file removes an existing file */
 static void test_delete_file(void) {
-    char src[1024], p[256];
+    char src[1024], p[128];
     snprintf(p, sizeof(p), "%s/lattice_test_del.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1875,7 +1879,7 @@ static void test_delete_file(void) {
 
 /* test_delete_file_error - deleting nonexistent file produces error */
 static void test_delete_file_error(void) {
-    char src[1024], p[256];
+    char src[1024], p[128];
     snprintf(p, sizeof(p), "%s/lattice_test_no_such_file_xyz.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1910,7 +1914,7 @@ static void test_list_dir(void) {
 
 /* test_list_dir_error - listing nonexistent directory produces error */
 static void test_list_dir_error(void) {
-    char src[1024], p[256];
+    char src[1024], p[128];
     snprintf(p, sizeof(p), "%s/lattice_no_such_dir_xyz", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1922,7 +1926,7 @@ static void test_list_dir_error(void) {
 
 /* test_append_file - append_file adds data to existing file */
 static void test_append_file(void) {
-    char src[1024], p[256];
+    char src[1024], p[128];
     snprintf(p, sizeof(p), "%s/lattice_test_append.txt", test_tmp());
     snprintf(src, sizeof(src),
              "fn main() {\n"
@@ -1938,7 +1942,7 @@ static void test_append_file(void) {
 
 /* test_append_file_creates - append_file creates file if it doesn't exist */
 static void test_append_file_creates(void) {
-    char src[1024], p[256];
+    char src[1024], p[128];
     snprintf(p, sizeof(p), "%s/lattice_test_append_new.txt", test_tmp());
     (void)remove(p);
     snprintf(src, sizeof(src),
@@ -1976,6 +1980,7 @@ static void test_fs_error_handling(void) {
  * Regex Builtins
  * ====================================================================== */
 
+#ifndef _WIN32
 /* regex_match: pattern matches */
 static void test_regex_match_true(void) {
     ASSERT_OUTPUT("fn main() {\n"
@@ -2117,6 +2122,7 @@ static void test_regex_invalid_flag(void) {
                               "}\n",
                               "EVAL_ERROR:");
 }
+#endif /* !_WIN32 */
 
 /* ======================================================================
  * format() Builtin

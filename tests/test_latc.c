@@ -11,8 +11,8 @@
 #include "runtime.h"
 #include "value.h"
 #ifdef _WIN32
-#include <windows.h>
 #include <io.h>
+#include <process.h>
 #define unlink _unlink
 #define getpid _getpid
 #else
@@ -61,9 +61,12 @@ extern int test_current_failed;
 /* ── Helper: platform temp directory ── */
 static const char *test_tmp(void) {
 #ifdef _WIN32
-    static char buf[MAX_PATH];
+    static char buf[260];
     if (!buf[0]) {
-        GetTempPathA(MAX_PATH, buf);
+        const char *t = getenv("TEMP");
+        if (!t) t = getenv("TMP");
+        if (!t) t = ".";
+        snprintf(buf, sizeof(buf), "%s", t);
         size_t len = strlen(buf);
         while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
     }
