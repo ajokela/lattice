@@ -34,7 +34,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     /* Format */
     char *err = NULL;
-    char *formatted = lat_format(src, &err);
+    char *formatted = lat_format(src, 0, &err);
     free(formatted); /* NULL-safe */
     free(err);       /* NULL-safe */
 

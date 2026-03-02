@@ -17,8 +17,8 @@
 #include <ctype.h>
 #include <stdio.h>
 
-#define INDENT_WIDTH   4
-#define MAX_LINE_WIDTH 100
+#define INDENT_WIDTH       4
+#define DEFAULT_LINE_WIDTH 100
 
 /* ── Scanner state ── */
 typedef struct {
@@ -31,6 +31,7 @@ typedef struct {
     bool at_line_start;
     bool need_space; /* emit a space before next token */
     int line_len;    /* chars on current output line */
+    int max_width;   /* target line width */
     bool last_was_newline;
     int blank_lines;    /* consecutive blank lines emitted */
     bool in_struct_lit; /* track if we're inside a struct literal */
@@ -348,7 +349,7 @@ static int skip_ws_counting_newlines(Fmt *f) {
     return newlines;
 }
 
-char *lat_format(const char *source, char **err) {
+char *lat_format(const char *source, int max_width, char **err) {
     if (!source) {
         if (err) *err = strdup("null source");
         return NULL;
@@ -372,6 +373,7 @@ char *lat_format(const char *source, char **err) {
     f.brace_depth = 0;
     f.in_struct_lit = false;
     f.need_space = false;
+    f.max_width = (max_width > 0) ? max_width : DEFAULT_LINE_WIDTH;
 
     while (f.pos < f.len) {
         /* Skip source whitespace and count newlines for blank line detection */
@@ -1140,8 +1142,8 @@ char *lat_format(const char *source, char **err) {
     return result;
 }
 
-bool lat_format_check(const char *source, char **err) {
-    char *formatted = lat_format(source, err);
+bool lat_format_check(const char *source, int max_width, char **err) {
+    char *formatted = lat_format(source, max_width, err);
     if (!formatted) return false;
 
     bool same = (strcmp(source, formatted) == 0);
@@ -1149,7 +1151,7 @@ bool lat_format_check(const char *source, char **err) {
     return same;
 }
 
-char *lat_format_stdin(char **err) {
+char *lat_format_stdin(int max_width, char **err) {
     /* Read all of stdin into a buffer */
     size_t cap = 4096;
     size_t len = 0;
@@ -1175,7 +1177,7 @@ char *lat_format_stdin(char **err) {
     }
     buf[len] = '\0';
 
-    char *result = lat_format(buf, err);
+    char *result = lat_format(buf, max_width, err);
     free(buf);
     return result;
 }

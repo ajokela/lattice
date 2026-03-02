@@ -3210,7 +3210,7 @@ TEST(fmt_preserves_semantics) {
                          "}\n";
 
     char *fmt_err = NULL;
-    char *formatted = lat_format(source, &fmt_err);
+    char *formatted = lat_format(source, 0, &fmt_err);
     ASSERT(formatted != NULL);
     ASSERT(fmt_err == NULL);
 
@@ -3235,10 +3235,10 @@ TEST(fmt_idempotent) {
                          "}\n";
 
     char *fmt_err = NULL;
-    char *first = lat_format(source, &fmt_err);
+    char *first = lat_format(source, 0, &fmt_err);
     ASSERT(first != NULL);
 
-    char *second = lat_format(first, &fmt_err);
+    char *second = lat_format(first, 0, &fmt_err);
     ASSERT(second != NULL);
 
     ASSERT_EQ_STR(first, second);
@@ -3252,7 +3252,7 @@ TEST(fmt_operator_spacing) {
     const char *source = "fn main() {\n    let x=1+2\n}\n";
 
     char *fmt_err = NULL;
-    char *formatted = lat_format(source, &fmt_err);
+    char *formatted = lat_format(source, 0, &fmt_err);
     ASSERT(formatted != NULL);
 
     /* Should contain "x = 1 + 2" with spaces */
@@ -3270,7 +3270,7 @@ TEST(fmt_preserves_comments) {
                          "}\n";
 
     char *fmt_err = NULL;
-    char *formatted = lat_format(source, &fmt_err);
+    char *formatted = lat_format(source, 0, &fmt_err);
     ASSERT(formatted != NULL);
 
     ASSERT(strstr(formatted, "// Top-level comment") != NULL);
@@ -3284,7 +3284,7 @@ TEST(fmt_four_space_indent) {
     const char *source = "fn main() {\n  let x = 1\n}\n";
 
     char *fmt_err = NULL;
-    char *formatted = lat_format(source, &fmt_err);
+    char *formatted = lat_format(source, 0, &fmt_err);
     ASSERT(formatted != NULL);
 
     /* Should be indented with 4 spaces, not 2 */
@@ -3298,7 +3298,7 @@ TEST(fmt_trailing_newline) {
     const char *source = "fn main() {\n    let x = 1\n}";
 
     char *fmt_err = NULL;
-    char *formatted = lat_format(source, &fmt_err);
+    char *formatted = lat_format(source, 0, &fmt_err);
     ASSERT(formatted != NULL);
 
     /* Should end with exactly one newline */
@@ -3316,7 +3316,7 @@ TEST(fmt_check_detects_unformatted) {
     const char *unformatted = "fn main(){\nlet x=1+2\n}\n";
 
     char *fmt_err = NULL;
-    bool ok = lat_format_check(unformatted, &fmt_err);
+    bool ok = lat_format_check(unformatted, 0, &fmt_err);
     ASSERT(!ok);
 }
 
@@ -3327,11 +3327,11 @@ TEST(fmt_check_passes_formatted) {
                          "}\n";
 
     char *fmt_err = NULL;
-    char *formatted = lat_format(source, &fmt_err);
+    char *formatted = lat_format(source, 0, &fmt_err);
     ASSERT(formatted != NULL);
 
     /* The formatted version should pass check */
-    bool ok = lat_format_check(formatted, &fmt_err);
+    bool ok = lat_format_check(formatted, 0, &fmt_err);
     ASSERT(ok);
 
     free(formatted);

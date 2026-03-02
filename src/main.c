@@ -153,13 +153,15 @@ static void print_fmt_help(void) {
     printf("Usage: clat fmt [options] <file.lat>\n");
     printf("\nFormat Lattice source code.\n");
     printf("\nOptions:\n");
+    printf("  -w, --width <N>   Set max line width (default: 100)\n");
     printf("  --check           Check formatting without modifying\n");
     printf("  --stdin           Read from stdin, write to stdout\n");
     printf("  -h, --help        Show this help\n");
     printf("\nExamples:\n");
-    printf("  clat fmt main.lat           Format file in place\n");
-    printf("  clat fmt --check main.lat   Check if file is formatted\n");
-    printf("  clat fmt --stdin            Format stdin to stdout\n");
+    printf("  clat fmt main.lat              Format file in place\n");
+    printf("  clat fmt --width 80 main.lat   Format with 80-column width\n");
+    printf("  clat fmt --check main.lat      Check if file is formatted\n");
+    printf("  clat fmt --stdin               Format stdin to stdout\n");
 }
 
 static void print_package_help(void) {
@@ -1361,6 +1363,7 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "fmt") == 0) {
         bool check_only = false;
         bool from_stdin = false;
+        int fmt_width = 0; /* 0 = use default */
         const char *fmt_path = NULL;
 
         for (int i = 2; i < argc; i++) {
@@ -1369,16 +1372,26 @@ int main(int argc, char **argv) {
                 return 0;
             } else if (strcmp(argv[i], "--check") == 0) check_only = true;
             else if (strcmp(argv[i], "--stdin") == 0) from_stdin = true;
-            else if (!fmt_path) fmt_path = argv[i];
+            else if (strcmp(argv[i], "--width") == 0 || strcmp(argv[i], "-w") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "error: %s requires a number\n", argv[i]);
+                    return 1;
+                }
+                fmt_width = atoi(argv[++i]);
+                if (fmt_width < 1) {
+                    fprintf(stderr, "error: --width must be a positive integer\n");
+                    return 1;
+                }
+            } else if (!fmt_path) fmt_path = argv[i];
             else {
-                fprintf(stderr, "usage: clat fmt [--check] [--stdin] [file.lat]\n");
+                fprintf(stderr, "usage: clat fmt [--check] [--stdin] [--width N] [file.lat]\n");
                 return 1;
             }
         }
 
         if (from_stdin) {
             char *fmt_err = NULL;
-            char *formatted = lat_format_stdin(&fmt_err);
+            char *formatted = lat_format_stdin(fmt_width, &fmt_err);
             if (!formatted) {
                 fprintf(stderr, "error: %s\n", fmt_err ? fmt_err : "format failed");
                 free(fmt_err);
@@ -1390,7 +1403,7 @@ int main(int argc, char **argv) {
         }
 
         if (!fmt_path) {
-            fprintf(stderr, "usage: clat fmt [--check] [--stdin] <file.lat>\n");
+            fprintf(stderr, "usage: clat fmt [--check] [--stdin] [--width N] <file.lat>\n");
             return 1;
         }
 
@@ -1402,7 +1415,7 @@ int main(int argc, char **argv) {
 
         if (check_only) {
             char *fmt_err = NULL;
-            bool ok = lat_format_check(source, &fmt_err);
+            bool ok = lat_format_check(source, fmt_width, &fmt_err);
             free(source);
             if (fmt_err) {
                 fprintf(stderr, "error: %s\n", fmt_err);
@@ -1417,7 +1430,7 @@ int main(int argc, char **argv) {
         }
 
         char *fmt_err = NULL;
-        char *formatted = lat_format(source, &fmt_err);
+        char *formatted = lat_format(source, fmt_width, &fmt_err);
         free(source);
         if (!formatted) {
             fprintf(stderr, "error: %s\n", fmt_err ? fmt_err : "format failed");

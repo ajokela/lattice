@@ -2556,7 +2556,7 @@ static void handle_formatting(LspServer *srv, cJSON *params, int id) {
 
     /* Run the formatter on the document text */
     char *fmt_err = NULL;
-    char *formatted = lat_format(doc->text, &fmt_err);
+    char *formatted = lat_format(doc->text, 0, &fmt_err);
     if (!formatted) {
         /* Formatting failed — return null result (no edits) */
         free(fmt_err);

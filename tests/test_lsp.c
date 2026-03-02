@@ -1021,7 +1021,7 @@ TEST(lsp_format_request) {
 
     /* Run the formatter directly on the text to verify it works */
     char *err = NULL;
-    char *formatted = lat_format(unformatted, &err);
+    char *formatted = lat_format(unformatted, 0, &err);
     ASSERT(formatted != NULL);
     ASSERT(err == NULL);
 
@@ -1044,13 +1044,13 @@ TEST(lsp_format_preserves_semantics) {
                          "let x=add(1,2)\nprint(x)\n";
 
     char *err = NULL;
-    char *formatted = lat_format(source, &err);
+    char *formatted = lat_format(source, 0, &err);
     ASSERT(formatted != NULL);
     ASSERT(err == NULL);
 
     /* Format the already-formatted output */
     char *err2 = NULL;
-    char *reformatted = lat_format(formatted, &err2);
+    char *reformatted = lat_format(formatted, 0, &err2);
     ASSERT(reformatted != NULL);
     ASSERT(err2 == NULL);
 
@@ -1089,7 +1089,7 @@ TEST(lsp_format_capability) {
 
     /* Verify that formatting already-formatted text returns empty edits */
     char *err = NULL;
-    char *formatted = lat_format(text, &err);
+    char *formatted = lat_format(text, 0, &err);
     ASSERT(formatted != NULL);
     /* If already formatted, text should match */
     if (strcmp(text, formatted) == 0) { /* Good — the formatter recognizes it's already formatted */
