@@ -7,7 +7,9 @@
 #endif
 #ifdef _WIN32
 #include <windows.h>
-#include <bcrypt.h>
+/* RtlGenRandom (SystemFunction036) from advapi32 — no extra link dependency */
+#define RtlGenRandom SystemFunction036
+BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer, ULONG RandomBufferLength);
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -556,10 +558,9 @@ uint8_t *crypto_random_bytes(size_t n, char **err) {
         *err = strdup("random_bytes: allocation failed");
         return NULL;
     }
-    NTSTATUS status = BCryptGenRandom(NULL, buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    if (status != 0) {
+    if (!RtlGenRandom(buf, (ULONG)n)) {
         free(buf);
-        *err = strdup("random_bytes: BCryptGenRandom failed");
+        *err = strdup("random_bytes: RtlGenRandom failed");
         return NULL;
     }
     return buf;
