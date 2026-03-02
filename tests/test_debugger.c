@@ -897,3 +897,540 @@ TEST(test_dap_read_bad_content_length) {
     fclose(f);
     remove(tmppath);
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+ * SECTION 3: Expression eval with program state (Group A)
+ * ══════════════════════════════════════════════════════════════════════ */
+
+TEST(test_dbg_eval_global_variable) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 42");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "x", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT_STR_EQ(repr, "42");
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_eval_global_expression) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 10\nlet y = 20");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "x + y", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT_STR_EQ(repr, "30");
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_eval_undefined_variable) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(!debugger_eval_expr(dbg, &t.vm, "nonexistent_var", &repr, &error));
+    ASSERT(error != NULL);
+    free(error);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_eval_function_call) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "fn double(n: Int) { return n * 2 }");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "double(21)", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT_STR_EQ(repr, "42");
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * SECTION 4: Conditional breakpoint truthiness (Group B)
+ * Mirrors the logic from check_bp_condition(): "false", "nil", "0",
+ * and "\"\"" are falsy; everything else is truthy.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static bool is_truthy(const char *repr) {
+    if (strcmp(repr, "false") == 0) return false;
+    if (strcmp(repr, "nil") == 0) return false;
+    if (strcmp(repr, "0") == 0) return false;
+    if (strcmp(repr, "\"\"") == 0) return false;
+    return true;
+}
+
+TEST(test_dbg_condition_truthy_true) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "true", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT(is_truthy(repr));
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_condition_truthy_false) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "false", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT(!is_truthy(repr));
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_condition_truthy_nil) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "nil", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT(!is_truthy(repr));
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_condition_truthy_zero) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "0", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT(!is_truthy(repr));
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_condition_truthy_nonzero) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "42", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT(is_truthy(repr));
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dbg_condition_truthy_comparison) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    Debugger *dbg = debugger_new();
+    char *repr = NULL, *error = NULL;
+
+    /* 10 > 5 evaluates to "true" → truthy */
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "10 > 5", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT(is_truthy(repr));
+    free(repr);
+
+    /* 5 > 10 evaluates to "false" → not truthy */
+    repr = NULL;
+    error = NULL;
+    ASSERT(debugger_eval_expr(dbg, &t.vm, "5 > 10", &repr, &error));
+    ASSERT(repr != NULL);
+    ASSERT(!is_truthy(repr));
+    free(repr);
+
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * SECTION 5: DAP evaluate and conditional breakpoint protocol (Group C)
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* Helper: build a DAP request JSON object */
+static cJSON *make_dap_request(int seq, const char *command, cJSON *arguments) {
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddNumberToObject(msg, "seq", seq);
+    cJSON_AddStringToObject(msg, "type", "request");
+    cJSON_AddStringToObject(msg, "command", command);
+    if (arguments) cJSON_AddItemToObject(msg, "arguments", arguments);
+    return msg;
+}
+
+TEST(test_dap_evaluate_expression) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    /* Set up a VM with a global variable */
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 42");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    /* Write DAP requests to temp file: evaluate + continue */
+    char tmppath_in[256], tmppath_out[256];
+    snprintf(tmppath_in, sizeof(tmppath_in), "%s/dap_eval_in.bin", test_tmp());
+    snprintf(tmppath_out, sizeof(tmppath_out), "%s/dap_eval_out.bin", test_tmp());
+
+    FILE *in = fopen(tmppath_in, "w+");
+    ASSERT(in != NULL);
+
+    cJSON *eval_args = cJSON_CreateObject();
+    cJSON_AddStringToObject(eval_args, "expression", "x + 8");
+    cJSON *eval_req = make_dap_request(1, "evaluate", eval_args);
+    dap_write_message(eval_req, in);
+    cJSON_Delete(eval_req);
+
+    cJSON *cont_req = make_dap_request(2, "continue", NULL);
+    dap_write_message(cont_req, in);
+    cJSON_Delete(cont_req);
+
+    rewind(in);
+
+    FILE *out = fopen(tmppath_out, "w+");
+    ASSERT(out != NULL);
+
+    Debugger *dbg = debugger_new_dap(in, out);
+    t.vm.debugger = dbg;
+
+    /* Call dap_debugger_check which enters the stopped message loop */
+    StackCallFrame *frame = &t.vm.frames[0];
+    bool cont = dap_debugger_check(dbg, &t.vm, frame, t.vm.frame_count, 1, "step");
+    ASSERT(cont); /* continue request should return true */
+
+    /* Read responses from output file */
+    rewind(out);
+
+    /* First message: stopped event */
+    cJSON *stopped = dap_read_message(out);
+    ASSERT(stopped != NULL);
+    cJSON *stopped_type = cJSON_GetObjectItem(stopped, "type");
+    ASSERT_STR_EQ(stopped_type->valuestring, "event");
+    cJSON_Delete(stopped);
+
+    /* Second message: evaluate response */
+    cJSON *eval_resp = dap_read_message(out);
+    ASSERT(eval_resp != NULL);
+    cJSON *eval_type = cJSON_GetObjectItem(eval_resp, "type");
+    ASSERT_STR_EQ(eval_type->valuestring, "response");
+    cJSON *eval_success = cJSON_GetObjectItem(eval_resp, "success");
+    ASSERT(cJSON_IsTrue(eval_success));
+    cJSON *eval_cmd = cJSON_GetObjectItem(eval_resp, "command");
+    ASSERT_STR_EQ(eval_cmd->valuestring, "evaluate");
+    cJSON *eval_body = cJSON_GetObjectItem(eval_resp, "body");
+    ASSERT(eval_body != NULL);
+    cJSON *eval_result = cJSON_GetObjectItem(eval_body, "result");
+    ASSERT(eval_result != NULL);
+    ASSERT_STR_EQ(eval_result->valuestring, "50");
+    cJSON_Delete(eval_resp);
+
+    /* Third message: continue response */
+    cJSON *cont_resp = dap_read_message(out);
+    ASSERT(cont_resp != NULL);
+    cJSON *cont_cmd = cJSON_GetObjectItem(cont_resp, "command");
+    ASSERT_STR_EQ(cont_cmd->valuestring, "continue");
+    cJSON_Delete(cont_resp);
+
+    fclose(in);
+    fclose(out);
+    remove(tmppath_in);
+    remove(tmppath_out);
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dap_evaluate_error_response) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    /* Write DAP requests: evaluate with bad syntax + continue */
+    char tmppath_in[256], tmppath_out[256];
+    snprintf(tmppath_in, sizeof(tmppath_in), "%s/dap_eval_err_in.bin", test_tmp());
+    snprintf(tmppath_out, sizeof(tmppath_out), "%s/dap_eval_err_out.bin", test_tmp());
+
+    FILE *in = fopen(tmppath_in, "w+");
+    ASSERT(in != NULL);
+
+    cJSON *eval_args = cJSON_CreateObject();
+    cJSON_AddStringToObject(eval_args, "expression", "1 +");
+    cJSON *eval_req = make_dap_request(1, "evaluate", eval_args);
+    dap_write_message(eval_req, in);
+    cJSON_Delete(eval_req);
+
+    cJSON *cont_req = make_dap_request(2, "continue", NULL);
+    dap_write_message(cont_req, in);
+    cJSON_Delete(cont_req);
+
+    rewind(in);
+
+    FILE *out = fopen(tmppath_out, "w+");
+    ASSERT(out != NULL);
+
+    Debugger *dbg = debugger_new_dap(in, out);
+    t.vm.debugger = dbg;
+
+    StackCallFrame *frame = &t.vm.frames[0];
+    bool cont = dap_debugger_check(dbg, &t.vm, frame, t.vm.frame_count, 1, "step");
+    ASSERT(cont);
+
+    rewind(out);
+
+    /* First: stopped event */
+    cJSON *stopped = dap_read_message(out);
+    ASSERT(stopped != NULL);
+    cJSON_Delete(stopped);
+
+    /* Second: evaluate error response */
+    cJSON *eval_resp = dap_read_message(out);
+    ASSERT(eval_resp != NULL);
+    cJSON *eval_success = cJSON_GetObjectItem(eval_resp, "success");
+    ASSERT(cJSON_IsFalse(eval_success));
+    cJSON *eval_msg = cJSON_GetObjectItem(eval_resp, "message");
+    ASSERT(eval_msg != NULL);
+    ASSERT(eval_msg->valuestring != NULL);
+    ASSERT(strlen(eval_msg->valuestring) > 0); /* Has an error message */
+    cJSON_Delete(eval_resp);
+
+    /* Third: continue response */
+    cJSON *cont_resp = dap_read_message(out);
+    ASSERT(cont_resp != NULL);
+    cJSON_Delete(cont_resp);
+
+    fclose(in);
+    fclose(out);
+    remove(tmppath_in);
+    remove(tmppath_out);
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
+
+TEST(test_dap_setBreakpoints_with_conditions) {
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    DebugTestVM t;
+    dbg_vm_init(&t, "let x = 1");
+    ASSERT(t.ok);
+
+    LatValue result;
+    stackvm_run(&t.vm, t.chunk, &result);
+    value_free(&result);
+
+    /* Write DAP requests: setBreakpoints with conditions + continue */
+    char tmppath_in[256], tmppath_out[256];
+    snprintf(tmppath_in, sizeof(tmppath_in), "%s/dap_setbp_in.bin", test_tmp());
+    snprintf(tmppath_out, sizeof(tmppath_out), "%s/dap_setbp_out.bin", test_tmp());
+
+    FILE *in = fopen(tmppath_in, "w+");
+    ASSERT(in != NULL);
+
+    /* Build setBreakpoints request with two breakpoints, one conditional */
+    cJSON *bp_args = cJSON_CreateObject();
+    cJSON *source = cJSON_CreateObject();
+    cJSON_AddStringToObject(source, "path", "test.lat");
+    cJSON_AddItemToObject(bp_args, "source", source);
+    cJSON *bps = cJSON_CreateArray();
+    cJSON *bp1 = cJSON_CreateObject();
+    cJSON_AddNumberToObject(bp1, "line", 5);
+    cJSON_AddItemToArray(bps, bp1);
+    cJSON *bp2 = cJSON_CreateObject();
+    cJSON_AddNumberToObject(bp2, "line", 10);
+    cJSON_AddStringToObject(bp2, "condition", "x > 0");
+    cJSON_AddItemToArray(bps, bp2);
+    cJSON_AddItemToObject(bp_args, "breakpoints", bps);
+
+    cJSON *bp_req = make_dap_request(1, "setBreakpoints", bp_args);
+    dap_write_message(bp_req, in);
+    cJSON_Delete(bp_req);
+
+    cJSON *cont_req = make_dap_request(2, "continue", NULL);
+    dap_write_message(cont_req, in);
+    cJSON_Delete(cont_req);
+
+    rewind(in);
+
+    FILE *out = fopen(tmppath_out, "w+");
+    ASSERT(out != NULL);
+
+    Debugger *dbg = debugger_new_dap(in, out);
+    t.vm.debugger = dbg;
+
+    StackCallFrame *frame = &t.vm.frames[0];
+    bool cont = dap_debugger_check(dbg, &t.vm, frame, t.vm.frame_count, 1, "step");
+    ASSERT(cont);
+
+    /* Verify breakpoints were set in debugger state */
+    ASSERT_EQ_INT(dbg->bp_count, 2);
+
+    /* Find breakpoints (order may vary due to DAP clearing first) */
+    bool found_line5 = false, found_line10 = false;
+    for (size_t i = 0; i < dbg->bp_count; i++) {
+        if (dbg->breakpoints[i].line == 5) {
+            found_line5 = true;
+            ASSERT(dbg->breakpoints[i].condition == NULL);
+            ASSERT(dbg->breakpoints[i].type == BP_LINE);
+        }
+        if (dbg->breakpoints[i].line == 10) {
+            found_line10 = true;
+            ASSERT(dbg->breakpoints[i].condition != NULL);
+            ASSERT_STR_EQ(dbg->breakpoints[i].condition, "x > 0");
+            ASSERT(dbg->breakpoints[i].type == BP_LINE);
+        }
+    }
+    ASSERT(found_line5);
+    ASSERT(found_line10);
+
+    /* Also verify the response message */
+    rewind(out);
+
+    /* First: stopped event */
+    cJSON *stopped = dap_read_message(out);
+    ASSERT(stopped != NULL);
+    cJSON_Delete(stopped);
+
+    /* Second: setBreakpoints response */
+    cJSON *bp_resp = dap_read_message(out);
+    ASSERT(bp_resp != NULL);
+    cJSON *bp_success = cJSON_GetObjectItem(bp_resp, "success");
+    ASSERT(cJSON_IsTrue(bp_success));
+    cJSON *bp_cmd = cJSON_GetObjectItem(bp_resp, "command");
+    ASSERT_STR_EQ(bp_cmd->valuestring, "setBreakpoints");
+    cJSON *bp_body = cJSON_GetObjectItem(bp_resp, "body");
+    ASSERT(bp_body != NULL);
+    cJSON *bp_list = cJSON_GetObjectItem(bp_body, "breakpoints");
+    ASSERT(bp_list != NULL);
+    ASSERT_EQ_INT(cJSON_GetArraySize(bp_list), 2);
+
+    /* Verify each breakpoint in response has an id and verified flag */
+    cJSON *bp_item;
+    cJSON_ArrayForEach(bp_item, bp_list) {
+        cJSON *id = cJSON_GetObjectItem(bp_item, "id");
+        ASSERT(id != NULL);
+        ASSERT(id->valueint > 0);
+        cJSON *verified = cJSON_GetObjectItem(bp_item, "verified");
+        ASSERT(cJSON_IsTrue(verified));
+    }
+    cJSON_Delete(bp_resp);
+
+    /* Third: continue response */
+    cJSON *cont_resp = dap_read_message(out);
+    ASSERT(cont_resp != NULL);
+    cJSON_Delete(cont_resp);
+
+    fclose(in);
+    fclose(out);
+    remove(tmppath_in);
+    remove(tmppath_out);
+    debugger_free(dbg);
+    dbg_vm_free(&t);
+}
