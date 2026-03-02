@@ -53,23 +53,7 @@ extern int test_current_failed;
         }                                                                                                      \
     } while (0)
 
-/* ── Helper: platform temp directory ── */
-static const char *test_tmp(void) {
-#ifdef _WIN32
-    static char buf[260];
-    if (!buf[0]) {
-        const char *t = getenv("TEMP");
-        if (!t) t = getenv("TMP");
-        if (!t) t = ".";
-        snprintf(buf, sizeof(buf), "%s", t);
-        size_t len = strlen(buf);
-        while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
-    }
-    return buf;
-#else
-    return "/tmp";
-#endif
-}
+/* test_tmp() and test_tmpfile() are provided by test_backend.h */
 
 /* ── Helper: run Lattice source and capture stdout ── */
 
@@ -8396,7 +8380,8 @@ static char *latc_round_trip_capture(const char *source) {
 
     /* Run the deserialized chunk, capturing stdout */
     fflush(stdout);
-    FILE *tmp = tmpfile();
+    char _tmppath[256];
+    FILE *tmp = test_tmpfile(_tmppath, sizeof(_tmppath));
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
@@ -8418,6 +8403,7 @@ static char *latc_round_trip_capture(const char *source) {
     size_t n = fread(output, 1, (size_t)len, tmp);
     output[n] = '\0';
     fclose(tmp);
+    remove(_tmppath);
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
 
     if (vm_res != STACKVM_OK) {
@@ -8524,7 +8510,8 @@ static void test_latc_file_save_load(void) {
 
     /* Run it */
     fflush(stdout);
-    FILE *tmp = tmpfile();
+    char _tmppath[256];
+    FILE *tmp = test_tmpfile(_tmppath, sizeof(_tmppath));
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
@@ -8546,6 +8533,7 @@ static void test_latc_file_save_load(void) {
     size_t n = fread(output, 1, (size_t)len, tmp);
     output[n] = '\0';
     fclose(tmp);
+    remove(_tmppath);
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
 
     ASSERT(vm_res == STACKVM_OK);
@@ -8620,7 +8608,8 @@ static char *rlatc_round_trip_capture(const char *source) {
 
     /* Run the deserialized chunk, capturing stdout */
     fflush(stdout);
-    FILE *tmp = tmpfile();
+    char _tmppath[256];
+    FILE *tmp = test_tmpfile(_tmppath, sizeof(_tmppath));
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
@@ -8642,6 +8631,7 @@ static char *rlatc_round_trip_capture(const char *source) {
     size_t n = fread(output, 1, (size_t)len, tmp);
     output[n] = '\0';
     fclose(tmp);
+    remove(_tmppath);
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
 
     if (rvm_res != REGVM_OK) {
@@ -8748,7 +8738,8 @@ static void test_rlatc_file_save_load(void) {
 
     /* Run it */
     fflush(stdout);
-    FILE *tmp = tmpfile();
+    char _tmppath[256];
+    FILE *tmp = test_tmpfile(_tmppath, sizeof(_tmppath));
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
@@ -8770,6 +8761,7 @@ static void test_rlatc_file_save_load(void) {
     size_t n = fread(output, 1, (size_t)len, tmp);
     output[n] = '\0';
     fclose(tmp);
+    remove(_tmppath);
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
 
     ASSERT(rvm_res == REGVM_OK);
@@ -8869,7 +8861,8 @@ static void test_rlatc_scope_file_save_load(void) {
 
     /* Run it */
     fflush(stdout);
-    FILE *tmp = tmpfile();
+    char _tmppath[256];
+    FILE *tmp = test_tmpfile(_tmppath, sizeof(_tmppath));
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
@@ -8891,6 +8884,7 @@ static void test_rlatc_scope_file_save_load(void) {
     size_t n = fread(output, 1, (size_t)len, tmp);
     output[n] = '\0';
     fclose(tmp);
+    remove(_tmppath);
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
 
     ASSERT(rvm_res == REGVM_OK);

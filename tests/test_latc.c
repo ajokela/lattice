@@ -10,6 +10,7 @@
 #include "latc.h"
 #include "runtime.h"
 #include "value.h"
+#include "test_backend.h"
 #include <unistd.h>
 
 /* Import test macros from test_main.c */
@@ -51,23 +52,7 @@ extern int test_current_failed;
     static void name##_register(void) { register_test(#name, name); } \
     static void name(void)
 
-/* ── Helper: platform temp directory ── */
-static const char *test_tmp(void) {
-#ifdef _WIN32
-    static char buf[260];
-    if (!buf[0]) {
-        const char *t = getenv("TEMP");
-        if (!t) t = getenv("TMP");
-        if (!t) t = ".";
-        snprintf(buf, sizeof(buf), "%s", t);
-        size_t len = strlen(buf);
-        while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
-    }
-    return buf;
-#else
-    return "/tmp";
-#endif
-}
+/* test_tmp() is provided by test_backend.h */
 
 /* ── Helper: generate a unique temp file path, write nothing ── */
 static char *make_temp_path(const char *suffix) {

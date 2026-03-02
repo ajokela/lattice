@@ -4,6 +4,7 @@
 #include "lsp.h"
 #include "formatter.h"
 #include "../vendor/cJSON.h"
+#include "test_backend.h"
 
 /* Import test harness from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
@@ -218,7 +219,8 @@ TEST(lsp_read_message_valid) {
     const char *body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}";
     size_t body_len = strlen(body);
 
-    FILE *f = tmpfile();
+    char _tmppath[256];
+    FILE *f = test_tmpfile(_tmppath, sizeof(_tmppath));
     ASSERT(f != NULL);
     fprintf(f, "Content-Length: %zu\r\n\r\n%s", body_len, body);
     rewind(f);
@@ -240,10 +242,12 @@ TEST(lsp_read_message_valid) {
 
     cJSON_Delete(msg);
     fclose(f);
+    remove(_tmppath);
 }
 
 TEST(lsp_read_message_no_content_length) {
-    FILE *f = tmpfile();
+    char _tmppath[256];
+    FILE *f = test_tmpfile(_tmppath, sizeof(_tmppath));
     ASSERT(f != NULL);
     fprintf(f, "Some-Header: value\r\n\r\n{\"test\":true}");
     rewind(f);
@@ -251,10 +255,12 @@ TEST(lsp_read_message_no_content_length) {
     cJSON *msg = lsp_read_message(f);
     ASSERT(msg == NULL);
     fclose(f);
+    remove(_tmppath);
 }
 
 TEST(lsp_read_message_empty_input) {
-    FILE *f = tmpfile();
+    char _tmppath[256];
+    FILE *f = test_tmpfile(_tmppath, sizeof(_tmppath));
     ASSERT(f != NULL);
     /* Write nothing, just close so fgets returns NULL */
     rewind(f);
@@ -262,13 +268,15 @@ TEST(lsp_read_message_empty_input) {
     cJSON *msg = lsp_read_message(f);
     ASSERT(msg == NULL);
     fclose(f);
+    remove(_tmppath);
 }
 
 TEST(lsp_read_message_multiple_headers) {
     const char *body = "{\"id\":2}";
     size_t body_len = strlen(body);
 
-    FILE *f = tmpfile();
+    char _tmppath[256];
+    FILE *f = test_tmpfile(_tmppath, sizeof(_tmppath));
     ASSERT(f != NULL);
     fprintf(f, "Content-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s", body_len, body);
     rewind(f);
@@ -282,6 +290,7 @@ TEST(lsp_read_message_multiple_headers) {
 
     cJSON_Delete(msg);
     fclose(f);
+    remove(_tmppath);
 }
 
 /* ================================================================
@@ -293,7 +302,8 @@ TEST(lsp_write_response_format) {
     cJSON_AddStringToObject(json, "jsonrpc", "2.0");
     cJSON_AddNumberToObject(json, "id", 1);
 
-    FILE *f = tmpfile();
+    char _tmppath[256];
+    FILE *f = test_tmpfile(_tmppath, sizeof(_tmppath));
     ASSERT(f != NULL);
     lsp_write_response(json, f);
     cJSON_Delete(json);
@@ -304,6 +314,7 @@ TEST(lsp_write_response_format) {
     size_t nread = fread(buf, 1, sizeof(buf) - 1, f);
     buf[nread] = '\0';
     fclose(f);
+    remove(_tmppath);
 
     /* Should start with Content-Length header */
     ASSERT(strstr(buf, "Content-Length:") != NULL);
@@ -1099,19 +1110,22 @@ TEST(test_lsp_code_action_capability) {
                             "\"params\":{\"capabilities\":{}}}";
     size_t body_len = strlen(init_body);
 
-    FILE *in_f = tmpfile();
+    char _tmppath_in[256];
+    FILE *in_f = test_tmpfile(_tmppath_in, sizeof(_tmppath_in));
     ASSERT(in_f != NULL);
     fprintf(in_f, "Content-Length: %zu\r\n\r\n%s", body_len, init_body);
     rewind(in_f);
 
     /* Capture output */
-    FILE *out_f = tmpfile();
+    char _tmppath_out[256];
+    FILE *out_f = test_tmpfile(_tmppath_out, sizeof(_tmppath_out));
     ASSERT(out_f != NULL);
 
     /* Read the message */
     cJSON *msg = lsp_read_message(in_f);
     ASSERT(msg != NULL);
     fclose(in_f);
+    remove(_tmppath_in);
 
     /* Create server and manually call what handle_initialize produces */
     LspServer *srv = lsp_server_new();
@@ -1136,6 +1150,8 @@ TEST(test_lsp_code_action_capability) {
 
     cJSON_Delete(result);
     lsp_server_free(srv);
+    fclose(out_f);
+    remove(_tmppath_out);
 }
 
 /* The remaining LSP tests use direct stdin/stdout assignment which is not

@@ -1003,7 +1003,8 @@ TEST(eval_arena_survives_gc) {
 
 static char *run_capture_gc_stress(const char *source, LatVec *tokens_out, Program *prog_out, Evaluator **ev_out) {
     fflush(stdout);
-    FILE *tmp = tmpfile();
+    char _tmppath[256];
+    FILE *tmp = test_tmpfile(_tmppath, sizeof(_tmppath));
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
@@ -1016,6 +1017,7 @@ static char *run_capture_gc_stress(const char *source, LatVec *tokens_out, Progr
         dup2(old_stdout, fileno(stdout));
         close(old_stdout);
         fclose(tmp);
+        remove(_tmppath);
         lat_vec_free(tokens_out);
         *ev_out = NULL;
         return NULL;
@@ -1030,6 +1032,7 @@ static char *run_capture_gc_stress(const char *source, LatVec *tokens_out, Progr
         dup2(old_stdout, fileno(stdout));
         close(old_stdout);
         fclose(tmp);
+        remove(_tmppath);
         program_free(prog_out);
         for (size_t i = 0; i < tokens_out->len; i++) token_free(lat_vec_get(tokens_out, i));
         lat_vec_free(tokens_out);
@@ -1052,6 +1055,7 @@ static char *run_capture_gc_stress(const char *source, LatVec *tokens_out, Progr
         for (size_t i = 0; i < tokens_out->len; i++) token_free(lat_vec_get(tokens_out, i));
         lat_vec_free(tokens_out);
         fclose(tmp);
+        remove(_tmppath);
         *ev_out = NULL;
         return NULL;
     }
@@ -1064,6 +1068,7 @@ static char *run_capture_gc_stress(const char *source, LatVec *tokens_out, Progr
     size_t n = fread(output, 1, (size_t)len, tmp);
     output[n] = '\0';
     fclose(tmp);
+    remove(_tmppath);
 
     /* Strip trailing newline */
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
@@ -2836,7 +2841,8 @@ TEST(eval_deep_recursion_within_limit) {
 static char *run_match_check(const char *source) {
     /* Redirect stderr to a temp file */
     fflush(stderr);
-    FILE *tmp = tmpfile();
+    char _tmppath[256];
+    FILE *tmp = test_tmpfile(_tmppath, sizeof(_tmppath));
     int old_stderr = dup(fileno(stderr));
     dup2(fileno(tmp), fileno(stderr));
 
@@ -2850,6 +2856,7 @@ static char *run_match_check(const char *source) {
         dup2(old_stderr, fileno(stderr));
         close(old_stderr);
         fclose(tmp);
+        remove(_tmppath);
         lat_vec_free(&tokens);
         return strdup("");
     }
@@ -2886,6 +2893,7 @@ static char *run_match_check(const char *source) {
         buf[n] = '\0';
     }
     fclose(tmp);
+    remove(_tmppath);
 
     program_free(&prog);
     for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));

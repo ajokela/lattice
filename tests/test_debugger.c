@@ -53,23 +53,7 @@ extern int test_current_failed;
     static void name##_register(void) { register_test(#name, name); } \
     static void name(void)
 
-/* ── Helper: platform temp directory ── */
-static const char *test_tmp(void) {
-#ifdef _WIN32
-    static char buf[260];
-    if (!buf[0]) {
-        const char *t = getenv("TEMP");
-        if (!t) t = getenv("TMP");
-        if (!t) t = ".";
-        snprintf(buf, sizeof(buf), "%s", t);
-        size_t len = strlen(buf);
-        while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
-    }
-    return buf;
-#else
-    return "/tmp";
-#endif
-}
+/* test_tmp() is provided by test_backend.h */
 
 /* ── Helper: compile source and set up a StackVM for debugger testing ── */
 
