@@ -72,6 +72,7 @@ static char *read_file(const char *path) {
 
 static bool gc_mode = false;
 static bool gc_stress_mode = false;
+static bool gc_incremental_mode = false;
 static bool no_regions_mode = false;
 static bool no_assertions_mode = false;
 static bool tree_walk_mode = false;
@@ -104,6 +105,7 @@ static void print_help(void) {
     printf("  --gc              Enable garbage collector\n");
     printf("  --no-gc           Disable garbage collector\n");
     printf("  --gc-stress       GC stress testing mode\n");
+    printf("  --gc-incremental  Incremental garbage collection mode\n");
     printf("  --no-regions      Disable region-based memory\n");
     printf("  --no-assertions   Disable runtime assertions\n");
     printf("  --debug           Attach debugger\n");
@@ -377,9 +379,10 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         }
     }
 
-    if (gc_mode || gc_stress_mode) {
+    if (gc_mode || gc_stress_mode || gc_incremental_mode) {
         vm.gc.enabled = true;
         vm.gc.stress = gc_stress_mode;
+        vm.gc.incremental = gc_incremental_mode;
     }
     LatValue result;
     StackVMResult vm_res = stackvm_run(&vm, chunk, &result);
@@ -1460,6 +1463,9 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--gc-stress") == 0) {
             gc_mode = true;
             gc_stress_mode = true;
+        } else if (strcmp(argv[i], "--gc-incremental") == 0) {
+            gc_mode = true;
+            gc_incremental_mode = true;
         } else if (strcmp(argv[i], "--no-gc") == 0) gc_mode = false;
         else if (strcmp(argv[i], "--no-regions") == 0) no_regions_mode = true;
         else if (strcmp(argv[i], "--no-assertions") == 0) no_assertions_mode = true;

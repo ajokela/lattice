@@ -737,6 +737,12 @@ StackVM *stackvm_clone_for_thread(StackVM *parent) {
     child->module_cache = lat_map_new(sizeof(LatValue));
     child->ephemeral = bump_arena_new();
 
+    /* Propagate GC configuration from parent */
+    gc_init(&child->gc);
+    child->gc.enabled = parent->gc.enabled;
+    child->gc.incremental = parent->gc.incremental;
+    child->gc.stress = parent->gc.stress;
+
     /* Pre-build the call wrapper chunk */
     memset(&child->call_wrapper, 0, sizeof(Chunk));
     child->call_wrapper.code = malloc(3);

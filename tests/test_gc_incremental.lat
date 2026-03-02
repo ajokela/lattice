@@ -1,0 +1,244 @@
+// Test: Incremental GC — exercises mutation-during-collection patterns
+// Run with: clat --gc-incremental tests/test_gc_incremental.lat
+
+// -- Rapid global reassignment (old values become garbage mid-cycle) --
+fn test_global_reassignment() {
+    print("--- global reassignment ---")
+    flux g = "initial"
+    for i in 0..500 {
+        g = "value_" + to_string(i)
+    }
+    print(g)
+
+    // Multiple globals being churned simultaneously
+    flux a = 0
+    flux b = ""
+    flux c = []
+    for i in 0..200 {
+        a = i * 3
+        b = "str_" + to_string(i)
+        c = [i, i + 1, i + 2]
+    }
+    print(a)
+    print(b)
+    print(len(c))
+}
+
+// -- Object graph rewiring (references changed while GC traces) --
+struct Node { val: any, child: any }
+
+fn test_graph_rewiring() {
+    print("--- graph rewiring ---")
+    flux root = Node { val: 0, child: nil }
+    for i in 1..100 {
+        // Build a chain then immediately rewire it
+        let new_node = Node { val: i, child: root }
+        root = Node { val: i * 10, child: new_node }
+    }
+    print(root.val)
+    print(root.child.val)
+
+    // Rewire struct fields mid-loop
+    flux container = Node { val: "start", child: Node { val: "middle", child: nil } }
+    for i in 0..200 {
+        container.child = Node { val: "iter_" + to_string(i), child: nil }
+        container.val = i
+    }
+    print(container.val)
+    print(container.child.val)
+}
+
+// -- Closure creation storms (many closures allocated across statements) --
+fn test_closure_storm() {
+    print("--- closure storm ---")
+    flux total = 0
+    for i in 0..300 {
+        let captured = i
+        let f = | | { return captured * 2 }
+        total = total + f()
+    }
+    print(total)
+
+    // Closures that capture different variables at each step
+    flux funcs = []
+    for i in 0..50 {
+        let val = i * 3
+        funcs.push(|x| x + val)
+    }
+    flux sum = 0
+    for i in 0..50 {
+        let f = funcs[i]
+        sum = sum + f(10)
+    }
+    print(sum)
+}
+
+// -- Mixed container churn (arrays, maps, structs created and discarded) --
+struct DataPoint { x: any, y: any, label: any }
+enum Shape {
+    Circle(any),
+    Rect(any, any),
+    Point
+}
+
+fn test_mixed_churn() {
+    print("--- mixed churn ---")
+    flux total = 0
+    for i in 0..300 {
+        // Array created and discarded
+        let arr = [i, i * 2, i * 3, i * 4]
+        total = total + arr[0] + arr[3]
+
+        // Map created and discarded
+        flux m = Map::new()
+        m["a"] = i
+        m["b"] = i * 10
+        total = total + m["a"]
+
+        // Struct created and discarded
+        let dp = DataPoint { x: i, y: i * 2, label: "p_" + to_string(i) }
+        total = total + dp.x
+
+        // Enum created and discarded
+        let s = Shape::Rect(i, i + 1)
+        let c = Shape::Circle(i * 3)
+        let _ = s
+        let _ = c
+    }
+    print(total)
+}
+
+// -- Deep chains built incrementally --
+struct Chain { val: any, next: any }
+
+fn chain_len(c: any) {
+    flux count = 0
+    flux cur = c
+    while cur != nil {
+        count = count + 1
+        cur = cur.next
+    }
+    return count
+}
+
+fn test_deep_chains() {
+    print("--- deep chains ---")
+    // Build chains and immediately discard them
+    flux last_len = 0
+    for round in 0..50 {
+        flux head = nil
+        for i in 0..30 {
+            head = Chain { val: i + round, next: head }
+        }
+        last_len = chain_len(head)
+        // head becomes garbage after each outer iteration
+    }
+    print(last_len)
+
+    // Build one long chain across many statements
+    flux big_chain = nil
+    for i in 0..200 {
+        big_chain = Chain { val: i, next: big_chain }
+    }
+    print(chain_len(big_chain))
+}
+
+// -- String interleaving (alternating between short-lived and long-lived) --
+fn test_string_interleave() {
+    print("--- string interleave ---")
+    flux survivors = []
+    for i in 0..100 {
+        // Short-lived temp
+        let temp = "temp_" + to_string(i) + "_garbage_" + to_string(i * 7)
+        let _ = len(temp)
+
+        // Long-lived survivor (every 10th)
+        if i % 10 == 0 {
+            survivors.push("survivor_" + to_string(i))
+        }
+    }
+    print(len(survivors))
+    print(survivors[0])
+    print(survivors[9])
+}
+
+// -- Map with heavy updates --
+fn test_map_updates() {
+    print("--- map updates ---")
+    flux m = Map::new()
+    for i in 0..300 {
+        let key = "key_" + to_string(i % 20)
+        m[key] = i
+    }
+    // Only the last 20 keys should survive with their final values
+    print(m["key_0"])
+    print(m["key_19"])
+
+    // Nested map operations creating lots of garbage
+    flux total = 0
+    for i in 0..100 {
+        flux inner = Map::new()
+        inner["x"] = i
+        inner["y"] = i * 2
+        total = total + inner["x"] + inner["y"]
+    }
+    print(total)
+}
+
+// -- Tuple and enum allocation interleaved --
+fn test_tuple_enum_mix() {
+    print("--- tuple enum mix ---")
+    flux total = 0
+    for i in 0..500 {
+        let t = (i, i + 1, i + 2)
+        total = total + t.0 + t.1 + t.2
+
+        let s = Shape::Circle(i)
+        let r = Shape::Rect(i, i + 1)
+        let _ = s
+        let _ = r
+    }
+    print(total)
+}
+
+// -- Recursive tree build (deep stack + lots of allocation) --
+struct TreeNode { val: any, left: any, right: any }
+
+fn build_tree(depth: any) {
+    if depth <= 0 {
+        return TreeNode { val: 1, left: nil, right: nil }
+    }
+    return TreeNode {
+        val: depth,
+        left: build_tree(depth - 1),
+        right: build_tree(depth - 1)
+    }
+}
+
+fn sum_tree(node: any) {
+    if node == nil { return 0 }
+    return node.val + sum_tree(node.left) + sum_tree(node.right)
+}
+
+fn test_tree_gc() {
+    print("--- tree gc ---")
+    flux total = 0
+    for i in 0..50 {
+        let t = build_tree(5)
+        total = total + sum_tree(t)
+    }
+    print(total)
+}
+
+fn main() {
+    test_global_reassignment()
+    test_graph_rewiring()
+    test_closure_storm()
+    test_mixed_churn()
+    test_deep_chains()
+    test_string_interleave()
+    test_map_updates()
+    test_tuple_enum_mix()
+    test_tree_gc()
+    print("ALL GC INCREMENTAL TESTS PASSED")
+}

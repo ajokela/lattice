@@ -62,7 +62,8 @@ extern int test_current_failed;
  * Returns 0 on success, non-zero on failure.
  * If err_out is non-NULL, stores a heap-allocated error string on failure.
  */
-static bool gc_stress = false; /* toggled by gc-stress tests */
+static bool gc_stress = false;      /* toggled by gc-stress tests */
+static bool gc_incremental = false; /* toggled by gc-incremental tests */
 
 static int run_source_ok(const char *source, char **err_out) {
     if (err_out) *err_out = NULL;
@@ -155,6 +156,14 @@ static int run_source_ok(const char *source, char **err_out) {
         lat_runtime_init(&rt);
         StackVM vm;
         stackvm_init(&vm, &rt);
+        if (gc_stress) {
+            vm.gc.enabled = true;
+            vm.gc.stress = true;
+        }
+        if (gc_incremental) {
+            vm.gc.enabled = true;
+            vm.gc.incremental = true;
+        }
         LatValue vm_result;
         StackVMResult vm_res = stackvm_run(&vm, chunk, &vm_result);
         if (vm_res != STACKVM_OK) {
@@ -887,6 +896,77 @@ TEST(eval_gc_shadow_stack_depth) {
                 "    print(step5.len())\n"
                 "}\n");
     gc_stress = false;
+}
+
+/* ── Incremental GC Tests ── */
+
+TEST(eval_gc_incremental_hello) {
+    gc_incremental = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let msg = \"Hello\"\n"
+                "    let nums = [1, 2, 3, 4, 5]\n"
+                "    let p = Point { x: 3, y: 4 }\n"
+                "    print(msg)\n"
+                "    print(nums)\n"
+                "}\n"
+                "struct Point { x: Int, y: Int }\n");
+    gc_incremental = false;
+}
+
+TEST(eval_gc_incremental_loops) {
+    gc_incremental = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let sum = 0\n"
+                "    for i in 0..100 {\n"
+                "        sum = sum + i\n"
+                "        let s = \"iter_\" + to_string(i)\n"
+                "        let arr = [i, i * 2]\n"
+                "    }\n"
+                "    print(sum)\n"
+                "}\n");
+    gc_incremental = false;
+}
+
+TEST(eval_gc_incremental_closures) {
+    gc_incremental = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let total = 0\n"
+                "    for i in 0..50 {\n"
+                "        let val = i\n"
+                "        let f = | | { return val * 2 }\n"
+                "        total = total + f()\n"
+                "    }\n"
+                "    print(total)\n"
+                "}\n");
+    gc_incremental = false;
+}
+
+TEST(eval_gc_incremental_game_loop) {
+    gc_incremental = true;
+    ASSERT_RUNS("#mode strict\n"
+                "struct Entity { x: Float, y: Float, name: String }\n"
+                "struct World { entities: [Entity], tick: Int }\n"
+                "fn update_physics(world: ~World) {\n"
+                "    for i in 0..world.entities.len() {\n"
+                "        world.entities[i].x = world.entities[i].x + 1.0\n"
+                "        world.entities[i].y = world.entities[i].y + 0.5\n"
+                "    }\n"
+                "    world.tick = world.tick + 1\n"
+                "}\n"
+                "fn main() {\n"
+                "    flux world = World {\n"
+                "        entities: [\n"
+                "            Entity { x: 0.0, y: 0.0, name: \"Player\" },\n"
+                "        ],\n"
+                "        tick: 0,\n"
+                "    }\n"
+                "    for i in 0..20 {\n"
+                "        update_physics(world)\n"
+                "    }\n"
+                "    fix frame = freeze(clone(world))\n"
+                "    print(frame.tick)\n"
+                "}\n");
+    gc_incremental = false;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
