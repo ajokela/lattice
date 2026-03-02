@@ -37,8 +37,8 @@ extern void register_stdlib_tests(void);
 static const char *backend_name(TestBackend b) {
     switch (b) {
         case BACKEND_TREE_WALK: return "tree-walk";
-        case BACKEND_STACK_VM:  return "stack-vm";
-        case BACKEND_REG_VM:   return "regvm";
+        case BACKEND_STACK_VM: return "stack-vm";
+        case BACKEND_REG_VM: return "regvm";
     }
     return "unknown";
 }
@@ -69,6 +69,8 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < test_count; i++) {
         test_current_failed = 0;
         tests_run++;
+        fprintf(stderr, "[%d/%d] %s ...\n", i + 1, test_count, all_tests[i].name);
+        fflush(stderr);
         all_tests[i].fn();
         if (test_current_failed) {
             tests_failed++;
