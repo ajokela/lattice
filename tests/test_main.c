@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,9 @@ typedef struct {
 static TestEntry all_tests[MAX_TESTS];
 static int test_count = 0;
 
+/* Track current test for crash diagnostics */
+static const char *current_test_name = NULL;
+
 void register_test(const char *name, TestFn fn) {
     if (test_count < MAX_TESTS) {
         all_tests[test_count].name = name;
@@ -43,7 +47,30 @@ static const char *backend_name(TestBackend b) {
     return "unknown";
 }
 
+static void crash_handler(int sig) {
+    const char *name = "unknown";
+    switch (sig) {
+        case SIGSEGV: name = "SIGSEGV"; break;
+        case SIGFPE: name = "SIGFPE"; break;
+        case SIGABRT: name = "SIGABRT"; break;
+#ifdef SIGBUS
+        case SIGBUS: name = "SIGBUS"; break;
+#endif
+    }
+    fprintf(stderr, "\n*** CRASH: signal %s (%d) during test: %s ***\n", name, sig,
+            current_test_name ? current_test_name : "(none)");
+    fflush(stderr);
+    _exit(128 + sig);
+}
+
 int main(int argc, char *argv[]) {
+    signal(SIGSEGV, crash_handler);
+    signal(SIGFPE, crash_handler);
+    signal(SIGABRT, crash_handler);
+#ifdef SIGBUS
+    signal(SIGBUS, crash_handler);
+#endif
+
     /* Parse --backend flag */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
@@ -69,6 +96,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < test_count; i++) {
         test_current_failed = 0;
         tests_run++;
+        current_test_name = all_tests[i].name;
         fprintf(stderr, "[%d/%d] %s\n", i + 1, test_count, all_tests[i].name);
         fflush(stderr);
         all_tests[i].fn();

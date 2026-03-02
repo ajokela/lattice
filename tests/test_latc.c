@@ -332,12 +332,16 @@ static int reg_roundtrip(const char *source, char **err_out) {
     }
 
     /* Run the deserialized chunk */
+    fprintf(stderr, "  [reg_roundtrip] file-loaded chunk @%p, starting regvm_run\n", (void *)loaded);
+    fflush(stderr);
     LatRuntime rt;
     lat_runtime_init(&rt);
     RegVM rvm;
     regvm_init(&rvm, &rt);
     LatValue result;
     RegVMResult rvm_res = regvm_run(&rvm, loaded, &result);
+    fprintf(stderr, "  [reg_roundtrip] regvm_run returned %d\n", rvm_res);
+    fflush(stderr);
     int rc = 0;
     if (rvm_res != REGVM_OK) {
         if (err_out) *err_out = strdup(rvm.error ? rvm.error : "regvm error");
