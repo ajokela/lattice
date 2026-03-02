@@ -366,4 +366,3 @@ jobs:
 
       - name: Test
         run: make test WINDOWS=1
-        continue-on-error: true

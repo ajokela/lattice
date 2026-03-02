@@ -10,14 +10,7 @@
 #include "latc.h"
 #include "runtime.h"
 #include "value.h"
-#ifdef _WIN32
-#include <io.h>
-#include <process.h>
-#define unlink _unlink
-#define getpid _getpid
-#else
 #include <unistd.h>
-#endif
 
 /* Import test macros from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));

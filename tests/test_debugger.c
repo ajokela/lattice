@@ -10,13 +10,8 @@
 #include "runtime.h"
 #include "value.h"
 #include "test_backend.h"
-#ifdef _WIN32
-#include <io.h>
-#define STDOUT_FILENO 1
-#else
 #include <unistd.h>
 #include <fcntl.h>
-#endif
 #include "../vendor/cJSON.h"
 
 /* Import test macros from test_main.c */
@@ -638,18 +633,9 @@ TEST(test_dbg_print_callback_redirect) {
     /* Suppress stdout so test runner doesn't see it */
     fflush(stdout);
     int saved_stdout = dup(STDOUT_FILENO);
-#ifdef _WIN32
-    FILE *devnull_f = fopen("NUL", "w");
-    int devnull = fileno(devnull_f);
-#else
     int devnull = open("/dev/null", O_WRONLY);
-#endif
     dup2(devnull, STDOUT_FILENO);
-#ifdef _WIN32
-    fclose(devnull_f);
-#else
     close(devnull);
-#endif
 
     LatValue result;
     stackvm_run(&t.vm, t.chunk, &result);
@@ -687,18 +673,9 @@ TEST(test_dbg_print_callback_multi_arg) {
 
     fflush(stdout);
     int saved_stdout = dup(STDOUT_FILENO);
-#ifdef _WIN32
-    FILE *devnull_f2 = fopen("NUL", "w");
-    int devnull2 = fileno(devnull_f2);
-#else
     int devnull2 = open("/dev/null", 1);
-#endif
     dup2(devnull2, STDOUT_FILENO);
-#ifdef _WIN32
-    fclose(devnull_f2);
-#else
     close(devnull2);
-#endif
 
     LatValue result;
     stackvm_run(&t.vm, t.chunk, &result);
