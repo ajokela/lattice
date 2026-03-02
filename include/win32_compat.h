@@ -186,10 +186,17 @@ static inline char *strptime(const char *s, const char *fmt, struct tm *tm) {
 }
 
 /* ── realpath ── */
+/* _fullpath resolves relative→absolute but doesn't check existence.
+   POSIX realpath fails for non-existent paths, so we add _access check. */
 static inline char *realpath(const char *path, char *resolved) {
-    if (resolved) { return _fullpath(resolved, path, _MAX_PATH); }
+    if (resolved) {
+        char *r = _fullpath(resolved, path, _MAX_PATH);
+        if (r && _access(r, 0) != 0) return NULL;
+        return r;
+    }
     char buf[_MAX_PATH];
     if (!_fullpath(buf, path, sizeof(buf))) return NULL;
+    if (_access(buf, 0) != 0) return NULL;
     return _strdup(buf);
 }
 

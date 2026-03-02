@@ -29,6 +29,10 @@ static inline const char *test_tmp(void) {
         snprintf(buf, sizeof(buf), "%s", t);
         size_t len = strlen(buf);
         while (len > 0 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) buf[--len] = '\0';
+        /* Normalize to forward slashes so paths embed safely in Lattice source strings */
+        for (size_t i = 0; i < len; i++) {
+            if (buf[i] == '\\') buf[i] = '/';
+        }
     }
     return buf;
 #else
