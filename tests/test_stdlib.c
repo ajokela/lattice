@@ -76,7 +76,16 @@ static const char *test_tmp(void) {
 static char *run_capture(const char *source) {
     /* Redirect stdout to a temp file */
     fflush(stdout);
-    FILE *tmp = tmpfile();
+    char tmpname[256];
+    snprintf(tmpname, sizeof(tmpname), "%s/lattice_capture_XXXXXX", test_tmp());
+#ifdef _WIN32
+    /* tmpfile() fails on Windows when root dir isn't writable */
+    _mktemp(tmpname);
+    FILE *tmp = fopen(tmpname, "w+b");
+#else
+    int tmpfd = mkstemp(tmpname);
+    FILE *tmp = fdopen(tmpfd, "w+b");
+#endif
     int old_stdout = dup(fileno(stdout));
     dup2(fileno(tmp), fileno(stdout));
 
@@ -90,6 +99,7 @@ static char *run_capture(const char *source) {
         dup2(old_stdout, fileno(stdout));
         close(old_stdout);
         fclose(tmp);
+        remove(tmpname);
         return strdup("LEX_ERROR");
     }
 
@@ -108,6 +118,7 @@ static char *run_capture(const char *source) {
         dup2(old_stdout, fileno(stdout));
         close(old_stdout);
         fclose(tmp);
+        remove(tmpname);
         return pe_out;
     }
 
@@ -131,6 +142,7 @@ static char *run_capture(const char *source) {
             dup2(old_stdout, fileno(stdout));
             close(old_stdout);
             fclose(tmp);
+            remove(tmpname);
             program_free(&prog);
             for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
@@ -167,6 +179,7 @@ static char *run_capture(const char *source) {
             dup2(old_stdout, fileno(stdout));
             close(old_stdout);
             fclose(tmp);
+            remove(tmpname);
             program_free(&prog);
             for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
             lat_vec_free(&tokens);
@@ -207,6 +220,7 @@ static char *run_capture(const char *source) {
     size_t n = fread(output, 1, (size_t)len, tmp);
     output[n] = '\0';
     fclose(tmp);
+    remove(tmpname);
 
     /* Strip trailing newline for comparison */
     if (n > 0 && output[n - 1] == '\n') output[n - 1] = '\0';
