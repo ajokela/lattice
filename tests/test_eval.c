@@ -2904,8 +2904,12 @@ TEST(eval_recursion_limit_query) {
 
 TEST(eval_deep_recursion_within_limit) {
     if (test_backend != BACKEND_TREE_WALK) return;
-#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+#if defined(__SANITIZE_ADDRESS__)
     return; /* ASAN inflates stack frames ~3x; 100-deep recursion overflows the default 8MB stack */
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    return;
+#endif
 #endif
     ASSERT_RUNS("fn recurse(n: Int) -> Int {\n"
                 "    if n <= 0 { return 0 }\n"

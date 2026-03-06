@@ -47,7 +47,16 @@ static const char *backend_name(TestBackend b) {
     return "unknown";
 }
 
-#if !defined(__SANITIZE_ADDRESS__) && !(defined(__has_feature) && __has_feature(address_sanitizer))
+/* Detect sanitizer: GCC uses __SANITIZE_ADDRESS__, Clang uses __has_feature */
+#if defined(__SANITIZE_ADDRESS__)
+#define LATTICE_HAS_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define LATTICE_HAS_ASAN 1
+#endif
+#endif
+
+#ifndef LATTICE_HAS_ASAN
 static void crash_handler(int sig) {
     const char *name = "unknown";
     switch (sig) {
@@ -66,9 +75,7 @@ static void crash_handler(int sig) {
 #endif
 
 int main(int argc, char *argv[]) {
-#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
-    /* ASAN provides its own signal handlers with better diagnostics */
-#else
+#ifndef LATTICE_HAS_ASAN
     signal(SIGSEGV, crash_handler);
     signal(SIGFPE, crash_handler);
     signal(SIGABRT, crash_handler);
