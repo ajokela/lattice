@@ -67,20 +67,23 @@ for f in \
     src/runtime.c src/intern.c src/latc.c src/regopcode.c src/regcompiler.c \
     src/regvm.c src/builtin_methods.c src/match_check.c src/package.c \
     src/formatter.c src/debugger.c src/dap.c src/completion.c src/doc_gen.c \
-    src/iterator.c src/gc.c src/progress.c; do
+    src/iterator.c src/gc.c src/progress.c \
+    vendor/cJSON.c; do
     SRCS="$SRCS $f"
 done
 
 # Build
 rm -rf build clat
-mkdir -p build/ds
+mkdir -p build/ds build/vendor
 
 echo "==> Compiling..."
 OBJS=""
 for f in $SRCS; do
-    obj="build/$(echo "$f" | sed 's|^src/||; s|\.c$|.o|')"
+    obj="build/$(echo "$f" | sed 's|^src/||; s|^vendor/||; s|\.c$|.o|')"
     mkdir -p "$(dirname "$obj")"
-    $CC $CFLAGS -c -o "$obj" "$f"
+    EXTRA_FLAGS=""
+    case "$f" in vendor/*) EXTRA_FLAGS="-Wno-unused-parameter -Wno-deprecated-declarations" ;; esac
+    $CC $CFLAGS $EXTRA_FLAGS -c -o "$obj" "$f"
     OBJS="$OBJS $obj"
 done
 
@@ -110,7 +113,7 @@ for f in \
     src/array_ops.c src/channel.c src/http.c src/toml_ops.c src/yaml_ops.c \
     src/ext.c src/stackopcode.c src/chunk.c src/stackvm.c \
     src/runtime.c src/intern.c src/latc.c src/builtin_methods.c \
-    src/iterator.c src/gc.c; do
+    src/iterator.c src/gc.c src/progress.c; do
     RUNTIME_SRCS="$RUNTIME_SRCS $f"
 done
 
@@ -120,9 +123,11 @@ mkdir -p build/ds
 echo "==> Compiling runtime..."
 RUNTIME_OBJS=""
 for f in $RUNTIME_SRCS; do
-    obj="build/$(echo "$f" | sed 's|^src/||; s|\.c$|.o|')"
+    obj="build/$(echo "$f" | sed 's|^src/||; s|^vendor/||; s|\.c$|.o|')"
     mkdir -p "$(dirname "$obj")"
-    $CC $CFLAGS -c -o "$obj" "$f"
+    EXTRA_FLAGS=""
+    case "$f" in vendor/*) EXTRA_FLAGS="-Wno-unused-parameter -Wno-deprecated-declarations" ;; esac
+    $CC $CFLAGS $EXTRA_FLAGS -c -o "$obj" "$f"
     RUNTIME_OBJS="$RUNTIME_OBJS $obj"
 done
 

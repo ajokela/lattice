@@ -220,7 +220,11 @@ RUNTIME_SRCS = $(SRC_DIR)/runtime_main.c \
                $(SRC_DIR)/progress.c
 
 RUNTIME_OBJS = $(RUNTIME_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+ifdef WINDOWS
+RUNTIME_TARGET = clat-run.exe
+else
 RUNTIME_TARGET = clat-run
+endif
 
 # LSP server sources
 LSP_SRCS = $(SRC_DIR)/lsp_main.c \
