@@ -1142,7 +1142,7 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
         if (rc != 0) {
             /* Clean up failed checkout */
             snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dest);
-            system(cmd);
+            (void)system(cmd);
             if (err) {
                 size_t elen = strlen(rev) + strlen(name) + 128;
                 *err = malloc(elen);
@@ -1154,7 +1154,7 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
 
     /* Remove .git directory — we only need the source */
     snprintf(cmd, sizeof(cmd), "rm -rf '%s/.git'", dest);
-    system(cmd);
+    (void)system(cmd);
 
     /* Cache the result */
     if (ensure_cache_dir()) {
@@ -1170,7 +1170,7 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
             char cache_dest[PATH_MAX];
             snprintf(cache_dest, sizeof(cache_dest), "%s/%s/%s", cache_dir, name, cache_key);
             snprintf(cmd, sizeof(cmd), "cp -R '%s' '%s'", dest, cache_dest);
-            system(cmd);
+            (void)system(cmd);
             free(cache_dir);
         }
     }
