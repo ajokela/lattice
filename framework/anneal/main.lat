@@ -1,0 +1,95 @@
+// Anneal - A Web Framework for Lattice
+// Re-exports the top-level API for convenient use.
+//
+// Usage:
+//   import "framework/anneal/main" as anneal
+//
+//   let app = anneal.new()
+//   let get = app.get("get")
+//   get("/", |req, res| { ... }, "root")
+//   let listen = app.get("listen")
+//   listen(nil)
+
+import "framework/anneal/app" as anneal_app
+import "framework/anneal/controller" as anneal_controller
+import "framework/anneal/model" as anneal_model
+import "framework/anneal/view" as anneal_view
+import "framework/anneal/router" as anneal_router
+import "framework/anneal/middleware/session" as anneal_session
+import "framework/anneal/middleware/csrf" as anneal_csrf
+import "framework/anneal/middleware/flash" as anneal_flash
+import "framework/anneal/middleware/static_files" as anneal_static
+import "framework/anneal/middleware/params" as anneal_params
+import "framework/anneal/helpers/form" as anneal_form
+import "framework/anneal/helpers/url" as anneal_url
+import "framework/anneal/helpers/mime" as anneal_mime
+
+// Create a new Anneal application.
+fn new(opts: Any = nil) -> Map {
+    return anneal_app.new(opts)
+}
+
+// Create a new controller definition.
+fn controller(name: String) -> Map {
+    return anneal_controller.define(name)
+}
+
+// Create a controller dispatch handler.
+fn action(ctrl: Map, action_name: String) -> Fn {
+    return anneal_controller.handler(ctrl, action_name)
+}
+
+// Define a model.
+fn model(db: Map, table: String, schema: Map, opts: Any = nil) -> Map {
+    return anneal_model.define(db, table, schema, opts)
+}
+
+// Render a template to string.
+fn render(template_name: String, data: Map, opts: Any = nil) -> String {
+    return anneal_view.render(template_name, data, opts)
+}
+
+// Render a template as an HTML response Map.
+fn html(template_name: String, data: Map, opts: Any = nil) -> Map {
+    return anneal_view.html(template_name, data, opts)
+}
+
+// Create session middleware.
+fn session(secret: String) -> Fn {
+    return anneal_session.new(secret)
+}
+
+// Create CSRF middleware.
+fn csrf() -> Fn {
+    return anneal_csrf.new()
+}
+
+// Create flash middleware.
+fn flash() -> Fn {
+    return anneal_flash.new()
+}
+
+// Create static files middleware.
+fn static_files(root: String) -> Fn {
+    return anneal_static.new(root)
+}
+
+// Create params middleware.
+fn params() -> Fn {
+    return anneal_params.new()
+}
+
+// Generate a CSRF hidden input field.
+fn csrf_field(token: String) -> String {
+    return anneal_form.csrf_field(token)
+}
+
+// Generate a URL from a named route.
+fn path_for(app: Map, name: String, params: Any = nil) -> String {
+    return anneal_url.path_for(app, name, params)
+}
+
+// Look up MIME type for a file path.
+fn mime_for(path: String) -> String {
+    return anneal_mime.for_path(path)
+}

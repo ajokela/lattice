@@ -1,0 +1,11 @@
+// Anneal URL Helpers
+// Named route URL generation.
+
+// Generate a URL path from a named route using the app's router.
+// app: the Anneal app Map
+// name: route name string
+// params: optional Map of dynamic segment values
+fn path_for(app: Map, name: String, params: Any = nil) -> String {
+    let p = if params != nil { params } else { Map::new() }
+    return app.get("path_for")(name, p)
+}

@@ -1,0 +1,50 @@
+// Anneal Configuration
+// Loads .env via dotenv and provides sensible defaults.
+
+import "lib/dotenv" as dotenv
+
+// Load application configuration from .env and environment.
+// Returns a config Map with all settings.
+fn load() -> Map {
+    // Load .env file if present (doesn't override existing env vars)
+    dotenv.load()
+
+    let config = Map::new()
+
+    // Server
+    config.set("port", _env_int("PORT", 3000))
+    config.set("host", _env_str("HOST", "0.0.0.0"))
+
+    // Security
+    config.set("secret_key", _env_str("SECRET_KEY", "anneal-dev-secret-change-me"))
+
+    // Database
+    config.set("database_url", _env_str("DATABASE_URL", "db/development.db"))
+
+    // Paths
+    config.set("views_path", _env_str("VIEWS_PATH", "app/views"))
+    config.set("public_path", _env_str("PUBLIC_PATH", "public"))
+
+    // Environment
+    config.set("env", _env_str("ANNEAL_ENV", "development"))
+
+    return config
+}
+
+// Get an environment variable with a default string value.
+fn _env_str(key: String, default: String) -> String {
+    let val = env(key)
+    if val != nil && len(val) > 0 {
+        return val
+    }
+    return default
+}
+
+// Get an environment variable as an integer with a default.
+fn _env_int(key: String, default: Int) -> Int {
+    let val = env(key)
+    if val != nil && len(val) > 0 {
+        return to_int(val)
+    }
+    return default
+}

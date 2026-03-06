@@ -252,6 +252,7 @@ TEST_SRCS = $(TEST_DIR)/test_main.c \
             $(TEST_DIR)/test_eval.c \
             $(TEST_DIR)/test_stdlib.c \
             $(TEST_DIR)/test_lsp.c \
+            $(TEST_DIR)/test_lsp_integration.c \
             $(TEST_DIR)/test_latc.c \
             $(TEST_DIR)/test_debugger.c
 
@@ -355,16 +356,16 @@ $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 $(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test: $(TEST_TARGET)
+test: $(TEST_TARGET) $(LSP_TARGET)
 	./$(BUILD_DIR)/test_runner
 
-test-tree-walk: $(TEST_TARGET)
+test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
 	./$(BUILD_DIR)/test_runner --backend tree-walk
 
-test-regvm: $(TEST_TARGET)
+test-regvm: $(TEST_TARGET) $(LSP_TARGET)
 	./$(BUILD_DIR)/test_runner --backend regvm
 
-test-all-backends: $(TEST_TARGET)
+test-all-backends: $(TEST_TARGET) $(LSP_TARGET)
 	@echo "=== stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
 	@echo "=== tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
 	@echo "=== regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
@@ -373,7 +374,10 @@ LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_trait
              latc_expressions latc_variables latc_control_flow latc_functions \
              latc_data_structures latc_enums_match latc_structs_impl latc_error_handling \
              latc_string_interp latc_spread_test latc_tuple_test \
-             latc_impl_test latc_impl_advanced latc_import_test
+             latc_impl_test latc_impl_advanced latc_import_test \
+             latc_match_enum latc_match_test latc_try_test \
+             latc_from_import_test latc_scope_test \
+             latc_defer_test latc_select_test
 
 test-latc: $(TARGET)
 	@PASS=0; FAIL=0; \
@@ -436,12 +440,12 @@ test-latc: $(TARGET)
 
 asan: CFLAGS += -fsanitize=address,undefined -g -O1
 asan: LDFLAGS += -fsanitize=address,undefined
-asan: clean $(TEST_TARGET)
+asan: clean $(TEST_TARGET) $(LSP_TARGET)
 	./$(BUILD_DIR)/test_runner
 
 asan-all: CFLAGS += -fsanitize=address,undefined -g -O1
 asan-all: LDFLAGS += -fsanitize=address,undefined
-asan-all: clean $(TEST_TARGET)
+asan-all: clean $(TEST_TARGET) $(LSP_TARGET)
 	@echo "=== asan: stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
 	@echo "=== asan: tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
 	@echo "=== asan: regvm ===" ; ./$(BUILD_DIR)/test_runner --backend regvm; \
@@ -449,12 +453,12 @@ asan-all: clean $(TEST_TARGET)
 
 tsan: CFLAGS += -fsanitize=thread -g -O1
 tsan: LDFLAGS += -fsanitize=thread
-tsan: clean $(TEST_TARGET)
+tsan: clean $(TEST_TARGET) $(LSP_TARGET)
 	./$(BUILD_DIR)/test_runner
 
 coverage: CFLAGS += -fprofile-instr-generate -fcoverage-mapping -g -O0
 coverage: LDFLAGS += -fprofile-instr-generate
-coverage: clean $(TEST_TARGET)
+coverage: clean $(TEST_TARGET) $(LSP_TARGET)
 	LLVM_PROFILE_FILE=$(BUILD_DIR)/stackvm.profraw ./$(BUILD_DIR)/test_runner
 	LLVM_PROFILE_FILE=$(BUILD_DIR)/treewalk.profraw ./$(BUILD_DIR)/test_runner --backend tree-walk
 	LLVM_PROFILE_FILE=$(BUILD_DIR)/regvm.profraw ./$(BUILD_DIR)/test_runner --backend regvm

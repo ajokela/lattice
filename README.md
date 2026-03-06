@@ -12,6 +12,16 @@ Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 c
 
 ## Quick Start
 
+**Install via Homebrew (macOS/Linux):**
+
+```sh
+brew tap alexjokela/lattice
+brew install lattice
+clat                          # start the REPL
+```
+
+**Or build from source:**
+
 **Prerequisites:** C compiler with C11 support, libedit (ships with macOS; `libedit-dev` on Debian/Ubuntu)
 
 **Optional:** OpenSSL for TLS networking and crypto builtins (`openssl` via pkg-config)
@@ -1102,6 +1112,58 @@ fix frozen = freeze(data)
 // data is no longer accessible here
 ```
 
+## Package Management
+
+Lattice includes a built-in package manager. Dependencies are declared in `lattice.toml` and installed to `lat_modules/`.
+
+### Initialize a Project
+
+```sh
+clat init
+```
+
+Creates a `lattice.toml` manifest:
+
+```toml
+[package]
+name = "my-project"
+version = "0.1.0"
+entry = "main.lat"
+```
+
+### Add Dependencies
+
+```sh
+clat add json-utils 0.2.0             # registry dependency
+clat add my-lib --git https://github.com/user/my-lib.git --tag v1.0.0
+clat add dev-tools --git https://github.com/user/dev-tools.git --branch main
+```
+
+Dependencies appear in `lattice.toml`:
+
+```toml
+[dependencies]
+json-utils = "0.2.0"
+my-lib = { git = "https://github.com/user/my-lib.git", tag = "v1.0.0" }
+dev-tools = { git = "https://github.com/user/dev-tools.git", branch = "main" }
+```
+
+### Install & Remove
+
+```sh
+clat install                          # install all dependencies
+clat remove json-utils                # remove a dependency
+```
+
+### Using Packages
+
+```lattice
+import "json-utils" as json           // resolves from lat_modules/
+let data = json.parse('{"key": "value"}')
+```
+
+Git dependencies are cloned, checked out to the specified ref, cached in `~/.lattice/packages/`, and copied to `lat_modules/`. The `.git` directory is stripped — only source files are kept.
+
 ## Standard Library
 
 Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, math, strings, files, networking, data formats, concurrency, and more.
@@ -1670,9 +1732,14 @@ Both backends produce identical output. The self-hosted compiler supports the fu
 ```
 clat [options] [file.lat]
 clat compile <file.lat> -o <output.latc>
-clat fmt [--check] [--stdin] <file.lat>
+clat fmt [--check] [--stdin] [--width N] <file.lat>
 clat doc [--json|--html] [-o dir] <file.lat>
 clat test [--filter pat] [--verbose] [--summary] <file_or_dir>
+clat init
+clat install
+clat add <pkg> [version]
+clat add <pkg> --git <url> [--tag <tag>] [--branch <branch>] [--rev <commit>]
+clat remove <pkg>
 ```
 
 | Flag | Description |
@@ -1684,6 +1751,11 @@ clat test [--filter pat] [--verbose] [--summary] <file_or_dir>
 | `fmt --check file.lat` | Check formatting without modifying (exit 1 if unformatted) |
 | `doc file.lat` | Generate documentation from `///` doc comments |
 | `test file_or_dir` | Run tests with assertion builtins and colored output |
+| `init` | Initialize a new `lattice.toml` manifest |
+| `install` | Install dependencies from `lattice.toml` |
+| `add <pkg> [version]` | Add a registry dependency |
+| `add <pkg> --git <url>` | Add a git dependency (with optional `--tag`, `--branch`, or `--rev`) |
+| `remove <pkg>` | Remove a dependency |
 | `--tree-walk` | Use the tree-walking interpreter instead of the bytecode VM |
 | `--regvm` | Use the register-based VM backend |
 | `--debug` | Run with interactive debugger (step/next/continue/breakpoints) |

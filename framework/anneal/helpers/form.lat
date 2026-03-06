@@ -1,0 +1,72 @@
+// Anneal Form Helpers
+// CSRF hidden field generation and basic form tag helpers.
+
+// Generate a hidden input field containing the CSRF token.
+fn csrf_field(token: String) -> String {
+    return "<input type=\"hidden\" name=\"_csrf_token\" value=\"" + _escape(token) + "\">"
+}
+
+// Generate an opening form tag with CSRF token.
+fn form_open(action: String, method: String = "POST") -> String {
+    return "<form action=\"" + _escape(action) + "\" method=\"" + _escape(method) + "\">"
+}
+
+// Generate a closing form tag.
+fn form_close() -> String {
+    return "</form>"
+}
+
+// Generate a text input field.
+fn text_field(name: String, value: String = "", attrs: String = "") -> String {
+    flux html = "<input type=\"text\" name=\"" + _escape(name) + "\" value=\"" + _escape(value) + "\""
+    if len(attrs) > 0 {
+        html = html + " " + attrs
+    }
+    html = html + ">"
+    return html
+}
+
+// Generate a password input field.
+fn password_field(name: String, attrs: String = "") -> String {
+    flux html = "<input type=\"password\" name=\"" + _escape(name) + "\""
+    if len(attrs) > 0 {
+        html = html + " " + attrs
+    }
+    html = html + ">"
+    return html
+}
+
+// Generate a textarea.
+fn textarea(name: String, value: String = "", attrs: String = "") -> String {
+    flux html = "<textarea name=\"" + _escape(name) + "\""
+    if len(attrs) > 0 {
+        html = html + " " + attrs
+    }
+    html = html + ">" + _escape(value) + "</textarea>"
+    return html
+}
+
+// Generate a submit button.
+fn submit(label: String = "Submit", attrs: String = "") -> String {
+    flux html = "<input type=\"submit\" value=\"" + _escape(label) + "\""
+    if len(attrs) > 0 {
+        html = html + " " + attrs
+    }
+    html = html + ">"
+    return html
+}
+
+// Generate a hidden input field.
+fn hidden_field(name: String, value: String) -> String {
+    return "<input type=\"hidden\" name=\"" + _escape(name) + "\" value=\"" + _escape(value) + "\">"
+}
+
+// Escape HTML special characters in attribute values.
+fn _escape(s: String) -> String {
+    flux result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("\"", "&quot;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    return result
+}

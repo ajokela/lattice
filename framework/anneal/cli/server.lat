@@ -1,0 +1,33 @@
+// Anneal CLI: Development Server
+// Loads config and starts the Anneal application.
+
+// Run the development server.
+// This is used by `anneal server` but most users will run their
+// own server.lat entry point directly.
+fn run(port: Any) {
+    print("Starting Anneal development server...")
+
+    // Check that we're in a project directory
+    if !file_exists("server.lat") {
+        print("Error: No server.lat found in current directory.")
+        print("Are you in an Anneal project directory?")
+        print("Create a new project with: clat framework/anneal/anneal.lat new myapp")
+        exit(1)
+    }
+
+    // Print startup info
+    if port != nil {
+        print("Port override: " + to_string(port))
+    }
+
+    // We can't dynamically import and run server.lat from here,
+    // so instruct the user
+    print("")
+    print("Run your application with:")
+    print("  clat server.lat")
+    print("")
+    if port != nil {
+        print("Or set the port in .env:")
+        print("  PORT=" + to_string(port))
+    }
+}

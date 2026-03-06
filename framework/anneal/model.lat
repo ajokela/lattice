@@ -1,0 +1,98 @@
+// Anneal Model Layer
+// Wraps orm.lat + validate.lat for model definitions with automatic validation.
+
+import "lib/orm" as orm
+import "lib/validate" as v
+
+// Define a model with optional validation rules.
+// db: database connection from orm.connect()
+// table: table name string
+// schema: orm schema Map (field_name -> SQL type)
+// opts: optional Map with "validations" key (a validate.lat schema)
+fn define(db: Map, table: String, schema: Map, opts: Any = nil) -> Map {
+    let model = orm.model(db, table, schema)
+    let m = Map::new()
+
+    // Extract ORM functions upfront to avoid chained map.get()() calls
+    let orm_create_table = model.get("create_table")
+    let orm_drop_table = model.get("drop_table")
+    let orm_create = model.get("create")
+    let orm_find = model.get("find")
+    let orm_all = model.get("all")
+    let orm_where = model.get("where")
+    let orm_update = model.get("update")
+    let orm_delete = model.get("delete")
+    let orm_count = model.get("count")
+
+    flux validations = nil
+    if opts != nil && opts.has("validations") {
+        validations = opts.get("validations")
+    }
+
+    m.set("create_table", | | {
+        orm_create_table()
+    })
+
+    m.set("drop_table", | | {
+        orm_drop_table()
+    })
+
+    // Create a record with validation.
+    // Returns {ok: true, id: Int} or {ok: false, errors: Array}
+    m.set("create", |data| {
+        if validations != nil {
+            let result = v.check(validations, data)
+            if !result.get("valid") {
+                let r = Map::new()
+                r.set("ok", false)
+                r.set("errors", result.get("errors"))
+                return r
+            }
+        }
+        let id = orm_create(data)
+        let r = Map::new()
+        r.set("ok", true)
+        r.set("id", id)
+        return r
+    })
+
+    m.set("find", |id| {
+        return orm_find(id)
+    })
+
+    m.set("all", | | {
+        return orm_all()
+    })
+
+    m.set("where", |condition, params| {
+        return orm_where(condition, params)
+    })
+
+    // Update a record with validation.
+    // Returns {ok: true} or {ok: false, errors: Array}
+    m.set("update", |id, data| {
+        if validations != nil {
+            let result = v.check(validations, data)
+            if !result.get("valid") {
+                let r = Map::new()
+                r.set("ok", false)
+                r.set("errors", result.get("errors"))
+                return r
+            }
+        }
+        orm_update(id, data)
+        let r = Map::new()
+        r.set("ok", true)
+        return r
+    })
+
+    m.set("delete", |id| {
+        orm_delete(id)
+    })
+
+    m.set("count", | | {
+        return orm_count()
+    })
+
+    return m
+}

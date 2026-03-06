@@ -1,0 +1,70 @@
+// Anneal Static Files Middleware
+// Serves files from a public directory with MIME type detection
+// and path traversal protection.
+
+import "framework/anneal/helpers/mime" as mime
+
+// Create a static file serving middleware.
+// root_dir: path to the public directory (e.g. "public")
+fn new(root_dir: String) -> Fn {
+    // Resolve the root directory to an absolute path once
+    let abs_root = realpath(root_dir)
+
+    return |req, res, next| {
+        let method = req.get("method")
+        // Only serve GET and HEAD requests
+        if method != "GET" && method != "HEAD" {
+            return next(req, res)
+        }
+
+        let path = req.get("path")
+
+        // Skip paths that look like API routes (no extension, not a known static prefix)
+        // Try to serve the file, fall through to next handler if not found
+        let file_path = root_dir + path
+
+        // Path traversal protection: resolve and verify it's under root
+        if !_safe_path(file_path, abs_root) {
+            return next(req, res)
+        }
+
+        // Check if the file exists
+        if !file_exists(file_path) {
+            return next(req, res)
+        }
+
+        // Read and serve the file
+        let content = read_file(file_path)
+        let content_type = mime.for_path(path)
+
+        let resp = Map::new()
+        resp.set("status", 200)
+        resp.set("body", content)
+        resp.set("streaming", false)
+        let headers = Map::new()
+        headers.set("Content-Type", content_type)
+        headers.set("Cache-Control", "public, max-age=3600")
+        resp.set("headers", headers)
+        resp.set("_cookies", [])
+        return resp
+    }
+}
+
+// Verify a file path is safely under the root directory.
+// Uses realpath() to resolve symlinks and relative segments.
+fn _safe_path(file_path: String, abs_root: String) -> Bool {
+    // Check for obvious traversal attempts before resolving
+    if file_path.contains("..") {
+        return false
+    }
+    if file_path.contains("\0") {
+        return false
+    }
+    // Resolve the file path
+    let resolved = realpath(file_path)
+    if resolved == nil {
+        return false
+    }
+    // Ensure the resolved path starts with the root
+    return resolved.starts_with(abs_root)
+}

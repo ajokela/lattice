@@ -1,0 +1,194 @@
+// Anneal CLI: new project scaffolding
+// Generates a full project structure with all necessary files.
+
+// Scaffold a new Anneal project at the given path.
+fn run(name: String, path: String) -> Bool {
+    print("Creating new Anneal project: " + name)
+    print("  at: " + path)
+
+    // Create directory structure
+    let dirs = [
+        path,
+        path + "/config",
+        path + "/app",
+        path + "/app/controllers",
+        path + "/app/models",
+        path + "/app/views",
+        path + "/app/views/layouts",
+        path + "/app/views/home",
+        path + "/app/views/shared",
+        path + "/db",
+        path + "/public",
+        path + "/public/css",
+        path + "/public/js",
+        path + "/test",
+        path + "/test/controllers",
+        path + "/test/models"
+    ]
+    for dir in dirs {
+        mkdir(dir)
+    }
+
+    // Detect Lattice root before writing files
+    let lattice_root = _detect_lattice_root()
+
+    // Write all project files
+    _write_lattice_toml(path, name)
+    _write_env(path)
+    _write_gitignore(path)
+    _write_server_lat(path, lattice_root)
+    _write_config_routes(path)
+    _write_config_app(path)
+    _write_config_database(path, lattice_root)
+    _write_home_controller(path, lattice_root)
+    _write_layout(path)
+    _write_home_index(path)
+    _write_header_partial(path)
+    _write_footer_partial(path)
+    _write_css(path)
+    _write_favicon(path)
+    _write_keep_files(path)
+
+    // Write helper scripts
+    _write_run_script(path, lattice_root)
+    _write_gen_script(path, lattice_root)
+
+    print("")
+    print("Project created successfully!")
+    print("")
+    print("Next steps:")
+    print("  cd " + path)
+    print("  sh run.sh")
+    print("")
+    print("Or from the Lattice root (" + lattice_root + "):")
+    print("  clat " + path + "/server.lat")
+    print("")
+    print("Then visit http://localhost:3000")
+
+    return true
+}
+
+fn _write_lattice_toml(path: String, name: String) {
+    let content = "[package]\nname = \"" + name + "\"\nversion = \"0.1.0\"\ndescription = \"An Anneal web application\"\n\n[dependencies]\n"
+    write_file(path + "/lattice.toml", content)
+}
+
+fn _write_env(path: String) {
+    let content = "# Application Configuration\nPORT=3000\nSECRET_KEY=change-me-in-production-" + uuid() + "\nDATABASE_URL=db/development.db\nANNEAL_ENV=development\n"
+    write_file(path + "/.env", content)
+}
+
+fn _write_gitignore(path: String) {
+    let content = "# Dependencies\nlat_modules/\n\n# Database\ndb/*.db\n\n# Environment\n.env\n\n# OS\n.DS_Store\nThumbs.db\n\n# Build\n*.latc\n"
+    write_file(path + "/.gitignore", content)
+}
+
+fn _write_server_lat(path: String, lattice_root: String) {
+    let abs_path = realpath(path)
+    let fw = lattice_root + "/framework/anneal"
+    let content = "// Anneal Application Entry Point\n// Start with: sh run.sh\n\nimport \"" + fw + "/app\" as anneal_app\nimport \"" + fw + "/middleware/session\" as session\nimport \"" + fw + "/middleware/csrf\" as csrf\nimport \"" + fw + "/middleware/flash\" as flash_mw\nimport \"" + abs_path + "/config/routes\" as routes\nimport \"" + abs_path + "/config/app\" as app_config\n\n// Create the application\nlet config = app_config.load()\nlet app = anneal_app.new(config)\n\n// Register middleware\nlet use_mw = app.get(\"use\")\nuse_mw(session.new(config.get(\"secret_key\")))\nuse_mw(csrf.new())\nuse_mw(flash_mw.new())\n\n// Register routes\nroutes.register(app)\n\n// Start the server\nlet listen = app.get(\"listen\")\nlisten(nil)\n"
+    write_file(path + "/server.lat", content)
+}
+
+fn _write_config_routes(path: String) {
+    let abs_path = realpath(path)
+    let content = "// Route Definitions\n// Register all application routes here.\n\nimport \"" + abs_path + "/app/controllers/home_controller\" as home\n\nfn register(app: Map) {\n    let get = app.get(\"get\")\n    get(\"/\", home.index, \"root\")\n}\n"
+    write_file(path + "/config/routes.lat", content)
+}
+
+fn _write_config_app(path: String) {
+    let abs_path = realpath(path)
+    let content = "// Application Configuration\n\nimport \"lib/dotenv\" as dotenv\n\nfn load() -> Map {\n    dotenv.load_file(\"" + abs_path + "/.env\")\n\n    let config = Map::new()\n    config.set(\"port\", _env_int(\"PORT\", 3000))\n    config.set(\"secret_key\", _env_str(\"SECRET_KEY\", \"dev-secret-change-me\"))\n    config.set(\"database_url\", _env_str(\"DATABASE_URL\", \"" + abs_path + "/db/development.db\"))\n    config.set(\"env\", _env_str(\"ANNEAL_ENV\", \"development\"))\n    config.set(\"views_path\", \"" + abs_path + "/app/views\")\n    config.set(\"public_path\", \"" + abs_path + "/public\")\n    return config\n}\n\nfn _env_str(key: String, default: String) -> String {\n    let val = env(key)\n    if val != nil && len(val) > 0 { return val }\n    return default\n}\n\nfn _env_int(key: String, default: Int) -> Int {\n    let val = env(key)\n    if val != nil && len(val) > 0 { return to_int(val) }\n    return default\n}\n"
+    write_file(path + "/config/app.lat", content)
+}
+
+fn _write_config_database(path: String, lattice_root: String) {
+    let content = "// Database Configuration\n\nimport \"" + lattice_root + "/lib/orm\" as orm\n\n// Connect to the application database.\nfn connect(config: Map) -> Map {\n    let url = config.get(\"database_url\")\n    return orm.connect(url)\n}\n"
+    write_file(path + "/config/database.lat", content)
+}
+
+fn _write_home_controller(path: String, lattice_root: String) {
+    let abs_path = realpath(path)
+    let fw = lattice_root + "/framework/anneal"
+    let content = "// Home Controller\n\nimport \"" + fw + "/view\" as view\nimport \"lib/http_server\" as http\n\nfn index(req: Map, res: Map) -> Map {\n    let data = Map::new()\n    data.set(\"title\", \"Welcome to Anneal\")\n    data.set(\"message\", \"Your Lattice web application is running!\")\n\n    // Pass CSRF token and flash messages to the template\n    if req.has(\"csrf_token\") {\n        data.set(\"csrf_token\", req.get(\"csrf_token\"))\n    }\n    if req.has(\"flash\") {\n        data.set(\"flash\", req.get(\"flash\"))\n    }\n\n    let opts = Map::new()\n    opts.set(\"views_path\", \"" + abs_path + "/app/views\")\n    return view.html(\"home/index\", data, opts)\n}\n"
+    write_file(path + "/app/controllers/home_controller.lat", content)
+}
+
+fn _write_layout(path: String) {
+    let abs_path = realpath(path)
+    let content = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>{{title}} | Anneal</title>\n    <link rel=\"stylesheet\" href=\"/css/style.css\">\n</head>\n<body>\n    {% include \"" + abs_path + "/app/views/shared/_header.html\" %}\n    <main class=\"container\">\n        {% block content %}{% endblock %}\n    </main>\n    {% include \"" + abs_path + "/app/views/shared/_footer.html\" %}\n</body>\n</html>\n"
+    write_file(path + "/app/views/layouts/application.html", content)
+}
+
+fn _write_home_index(path: String) {
+    let abs_path = realpath(path)
+    let content = "{% extends \"" + abs_path + "/app/views/layouts/application.html\" %}\n{% block content %}\n<div class=\"hero\">\n    <h1>{{title}}</h1>\n    <p>{{message}}</p>\n    <div class=\"info\">\n        <p>Edit <code>app/controllers/home_controller.lat</code> and <code>app/views/home/index.html</code> to get started.</p>\n        <p>Define your routes in <code>config/routes.lat</code>.</p>\n    </div>\n</div>\n{% endblock %}\n"
+    write_file(path + "/app/views/home/index.html", content)
+}
+
+fn _write_header_partial(path: String) {
+    let content = "<header class=\"site-header\">\n    <nav class=\"container\">\n        <a href=\"/\" class=\"logo\">Anneal</a>\n    </nav>\n</header>\n"
+    write_file(path + "/app/views/shared/_header.html", content)
+}
+
+fn _write_footer_partial(path: String) {
+    let content = "<footer class=\"site-footer\">\n    <div class=\"container\">\n        <p>Powered by <strong>Anneal</strong> &mdash; a Lattice web framework</p>\n    </div>\n</footer>\n"
+    write_file(path + "/app/views/shared/_footer.html", content)
+}
+
+fn _write_css(path: String) {
+    let content = "/* Anneal Default Styles */\n* { margin: 0; padding: 0; box-sizing: border-box; }\n\nbody {\n    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n    line-height: 1.6;\n    color: #1a1a2e;\n    background: #f8f9fa;\n}\n\n.container {\n    max-width: 960px;\n    margin: 0 auto;\n    padding: 0 1.5rem;\n}\n\n.site-header {\n    background: #1a1a2e;\n    padding: 1rem 0;\n}\n\n.site-header nav {\n    display: flex;\n    align-items: center;\n}\n\n.site-header .logo {\n    color: #e94560;\n    text-decoration: none;\n    font-size: 1.5rem;\n    font-weight: 700;\n    letter-spacing: -0.02em;\n}\n\nmain {\n    padding: 3rem 0;\n}\n\n.hero {\n    text-align: center;\n    padding: 4rem 0;\n}\n\n.hero h1 {\n    font-size: 2.5rem;\n    color: #1a1a2e;\n    margin-bottom: 0.5rem;\n}\n\n.hero p {\n    font-size: 1.2rem;\n    color: #666;\n    margin-bottom: 1rem;\n}\n\n.info {\n    margin-top: 2rem;\n    padding: 1.5rem;\n    background: #fff;\n    border-radius: 8px;\n    border: 1px solid #e0e0e0;\n    text-align: left;\n    display: inline-block;\n}\n\n.info code {\n    background: #f0f0f0;\n    padding: 0.15em 0.4em;\n    border-radius: 3px;\n    font-size: 0.9em;\n}\n\n.info p {\n    font-size: 1rem;\n    margin-bottom: 0.5rem;\n}\n\n.info p:last-child {\n    margin-bottom: 0;\n}\n\n.site-footer {\n    padding: 2rem 0;\n    text-align: center;\n    color: #999;\n    font-size: 0.9rem;\n    border-top: 1px solid #e0e0e0;\n    margin-top: 4rem;\n}\n"
+    write_file(path + "/public/css/style.css", content)
+}
+
+fn _write_favicon(path: String) {
+    // Write an empty favicon to prevent 404s
+    write_file(path + "/public/favicon.ico", "")
+}
+
+fn _write_keep_files(path: String) {
+    let keep = ""
+    write_file(path + "/app/models/.keep", keep)
+    write_file(path + "/public/js/.keep", keep)
+    write_file(path + "/db/.keep", keep)
+    write_file(path + "/test/controllers/.keep", keep)
+    write_file(path + "/test/models/.keep", keep)
+}
+
+// Detect the Lattice root directory (where framework/ and lib/ live).
+// Uses the script args to find where anneal.lat lives.
+fn _detect_lattice_root() -> String {
+    let raw_args = args()
+    if len(raw_args) > 0 {
+        // args()[0] is the script path (e.g. "framework/anneal/anneal.lat")
+        let script = raw_args[0]
+        // Go up from framework/anneal/anneal.lat to the root
+        let resolved = realpath(script)
+        if resolved != nil {
+            // Strip /framework/anneal/anneal.lat from the end
+            let idx = resolved.index_of("/framework/anneal/")
+            if idx >= 0 {
+                return resolved.substring(0, idx)
+            }
+        }
+    }
+    // Fallback: use CWD
+    let cwd = realpath(".")
+    if cwd != nil {
+        return cwd
+    }
+    return "."
+}
+
+// Write a run script that launches the app from the Lattice root.
+fn _write_run_script(path: String, lattice_root: String) {
+    let content = "#!/bin/sh\n# Run the Anneal application\ncd \"" + lattice_root + "\" && ./clat \"" + realpath(path) + "/server.lat\"\n"
+    write_file(path + "/run.sh", content)
+}
+
+// Write a generator script.
+fn _write_gen_script(path: String, lattice_root: String) {
+    let abs_path = realpath(path)
+    let content = "#!/bin/sh\n# Run Anneal generators from within the project directory.\n# Usage: sh gen.sh controller users index show create\n#        sh gen.sh model post title:text body:text\ncd \"" + abs_path + "\" && \"" + lattice_root + "/clat\" \"" + lattice_root + "/framework/anneal/anneal.lat\" generate \"$@\"\n"
+    write_file(path + "/gen.sh", content)
+}

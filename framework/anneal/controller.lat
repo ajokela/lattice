@@ -1,0 +1,118 @@
+// Anneal Controller
+// Convention-based controller pattern with before/after filters.
+// Uses pre-allocated arrays for upvalue-safe state management.
+
+import "lib/http_server" as http
+
+let MAX_ACTIONS = 32
+let MAX_FILTERS = 16
+
+// Define a new controller.
+// Returns a controller Map with action registration and dispatch.
+fn define(name: String) -> Map {
+    let ctrl = Map::new()
+    ctrl.set("name", name)
+
+    // Pre-allocated parallel arrays for actions
+    flux action_names = _make_slots(MAX_ACTIONS)
+    flux action_handlers = _make_slots(MAX_ACTIONS)
+    flux action_count = 0
+
+    // Pre-allocated arrays for filters
+    flux before_fns = _make_slots(MAX_FILTERS)
+    flux before_count = 0
+    flux after_fns = _make_slots(MAX_FILTERS)
+    flux after_count = 0
+
+    // Register an action handler.
+    ctrl.set("action", |action_name, handler| {
+        let idx = action_count
+        action_names[idx] = action_name
+        action_handlers[idx] = handler
+        action_count = action_count + 1
+    })
+
+    // Register a before filter.
+    ctrl.set("before", |filter| {
+        let idx = before_count
+        before_fns[idx] = filter
+        before_count = before_count + 1
+    })
+
+    // Register an after filter.
+    ctrl.set("after", |filter| {
+        let idx = after_count
+        after_fns[idx] = filter
+        after_count = after_count + 1
+    })
+
+    // Dispatch an action by name.
+    // Runs before filters, action, then after filters.
+    ctrl.set("dispatch", |action_name, req, res| {
+        // Find action
+        flux handler = nil
+        flux ai = 0
+        while ai < action_count {
+            if action_names[ai] == action_name {
+                handler = action_handlers[ai]
+            }
+            ai = ai + 1
+        }
+
+        if handler == nil {
+            return http.response(404, "Action not found: " + name + "#" + action_name)
+        }
+
+        // Run before filters
+        flux current_req = req
+        flux bi = 0
+        while bi < before_count {
+            let filter = before_fns[bi]
+            let result = filter(current_req, res)
+            if result != nil && typeof(result) == "Map" && result.has("status") {
+                return result
+            }
+            if result != nil && typeof(result) == "Map" {
+                current_req = result
+            }
+            bi = bi + 1
+        }
+
+        // Run the action
+        flux response = handler(current_req, res)
+
+        // Run after filters
+        flux fi = 0
+        while fi < after_count {
+            let filter = after_fns[fi]
+            let modified = filter(current_req, res, response)
+            if modified != nil {
+                response = modified
+            }
+            fi = fi + 1
+        }
+
+        return response
+    })
+
+    return ctrl
+}
+
+// Create a handler function that dispatches to a controller action.
+fn handler(ctrl: Map, action_name: String) -> Fn {
+    let dispatch = ctrl.get("dispatch")
+    return |req, res| {
+        return dispatch(action_name, req, res)
+    }
+}
+
+// Pre-allocate an array of nil slots.
+fn _make_slots(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        arr.push(nil)
+        i = i + 1
+    }
+    return arr
+}

@@ -2851,13 +2851,26 @@ fn parse_select() {
             // Compile body as sub-chunk
             save_compiler()
             let ss_default = init_sub_compiler()
+            flux last_was_expr_d = false
             while peek_text() != "}" {
                 if peek() == nil {
                     compiler_error("unexpected end of input in select default body", line)
                 }
-                parse_statement_or_expression()
+                if last_was_expr_d {
+                    emit_byte(OP_POP, line)
+                }
+                last_was_expr_d = false
+                if is_statement_start() {
+                    parse_statement()
+                } else {
+                    parse_expression()
+                    last_was_expr_d = true
+                }
+                emit_byte(OP_RESET_EPHEMERAL, line)
             }
-            emit_byte(OP_UNIT, line)
+            if !last_was_expr_d {
+                emit_byte(OP_UNIT, line)
+            }
             emit_byte(OP_RETURN, line)
             let body_snap = snapshot_chunk()
             compiler_stack = ss_default
@@ -2884,13 +2897,26 @@ fn parse_select() {
             // Compile body as sub-chunk
             save_compiler()
             let ss_timeout = init_sub_compiler()
+            flux last_was_expr_t = false
             while peek_text() != "}" {
                 if peek() == nil {
                     compiler_error("unexpected end of input in select timeout body", line)
                 }
-                parse_statement_or_expression()
+                if last_was_expr_t {
+                    emit_byte(OP_POP, line)
+                }
+                last_was_expr_t = false
+                if is_statement_start() {
+                    parse_statement()
+                } else {
+                    parse_expression()
+                    last_was_expr_t = true
+                }
+                emit_byte(OP_RESET_EPHEMERAL, line)
             }
-            emit_byte(OP_UNIT, line)
+            if !last_was_expr_t {
+                emit_byte(OP_UNIT, line)
+            }
             emit_byte(OP_RETURN, line)
             let body_snap = snapshot_chunk()
             compiler_stack = ss_timeout
@@ -2916,13 +2942,26 @@ fn parse_select() {
             // Compile body as sub-chunk
             save_compiler()
             let ss_arm = init_sub_compiler()
+            flux last_was_expr_a = false
             while peek_text() != "}" {
                 if peek() == nil {
                     compiler_error("unexpected end of input in select arm body", line)
                 }
-                parse_statement_or_expression()
+                if last_was_expr_a {
+                    emit_byte(OP_POP, line)
+                }
+                last_was_expr_a = false
+                if is_statement_start() {
+                    parse_statement()
+                } else {
+                    parse_expression()
+                    last_was_expr_a = true
+                }
+                emit_byte(OP_RESET_EPHEMERAL, line)
             }
-            emit_byte(OP_UNIT, line)
+            if !last_was_expr_a {
+                emit_byte(OP_UNIT, line)
+            }
             emit_byte(OP_RETURN, line)
             let body_snap = snapshot_chunk()
             compiler_stack = ss_arm

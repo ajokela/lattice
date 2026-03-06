@@ -1,0 +1,116 @@
+// Anneal CLI: Code Generators
+// Generate controllers and models from the command line.
+
+// Generate a controller with the given name and actions.
+// name: controller name (e.g. "users")
+// actions: Array of action name strings (e.g. ["index", "show", "create"])
+fn controller(name: String, actions: Array) {
+    let filename = "app/controllers/" + name + "_controller.lat"
+    print("Creating controller: " + filename)
+
+    flux content = "// " + _capitalize(name) + " Controller\n\n"
+    content = content + "import \"framework/anneal/view\" as view\n"
+    content = content + "import \"lib/http_server\" as http\n\n"
+
+    for action in actions {
+        content = content + "fn " + action + "(req: Map, res: Map) -> Map {\n"
+        content = content + "    let data = Map::new()\n"
+        content = content + "    data.set(\"title\", \"" + _capitalize(name) + " - " + _capitalize(action) + "\")\n"
+        content = content + "    return view.html(\"" + name + "/" + action + "\", data)\n"
+        content = content + "}\n\n"
+    }
+
+    // Create controller file
+    mkdir("app/controllers")
+    write_file(filename, content)
+
+    // Create view directory and template files
+    let view_dir = "app/views/" + name
+    mkdir(view_dir)
+
+    for action in actions {
+        let view_file = view_dir + "/" + action + ".html"
+        let view_content = "{% extends \"app/views/layouts/application.html\" %}\n{% block content %}\n<h1>" + _capitalize(name) + " - " + _capitalize(action) + "</h1>\n<p>Edit this template at <code>" + view_file + "</code></p>\n{% endblock %}\n"
+        write_file(view_file, view_content)
+        print("  Created view: " + view_file)
+    }
+
+    // Print route suggestions
+    print("")
+    print("Add to config/routes.lat:")
+    print("  import \"app/controllers/" + name + "_controller\" as " + name)
+    print("  let get = app.get(\"get\")")
+    print("  let post = app.get(\"post\")")
+    print("  let put = app.get(\"put\")")
+    print("  let delete_fn = app.get(\"delete\")")
+    for action in actions {
+        if action == "index" {
+            print("  get(\"/" + name + "\", " + name + ".index, \"" + name + "_index\")")
+        } else if action == "show" {
+            print("  get(\"/" + name + "/:id\", " + name + ".show, \"" + name + "_show\")")
+        } else if action == "create" {
+            print("  post(\"/" + name + "\", " + name + ".create, \"" + name + "_create\")")
+        } else if action == "edit" {
+            print("  get(\"/" + name + "/:id/edit\", " + name + ".edit, \"" + name + "_edit\")")
+        } else if action == "update" {
+            print("  put(\"/" + name + "/:id\", " + name + ".update, \"" + name + "_update\")")
+        } else if action == "destroy" {
+            print("  delete_fn(\"/" + name + "/:id\", " + name + ".destroy, \"" + name + "_destroy\")")
+        } else {
+            print("  get(\"/" + name + "/" + action + "\", " + name + "." + action + ", \"" + name + "_" + action + "\")")
+        }
+    }
+}
+
+// Generate a model with the given name and fields.
+// name: model name (e.g. "user")
+// fields: Array of "name:type" strings (e.g. ["name:text", "email:text", "age:integer"])
+fn model(name: String, fields: Array) {
+    let filename = "app/models/" + name + ".lat"
+    print("Creating model: " + filename)
+
+    flux content = "// " + _capitalize(name) + " Model\n\n"
+    content = content + "import \"framework/anneal/model\" as model\nimport \"lib/validate\" as v\n\n"
+    content = content + "// Define the " + name + " model.\n"
+    content = content + "// db: database connection from orm.connect()\n"
+    content = content + "fn define(db: Map) -> Map {\n"
+
+    // Build schema
+    content = content + "    let schema = Map::new()\n"
+    content = content + "    schema.set(\"id\", \"INTEGER PRIMARY KEY\")\n"
+    for field in fields {
+        let parts = field.split(":")
+        let field_name = parts[0]
+        flux sql_type = "TEXT"
+        if len(parts) > 1 {
+            let t = parts[1].to_lower()
+            if t == "integer" || t == "int" {
+                sql_type = "INTEGER"
+            } else if t == "real" || t == "float" {
+                sql_type = "REAL"
+            } else if t == "bool" || t == "boolean" {
+                sql_type = "INTEGER"
+            }
+        }
+        content = content + "    schema.set(\"" + field_name + "\", \"" + sql_type + "\")\n"
+    }
+
+    // Build validations
+    content = content + "\n    let validations = v.object(Map::new())\n"
+
+    // Build opts
+    content = content + "    let opts = Map::new()\n"
+    content = content + "    opts.set(\"validations\", validations)\n\n"
+    content = content + "    return model.define(db, \"" + name + "s\", schema, opts)\n"
+    content = content + "}\n"
+
+    mkdir("app/models")
+    write_file(filename, content)
+}
+
+fn _capitalize(s: String) -> String {
+    if len(s) == 0 { return s }
+    let first = s.substring(0, 1).to_upper()
+    let rest = s.substring(1, len(s))
+    return first + rest
+}

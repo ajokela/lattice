@@ -1,0 +1,46 @@
+// Anneal View Layer
+// Wraps the template engine with layout/partial conventions and helper injection.
+
+import "lib/template" as tmpl
+
+// Render a template by name with data.
+// template_name: relative name like "home/index" (resolves to views_path/home/index.html)
+// data: Map of template variables
+// opts: optional Map with "views_path" (default: "app/views"), "layout" (default: nil)
+fn render(template_name: String, data: Map, opts: Any = nil) -> String {
+    let views_path = if opts != nil && opts.has("views_path") {
+        opts.get("views_path")
+    } else {
+        "app/views"
+    }
+
+    let template_path = views_path + "/" + template_name + ".html"
+    let compiled = tmpl.from_file(template_path)
+    return tmpl.render(compiled, data)
+}
+
+// Render a template and return an HTML response Map.
+fn html(template_name: String, data: Map, opts: Any = nil) -> Map {
+    let body = render(template_name, data, opts)
+    let res = Map::new()
+    res.set("status", 200)
+    res.set("body", body)
+    res.set("streaming", false)
+    let headers = Map::new()
+    headers.set("Content-Type", "text/html; charset=utf-8")
+    res.set("headers", headers)
+    res.set("_cookies", [])
+    return res
+}
+
+// Render a template with a specific HTTP status code.
+fn html_status(status: Int, template_name: String, data: Map, opts: Any = nil) -> Map {
+    let resp = html(template_name, data, opts)
+    resp.set("status", status)
+    return resp
+}
+
+// Compile a template string directly (for inline templates).
+fn render_string(template_str: String, data: Map) -> String {
+    return tmpl.render_string(template_str, data)
+}

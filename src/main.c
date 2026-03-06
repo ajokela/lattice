@@ -172,6 +172,10 @@ static void print_package_help(void) {
     printf("\n  clat init                   Initialize a new package\n");
     printf("  clat install                Install package dependencies\n");
     printf("  clat add <pkg> [version]    Add a package dependency\n");
+    printf("  clat add <pkg> --git <url>  Add a git dependency\n");
+    printf("       [--tag <tag>]          Checkout a specific tag\n");
+    printf("       [--branch <branch>]    Checkout a specific branch\n");
+    printf("       [--rev <commit>]       Checkout a specific commit\n");
     printf("  clat remove <pkg>           Remove a package dependency\n");
     printf("\nOptions:\n");
     printf("  -h, --help                  Show this help\n");
@@ -1343,9 +1347,32 @@ int main(int argc, char **argv) {
         }
         if (argc < 3) {
             fprintf(stderr, "usage: clat add <package> [version]\n");
+            fprintf(stderr, "       clat add <package> --git <url> [--tag|--branch|--rev <ref>]\n");
             return 1;
         }
-        const char *pkg_version = (argc >= 4) ? argv[3] : NULL;
+        /* Check for --git flag */
+        const char *git_url = NULL;
+        const char *git_tag = NULL;
+        const char *git_branch = NULL;
+        const char *git_rev = NULL;
+        const char *pkg_version = NULL;
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--git") == 0 && i + 1 < argc) {
+                git_url = argv[++i];
+            } else if (strcmp(argv[i], "--tag") == 0 && i + 1 < argc) {
+                git_tag = argv[++i];
+            } else if (strcmp(argv[i], "--branch") == 0 && i + 1 < argc) {
+                git_branch = argv[++i];
+            } else if (strcmp(argv[i], "--rev") == 0 && i + 1 < argc) {
+                git_rev = argv[++i];
+            } else if (!pkg_version) {
+                pkg_version = argv[i];
+            } else {
+                fprintf(stderr, "error: unexpected argument '%s'\n", argv[i]);
+                return 1;
+            }
+        }
+        if (git_url) { return pkg_cmd_add_git(argv[2], git_url, git_tag, git_branch, git_rev); }
         return pkg_cmd_add(argv[2], pkg_version);
     }
 

@@ -1,0 +1,66 @@
+// Anneal CSRF Middleware
+// Generates a per-session CSRF token and validates it on state-changing requests.
+
+import "lib/http_server" as http
+
+// Create a CSRF protection middleware.
+// Requires the session middleware to be registered first.
+fn new() -> Fn {
+    return |req, res, next| {
+        let method = req.get("method")
+
+        // Ensure a CSRF token exists in the session
+        let session_get = req.get("session_get")
+        let session_set = req.get("session_set")
+        flux token = session_get("_csrf_token")
+        if token == nil {
+            token = _generate_token()
+            session_set("_csrf_token", token)
+        }
+
+        // Make the token available to templates and handlers
+        req.set("csrf_token", token)
+
+        // Validate on state-changing methods
+        if method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE" {
+            flux submitted_token = nil
+
+            // Check the request body (form field _csrf_token)
+            if req.has("parsed_body") {
+                let body = req.get("parsed_body")
+                if body != nil && typeof(body) == "Map" && body.has("_csrf_token") {
+                    submitted_token = body.get("_csrf_token")
+                }
+            }
+
+            // Check query string as fallback
+            if submitted_token == nil {
+                let query = req.get("query")
+                if query != nil && query.has("_csrf_token") {
+                    submitted_token = query.get("_csrf_token")
+                }
+            }
+
+            // Check X-CSRF-Token header
+            if submitted_token == nil {
+                let headers = req.get("headers")
+                if headers.has("X-CSRF-Token") {
+                    submitted_token = headers.get("X-CSRF-Token")
+                }
+            }
+
+            // Validate
+            if submitted_token == nil || submitted_token != token {
+                return http.response(403, "403 Forbidden: Invalid CSRF token")
+            }
+        }
+
+        return next(req, res)
+    }
+}
+
+// Generate a random CSRF token.
+fn _generate_token() -> String {
+    // Use uuid + sha256 since random_bytes returns a Buffer
+    return sha256(uuid())
+}

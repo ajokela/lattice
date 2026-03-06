@@ -1,0 +1,34 @@
+// Anneal Flash Messages Middleware
+// One-request persistence of messages via session.
+// Requires the session middleware to be registered first.
+
+// Create a flash messages middleware.
+fn new() -> Fn {
+    return |req, res, next| {
+        let session_get = req.get("session_get")
+        let session_set = req.get("session_set")
+
+        // Read flash messages from session and clear them
+        flux flash = session_get("_flash")
+        if flash == nil {
+            flash = Map::new()
+        }
+        // Clear flash from session after reading
+        session_set("_flash", Map::new())
+
+        // Make current flash available on the request
+        req.set("flash", flash)
+
+        // Provide a setter for the next request's flash
+        req.set("flash_set", |key, value| {
+            flux next_flash = session_get("_flash")
+            if next_flash == nil {
+                next_flash = Map::new()
+            }
+            next_flash.set(key, value)
+            session_set("_flash", next_flash)
+        })
+
+        return next(req, res)
+    }
+}

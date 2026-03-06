@@ -446,7 +446,7 @@ fn main() {
                     let middlewares = [mw1, mw2]
                     let req = Map::new()
                     let res = Map::new()
-                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+                    let result = http._run_middleware(middlewares, len(middlewares), 0, req, res, handler)
 
                     let final_order = order.deref()
                     t.assert_eq(len(final_order), 5)
@@ -473,7 +473,7 @@ fn main() {
                     let middlewares = [auth_mw]
                     let req = Map::new()
                     let res = Map::new()
-                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+                    let result = http._run_middleware(middlewares, len(middlewares), 0, req, res, handler)
 
                     t.assert_eq(result.get("status"), 401)
                     t.assert_false(handler_called.deref())
@@ -494,7 +494,7 @@ fn main() {
                     let middlewares = [add_user_mw]
                     let req = Map::new()
                     let res = Map::new()
-                    http._run_middleware(middlewares, 0, req, res, handler)
+                    http._run_middleware(middlewares, len(middlewares), 0, req, res, handler)
 
                     t.assert_eq(captured_user.deref(), "admin")
                 }),
@@ -515,7 +515,7 @@ fn main() {
                     let middlewares = [add_header_mw]
                     let req = Map::new()
                     let res = Map::new()
-                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+                    let result = http._run_middleware(middlewares, len(middlewares), 0, req, res, handler)
 
                     let h = result.get("headers")
                     t.assert_eq(h.get("X-Custom"), "middleware-added")
@@ -529,7 +529,7 @@ fn main() {
                     let middlewares = []
                     let req = Map::new()
                     let res = Map::new()
-                    let result = http._run_middleware(middlewares, 0, req, res, handler)
+                    let result = http._run_middleware(middlewares, len(middlewares), 0, req, res, handler)
 
                     t.assert_eq(result.get("status"), 200)
                     t.assert_eq(result.get("body"), "direct")

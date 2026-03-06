@@ -1,0 +1,83 @@
+// Test: select expression round-trip through self-hosted compiler
+
+fn test_basic_select() {
+    print("--- basic select ---")
+    let ch = Channel::new()
+    scope {
+        spawn {
+            ch.send(freeze(42))
+        }
+    }
+    let result = select {
+        v from ch => { v }
+    }
+    print(result)
+}
+
+fn test_select_default() {
+    print("--- select default ---")
+    let ch = Channel::new()
+    let result = select {
+        v from ch => { "got: " + to_string(v) }
+        default => { "default taken" }
+    }
+    print(result)
+}
+
+fn test_select_multiple_channels() {
+    print("--- select multiple ---")
+    let ch1 = Channel::new()
+    let ch2 = Channel::new()
+    ch1.send(freeze("alpha"))
+    ch2.send(freeze("beta"))
+
+    let r1 = select {
+        v from ch1 => { "ch1: " + to_string(v) }
+        v from ch2 => { "ch2: " + to_string(v) }
+    }
+    print(r1)
+
+    let r2 = select {
+        v from ch1 => { "ch1: " + to_string(v) }
+        v from ch2 => { "ch2: " + to_string(v) }
+    }
+    print(r2)
+}
+
+fn test_select_in_loop() {
+    print("--- select in loop ---")
+    let ch = Channel::new()
+    for i in 0..3 {
+        ch.send(freeze(i * 10))
+    }
+    for i in 0..3 {
+        let v = select {
+            val from ch => { val }
+        }
+        print(v)
+    }
+}
+
+fn test_select_after_scope() {
+    print("--- select after scope ---")
+    let ch = Channel::new()
+    scope {
+        spawn {
+            ch.send(freeze("hello from spawn"))
+        }
+    }
+    let msg = select {
+        v from ch => { v }
+        default => { "no message" }
+    }
+    print(msg)
+}
+
+fn main() {
+    test_basic_select()
+    test_select_default()
+    test_select_multiple_channels()
+    test_select_in_loop()
+    test_select_after_scope()
+    print("ALL SELECT TESTS PASSED")
+}

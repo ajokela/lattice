@@ -1,0 +1,64 @@
+// Test: defer statement round-trip through self-hosted compiler
+
+fn test_basic_defer() {
+    print("--- basic defer ---")
+    defer { print("deferred 1") }
+    print("before defer runs")
+}
+
+fn test_multiple_defers() {
+    print("--- multiple defers ---")
+    defer { print("last") }
+    defer { print("middle") }
+    defer { print("first") }
+    print("body")
+}
+
+fn test_defer_with_return() {
+    print("--- defer with return ---")
+    defer { print("cleanup") }
+    if true {
+        print("returning early")
+        return
+    }
+    print("unreachable")
+}
+
+fn test_defer_in_loop() {
+    print("--- defer in loop ---")
+    for i in 0..3 {
+        defer { print("deferred " + to_string(i)) }
+        print("iter " + to_string(i))
+    }
+    print("after loop")
+}
+
+fn test_defer_with_try() {
+    print("--- defer with try ---")
+    try {
+        defer { print("defer in try") }
+        print("try body")
+        let x = 1 / 0
+    } catch e {
+        print("caught error")
+    }
+}
+
+fn test_defer_order() {
+    print("--- defer order ---")
+    flux log = []
+    defer { print("d3") }
+    defer { print("d2") }
+    defer { print("d1") }
+    print("body done")
+}
+
+fn main() {
+    test_basic_defer()
+    test_multiple_defers()
+    test_defer_with_return()
+    test_defer_in_loop()
+    test_defer_with_try()
+    test_defer_order()
+    print("ALL DEFER TESTS PASSED")
+}

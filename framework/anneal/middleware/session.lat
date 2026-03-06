@@ -1,0 +1,161 @@
+// Anneal Session Middleware
+// In-memory session store with signed cookies.
+// Uses pre-allocated arrays because Lattice closures cannot share mutable
+// state via Map.set() or Array.push() on upvalues.
+
+import "lib/http_server" as http
+
+let MAX_SESSIONS = 1024
+let MAX_SESSION_KEYS = 64
+
+// Create a session middleware.
+// secret: string used to sign session cookies
+fn new(secret: String) -> Fn {
+    // Pre-allocated parallel arrays for session store
+    // Each session has: id, and key/value pairs stored as serialized strings
+    flux sess_ids = _make_slots(MAX_SESSIONS)
+    flux sess_data = _make_slots(MAX_SESSIONS)  // serialized "k1\x00v1\x01k2\x00v2"
+    flux sess_count = 0
+
+    return |req, res, next| {
+        let cookies = req.get("cookies")
+        flux session_idx = -1
+        flux is_new = false
+
+        // Check for existing session cookie
+        if cookies.has("anneal_session") {
+            let cookie_val = cookies.get("anneal_session")
+            let dot = cookie_val.index_of(".")
+            if dot > 0 {
+                let id = cookie_val.substring(0, dot)
+                let sig = cookie_val.substring(dot + 1, len(cookie_val))
+                let expected_sig = _sign(id, secret)
+                if sig == expected_sig {
+                    // Find session in store
+                    flux si = 0
+                    while si < sess_count {
+                        if sess_ids[si] == id {
+                            session_idx = si
+                        }
+                        si = si + 1
+                    }
+                }
+            }
+        }
+
+        // Create new session if needed
+        if session_idx < 0 {
+            let new_id = uuid()
+            session_idx = sess_count
+            sess_ids[session_idx] = new_id
+            sess_data[session_idx] = ""
+            sess_count = sess_count + 1
+            is_new = true
+        }
+
+        let sidx = session_idx
+
+        // Attach session accessors to the request
+        // These closures capture sidx and the arrays, using index assignment
+        req.set("session_get", |key| {
+            return _data_get(sess_data[sidx], key)
+        })
+
+        req.set("session_set", |key, value| {
+            sess_data[sidx] = _data_set(sess_data[sidx], key, value)
+        })
+
+        req.set("session_delete", |key| {
+            sess_data[sidx] = _data_delete(sess_data[sidx], key)
+        })
+
+        // Run the rest of the middleware chain
+        flux result = next(req, res)
+
+        // Set the session cookie on new sessions
+        if is_new && result != nil {
+            let sid = sess_ids[sidx]
+            let sig = _sign(sid, secret)
+            let cookie_val = sid + "." + sig
+            let opts = http.cookie_opts()
+            opts.set("http_only", true)
+            opts.set("same_site", "Lax")
+            result = http.set_cookie(result, "anneal_session", cookie_val, opts)
+        }
+
+        return result
+    }
+}
+
+// Sign a session ID with HMAC-SHA256.
+fn _sign(id: String, secret: String) -> String {
+    return hmac_sha256(secret, id)
+}
+
+// Pre-allocate an array of nil slots.
+fn _make_slots(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        arr.push(nil)
+        i = i + 1
+    }
+    return arr
+}
+
+// Session data is serialized as "key1\x01val1\x02key2\x01val2"
+// \x01 separates key from value, \x02 separates pairs
+let SEP_KV = "\x01"
+let SEP_PAIR = "\x02"
+
+// Get a value from serialized session data.
+fn _data_get(data: String, key: String) -> Any {
+    if len(data) == 0 {
+        return nil
+    }
+    let pairs = data.split(SEP_PAIR)
+    for pair in pairs {
+        if len(pair) > 0 {
+            let kv = pair.split(SEP_KV)
+            if len(kv) >= 2 && kv[0] == key {
+                return kv[1]
+            }
+        }
+    }
+    return nil
+}
+
+// Set a value in serialized session data. Returns the updated string.
+fn _data_set(data: String, key: String, value: Any) -> String {
+    let val_str = to_string(value)
+    // Remove existing key first
+    let cleaned = _data_delete(data, key)
+    if len(cleaned) > 0 {
+        return cleaned + SEP_PAIR + key + SEP_KV + val_str
+    }
+    return key + SEP_KV + val_str
+}
+
+// Delete a key from serialized session data. Returns the updated string.
+fn _data_delete(data: String, key: String) -> String {
+    if len(data) == 0 {
+        return ""
+    }
+    let pairs = data.split(SEP_PAIR)
+    flux result = ""
+    flux first = true
+    for pair in pairs {
+        if len(pair) > 0 {
+            let kv = pair.split(SEP_KV)
+            if len(kv) >= 2 && kv[0] != key {
+                if first {
+                    result = pair
+                    first = false
+                } else {
+                    result = result + SEP_PAIR + pair
+                }
+            }
+        }
+    }
+    return result
+}

@@ -47,6 +47,7 @@ static const char *backend_name(TestBackend b) {
     return "unknown";
 }
 
+#if !defined(__SANITIZE_ADDRESS__) && !(defined(__has_feature) && __has_feature(address_sanitizer))
 static void crash_handler(int sig) {
     const char *name = "unknown";
     switch (sig) {
@@ -62,13 +63,18 @@ static void crash_handler(int sig) {
     fflush(stderr);
     _exit(128 + sig);
 }
+#endif
 
 int main(int argc, char *argv[]) {
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+    /* ASAN provides its own signal handlers with better diagnostics */
+#else
     signal(SIGSEGV, crash_handler);
     signal(SIGFPE, crash_handler);
     signal(SIGABRT, crash_handler);
 #ifdef SIGBUS
     signal(SIGBUS, crash_handler);
+#endif
 #endif
 
     /* Parse --backend flag */

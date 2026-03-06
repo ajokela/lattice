@@ -555,11 +555,31 @@ bool pkg_manifest_parse(const char *toml_str, PkgManifest *out, char **err) {
                 out->deps = realloc(out->deps, out->dep_cap * sizeof(PkgDep));
             }
 
-            out->deps[out->dep_count].name = strdup(dep_name);
+            PkgDep *d = &out->deps[out->dep_count];
+            d->name = strdup(dep_name);
+            d->version = NULL;
+            d->git_url = NULL;
+            d->git_tag = NULL;
+            d->git_branch = NULL;
+            d->git_rev = NULL;
+
             if (dep_val->type == VAL_STR) {
-                out->deps[out->dep_count].version = strdup(dep_val->as.str_val);
+                /* Simple string: name = "^1.0.0" */
+                d->version = strdup(dep_val->as.str_val);
+            } else if (dep_val->type == VAL_MAP) {
+                /* Table: name = { git = "...", tag = "...", version = "..." } */
+                const char *v = map_get_str(dep_val, "version");
+                d->version = v ? strdup(v) : strdup("*");
+                const char *git = map_get_str(dep_val, "git");
+                if (git) d->git_url = strdup(git);
+                const char *gtag = map_get_str(dep_val, "tag");
+                if (gtag) d->git_tag = strdup(gtag);
+                const char *gbranch = map_get_str(dep_val, "branch");
+                if (gbranch) d->git_branch = strdup(gbranch);
+                const char *grev = map_get_str(dep_val, "rev");
+                if (grev) d->git_rev = strdup(grev);
             } else {
-                out->deps[out->dep_count].version = strdup("*");
+                d->version = strdup("*");
             }
             out->dep_count++;
         }
@@ -597,7 +617,18 @@ char *pkg_manifest_to_toml(const PkgManifest *m) {
 
     if (m->dep_count > 0) {
         APPEND("\n[dependencies]\n");
-        for (size_t i = 0; i < m->dep_count; i++) { APPEND("%s = \"%s\"\n", m->deps[i].name, m->deps[i].version); }
+        for (size_t i = 0; i < m->dep_count; i++) {
+            if (m->deps[i].git_url) {
+                /* Table-style dependency for git sources */
+                APPEND("%s = { git = \"%s\"", m->deps[i].name, m->deps[i].git_url);
+                if (m->deps[i].git_tag) APPEND(", tag = \"%s\"", m->deps[i].git_tag);
+                if (m->deps[i].git_branch) APPEND(", branch = \"%s\"", m->deps[i].git_branch);
+                if (m->deps[i].git_rev) APPEND(", rev = \"%s\"", m->deps[i].git_rev);
+                APPEND(" }\n");
+            } else {
+                APPEND("%s = \"%s\"\n", m->deps[i].name, m->deps[i].version);
+            }
+        }
     }
 
 #undef APPEND
@@ -613,6 +644,10 @@ void pkg_manifest_free(PkgManifest *m) {
     for (size_t i = 0; i < m->dep_count; i++) {
         free(m->deps[i].name);
         free(m->deps[i].version);
+        free(m->deps[i].git_url);
+        free(m->deps[i].git_tag);
+        free(m->deps[i].git_branch);
+        free(m->deps[i].git_rev);
     }
     free(m->deps);
     memset(m, 0, sizeof(PkgManifest));
@@ -1017,7 +1052,134 @@ static bool version_matches(const char *constraint, const char *actual) {
     return pkg_semver_satisfies(constraint, actual);
 }
 
-/* Attempt to fetch a package. Sets *out_source to "local", "registry", or "path"
+/* ========================================================================
+ * Git-based package fetching
+ * ======================================================================== */
+
+/* Ensure lat_modules/ directory exists. Returns true on success. */
+static bool ensure_lat_modules(char **err) {
+    if (!fs_is_dir("lat_modules")) {
+        char *mkdir_err = NULL;
+        if (!fs_mkdir("lat_modules", &mkdir_err)) {
+            if (err) {
+                size_t elen = strlen(mkdir_err) + 64;
+                *err = malloc(elen);
+                snprintf(*err, elen, "cannot create lat_modules/: %s", mkdir_err);
+            }
+            free(mkdir_err);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Fetch a package from a git repository.
+ * Clones the repo into lat_modules/<name> and checks out the specified ref.
+ * Caches the clone in ~/.lattice/packages/<name>/<ref>/ for future use.
+ * Returns true on success. */
+static bool fetch_from_git(const char *name, const char *git_url, const char *tag, const char *branch, const char *rev,
+                           char **err) {
+    if (!git_url || !*git_url) {
+        if (err) *err = strdup("git URL is empty");
+        return false;
+    }
+
+    if (!ensure_lat_modules(err)) return false;
+
+    /* Determine the ref label for display/caching */
+    const char *ref_label = tag ? tag : branch ? branch : rev ? rev : "HEAD";
+
+    /* Check cache first: ~/.lattice/packages/<name>/git-<ref>/ */
+    char cache_key[256];
+    snprintf(cache_key, sizeof(cache_key), "git-%s", ref_label);
+
+    char *cached = find_cached_package(name, cache_key);
+    if (cached) {
+        /* Copy from cache to lat_modules/ */
+        char cmd[PATH_MAX * 2 + 32];
+        snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", cached, name);
+        free(cached);
+        if (system(cmd) == 0) {
+            printf("  %s (cached, git %s)\n", name, ref_label);
+            return true;
+        }
+        /* Cache copy failed, fall through to fresh clone */
+    }
+
+    /* Clone the repository */
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "lat_modules/%s", name);
+
+    char cmd[PATH_MAX * 3 + 256];
+    if (tag) {
+        /* Clone with --branch (works for tags too) --depth 1 for speed */
+        snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 --branch '%s' '%s' '%s' 2>&1", tag, git_url, dest);
+    } else if (branch) {
+        snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 --branch '%s' '%s' '%s' 2>&1", branch, git_url, dest);
+    } else {
+        /* Clone HEAD (or full clone if we need a specific rev) */
+        if (rev) {
+            snprintf(cmd, sizeof(cmd), "git clone --quiet '%s' '%s' 2>&1", git_url, dest);
+        } else {
+            snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 '%s' '%s' 2>&1", git_url, dest);
+        }
+    }
+
+    int rc = system(cmd);
+    if (rc != 0) {
+        if (err) {
+            size_t elen = strlen(name) + strlen(git_url) + 128;
+            *err = malloc(elen);
+            snprintf(*err, elen, "git clone failed for '%s' from %s", name, git_url);
+        }
+        return false;
+    }
+
+    /* Checkout specific revision if requested */
+    if (rev) {
+        snprintf(cmd, sizeof(cmd), "cd '%s' && git checkout --quiet '%s' 2>&1", dest, rev);
+        rc = system(cmd);
+        if (rc != 0) {
+            /* Clean up failed checkout */
+            snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dest);
+            system(cmd);
+            if (err) {
+                size_t elen = strlen(rev) + strlen(name) + 128;
+                *err = malloc(elen);
+                snprintf(*err, elen, "git checkout '%s' failed for package '%s'", rev, name);
+            }
+            return false;
+        }
+    }
+
+    /* Remove .git directory — we only need the source */
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s/.git'", dest);
+    system(cmd);
+
+    /* Cache the result */
+    if (ensure_cache_dir()) {
+        char *cache_dir = get_cache_dir();
+        if (cache_dir) {
+            char pkg_cache[PATH_MAX];
+            snprintf(pkg_cache, sizeof(pkg_cache), "%s/%s", cache_dir, name);
+            if (!fs_is_dir(pkg_cache)) {
+                char *me = NULL;
+                fs_mkdir(pkg_cache, &me);
+                free(me);
+            }
+            char cache_dest[PATH_MAX];
+            snprintf(cache_dest, sizeof(cache_dest), "%s/%s/%s", cache_dir, name, cache_key);
+            snprintf(cmd, sizeof(cmd), "cp -R '%s' '%s'", dest, cache_dest);
+            system(cmd);
+            free(cache_dir);
+        }
+    }
+
+    printf("  %s (git %s)\n", name, ref_label);
+    return true;
+}
+
+/* Attempt to fetch a package. Sets *out_source to "local", "registry", "git", or "path"
  * to indicate how the package was resolved. Caller should not free out_source. */
 static bool fetch_package(const char *name, const char *version, char **err, const char **out_source) {
     if (out_source) *out_source = "local";
@@ -1201,18 +1363,43 @@ int pkg_cmd_install(void) {
     for (size_t i = 0; i < manifest.dep_count; i++) {
         const char *dep_name = manifest.deps[i].name;
         const char *dep_ver = manifest.deps[i].version;
+        const PkgDep *dep = &manifest.deps[i];
 
         /* If we have a lock file, prefer the locked version for reproducibility.
          * Only use it if the locked version still satisfies the manifest constraint. */
         const char *locked_ver = have_lock ? lock_find_version(&existing_lock, dep_name) : NULL;
         if (locked_ver && pkg_semver_satisfies(dep_ver, locked_ver)) { dep_ver = locked_ver; }
 
-        printf("  Installing %s@%s...", dep_name, dep_ver);
+        const char *ref_label = dep->git_url ? (dep->git_tag      ? dep->git_tag
+                                                : dep->git_branch ? dep->git_branch
+                                                : dep->git_rev    ? dep->git_rev
+                                                                  : "HEAD")
+                                             : dep_ver;
+        printf("  Installing %s@%s...", dep_name, ref_label);
         fflush(stdout);
 
         char *fetch_err = NULL;
         const char *pkg_source = "local";
-        if (fetch_package(dep_name, dep_ver, &fetch_err, &pkg_source)) {
+        bool fetch_ok;
+
+        if (dep->git_url) {
+            /* Git-based dependency */
+            /* Check if already in lat_modules/ */
+            char check_path[PATH_MAX];
+            snprintf(check_path, sizeof(check_path), "lat_modules/%s", dep_name);
+            if (fs_is_dir(check_path)) {
+                fetch_ok = true;
+                pkg_source = "git";
+            } else {
+                fetch_ok =
+                    fetch_from_git(dep_name, dep->git_url, dep->git_tag, dep->git_branch, dep->git_rev, &fetch_err);
+                if (fetch_ok) pkg_source = "git";
+            }
+        } else {
+            fetch_ok = fetch_package(dep_name, dep_ver, &fetch_err, &pkg_source);
+        }
+
+        if (fetch_ok) {
             printf(" ok\n");
 
             /* Determine resolved version */
@@ -1348,12 +1535,104 @@ int pkg_cmd_add(const char *name, const char *version) {
         manifest.dep_cap = manifest.dep_cap < 4 ? 4 : manifest.dep_cap * 2;
         manifest.deps = realloc(manifest.deps, manifest.dep_cap * sizeof(PkgDep));
     }
+    memset(&manifest.deps[manifest.dep_count], 0, sizeof(PkgDep));
     manifest.deps[manifest.dep_count].name = strdup(name);
     manifest.deps[manifest.dep_count].version = strdup(version);
     manifest.dep_count++;
     printf("Added %s@%s to dependencies\n", name, version);
 
 write_manifest:;
+    char *toml = pkg_manifest_to_toml(&manifest);
+    if (!builtin_write_file("lattice.toml", toml)) {
+        fprintf(stderr, "error: cannot write lattice.toml\n");
+        free(toml);
+        pkg_manifest_free(&manifest);
+        return 1;
+    }
+    free(toml);
+    pkg_manifest_free(&manifest);
+
+    /* Try to install */
+    return pkg_cmd_install();
+}
+
+/* ========================================================================
+ * CLI: clat add <package> --git <url> [--tag|--branch|--rev <ref>]
+ * ======================================================================== */
+
+int pkg_cmd_add_git(const char *name, const char *git_url, const char *tag, const char *branch, const char *rev) {
+    if (!name || name[0] == '\0') {
+        fprintf(stderr, "error: package name required\n");
+        return 1;
+    }
+    if (!git_url || git_url[0] == '\0') {
+        fprintf(stderr, "error: git URL required\n");
+        return 1;
+    }
+
+    /* Read existing manifest or create one */
+    PkgManifest manifest;
+    memset(&manifest, 0, sizeof(manifest));
+
+    if (fs_file_exists("lattice.toml")) {
+        char *toml_src = read_file_str("lattice.toml");
+        if (toml_src) {
+            char *parse_err = NULL;
+            if (!pkg_manifest_parse(toml_src, &manifest, &parse_err)) {
+                fprintf(stderr, "error: %s\n", parse_err);
+                free(parse_err);
+                free(toml_src);
+                return 1;
+            }
+            free(toml_src);
+        }
+    } else {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            char *cwd_copy = strdup(cwd);
+            manifest.meta.name = strdup(basename(cwd_copy));
+            free(cwd_copy);
+        } else {
+            manifest.meta.name = strdup("my-project");
+        }
+        manifest.meta.version = strdup("0.1.0");
+        manifest.meta.entry = strdup("main.lat");
+    }
+
+    /* Check if dependency already exists — replace it */
+    for (size_t i = 0; i < manifest.dep_count; i++) {
+        if (strcmp(manifest.deps[i].name, name) == 0) {
+            free(manifest.deps[i].version);
+            free(manifest.deps[i].git_url);
+            free(manifest.deps[i].git_tag);
+            free(manifest.deps[i].git_branch);
+            free(manifest.deps[i].git_rev);
+            manifest.deps[i].version = strdup("*");
+            manifest.deps[i].git_url = strdup(git_url);
+            manifest.deps[i].git_tag = safe_strdup(tag);
+            manifest.deps[i].git_branch = safe_strdup(branch);
+            manifest.deps[i].git_rev = safe_strdup(rev);
+            printf("Updated %s to git dependency (%s)\n", name, git_url);
+            goto write_git_manifest;
+        }
+    }
+
+    /* Add new dependency */
+    if (manifest.dep_count >= manifest.dep_cap) {
+        manifest.dep_cap = manifest.dep_cap < 4 ? 4 : manifest.dep_cap * 2;
+        manifest.deps = realloc(manifest.deps, manifest.dep_cap * sizeof(PkgDep));
+    }
+    memset(&manifest.deps[manifest.dep_count], 0, sizeof(PkgDep));
+    manifest.deps[manifest.dep_count].name = strdup(name);
+    manifest.deps[manifest.dep_count].version = strdup("*");
+    manifest.deps[manifest.dep_count].git_url = strdup(git_url);
+    manifest.deps[manifest.dep_count].git_tag = safe_strdup(tag);
+    manifest.deps[manifest.dep_count].git_branch = safe_strdup(branch);
+    manifest.deps[manifest.dep_count].git_rev = safe_strdup(rev);
+    manifest.dep_count++;
+    printf("Added %s from git (%s)\n", name, git_url);
+
+write_git_manifest:;
     char *toml = pkg_manifest_to_toml(&manifest);
     if (!builtin_write_file("lattice.toml", toml)) {
         fprintf(stderr, "error: cannot write lattice.toml\n");

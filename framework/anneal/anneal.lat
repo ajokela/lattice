@@ -1,0 +1,25 @@
+// Anneal CLI Entry Point
+// Usage: clat framework/anneal/anneal.lat <command> [options]
+
+import "framework/anneal/cli/commands" as commands
+
+// Parse command line arguments
+let cli_args = args()
+
+if len(cli_args) < 2 {
+    commands.dispatch("help", [])
+    exit(0)
+}
+
+// cli_args[0] is the script path, cli_args[1] is the command
+let command = cli_args[1]
+
+// Collect remaining arguments
+flux cmd_args = []
+flux i = 2
+while i < len(cli_args) {
+    cmd_args.push(cli_args[i])
+    i = i + 1
+}
+
+commands.dispatch(command, cmd_args)

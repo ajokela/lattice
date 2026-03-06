@@ -1490,12 +1490,15 @@ static void compile_expr(const Expr *e, int line) {
                     emit_byte(OP_POP, line); /* pop S': [S] */
                     emit_byte(OP_POP, line); /* pop S: [] */
 
-                    /* Compile arm body */
+                    /* Compile arm body (scoped so body-locals are cleaned up) */
+                    begin_scope();
                     if (arm->body_count > 0 && arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
                         for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
                         compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
+                        end_scope_preserve_tos(line);
                     } else {
                         for (size_t j = 0; j < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
+                        end_scope(line);
                         emit_byte(OP_UNIT, line);
                     }
 
@@ -1525,13 +1528,16 @@ static void compile_expr(const Expr *e, int line) {
             size_t saved_local_count = current->local_count;
             int saved_scope_depth = current->scope_depth;
 
-            /* Try body — if last stmt is an expression, use its value */
+            /* Try body — scoped so locals are cleaned up on success path */
+            begin_scope();
             if (e->as.try_catch.try_count > 0 &&
                 e->as.try_catch.try_stmts[e->as.try_catch.try_count - 1]->tag == STMT_EXPR) {
                 for (size_t i = 0; i + 1 < e->as.try_catch.try_count; i++) compile_stmt(e->as.try_catch.try_stmts[i]);
                 compile_expr(e->as.try_catch.try_stmts[e->as.try_catch.try_count - 1]->as.expr, line);
+                end_scope_preserve_tos(line);
             } else {
                 for (size_t i = 0; i < e->as.try_catch.try_count; i++) compile_stmt(e->as.try_catch.try_stmts[i]);
+                end_scope(line);
                 emit_byte(OP_UNIT, line);
             }
 

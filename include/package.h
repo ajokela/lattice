@@ -17,7 +17,11 @@ typedef struct {
 
 typedef struct {
     char *name;
-    char *version; /* semver constraint e.g. "0.2.0" */
+    char *version;    /* semver constraint e.g. "0.2.0" */
+    char *git_url;    /* git repository URL, or NULL for registry deps */
+    char *git_tag;    /* git tag to checkout, or NULL */
+    char *git_branch; /* git branch to checkout, or NULL */
+    char *git_rev;    /* git commit hash to checkout, or NULL */
 } PkgDep;
 
 typedef struct {
@@ -74,6 +78,9 @@ int pkg_cmd_install(void);
 
 /* `clat add <package> [version]` — add a dependency. */
 int pkg_cmd_add(const char *name, const char *version);
+
+/* `clat add <package> --git <url> [--tag|--branch|--rev <ref>]` — add a git dependency. */
+int pkg_cmd_add_git(const char *name, const char *git_url, const char *tag, const char *branch, const char *rev);
 
 /* `clat remove <package>` — remove a dependency. */
 int pkg_cmd_remove(const char *name);

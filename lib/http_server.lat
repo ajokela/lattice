@@ -663,8 +663,8 @@ fn _method_not_allowed_response(method: String) -> Map {
 // Execute the middleware pipeline. Middlewares are called in order; each can
 // either short-circuit by returning a response or call next(req, res) to
 // continue the chain. The final "next" invokes the route handler.
-fn _run_middleware(middlewares: Array, index: Int, req: Map, res: Map, final_handler: Fn) -> Map {
-    if index >= len(middlewares) {
+fn _run_middleware(middlewares: Array, mw_count: Int, index: Int, req: Map, res: Map, final_handler: Fn) -> Map {
+    if index >= mw_count {
         // No more middleware; call the route handler
         return final_handler(req, res)
     }
@@ -672,7 +672,7 @@ fn _run_middleware(middlewares: Array, index: Int, req: Map, res: Map, final_han
     let next_index = index + 1
     // Build the next function that continues the chain
     let next_fn = |r, s| {
-        return _run_middleware(middlewares, next_index, r, s, final_handler)
+        return _run_middleware(middlewares, mw_count, next_index, r, s, final_handler)
     }
     return mw(req, res, next_fn)
 }
@@ -684,74 +684,97 @@ fn _run_middleware(middlewares: Array, index: Int, req: Map, res: Map, final_han
 // Create a new HTTP application (router) with middleware support.
 // Returns a Map with route registration closures (.get, .post, .put, .delete),
 // middleware registration (.use), and a .listen closure to start the server.
+let _MAX_ROUTES = 512
+let _MAX_MIDDLEWARE = 64
+
 fn new() -> Map {
     let app = Map::new()
 
-    // Route tables keyed by HTTP method, each a Map of path -> handler
-    let routes = Map::new()
-    routes.set("GET", Map::new())
-    routes.set("POST", Map::new())
-    routes.set("PUT", Map::new())
-    routes.set("DELETE", Map::new())
-    routes.set("PATCH", Map::new())
-    routes.set("OPTIONS", Map::new())
-    app.set("_routes", routes)
+    // Pre-allocated route storage (parallel arrays, upvalue-safe)
+    flux route_methods = _make_slots(_MAX_ROUTES)
+    flux route_paths = _make_slots(_MAX_ROUTES)
+    flux route_handlers = _make_slots(_MAX_ROUTES)
+    flux route_count = 0
 
-    // Middleware stack (array of functions)
-    flux middlewares = []
+    // Pre-allocated middleware stack (upvalue-safe)
+    flux mw_stack = _make_slots(_MAX_MIDDLEWARE)
+    flux mw_count = 0
 
     // ── Middleware registration ──
 
     // Register a middleware function.
     // Middleware signature: |req, res, next| { ... return next(req, res) ... }
     app.set("use", |mw| {
-        middlewares.push(mw)
+        let idx = mw_count
+        mw_stack[idx] = mw
+        mw_count = mw_count + 1
     })
 
     // ── Route registration helpers ──
 
     // Register a GET route handler.
     app.set("get", |path, handler| {
-        let get_routes = routes.get("GET")
-        get_routes.set(path, handler)
+        let idx = route_count
+        route_methods[idx] = "GET"
+        route_paths[idx] = path
+        route_handlers[idx] = handler
+        route_count = route_count + 1
     })
 
     // Register a POST route handler.
     app.set("post", |path, handler| {
-        let post_routes = routes.get("POST")
-        post_routes.set(path, handler)
+        let idx = route_count
+        route_methods[idx] = "POST"
+        route_paths[idx] = path
+        route_handlers[idx] = handler
+        route_count = route_count + 1
     })
 
     // Register a PUT route handler.
     app.set("put", |path, handler| {
-        let put_routes = routes.get("PUT")
-        put_routes.set(path, handler)
+        let idx = route_count
+        route_methods[idx] = "PUT"
+        route_paths[idx] = path
+        route_handlers[idx] = handler
+        route_count = route_count + 1
     })
 
     // Register a DELETE route handler.
     app.set("delete", |path, handler| {
-        let delete_routes = routes.get("DELETE")
-        delete_routes.set(path, handler)
+        let idx = route_count
+        route_methods[idx] = "DELETE"
+        route_paths[idx] = path
+        route_handlers[idx] = handler
+        route_count = route_count + 1
     })
 
     // Register a PATCH route handler.
     app.set("patch", |path, handler| {
-        let patch_routes = routes.get("PATCH")
-        patch_routes.set(path, handler)
+        let idx = route_count
+        route_methods[idx] = "PATCH"
+        route_paths[idx] = path
+        route_handlers[idx] = handler
+        route_count = route_count + 1
     })
 
     // Register an OPTIONS route handler.
     app.set("options", |path, handler| {
-        let options_routes = routes.get("OPTIONS")
-        options_routes.set(path, handler)
+        let idx = route_count
+        route_methods[idx] = "OPTIONS"
+        route_paths[idx] = path
+        route_handlers[idx] = handler
+        route_count = route_count + 1
     })
 
     // Register a handler for all HTTP methods on a path.
     app.set("all", |path, handler| {
         let methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
         for m in methods {
-            let method_routes = routes.get(m)
-            method_routes.set(path, handler)
+            let idx = route_count
+            route_methods[idx] = m
+            route_paths[idx] = path
+            route_handlers[idx] = handler
+            route_count = route_count + 1
         }
     })
 
@@ -780,17 +803,16 @@ fn new() -> Map {
 
                 // Build the final handler (route dispatch)
                 let route_handler = |r, s| {
-                    if routes.has(method) {
-                        let method_routes = routes.get(method)
-                        if method_routes.has(path) {
-                            let handler = method_routes.get(path)
+                    // Linear scan through registered routes
+                    flux i = 0
+                    while i < route_count {
+                        if route_methods[i] == method && route_paths[i] == path {
+                            let handler = route_handlers[i]
                             return handler(r, s)
-                        } else {
-                            return _not_found_response(path)
                         }
-                    } else {
-                        return _method_not_allowed_response(method)
+                        i = i + 1
                     }
+                    return _not_found_response(path)
                 }
 
                 // Create initial response context
@@ -800,7 +822,7 @@ fn new() -> Map {
                 // Run through the middleware pipeline, then the route handler
                 flux final_res = nil
                 let mw_result = try {
-                    _run_middleware(middlewares, 0, req, res_ctx, route_handler)
+                    _run_middleware(mw_stack, mw_count, 0, req, res_ctx, route_handler)
                 } catch e {
                     print("Error: " + to_string(e))
                     response(500, "Internal Server Error")
@@ -822,4 +844,15 @@ fn new() -> Map {
     })
 
     return app
+}
+
+// Pre-allocate an array of nil slots.
+fn _make_slots(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        arr.push(nil)
+        i = i + 1
+    }
+    return arr
 }

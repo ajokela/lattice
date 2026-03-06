@@ -1,0 +1,106 @@
+// Anneal CLI: Command Dispatcher
+// Routes CLI commands to their implementations.
+
+import "framework/anneal/cli/new_project" as new_project
+import "framework/anneal/cli/generate" as generate
+import "framework/anneal/cli/server" as server
+
+// Dispatch a CLI command.
+// command: the command name (e.g. "new", "generate", "server", "help")
+// args: remaining arguments after the command
+fn dispatch(command: String, args: Array) {
+    if command == "new" {
+        _cmd_new(args)
+    } else if command == "generate" || command == "g" {
+        _cmd_generate(args)
+    } else if command == "server" || command == "s" {
+        _cmd_server(args)
+    } else if command == "help" || command == "h" {
+        _cmd_help()
+    } else if command == "version" || command == "v" {
+        _cmd_version()
+    } else {
+        print("Unknown command: " + command)
+        print("")
+        _cmd_help()
+        exit(1)
+    }
+}
+
+fn _cmd_new(args: Array) {
+    if len(args) < 1 {
+        print("Usage: anneal new <project_name> [path]")
+        print("")
+        print("Creates a new Anneal project with the standard directory structure.")
+        exit(1)
+    }
+    let name = args[0]
+    let path = if len(args) > 1 { args[1] } else { name }
+    new_project.run(name, path)
+}
+
+fn _cmd_generate(args: Array) {
+    if len(args) < 2 {
+        print("Usage: anneal generate <type> <name> [options]")
+        print("")
+        print("Types:")
+        print("  controller <name> [action1 action2 ...]")
+        print("  model <name> [field:type ...]")
+        exit(1)
+    }
+    let gen_type = args[0]
+    let name = args[1]
+
+    // Collect remaining args
+    flux extra = []
+    flux i = 2
+    while i < len(args) {
+        extra.push(args[i])
+        i = i + 1
+    }
+
+    if gen_type == "controller" {
+        if len(extra) == 0 {
+            extra = ["index"]
+        }
+        generate.controller(name, extra)
+    } else if gen_type == "model" {
+        generate.model(name, extra)
+    } else {
+        print("Unknown generator type: " + gen_type)
+        print("Available: controller, model")
+        exit(1)
+    }
+}
+
+fn _cmd_server(args: Array) {
+    flux port = nil
+    if len(args) > 0 {
+        port = to_int(args[0])
+    }
+    server.run(port)
+}
+
+fn _cmd_help() {
+    print("Anneal - A web framework for Lattice")
+    print("")
+    print("Usage: clat framework/anneal/anneal.lat <command> [options]")
+    print("")
+    print("Commands:")
+    print("  new <name> [path]                    Create a new Anneal project")
+    print("  generate controller <name> [actions]  Generate a controller")
+    print("  generate model <name> [fields]        Generate a model")
+    print("  server [port]                         Start the development server")
+    print("  help                                  Show this help message")
+    print("  version                               Show version")
+    print("")
+    print("Examples:")
+    print("  clat framework/anneal/anneal.lat new myapp")
+    print("  clat framework/anneal/anneal.lat new myapp /tmp/myapp")
+    print("  clat framework/anneal/anneal.lat generate controller users index show create")
+    print("  clat framework/anneal/anneal.lat generate model post title:text body:text")
+}
+
+fn _cmd_version() {
+    print("Anneal v0.1.0")
+}

@@ -1,0 +1,254 @@
+// Anneal Application
+// Custom HTTP server with Anneal router integration.
+// Uses http_server.lat for response helpers and request parsing,
+// but implements its own server loop to avoid upvalue mutation issues.
+
+import "lib/http_server" as http
+import "framework/anneal/router" as anneal_router
+import "framework/anneal/config" as anneal_config
+import "framework/anneal/middleware/params" as params_mw
+import "framework/anneal/middleware/static_files" as static_mw
+import "framework/anneal/helpers/mime" as mime
+
+let MAX_MIDDLEWARE = 64
+
+// Create a new Anneal application.
+// opts: optional config overrides Map
+fn new(opts: Any = nil) -> Map {
+    let app = Map::new()
+    let config = anneal_config.load()
+
+    // Apply overrides
+    if opts != nil {
+        let keys = opts.keys()
+        for k in keys {
+            config.set(k, opts.get(k))
+        }
+    }
+    app.set("config", config)
+
+    // Create the router
+    let router = anneal_router.new()
+
+    // Pre-allocated middleware stack (upvalue-safe with index assignment)
+    flux mw_stack = _make_slots(MAX_MIDDLEWARE)
+    flux mw_count = 0
+
+    // Register middleware
+    app.set("use", |mw| {
+        let idx = mw_count
+        mw_stack[idx] = mw
+        mw_count = mw_count + 1
+    })
+
+    // Route registration — get the router functions once
+    let router_get = router.get("get")
+    let router_post = router.get("post")
+    let router_put = router.get("put")
+    let router_delete = router.get("delete")
+    let router_patch = router.get("patch")
+    let router_resources = router.get("resources")
+    let router_group = router.get("group")
+    let router_match = router.get("match")
+    let router_path_for = router.get("path_for")
+
+    app.set("get", |pattern, handler, name| {
+        router_get(pattern, handler, name)
+    })
+    app.set("post", |pattern, handler, name| {
+        router_post(pattern, handler, name)
+    })
+    app.set("put", |pattern, handler, name| {
+        router_put(pattern, handler, name)
+    })
+    app.set("delete", |pattern, handler, name| {
+        router_delete(pattern, handler, name)
+    })
+    app.set("patch", |pattern, handler, name| {
+        router_patch(pattern, handler, name)
+    })
+    app.set("resources", |base, handlers| {
+        router_resources(base, handlers)
+    })
+    app.set("group", |prefix, callback| {
+        router_group(prefix, callback)
+    })
+
+    // Named route URL generation
+    app.set("path_for", |name, params| {
+        return router_path_for(name, params)
+    })
+
+    // Start the server
+    app.set("listen", |port_override| {
+        let port = if port_override != nil { port_override } else { config.get("port") }
+        let public_path = config.get("public_path")
+        let has_public = file_exists(public_path)
+        flux abs_public = ""
+        if has_public {
+            abs_public = realpath(public_path)
+        }
+
+        let server_fd = tcp_listen("0.0.0.0", port)
+        print("Anneal server listening on http://localhost:" + to_string(port))
+
+        loop {
+            let client_fd = tcp_accept(server_fd)
+            let raw = tcp_read(client_fd)
+
+            if len(raw) > 0 {
+                let req = http._parse_request(raw)
+                let peer = tcp_peer_addr(client_fd)
+                req.set("peer", peer)
+
+                let method = req.get("method")
+                let path = req.get("path")
+                let start_time = time()
+
+                // Parse JSON body if applicable
+                let headers = req.get("headers")
+                flux content_type = ""
+                if headers.has("Content-Type") {
+                    content_type = headers.get("Content-Type")
+                }
+                if content_type.contains("application/json") {
+                    let body = req.get("body")
+                    if len(body) > 0 {
+                        let parsed = try {
+                            json_parse(body)
+                        } catch _e {
+                            nil
+                        }
+                        req.set("parsed_body", parsed)
+                    }
+                }
+
+                // Initialize params from query string
+                let query = req.get("query")
+                let params = Map::new()
+                if query != nil {
+                    let qkeys = query.keys()
+                    for qk in qkeys {
+                        params.set(qk, query.get(qk))
+                    }
+                }
+                // Merge parsed body params
+                if req.has("parsed_body") {
+                    let pbody = req.get("parsed_body")
+                    if pbody != nil && typeof(pbody) == "Map" {
+                        let bkeys = pbody.keys()
+                        for bk in bkeys {
+                            params.set(bk, pbody.get(bk))
+                        }
+                    }
+                }
+                req.set("params", params)
+
+                // Try static files first (only for paths with file extensions)
+                flux final_res = nil
+                let path_ext = mime.ext_from_path(path)
+                if has_public && (method == "GET" || method == "HEAD") && len(path_ext) > 0 {
+                    let file_path = public_path + path
+                    if _safe_static(file_path, abs_public) && file_exists(file_path) {
+                        let content = read_file(file_path)
+                        let ct = mime.for_path(path)
+                        final_res = http.response(200, content)
+                        let rh = final_res.get("headers")
+                        rh.set("Content-Type", ct)
+                        rh.set("Cache-Control", "public, max-age=3600")
+                        final_res.set("headers", rh)
+                    }
+                }
+
+                // Route dispatch with middleware pipeline
+                if final_res == nil {
+                    let route_match = router_match(method, path)
+                    if route_match != nil {
+                        // Merge route params
+                        let rparams = route_match.get("params")
+                        let rpkeys = rparams.keys()
+                        for rpk in rpkeys {
+                            params.set(rpk, rparams.get(rpk))
+                        }
+                        req.set("params", params)
+
+                        let handler = route_match.get("handler")
+                        // Run middleware pipeline then handler
+                        let res_ctx = Map::new()
+                        let final_handler = |r, s| {
+                            return handler(r, s)
+                        }
+                        let result = try {
+                            _run_mw(mw_stack, mw_count, 0, req, res_ctx, final_handler)
+                        } catch e {
+                            print("Error: " + to_string(e))
+                            http.response(500, "Internal Server Error")
+                        }
+                        final_res = result
+                    } else {
+                        final_res = http.response(404, "404 Not Found: " + path)
+                    }
+                }
+
+                if final_res == nil {
+                    final_res = http.response(500, "Internal Server Error")
+                }
+
+                // Add security headers
+                let fh = final_res.get("headers")
+                fh.set("X-Content-Type-Options", "nosniff")
+                fh.set("X-Frame-Options", "DENY")
+                final_res.set("headers", fh)
+
+                // Log the request
+                let elapsed = time() - start_time
+                flux status_str = to_string(final_res.get("status"))
+                print(method + " " + path + " " + status_str + " " + to_string(elapsed) + "ms")
+
+                // Send response
+                let raw_response = http._format_response(final_res)
+                tcp_write(client_fd, raw_response)
+            }
+
+            tcp_close(client_fd)
+        }
+    })
+
+    return app
+}
+
+// Run middleware pipeline recursively.
+fn _run_mw(stack: Array, count: Int, index: Int, req: Map, res: Map, final_handler: Fn) -> Any {
+    if index >= count {
+        return final_handler(req, res)
+    }
+    let mw = stack[index]
+    let next_idx = index + 1
+    let next_fn = |r, s| {
+        return _run_mw(stack, count, next_idx, r, s, final_handler)
+    }
+    return mw(req, res, next_fn)
+}
+
+// Check if a file path is safely under the public root.
+fn _safe_static(file_path: String, abs_root: String) -> Bool {
+    if file_path.contains("..") {
+        return false
+    }
+    let resolved = realpath(file_path)
+    if resolved == nil {
+        return false
+    }
+    return resolved.starts_with(abs_root)
+}
+
+// Pre-allocate an array of nil slots.
+fn _make_slots(size: Int) -> Array {
+    flux arr = []
+    flux i = 0
+    while i < size {
+        arr.push(nil)
+        i = i + 1
+    }
+    return arr
+}

@@ -1,0 +1,84 @@
+// Anneal MIME Type Helpers
+// Maps file extensions to MIME types for static file serving.
+
+fn types() -> Map {
+    let m = Map::new()
+    // Text
+    m.set("html", "text/html; charset=utf-8")
+    m.set("htm", "text/html; charset=utf-8")
+    m.set("css", "text/css; charset=utf-8")
+    m.set("js", "application/javascript; charset=utf-8")
+    m.set("mjs", "application/javascript; charset=utf-8")
+    m.set("json", "application/json; charset=utf-8")
+    m.set("xml", "application/xml; charset=utf-8")
+    m.set("txt", "text/plain; charset=utf-8")
+    m.set("csv", "text/csv; charset=utf-8")
+    m.set("md", "text/markdown; charset=utf-8")
+
+    // Images
+    m.set("png", "image/png")
+    m.set("jpg", "image/jpeg")
+    m.set("jpeg", "image/jpeg")
+    m.set("gif", "image/gif")
+    m.set("svg", "image/svg+xml")
+    m.set("ico", "image/x-icon")
+    m.set("webp", "image/webp")
+    m.set("avif", "image/avif")
+
+    // Fonts
+    m.set("woff", "font/woff")
+    m.set("woff2", "font/woff2")
+    m.set("ttf", "font/ttf")
+    m.set("otf", "font/otf")
+    m.set("eot", "application/vnd.ms-fontobject")
+
+    // Media
+    m.set("mp3", "audio/mpeg")
+    m.set("mp4", "video/mp4")
+    m.set("webm", "video/webm")
+    m.set("ogg", "audio/ogg")
+    m.set("wav", "audio/wav")
+
+    // Archives / binary
+    m.set("pdf", "application/pdf")
+    m.set("zip", "application/zip")
+    m.set("gz", "application/gzip")
+    m.set("tar", "application/x-tar")
+    m.set("wasm", "application/wasm")
+
+    return m
+}
+
+// Look up the MIME type for a file extension (without the dot).
+// Returns "application/octet-stream" if unknown.
+fn lookup(ext: String) -> String {
+    let t = types()
+    let lower = ext.to_lower()
+    if t.has(lower) {
+        return t.get(lower)
+    }
+    return "application/octet-stream"
+}
+
+// Extract extension from a file path (without the dot).
+fn ext_from_path(path: String) -> String {
+    let dot = path.last_index_of(".")
+    if dot < 0 {
+        return ""
+    }
+    // Make sure this isn't a dot in a directory name
+    let slash = path.last_index_of("/")
+    if slash > dot {
+        return ""
+    }
+    return path.substring(dot + 1, len(path))
+}
+
+// Look up the MIME type for a file path.
+fn for_path(path: String) -> String {
+    let ext = ext_from_path(path)
+    if len(ext) == 0 {
+        return "application/octet-stream"
+    }
+    return lookup(ext)
+}

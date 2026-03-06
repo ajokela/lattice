@@ -1,0 +1,300 @@
+// Anneal Router
+// Dynamic segment matching, named routes, route groups, and RESTful resources.
+//
+// Uses pre-allocated arrays with index-based tracking because Lattice closures
+// stored in Maps cannot share mutable state via .push() or Map.set().
+
+let MAX_ROUTES = 256
+
+// Create a new router.
+fn new() -> Map {
+    let router = Map::new()
+
+    // Pre-allocated parallel arrays for route data
+    flux route_methods = _make_slots(MAX_ROUTES)
+    flux route_patterns = _make_slots(MAX_ROUTES)
+    flux route_handlers = _make_slots(MAX_ROUTES)
+    flux route_names = _make_slots(MAX_ROUTES)
+    // Store segments as serialized strings: "seg1\tseg2\tseg3"
+    flux route_seg_strs = _make_slots(MAX_ROUTES)
+    flux route_count = 0
+
+    // Named route parallel arrays
+    flux named_keys = _make_slots(MAX_ROUTES)
+    flux named_vals = _make_slots(MAX_ROUTES)
+    flux named_count = 0
+
+    flux prefix = ""
+
+    // Add a route.
+    router.set("add", |method, pattern, handler, name| {
+        let full_pattern = prefix + pattern
+        let idx = route_count
+        route_methods[idx] = method
+        route_patterns[idx] = full_pattern
+        route_handlers[idx] = handler
+        route_names[idx] = name
+        route_seg_strs[idx] = _join_segments(_split_path(full_pattern))
+        route_count = route_count + 1
+        if name != nil {
+            let ni = named_count
+            named_keys[ni] = name
+            named_vals[ni] = full_pattern
+            named_count = named_count + 1
+        }
+    })
+
+    // Convenience methods — call add directly (avoiding chained map.get calls)
+    router.set("get", |pattern, handler, name| {
+        let full_pattern = prefix + pattern
+        let idx = route_count
+        route_methods[idx] = "GET"
+        route_patterns[idx] = full_pattern
+        route_handlers[idx] = handler
+        route_names[idx] = name
+        route_seg_strs[idx] = _join_segments(_split_path(full_pattern))
+        route_count = route_count + 1
+        if name != nil {
+            let ni = named_count
+            named_keys[ni] = name
+            named_vals[ni] = full_pattern
+            named_count = named_count + 1
+        }
+    })
+    router.set("post", |pattern, handler, name| {
+        let full_pattern = prefix + pattern
+        let idx = route_count
+        route_methods[idx] = "POST"
+        route_patterns[idx] = full_pattern
+        route_handlers[idx] = handler
+        route_names[idx] = name
+        route_seg_strs[idx] = _join_segments(_split_path(full_pattern))
+        route_count = route_count + 1
+        if name != nil {
+            let ni = named_count
+            named_keys[ni] = name
+            named_vals[ni] = full_pattern
+            named_count = named_count + 1
+        }
+    })
+    router.set("put", |pattern, handler, name| {
+        let full_pattern = prefix + pattern
+        let idx = route_count
+        route_methods[idx] = "PUT"
+        route_patterns[idx] = full_pattern
+        route_handlers[idx] = handler
+        route_names[idx] = name
+        route_seg_strs[idx] = _join_segments(_split_path(full_pattern))
+        route_count = route_count + 1
+        if name != nil {
+            let ni = named_count
+            named_keys[ni] = name
+            named_vals[ni] = full_pattern
+            named_count = named_count + 1
+        }
+    })
+    router.set("delete", |pattern, handler, name| {
+        let full_pattern = prefix + pattern
+        let idx = route_count
+        route_methods[idx] = "DELETE"
+        route_patterns[idx] = full_pattern
+        route_handlers[idx] = handler
+        route_names[idx] = name
+        route_seg_strs[idx] = _join_segments(_split_path(full_pattern))
+        route_count = route_count + 1
+        if name != nil {
+            let ni = named_count
+            named_keys[ni] = name
+            named_vals[ni] = full_pattern
+            named_count = named_count + 1
+        }
+    })
+    router.set("patch", |pattern, handler, name| {
+        let full_pattern = prefix + pattern
+        let idx = route_count
+        route_methods[idx] = "PATCH"
+        route_patterns[idx] = full_pattern
+        route_handlers[idx] = handler
+        route_names[idx] = name
+        route_seg_strs[idx] = _join_segments(_split_path(full_pattern))
+        route_count = route_count + 1
+        if name != nil {
+            let ni = named_count
+            named_keys[ni] = name
+            named_vals[ni] = full_pattern
+            named_count = named_count + 1
+        }
+    })
+
+    // Register RESTful resource routes.
+    router.set("resources", |base, handlers| {
+        let rname = _resource_name(base)
+        let add_fn = router.get("add")
+        if handlers.has("index") {
+            add_fn("GET", base, handlers.get("index"), rname + "_index")
+        }
+        if handlers.has("new_form") {
+            add_fn("GET", base + "/new", handlers.get("new_form"), rname + "_new")
+        }
+        if handlers.has("create") {
+            add_fn("POST", base, handlers.get("create"), rname + "_create")
+        }
+        if handlers.has("show") {
+            add_fn("GET", base + "/:id", handlers.get("show"), rname + "_show")
+        }
+        if handlers.has("edit") {
+            add_fn("GET", base + "/:id/edit", handlers.get("edit"), rname + "_edit")
+        }
+        if handlers.has("update") {
+            add_fn("PUT", base + "/:id", handlers.get("update"), rname + "_update")
+            add_fn("PATCH", base + "/:id", handlers.get("update"), nil)
+        }
+        if handlers.has("destroy") {
+            add_fn("DELETE", base + "/:id", handlers.get("destroy"), rname + "_destroy")
+        }
+    })
+
+    // Route group with a shared prefix.
+    router.set("group", |group_prefix, callback| {
+        let old_prefix = prefix
+        prefix = prefix + group_prefix
+        callback(router)
+        prefix = old_prefix
+    })
+
+    // Match a request method and path against registered routes.
+    // Returns {handler, params} or nil if no match.
+    router.set("match", |method, path| {
+        let path_segs = _split_path(path)
+        flux i = 0
+        while i < route_count {
+            if route_methods[i] == method {
+                let route_segs = _split_segments(route_seg_strs[i])
+                let result = _match_segments(route_segs, path_segs)
+                if result != nil {
+                    let m = Map::new()
+                    m.set("handler", route_handlers[i])
+                    m.set("params", result)
+                    return m
+                }
+            }
+            i = i + 1
+        }
+        return nil
+    })
+
+    // Generate a URL path from a named route + params Map.
+    router.set("path_for", |name, params| {
+        flux pattern = nil
+        flux i = 0
+        while i < named_count {
+            if named_keys[i] == name {
+                pattern = named_vals[i]
+            }
+            i = i + 1
+        }
+        if pattern == nil {
+            return nil
+        }
+        let segs = _split_path(pattern)
+        flux result = ""
+        for seg in segs {
+            if len(seg) > 0 {
+                if seg.starts_with(":") {
+                    let key = seg.substring(1, len(seg))
+                    if params != nil && params.has(key) {
+                        result = result + "/" + to_string(params.get(key))
+                    } else {
+                        result = result + "/" + seg
+                    }
+                } else {
+                    result = result + "/" + seg
+                }
+            }
+        }
+        if len(result) == 0 {
+            return "/"
+        }
+        return result
+    })
+
+    return router
+}
+
+// Create a pre-allocated array of nil slots.
+fn _make_slots(size: Int) -> Array {
+    flux arr = [nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil]
+    // Extend to desired size (256) in chunks
+    flux i = 16
+    while i < size {
+        arr.push(nil)
+        i = i + 1
+    }
+    return arr
+}
+
+// Join segments into a tab-separated string for storage.
+fn _join_segments(segs: Array) -> String {
+    flux result = ""
+    flux first = true
+    for s in segs {
+        if first {
+            result = s
+            first = false
+        } else {
+            result = result + "\t" + s
+        }
+    }
+    return result
+}
+
+// Split a tab-separated segment string back into an array.
+fn _split_segments(seg_str: String) -> Array {
+    if len(seg_str) == 0 {
+        return []
+    }
+    return seg_str.split("\t")
+}
+
+// Split a path into segments, filtering out empty strings.
+fn _split_path(path: String) -> Array {
+    let parts = path.split("/")
+    flux result = []
+    for p in parts {
+        if len(p) > 0 {
+            result.push(p)
+        }
+    }
+    return result
+}
+
+// Match route segments against path segments.
+// Returns a Map of param values on match, nil on mismatch.
+fn _match_segments(route_segs: Array, path_segs: Array) -> Any {
+    if len(route_segs) != len(path_segs) {
+        return nil
+    }
+    let params = Map::new()
+    flux i = 0
+    while i < len(route_segs) {
+        let rseg = route_segs[i]
+        let pseg = path_segs[i]
+        if rseg.starts_with(":") {
+            let key = rseg.substring(1, len(rseg))
+            params.set(key, pseg)
+        } else if rseg != pseg {
+            return nil
+        }
+        i = i + 1
+    }
+    return params
+}
+
+// Extract a resource name from a path like "/users" -> "users".
+fn _resource_name(base: String) -> String {
+    let segs = _split_path(base)
+    if len(segs) > 0 {
+        return segs[len(segs) - 1]
+    }
+    return "resource"
+}

@@ -1,0 +1,54 @@
+// Anneal Params Middleware
+// Merges URL dynamic segments, query string parameters, and parsed JSON body
+// into a single ctx.params Map on the request.
+
+// Create a params-merging middleware.
+fn new() -> Fn {
+    return |req, res, next| {
+        let params = Map::new()
+
+        // 1. Query string parameters (already parsed by http_server)
+        let query = req.get("query")
+        if query != nil {
+            let keys = query.keys()
+            for k in keys {
+                params.set(k, query.get(k))
+            }
+        }
+
+        // 2. Parsed JSON body (from body_parser middleware)
+        if req.has("parsed_body") {
+            let body = req.get("parsed_body")
+            if body != nil && typeof(body) == "Map" {
+                let keys = body.keys()
+                for k in keys {
+                    params.set(k, body.get(k))
+                }
+            }
+        }
+
+        // 3. URL params will be merged in by the app dispatcher
+        //    after route matching (route_params)
+        //    Store the base params for later merging
+        req.set("params", params)
+
+        return next(req, res)
+    }
+}
+
+// Merge route params (from dynamic segments) into the request's params Map.
+// Called by the app after route matching.
+fn merge_route_params(req: Map, route_params: Map) -> Map {
+    flux params = req.get("params")
+    if params == nil {
+        params = Map::new()
+    }
+    if route_params != nil {
+        let keys = route_params.keys()
+        for k in keys {
+            params.set(k, route_params.get(k))
+        }
+    }
+    req.set("params", params)
+    return req
+}
