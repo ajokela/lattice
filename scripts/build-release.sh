@@ -210,7 +210,7 @@ build_bg "linux-x86_64" "
         -v '$SRC_TAR:/tmp/src.tar.gz:ro' \
         -v '$ABSOUT:/out' \
         alpine:3.19 sh -c '
-            apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers &&
+            apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers ncurses-static ncurses-dev &&
             mkdir /build && cd /build &&
             tar xzf /tmp/src.tar.gz &&
             make release STATIC=1 &&
@@ -225,7 +225,7 @@ build_bg "linux-aarch64" "
         -v '$SRC_TAR:/tmp/src.tar.gz:ro' \
         -v '$ABSOUT:/out' \
         alpine:3.19 sh -c '
-            apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers &&
+            apk add --no-cache build-base libedit-static libedit-dev openssl-dev openssl-libs-static linux-headers ncurses-static ncurses-dev &&
             mkdir /build && cd /build &&
             tar xzf /tmp/src.tar.gz &&
             make release STATIC=1 &&

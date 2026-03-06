@@ -66,8 +66,8 @@ for f in \
     src/ext.c src/stackopcode.c src/chunk.c src/stackcompiler.c src/stackvm.c \
     src/runtime.c src/intern.c src/latc.c src/regopcode.c src/regcompiler.c \
     src/regvm.c src/builtin_methods.c src/match_check.c src/package.c \
-    src/formatter.c src/debugger.c src/completion.c src/doc_gen.c \
-    src/iterator.c src/gc.c; do
+    src/formatter.c src/debugger.c src/dap.c src/completion.c src/doc_gen.c \
+    src/iterator.c src/gc.c src/progress.c; do
     SRCS="$SRCS $f"
 done
 
