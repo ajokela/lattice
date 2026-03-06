@@ -6,6 +6,7 @@
 #include <windows.h>
 #include "win32_compat.h"
 #else
+#include <unistd.h>
 #include <libgen.h>
 #endif
 #include <limits.h>
