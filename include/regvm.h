@@ -143,4 +143,9 @@ RegChunk *reg_compile_module(const Program *prog, char **error);
 /* Free known enums (call on exit). */
 void reg_compiler_free_known_enums(void);
 
+/* Verify a deserialized (untrusted) register chunk before execution. Returns
+ * NULL if the chunk and all of its sub-chunks are well-formed; otherwise a
+ * heap-allocated error string (caller frees) describing the first violation. */
+char *regchunk_verify(const RegChunk *c);
+
 #endif /* REGVM_H */

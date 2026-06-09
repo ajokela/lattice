@@ -16,6 +16,7 @@
 #include "doc_gen.h"
 #include "latc.h"
 #include "stackopcode.h"
+#include "regopcode.h"
 #include "test_backend.h"
 
 /* Import test macros from test_main.c */
@@ -5132,4 +5133,102 @@ TEST(verify_accepts_real_compiled_bytecode) {
     program_free(&prog);
     for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
     lat_vec_free(&tokens);
+}
+
+/* ── Register-VM bytecode verifier (LAT-406): a malformed .rlatc must be
+ *    REJECTED by regchunk_deserialize, not handed to the register VM. ── */
+
+/* Assemble a single-chunk .rlatc image. code is an array of 32-bit instructions. */
+static uint8_t *build_rlatc_image(const uint32_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts,
+                                  uint8_t max_reg, size_t *out_len) {
+    LatcBuf b;
+    lb_init(&b);
+    lb_byte(&b, 'R');
+    lb_byte(&b, 'L');
+    lb_byte(&b, 'A');
+    lb_byte(&b, 'T');
+    lb_u16(&b, RLATC_FORMAT);
+    lb_u16(&b, 0); /* reserved */
+    lb_u32(&b, code_len);
+    for (uint32_t i = 0; i < code_len; i++) lb_u32(&b, code[i]);
+    lb_u32(&b, code_len); /* lines_len */
+    for (uint32_t i = 0; i < code_len; i++) lb_u32(&b, 0);
+    lb_u32(&b, nconsts);
+    for (uint32_t i = 0; i < nconsts; i++) {
+        lb_byte(&b, consts[i].tag);
+        if (consts[i].tag == LATC_TAG_INT) {
+            uint64_t v = (uint64_t)consts[i].i;
+            for (int k = 0; k < 8; k++) lb_byte(&b, (v >> (k * 8)) & 0xff);
+        } else if (consts[i].tag == LATC_TAG_STR) {
+            uint32_t sl = (uint32_t)strlen(consts[i].s);
+            lb_u32(&b, sl);
+            for (uint32_t k = 0; k < sl; k++) lb_byte(&b, (uint8_t)consts[i].s[k]);
+        }
+    }
+    lb_u32(&b, 0);        /* local_name_count */
+    lb_byte(&b, max_reg); /* max_reg */
+    *out_len = b.len;
+    return b.d;
+}
+
+static int rlatc_rejected(const uint32_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts) {
+    size_t len;
+    uint8_t *img = build_rlatc_image(code, code_len, consts, nconsts, 8, &len);
+    char *err = NULL;
+    RegChunk *c = regchunk_deserialize(img, len, &err);
+    free(img);
+    if (c) {
+        regchunk_free(c);
+        free(err);
+        return 0;
+    }
+    free(err);
+    return 1;
+}
+
+TEST(reg_verify_accepts_valid_minimal_chunk) {
+    /* LOADUNIT R0 ; RETURN R0 (count 1) — a well-formed chunk must still load. */
+    uint32_t code[] = {
+        REG_ENCODE_ABC(ROP_LOADUNIT, 0, 0, 0),
+        REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0),
+    };
+    size_t len;
+    uint8_t *img = build_rlatc_image(code, 2, NULL, 0, 1, &len);
+    char *err = NULL;
+    RegChunk *c = regchunk_deserialize(img, len, &err);
+    free(img);
+    if (!c) fprintf(stderr, "  reg verifier rejected valid bytecode: %s\n", err ? err : "(null)");
+    ASSERT(c != NULL);
+    if (c) regchunk_free(c);
+    free(err);
+}
+
+TEST(reg_verify_rejects_unknown_opcode) {
+    uint32_t code[] = {200u /* opcode 200 >= ROP_COUNT */, REG_ENCODE_ABC(ROP_RETURN, 0, 0, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
+}
+
+TEST(reg_verify_rejects_oob_constant_index) {
+    /* LOADK R0, K[500] with an empty constant pool. */
+    uint32_t code[] = {REG_ENCODE_ABx(ROP_LOADK, 0, 500), REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
+}
+
+TEST(reg_verify_rejects_global_name_type_confusion) {
+    /* GETGLOBAL R0, K[0] where K[0] is an Int — VM would deref its bits as char*. */
+    uint32_t code[] = {REG_ENCODE_ABx(ROP_GETGLOBAL, 0, 0), REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0)};
+    LatcConst consts[] = {{LATC_TAG_INT, 0x4141414141414141LL, NULL}};
+    ASSERT(rlatc_rejected(code, 2, consts, 1));
+}
+
+TEST(reg_verify_rejects_oob_jump) {
+    /* JMP with a huge forward offset lands far past code_len. */
+    uint32_t code[] = {REG_ENCODE_sBx(ROP_JMP, 100000), REG_ENCODE_ABC(ROP_RETURN, 0, 0, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
+}
+
+TEST(reg_verify_rejects_truncated_two_word_op) {
+    /* ROP_INVOKE is a two-word instruction but is the last word here. */
+    uint32_t code[] = {REG_ENCODE_ABC(ROP_RETURN, 0, 0, 0), REG_ENCODE_ABC(ROP_INVOKE, 0, 0, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
 }
