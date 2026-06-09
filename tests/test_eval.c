@@ -14,6 +14,8 @@
 #include "runtime.h"
 #include "package.h"
 #include "doc_gen.h"
+#include "latc.h"
+#include "stackopcode.h"
 #include "test_backend.h"
 
 /* Import test macros from test_main.c */
@@ -4962,4 +4964,172 @@ TEST(native_call_over_16_args) {
                 "\"s10\",\"s11\",\"s12\",\"s13\",\"s14\",\"s15\",\"s16\",\"s17\",\"s18\",\"s19\")\n"
                 "    assert(len(p) >= 20, \"path_join dropped arguments\")\n"
                 "}\n");
+}
+
+/* ── Bytecode verifier (LAT-405): a malformed .latc must be REJECTED by
+ *    chunk_deserialize, not handed to the VM with unvalidated operands. ── */
+
+/* Constant type tags as written by the .latc serializer (src/latc.c). */
+#define LATC_TAG_INT 0
+#define LATC_TAG_STR 3
+
+typedef struct {
+    uint8_t *d;
+    size_t len, cap;
+} LatcBuf;
+static void lb_init(LatcBuf *b) {
+    b->cap = 64;
+    b->len = 0;
+    b->d = malloc(b->cap);
+}
+static void lb_byte(LatcBuf *b, uint8_t x) {
+    if (b->len + 1 > b->cap) {
+        b->cap *= 2;
+        b->d = realloc(b->d, b->cap);
+    }
+    b->d[b->len++] = x;
+}
+static void lb_u16(LatcBuf *b, uint16_t x) {
+    lb_byte(b, x & 0xff);
+    lb_byte(b, (x >> 8) & 0xff);
+}
+static void lb_u32(LatcBuf *b, uint32_t x) {
+    for (int k = 0; k < 4; k++) lb_byte(b, (x >> (k * 8)) & 0xff);
+}
+
+typedef struct {
+    uint8_t tag;
+    int64_t i;
+    const char *s;
+} LatcConst;
+
+/* Assemble a single-chunk .latc image with the given code and constants.
+ * line_count is set to code_len (one line per byte, as the real serializer does). */
+static uint8_t *build_latc_image(const uint8_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts,
+                                 size_t *out_len) {
+    LatcBuf b;
+    lb_init(&b);
+    lb_byte(&b, 'L');
+    lb_byte(&b, 'A');
+    lb_byte(&b, 'T');
+    lb_byte(&b, 'C');
+    lb_u16(&b, LATC_FORMAT);
+    lb_u16(&b, 0); /* reserved */
+    lb_u32(&b, code_len);
+    for (uint32_t i = 0; i < code_len; i++) lb_byte(&b, code[i]);
+    lb_u32(&b, code_len); /* line_count */
+    for (uint32_t i = 0; i < code_len; i++) lb_u32(&b, 0);
+    lb_u32(&b, nconsts);
+    for (uint32_t i = 0; i < nconsts; i++) {
+        lb_byte(&b, consts[i].tag);
+        if (consts[i].tag == LATC_TAG_INT) {
+            uint64_t v = (uint64_t)consts[i].i;
+            for (int k = 0; k < 8; k++) lb_byte(&b, (v >> (k * 8)) & 0xff);
+        } else if (consts[i].tag == LATC_TAG_STR) {
+            uint32_t sl = (uint32_t)strlen(consts[i].s);
+            lb_u32(&b, sl);
+            for (uint32_t k = 0; k < sl; k++) lb_byte(&b, (uint8_t)consts[i].s[k]);
+        }
+    }
+    lb_u32(&b, 0);  /* local_name_count */
+    lb_byte(&b, 0); /* has_name */
+    *out_len = b.len;
+    return b.d;
+}
+
+/* Helper: assert a crafted image is rejected by the deserializer/verifier. */
+static int latc_rejected(const uint8_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts) {
+    size_t len;
+    uint8_t *img = build_latc_image(code, code_len, consts, nconsts, &len);
+    char *err = NULL;
+    Chunk *c = chunk_deserialize(img, len, &err);
+    free(img);
+    if (c) {
+        chunk_free(c);
+        free(err);
+        return 0; /* accepted -> NOT rejected */
+    }
+    free(err);
+    return 1; /* rejected */
+}
+
+TEST(verify_accepts_valid_minimal_chunk) {
+    uint8_t code[] = {OP_HALT};
+    size_t len;
+    uint8_t *img = build_latc_image(code, sizeof(code), NULL, 0, &len);
+    char *err = NULL;
+    Chunk *c = chunk_deserialize(img, len, &err);
+    free(img);
+    ASSERT(c != NULL); /* a well-formed chunk must still load */
+    if (c) chunk_free(c);
+    free(err);
+}
+
+TEST(verify_rejects_unknown_opcode) {
+    uint8_t code[] = {0xFE, OP_HALT}; /* 0xFE > OP_HALT */
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_rejects_oob_constant_index) {
+    /* OP_CONSTANT 255 with an empty constant pool -> OOB read in OP_CONSTANT. */
+    uint8_t code[] = {OP_CONSTANT, 0xFF, OP_HALT};
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_rejects_truncated_operand) {
+    /* OP_CONSTANT needs a following index byte; here it is the last byte. */
+    uint8_t code[] = {OP_CONSTANT};
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_rejects_global_name_type_confusion) {
+    /* OP_GET_GLOBAL 0 where constant 0 is an Int, not a String. The VM would
+     * reinterpret the int's bits as a char* (arbitrary-pointer deref). */
+    uint8_t code[] = {OP_GET_GLOBAL, 0, OP_HALT};
+    LatcConst consts[] = {{LATC_TAG_INT, 0x4141414141414141LL, NULL}};
+    ASSERT(latc_rejected(code, sizeof(code), consts, 1));
+}
+
+TEST(verify_rejects_oob_forward_jump) {
+    /* OP_JUMP with a huge forward offset lands far past code_len. */
+    uint8_t code[] = {OP_JUMP, 0xFF, 0xFF, OP_HALT};
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_accepts_real_compiled_bytecode) {
+    /* A genuine program compiled to bytecode must round-trip through
+     * serialize -> deserialize (with verification) without being rejected. */
+    const char *src = "fn add(a: Int, b: Int) -> Int { return a + b }\n"
+                      "fn main() {\n"
+                      "    let xs = [1, 2, 3]\n"
+                      "    let total = add(xs[0], xs[2])\n"
+                      "    print(total)\n"
+                      "}\n";
+    Lexer lex = lexer_new(src);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    ASSERT(lex_err == NULL);
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    ASSERT(parse_err == NULL);
+    char *comp_err = NULL;
+    Chunk *chunk = stack_compile(&prog, &comp_err);
+    ASSERT(chunk != NULL);
+
+    size_t len = 0;
+    uint8_t *img = chunk_serialize(chunk, &len);
+    ASSERT(img != NULL);
+    char *err = NULL;
+    Chunk *loaded = chunk_deserialize(img, len, &err);
+    if (!loaded) fprintf(stderr, "  verifier rejected valid bytecode: %s\n", err ? err : "(null)");
+    ASSERT(loaded != NULL);
+
+    if (loaded) chunk_free(loaded);
+    free(err);
+    free(img);
+    chunk_free(chunk);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
 }

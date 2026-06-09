@@ -206,7 +206,14 @@ static void serialize_chunk(ByteBuf *bb, const Chunk *c) {
 
 /* ── Deserialize a single chunk (recursive) ── */
 
-static Chunk *deserialize_chunk(ByteReader *br, char **err) {
+static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
+    /* Bound recursion so a deeply nested closure tree in an untrusted .latc
+     * cannot overflow the C stack during load. */
+    if (depth > 200) {
+        *err = strdup("chunk nesting too deep");
+        return NULL;
+    }
+
     uint32_t code_len;
     if (!br_read_u32_le(br, &code_len)) {
         *err = strdup("truncated: missing code_len");
@@ -330,7 +337,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err) {
                     chunk_free(c);
                     return NULL;
                 }
-                Chunk *sub = deserialize_chunk(br, err);
+                Chunk *sub = deserialize_chunk(br, err, depth + 1);
                 if (!sub) {
                     chunk_free(c);
                     return NULL;
@@ -474,7 +481,20 @@ Chunk *chunk_deserialize(const uint8_t *data, size_t len, char **err) {
         return NULL;
     }
 
-    return deserialize_chunk(&br, err);
+    Chunk *c = deserialize_chunk(&br, err, 0);
+    if (!c) return NULL;
+
+    /* Reject untrusted bytecode with invalid opcodes/operands before it can
+     * reach the VM dispatch loop (which trusts every operand). */
+    char *verr = chunk_verify(c);
+    if (verr) {
+        chunk_free(c);
+        if (err) *err = verr;
+        else free(verr);
+        return NULL;
+    }
+
+    return c;
 }
 
 int chunk_save(const Chunk *c, const char *path) {
