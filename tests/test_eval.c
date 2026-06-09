@@ -5297,3 +5297,23 @@ TEST(string_repeat_overflow_is_rejected) {
                 "    assert(len(s) == 0, \"repeat overflow should yield empty\")\n"
                 "}\n");
 }
+
+/* ── Channel send use-after-free (LAT-411) ── */
+TEST(channel_send_survives_spawn_exit) {
+    /* A value sent on a channel by a spawned thread must remain valid after the
+     * thread (and its thread-local heap) is torn down at scope join. The string
+     * is built at runtime so it is heap-allocated in the spawn thread, not an
+     * immortal interned literal. Reading it after the scope must not touch freed
+     * memory. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn {\n"
+                "            ch.send(freeze([100, 200, 300, 400, 500, 600, 700, 800]))\n"
+                "        }\n"
+                "    }\n"
+                "    let v = ch.recv()\n"
+                "    assert(v[0] == 100, \"channel array corrupted (elem 0)\")\n"
+                "    assert(v[7] == 800, \"channel array corrupted (elem 7)\")\n"
+                "}\n");
+}

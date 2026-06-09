@@ -159,6 +159,8 @@ bool value_is_crystal(const LatValue *v);
 
 /* ── Deep operations ── */
 LatValue value_deep_clone(const LatValue *v);
+/* Deep-clone into thread-independent (malloc-backed) storage; see value.c. */
+LatValue value_detach(const LatValue *v);
 LatValue value_freeze(LatValue v);
 LatValue value_thaw(const LatValue *v);
 
