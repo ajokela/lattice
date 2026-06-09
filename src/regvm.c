@@ -1682,10 +1682,16 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             }
             int64_t n = args[0].as.int_val;
             size_t slen = strlen(obj->as.str_val);
-            char *buf = malloc(slen * (size_t)n + 1);
+            if (n == 0 || slen == 0 || (size_t)n > (SIZE_MAX - 1) / slen) {
+                /* n==0/empty string, or slen*n would overflow size_t. */
+                *result = value_string("");
+                return true;
+            }
+            size_t total = slen * (size_t)n;
+            char *buf = malloc(total + 1);
             if (!buf) return 0;
-            for (int64_t i = 0; i < n; i++) memcpy(buf + i * (int64_t)slen, obj->as.str_val, slen);
-            buf[slen * (size_t)n] = '\0';
+            for (size_t i = 0; i < (size_t)n; i++) memcpy(buf + i * slen, obj->as.str_val, slen);
+            buf[total] = '\0';
             *result = value_string_owned(buf);
             return true;
         }

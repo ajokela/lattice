@@ -5286,3 +5286,14 @@ TEST(pkg_manifest_accepts_normal_deps) {
     ASSERT(ok);
     ASSERT_EQ_INT(n, 2);
 }
+
+/* ── String.repeat overflow (LAT-410) ── */
+TEST(string_repeat_overflow_is_rejected) {
+    /* slen(8) * n(2^61) overflows size_t to 0, so the old code malloc'd 1 byte
+     * and then memcpy'd ~2^64 bytes. The overflow must be detected and the
+     * result degraded to empty, not overflow the heap. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let s = \"abcdefgh\".repeat(2305843009213693952)\n"
+                "    assert(len(s) == 0, \"repeat overflow should yield empty\")\n"
+                "}\n");
+}
