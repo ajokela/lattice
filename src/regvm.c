@@ -3776,10 +3776,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
              * Native functions receive owned copies; value_free after call
              * handles cleanup.  Primitives have no heap data so bitwise
              * copy + no-op free is safe. */
-            LatValue args[16];
+            LatValue stackargs[16];
+            LatValue *args = (b <= 16) ? stackargs : malloc((size_t)b * sizeof(LatValue));
             for (int i = 0; i < b; i++) args[i] = rvm_clone_or_borrow(&R[a + 1 + i]);
             LatValue ret = native(args, b);
             for (int i = 0; i < b; i++) value_free(&args[i]);
+            if (b > 16) free(args);
             /* Check runtime for native errors */
             if (vm->rt->error) {
                 char *err = vm->rt->error;
@@ -3801,10 +3803,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Extension native function (loaded via require_ext) */
         if (func->as.closure.default_values == VM_EXT_MARKER) {
-            LatValue args[16];
+            LatValue stackargs[16];
+            LatValue *args = (b <= 16) ? stackargs : malloc((size_t)b * sizeof(LatValue));
             for (int i = 0; i < b; i++) args[i] = rvm_clone_or_borrow(&R[a + 1 + i]);
             LatValue ret = ext_call_native(func->as.closure.native_fn, args, (size_t)b);
             for (int i = 0; i < b; i++) value_free(&args[i]);
+            if (b > 16) free(args);
             /* Extension errors return strings prefixed with "EVAL_ERROR:" */
             if (ret.type == VAL_STR && ret.as.str_val && strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
                 char *msg = strdup(ret.as.str_val + 11);

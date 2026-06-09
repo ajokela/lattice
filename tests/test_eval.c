@@ -4949,3 +4949,17 @@ TEST(scope_spawn_error_propagation) {
                  "    }\n"
                  "}\n");
 }
+
+/* ── Regression (LAT-407): a native called with more than 16 arguments must not
+ *    overflow the register VM's argument-gather buffer. ROP_CALL decoded the arg
+ *    count as an unbounded uint8 (0-255) and gathered into a fixed LatValue[16]. ── */
+TEST(native_call_over_16_args) {
+    /* path_join is a variadic native (-1 arity, not special-cased by the
+     * compilers), so a 20-segment call exercises the native dispatch path with
+     * arg count b = 20 > 16 on every backend. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let p = path_join(\"s0\",\"s1\",\"s2\",\"s3\",\"s4\",\"s5\",\"s6\",\"s7\",\"s8\",\"s9\","
+                "\"s10\",\"s11\",\"s12\",\"s13\",\"s14\",\"s15\",\"s16\",\"s17\",\"s18\",\"s19\")\n"
+                "    assert(len(p) >= 20, \"path_join dropped arguments\")\n"
+                "}\n");
+}
