@@ -65,6 +65,32 @@ static int pkg_remove_tree(const char *path) {
 
 static char *safe_strdup(const char *s) { return s ? strdup(s) : NULL; }
 
+bool pkg_name_is_valid(const char *name) {
+    if (!name || !*name) return false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
+    for (const char *p = name; *p; p++) {
+        char ch = *p;
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' ||
+              ch == '_' || ch == '-'))
+            return false;
+    }
+    return true;
+}
+
+/* True if `s` is safe to use as a single filesystem path component: non-empty,
+ * not "." or "..", no path separators, no embedded ".." and no control bytes.
+ * Looser than pkg_name_is_valid so it accepts version strings and refs
+ * ("^1.2.3", "1.0.0-beta", "*"). */
+static bool pkg_path_component_is_safe(const char *s) {
+    if (!s || !*s) return false;
+    if (strcmp(s, ".") == 0 || strcmp(s, "..") == 0) return false;
+    if (strstr(s, "..")) return false;
+    for (const char *p = s; *p; p++) {
+        if (*p == '/' || *p == '\\' || (unsigned char)*p < 0x20) return false;
+    }
+    return true;
+}
+
 /* Get string value from a TOML map, or NULL. Result is a borrowed pointer. */
 static const char *map_get_str(LatValue *map, const char *key) {
     if (!map || map->type != VAL_MAP) return NULL;
@@ -619,6 +645,30 @@ bool pkg_manifest_parse(const char *toml_str, PkgManifest *out, char **err) {
                 if (grev) d->git_rev = strdup(grev);
             } else {
                 d->version = strdup("*");
+            }
+
+            /* Reject manifest entries that could traverse the filesystem when
+             * used to build lat_modules/<name> and cache/<name>/<version>, or
+             * a git ref used as a cache path component. */
+            if (!pkg_name_is_valid(d->name) || !pkg_path_component_is_safe(d->version) ||
+                (d->git_tag && strstr(d->git_tag, "..")) || (d->git_branch && strstr(d->git_branch, "..")) ||
+                (d->git_rev && strstr(d->git_rev, ".."))) {
+                if (err) {
+                    size_t elen = strlen(d->name ? d->name : "") + 96;
+                    *err = malloc(elen);
+                    if (*err)
+                        snprintf(*err, elen, "invalid or unsafe dependency entry '%s' in lattice.toml",
+                                 d->name ? d->name : "");
+                }
+                free(d->name);
+                free(d->version);
+                free(d->git_url);
+                free(d->git_tag);
+                free(d->git_branch);
+                free(d->git_rev);
+                value_free(&root);
+                pkg_manifest_free(out);
+                return false;
             }
             out->dep_count++;
         }

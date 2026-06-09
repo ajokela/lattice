@@ -5232,3 +5232,57 @@ TEST(reg_verify_rejects_truncated_two_word_op) {
     uint32_t code[] = {REG_ENCODE_ABC(ROP_RETURN, 0, 0, 0), REG_ENCODE_ABC(ROP_INVOKE, 0, 0, 0)};
     ASSERT(rlatc_rejected(code, 2, NULL, 0));
 }
+
+/* ── Package name validation / path traversal (LAT-408) ── */
+
+TEST(pkg_name_is_valid_basic) {
+    ASSERT(pkg_name_is_valid("http-client"));
+    ASSERT(pkg_name_is_valid("json_parser"));
+    ASSERT(pkg_name_is_valid("a.b.c"));
+    ASSERT(!pkg_name_is_valid(""));
+    ASSERT(!pkg_name_is_valid("."));
+    ASSERT(!pkg_name_is_valid(".."));
+    ASSERT(!pkg_name_is_valid("../etc"));
+    ASSERT(!pkg_name_is_valid("../../../../tmp/evil"));
+    ASSERT(!pkg_name_is_valid("a/b"));
+    ASSERT(!pkg_name_is_valid("a;rm -rf ~"));
+    ASSERT(!pkg_name_is_valid("a'b"));
+}
+
+TEST(pkg_manifest_rejects_traversal_dep_name) {
+    /* A dependency name that escapes lat_modules/ must be rejected at parse,
+     * before it can reach a filesystem path or be removed with rm -rf. */
+    const char *toml = "[dependencies]\n\"../../../../tmp/evil\" = \"1.0.0\"\n";
+    PkgManifest m;
+    memset(&m, 0, sizeof(m));
+    char *err = NULL;
+    bool ok = pkg_manifest_parse(toml, &m, &err);
+    pkg_manifest_free(&m);
+    free(err);
+    ASSERT(!ok);
+}
+
+TEST(pkg_manifest_rejects_traversal_version) {
+    const char *toml = "[dependencies]\nfoo = \"../../etc\"\n";
+    PkgManifest m;
+    memset(&m, 0, sizeof(m));
+    char *err = NULL;
+    bool ok = pkg_manifest_parse(toml, &m, &err);
+    pkg_manifest_free(&m);
+    free(err);
+    ASSERT(!ok);
+}
+
+TEST(pkg_manifest_accepts_normal_deps) {
+    const char *toml = "[dependencies]\nhttp-client = \"^1.2.0\"\njson_parser = \"2.0.0\"\n";
+    PkgManifest m;
+    memset(&m, 0, sizeof(m));
+    char *err = NULL;
+    bool ok = pkg_manifest_parse(toml, &m, &err);
+    int n = (int)m.dep_count;
+    pkg_manifest_free(&m);
+    free(err);
+    if (!ok) fprintf(stderr, "  rejected valid manifest: %s\n", err ? err : "(null)");
+    ASSERT(ok);
+    ASSERT_EQ_INT(n, 2);
+}
