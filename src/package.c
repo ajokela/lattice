@@ -12,13 +12,52 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "win32_compat.h"
+#include <process.h>
 #else
 #include <unistd.h>
 #include <libgen.h>
+#include <sys/wait.h>
 #endif
 
 /* Default HTTP registry URL */
 #define PKG_DEFAULT_REGISTRY "https://registry.lattice-lang.org/v1"
+
+/* ── Shell-free command execution ──
+ * Run a program directly (no /bin/sh), so untrusted manifest fields (package
+ * names, git URLs, refs) cannot be interpreted as shell syntax. argv must be
+ * NULL-terminated and argv[0] is the program name. Returns the child exit
+ * status (0 = success), or -1 on spawn failure. */
+static int pkg_run(const char *const argv[]) {
+#ifdef _WIN32
+    intptr_t rc = _spawnvp(_P_WAIT, argv[0], (const char *const *)argv);
+    return (rc < 0) ? -1 : (int)rc;
+#else
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execvp(argv[0], (char *const *)argv);
+        _exit(127); /* exec failed */
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+}
+
+/* Recursively copy a directory tree (cp -R src dst), no shell. "--" guards
+ * against a src/dst that begins with '-' being parsed as an option. */
+static int pkg_copy_tree(const char *src, const char *dst) {
+    const char *argv[] = {"cp", "-R", "--", src, dst, NULL};
+    return pkg_run(argv);
+}
+
+/* Recursively remove a path (rm -rf path), no shell. */
+static int pkg_remove_tree(const char *path) {
+    const char *argv[] = {"rm", "-rf", "--", path, NULL};
+    return pkg_run(argv);
+}
 
 /* ========================================================================
  * Helpers
@@ -433,9 +472,9 @@ static bool fetch_from_registry(const char *name, const char *version, char **er
                 return false;
             }
         }
-        char cmd[PATH_MAX * 2 + 32];
-        snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", cached, name);
-        int rc = system(cmd);
+        char dst[PATH_MAX];
+        snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+        int rc = pkg_copy_tree(cached, dst);
         free(cached);
         if (rc != 0) {
             size_t elen = 256;
@@ -491,9 +530,9 @@ static bool fetch_from_registry(const char *name, const char *version, char **er
         }
     }
 
-    char cmd[PATH_MAX * 2 + 32];
-    snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", pkg_cache, name);
-    int rc = system(cmd);
+    char dst[PATH_MAX];
+    snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+    int rc = pkg_copy_tree(pkg_cache, dst);
     if (rc != 0) {
         size_t elen = 256;
         *err = malloc(elen);
@@ -1096,10 +1135,11 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
     char *cached = find_cached_package(name, cache_key);
     if (cached) {
         /* Copy from cache to lat_modules/ */
-        char cmd[PATH_MAX * 2 + 32];
-        snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", cached, name);
+        char dst[PATH_MAX];
+        snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+        int copy_rc = pkg_copy_tree(cached, dst);
         free(cached);
-        if (system(cmd) == 0) {
+        if (copy_rc == 0) {
             printf("  %s (cached, git %s)\n", name, ref_label);
             return true;
         }
@@ -1110,22 +1150,35 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
     char dest[PATH_MAX];
     snprintf(dest, sizeof(dest), "lat_modules/%s", name);
 
-    char cmd[PATH_MAX * 3 + 256];
+    /* Build the git clone argv with no shell. "--" separates options from the
+     * repo/dir positional args so a URL or dest beginning with '-' cannot be
+     * parsed as an option. --branch works for tags too; a specific rev needs a
+     * full clone (no --depth) so the commit is reachable. */
+    const char *clone_argv[12];
+    int ci = 0;
+    clone_argv[ci++] = "git";
+    clone_argv[ci++] = "clone";
+    clone_argv[ci++] = "--quiet";
     if (tag) {
-        /* Clone with --branch (works for tags too) --depth 1 for speed */
-        snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 --branch '%s' '%s' '%s' 2>&1", tag, git_url, dest);
+        clone_argv[ci++] = "--depth";
+        clone_argv[ci++] = "1";
+        clone_argv[ci++] = "--branch";
+        clone_argv[ci++] = tag;
     } else if (branch) {
-        snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 --branch '%s' '%s' '%s' 2>&1", branch, git_url, dest);
-    } else {
-        /* Clone HEAD (or full clone if we need a specific rev) */
-        if (rev) {
-            snprintf(cmd, sizeof(cmd), "git clone --quiet '%s' '%s' 2>&1", git_url, dest);
-        } else {
-            snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 '%s' '%s' 2>&1", git_url, dest);
-        }
+        clone_argv[ci++] = "--depth";
+        clone_argv[ci++] = "1";
+        clone_argv[ci++] = "--branch";
+        clone_argv[ci++] = branch;
+    } else if (!rev) {
+        clone_argv[ci++] = "--depth";
+        clone_argv[ci++] = "1";
     }
+    clone_argv[ci++] = "--";
+    clone_argv[ci++] = git_url;
+    clone_argv[ci++] = dest;
+    clone_argv[ci] = NULL;
 
-    int rc = system(cmd);
+    int rc = pkg_run(clone_argv);
     if (rc != 0) {
         if (err) {
             size_t elen = strlen(name) + strlen(git_url) + 128;
@@ -1137,12 +1190,11 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
 
     /* Checkout specific revision if requested */
     if (rev) {
-        snprintf(cmd, sizeof(cmd), "cd '%s' && git checkout --quiet '%s' 2>&1", dest, rev);
-        rc = system(cmd);
+        const char *co_argv[] = {"git", "-C", dest, "checkout", "--quiet", rev, NULL};
+        rc = pkg_run(co_argv);
         if (rc != 0) {
             /* Clean up failed checkout */
-            snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dest);
-            int ignored = system(cmd);
+            int ignored = pkg_remove_tree(dest);
             (void)ignored;
             if (err) {
                 size_t elen = strlen(rev) + strlen(name) + 128;
@@ -1154,8 +1206,9 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
     }
 
     /* Remove .git directory — we only need the source */
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s/.git'", dest);
-    int ignored2 = system(cmd);
+    char git_dir[PATH_MAX];
+    snprintf(git_dir, sizeof(git_dir), "%s/.git", dest);
+    int ignored2 = pkg_remove_tree(git_dir);
     (void)ignored2;
 
     /* Cache the result */
@@ -1171,8 +1224,7 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
             }
             char cache_dest[PATH_MAX];
             snprintf(cache_dest, sizeof(cache_dest), "%s/%s/%s", cache_dir, name, cache_key);
-            snprintf(cmd, sizeof(cmd), "cp -R '%s' '%s'", dest, cache_dest);
-            int ignored3 = system(cmd);
+            int ignored3 = pkg_copy_tree(dest, cache_dest);
             (void)ignored3;
             free(cache_dir);
         }
@@ -1237,10 +1289,10 @@ static bool fetch_package(const char *name, const char *version, char **err, con
                 }
             }
 
-            /* Copy directory recursively using system cp */
-            char cmd[PATH_MAX * 2 + 32];
-            snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", src_path, name);
-            int rc = system(cmd);
+            /* Copy directory recursively (no shell) */
+            char dst[PATH_MAX];
+            snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+            int rc = pkg_copy_tree(src_path, dst);
             if (rc != 0) {
                 if (err) {
                     size_t elen = 256;
@@ -1716,9 +1768,7 @@ int pkg_cmd_remove(const char *name) {
     char mod_path[PATH_MAX];
     snprintf(mod_path, sizeof(mod_path), "lat_modules/%s", name);
     if (fs_is_dir(mod_path)) {
-        char cmd[PATH_MAX + 16];
-        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", mod_path);
-        if (system(cmd) != 0) { fprintf(stderr, "warning: failed to remove '%s'\n", mod_path); }
+        if (pkg_remove_tree(mod_path) != 0) { fprintf(stderr, "warning: failed to remove '%s'\n", mod_path); }
     }
 
     /* Update lock file */
