@@ -48,6 +48,12 @@ typedef struct {
 
 /* ── Manifest I/O ── */
 
+/* True if `name` is a safe package name: a single path component made only of
+ * [A-Za-z0-9._-], and not "." or "..". Rejects names that could traverse the
+ * filesystem (e.g. "../../etc") or inject shell/option syntax when used to
+ * build lat_modules/<name> and cache paths. */
+bool pkg_name_is_valid(const char *name);
+
 /* Parse lattice.toml from string. Sets *err on failure. Caller must free with pkg_manifest_free(). */
 bool pkg_manifest_parse(const char *toml_str, PkgManifest *out, char **err);
 

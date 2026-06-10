@@ -16,7 +16,15 @@ typedef struct {
     const char *src;
     size_t pos;
     char *err;
+    int depth; /* current container/block nesting depth */
 } YamlParser;
+
+/* Bound recursion so deeply nested input cannot overflow the C stack. */
+#define YAML_MAX_DEPTH 1000
+
+static void yaml_error(YamlParser *p, const char *msg) {
+    if (!p->err) p->err = strdup(msg);
+}
 
 /* ── Scalar auto-detection ── */
 static LatValue yaml_detect_scalar(const char *s) {
@@ -181,15 +189,25 @@ static LatValue yaml_parse_flow_map(YamlParser *p) {
 /* ── Parse a flow value ── */
 static LatValue yaml_parse_flow_value(YamlParser *p) {
     while (p->src[p->pos] == ' ') p->pos++;
-    if (p->src[p->pos] == '[') return yaml_parse_flow_seq(p);
-    if (p->src[p->pos] == '{') return yaml_parse_flow_map(p);
+    if (p->src[p->pos] == '[' || p->src[p->pos] == '{') {
+        if (p->depth >= YAML_MAX_DEPTH) {
+            yaml_error(p, "maximum nesting depth exceeded");
+            return value_nil();
+        }
+        p->depth++;
+        LatValue r = (p->src[p->pos] == '[') ? yaml_parse_flow_seq(p) : yaml_parse_flow_map(p);
+        p->depth--;
+        return r;
+    }
 
     /* Quoted string */
     if (p->src[p->pos] == '"' || p->src[p->pos] == '\'') {
         char quote = p->src[p->pos++];
         size_t start = p->pos;
         while (p->src[p->pos] && p->src[p->pos] != quote) {
-            if (p->src[p->pos] == '\\') p->pos++;
+            /* Only skip the escaped char if one exists, so a string ending in a
+             * lone backslash does not advance past the NUL terminator. */
+            if (p->src[p->pos] == '\\' && p->src[p->pos + 1]) p->pos++;
             p->pos++;
         }
         char *s = strndup(p->src + start, p->pos - start);
@@ -248,7 +266,14 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
             if (p->src[p->pos] == '\n' || p->src[p->pos] == '\r' || p->src[p->pos] == '\0') {
                 if (p->src[p->pos] == '\r') p->pos++;
                 if (p->src[p->pos] == '\n') p->pos++;
-                elem = yaml_parse_node(p, cur_indent + 2);
+                if (p->depth >= YAML_MAX_DEPTH) {
+                    yaml_error(p, "maximum nesting depth exceeded");
+                    elem = value_nil();
+                } else {
+                    p->depth++;
+                    elem = yaml_parse_node(p, cur_indent + 2);
+                    p->depth--;
+                }
             } else if (p->src[p->pos] == '[' || p->src[p->pos] == '{') {
                 elem = yaml_parse_flow_value(p);
                 while (p->src[p->pos] && p->src[p->pos] != '\n') p->pos++;
@@ -285,7 +310,15 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
                     if (p->src[p->pos] == '\n' || p->src[p->pos] == '\r' || p->src[p->pos] == '\0') {
                         if (p->src[p->pos] == '\r') p->pos++;
                         if (p->src[p->pos] == '\n') p->pos++;
-                        LatValue val = yaml_parse_node(p, cur_indent + 2);
+                        LatValue val;
+                        if (p->depth >= YAML_MAX_DEPTH) {
+                            yaml_error(p, "maximum nesting depth exceeded");
+                            val = value_nil();
+                        } else {
+                            p->depth++;
+                            val = yaml_parse_node(p, cur_indent + 2);
+                            p->depth--;
+                        }
                         lat_map_set(map_elem.as.map.map, stripped_key, &val);
                     } else {
                         char *raw = yaml_read_line_value(p);
@@ -417,7 +450,9 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
             if (p->src[scan] == '"' || p->src[scan] == '\'') {
                 char q = p->src[scan++];
                 while (p->src[scan] && p->src[scan] != q) {
-                    if (p->src[scan] == '\\') scan++;
+                    /* Only skip the escaped char if one exists (avoid running
+                     * past the NUL on a trailing backslash). */
+                    if (p->src[scan] == '\\' && p->src[scan + 1]) scan++;
                     scan++;
                 }
                 if (p->src[scan]) scan++;

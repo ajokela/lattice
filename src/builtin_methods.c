@@ -613,7 +613,8 @@ LatValue builtin_array_group_by(LatValue *obj, void *closure, BuiltinCallback cb
         if (existing && existing->type == VAL_ARRAY) {
             if (existing->as.array.len >= existing->as.array.cap) {
                 existing->as.array.cap = existing->as.array.cap ? existing->as.array.cap * 2 : 4;
-                existing->as.array.elems = realloc(existing->as.array.elems, existing->as.array.cap * sizeof(LatValue));
+                existing->as.array.elems =
+                    lat_realloc_routed(existing->as.array.elems, existing->as.array.cap * sizeof(LatValue));
             }
             existing->as.array.elems[existing->as.array.len++] = value_deep_clone(&obj->as.array.elems[i]);
         } else {
@@ -887,10 +888,15 @@ LatValue builtin_string_repeat(LatValue *obj, LatValue *args, int arg_count, cha
     if (args[0].type != VAL_INT || args[0].as.int_val < 0) return value_string("");
     int64_t n = args[0].as.int_val;
     size_t slen = strlen(obj->as.str_val);
-    char *buf = malloc(slen * (size_t)n + 1);
+    if (n == 0 || slen == 0) return value_string("");
+    /* Guard against size_t overflow in slen*n (+1): an unchecked product wraps
+     * to a small malloc while the copy loop writes the full slen*n bytes. */
+    if ((size_t)n > (SIZE_MAX - 1) / slen) return value_string("");
+    size_t total = slen * (size_t)n;
+    char *buf = malloc(total + 1);
     if (!buf) return value_string("");
-    for (int64_t i = 0; i < n; i++) memcpy(buf + i * (int64_t)slen, obj->as.str_val, slen);
-    buf[slen * (size_t)n] = '\0';
+    for (size_t i = 0; i < (size_t)n; i++) memcpy(buf + i * slen, obj->as.str_val, slen);
+    buf[total] = '\0';
     return value_string_owned(buf);
 }
 

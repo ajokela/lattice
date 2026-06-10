@@ -88,9 +88,23 @@ static int compile_regex(regex_t *re, const char *pattern, int extra_flags, char
     return 0;
 }
 
+/* Bound pattern and subject size. POSIX regexec has no step/time budget, so a
+ * crafted pattern can backtrack catastrophically; capping the inputs limits the
+ * blow-up and prevents large-subject resource exhaustion. */
+#define REGEX_MAX_PATTERN 8192u
+#define REGEX_MAX_INPUT   (16u * 1024u * 1024u)
+static bool regex_inputs_ok(const char *pattern, const char *str, char **err) {
+    if (strlen(pattern) > REGEX_MAX_PATTERN || strlen(str) > REGEX_MAX_INPUT) {
+        if (err) *err = strdup("regex: pattern or input too large");
+        return false;
+    }
+    return true;
+}
+
 /* ── regex_match ── */
 
 LatValue regex_match(const char *pattern, const char *str, int extra_flags, char **err) {
+    if (!regex_inputs_ok(pattern, str, err)) return value_unit();
     regex_t re;
     if (compile_regex(&re, pattern, extra_flags, err) != 0) { return value_unit(); }
     int result = regexec(&re, str, 0, NULL, 0);
@@ -101,6 +115,7 @@ LatValue regex_match(const char *pattern, const char *str, int extra_flags, char
 /* ── regex_find_all ── */
 
 LatValue regex_find_all(const char *pattern, const char *str, int extra_flags, char **err) {
+    if (!regex_inputs_ok(pattern, str, err)) return value_unit();
     regex_t re;
     if (compile_regex(&re, pattern, extra_flags, err) != 0) { return value_unit(); }
 
@@ -132,7 +147,12 @@ LatValue regex_find_all(const char *pattern, const char *str, int extra_flags, c
 
         if (len >= cap) {
             cap *= 2;
-            elems = realloc(elems, cap * sizeof(LatValue));
+            LatValue *ne = realloc(elems, cap * sizeof(LatValue));
+            if (!ne) {
+                free(substr);
+                break;
+            }
+            elems = ne;
         }
         elems[len++] = value_string_owned(substr);
 
@@ -146,6 +166,7 @@ LatValue regex_find_all(const char *pattern, const char *str, int extra_flags, c
 /* ── regex_replace ── */
 
 char *regex_replace(const char *pattern, const char *str, const char *replacement, int extra_flags, char **err) {
+    if (!regex_inputs_ok(pattern, str, err)) return NULL;
     regex_t re;
     if (compile_regex(&re, pattern, extra_flags, err) != 0) { return NULL; }
 
@@ -182,7 +203,13 @@ char *regex_replace(const char *pattern, const char *str, const char *replacemen
         size_t needed = result_len + prefix_len + repl_len + 1;
         if (needed >= result_cap) {
             result_cap = needed * 2;
-            result = realloc(result, result_cap);
+            char *_nr = realloc(result, result_cap);
+            if (!_nr) {
+                free(result);
+                regfree(&re);
+                return NULL;
+            }
+            result = _nr;
         }
         memcpy(result + result_len, cursor, prefix_len);
         result_len += prefix_len;
@@ -199,7 +226,13 @@ char *regex_replace(const char *pattern, const char *str, const char *replacemen
     size_t needed = result_len + tail_len + 1;
     if (needed >= result_cap) {
         result_cap = needed;
-        result = realloc(result, result_cap);
+        char *_nr = realloc(result, result_cap);
+        if (!_nr) {
+            free(result);
+            regfree(&re);
+            return NULL;
+        }
+        result = _nr;
     }
     memcpy(result + result_len, cursor, tail_len);
     result_len += tail_len;

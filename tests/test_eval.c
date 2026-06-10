@@ -14,6 +14,9 @@
 #include "runtime.h"
 #include "package.h"
 #include "doc_gen.h"
+#include "latc.h"
+#include "stackopcode.h"
+#include "regopcode.h"
 #include "test_backend.h"
 
 /* Import test macros from test_main.c */
@@ -4948,4 +4951,568 @@ TEST(scope_spawn_error_propagation) {
                  "        }\n"
                  "    }\n"
                  "}\n");
+}
+
+/* ── Regression (LAT-407): a native called with more than 16 arguments must not
+ *    overflow the register VM's argument-gather buffer. ROP_CALL decoded the arg
+ *    count as an unbounded uint8 (0-255) and gathered into a fixed LatValue[16]. ── */
+TEST(native_call_over_16_args) {
+    /* path_join is a variadic native (-1 arity, not special-cased by the
+     * compilers), so a 20-segment call exercises the native dispatch path with
+     * arg count b = 20 > 16 on every backend. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let p = path_join(\"s0\",\"s1\",\"s2\",\"s3\",\"s4\",\"s5\",\"s6\",\"s7\",\"s8\",\"s9\","
+                "\"s10\",\"s11\",\"s12\",\"s13\",\"s14\",\"s15\",\"s16\",\"s17\",\"s18\",\"s19\")\n"
+                "    assert(len(p) >= 20, \"path_join dropped arguments\")\n"
+                "}\n");
+}
+
+/* ── Bytecode verifier (LAT-405): a malformed .latc must be REJECTED by
+ *    chunk_deserialize, not handed to the VM with unvalidated operands. ── */
+
+/* Constant type tags as written by the .latc serializer (src/latc.c). */
+#define LATC_TAG_INT 0
+#define LATC_TAG_STR 3
+
+typedef struct {
+    uint8_t *d;
+    size_t len, cap;
+} LatcBuf;
+static void lb_init(LatcBuf *b) {
+    b->cap = 64;
+    b->len = 0;
+    b->d = malloc(b->cap);
+}
+static void lb_byte(LatcBuf *b, uint8_t x) {
+    if (b->len + 1 > b->cap) {
+        b->cap *= 2;
+        b->d = realloc(b->d, b->cap);
+    }
+    b->d[b->len++] = x;
+}
+static void lb_u16(LatcBuf *b, uint16_t x) {
+    lb_byte(b, x & 0xff);
+    lb_byte(b, (x >> 8) & 0xff);
+}
+static void lb_u32(LatcBuf *b, uint32_t x) {
+    for (int k = 0; k < 4; k++) lb_byte(b, (x >> (k * 8)) & 0xff);
+}
+
+typedef struct {
+    uint8_t tag;
+    int64_t i;
+    const char *s;
+} LatcConst;
+
+/* Assemble a single-chunk .latc image with the given code and constants.
+ * line_count is set to code_len (one line per byte, as the real serializer does). */
+static uint8_t *build_latc_image(const uint8_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts,
+                                 size_t *out_len) {
+    LatcBuf b;
+    lb_init(&b);
+    lb_byte(&b, 'L');
+    lb_byte(&b, 'A');
+    lb_byte(&b, 'T');
+    lb_byte(&b, 'C');
+    lb_u16(&b, LATC_FORMAT);
+    lb_u16(&b, 0); /* reserved */
+    lb_u32(&b, code_len);
+    for (uint32_t i = 0; i < code_len; i++) lb_byte(&b, code[i]);
+    lb_u32(&b, code_len); /* line_count */
+    for (uint32_t i = 0; i < code_len; i++) lb_u32(&b, 0);
+    lb_u32(&b, nconsts);
+    for (uint32_t i = 0; i < nconsts; i++) {
+        lb_byte(&b, consts[i].tag);
+        if (consts[i].tag == LATC_TAG_INT) {
+            uint64_t v = (uint64_t)consts[i].i;
+            for (int k = 0; k < 8; k++) lb_byte(&b, (v >> (k * 8)) & 0xff);
+        } else if (consts[i].tag == LATC_TAG_STR) {
+            uint32_t sl = (uint32_t)strlen(consts[i].s);
+            lb_u32(&b, sl);
+            for (uint32_t k = 0; k < sl; k++) lb_byte(&b, (uint8_t)consts[i].s[k]);
+        }
+    }
+    lb_u32(&b, 0);  /* local_name_count */
+    lb_byte(&b, 0); /* has_name */
+    *out_len = b.len;
+    return b.d;
+}
+
+/* Helper: assert a crafted image is rejected by the deserializer/verifier. */
+static int latc_rejected(const uint8_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts) {
+    size_t len;
+    uint8_t *img = build_latc_image(code, code_len, consts, nconsts, &len);
+    char *err = NULL;
+    Chunk *c = chunk_deserialize(img, len, &err);
+    free(img);
+    if (c) {
+        chunk_free(c);
+        free(err);
+        return 0; /* accepted -> NOT rejected */
+    }
+    free(err);
+    return 1; /* rejected */
+}
+
+TEST(verify_accepts_valid_minimal_chunk) {
+    uint8_t code[] = {OP_HALT};
+    size_t len;
+    uint8_t *img = build_latc_image(code, sizeof(code), NULL, 0, &len);
+    char *err = NULL;
+    Chunk *c = chunk_deserialize(img, len, &err);
+    free(img);
+    ASSERT(c != NULL); /* a well-formed chunk must still load */
+    if (c) chunk_free(c);
+    free(err);
+}
+
+TEST(verify_rejects_unknown_opcode) {
+    uint8_t code[] = {0xFE, OP_HALT}; /* 0xFE > OP_HALT */
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_rejects_oob_constant_index) {
+    /* OP_CONSTANT 255 with an empty constant pool -> OOB read in OP_CONSTANT. */
+    uint8_t code[] = {OP_CONSTANT, 0xFF, OP_HALT};
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_rejects_truncated_operand) {
+    /* OP_CONSTANT needs a following index byte; here it is the last byte. */
+    uint8_t code[] = {OP_CONSTANT};
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_rejects_global_name_type_confusion) {
+    /* OP_GET_GLOBAL 0 where constant 0 is an Int, not a String. The VM would
+     * reinterpret the int's bits as a char* (arbitrary-pointer deref). */
+    uint8_t code[] = {OP_GET_GLOBAL, 0, OP_HALT};
+    LatcConst consts[] = {{LATC_TAG_INT, 0x4141414141414141LL, NULL}};
+    ASSERT(latc_rejected(code, sizeof(code), consts, 1));
+}
+
+TEST(verify_rejects_oob_forward_jump) {
+    /* OP_JUMP with a huge forward offset lands far past code_len. */
+    uint8_t code[] = {OP_JUMP, 0xFF, 0xFF, OP_HALT};
+    ASSERT(latc_rejected(code, sizeof(code), NULL, 0));
+}
+
+TEST(verify_accepts_real_compiled_bytecode) {
+    /* A genuine program compiled to bytecode must round-trip through
+     * serialize -> deserialize (with verification) without being rejected. */
+    const char *src = "fn add(a: Int, b: Int) -> Int { return a + b }\n"
+                      "fn main() {\n"
+                      "    let xs = [1, 2, 3]\n"
+                      "    let total = add(xs[0], xs[2])\n"
+                      "    print(total)\n"
+                      "}\n";
+    Lexer lex = lexer_new(src);
+    char *lex_err = NULL;
+    LatVec tokens = lexer_tokenize(&lex, &lex_err);
+    ASSERT(lex_err == NULL);
+    Parser parser = parser_new(&tokens);
+    char *parse_err = NULL;
+    Program prog = parser_parse(&parser, &parse_err);
+    ASSERT(parse_err == NULL);
+    char *comp_err = NULL;
+    Chunk *chunk = stack_compile(&prog, &comp_err);
+    ASSERT(chunk != NULL);
+
+    size_t len = 0;
+    uint8_t *img = chunk_serialize(chunk, &len);
+    ASSERT(img != NULL);
+    char *err = NULL;
+    Chunk *loaded = chunk_deserialize(img, len, &err);
+    if (!loaded) fprintf(stderr, "  verifier rejected valid bytecode: %s\n", err ? err : "(null)");
+    ASSERT(loaded != NULL);
+
+    if (loaded) chunk_free(loaded);
+    free(err);
+    free(img);
+    chunk_free(chunk);
+    program_free(&prog);
+    for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+    lat_vec_free(&tokens);
+}
+
+/* ── Register-VM bytecode verifier (LAT-406): a malformed .rlatc must be
+ *    REJECTED by regchunk_deserialize, not handed to the register VM. ── */
+
+/* Assemble a single-chunk .rlatc image. code is an array of 32-bit instructions. */
+static uint8_t *build_rlatc_image(const uint32_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts,
+                                  uint8_t max_reg, size_t *out_len) {
+    LatcBuf b;
+    lb_init(&b);
+    lb_byte(&b, 'R');
+    lb_byte(&b, 'L');
+    lb_byte(&b, 'A');
+    lb_byte(&b, 'T');
+    lb_u16(&b, RLATC_FORMAT);
+    lb_u16(&b, 0); /* reserved */
+    lb_u32(&b, code_len);
+    for (uint32_t i = 0; i < code_len; i++) lb_u32(&b, code[i]);
+    lb_u32(&b, code_len); /* lines_len */
+    for (uint32_t i = 0; i < code_len; i++) lb_u32(&b, 0);
+    lb_u32(&b, nconsts);
+    for (uint32_t i = 0; i < nconsts; i++) {
+        lb_byte(&b, consts[i].tag);
+        if (consts[i].tag == LATC_TAG_INT) {
+            uint64_t v = (uint64_t)consts[i].i;
+            for (int k = 0; k < 8; k++) lb_byte(&b, (v >> (k * 8)) & 0xff);
+        } else if (consts[i].tag == LATC_TAG_STR) {
+            uint32_t sl = (uint32_t)strlen(consts[i].s);
+            lb_u32(&b, sl);
+            for (uint32_t k = 0; k < sl; k++) lb_byte(&b, (uint8_t)consts[i].s[k]);
+        }
+    }
+    lb_u32(&b, 0);        /* local_name_count */
+    lb_byte(&b, max_reg); /* max_reg */
+    *out_len = b.len;
+    return b.d;
+}
+
+static int rlatc_rejected(const uint32_t *code, uint32_t code_len, const LatcConst *consts, uint32_t nconsts) {
+    size_t len;
+    uint8_t *img = build_rlatc_image(code, code_len, consts, nconsts, 8, &len);
+    char *err = NULL;
+    RegChunk *c = regchunk_deserialize(img, len, &err);
+    free(img);
+    if (c) {
+        regchunk_free(c);
+        free(err);
+        return 0;
+    }
+    free(err);
+    return 1;
+}
+
+TEST(reg_verify_accepts_valid_minimal_chunk) {
+    /* LOADUNIT R0 ; RETURN R0 (count 1) — a well-formed chunk must still load. */
+    uint32_t code[] = {
+        REG_ENCODE_ABC(ROP_LOADUNIT, 0, 0, 0),
+        REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0),
+    };
+    size_t len;
+    uint8_t *img = build_rlatc_image(code, 2, NULL, 0, 1, &len);
+    char *err = NULL;
+    RegChunk *c = regchunk_deserialize(img, len, &err);
+    free(img);
+    if (!c) fprintf(stderr, "  reg verifier rejected valid bytecode: %s\n", err ? err : "(null)");
+    ASSERT(c != NULL);
+    if (c) regchunk_free(c);
+    free(err);
+}
+
+TEST(reg_verify_rejects_unknown_opcode) {
+    uint32_t code[] = {200u /* opcode 200 >= ROP_COUNT */, REG_ENCODE_ABC(ROP_RETURN, 0, 0, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
+}
+
+TEST(reg_verify_rejects_oob_constant_index) {
+    /* LOADK R0, K[500] with an empty constant pool. */
+    uint32_t code[] = {REG_ENCODE_ABx(ROP_LOADK, 0, 500), REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
+}
+
+TEST(reg_verify_rejects_global_name_type_confusion) {
+    /* GETGLOBAL R0, K[0] where K[0] is an Int — VM would deref its bits as char*. */
+    uint32_t code[] = {REG_ENCODE_ABx(ROP_GETGLOBAL, 0, 0), REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0)};
+    LatcConst consts[] = {{LATC_TAG_INT, 0x4141414141414141LL, NULL}};
+    ASSERT(rlatc_rejected(code, 2, consts, 1));
+}
+
+TEST(reg_verify_rejects_oob_jump) {
+    /* JMP with a huge forward offset lands far past code_len. */
+    uint32_t code[] = {REG_ENCODE_sBx(ROP_JMP, 100000), REG_ENCODE_ABC(ROP_RETURN, 0, 0, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
+}
+
+TEST(reg_verify_rejects_truncated_two_word_op) {
+    /* ROP_INVOKE is a two-word instruction but is the last word here. */
+    uint32_t code[] = {REG_ENCODE_ABC(ROP_RETURN, 0, 0, 0), REG_ENCODE_ABC(ROP_INVOKE, 0, 0, 0)};
+    ASSERT(rlatc_rejected(code, 2, NULL, 0));
+}
+
+/* ── Package name validation / path traversal (LAT-408) ── */
+
+TEST(pkg_name_is_valid_basic) {
+    ASSERT(pkg_name_is_valid("http-client"));
+    ASSERT(pkg_name_is_valid("json_parser"));
+    ASSERT(pkg_name_is_valid("a.b.c"));
+    ASSERT(!pkg_name_is_valid(""));
+    ASSERT(!pkg_name_is_valid("."));
+    ASSERT(!pkg_name_is_valid(".."));
+    ASSERT(!pkg_name_is_valid("../etc"));
+    ASSERT(!pkg_name_is_valid("../../../../tmp/evil"));
+    ASSERT(!pkg_name_is_valid("a/b"));
+    ASSERT(!pkg_name_is_valid("a;rm -rf ~"));
+    ASSERT(!pkg_name_is_valid("a'b"));
+}
+
+TEST(pkg_manifest_rejects_traversal_dep_name) {
+    /* A dependency name that escapes lat_modules/ must be rejected at parse,
+     * before it can reach a filesystem path or be removed with rm -rf. */
+    const char *toml = "[dependencies]\n\"../../../../tmp/evil\" = \"1.0.0\"\n";
+    PkgManifest m;
+    memset(&m, 0, sizeof(m));
+    char *err = NULL;
+    bool ok = pkg_manifest_parse(toml, &m, &err);
+    pkg_manifest_free(&m);
+    free(err);
+    ASSERT(!ok);
+}
+
+TEST(pkg_manifest_rejects_traversal_version) {
+    const char *toml = "[dependencies]\nfoo = \"../../etc\"\n";
+    PkgManifest m;
+    memset(&m, 0, sizeof(m));
+    char *err = NULL;
+    bool ok = pkg_manifest_parse(toml, &m, &err);
+    pkg_manifest_free(&m);
+    free(err);
+    ASSERT(!ok);
+}
+
+TEST(pkg_manifest_accepts_normal_deps) {
+    const char *toml = "[dependencies]\nhttp-client = \"^1.2.0\"\njson_parser = \"2.0.0\"\n";
+    PkgManifest m;
+    memset(&m, 0, sizeof(m));
+    char *err = NULL;
+    bool ok = pkg_manifest_parse(toml, &m, &err);
+    int n = (int)m.dep_count;
+    pkg_manifest_free(&m);
+    free(err);
+    if (!ok) fprintf(stderr, "  rejected valid manifest: %s\n", err ? err : "(null)");
+    ASSERT(ok);
+    ASSERT_EQ_INT(n, 2);
+}
+
+/* ── String.repeat overflow (LAT-410) ── */
+TEST(string_repeat_overflow_is_rejected) {
+    /* slen(8) * n(2^61) overflows size_t to 0, so the old code malloc'd 1 byte
+     * and then memcpy'd ~2^64 bytes. The overflow must be detected and the
+     * result degraded to empty, not overflow the heap. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let s = \"abcdefgh\".repeat(2305843009213693952)\n"
+                "    assert(len(s) == 0, \"repeat overflow should yield empty\")\n"
+                "}\n");
+}
+
+/* ── Channel send use-after-free (LAT-411) ── */
+TEST(channel_send_survives_spawn_exit) {
+    /* A value sent on a channel by a spawned thread must remain valid after the
+     * thread (and its thread-local heap) is torn down at scope join. The string
+     * is built at runtime so it is heap-allocated in the spawn thread, not an
+     * immortal interned literal. Reading it after the scope must not touch freed
+     * memory. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn {\n"
+                "            ch.send(freeze([100, 200, 300, 400, 500, 600, 700, 800]))\n"
+                "        }\n"
+                "    }\n"
+                "    let v = ch.recv()\n"
+                "    assert(v[0] == 100, \"channel array corrupted (elem 0)\")\n"
+                "    assert(v[7] == 800, \"channel array corrupted (elem 7)\")\n"
+                "}\n");
+}
+
+/* ── Intern table thread-safety (LAT-412) ── */
+#include "intern.h"
+#include <pthread.h>
+static void *intern_stress_thread(void *arg) {
+    int base = *(int *)arg;
+    char buf[40];
+    for (int i = 0; i < 3000; i++) {
+        /* Distinct strings per thread force the table to grow repeatedly... */
+        snprintf(buf, sizeof(buf), "k_%d_%d", base, i);
+        intern(buf);
+        /* ...while shared strings contend on the same slots. */
+        snprintf(buf, sizeof(buf), "shared_%d", i % 600);
+        intern(buf);
+    }
+    return NULL;
+}
+TEST(intern_concurrent_threads_safe) {
+    /* Hammer the global intern table from several threads directly (isolating
+     * it from the VM's other spawn machinery). Without a lock, intern_grow()
+     * frees and rebuilds the entries array while peer threads read it — a data
+     * race / use-after-free that ASan catches here. */
+    enum { NTHREADS = 6 };
+    pthread_t th[NTHREADS];
+    int args[NTHREADS];
+    for (int t = 0; t < NTHREADS; t++) {
+        args[t] = t;
+        pthread_create(&th[t], NULL, intern_stress_thread, &args[t]);
+    }
+    for (int t = 0; t < NTHREADS; t++) pthread_join(th[t], NULL);
+    /* Reaching here without an ASan abort means the table stayed consistent.
+     * Spot-check that interning is still canonical. */
+    ASSERT(intern("shared_1") == intern("shared_1"));
+}
+
+/* ── Format-parser recursion limits (LAT-413) ── */
+TEST(json_deep_nesting_rejected) {
+    /* 50000 levels of nesting would overflow the C stack; the parser must
+     * reject it with an error instead. */
+    ASSERT_FAILS("fn main() {\n"
+                 "    let deep = \"[\".repeat(50000) + \"]\".repeat(50000)\n"
+                 "    json_parse(deep)\n"
+                 "}\n");
+}
+TEST(json_moderate_nesting_ok) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let s = \"[\".repeat(100) + \"1\" + \"]\".repeat(100)\n"
+                "    let v = json_parse(s)\n"
+                "    assert(v[0] != nil || true, \"parsed\")\n"
+                "}\n");
+}
+TEST(toml_deep_nesting_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let deep = \"a = \" + \"[\".repeat(50000) + \"]\".repeat(50000)\n"
+                 "    toml_parse(deep)\n"
+                 "}\n");
+}
+TEST(yaml_deep_nesting_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let deep = \"[\".repeat(50000) + \"]\".repeat(50000)\n"
+                 "    yaml_parse(deep)\n"
+                 "}\n");
+}
+
+/* ── Parser/lexer recursion limits (LAT-417) ── */
+TEST(parser_deep_paren_nesting_rejected) {
+    /* Tens of thousands of nested parentheses in the SOURCE would overflow the
+     * recursive-descent parser's C stack; it must reject them with an error. */
+    size_t n = 50000;
+    char *src = malloc(n * 2 + 64);
+    char *q = src;
+    memcpy(q, "fn main() { let x = ", 20);
+    q += 20;
+    for (size_t i = 0; i < n; i++) *q++ = '(';
+    *q++ = '1';
+    for (size_t i = 0; i < n; i++) *q++ = ')';
+    memcpy(q, " }", 3); /* includes NUL */
+    char *err = NULL;
+    int rc = run_source_ok(src, &err);
+    free(src);
+    free(err);
+    ASSERT(rc != 0); /* rejected, not a stack overflow */
+}
+
+TEST(lexer_deep_interp_nesting_rejected) {
+    /* Deeply nested string interpolation "${ "${ ... }" }" recurses through
+     * lex_one/lex_string_or_interp; it must be bounded, not overflow the stack. */
+    size_t n = 5000;
+    char *src = malloc(n * 5 + 64);
+    char *q = src;
+    memcpy(q, "fn main() { let s = ", 20);
+    q += 20;
+    for (size_t i = 0; i < n; i++) {
+        *q++ = '"';
+        *q++ = '$';
+        *q++ = '{';
+    }
+    *q++ = '1';
+    for (size_t i = 0; i < n; i++) {
+        *q++ = '}';
+        *q++ = '"';
+    }
+    memcpy(q, " }", 3); /* includes NUL */
+    char *err = NULL;
+    int rc = run_source_ok(src, &err);
+    free(src);
+    free(err);
+    ASSERT(rc != 0); /* rejected, not a stack overflow */
+}
+
+/* ── YAML out-of-bounds read on trailing backslash (LAT-414) ── */
+#include "yaml_ops.h"
+TEST(yaml_trailing_backslash_no_oob) {
+    /* Quoted strings ending in a lone backslash made the scanner advance past
+     * the NUL terminator (out-of-bounds read), in both the flow-value and the
+     * mapping-detection scanners. ASan would flag the OOB here. */
+    const char *inputs[] = {
+        "\"ab\\",    /* top-level quoted scalar: "ab\          */
+        "[\"ab\\",   /* flow seq with quoted element: ["ab\    */
+        "{\"ab\\",   /* flow map with quoted key: {"ab\        */
+        "\"ab\\: x", /* quoted key in a mapping line: "ab\: x  */
+    };
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        char *err = NULL;
+        LatValue v = yaml_ops_parse(inputs[i], &err);
+        value_free(&v);
+        free(err);
+    }
+    ASSERT(1); /* reaching here without an ASan abort is the assertion */
+}
+
+/* ── Buffer negative-index OOB (LAT-418) ── */
+TEST(buffer_negative_index_no_oob) {
+    /* A negative index cast to size_t wraps huge, and `i + N` wrapped back small
+     * enough to pass the bounds check -> out-of-bounds read/write. Backends
+     * differ in whether they error or return nil, but none may touch memory out
+     * of bounds; ASan flags the OOB here if the guard is missing. */
+    char *err = NULL;
+    run_source_ok("fn main() {\n"
+                  "    flux b = Buffer::new(16)\n"
+                  "    let a = b.read_i16(-1)\n"
+                  "    let c = b.read_u32(-4)\n"
+                  "    let d = b.read_f64(-8)\n"
+                  "    b.write_u16(-1, 42)\n"
+                  "    b.write_u64(-2, 7)\n"
+                  "}\n",
+                  &err);
+    free(err);
+    ASSERT(1); /* reaching here without a crash / ASan abort is the assertion */
+}
+
+/* ── Regex resource bounds (LAT-419) ── */
+/* POSIX regex is not available on Windows (regex_ops.c is guarded out). */
+#ifndef _WIN32
+TEST(regex_oversized_pattern_rejected) {
+    /* An oversized pattern is rejected before it can drive pathological
+     * backtracking / resource exhaustion. */
+    ASSERT_FAILS("fn main() {\n"
+                 "    let pat = \"a\".repeat(9000)\n"
+                 "    regex_match(pat, \"hello\")\n"
+                 "}\n");
+}
+TEST(regex_normal_still_works) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let r = regex_replace(\"o\", \"hello world\", \"0\")\n"
+                "    assert(r == \"hell0 w0rld\", \"regex_replace broke\")\n"
+                "}\n");
+}
+#endif /* !_WIN32 */
+
+/* ── Spawn-thread env value lifetime (LAT-420 / LAT-421) ── */
+TEST(spawn_freeze_ident_env_safe) {
+    /* freeze(arr) on an ident inside a spawn writes the frozen value back into
+     * the spawn's (cloned) env. That value's backing lived in the spawn thread's
+     * heap, which is freed at thread exit while the parent frees the env after
+     * join -> use-after-free (LAT-420). ASan flags it without env_detach_values. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn {\n"
+                "            let arr = [100, 200, 300, 400, 500, 600, 700, 800]\n"
+                "            ch.send(freeze(arr))\n"
+                "        }\n"
+                "    }\n"
+                "    let v = ch.recv()\n"
+                "    assert(v[0] == 100, \"spawn env value corrupted\")\n"
+                "}\n");
+}
+TEST(spawn_concurrent_globals_safe) {
+    /* Top-level `let` in a spawn body becomes a global stored in the spawn's
+     * env, backed by the spawn thread's heap; freeing the env after the heap
+     * was torn down double-freed (LAT-421). */
+    ASSERT_RUNS("fn main() {\n"
+                "    scope {\n"
+                "        spawn { let a = []; let i = 0; while i < 200 { a.push(\"p\" + to_string(i)); i = i + 1 } }\n"
+                "        spawn { let b = []; let j = 0; while j < 200 { b.push(\"q\" + to_string(j)); j = j + 1 } }\n"
+                "    }\n"
+                "}\n");
 }

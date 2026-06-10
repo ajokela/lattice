@@ -851,6 +851,11 @@ static void *stackvm_spawn_thread_fn(void *arg) {
         value_free(&result);
     }
 
+    /* Detach any values the child stored in its env out of this thread's heap
+     * before the heap is freed — the parent frees the child env after join, so
+     * env values backed by this heap would otherwise be a use-after-free. */
+    if (task->child_vm->rt) env_detach_values(task->child_vm->rt->env);
+
     dual_heap_free(heap);
     return NULL;
 }
@@ -1223,7 +1228,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 /* Mutate the array in-place */
                 if (obj->as.array.len >= obj->as.array.cap) {
                     obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
-                    obj->as.array.elems = realloc(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
+                    obj->as.array.elems = lat_realloc_routed(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
                 }
                 obj->as.array.elems[obj->as.array.len++] = val;
                 push(vm, value_unit());
@@ -1611,7 +1616,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 /* Grow if needed */
                 if (obj->as.array.len >= obj->as.array.cap) {
                     size_t new_cap = obj->as.array.cap < 4 ? 4 : obj->as.array.cap * 2;
-                    obj->as.array.elems = realloc(obj->as.array.elems, new_cap * sizeof(LatValue));
+                    obj->as.array.elems = lat_realloc_routed(obj->as.array.elems, new_cap * sizeof(LatValue));
                     obj->as.array.cap = new_cap;
                 }
                 /* Shift elements right */
@@ -2653,7 +2658,8 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     if (inner->as.array.len >= inner->as.array.cap) {
                         size_t old_cap = inner->as.array.cap;
                         inner->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
-                        inner->as.array.elems = realloc(inner->as.array.elems, inner->as.array.cap * sizeof(LatValue));
+                        inner->as.array.elems =
+                            lat_realloc_routed(inner->as.array.elems, inner->as.array.cap * sizeof(LatValue));
                     }
                     inner->as.array.elems[inner->as.array.len++] = val2;
                     push(vm, value_unit());
@@ -6271,7 +6277,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             if (new_len != old_len) {
                 if (new_len > obj.as.array.cap) {
                     size_t new_cap = new_len < 4 ? 4 : new_len * 2;
-                    obj.as.array.elems = realloc(obj.as.array.elems, new_cap * sizeof(LatValue));
+                    obj.as.array.elems = lat_realloc_routed(obj.as.array.elems, new_cap * sizeof(LatValue));
                     obj.as.array.cap = new_cap;
                 }
                 /* Shift tail elements */
@@ -6355,7 +6361,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             if (new_len != old_len) {
                 if (new_len > obj->as.array.cap) {
                     size_t new_cap = new_len < 4 ? 4 : new_len * 2;
-                    obj->as.array.elems = realloc(obj->as.array.elems, new_cap * sizeof(LatValue));
+                    obj->as.array.elems = lat_realloc_routed(obj->as.array.elems, new_cap * sizeof(LatValue));
                     obj->as.array.cap = new_cap;
                 }
                 /* Shift tail elements */

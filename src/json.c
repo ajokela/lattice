@@ -13,7 +13,11 @@ typedef struct {
     const char *src;
     size_t pos;
     char *err;
+    int depth; /* current container nesting depth */
 } JsonParser;
+
+/* Bound recursion so deeply nested input cannot overflow the C stack. */
+#define JSON_MAX_DEPTH 1000
 
 static void jp_skip_ws(JsonParser *p) {
     while (p->src[p->pos] == ' ' || p->src[p->pos] == '\t' || p->src[p->pos] == '\n' || p->src[p->pos] == '\r') {
@@ -350,8 +354,26 @@ static LatValue jp_parse_value(JsonParser *p) {
     char c = jp_peek(p);
 
     if (c == '"') return jp_parse_string(p);
-    if (c == '{') return jp_parse_object(p);
-    if (c == '[') return jp_parse_array(p);
+    if (c == '{') {
+        if (p->depth >= JSON_MAX_DEPTH) {
+            jp_error(p, "maximum nesting depth exceeded");
+            return value_unit();
+        }
+        p->depth++;
+        LatValue r = jp_parse_object(p);
+        p->depth--;
+        return r;
+    }
+    if (c == '[') {
+        if (p->depth >= JSON_MAX_DEPTH) {
+            jp_error(p, "maximum nesting depth exceeded");
+            return value_unit();
+        }
+        p->depth++;
+        LatValue r = jp_parse_array(p);
+        p->depth--;
+        return r;
+    }
     if (c == '-' || (c >= '0' && c <= '9')) return jp_parse_number(p);
 
     /* true */

@@ -6,10 +6,11 @@
 
 typedef struct {
     const char *source;
-    size_t      len;
-    size_t      pos;
-    size_t      line;
-    size_t      col;
+    size_t len;
+    size_t pos;
+    size_t line;
+    size_t col;
+    int interp_depth; /* string-interpolation nesting depth */
 } Lexer;
 
 /* Initialize a lexer with source code */

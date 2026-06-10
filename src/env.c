@@ -6,12 +6,11 @@
 
 #define INITIAL_SCOPE_CAP 8
 
-static Scope scope_new(void) {
-    return lat_map_new(sizeof(LatValue));
-}
+static Scope scope_new(void) { return lat_map_new(sizeof(LatValue)); }
 
 static void scope_free_values(const char *key, void *value, void *ctx) {
-    (void)key; (void)ctx;
+    (void)key;
+    (void)ctx;
     LatValue *v = (LatValue *)value;
     value_free(v);
 }
@@ -29,7 +28,10 @@ Env *env_new(void) {
     env->refcount = 1;
     env->arena_backed = false;
     env->scopes = malloc(env->cap * sizeof(Scope));
-    if (!env->scopes) { free(env); return NULL; }
+    if (!env->scopes) {
+        free(env);
+        return NULL;
+    }
     env->scopes[0] = scope_new();
     return env;
 }
@@ -40,18 +42,33 @@ void env_retain(Env *env) {
 
 void env_release(Env *env) {
     if (!env) return;
-    if (--env->refcount == 0)
-        env_free(env);
+    if (--env->refcount == 0) env_free(env);
 }
 
 void env_free(Env *env) {
     if (!env) return;
     if (env->arena_backed) return;
-    for (size_t i = 0; i < env->count; i++) {
-        scope_free(&env->scopes[i]);
-    }
+    for (size_t i = 0; i < env->count; i++) { scope_free(&env->scopes[i]); }
     free(env->scopes);
     free(env);
+}
+
+/* Replace every bound value with a thread-independent (malloc-backed) copy.
+ * A spawned thread stores values whose backing lives in its thread-local fluid
+ * heap into its (cloned) env; that heap is freed when the thread exits, while
+ * the env is freed later by the parent. Detaching the values before the heap is
+ * torn down keeps them valid (avoids use-after-free / double-free). */
+static void env_detach_entry(const char *key, void *value, void *ctx) {
+    (void)key;
+    (void)ctx;
+    LatValue *v = (LatValue *)value;
+    LatValue detached = value_detach(v);
+    value_free(v);
+    *v = detached;
+}
+void env_detach_values(Env *env) {
+    if (!env || env->arena_backed) return;
+    for (size_t i = 0; i < env->count; i++) { lat_map_iter(&env->scopes[i], env_detach_entry, NULL); }
 }
 
 void env_push_scope(Env *env) {
@@ -77,16 +94,17 @@ void env_define_at(Env *env, size_t scope_idx, const char *name, LatValue value)
     if (scope_idx >= env->count) return;
     Scope *scope = &env->scopes[scope_idx];
     LatValue *existing = lat_map_get(scope, name);
-    if (existing) {
-        value_free(existing);
-    }
+    if (existing) { value_free(existing); }
     lat_map_set(scope, name, &value);
 }
 
 bool env_get(const Env *env, const char *name, LatValue *out) {
     if (env->count == 1) {
         LatValue *v = lat_map_get(&env->scopes[0], name);
-        if (v) { *out = value_deep_clone(v); return true; }
+        if (v) {
+            *out = value_deep_clone(v);
+            return true;
+        }
         return false;
     }
     for (size_t i = env->count; i > 0; i--) {
@@ -100,8 +118,7 @@ bool env_get(const Env *env, const char *name, LatValue *out) {
 }
 
 LatValue *env_get_ref(const Env *env, const char *name) {
-    if (env->count == 1)
-        return lat_map_get(&env->scopes[0], name);
+    if (env->count == 1) return lat_map_get(&env->scopes[0], name);
     for (size_t i = env->count; i > 0; i--) {
         LatValue *v = lat_map_get(&env->scopes[i - 1], name);
         if (v) return v;
@@ -110,8 +127,7 @@ LatValue *env_get_ref(const Env *env, const char *name) {
 }
 
 LatValue *env_get_ref_prehashed(const Env *env, const char *name, size_t hash) {
-    if (env->count == 1)
-        return lat_map_get_prehashed(&env->scopes[0], name, hash);
+    if (env->count == 1) return lat_map_get_prehashed(&env->scopes[0], name, hash);
     for (size_t i = env->count; i > 0; i--) {
         LatValue *v = lat_map_get_prehashed(&env->scopes[i - 1], name, hash);
         if (v) return v;
@@ -187,7 +203,7 @@ static Env *env_clone_arena(const Env *env) {
         LatMap *dst = &new_env->scopes[i];
         dst->value_size = src->value_size;
         dst->cap = src->cap;
-        dst->count = src->count;  /* preserve tombstone count for probe chains */
+        dst->count = src->count; /* preserve tombstone count for probe chains */
         dst->live = src->live;
         dst->entries = lat_calloc_routed(src->cap, sizeof(LatMapEntry));
         for (size_t j = 0; j < src->cap; j++) {
@@ -217,7 +233,10 @@ Env *env_clone(const Env *env) {
     new_env->refcount = 1;
     new_env->arena_backed = false;
     new_env->scopes = malloc(new_env->cap * sizeof(Scope));
-    if (!new_env->scopes) { free(new_env); return NULL; }
+    if (!new_env->scopes) {
+        free(new_env);
+        return NULL;
+    }
 
     CloneCtx ctx;
     ctx.dest = new_env;
@@ -238,10 +257,8 @@ static void iter_scope_values(const char *key, void *value, void *ctx) {
 }
 
 void env_iter_values(Env *env, EnvIterFn fn, void *ctx) {
-    void *args[2] = { (void *)fn, ctx };
-    for (size_t i = 0; i < env->count; i++) {
-        lat_map_iter(&env->scopes[i], iter_scope_values, args);
-    }
+    void *args[2] = {(void *)fn, ctx};
+    for (size_t i = 0; i < env->count; i++) { lat_map_iter(&env->scopes[i], iter_scope_values, args); }
 }
 
 /* ── Spellcheck suggestion for undefined variables ── */
@@ -266,9 +283,7 @@ static void env_similar_iter(const char *key, void *value, void *ctx) {
 
 const char *env_find_similar_name(const Env *env, const char *name) {
     if (!env || !name) return NULL;
-    EnvSimilarCtx ctx = { .target = name, .best = NULL, .best_dist = 3 };
-    for (size_t i = 0; i < env->count; i++) {
-        lat_map_iter(&env->scopes[i], env_similar_iter, &ctx);
-    }
+    EnvSimilarCtx ctx = {.target = name, .best = NULL, .best_dist = 3};
+    for (size_t i = 0; i < env->count; i++) { lat_map_iter(&env->scopes[i], env_similar_iter, &ctx); }
     return ctx.best;
 }

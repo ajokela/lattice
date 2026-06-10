@@ -5,9 +5,7 @@
 #include <string.h>
 
 /* Helper: treat NULL as "" */
-static const char *safe_str(const char *s) {
-    return s ? s : "";
-}
+static const char *safe_str(const char *s) { return s ? s : ""; }
 
 bool lat_str_contains(const char *s, const char *substr) {
     s = safe_str(s);
@@ -89,15 +87,11 @@ char *lat_str_trim(const char *s) {
 
     /* Find first non-whitespace */
     size_t start = 0;
-    while (start < len && isspace((unsigned char)s[start])) {
-        start++;
-    }
+    while (start < len && isspace((unsigned char)s[start])) { start++; }
 
     /* Find last non-whitespace */
     size_t end = len;
-    while (end > start && isspace((unsigned char)s[end - 1])) {
-        end--;
-    }
+    while (end > start && isspace((unsigned char)s[end - 1])) { end--; }
 
     size_t trimmed_len = end - start;
     char *result = malloc(trimmed_len + 1);
@@ -112,9 +106,7 @@ bool lat_str_starts_with(const char *s, const char *prefix) {
     s = safe_str(s);
     prefix = safe_str(prefix);
     size_t plen = strlen(prefix);
-    if (plen > strlen(s)) {
-        return false;
-    }
+    if (plen > strlen(s)) { return false; }
     return memcmp(s, prefix, plen) == 0;
 }
 
@@ -123,9 +115,7 @@ bool lat_str_ends_with(const char *s, const char *suffix) {
     suffix = safe_str(suffix);
     size_t slen = strlen(s);
     size_t suflen = strlen(suffix);
-    if (suflen > slen) {
-        return false;
-    }
+    if (suflen > slen) { return false; }
     return memcmp(s + slen - suflen, suffix, suflen) == 0;
 }
 
@@ -139,9 +129,7 @@ char *lat_str_replace(const char *s, const char *old_str, const char *new_str) {
     size_t new_len = strlen(new_str);
 
     /* Empty old_str: return copy of s */
-    if (old_len == 0) {
-        return strdup(s);
-    }
+    if (old_len == 0) { return strdup(s); }
 
     /* Count occurrences */
     size_t count = 0;
@@ -151,16 +139,12 @@ char *lat_str_replace(const char *s, const char *old_str, const char *new_str) {
         p += old_len;
     }
 
-    if (count == 0) {
-        return strdup(s);
-    }
+    if (count == 0) { return strdup(s); }
 
     /* Allocate result */
     size_t result_len = slen + count * (new_len - old_len);
     char *result = malloc(result_len + 1);
-    if (!result) {
-        return NULL;
-    }
+    if (!result) { return NULL; }
 
     char *dst = result;
     const char *src = s;
@@ -183,9 +167,7 @@ char *lat_str_to_upper(const char *s) {
     size_t len = strlen(s);
     char *result = malloc(len + 1);
     if (result) {
-        for (size_t i = 0; i < len; i++) {
-            result[i] = (char)toupper((unsigned char)s[i]);
-        }
+        for (size_t i = 0; i < len; i++) { result[i] = (char)toupper((unsigned char)s[i]); }
         result[len] = '\0';
     }
     return result;
@@ -196,9 +178,7 @@ char *lat_str_to_lower(const char *s) {
     size_t len = strlen(s);
     char *result = malloc(len + 1);
     if (result) {
-        for (size_t i = 0; i < len; i++) {
-            result[i] = (char)tolower((unsigned char)s[i]);
-        }
+        for (size_t i = 0; i < len; i++) { result[i] = (char)tolower((unsigned char)s[i]); }
         result[len] = '\0';
     }
     return result;
@@ -215,9 +195,7 @@ char *lat_str_substring(const char *s, int64_t start, int64_t end) {
     if (end > len) end = len;
 
     /* start >= end: return empty string */
-    if (start >= end) {
-        return strdup("");
-    }
+    if (start >= end) { return strdup(""); }
 
     size_t sub_len = (size_t)(end - start);
     char *result = malloc(sub_len + 1);
@@ -232,24 +210,18 @@ int64_t lat_str_index_of(const char *s, const char *substr) {
     s = safe_str(s);
     substr = safe_str(substr);
     const char *p = strstr(s, substr);
-    if (!p) {
-        return -1;
-    }
+    if (!p) { return -1; }
     return (int64_t)(p - s);
 }
 
 int64_t lat_str_char_code_at(const char *s, size_t idx) {
     s = safe_str(s);
-    if (idx >= strlen(s)) {
-        return -1;
-    }
+    if (idx >= strlen(s)) { return -1; }
     return (int64_t)(unsigned char)s[idx];
 }
 
 char *lat_str_from_char_code(int64_t code) {
-    if (code < 0 || code > 127) {
-        return strdup("");
-    }
+    if (code < 0 || code > 127) { return strdup(""); }
     char *result = malloc(2);
     if (result) {
         result[0] = (char)code;
@@ -262,9 +234,11 @@ char *lat_str_repeat(const char *s, size_t count) {
     s = safe_str(s);
     size_t len = strlen(s);
 
-    if (count == 0 || len == 0) {
-        return strdup("");
-    }
+    if (count == 0 || len == 0) { return strdup(""); }
+
+    /* Guard against size_t overflow in len*count (+1): an unchecked product
+     * wraps to a small malloc while the copy loop writes the full len*count. */
+    if (count > (SIZE_MAX - 1) / len) { return strdup(""); }
 
     size_t total = len * count;
     char *result = malloc(total + 1);
@@ -284,9 +258,7 @@ char *lat_str_reverse(const char *s) {
     size_t len = strlen(s);
     char *result = malloc(len + 1);
     if (result) {
-        for (size_t i = 0; i < len; i++) {
-            result[i] = s[len - 1 - i];
-        }
+        for (size_t i = 0; i < len; i++) { result[i] = s[len - 1 - i]; }
         result[len] = '\0';
     }
     return result;
@@ -424,25 +396,19 @@ const char *lat_find_similar(const char *name, const char **candidates, int max_
 
 /* ── Built-in type names for "did you mean?" suggestions ── */
 
-static const char *builtin_type_names[] = {
-    "Int", "Float", "String", "Bool", "Array", "Map", "Set", "Buffer",
-    "Channel", "Nil", "Any", "Fn", "Tuple", "Ref", "Enum", "Struct",
-    "Range", "Number", "Closure",
-    NULL
-};
+static const char *builtin_type_names[] = {"Int",    "Float",   "String", "Bool",   "Array",   "Map",   "Set",
+                                           "Buffer", "Channel", "Nil",    "Any",    "Fn",      "Tuple", "Ref",
+                                           "Enum",   "Struct",  "Range",  "Number", "Closure", NULL};
 
 bool lat_is_known_type(const char *name) {
     if (!name) return false;
     for (int i = 0; builtin_type_names[i]; i++) {
-        if (strcmp(name, builtin_type_names[i]) == 0)
-            return true;
+        if (strcmp(name, builtin_type_names[i]) == 0) return true;
     }
     return false;
 }
 
-const char *lat_find_similar_type(const char *name,
-                                  const char **struct_names,
-                                  const char **enum_names) {
+const char *lat_find_similar_type(const char *name, const char **struct_names, const char **enum_names) {
     if (!name) return NULL;
     const char *best = NULL;
     int best_dist = 3; /* max_distance + 1 */
@@ -481,18 +447,12 @@ const char *lat_find_similar_type(const char *name,
 /* ── Keyword list for "did you mean?" suggestions ── */
 
 static const char *lattice_keywords[] = {
-    "fn", "let", "flux", "fix", "if", "else", "while", "for", "in",
-    "return", "break", "continue", "struct", "enum", "trait", "impl",
-    "match", "scope", "spawn", "select", "defer", "try", "catch",
-    "throw", "import", "true", "false", "nil", "freeze", "thaw",
-    "sublimate", "phase_of", "typeof", "print", "loop", "clone",
-    "anneal", "forge", "test", "from", "as", "crystallize", "export",
-    NULL
-};
+    "fn",       "let",    "flux",   "fix",    "if",    "else",  "while",  "for",   "in",          "return",   "break",
+    "continue", "struct", "enum",   "trait",  "impl",  "match", "scope",  "spawn", "select",      "defer",    "try",
+    "catch",    "throw",  "import", "true",   "false", "nil",   "freeze", "thaw",  "sublimate",   "phase_of", "typeof",
+    "print",    "loop",   "clone",  "anneal", "forge", "test",  "from",   "as",    "crystallize", "export",   NULL};
 
-const char *lat_find_similar_keyword(const char *name) {
-    return lat_find_similar(name, lattice_keywords, 2);
-}
+const char *lat_find_similar_keyword(const char *name) { return lat_find_similar(name, lattice_keywords, 2); }
 
 char *lat_str_kebab_case(const char *s) {
     s = safe_str(s);

@@ -4,6 +4,7 @@
 #include "builtins.h"
 #include "value.h"
 #include "http.h"
+#include "crypto_ops.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -12,19 +13,84 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "win32_compat.h"
+#include <process.h>
 #else
 #include <unistd.h>
 #include <libgen.h>
+#include <sys/wait.h>
 #endif
 
 /* Default HTTP registry URL */
 #define PKG_DEFAULT_REGISTRY "https://registry.lattice-lang.org/v1"
+
+/* ── Shell-free command execution ──
+ * Run a program directly (no /bin/sh), so untrusted manifest fields (package
+ * names, git URLs, refs) cannot be interpreted as shell syntax. argv must be
+ * NULL-terminated and argv[0] is the program name. Returns the child exit
+ * status (0 = success), or -1 on spawn failure. */
+static int pkg_run(const char *const argv[]) {
+#ifdef _WIN32
+    intptr_t rc = _spawnvp(_P_WAIT, argv[0], (const char *const *)argv);
+    return (rc < 0) ? -1 : (int)rc;
+#else
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execvp(argv[0], (char *const *)argv);
+        _exit(127); /* exec failed */
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+}
+
+/* Recursively copy a directory tree (cp -R src dst), no shell. "--" guards
+ * against a src/dst that begins with '-' being parsed as an option. */
+static int pkg_copy_tree(const char *src, const char *dst) {
+    const char *argv[] = {"cp", "-R", "--", src, dst, NULL};
+    return pkg_run(argv);
+}
+
+/* Recursively remove a path (rm -rf path), no shell. */
+static int pkg_remove_tree(const char *path) {
+    const char *argv[] = {"rm", "-rf", "--", path, NULL};
+    return pkg_run(argv);
+}
 
 /* ========================================================================
  * Helpers
  * ======================================================================== */
 
 static char *safe_strdup(const char *s) { return s ? strdup(s) : NULL; }
+
+bool pkg_name_is_valid(const char *name) {
+    if (!name || !*name) return false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
+    for (const char *p = name; *p; p++) {
+        char ch = *p;
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' ||
+              ch == '_' || ch == '-'))
+            return false;
+    }
+    return true;
+}
+
+/* True if `s` is safe to use as a single filesystem path component: non-empty,
+ * not "." or "..", no path separators, no embedded ".." and no control bytes.
+ * Looser than pkg_name_is_valid so it accepts version strings and refs
+ * ("^1.2.3", "1.0.0-beta", "*"). */
+static bool pkg_path_component_is_safe(const char *s) {
+    if (!s || !*s) return false;
+    if (strcmp(s, ".") == 0 || strcmp(s, "..") == 0) return false;
+    if (strstr(s, "..")) return false;
+    for (const char *p = s; *p; p++) {
+        if (*p == '/' || *p == '\\' || (unsigned char)*p < 0x20) return false;
+    }
+    return true;
+}
 
 /* Get string value from a TOML map, or NULL. Result is a borrowed pointer. */
 static const char *map_get_str(LatValue *map, const char *key) {
@@ -183,9 +249,32 @@ static char *find_cached_package(const char *name, const char *version) {
  * static or from getenv — do NOT free. */
 static const char *get_registry_url(void) {
     const char *url = getenv("LATTICE_REGISTRY");
-    /* Only use LATTICE_REGISTRY if it looks like an HTTP(S) URL */
-    if (url && (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0)) return url;
+    if (url) {
+        if (strncmp(url, "https://", 8) == 0) return url;
+        if (strncmp(url, "http://", 7) == 0) {
+            /* Plain HTTP lets an on-path attacker substitute package contents,
+             * which are then executed. Require an explicit insecure opt-in. */
+            if (getenv("LATTICE_INSECURE_REGISTRY")) return url;
+            fprintf(stderr, "warning: ignoring insecure http:// LATTICE_REGISTRY "
+                            "(set LATTICE_INSECURE_REGISTRY=1 to allow); using default HTTPS registry\n");
+        }
+    }
     return PKG_DEFAULT_REGISTRY;
+}
+
+/* Compute the SHA-256 (hex) of an installed package's primary source file, for
+ * recording in / verifying against lattice.lock. Returns "" if unavailable. */
+static char *pkg_compute_checksum(const char *name) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "lat_modules/%s/main.lat", name);
+    if (!fs_file_exists(path)) snprintf(path, sizeof(path), "lat_modules/%s/lattice.toml", name);
+    char *content = builtin_read_file(path);
+    if (!content) return strdup("");
+    char *cerr = NULL;
+    char *sum = crypto_sha256(content, strlen(content), &cerr);
+    free(content);
+    free(cerr);
+    return sum ? sum : strdup("");
 }
 
 /* Fetch package version list from registry.
@@ -433,9 +522,9 @@ static bool fetch_from_registry(const char *name, const char *version, char **er
                 return false;
             }
         }
-        char cmd[PATH_MAX * 2 + 32];
-        snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", cached, name);
-        int rc = system(cmd);
+        char dst[PATH_MAX];
+        snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+        int rc = pkg_copy_tree(cached, dst);
         free(cached);
         if (rc != 0) {
             size_t elen = 256;
@@ -491,9 +580,9 @@ static bool fetch_from_registry(const char *name, const char *version, char **er
         }
     }
 
-    char cmd[PATH_MAX * 2 + 32];
-    snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", pkg_cache, name);
-    int rc = system(cmd);
+    char dst[PATH_MAX];
+    snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+    int rc = pkg_copy_tree(pkg_cache, dst);
     if (rc != 0) {
         size_t elen = 256;
         *err = malloc(elen);
@@ -580,6 +669,30 @@ bool pkg_manifest_parse(const char *toml_str, PkgManifest *out, char **err) {
                 if (grev) d->git_rev = strdup(grev);
             } else {
                 d->version = strdup("*");
+            }
+
+            /* Reject manifest entries that could traverse the filesystem when
+             * used to build lat_modules/<name> and cache/<name>/<version>, or
+             * a git ref used as a cache path component. */
+            if (!pkg_name_is_valid(d->name) || !pkg_path_component_is_safe(d->version) ||
+                (d->git_tag && strstr(d->git_tag, "..")) || (d->git_branch && strstr(d->git_branch, "..")) ||
+                (d->git_rev && strstr(d->git_rev, ".."))) {
+                if (err) {
+                    size_t elen = strlen(d->name ? d->name : "") + 96;
+                    *err = malloc(elen);
+                    if (*err)
+                        snprintf(*err, elen, "invalid or unsafe dependency entry '%s' in lattice.toml",
+                                 d->name ? d->name : "");
+                }
+                free(d->name);
+                free(d->version);
+                free(d->git_url);
+                free(d->git_tag);
+                free(d->git_branch);
+                free(d->git_rev);
+                value_free(&root);
+                pkg_manifest_free(out);
+                return false;
             }
             out->dep_count++;
         }
@@ -1096,10 +1209,11 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
     char *cached = find_cached_package(name, cache_key);
     if (cached) {
         /* Copy from cache to lat_modules/ */
-        char cmd[PATH_MAX * 2 + 32];
-        snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", cached, name);
+        char dst[PATH_MAX];
+        snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+        int copy_rc = pkg_copy_tree(cached, dst);
         free(cached);
-        if (system(cmd) == 0) {
+        if (copy_rc == 0) {
             printf("  %s (cached, git %s)\n", name, ref_label);
             return true;
         }
@@ -1110,22 +1224,35 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
     char dest[PATH_MAX];
     snprintf(dest, sizeof(dest), "lat_modules/%s", name);
 
-    char cmd[PATH_MAX * 3 + 256];
+    /* Build the git clone argv with no shell. "--" separates options from the
+     * repo/dir positional args so a URL or dest beginning with '-' cannot be
+     * parsed as an option. --branch works for tags too; a specific rev needs a
+     * full clone (no --depth) so the commit is reachable. */
+    const char *clone_argv[12];
+    int ci = 0;
+    clone_argv[ci++] = "git";
+    clone_argv[ci++] = "clone";
+    clone_argv[ci++] = "--quiet";
     if (tag) {
-        /* Clone with --branch (works for tags too) --depth 1 for speed */
-        snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 --branch '%s' '%s' '%s' 2>&1", tag, git_url, dest);
+        clone_argv[ci++] = "--depth";
+        clone_argv[ci++] = "1";
+        clone_argv[ci++] = "--branch";
+        clone_argv[ci++] = tag;
     } else if (branch) {
-        snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 --branch '%s' '%s' '%s' 2>&1", branch, git_url, dest);
-    } else {
-        /* Clone HEAD (or full clone if we need a specific rev) */
-        if (rev) {
-            snprintf(cmd, sizeof(cmd), "git clone --quiet '%s' '%s' 2>&1", git_url, dest);
-        } else {
-            snprintf(cmd, sizeof(cmd), "git clone --quiet --depth 1 '%s' '%s' 2>&1", git_url, dest);
-        }
+        clone_argv[ci++] = "--depth";
+        clone_argv[ci++] = "1";
+        clone_argv[ci++] = "--branch";
+        clone_argv[ci++] = branch;
+    } else if (!rev) {
+        clone_argv[ci++] = "--depth";
+        clone_argv[ci++] = "1";
     }
+    clone_argv[ci++] = "--";
+    clone_argv[ci++] = git_url;
+    clone_argv[ci++] = dest;
+    clone_argv[ci] = NULL;
 
-    int rc = system(cmd);
+    int rc = pkg_run(clone_argv);
     if (rc != 0) {
         if (err) {
             size_t elen = strlen(name) + strlen(git_url) + 128;
@@ -1137,12 +1264,11 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
 
     /* Checkout specific revision if requested */
     if (rev) {
-        snprintf(cmd, sizeof(cmd), "cd '%s' && git checkout --quiet '%s' 2>&1", dest, rev);
-        rc = system(cmd);
+        const char *co_argv[] = {"git", "-C", dest, "checkout", "--quiet", rev, NULL};
+        rc = pkg_run(co_argv);
         if (rc != 0) {
             /* Clean up failed checkout */
-            snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dest);
-            int ignored = system(cmd);
+            int ignored = pkg_remove_tree(dest);
             (void)ignored;
             if (err) {
                 size_t elen = strlen(rev) + strlen(name) + 128;
@@ -1154,8 +1280,9 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
     }
 
     /* Remove .git directory — we only need the source */
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s/.git'", dest);
-    int ignored2 = system(cmd);
+    char git_dir[PATH_MAX + 8];
+    snprintf(git_dir, sizeof(git_dir), "%s/.git", dest);
+    int ignored2 = pkg_remove_tree(git_dir);
     (void)ignored2;
 
     /* Cache the result */
@@ -1171,8 +1298,7 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
             }
             char cache_dest[PATH_MAX];
             snprintf(cache_dest, sizeof(cache_dest), "%s/%s/%s", cache_dir, name, cache_key);
-            snprintf(cmd, sizeof(cmd), "cp -R '%s' '%s'", dest, cache_dest);
-            int ignored3 = system(cmd);
+            int ignored3 = pkg_copy_tree(dest, cache_dest);
             (void)ignored3;
             free(cache_dir);
         }
@@ -1237,10 +1363,10 @@ static bool fetch_package(const char *name, const char *version, char **err, con
                 }
             }
 
-            /* Copy directory recursively using system cp */
-            char cmd[PATH_MAX * 2 + 32];
-            snprintf(cmd, sizeof(cmd), "cp -R '%s' 'lat_modules/%s'", src_path, name);
-            int rc = system(cmd);
+            /* Copy directory recursively (no shell) */
+            char dst[PATH_MAX];
+            snprintf(dst, sizeof(dst), "lat_modules/%s", name);
+            int rc = pkg_copy_tree(src_path, dst);
             if (rc != 0) {
                 if (err) {
                     size_t elen = 256;
@@ -1288,6 +1414,13 @@ static bool fetch_package(const char *name, const char *version, char **err, con
 static const char *lock_find_version(const PkgLock *lock, const char *name) {
     for (size_t i = 0; i < lock->entry_count; i++) {
         if (lock->entries[i].name && strcmp(lock->entries[i].name, name) == 0) return lock->entries[i].version;
+    }
+    return NULL;
+}
+
+static const char *lock_find_checksum(const PkgLock *lock, const char *name) {
+    for (size_t i = 0; i < lock->entry_count; i++) {
+        if (lock->entries[i].name && strcmp(lock->entries[i].name, name) == 0) return lock->entries[i].checksum;
     }
     return NULL;
 }
@@ -1427,16 +1560,31 @@ int pkg_cmd_install(void) {
                 }
             }
 
-            /* Add to lock */
-            if (lock.entry_count >= lock.entry_cap) {
-                lock.entry_cap *= 2;
-                lock.entries = realloc(lock.entries, lock.entry_cap * sizeof(PkgLockEntry));
+            /* Verify integrity against the existing lock (trust-on-first-use),
+             * then record the real checksum. */
+            char *new_sum = pkg_compute_checksum(dep_name);
+            const char *old_sum = have_lock ? lock_find_checksum(&existing_lock, dep_name) : NULL;
+            if (old_sum && *old_sum && strcmp(old_sum, new_sum) != 0) {
+                fprintf(stderr,
+                        "  error: integrity check failed for '%s' — content does not match lattice.lock checksum\n",
+                        dep_name);
+                char rmpath[PATH_MAX];
+                snprintf(rmpath, sizeof(rmpath), "lat_modules/%s", dep_name);
+                pkg_remove_tree(rmpath);
+                free(new_sum);
+                free(resolved_ver);
+            } else {
+                /* Add to lock */
+                if (lock.entry_count >= lock.entry_cap) {
+                    lock.entry_cap *= 2;
+                    lock.entries = realloc(lock.entries, lock.entry_cap * sizeof(PkgLockEntry));
+                }
+                PkgLockEntry *le = &lock.entries[lock.entry_count++];
+                le->name = strdup(dep_name);
+                le->version = resolved_ver;
+                le->source = strdup(pkg_source);
+                le->checksum = new_sum;
             }
-            PkgLockEntry *le = &lock.entries[lock.entry_count++];
-            le->name = strdup(dep_name);
-            le->version = resolved_ver;
-            le->source = strdup(pkg_source);
-            le->checksum = strdup("");
         } else {
             printf(" FAILED\n");
             fprintf(stderr, "  error: %s\n", fetch_err ? fetch_err : "unknown error");
@@ -1716,9 +1864,7 @@ int pkg_cmd_remove(const char *name) {
     char mod_path[PATH_MAX];
     snprintf(mod_path, sizeof(mod_path), "lat_modules/%s", name);
     if (fs_is_dir(mod_path)) {
-        char cmd[PATH_MAX + 16];
-        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", mod_path);
-        if (system(cmd) != 0) { fprintf(stderr, "warning: failed to remove '%s'\n", mod_path); }
+        if (pkg_remove_tree(mod_path) != 0) { fprintf(stderr, "warning: failed to remove '%s'\n", mod_path); }
     }
 
     /* Update lock file */

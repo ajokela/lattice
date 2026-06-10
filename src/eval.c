@@ -1597,6 +1597,10 @@ static void *spawn_thread_fn(void *arg) {
         value_free(&result.value);
     }
 
+    /* Detach values the spawn stored in the child env out of this thread's heap
+     * before the parent frees that heap (see env_detach_values / LAT-420). */
+    env_detach_values(child->env);
+
     return NULL;
 }
 
@@ -8040,7 +8044,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return vr;
                     }
                     size_t idx = (size_t)ir.value.as.int_val;
-                    if (ir.value.type != VAL_INT || idx + 2 > buf_lv->as.buffer.len) {
+                    if (ir.value.type != VAL_INT || ir.value.as.int_val < 0 || idx + 2 > buf_lv->as.buffer.len) {
                         value_free(&ir.value);
                         value_free(&vr.value);
                         return eval_err(strdup("Buffer.write_u16: index out of bounds"));
@@ -8066,7 +8070,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return vr;
                     }
                     size_t idx = (size_t)ir.value.as.int_val;
-                    if (ir.value.type != VAL_INT || idx + 4 > buf_lv->as.buffer.len) {
+                    if (ir.value.type != VAL_INT || ir.value.as.int_val < 0 || idx + 4 > buf_lv->as.buffer.len) {
                         value_free(&ir.value);
                         value_free(&vr.value);
                         return eval_err(strdup("Buffer.write_u32: index out of bounds"));
@@ -8094,7 +8098,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return vr;
                     }
                     size_t idx = (size_t)ir.value.as.int_val;
-                    if (ir.value.type != VAL_INT || idx + 8 > buf_lv->as.buffer.len) {
+                    if (ir.value.type != VAL_INT || ir.value.as.int_val < 0 || idx + 8 > buf_lv->as.buffer.len) {
                         value_free(&ir.value);
                         value_free(&vr.value);
                         return eval_err(strdup("Buffer.write_u64: index out of bounds"));
@@ -8119,7 +8123,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return vr;
                     }
                     size_t idx = (size_t)ir.value.as.int_val;
-                    if (ir.value.type != VAL_INT || idx + 8 > buf_lv->as.buffer.len) {
+                    if (ir.value.type != VAL_INT || ir.value.as.int_val < 0 || idx + 8 > buf_lv->as.buffer.len) {
                         value_free(&ir.value);
                         value_free(&vr.value);
                         return eval_err(strdup("Buffer.write_i64: index out of bounds"));
@@ -11450,7 +11454,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_u16() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 2 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_u16: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 2 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_u16: index out of bounds"));
             uint16_t v = (uint16_t)(obj.as.buffer.data[i] | (obj.as.buffer.data[i + 1] << 8));
             return eval_ok(value_int(v));
         }
@@ -11467,7 +11472,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_u32() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 4 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_u32: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 4 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_u32: index out of bounds"));
             uint32_t v = (uint32_t)obj.as.buffer.data[i] | ((uint32_t)obj.as.buffer.data[i + 1] << 8) |
                          ((uint32_t)obj.as.buffer.data[i + 2] << 16) | ((uint32_t)obj.as.buffer.data[i + 3] << 24);
             return eval_ok(value_int((int64_t)v));
@@ -11496,7 +11502,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_i16() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 2 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_i16: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 2 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_i16: index out of bounds"));
             int16_t v;
             memcpy(&v, obj.as.buffer.data + i, 2);
             return eval_ok(value_int(v));
@@ -11508,7 +11515,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_i32() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 4 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_i32: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 4 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_i32: index out of bounds"));
             int32_t v;
             memcpy(&v, obj.as.buffer.data + i, 4);
             return eval_ok(value_int(v));
@@ -11520,7 +11528,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_f32() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 4 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_f32: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 4 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_f32: index out of bounds"));
             float v;
             memcpy(&v, obj.as.buffer.data + i, 4);
             return eval_ok(value_float((double)v));
@@ -11532,7 +11541,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_f64() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 8 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_f64: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 8 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_f64: index out of bounds"));
             double v;
             memcpy(&v, obj.as.buffer.data + i, 8);
             return eval_ok(value_float(v));
@@ -11541,7 +11551,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_u64() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 8 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_u64: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 8 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_u64: index out of bounds"));
             uint64_t v = 0;
             for (int b = 0; b < 8; b++) v |= (uint64_t)obj.as.buffer.data[i + b] << (b * 8);
             return eval_ok(value_int((int64_t)v));
@@ -11550,7 +11561,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup("Buffer.read_i64() expects 1 Int argument"));
             size_t i = (size_t)args[0].as.int_val;
-            if (i + 8 > obj.as.buffer.len) return eval_err(strdup("Buffer.read_i64: index out of bounds"));
+            if (args[0].as.int_val < 0 || i + 8 > obj.as.buffer.len)
+                return eval_err(strdup("Buffer.read_i64: index out of bounds"));
             int64_t v;
             memcpy(&v, obj.as.buffer.data + i, 8);
             return eval_ok(value_int(v));

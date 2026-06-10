@@ -16,7 +16,11 @@ typedef struct {
     const char *src;
     size_t pos;
     char *err;
+    int depth; /* current container nesting depth */
 } TomlParser;
+
+/* Bound recursion so deeply nested input cannot overflow the C stack. */
+#define TOML_MAX_DEPTH 1000
 
 static void tp_skip_ws(TomlParser *p) {
     while (p->src[p->pos] == ' ' || p->src[p->pos] == '\t') p->pos++;
@@ -311,8 +315,26 @@ static LatValue tp_parse_inline_table(TomlParser *p) {
 static LatValue tp_parse_value(TomlParser *p) {
     char c = p->src[p->pos];
     if (c == '"' || c == '\'') return tp_parse_string_value(p);
-    if (c == '[') return tp_parse_array(p);
-    if (c == '{') return tp_parse_inline_table(p);
+    if (c == '[') {
+        if (p->depth >= TOML_MAX_DEPTH) {
+            tp_error(p, "maximum nesting depth exceeded");
+            return value_unit();
+        }
+        p->depth++;
+        LatValue r = tp_parse_array(p);
+        p->depth--;
+        return r;
+    }
+    if (c == '{') {
+        if (p->depth >= TOML_MAX_DEPTH) {
+            tp_error(p, "maximum nesting depth exceeded");
+            return value_unit();
+        }
+        p->depth++;
+        LatValue r = tp_parse_inline_table(p);
+        p->depth--;
+        return r;
+    }
     if (c == 't' && strncmp(p->src + p->pos, "true", 4) == 0 && !isalnum((unsigned char)p->src[p->pos + 4])) {
         p->pos += 4;
         return value_bool(true);

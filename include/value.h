@@ -159,6 +159,8 @@ bool value_is_crystal(const LatValue *v);
 
 /* ── Deep operations ── */
 LatValue value_deep_clone(const LatValue *v);
+/* Deep-clone into thread-independent (malloc-backed) storage; see value.c. */
+LatValue value_detach(const LatValue *v);
 LatValue value_freeze(LatValue v);
 LatValue value_thaw(const LatValue *v);
 
@@ -193,6 +195,9 @@ struct CrystalRegion *value_get_arena(void);
 void *lat_alloc_routed(size_t size);
 void *lat_calloc_routed(size_t count, size_t size);
 char *lat_strdup_routed(const char *s);
+/* Heap-aware realloc: avoids leaving a stale pointer in a fluid heap's tracking
+ * list (which double-frees at teardown). See value.c. */
+void *lat_realloc_routed(void *ptr, size_t new_size);
 
 /* ── Destructor ── */
 void value_free(LatValue *v);

@@ -175,9 +175,19 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
         const char *colon = memchr(hdr, ':', (size_t)(next - hdr));
         if (colon) {
             if (resp->header_count >= hdr_cap) {
-                hdr_cap *= 2;
-                resp->header_keys = realloc(resp->header_keys, hdr_cap * sizeof(char *));
-                resp->header_values = realloc(resp->header_values, hdr_cap * sizeof(char *));
+                size_t new_cap = hdr_cap * 2;
+                char **nk = realloc(resp->header_keys, new_cap * sizeof(char *));
+                char **nv = realloc(resp->header_values, new_cap * sizeof(char *));
+                if (!nk || !nv) {
+                    free(nk ? nk : resp->header_keys);
+                    free(nv ? nv : resp->header_values);
+                    resp->header_keys = NULL;
+                    resp->header_values = NULL;
+                    break; /* out of memory: stop parsing headers */
+                }
+                resp->header_keys = nk;
+                resp->header_values = nv;
+                hdr_cap = new_cap;
             }
             /* Key: lowercase for easy lookup */
             size_t klen = (size_t)(colon - hdr);
@@ -231,12 +241,23 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
 
             if (chunk_size == 0) break; /* Final chunk */
 
-            while (bpos + chunk_size + 1 > bcap) {
-                bcap *= 2;
-                body = realloc(body, bcap);
-            }
+            /* Grow by the bytes actually available to copy, not by the
+             * attacker-claimed chunk_size (which can be up to ULONG_MAX and
+             * overflow the size arithmetic / force a giant allocation). */
             size_t avail = (size_t)(end - cp);
             size_t to_copy = chunk_size < avail ? chunk_size : avail;
+            while (bpos + to_copy + 1 > bcap) {
+                size_t newcap = bcap * 2;
+                char *nb = (newcap > bcap) ? realloc(body, newcap) : NULL;
+                if (!nb) {
+                    free(body);
+                    body = NULL;
+                    break;
+                }
+                body = nb;
+                bcap = newcap;
+            }
+            if (!body) break;
             memcpy(body + bpos, cp, to_copy);
             bpos += to_copy;
             cp += to_copy;
@@ -244,7 +265,11 @@ static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err)
             /* Skip trailing \r\n */
             if (cp + 2 <= end && cp[0] == '\r' && cp[1] == '\n') cp += 2;
         }
-        body[bpos] = '\0';
+        if (!body) { /* allocation failed mid-decode */
+            body = calloc(1, 1);
+            bpos = 0;
+        }
+        if (body) body[bpos] = '\0';
         resp->body = body;
         resp->body_len = bpos;
     } else {
@@ -345,8 +370,19 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
         } /* EOF */
 
         while (resp_len + clen + 1 > resp_cap) {
-            resp_cap *= 2;
-            resp_buf = realloc(resp_buf, resp_cap);
+            size_t newcap = resp_cap * 2;
+            char *nb = (newcap > resp_cap) ? realloc(resp_buf, newcap) : NULL;
+            if (!nb) {
+                free(resp_buf);
+                resp_buf = NULL;
+                break;
+            }
+            resp_buf = nb;
+            resp_cap = newcap;
+        }
+        if (!resp_buf) {
+            free(chunk);
+            break;
         }
         memcpy(resp_buf + resp_len, chunk, clen);
         resp_len += clen;

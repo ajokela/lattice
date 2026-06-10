@@ -16,9 +16,7 @@ LatChannel *channel_new(void) {
     return ch;
 }
 
-void channel_retain(LatChannel *ch) {
-    __atomic_add_fetch(&ch->refcount, 1, __ATOMIC_SEQ_CST);
-}
+void channel_retain(LatChannel *ch) { __atomic_add_fetch(&ch->refcount, 1, __ATOMIC_SEQ_CST); }
 
 void channel_release(LatChannel *ch) {
     size_t prev = __atomic_sub_fetch(&ch->refcount, 1, __ATOMIC_SEQ_CST);
@@ -38,6 +36,12 @@ void channel_release(LatChannel *ch) {
 }
 
 bool channel_send(LatChannel *ch, LatValue val) {
+    /* Detach the value from the sending thread's local heap so it survives the
+     * thread's teardown — channels are drained by another thread, which would
+     * otherwise read freed memory (use-after-free) and double-free on cleanup.
+     * The sender-owned original is released into the sender's own heap. */
+    LatValue owned = value_detach(&val);
+    value_free(&val);
 #ifndef __EMSCRIPTEN__
     pthread_mutex_lock(&ch->mutex);
 #endif
@@ -45,10 +49,10 @@ bool channel_send(LatChannel *ch, LatValue val) {
 #ifndef __EMSCRIPTEN__
         pthread_mutex_unlock(&ch->mutex);
 #endif
-        value_free(&val);
+        value_free(&owned);
         return false;
     }
-    lat_vec_push(&ch->buffer, &val);
+    lat_vec_push(&ch->buffer, &owned);
 #ifndef __EMSCRIPTEN__
     pthread_cond_signal(&ch->cond_notempty);
     /* Wake any select waiters */
@@ -65,9 +69,7 @@ bool channel_send(LatChannel *ch, LatValue val) {
 LatValue channel_recv(LatChannel *ch, bool *ok) {
 #ifndef __EMSCRIPTEN__
     pthread_mutex_lock(&ch->mutex);
-    while (ch->buffer.len == 0 && !ch->closed) {
-        pthread_cond_wait(&ch->cond_notempty, &ch->mutex);
-    }
+    while (ch->buffer.len == 0 && !ch->closed) { pthread_cond_wait(&ch->cond_notempty, &ch->mutex); }
 #endif
     if (ch->buffer.len == 0) {
         /* closed + empty */
@@ -82,8 +84,7 @@ LatValue channel_recv(LatChannel *ch, bool *ok) {
     memcpy(&val, lat_vec_get(&ch->buffer, 0), sizeof(LatValue));
     /* Shift remaining elements forward */
     if (ch->buffer.len > 1) {
-        memmove(ch->buffer.data,
-                (char *)ch->buffer.data + ch->buffer.elem_size,
+        memmove(ch->buffer.data, (char *)ch->buffer.data + ch->buffer.elem_size,
                 (ch->buffer.len - 1) * ch->buffer.elem_size);
     }
     ch->buffer.len--;
@@ -124,8 +125,7 @@ bool channel_try_recv(LatChannel *ch, LatValue *out, bool *closed_out) {
     }
     memcpy(out, lat_vec_get(&ch->buffer, 0), sizeof(LatValue));
     if (ch->buffer.len > 1) {
-        memmove(ch->buffer.data,
-                (char *)ch->buffer.data + ch->buffer.elem_size,
+        memmove(ch->buffer.data, (char *)ch->buffer.data + ch->buffer.elem_size,
                 (ch->buffer.len - 1) * ch->buffer.elem_size);
     }
     ch->buffer.len--;
@@ -143,7 +143,8 @@ void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w) {
     ch->waiters = w;
     pthread_mutex_unlock(&ch->mutex);
 #else
-    (void)ch; (void)w;
+    (void)ch;
+    (void)w;
 #endif
 }
 
@@ -152,11 +153,15 @@ void channel_remove_waiter(LatChannel *ch, LatSelectWaiter *w) {
     pthread_mutex_lock(&ch->mutex);
     LatSelectWaiter **pp = &ch->waiters;
     while (*pp) {
-        if (*pp == w) { *pp = w->next; break; }
+        if (*pp == w) {
+            *pp = w->next;
+            break;
+        }
         pp = &(*pp)->next;
     }
     pthread_mutex_unlock(&ch->mutex);
 #else
-    (void)ch; (void)w;
+    (void)ch;
+    (void)w;
 #endif
 }

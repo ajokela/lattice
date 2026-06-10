@@ -12,8 +12,13 @@ Lexer lexer_new(const char *source) {
     lex.pos = 0;
     lex.line = 1;
     lex.col = 1;
+    lex.interp_depth = 0;
     return lex;
 }
+
+/* Bound string-interpolation nesting so deeply nested "${ "${ ... }" }"
+ * source cannot overflow the C stack via lex_one/lex_string_or_interp. */
+#define LEXER_MAX_INTERP_DEPTH 200
 
 static char lex_peek(const Lexer *lex) {
     if (lex->pos >= lex->len) return '\0';
@@ -41,14 +46,10 @@ static char lex_advance(Lexer *lex) {
 static void skip_whitespace_and_comments(Lexer *lex) {
     for (;;) {
         /* Skip whitespace */
-        while (lex->pos < lex->len && isspace((unsigned char)lex_peek(lex))) {
-            lex_advance(lex);
-        }
+        while (lex->pos < lex->len && isspace((unsigned char)lex_peek(lex))) { lex_advance(lex); }
         /* Line comment */
         if (lex_peek(lex) == '/' && lex_peek_ahead(lex, 1) == '/') {
-            while (lex->pos < lex->len && lex_peek(lex) != '\n') {
-                lex_advance(lex);
-            }
+            while (lex->pos < lex->len && lex_peek(lex) != '\n') { lex_advance(lex); }
             continue;
         }
         /* Block comment (nestable) */
@@ -74,9 +75,7 @@ static void skip_whitespace_and_comments(Lexer *lex) {
 
 static char *read_ident(Lexer *lex) {
     size_t start = lex->pos;
-    while (lex->pos < lex->len && (isalnum((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
-        lex_advance(lex);
-    }
+    while (lex->pos < lex->len && (isalnum((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) { lex_advance(lex); }
     size_t len = lex->pos - start;
     char *s = malloc(len + 1);
     if (!s) return NULL;
@@ -86,41 +85,41 @@ static char *read_ident(Lexer *lex) {
 }
 
 static TokenType keyword_lookup(const char *ident) {
-    if (strcmp(ident, "flux") == 0)     return TOK_FLUX;
-    if (strcmp(ident, "fix") == 0)      return TOK_FIX;
-    if (strcmp(ident, "let") == 0)      return TOK_LET;
-    if (strcmp(ident, "freeze") == 0)   return TOK_FREEZE;
-    if (strcmp(ident, "thaw") == 0)     return TOK_THAW;
-    if (strcmp(ident, "forge") == 0)    return TOK_FORGE;
-    if (strcmp(ident, "fn") == 0)       return TOK_FN;
-    if (strcmp(ident, "struct") == 0)   return TOK_STRUCT;
-    if (strcmp(ident, "if") == 0)       return TOK_IF;
-    if (strcmp(ident, "else") == 0)     return TOK_ELSE;
-    if (strcmp(ident, "for") == 0)      return TOK_FOR;
-    if (strcmp(ident, "in") == 0)       return TOK_IN;
-    if (strcmp(ident, "while") == 0)    return TOK_WHILE;
-    if (strcmp(ident, "loop") == 0)     return TOK_LOOP;
-    if (strcmp(ident, "return") == 0)   return TOK_RETURN;
-    if (strcmp(ident, "break") == 0)    return TOK_BREAK;
+    if (strcmp(ident, "flux") == 0) return TOK_FLUX;
+    if (strcmp(ident, "fix") == 0) return TOK_FIX;
+    if (strcmp(ident, "let") == 0) return TOK_LET;
+    if (strcmp(ident, "freeze") == 0) return TOK_FREEZE;
+    if (strcmp(ident, "thaw") == 0) return TOK_THAW;
+    if (strcmp(ident, "forge") == 0) return TOK_FORGE;
+    if (strcmp(ident, "fn") == 0) return TOK_FN;
+    if (strcmp(ident, "struct") == 0) return TOK_STRUCT;
+    if (strcmp(ident, "if") == 0) return TOK_IF;
+    if (strcmp(ident, "else") == 0) return TOK_ELSE;
+    if (strcmp(ident, "for") == 0) return TOK_FOR;
+    if (strcmp(ident, "in") == 0) return TOK_IN;
+    if (strcmp(ident, "while") == 0) return TOK_WHILE;
+    if (strcmp(ident, "loop") == 0) return TOK_LOOP;
+    if (strcmp(ident, "return") == 0) return TOK_RETURN;
+    if (strcmp(ident, "break") == 0) return TOK_BREAK;
     if (strcmp(ident, "continue") == 0) return TOK_CONTINUE;
-    if (strcmp(ident, "spawn") == 0)    return TOK_SPAWN;
-    if (strcmp(ident, "true") == 0)     return TOK_TRUE;
-    if (strcmp(ident, "false") == 0)    return TOK_FALSE;
-    if (strcmp(ident, "nil") == 0)      return TOK_NIL;
-    if (strcmp(ident, "clone") == 0)    return TOK_CLONE;
-    if (strcmp(ident, "anneal") == 0)   return TOK_ANNEAL;
-    if (strcmp(ident, "print") == 0)    return TOK_PRINT;
-    if (strcmp(ident, "try") == 0)      return TOK_TRY;
-    if (strcmp(ident, "catch") == 0)    return TOK_CATCH;
-    if (strcmp(ident, "scope") == 0)    return TOK_SCOPE;
-    if (strcmp(ident, "test") == 0)     return TOK_TEST;
-    if (strcmp(ident, "match") == 0)    return TOK_MATCH;
-    if (strcmp(ident, "enum") == 0)     return TOK_ENUM;
-    if (strcmp(ident, "import") == 0)   return TOK_IMPORT;
-    if (strcmp(ident, "from") == 0)     return TOK_FROM;
-    if (strcmp(ident, "as") == 0)       return TOK_AS;
+    if (strcmp(ident, "spawn") == 0) return TOK_SPAWN;
+    if (strcmp(ident, "true") == 0) return TOK_TRUE;
+    if (strcmp(ident, "false") == 0) return TOK_FALSE;
+    if (strcmp(ident, "nil") == 0) return TOK_NIL;
+    if (strcmp(ident, "clone") == 0) return TOK_CLONE;
+    if (strcmp(ident, "anneal") == 0) return TOK_ANNEAL;
+    if (strcmp(ident, "print") == 0) return TOK_PRINT;
+    if (strcmp(ident, "try") == 0) return TOK_TRY;
+    if (strcmp(ident, "catch") == 0) return TOK_CATCH;
+    if (strcmp(ident, "scope") == 0) return TOK_SCOPE;
+    if (strcmp(ident, "test") == 0) return TOK_TEST;
+    if (strcmp(ident, "match") == 0) return TOK_MATCH;
+    if (strcmp(ident, "enum") == 0) return TOK_ENUM;
+    if (strcmp(ident, "import") == 0) return TOK_IMPORT;
+    if (strcmp(ident, "from") == 0) return TOK_FROM;
+    if (strcmp(ident, "as") == 0) return TOK_AS;
     if (strcmp(ident, "crystallize") == 0) return TOK_CRYSTALLIZE;
-    if (strcmp(ident, "borrow") == 0)    return TOK_BORROW;
+    if (strcmp(ident, "borrow") == 0) return TOK_BORROW;
     if (strcmp(ident, "sublimate") == 0) return TOK_SUBLIMATE;
     if (strcmp(ident, "defer") == 0) return TOK_DEFER;
     if (strcmp(ident, "trait") == 0) return TOK_TRAIT;
@@ -171,25 +170,21 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         bool is_hex = false;
 
         /* Check for 0x / 0X hex prefix */
-        if (ch == '0' && lex->pos + 1 < lex->len &&
-            (lex_peek_ahead(lex, 1) == 'x' || lex_peek_ahead(lex, 1) == 'X')) {
+        if (ch == '0' && lex->pos + 1 < lex->len && (lex_peek_ahead(lex, 1) == 'x' || lex_peek_ahead(lex, 1) == 'X')) {
             is_hex = true;
             lex_advance(lex); /* consume '0' */
             lex_advance(lex); /* consume 'x' */
-            while (lex->pos < lex->len &&
-                   (isxdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
+            while (lex->pos < lex->len && (isxdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
                 lex_advance(lex);
             }
         } else {
-            while (lex->pos < lex->len &&
-                   (isdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
+            while (lex->pos < lex->len && (isdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
                 lex_advance(lex);
             }
             if (lex_peek(lex) == '.' && isdigit((unsigned char)lex_peek_ahead(lex, 1))) {
                 is_float = true;
                 lex_advance(lex); /* '.' */
-                while (lex->pos < lex->len &&
-                       (isdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
+                while (lex->pos < lex->len && (isdigit((unsigned char)lex_peek(lex)) || lex_peek(lex) == '_')) {
                     lex_advance(lex);
                 }
             }
@@ -235,12 +230,20 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
     switch (ch) {
         case '~': *out = token_simple(TOK_TILDE, line, col); return true;
         case '+':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_PLUS_EQ, line, col); }
-            else { *out = token_simple(TOK_PLUS, line, col); }
+            if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_PLUS_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_PLUS, line, col);
+            }
             return true;
         case '%':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_PERCENT_EQ, line, col); }
-            else { *out = token_simple(TOK_PERCENT, line, col); }
+            if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_PERCENT_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_PERCENT, line, col);
+            }
             return true;
         case '(': *out = token_simple(TOK_LPAREN, line, col); return true;
         case ')': *out = token_simple(TOK_RPAREN, line, col); return true;
@@ -252,76 +255,147 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
         case ';': *out = token_simple(TOK_SEMICOLON, line, col); return true;
         case '@': *out = token_simple(TOK_AT, line, col); return true;
         case '/':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_SLASH_EQ, line, col); }
-            else { *out = token_simple(TOK_SLASH, line, col); }
+            if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_SLASH_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_SLASH, line, col);
+            }
             return true;
         case '*':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_STAR_EQ, line, col); }
-            else { *out = token_simple(TOK_STAR, line, col); }
+            if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_STAR_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_STAR, line, col);
+            }
             return true;
         case '&':
-            if (lex_peek(lex) == '&') { lex_advance(lex); *out = token_simple(TOK_AND, line, col); }
-            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_AMP_EQ, line, col); }
-            else { *out = token_simple(TOK_AMPERSAND, line, col); }
+            if (lex_peek(lex) == '&') {
+                lex_advance(lex);
+                *out = token_simple(TOK_AND, line, col);
+            } else if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_AMP_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_AMPERSAND, line, col);
+            }
             return true;
         case '|':
-            if (lex_peek(lex) == '|') { lex_advance(lex); *out = token_simple(TOK_OR, line, col); }
-            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_PIPE_EQ, line, col); }
-            else { *out = token_simple(TOK_PIPE, line, col); }
+            if (lex_peek(lex) == '|') {
+                lex_advance(lex);
+                *out = token_simple(TOK_OR, line, col);
+            } else if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_PIPE_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_PIPE, line, col);
+            }
             return true;
         case '^':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_CARET_EQ, line, col); }
-            else { *out = token_simple(TOK_CARET, line, col); }
+            if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_CARET_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_CARET, line, col);
+            }
             return true;
         case '=':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_EQEQ, line, col); }
-            else if (lex_peek(lex) == '>') { lex_advance(lex); *out = token_simple(TOK_FATARROW, line, col); }
-            else { *out = token_simple(TOK_EQ, line, col); }
+            if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_EQEQ, line, col);
+            } else if (lex_peek(lex) == '>') {
+                lex_advance(lex);
+                *out = token_simple(TOK_FATARROW, line, col);
+            } else {
+                *out = token_simple(TOK_EQ, line, col);
+            }
             return true;
         case '!':
-            if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_BANGEQ, line, col); }
-            else { *out = token_simple(TOK_BANG, line, col); }
+            if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_BANGEQ, line, col);
+            } else {
+                *out = token_simple(TOK_BANG, line, col);
+            }
             return true;
         case '<':
             if (lex_peek(lex) == '<') {
                 lex_advance(lex);
-                if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_LSHIFT_EQ, line, col); }
-                else { *out = token_simple(TOK_LSHIFT, line, col); }
+                if (lex_peek(lex) == '=') {
+                    lex_advance(lex);
+                    *out = token_simple(TOK_LSHIFT_EQ, line, col);
+                } else {
+                    *out = token_simple(TOK_LSHIFT, line, col);
+                }
+            } else if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_LTEQ, line, col);
+            } else {
+                *out = token_simple(TOK_LT, line, col);
             }
-            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_LTEQ, line, col); }
-            else { *out = token_simple(TOK_LT, line, col); }
             return true;
         case '>':
             if (lex_peek(lex) == '>') {
                 lex_advance(lex);
-                if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_RSHIFT_EQ, line, col); }
-                else { *out = token_simple(TOK_RSHIFT, line, col); }
+                if (lex_peek(lex) == '=') {
+                    lex_advance(lex);
+                    *out = token_simple(TOK_RSHIFT_EQ, line, col);
+                } else {
+                    *out = token_simple(TOK_RSHIFT, line, col);
+                }
+            } else if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_GTEQ, line, col);
+            } else {
+                *out = token_simple(TOK_GT, line, col);
             }
-            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_GTEQ, line, col); }
-            else { *out = token_simple(TOK_GT, line, col); }
             return true;
         case '-':
-            if (lex_peek(lex) == '>') { lex_advance(lex); *out = token_simple(TOK_ARROW, line, col); }
-            else if (lex_peek(lex) == '=') { lex_advance(lex); *out = token_simple(TOK_MINUS_EQ, line, col); }
-            else { *out = token_simple(TOK_MINUS, line, col); }
+            if (lex_peek(lex) == '>') {
+                lex_advance(lex);
+                *out = token_simple(TOK_ARROW, line, col);
+            } else if (lex_peek(lex) == '=') {
+                lex_advance(lex);
+                *out = token_simple(TOK_MINUS_EQ, line, col);
+            } else {
+                *out = token_simple(TOK_MINUS, line, col);
+            }
             return true;
         case '.':
             if (lex_peek(lex) == '.') {
                 lex_advance(lex);
-                if (lex_peek(lex) == '.') { lex_advance(lex); *out = token_simple(TOK_DOTDOTDOT, line, col); }
-                else { *out = token_simple(TOK_DOTDOT, line, col); }
+                if (lex_peek(lex) == '.') {
+                    lex_advance(lex);
+                    *out = token_simple(TOK_DOTDOTDOT, line, col);
+                } else {
+                    *out = token_simple(TOK_DOTDOT, line, col);
+                }
+            } else {
+                *out = token_simple(TOK_DOT, line, col);
             }
-            else { *out = token_simple(TOK_DOT, line, col); }
             return true;
         case ':':
-            if (lex_peek(lex) == ':') { lex_advance(lex); *out = token_simple(TOK_COLONCOLON, line, col); }
-            else { *out = token_simple(TOK_COLON, line, col); }
+            if (lex_peek(lex) == ':') {
+                lex_advance(lex);
+                *out = token_simple(TOK_COLONCOLON, line, col);
+            } else {
+                *out = token_simple(TOK_COLON, line, col);
+            }
             return true;
         case '?':
-            if (lex_peek(lex) == '?') { lex_advance(lex); *out = token_simple(TOK_QUESTION_QUESTION, line, col); }
-            else if (lex_peek(lex) == '.') { lex_advance(lex); *out = token_simple(TOK_QUESTION_DOT, line, col); }
-            else if (lex_peek(lex) == '[') { lex_advance(lex); *out = token_simple(TOK_QUESTION_LBRACKET, line, col); }
-            else { *out = token_simple(TOK_QUESTION, line, col); }
+            if (lex_peek(lex) == '?') {
+                lex_advance(lex);
+                *out = token_simple(TOK_QUESTION_QUESTION, line, col);
+            } else if (lex_peek(lex) == '.') {
+                lex_advance(lex);
+                *out = token_simple(TOK_QUESTION_DOT, line, col);
+            } else if (lex_peek(lex) == '[') {
+                lex_advance(lex);
+                *out = token_simple(TOK_QUESTION_LBRACKET, line, col);
+            } else {
+                *out = token_simple(TOK_QUESTION, line, col);
+            }
             return true;
         default:
             *err = NULL;
@@ -332,8 +406,8 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
 
 /* Helper: scan escape sequence inside a string, appending to buf.
  * On entry, the backslash has already been consumed. Returns false on error. */
-static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len,
-                               size_t *buf_cap, size_t line, size_t col, char **err) {
+static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len, size_t *buf_cap, size_t line, size_t col,
+                              char **err) {
     if (lex->pos >= lex->len) {
         *err = NULL;
         lat_asprintf(err, "%zu:%zu: unterminated string escape", line, col);
@@ -342,14 +416,14 @@ static bool lex_string_escape(Lexer *lex, char **buf, size_t *buf_len,
     char esc = lex_advance(lex);
     char c;
     switch (esc) {
-        case 'n':  c = '\n'; break;
-        case 't':  c = '\t'; break;
-        case 'r':  c = '\r'; break;
-        case '0':  c = '\0'; break;
+        case 'n': c = '\n'; break;
+        case 't': c = '\t'; break;
+        case 'r': c = '\r'; break;
+        case '0': c = '\0'; break;
         case '\\': c = '\\'; break;
-        case '"':  c = '"';  break;
+        case '"': c = '"'; break;
         case '\'': c = '\''; break;
-        case '$':  c = '$';  break;
+        case '$': c = '$'; break;
         case 'x': {
             if (lex->pos + 1 >= lex->len) {
                 *err = NULL;
@@ -434,7 +508,15 @@ static bool lex_string_or_interp(Lexer *lex, LatVec *tokens, char **err) {
                 }
                 /* Lex one token (handles nested strings with interpolation) */
                 size_t before = tokens->len;
-                if (!lex_one(lex, tokens, err)) return false;
+                if (lex->interp_depth >= LEXER_MAX_INTERP_DEPTH) {
+                    *err = NULL;
+                    lat_asprintf(err, "%zu:%zu: string interpolation nested too deep", line, col);
+                    return false;
+                }
+                lex->interp_depth++;
+                bool tok_ok = lex_one(lex, tokens, err);
+                lex->interp_depth--;
+                if (!tok_ok) return false;
                 /* Track brace depth */
                 if (tokens->len > before) {
                     Token *last = lat_vec_get(tokens, tokens->len - 1);
@@ -559,7 +641,10 @@ static char *dedent_triple_string(const char *raw, size_t raw_len, size_t *out_l
         for (size_t i = last_nl + 1; i < raw_len; i++) {
             if (raw[i] == ' ') ws_count++;
             else if (raw[i] == '\t') ws_count += 4;
-            else { all_ws = false; break; }
+            else {
+                all_ws = false;
+                break;
+            }
         }
         if (all_ws) {
             closing_indent = ws_count;
@@ -589,9 +674,13 @@ static char *dedent_triple_string(const char *raw, size_t raw_len, size_t *out_l
         if (at_line_start) {
             size_t skipped = 0;
             while (i < content_end && skipped < closing_indent) {
-                if (raw[i] == ' ') { skipped++; i++; }
-                else if (raw[i] == '\t') { skipped += 4; i++; }
-                else break;
+                if (raw[i] == ' ') {
+                    skipped++;
+                    i++;
+                } else if (raw[i] == '\t') {
+                    skipped += 4;
+                    i++;
+                } else break;
             }
             at_line_start = false;
         }
@@ -619,13 +708,16 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
     size_t col = lex->col;
 
     /* Consume opening """ */
-    lex_advance(lex); lex_advance(lex); lex_advance(lex);
+    lex_advance(lex);
+    lex_advance(lex);
+    lex_advance(lex);
 
     /* Skip optional newline immediately after """ */
     if (lex_peek(lex) == '\n') {
         lex_advance(lex);
     } else if (lex_peek(lex) == '\r' && lex_peek_ahead(lex, 1) == '\n') {
-        lex_advance(lex); lex_advance(lex);
+        lex_advance(lex);
+        lex_advance(lex);
     }
 
     /* Collect raw content until closing """ */
@@ -641,9 +733,10 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             lat_asprintf(err, "%zu:%zu: unterminated triple-quoted string", line, col);
             return false;
         }
-        if (lex_peek(lex) == '"' && lex_peek_ahead(lex, 1) == '"' &&
-            lex_peek_ahead(lex, 2) == '"') {
-            lex_advance(lex); lex_advance(lex); lex_advance(lex);
+        if (lex_peek(lex) == '"' && lex_peek_ahead(lex, 1) == '"' && lex_peek_ahead(lex, 2) == '"') {
+            lex_advance(lex);
+            lex_advance(lex);
+            lex_advance(lex);
             break;
         }
         char c = lex_advance(lex);
@@ -683,9 +776,12 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             size_t expr_start = pos;
             while (pos < dedented_len && depth > 0) {
                 char ec = dedented[pos];
-                if (ec == '{') { depth++; }
-                else if (ec == '}') { depth--; if (depth == 0) break; }
-                else if (ec == '"') {
+                if (ec == '{') {
+                    depth++;
+                } else if (ec == '}') {
+                    depth--;
+                    if (depth == 0) break;
+                } else if (ec == '"') {
                     pos++;
                     while (pos < dedented_len && dedented[pos] != '"') {
                         if (dedented[pos] == '\\') pos++;
@@ -702,10 +798,10 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             }
 
             if (depth != 0) {
-                free(buf); free(dedented);
+                free(buf);
+                free(dedented);
                 *err = NULL;
-                lat_asprintf(err, "%zu:%zu: unterminated interpolation in triple-quoted string",
-                               line, col);
+                lat_asprintf(err, "%zu:%zu: unterminated interpolation in triple-quoted string", line, col);
                 return false;
             }
 
@@ -721,7 +817,9 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
                 skip_whitespace_and_comments(&expr_lex);
                 if (expr_lex.pos >= expr_lex.len) break;
                 if (!lex_one(&expr_lex, tokens, err)) {
-                    free(expr_src); free(buf); free(dedented);
+                    free(expr_src);
+                    free(buf);
+                    free(dedented);
                     return false;
                 }
             }
@@ -742,20 +840,20 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             char esc = dedented[pos++];
             char c;
             switch (esc) {
-                case 'n':  c = '\n'; break;
-                case 't':  c = '\t'; break;
-                case 'r':  c = '\r'; break;
-                case '0':  c = '\0'; break;
+                case 'n': c = '\n'; break;
+                case 't': c = '\t'; break;
+                case 'r': c = '\r'; break;
+                case '0': c = '\0'; break;
                 case '\\': c = '\\'; break;
-                case '"':  c = '"';  break;
+                case '"': c = '"'; break;
                 case '\'': c = '\''; break;
-                case '$':  c = '$';  break;
+                case '$': c = '$'; break;
                 case 'x': {
                     if (pos + 1 >= dedented_len) {
-                        free(buf); free(dedented);
+                        free(buf);
+                        free(dedented);
                         *err = NULL;
-                        lat_asprintf(err, "%zu:%zu: incomplete \\x escape in triple-quoted string",
-                                       line, col);
+                        lat_asprintf(err, "%zu:%zu: incomplete \\x escape in triple-quoted string", line, col);
                         return false;
                     }
                     char h1 = dedented[pos++];
@@ -768,10 +866,10 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
                     else if (h2 >= 'a' && h2 <= 'f') d2 = h2 - 'a' + 10;
                     else if (h2 >= 'A' && h2 <= 'F') d2 = h2 - 'A' + 10;
                     if (d1 < 0 || d2 < 0) {
-                        free(buf); free(dedented);
+                        free(buf);
+                        free(dedented);
                         *err = NULL;
-                        lat_asprintf(err, "%zu:%zu: invalid hex escape in triple-quoted string",
-                                       line, col);
+                        lat_asprintf(err, "%zu:%zu: invalid hex escape in triple-quoted string", line, col);
                         return false;
                     }
                     c = (char)((d1 << 4) | d2);
@@ -818,9 +916,7 @@ static bool lex_one(Lexer *lex, LatVec *tokens, char **err) {
         }
         return lex_string_or_interp(lex, tokens, err);
     }
-    if (lex_peek(lex) == '\'') {
-        return lex_single_quote_string(lex, tokens, err);
-    }
+    if (lex_peek(lex) == '\'') { return lex_single_quote_string(lex, tokens, err); }
     Token tok;
     if (!next_token(lex, &tok, err)) return false;
     lat_vec_push(tokens, &tok);
@@ -840,9 +936,7 @@ LatVec lexer_tokenize(Lexer *lex, char **err) {
         }
         if (!lex_one(lex, &tokens, err)) {
             /* Free tokens on error */
-            for (size_t i = 0; i < tokens.len; i++) {
-                token_free(lat_vec_get(&tokens, i));
-            }
+            for (size_t i = 0; i < tokens.len; i++) { token_free(lat_vec_get(&tokens, i)); }
             lat_vec_free(&tokens);
             return lat_vec_new(sizeof(Token));
         }

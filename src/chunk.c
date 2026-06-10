@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 /* Marker sentinels for native/extension closures (matches stackvm.c/regvm.c) */
 #define VM_NATIVE_MARKER ((struct Expr **)(uintptr_t)0x1)
@@ -452,4 +453,396 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
 void chunk_disassemble(const Chunk *c, const char *name) {
     fprintf(stderr, "== %s ==\n", name);
     for (size_t offset = 0; offset < c->code_len;) offset = chunk_disassemble_instruction(c, offset);
+}
+
+/* ═══════════════════════════════════════════════════════
+ * Bytecode verification
+ *
+ * A .latc file is untrusted input. Before a deserialized chunk is handed to
+ * the VM (whose dispatch loop trusts every operand and has no ip-bounds
+ * check), it must be verified: known opcodes only, no operand runs past the
+ * end of the code, every constant/local/jump operand is in range and of the
+ * expected type, jumps land on instruction boundaries, and the code ends in a
+ * control-terminating instruction. Verification recurses into sub-chunks
+ * (function/scope/select bodies stored as VAL_CLOSURE constants).
+ * ═══════════════════════════════════════════════════════ */
+
+#define CHUNK_VERIFY_MAX_DEPTH 200
+
+static char *verify_failf(const char *fmt, ...) {
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return strdup(buf);
+}
+
+/* Length (opcode + operands) of the instruction at `off`, after confirming all
+ * of its bytes — including count-driven variable parts — lie within code_len.
+ * Returns 0 and sets *err on any malformation. */
+static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
+    uint8_t op = c->code[off];
+    size_t remaining = c->code_len - off; /* >= 1, since off < code_len */
+#define NEED(n)                                                                             \
+    do {                                                                                    \
+        if (remaining < (size_t)(n)) {                                                      \
+            *err = verify_failf("truncated operands for opcode %u at offset %zu", op, off); \
+            return 0;                                                                       \
+        }                                                                                   \
+    } while (0)
+    switch (op) {
+        /* 1-byte */
+        case OP_NIL:
+        case OP_TRUE:
+        case OP_FALSE:
+        case OP_UNIT:
+        case OP_POP:
+        case OP_DUP:
+        case OP_SWAP:
+        case OP_ADD:
+        case OP_SUB:
+        case OP_MUL:
+        case OP_DIV:
+        case OP_MOD:
+        case OP_NEG:
+        case OP_NOT:
+        case OP_BIT_AND:
+        case OP_BIT_OR:
+        case OP_BIT_XOR:
+        case OP_BIT_NOT:
+        case OP_LSHIFT:
+        case OP_RSHIFT:
+        case OP_EQ:
+        case OP_NEQ:
+        case OP_LT:
+        case OP_GT:
+        case OP_LTEQ:
+        case OP_GTEQ:
+        case OP_CONCAT:
+        case OP_CLOSE_UPVALUE:
+        case OP_RETURN:
+        case OP_ITER_INIT:
+        case OP_ARRAY_FLATTEN:
+        case OP_BUILD_RANGE:
+        case OP_INDEX:
+        case OP_SET_INDEX:
+        case OP_POP_EXCEPTION_HANDLER:
+        case OP_THROW:
+        case OP_TRY_UNWRAP:
+        case OP_FREEZE:
+        case OP_THAW:
+        case OP_CLONE:
+        case OP_MARK_FLUID:
+        case OP_SUBLIMATE:
+        case OP_IS_CRYSTAL:
+        case OP_IS_FLUID:
+        case OP_ADD_INT:
+        case OP_SUB_INT:
+        case OP_MUL_INT:
+        case OP_LT_INT:
+        case OP_LTEQ_INT:
+        case OP_RESET_EPHEMERAL:
+        case OP_SET_SLICE:
+        case OP_HALT: return 1;
+        /* 2-byte */
+        case OP_CONSTANT:
+        case OP_GET_LOCAL:
+        case OP_SET_LOCAL:
+        case OP_SET_LOCAL_POP:
+        case OP_GET_GLOBAL:
+        case OP_SET_GLOBAL:
+        case OP_DEFINE_GLOBAL:
+        case OP_GET_UPVALUE:
+        case OP_SET_UPVALUE:
+        case OP_CALL:
+        case OP_GET_FIELD:
+        case OP_SET_FIELD:
+        case OP_BUILD_ARRAY:
+        case OP_BUILD_MAP:
+        case OP_BUILD_TUPLE:
+        case OP_PRINT:
+        case OP_IMPORT:
+        case OP_INC_LOCAL:
+        case OP_DEC_LOCAL:
+        case OP_LOAD_INT8:
+        case OP_SET_INDEX_LOCAL:
+        case OP_INDEX_LOCAL:
+        case OP_SET_SLICE_LOCAL:
+        case OP_APPEND_STR_LOCAL:
+        case OP_REACT:
+        case OP_UNREACT:
+        case OP_BOND:
+        case OP_UNBOND:
+        case OP_SEED:
+        case OP_UNSEED:
+        case OP_DEFER_RUN: NEED(2); return 2;
+        /* 3-byte */
+        case OP_JUMP:
+        case OP_JUMP_IF_FALSE:
+        case OP_JUMP_IF_TRUE:
+        case OP_JUMP_IF_NOT_NIL:
+        case OP_LOOP:
+        case OP_ITER_NEXT:
+        case OP_PUSH_EXCEPTION_HANDLER:
+        case OP_INVOKE:
+        case OP_BUILD_STRUCT:
+        case OP_GET_FIELD_LOCAL:
+        case OP_CONSTANT_16:
+        case OP_GET_GLOBAL_16:
+        case OP_SET_GLOBAL_16:
+        case OP_DEFINE_GLOBAL_16:
+        case OP_CHECK_RETURN_TYPE: NEED(3); return 3;
+        /* 4-byte */
+        case OP_BUILD_ENUM:
+        case OP_INVOKE_LOCAL:
+        case OP_INVOKE_GLOBAL:
+        case OP_FREEZE_VAR:
+        case OP_THAW_VAR:
+        case OP_SUBLIMATE_VAR:
+        case OP_FREEZE_FIELD:
+        case OP_CHECK_TYPE:
+        case OP_DEFER_PUSH: NEED(4); return 4;
+        /* 5-byte */
+        case OP_INVOKE_LOCAL_16:
+        case OP_FREEZE_EXCEPT: NEED(5); return 5;
+        /* 6-byte */
+        case OP_INVOKE_GLOBAL_16: NEED(6); return 6;
+        /* variable-length */
+        case OP_CLOSURE: {
+            NEED(3);
+            size_t uvc = c->code[off + 2];
+            NEED(3 + uvc * 2);
+            return 3 + uvc * 2;
+        }
+        case OP_CLOSURE_16: {
+            NEED(4);
+            size_t uvc = c->code[off + 3];
+            NEED(4 + uvc * 2);
+            return 4 + uvc * 2;
+        }
+        case OP_SCOPE: {
+            NEED(2);
+            size_t spawn_count = c->code[off + 1];
+            NEED(3 + spawn_count);
+            return 3 + spawn_count;
+        }
+        case OP_SELECT: {
+            NEED(2);
+            size_t arm_count = c->code[off + 1];
+            NEED(2 + arm_count * 4);
+            return 2 + arm_count * 4;
+        }
+        default: *err = verify_failf("unknown opcode %u at offset %zu", op, off); return 0;
+    }
+#undef NEED
+}
+
+/* Validate the index/jump/type operands of the instruction at `off`. */
+static char *verify_instr_operands(const Chunk *c, size_t off, const uint8_t *is_start) {
+    uint8_t op = c->code[off];
+#define U16(at) ((uint16_t)((c->code[(at)] << 8) | c->code[(at) + 1]))
+#define CK_BOUND(idx)                                                                                            \
+    do {                                                                                                         \
+        if ((size_t)(idx) >= c->const_len)                                                                       \
+            return verify_failf("constant index %u out of range (const_len=%zu) at offset %zu", (unsigned)(idx), \
+                                c->const_len, off);                                                              \
+    } while (0)
+#define CK_STR(idx)                                                                                        \
+    do {                                                                                                   \
+        CK_BOUND(idx);                                                                                     \
+        if (c->constants[(idx)].type != VAL_STR)                                                           \
+            return verify_failf("opcode %u at offset %zu requires a string constant at index %u", op, off, \
+                                (unsigned)(idx));                                                          \
+    } while (0)
+#define CK_SUBFN(idx)                                                                                        \
+    do {                                                                                                     \
+        CK_BOUND(idx);                                                                                       \
+        if (c->constants[(idx)].type != VAL_CLOSURE)                                                         \
+            return verify_failf("opcode %u at offset %zu requires a function constant at index %u", op, off, \
+                                (unsigned)(idx));                                                            \
+    } while (0)
+    switch (op) {
+        case OP_CONSTANT: CK_BOUND(c->code[off + 1]); break;
+        case OP_CONSTANT_16: CK_BOUND(U16(off + 1)); break;
+        case OP_GET_GLOBAL:
+        case OP_SET_GLOBAL:
+        case OP_DEFINE_GLOBAL:
+        case OP_GET_FIELD:
+        case OP_SET_FIELD:
+        case OP_IMPORT:
+        case OP_REACT:
+        case OP_UNREACT:
+        case OP_BOND:
+        case OP_UNBOND:
+        case OP_SEED:
+        case OP_UNSEED: CK_STR(c->code[off + 1]); break;
+        case OP_GET_GLOBAL_16:
+        case OP_SET_GLOBAL_16:
+        case OP_DEFINE_GLOBAL_16: CK_STR(U16(off + 1)); break;
+        case OP_INVOKE: CK_STR(c->code[off + 1]); break;
+        case OP_INVOKE_LOCAL: CK_STR(c->code[off + 2]); break;
+        case OP_INVOKE_GLOBAL:
+            CK_STR(c->code[off + 1]);
+            CK_STR(c->code[off + 2]);
+            break;
+        case OP_INVOKE_LOCAL_16: CK_STR(U16(off + 2)); break;
+        case OP_INVOKE_GLOBAL_16:
+            CK_STR(U16(off + 1));
+            CK_STR(U16(off + 3));
+            break;
+        case OP_GET_FIELD_LOCAL: CK_STR(c->code[off + 2]); break;
+        case OP_BUILD_STRUCT: {
+            /* The VM reads constants[name_idx .. name_idx+field_count] as strings. */
+            size_t name_idx = c->code[off + 1];
+            size_t last = name_idx + c->code[off + 2];
+            if (last >= c->const_len)
+                return verify_failf("OP_BUILD_STRUCT field-name constants out of range at offset %zu", off);
+            for (size_t k = name_idx; k <= last; k++)
+                if (c->constants[k].type != VAL_STR)
+                    return verify_failf("OP_BUILD_STRUCT requires string constants at offset %zu", off);
+            break;
+        }
+        case OP_BUILD_ENUM:
+            CK_STR(c->code[off + 1]);
+            CK_STR(c->code[off + 2]);
+            break;
+        case OP_FREEZE_VAR:
+        case OP_THAW_VAR:
+        case OP_SUBLIMATE_VAR:
+        case OP_FREEZE_FIELD:
+        case OP_FREEZE_EXCEPT: CK_STR(c->code[off + 1]); break;
+        case OP_CHECK_TYPE:
+            CK_STR(c->code[off + 2]);
+            CK_STR(c->code[off + 3]);
+            break;
+        case OP_CHECK_RETURN_TYPE:
+            CK_STR(c->code[off + 1]);
+            CK_STR(c->code[off + 2]);
+            break;
+        case OP_CLOSURE: CK_SUBFN(c->code[off + 1]); break;
+        case OP_CLOSURE_16: CK_SUBFN(U16(off + 1)); break;
+        case OP_SCOPE: {
+            size_t spawn_count = c->code[off + 1];
+            uint8_t sync_idx = c->code[off + 2];
+            if (sync_idx != 0xFF) CK_SUBFN(sync_idx);
+            for (size_t i = 0; i < spawn_count; i++) CK_SUBFN(c->code[off + 3 + i]);
+            break;
+        }
+        case OP_SELECT: {
+            size_t arm_count = c->code[off + 1];
+            for (size_t i = 0; i < arm_count; i++) {
+                size_t b = off + 2 + i * 4;
+                uint8_t flags = c->code[b];
+                uint8_t chan_idx = c->code[b + 1];
+                uint8_t body_idx = c->code[b + 2];
+                uint8_t binding_idx = c->code[b + 3];
+                CK_SUBFN(body_idx);
+                if (!(flags & 0x01)) CK_SUBFN(chan_idx); /* default arm has no channel */
+                if (flags & 0x04) CK_STR(binding_idx);   /* arm binds the received value */
+            }
+            break;
+        }
+        case OP_JUMP:
+        case OP_JUMP_IF_FALSE:
+        case OP_JUMP_IF_TRUE:
+        case OP_JUMP_IF_NOT_NIL:
+        case OP_ITER_NEXT:
+        case OP_PUSH_EXCEPTION_HANDLER: {
+            size_t target = off + 3 + U16(off + 1);
+            if (target >= c->code_len || !is_start[target])
+                return verify_failf("forward jump target %zu invalid at offset %zu", target, off);
+            break;
+        }
+        case OP_DEFER_PUSH: {
+            /* [op][sdepth:1][offset:2]; the VM skips the inline defer body via
+             * frame->ip += offset, so the skip target is off + 4 + offset. */
+            size_t target = off + 4 + U16(off + 2);
+            if (target >= c->code_len || !is_start[target])
+                return verify_failf("defer skip target %zu invalid at offset %zu", target, off);
+            break;
+        }
+        case OP_LOOP: {
+            uint16_t back = U16(off + 1);
+            if ((size_t)back > off + 3) return verify_failf("backward jump underflow at offset %zu", off);
+            size_t target = off + 3 - back;
+            if (target >= c->code_len || !is_start[target])
+                return verify_failf("backward jump target %zu invalid at offset %zu", target, off);
+            break;
+        }
+        default: break; /* opcodes with only slot/count/raw operands need no index check */
+    }
+    return NULL;
+#undef U16
+#undef CK_BOUND
+#undef CK_STR
+#undef CK_SUBFN
+}
+
+/* Verify the code stream of a single chunk (not its sub-chunks). */
+static char *verify_chunk_code(const Chunk *c) {
+    if (c->code_len == 0) return strdup("verify: empty chunk code");
+    if (c->lines_len < c->code_len) return strdup("verify: line table shorter than code");
+
+    uint8_t *is_start = calloc(c->code_len, 1);
+    if (!is_start) return strdup("verify: out of memory");
+
+    /* Pass 1: structural walk — opcode validity, operand lengths, boundaries. */
+    size_t off = 0;
+    uint8_t last_op = 0;
+    while (off < c->code_len) {
+        is_start[off] = 1;
+        char *e = NULL;
+        size_t len = verify_instr_length(c, off, &e);
+        if (len == 0) {
+            free(is_start);
+            return e;
+        }
+        last_op = c->code[off];
+        off += len;
+    }
+    if (off != c->code_len) {
+        free(is_start);
+        return strdup("verify: instruction crosses end of code");
+    }
+    if (last_op != OP_HALT && last_op != OP_RETURN && last_op != OP_THROW) {
+        free(is_start);
+        return strdup("verify: chunk does not end in a terminating instruction");
+    }
+
+    /* Pass 2: operand semantics (now that instruction boundaries are known). */
+    off = 0;
+    while (off < c->code_len) {
+        char *e = verify_instr_operands(c, off, is_start);
+        if (e) {
+            free(is_start);
+            return e;
+        }
+        char *ignore = NULL;
+        off += verify_instr_length(c, off, &ignore); /* lengths already validated in pass 1 */
+    }
+
+    free(is_start);
+    return NULL;
+}
+
+static char *chunk_verify_depth(const Chunk *c, int depth) {
+    if (depth > CHUNK_VERIFY_MAX_DEPTH) return strdup("verify: chunk nesting too deep");
+    char *e = verify_chunk_code(c);
+    if (e) return e;
+    for (size_t i = 0; i < c->const_len; i++) {
+        if (c->constants[i].type == VAL_CLOSURE) {
+            Chunk *sub = (Chunk *)c->constants[i].as.closure.native_fn;
+            if (sub) {
+                char *se = chunk_verify_depth(sub, depth + 1);
+                if (se) return se;
+            }
+        }
+    }
+    return NULL;
+}
+
+char *chunk_verify(const Chunk *c) {
+    if (!c) return strdup("verify: null chunk");
+    return chunk_verify_depth(c, 0);
 }

@@ -7,7 +7,7 @@
 FluidHeap *fluid_heap_new(void) {
     FluidHeap *h = calloc(1, sizeof(FluidHeap));
     if (!h) return NULL;
-    h->gc_threshold = 1024 * 1024;  /* 1 MB default */
+    h->gc_threshold = 1024 * 1024; /* 1 MB default */
     return h;
 }
 
@@ -27,7 +27,10 @@ void *fluid_alloc(FluidHeap *h, size_t size) {
     void *ptr = malloc(size);
     if (!ptr) return NULL;
     FluidAlloc *a = malloc(sizeof(FluidAlloc));
-    if (!a) { free(ptr); return NULL; }
+    if (!a) {
+        free(ptr);
+        return NULL;
+    }
     a->ptr = ptr;
     a->size = size;
     a->marked = false;
@@ -36,8 +39,7 @@ void *fluid_alloc(FluidHeap *h, size_t size) {
     h->total_bytes += size;
     h->alloc_count++;
     h->cumulative_bytes += size;
-    if (h->total_bytes > h->peak_bytes)
-        h->peak_bytes = h->total_bytes;
+    if (h->total_bytes > h->peak_bytes) h->peak_bytes = h->total_bytes;
     return ptr;
 }
 
@@ -57,13 +59,28 @@ bool fluid_dealloc(FluidHeap *h, void *ptr) {
     return false;
 }
 
-size_t fluid_live_count(const FluidHeap *h) {
-    return h->alloc_count;
+void *fluid_realloc(FluidHeap *h, void *ptr, size_t new_size) {
+    if (!ptr) return fluid_alloc(h, new_size);
+    /* Find the old block's tracked size. */
+    size_t old_size = 0;
+    bool tracked = false;
+    for (FluidAlloc *a = h->allocs; a; a = a->next) {
+        if (a->ptr == ptr) {
+            old_size = a->size;
+            tracked = true;
+            break;
+        }
+    }
+    if (!tracked) return realloc(ptr, new_size); /* a plain (untracked) allocation */
+    void *np = fluid_alloc(h, new_size);
+    if (np) memcpy(np, ptr, old_size < new_size ? old_size : new_size);
+    fluid_dealloc(h, ptr); /* removes the old block from tracking and frees it */
+    return np;
 }
 
-size_t fluid_total_bytes(const FluidHeap *h) {
-    return h->total_bytes;
-}
+size_t fluid_live_count(const FluidHeap *h) { return h->alloc_count; }
+
+size_t fluid_total_bytes(const FluidHeap *h) { return h->total_bytes; }
 
 bool fluid_mark(FluidHeap *h, void *ptr) {
     for (FluidAlloc *a = h->allocs; a; a = a->next) {
@@ -76,9 +93,7 @@ bool fluid_mark(FluidHeap *h, void *ptr) {
 }
 
 void fluid_unmark_all(FluidHeap *h) {
-    for (FluidAlloc *a = h->allocs; a; a = a->next) {
-        a->marked = false;
-    }
+    for (FluidAlloc *a = h->allocs; a; a = a->next) { a->marked = false; }
 }
 
 size_t fluid_sweep(FluidHeap *h) {
@@ -109,7 +124,10 @@ static ArenaPage *arena_page_new(size_t cap) {
     ArenaPage *p = malloc(sizeof(ArenaPage));
     if (!p) return NULL;
     p->data = malloc(cap);
-    if (!p->data) { free(p); return NULL; }
+    if (!p->data) {
+        free(p);
+        return NULL;
+    }
     p->used = 0;
     p->cap = cap;
     p->next = NULL;
@@ -131,7 +149,10 @@ BumpArena *bump_arena_new(void) {
     BumpArena *ba = calloc(1, sizeof(BumpArena));
     if (!ba) return NULL;
     ArenaPage *p = arena_page_new(ARENA_PAGE_SIZE);
-    if (!p) { free(ba); return NULL; }
+    if (!p) {
+        free(ba);
+        return NULL;
+    }
     ba->pages = p;
     ba->first_page = p;
     ba->total_bytes = 0;
@@ -146,8 +167,7 @@ void bump_arena_free(BumpArena *ba) {
 
 void bump_arena_reset(BumpArena *ba) {
     if (!ba) return;
-    for (ArenaPage *p = ba->first_page; p; p = p->next)
-        p->used = 0;
+    for (ArenaPage *p = ba->first_page; p; p = p->next) p->used = 0;
     ba->pages = ba->first_page;
     ba->total_bytes = 0;
 }
@@ -263,26 +283,23 @@ RegionManager *region_manager_new(void) {
     if (!rm) return NULL;
     rm->cap = 8;
     rm->regions = malloc(rm->cap * sizeof(CrystalRegion *));
-    if (!rm->regions) { free(rm); return NULL; }
+    if (!rm->regions) {
+        free(rm);
+        return NULL;
+    }
     return rm;
 }
 
 void region_manager_free(RegionManager *rm) {
     if (!rm) return;
-    for (size_t i = 0; i < rm->count; i++) {
-        crystal_region_free(rm->regions[i]);
-    }
+    for (size_t i = 0; i < rm->count; i++) { crystal_region_free(rm->regions[i]); }
     free(rm->regions);
     free(rm);
 }
 
-Epoch region_advance_epoch(RegionManager *rm) {
-    return ++rm->current_epoch;
-}
+Epoch region_advance_epoch(RegionManager *rm) { return ++rm->current_epoch; }
 
-Epoch region_current_epoch(const RegionManager *rm) {
-    return rm->current_epoch;
-}
+Epoch region_current_epoch(const RegionManager *rm) { return rm->current_epoch; }
 
 CrystalRegion *region_create(RegionManager *rm) {
     if (rm->count >= rm->cap) {
@@ -292,8 +309,7 @@ CrystalRegion *region_create(RegionManager *rm) {
     CrystalRegion *r = crystal_region_new(rm->next_id++, rm->current_epoch);
     rm->regions[rm->count++] = r;
     rm->total_allocs++;
-    if (rm->count > rm->peak_count)
-        rm->peak_count = rm->count;
+    if (rm->count > rm->peak_count) rm->peak_count = rm->count;
     return r;
 }
 
@@ -315,8 +331,7 @@ static bool regionid_bsearch(const RegionId *sorted, size_t count, RegionId targ
 }
 
 size_t region_collect(RegionManager *rm, RegionId *reachable, size_t reachable_count) {
-    if (reachable_count > 1)
-        qsort(reachable, reachable_count, sizeof(RegionId), regionid_cmp);
+    if (reachable_count > 1) qsort(reachable, reachable_count, sizeof(RegionId), regionid_cmp);
 
     size_t freed = 0;
     size_t i = 0;
@@ -333,18 +348,13 @@ size_t region_collect(RegionManager *rm, RegionId *reachable, size_t reachable_c
     return freed;
 }
 
-size_t region_count(const RegionManager *rm) {
-    return rm->count;
-}
+size_t region_count(const RegionManager *rm) { return rm->count; }
 
-size_t region_total_allocs(const RegionManager *rm) {
-    return rm->total_allocs;
-}
+size_t region_total_allocs(const RegionManager *rm) { return rm->total_allocs; }
 
 size_t region_live_data_bytes(const RegionManager *rm) {
     size_t total = 0;
-    for (size_t i = 0; i < rm->count; i++)
-        total += rm->regions[i]->total_bytes;
+    for (size_t i = 0; i < rm->count; i++) total += rm->regions[i]->total_bytes;
     return total;
 }
 

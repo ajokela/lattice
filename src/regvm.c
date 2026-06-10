@@ -345,6 +345,10 @@ static void *regvm_spawn_thread_fn(void *arg) {
         value_free(&result);
     }
 
+    /* Detach env values out of this thread's heap before freeing it — the parent
+     * frees the child env after join (see env_detach_values / LAT-420). */
+    if (task->child_vm->rt) env_detach_values(task->child_vm->rt->env);
+
     dual_heap_free(heap);
     return NULL;
 }
@@ -935,7 +939,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             LatValue val = rvm_clone_or_borrow(&args[0]);
             if (obj->as.array.len >= obj->as.array.cap) {
                 obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
-                obj->as.array.elems = realloc(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
+                obj->as.array.elems = lat_realloc_routed(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
             }
             obj->as.array.elems[obj->as.array.len++] = val;
             *result = value_unit();
@@ -1382,7 +1386,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             if (idx > (int64_t)obj->as.array.len) idx = (int64_t)obj->as.array.len;
             if (obj->as.array.len >= obj->as.array.cap) {
                 obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
-                obj->as.array.elems = realloc(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
+                obj->as.array.elems = lat_realloc_routed(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
             }
             memmove(&obj->as.array.elems[idx + 1], &obj->as.array.elems[idx],
                     (obj->as.array.len - (size_t)idx) * sizeof(LatValue));
@@ -1682,10 +1686,16 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             }
             int64_t n = args[0].as.int_val;
             size_t slen = strlen(obj->as.str_val);
-            char *buf = malloc(slen * (size_t)n + 1);
+            if (n == 0 || slen == 0 || (size_t)n > (SIZE_MAX - 1) / slen) {
+                /* n==0/empty string, or slen*n would overflow size_t. */
+                *result = value_string("");
+                return true;
+            }
+            size_t total = slen * (size_t)n;
+            char *buf = malloc(total + 1);
             if (!buf) return 0;
-            for (int64_t i = 0; i < n; i++) memcpy(buf + i * (int64_t)slen, obj->as.str_val, slen);
-            buf[slen * (size_t)n] = '\0';
+            for (size_t i = 0; i < (size_t)n; i++) memcpy(buf + i * slen, obj->as.str_val, slen);
+            buf[total] = '\0';
             *result = value_string_owned(buf);
             return true;
         }
@@ -2466,7 +2476,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 if (ref->value.as.array.len >= ref->value.as.array.cap) {
                     ref->value.as.array.cap = ref->value.as.array.cap ? ref->value.as.array.cap * 2 : 4;
                     ref->value.as.array.elems =
-                        realloc(ref->value.as.array.elems, ref->value.as.array.cap * sizeof(LatValue));
+                        lat_realloc_routed(ref->value.as.array.elems, ref->value.as.array.cap * sizeof(LatValue));
                 }
                 ref->value.as.array.elems[ref->value.as.array.len++] = val;
                 *result = value_unit();
@@ -3776,10 +3786,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
              * Native functions receive owned copies; value_free after call
              * handles cleanup.  Primitives have no heap data so bitwise
              * copy + no-op free is safe. */
-            LatValue args[16];
+            LatValue stackargs[16];
+            LatValue *args = (b <= 16) ? stackargs : malloc((size_t)b * sizeof(LatValue));
             for (int i = 0; i < b; i++) args[i] = rvm_clone_or_borrow(&R[a + 1 + i]);
             LatValue ret = native(args, b);
             for (int i = 0; i < b; i++) value_free(&args[i]);
+            if (b > 16) free(args);
             /* Check runtime for native errors */
             if (vm->rt->error) {
                 char *err = vm->rt->error;
@@ -3801,10 +3813,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Extension native function (loaded via require_ext) */
         if (func->as.closure.default_values == VM_EXT_MARKER) {
-            LatValue args[16];
+            LatValue stackargs[16];
+            LatValue *args = (b <= 16) ? stackargs : malloc((size_t)b * sizeof(LatValue));
             for (int i = 0; i < b; i++) args[i] = rvm_clone_or_borrow(&R[a + 1 + i]);
             LatValue ret = ext_call_native(func->as.closure.native_fn, args, (size_t)b);
             for (int i = 0; i < b; i++) value_free(&args[i]);
+            if (b > 16) free(args);
             /* Extension errors return strings prefixed with "EVAL_ERROR:" */
             if (ret.type == VAL_STR && ret.as.str_val && strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
                 char *msg = strdup(ret.as.str_val + 11);
@@ -6025,7 +6039,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (new_len != old_len) {
             if (new_len > R[a].as.array.cap) {
                 size_t new_cap = new_len < 4 ? 4 : new_len * 2;
-                R[a].as.array.elems = realloc(R[a].as.array.elems, new_cap * sizeof(LatValue));
+                R[a].as.array.elems = lat_realloc_routed(R[a].as.array.elems, new_cap * sizeof(LatValue));
                 R[a].as.array.cap = new_cap;
             }
             size_t tail_start = slice_end;
@@ -6077,7 +6091,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (new_len != old_len) {
             if (new_len > R[a].as.array.cap) {
                 size_t new_cap = new_len < 4 ? 4 : new_len * 2;
-                R[a].as.array.elems = realloc(R[a].as.array.elems, new_cap * sizeof(LatValue));
+                R[a].as.array.elems = lat_realloc_routed(R[a].as.array.elems, new_cap * sizeof(LatValue));
                 R[a].as.array.cap = new_cap;
             }
             size_t tail_start = slice_end;
@@ -6909,4 +6923,297 @@ RegVMResult regvm_run_repl(RegVM *vm, RegChunk *chunk, LatValue *result) {
     vm->reg_stack_top = REGVM_REG_MAX;
 
     return regvm_dispatch(vm, 0, result);
+}
+
+/* ═══════════════════════════════════════════════════════
+ * Register-VM bytecode verification (mirror of chunk_verify for .rlatc)
+ *
+ * The .rlatc deserializer copies the instruction stream verbatim and the
+ * register-VM dispatch loop trusts every operand with no ip-bounds check.
+ * regchunk_verify() walks an untrusted chunk (and its sub-chunks) before
+ * execution and rejects unknown opcodes, multi-word/variable instructions that
+ * run past the end of the code, out-of-range constant indices, name opcodes
+ * whose constant is not a string, closure/scope/select references that are not
+ * function constants, jumps that leave the code or miss an instruction
+ * boundary, and register windows that exceed a frame.
+ * ═══════════════════════════════════════════════════════ */
+
+#define REGCHUNK_VERIFY_MAX_DEPTH 200
+
+static char *reg_verify_failf(const char *fmt, ...) {
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return strdup(buf);
+}
+
+/* Words occupied by the instruction at word index i, after confirming every
+ * word lies within code_len. Returns 0 and sets *err on malformation. */
+static size_t reg_instr_words(const RegChunk *c, size_t i, char **err) {
+    RegInstr instr = c->code[i];
+    uint8_t op = REG_GET_OP(instr);
+    if (op >= ROP_COUNT) {
+        *err = reg_verify_failf("unknown opcode %u at word %zu", op, i);
+        return 0;
+    }
+    size_t avail = c->code_len - i; /* >= 1 */
+    switch (op) {
+        case ROP_INVOKE:
+        case ROP_NEWSTRUCT:
+        case ROP_NEWENUM:
+        case ROP_INVOKE_GLOBAL:
+        case ROP_INVOKE_LOCAL:
+        case ROP_CHECK_TYPE:
+        case ROP_FREEZE_EXCEPT:
+            if (avail < 2) {
+                *err = reg_verify_failf("truncated two-word opcode %u at word %zu", op, i);
+                return 0;
+            }
+            return 2;
+        case ROP_CLOSURE: {
+            uint16_t bx = REG_GET_Bx(instr);
+            if (bx >= c->const_len || c->constants[bx].type != VAL_CLOSURE) {
+                *err = reg_verify_failf("ROP_CLOSURE at word %zu references non-function constant %u", i, bx);
+                return 0;
+            }
+            size_t uv = c->constants[bx].region_id; /* upvalue count, set by deserializer */
+            size_t words = 1 + uv;
+            if (uv > c->code_len || words > avail) {
+                *err = reg_verify_failf("ROP_CLOSURE at word %zu has out-of-range upvalue count", i);
+                return 0;
+            }
+            return words;
+        }
+        case ROP_SCOPE: {
+            if (avail < 2) {
+                *err = reg_verify_failf("truncated ROP_SCOPE at word %zu", i);
+                return 0;
+            }
+            uint8_t spawn_count = REG_GET_A(c->code[i + 1]);
+            size_t words = 2 + (spawn_count + 2) / 3; /* 3 spawn indices packed per word */
+            if (words > avail) {
+                *err = reg_verify_failf("truncated ROP_SCOPE body at word %zu", i);
+                return 0;
+            }
+            return words;
+        }
+        case ROP_SELECT: {
+            if (avail < 2) {
+                *err = reg_verify_failf("truncated ROP_SELECT at word %zu", i);
+                return 0;
+            }
+            uint8_t arm_count = REG_GET_A(c->code[i + 1]);
+            size_t words = 2 + (size_t)arm_count * 2; /* 2 words per arm */
+            if (words > avail) {
+                *err = reg_verify_failf("truncated ROP_SELECT body at word %zu", i);
+                return 0;
+            }
+            return words;
+        }
+        default: return 1;
+    }
+}
+
+/* Validate the constant/jump/window operands of the instruction at word i. */
+static char *reg_verify_operands(const RegChunk *c, size_t i, const uint8_t *is_start) {
+    RegInstr instr = c->code[i];
+    uint8_t op = REG_GET_OP(instr);
+#define RCK_BOUND(idx)                                                                                 \
+    do {                                                                                               \
+        if ((size_t)(idx) >= c->const_len)                                                             \
+            return reg_verify_failf("constant index %u out of range at word %zu", (unsigned)(idx), i); \
+    } while (0)
+#define RCK_STR(idx)                                                                                           \
+    do {                                                                                                       \
+        RCK_BOUND(idx);                                                                                        \
+        if (c->constants[(idx)].type != VAL_STR)                                                               \
+            return reg_verify_failf("opcode %u at word %zu needs string constant %u", op, i, (unsigned)(idx)); \
+    } while (0)
+#define RCK_SUBFN(idx)                                                                                           \
+    do {                                                                                                         \
+        RCK_BOUND(idx);                                                                                          \
+        if (c->constants[(idx)].type != VAL_CLOSURE)                                                             \
+            return reg_verify_failf("opcode %u at word %zu needs function constant %u", op, i, (unsigned)(idx)); \
+    } while (0)
+#define RCK_WINDOW(base, count)                                                                 \
+    do {                                                                                        \
+        if ((size_t)(base) + (size_t)(count) > REGVM_REG_MAX)                                   \
+            return reg_verify_failf("register window base+count exceeds frame at word %zu", i); \
+    } while (0)
+#define RCK_JUMP(off)                                                               \
+    do {                                                                            \
+        long long _t = (long long)(i) + 1 + (long long)(off);                       \
+        if (_t < 0 || (size_t)_t >= c->code_len || !is_start[(size_t)_t])           \
+            return reg_verify_failf("jump target %lld invalid at word %zu", _t, i); \
+    } while (0)
+    uint8_t A = REG_GET_A(instr), B = REG_GET_B(instr), C = REG_GET_C(instr);
+    uint16_t Bx = REG_GET_Bx(instr);
+    switch (op) {
+        case ROP_LOADK: RCK_BOUND(Bx); break;
+        case ROP_GETGLOBAL:
+        case ROP_SETGLOBAL:
+        case ROP_DEFINEGLOBAL:
+        case ROP_IMPORT:
+        case ROP_REQUIRE: RCK_STR(Bx); break;
+        case ROP_GETFIELD: RCK_STR(C); break;
+        case ROP_SETFIELD: RCK_STR(B); break;
+        case ROP_FREEZE_VAR:
+        case ROP_THAW_VAR:
+        case ROP_SUBLIMATE_VAR: RCK_STR(A); break;
+        case ROP_FREEZE_FIELD:
+        case ROP_THAW_FIELD: RCK_STR(B); break;
+        case ROP_CLOSURE: RCK_SUBFN(Bx); break;
+        case ROP_NEWARRAY:
+        case ROP_NEWTUPLE: RCK_WINDOW(B, C); break;
+        case ROP_JMP: RCK_JUMP(REG_GET_sBx24(instr)); break;
+        case ROP_JMPFALSE:
+        case ROP_JMPTRUE:
+        case ROP_JMPNOTNIL:
+        case ROP_PUSH_HANDLER:
+        case ROP_DEFER_PUSH: RCK_JUMP(REG_GET_sBx(instr)); break;
+        case ROP_INVOKE:
+            RCK_STR(B); /* method name (word 1, field B) */
+            break;
+        case ROP_NEWSTRUCT: {
+            RegInstr w2 = c->code[i + 1];
+            RCK_STR(REG_GET_Bx(w2));      /* struct name */
+            RCK_WINDOW(REG_GET_A(w2), C); /* field base + count */
+            break;
+        }
+        case ROP_NEWENUM: {
+            RegInstr w2 = c->code[i + 1];
+            uint16_t name_ki = (uint16_t)(B | (REG_GET_C(w2) << 8));
+            RCK_STR(name_ki);             /* enum name */
+            RCK_STR(REG_GET_B(w2));       /* variant name */
+            RCK_WINDOW(REG_GET_A(w2), C); /* payload base + count */
+            break;
+        }
+        case ROP_INVOKE_GLOBAL: {
+            RegInstr w2 = c->code[i + 1];
+            RCK_STR(B);             /* global name */
+            RCK_STR(REG_GET_A(w2)); /* method name */
+            break;
+        }
+        case ROP_INVOKE_LOCAL: {
+            RegInstr w2 = c->code[i + 1];
+            RCK_STR(REG_GET_A(w2)); /* method name */
+            break;
+        }
+        case ROP_CHECK_TYPE: {
+            RCK_STR(Bx); /* type name */
+            RegInstr w2 = c->code[i + 1];
+            if (w2 != 0xFFFFFFFFu) RCK_STR(w2); /* optional error-message constant */
+            break;
+        }
+        case ROP_FREEZE_EXCEPT: {
+            RegInstr w2 = c->code[i + 1];
+            RCK_STR(A);                               /* variable name */
+            RCK_WINDOW(REG_GET_A(w2), REG_GET_B(w2)); /* except-field register window */
+            break;
+        }
+        case ROP_SCOPE: {
+            RegInstr data1 = c->code[i + 1];
+            uint8_t spawn_count = REG_GET_A(data1);
+            uint8_t sync_idx = REG_GET_B(data1);
+            if (sync_idx != 0xFF) RCK_SUBFN(sync_idx);
+            for (uint8_t j = 0; j < spawn_count; j++) {
+                RegInstr w = c->code[i + 2 + j / 3];
+                uint8_t idx = (j % 3 == 0) ? REG_GET_A(w) : (j % 3 == 1) ? REG_GET_B(w) : REG_GET_C(w);
+                RCK_SUBFN(idx);
+            }
+            break;
+        }
+        case ROP_SELECT: {
+            RegInstr data1 = c->code[i + 1];
+            uint8_t arm_count = REG_GET_A(data1);
+            for (uint8_t k = 0; k < arm_count; k++) {
+                RegInstr w1 = c->code[i + 2 + (size_t)k * 2];
+                RegInstr w2 = c->code[i + 2 + (size_t)k * 2 + 1];
+                uint8_t flags = REG_GET_A(w1);
+                uint8_t chan = REG_GET_B(w1);
+                uint8_t body = REG_GET_C(w1);
+                uint8_t binding = REG_GET_A(w2);
+                RCK_SUBFN(body);                      /* every arm has a body chunk */
+                RCK_BOUND(chan);                      /* channel/timeout chunk (type varies by arm flags) */
+                if (flags & 0x04) RCK_BOUND(binding); /* received-value binding name */
+            }
+            break;
+        }
+        default: break;
+    }
+    return NULL;
+#undef RCK_BOUND
+#undef RCK_STR
+#undef RCK_SUBFN
+#undef RCK_WINDOW
+#undef RCK_JUMP
+}
+
+static char *reg_verify_one(const RegChunk *c) {
+    if (c->code_len == 0) return strdup("verify: empty regchunk code");
+    if (c->lines_len < c->code_len) return strdup("verify: line table shorter than code");
+
+    uint8_t *is_start = calloc(c->code_len, 1);
+    if (!is_start) return strdup("verify: out of memory");
+
+    /* Pass 1: structural walk — opcodes, word counts, boundaries. */
+    size_t i = 0;
+    uint8_t last_op = 0;
+    while (i < c->code_len) {
+        is_start[i] = 1;
+        char *e = NULL;
+        size_t w = reg_instr_words(c, i, &e);
+        if (w == 0) {
+            free(is_start);
+            return e;
+        }
+        last_op = REG_GET_OP(c->code[i]);
+        i += w;
+    }
+    if (i != c->code_len) {
+        free(is_start);
+        return strdup("verify: instruction crosses end of code");
+    }
+    if (last_op != ROP_HALT && last_op != ROP_RETURN && last_op != ROP_THROW) {
+        free(is_start);
+        return strdup("verify: regchunk does not end in a terminating instruction");
+    }
+
+    /* Pass 2: operand semantics. */
+    i = 0;
+    while (i < c->code_len) {
+        char *e = reg_verify_operands(c, i, is_start);
+        if (e) {
+            free(is_start);
+            return e;
+        }
+        char *ignore = NULL;
+        i += reg_instr_words(c, i, &ignore);
+    }
+
+    free(is_start);
+    return NULL;
+}
+
+static char *regchunk_verify_depth(const RegChunk *c, int depth) {
+    if (depth > REGCHUNK_VERIFY_MAX_DEPTH) return strdup("verify: regchunk nesting too deep");
+    char *e = reg_verify_one(c);
+    if (e) return e;
+    for (size_t k = 0; k < c->const_len; k++) {
+        if (c->constants[k].type == VAL_CLOSURE) {
+            RegChunk *sub = (RegChunk *)c->constants[k].as.closure.native_fn;
+            if (sub) {
+                char *se = regchunk_verify_depth(sub, depth + 1);
+                if (se) return se;
+            }
+        }
+    }
+    return NULL;
+}
+
+char *regchunk_verify(const RegChunk *c) {
+    if (!c) return strdup("verify: null regchunk");
+    return regchunk_verify_depth(c, 0);
 }

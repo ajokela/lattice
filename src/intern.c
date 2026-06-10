@@ -3,6 +3,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The intern table is a process-global hash map. The bytecode VM runs spawn
+ * bodies as concurrent threads that intern strings (struct construction, field
+ * access, deep-clone, short-string promotion), so every mutation — including
+ * intern_grow(), which frees and rebuilds the entries array — must be
+ * serialized, or peer threads race the table (data race / use-after-free). */
+#ifndef __EMSCRIPTEN__
+#include <pthread.h>
+static pthread_mutex_t g_intern_mutex = PTHREAD_MUTEX_INITIALIZER;
+#define INTERN_LOCK()   pthread_mutex_lock(&g_intern_mutex)
+#define INTERN_UNLOCK() pthread_mutex_unlock(&g_intern_mutex)
+#else
+#define INTERN_LOCK()   ((void)0)
+#define INTERN_UNLOCK() ((void)0)
+#endif
+
 #define INTERN_INIT_CAP 256
 
 typedef struct {
@@ -21,8 +36,7 @@ void intern_init(void) {
 }
 
 void intern_free(void) {
-    for (size_t i = 0; i < g_intern.cap; i++)
-        free(g_intern.entries[i]);
+    for (size_t i = 0; i < g_intern.cap; i++) free(g_intern.entries[i]);
     free(g_intern.entries);
     g_intern.entries = NULL;
     g_intern.count = 0;
@@ -52,19 +66,25 @@ static void intern_grow(void) {
 
 const char *intern(const char *s) {
     if (!s) return NULL;
+
+    INTERN_LOCK();
     if (!g_intern.entries) intern_init();
 
-    if (g_intern.count * 2 >= g_intern.cap)
-        intern_grow();
+    if (g_intern.count * 2 >= g_intern.cap) intern_grow();
 
     uint32_t mask = (uint32_t)(g_intern.cap - 1);
     uint32_t h = intern_hash(s) & mask;
     while (g_intern.entries[h]) {
-        if (strcmp(g_intern.entries[h], s) == 0)
-            return g_intern.entries[h];
+        if (strcmp(g_intern.entries[h], s) == 0) {
+            const char *found = g_intern.entries[h];
+            INTERN_UNLOCK();
+            return found;
+        }
         h = (h + 1) & mask;
     }
     g_intern.entries[h] = strdup(s);
     g_intern.count++;
-    return g_intern.entries[h];
+    const char *result = g_intern.entries[h];
+    INTERN_UNLOCK();
+    return result;
 }

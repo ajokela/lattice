@@ -25,10 +25,36 @@ void value_set_heap(DualHeap *heap) { g_heap = heap; }
 void value_set_arena(CrystalRegion *region) { g_arena = region; }
 CrystalRegion *value_get_arena(void) { return g_arena; }
 
+/* Deep-clone a value into thread-independent (malloc-backed) storage by
+ * cloning with the thread-local heap/arena temporarily detached. The result's
+ * region_id is REGION_NONE, so its backing survives the current thread's heap
+ * teardown and is owned by whoever value_free()s it. Used when handing a value
+ * across threads (e.g. through a channel), where the sender's fluid heap is
+ * freed before the receiver reads the value. */
+LatValue value_detach(const LatValue *v) {
+    DualHeap *saved_heap = g_heap;
+    CrystalRegion *saved_arena = g_arena;
+    g_heap = NULL;
+    g_arena = NULL;
+    LatValue out = value_deep_clone(v);
+    g_heap = saved_heap;
+    g_arena = saved_arena;
+    return out;
+}
+
 static void *lat_alloc(size_t size) {
     if (g_arena) return arena_alloc(g_arena, size);
     if (g_heap) return fluid_alloc(g_heap->fluid, size);
     return malloc(size);
+}
+
+/* Grow a buffer in a heap-aware way. Plain realloc() on a fluid-heap-tracked
+ * allocation leaves a stale pointer in the heap's allocation list (the block is
+ * moved/freed by realloc), which double-frees at heap teardown. Route the
+ * resize through the active fluid heap so its tracking stays consistent. */
+void *lat_realloc_routed(void *ptr, size_t new_size) {
+    if (g_heap && !g_arena) return fluid_realloc(g_heap->fluid, ptr, new_size);
+    return realloc(ptr, new_size);
 }
 
 static void *lat_calloc(size_t count, size_t size) {
