@@ -153,72 +153,9 @@ void *reg_compile_repl(const Program *prog, char **error) {
     return NULL;
 }
 
-/* ── RegVM stubs ── */
-
-RegChunk *regchunk_new(void) {
-    stub_abort("regchunk_new");
-    return NULL;
-}
-
-void regchunk_free(RegChunk *c) {
-    (void)c;
-    stub_abort("regchunk_free");
-}
-
-size_t regchunk_write(RegChunk *c, RegInstr instr, int line) {
-    (void)c;
-    (void)instr;
-    (void)line;
-    stub_abort("regchunk_write");
-    return 0;
-}
-
-size_t regchunk_add_constant(RegChunk *c, LatValue val) {
-    (void)c;
-    (void)val;
-    stub_abort("regchunk_add_constant");
-    return 0;
-}
-
-void regchunk_set_local_name(RegChunk *c, size_t reg, const char *name) {
-    (void)c;
-    (void)reg;
-    (void)name;
-    stub_abort("regchunk_set_local_name");
-}
-
-/* Referenced by latc.c's regchunk_deserialize (the .rlatc loader), which is dead
- * code in the .latc-only thin runtime — but its symbol must still resolve. */
-char *regchunk_verify(const RegChunk *c) {
-    (void)c;
-    stub_abort("regchunk_verify");
-    return NULL;
-}
-
-RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
-    (void)vm;
-    (void)chunk;
-    (void)result;
-    stub_abort("regvm_run");
-    return REGVM_ERROR_STUB;
-}
-
-void regvm_track_chunk(RegVM *vm, RegChunk *ch) {
-    (void)vm;
-    (void)ch;
-    stub_abort("regvm_track_chunk");
-}
-
-RegVM *regvm_clone_for_thread(RegVM *parent) {
-    (void)parent;
-    stub_abort("regvm_clone_for_thread");
-    return NULL;
-}
-
-void regvm_free_child(RegVM *child) {
-    (void)child;
-    stub_abort("regvm_free_child");
-}
+/* NOTE: The register VM itself (regvm.c, regopcode.c) is linked into the
+ * thin runtime so clat-run can execute .rlat bytecode — only the regvm
+ * source COMPILER (regcompiler.c) is stubbed, above. */
 
 /* ── Package manager stub ── */
 

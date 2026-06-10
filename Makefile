@@ -183,8 +183,9 @@ ifndef WINDOWS
 TARGET = clat
 endif
 
-# Thin bytecode runtime (clat-run): VM + stdlib + bytecode loader + stubs.
-# Excludes: lexer, parser, ast, eval, compilers, regvm, lsp, formatter,
+# Thin bytecode runtime (clat-run): VMs + stdlib + bytecode loader + stubs.
+# Executes both .latc (stack VM) and .rlat (register VM) bytecode.
+# Excludes: lexer, parser, ast, eval, compilers, lsp, formatter,
 #           debugger, completion, doc_gen, package, phase_check, match_check.
 RUNTIME_SRCS = $(SRC_DIR)/runtime_main.c \
                $(SRC_DIR)/runtime_stubs.c \
@@ -219,6 +220,8 @@ RUNTIME_SRCS = $(SRC_DIR)/runtime_main.c \
                $(SRC_DIR)/stackopcode.c \
                $(SRC_DIR)/chunk.c \
                $(SRC_DIR)/stackvm.c \
+               $(SRC_DIR)/regopcode.c \
+               $(SRC_DIR)/regvm.c \
                $(SRC_DIR)/runtime.c \
                $(SRC_DIR)/intern.c \
                $(SRC_DIR)/latc.c \
@@ -336,7 +339,7 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc test-runtime asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -448,6 +451,42 @@ test-latc: $(TARGET)
 	done; \
 	PASS=$$((PASS + DPASS)); \
 	FAIL=$$((FAIL + DFAIL)); \
+	echo ""; \
+	echo "Results: $$PASS passed, $$FAIL failed"; \
+	if [ $$FAIL -gt 0 ]; then exit 1; fi
+
+# Thin-runtime roundtrip tests: compile to .latc (stack VM) and .rlat
+# (register VM), execute each with clat-run, and diff against direct
+# execution of the source on the corresponding backend.
+RUNTIME_TESTS = latc_expressions latc_variables latc_control_flow latc_functions \
+                latc_data_structures latc_error_handling latc_string_interp
+
+test-runtime: $(TARGET) $(RUNTIME_TARGET)
+	@PASS=0; FAIL=0; \
+	for name in $(RUNTIME_TESTS); do \
+		printf "%-35s" "runtime-latc:$$name..."; \
+		./$(TARGET) compile tests/$$name.lat -o /tmp/rt_$$name.latc > /dev/null 2>&1; \
+		./$(RUNTIME_TARGET) /tmp/rt_$$name.latc > /tmp/rt_$$name.out 2>&1; \
+		./$(TARGET) tests/$$name.lat > /tmp/rt_$$name.want 2>&1; \
+		if diff /tmp/rt_$$name.out /tmp/rt_$$name.want > /dev/null 2>&1; then \
+			echo "PASS"; PASS=$$((PASS + 1)); \
+		else \
+			echo "FAIL"; diff /tmp/rt_$$name.out /tmp/rt_$$name.want | head -5; FAIL=$$((FAIL + 1)); \
+		fi; \
+		rm -f /tmp/rt_$$name.latc /tmp/rt_$$name.out /tmp/rt_$$name.want; \
+	done; \
+	for name in $(RUNTIME_TESTS); do \
+		printf "%-35s" "runtime-rlat:$$name..."; \
+		./$(TARGET) compile --regvm tests/$$name.lat -o /tmp/rt_$$name.rlat > /dev/null 2>&1; \
+		./$(RUNTIME_TARGET) /tmp/rt_$$name.rlat > /tmp/rt_$$name.out 2>&1; \
+		./$(TARGET) --regvm tests/$$name.lat > /tmp/rt_$$name.want 2>&1; \
+		if diff /tmp/rt_$$name.out /tmp/rt_$$name.want > /dev/null 2>&1; then \
+			echo "PASS"; PASS=$$((PASS + 1)); \
+		else \
+			echo "FAIL"; diff /tmp/rt_$$name.out /tmp/rt_$$name.want | head -5; FAIL=$$((FAIL + 1)); \
+		fi; \
+		rm -f /tmp/rt_$$name.rlat /tmp/rt_$$name.out /tmp/rt_$$name.want; \
+	done; \
 	echo ""; \
 	echo "Results: $$PASS passed, $$FAIL failed"; \
 	if [ $$FAIL -gt 0 ]; then exit 1; fi
