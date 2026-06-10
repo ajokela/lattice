@@ -1280,7 +1280,7 @@ static bool fetch_from_git(const char *name, const char *git_url, const char *ta
     }
 
     /* Remove .git directory — we only need the source */
-    char git_dir[PATH_MAX];
+    char git_dir[PATH_MAX + 8];
     snprintf(git_dir, sizeof(git_dir), "%s/.git", dest);
     int ignored2 = pkg_remove_tree(git_dir);
     (void)ignored2;
