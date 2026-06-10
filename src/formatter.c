@@ -180,10 +180,10 @@ static size_t read_word(const Fmt *f, char *buf, size_t buf_size) {
 /* ── Comment handling ── */
 
 static void emit_line_comment(Fmt *f) {
-    /* // already peeked — emit it */
-    emit_char(f, fmt_advance(f)); /* / */
-    emit_char(f, fmt_advance(f)); /* / */
-    /* Ensure a space after // if there isn't one and next char isn't newline */
+    /* // already peeked — emit ALL leading slashes so /// doc comments keep
+     * their prefix intact (doc_gen depends on the triple slash) */
+    while (f->pos < f->len && f->src[f->pos] == '/') { emit_char(f, fmt_advance(f)); }
+    /* Ensure a space after the slashes if there isn't one and next char isn't newline */
     if (f->pos < f->len && f->src[f->pos] != ' ' && f->src[f->pos] != '\n' && f->src[f->pos] != '\r') {
         emit_char(f, ' ');
     }
