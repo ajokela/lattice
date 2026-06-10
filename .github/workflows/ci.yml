@@ -24,6 +24,9 @@ jobs:
       - name: Build
         run: make
 
+      - name: Build thin runtime (clat-run)
+        run: make runtime
+
       - name: Build extensions
         run: |
           make ext-sqlite
@@ -345,6 +348,9 @@ jobs:
 
       - name: Build (cross-compile)
         run: make WINDOWS=1
+
+      - name: Build thin runtime (cross-compile)
+        run: make WINDOWS=1 runtime
 
   windows-native:
     name: Windows Native (Build & Test)
