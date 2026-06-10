@@ -201,11 +201,13 @@ static inline char *realpath(const char *path, char *resolved) {
 }
 
 /* ── mkdtemp ── */
-/* mingw-w64 >= 12.0 declares mkdtemp() in <stdlib.h>; only provide a shim for
- * older toolchains (e.g. distro cross-compilers) that lack it, otherwise this
- * static definition conflicts with the system declaration. */
-#if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 12
-static inline char *mkdtemp(char *tmpl) {
+/* mingw-w64 declares/provides mkdtemp() inconsistently across versions and
+ * distributions (MSYS2 has it, some cross-compilers don't), and redeclaring it
+ * as our own static shim conflicts with the system declaration where it exists.
+ * Define the implementation under a private name and route callers to it via a
+ * macro: we never declare a symbol named 'mkdtemp', so there is no conflict on
+ * any toolchain, and we don't depend on the toolchain providing it. */
+static inline char *lat_compat_mkdtemp(char *tmpl) {
     size_t len = strlen(tmpl);
     if (len < 6) return NULL;
     char *suffix = tmpl + len - 6;
@@ -215,7 +217,7 @@ static inline char *mkdtemp(char *tmpl) {
     }
     return NULL;
 }
-#endif
+#define mkdtemp lat_compat_mkdtemp
 
 /* ── basename / dirname ── */
 /* Custom implementations that handle both '/' and '\\' */

@@ -10,7 +10,12 @@ TEST_DIR   = tests
 ifdef WINDOWS
     CC       = x86_64-w64-mingw32-gcc
     CFLAGS   = -std=c11 -Wall -Wextra -Werror -Wno-implicit-fallthrough -Iinclude -O3 -D_WIN32_WINNT=0x0600
-    LDFLAGS  = -lws2_32 -lpthread -lsecur32 -lcrypt32 -ladvapi32 -static
+    # Windows defaults to a 1 MB main-thread stack (vs 8 MB on Linux/macOS), which
+    # the recursive-descent parser's depth limit (1000) overflows before it can
+    # reject — making the LAT-417/413 stack-overflow DoS guards ineffective and
+    # crashing on deeply nested input. Reserve 16 MB so the limits behave as on
+    # other platforms (reserve is address space, committed on demand).
+    LDFLAGS  = -lws2_32 -lpthread -lsecur32 -lcrypt32 -ladvapi32 -static -Wl,--stack,0x1000000
     TARGET   = clat.exe
     RELEASE_NAME = clat-windows-x86_64.exe
     # Skip editline and computed goto on Windows; use Schannel for TLS
