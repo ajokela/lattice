@@ -84,9 +84,6 @@ ifeq ($(TLS_AVAILABLE),no)
     endif
 endif
 endif
-CFLAGS  += $(TLS_CFLAGS)
-LDFLAGS += $(TLS_LDFLAGS)
-
 # ── pthreads and dlopen (Linux needs explicit linking) ──
 ifeq ($(UNAME_S),Linux)
     CFLAGS  += -D_GNU_SOURCE
@@ -108,6 +105,12 @@ ifdef STATIC
     LDFLAGS += -static
 endif
 endif # SKIP_AUTODETECT
+
+# TLS flags must apply on every platform — the Windows block above sets them
+# explicitly (Schannel) while skipping autodetection, so this append has to
+# live outside the SKIP_AUTODETECT guard
+CFLAGS  += $(TLS_CFLAGS)
+LDFLAGS += $(TLS_LDFLAGS)
 
 # Source files
 SRCS = $(SRC_DIR)/main.c \

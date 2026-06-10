@@ -1,7 +1,9 @@
 #include "tls.h"
 #include "net.h"
 
-#ifdef LATTICE_HAS_TLS
+/* Schannel takes priority: Windows builds define both LATTICE_HAS_TLS and
+ * LATTICE_TLS_SCHANNEL but have no OpenSSL */
+#if defined(LATTICE_HAS_TLS) && !defined(LATTICE_TLS_SCHANNEL)
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -204,8 +206,8 @@ void net_tls_cleanup(void) {
  * ══════════════════════════════════════════════════════════════════════════ */
 
 #define SECURITY_WIN32
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 #include <ws2tcpip.h>
 #include <security.h>
 #include <schannel.h>
@@ -223,9 +225,14 @@ typedef struct {
     CtxtHandle ctx;
     CredHandle cred;
     int active;
-    /* Decrypted leftover buffer (partial reads from DecryptMessage) */
+    /* Encrypted leftover (extra ciphertext from handshake or SECBUFFER_EXTRA);
+     * re-fed into DecryptMessage on the next read */
     char *extra_buf;
     size_t extra_len;
+    /* Decrypted leftover (plaintext pushed back by tls_read_bytes);
+     * returned directly on the next read, never re-decrypted */
+    char *dec_buf;
+    size_t dec_len;
     /* Stream sizes for EncryptMessage */
     SecPkgContext_StreamSizes sizes;
 } SchanSession;
@@ -290,7 +297,6 @@ int net_tls_connect(const char *host, int port, char **err) {
 
     /* TLS handshake loop */
     CtxtHandle ctx;
-    int have_ctx = 0;
     DWORD ctx_req = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY |
                     ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM;
 
@@ -307,7 +313,6 @@ int net_tls_connect(const char *host, int port, char **err) {
         net_tcp_close(fd);
         return -1;
     }
-    have_ctx = 1;
 
     /* Send initial token */
     if (out_buf.cbBuffer > 0 && out_buf.pvBuffer) {
@@ -426,8 +431,16 @@ char *net_tls_read(int fd, char **err) {
     SchanSession *sess = &schan_sessions[fd];
     SOCKET sock = (SOCKET)fd;
 
-    /* If we have leftover decrypted data from a previous read, return that */
-    if (sess->extra_buf && sess->extra_len > 0) { /* Try to decrypt the extra buffer first */
+    /* If we have leftover decrypted data from a previous read, return it
+     * directly — it must not be fed back through DecryptMessage */
+    if (sess->dec_buf && sess->dec_len > 0) {
+        char *result = malloc(sess->dec_len + 1);
+        memcpy(result, sess->dec_buf, sess->dec_len);
+        result[sess->dec_len] = '\0';
+        free(sess->dec_buf);
+        sess->dec_buf = NULL;
+        sess->dec_len = 0;
+        return result;
     }
 
     char *iobuf = malloc(SCHAN_READ_BUF);
@@ -543,18 +556,20 @@ char *net_tls_read_bytes(int fd, size_t count, char **err) {
         memcpy(result + total, chunk, take);
         total += take;
 
-        /* If we read more than needed, push extra back */
+        /* If we read more than needed, push the surplus plaintext back so the
+         * next read returns it (dec_buf, NOT extra_buf — extra_buf holds
+         * ciphertext destined for DecryptMessage) */
         if (take < clen) {
             SchanSession *sess = &schan_sessions[fd];
             size_t leftover = clen - take;
-            char *newextra = malloc(sess->extra_len + leftover);
-            memcpy(newextra, chunk + take, leftover);
-            if (sess->extra_buf) {
-                memcpy(newextra + leftover, sess->extra_buf, sess->extra_len);
-                free(sess->extra_buf);
+            char *newdec = malloc(sess->dec_len + leftover);
+            memcpy(newdec, chunk + take, leftover);
+            if (sess->dec_buf) {
+                memcpy(newdec + leftover, sess->dec_buf, sess->dec_len);
+                free(sess->dec_buf);
             }
-            sess->extra_buf = newextra;
-            sess->extra_len += leftover;
+            sess->dec_buf = newdec;
+            sess->dec_len += leftover;
         }
         free(chunk);
     }
@@ -645,6 +660,7 @@ void net_tls_close(int fd) {
         DeleteSecurityContext(&sess->ctx);
         FreeCredentialsHandle(&sess->cred);
         free(sess->extra_buf);
+        free(sess->dec_buf);
         memset(sess, 0, sizeof(*sess));
     }
     net_tcp_close(fd);
@@ -663,6 +679,7 @@ void net_tls_cleanup(void) {
             DeleteSecurityContext(&sess->ctx);
             FreeCredentialsHandle(&sess->cred);
             free(sess->extra_buf);
+            free(sess->dec_buf);
             memset(sess, 0, sizeof(*sess));
         }
     }

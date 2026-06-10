@@ -28,7 +28,9 @@ static char *hex_encode(const unsigned char *hash, unsigned int len) {
  * SHA-256, MD5, SHA-512, HMAC-SHA256, random_bytes
  * ══════════════════════════════════════════════════════════════════════ */
 
-#ifdef LATTICE_HAS_TLS
+/* OpenSSL-backed implementations — not on Windows/Schannel, which has no
+ * OpenSSL and uses the pure-C fallbacks below */
+#if defined(LATTICE_HAS_TLS) && !defined(LATTICE_TLS_SCHANNEL)
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
