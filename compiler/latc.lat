@@ -286,6 +286,12 @@ flux current_return_type = ""
 // Chunk name tracking for debug info (stack traces)
 flux current_chunk_name = nil
 
+// Per-chunk function call metadata (LAT-432 / LAT-433):
+// whether the last parameter is variadic, and the default values
+// (as tagged constants) for trailing defaulted parameters.
+flux cur_chunk_variadic = false
+flux cur_chunk_defaults = []
+
 // Compiler stack for save/restore during function compilation
 // Each entry is an array: [code, c_lines, constants, local_names,
 //   local_name_arr, local_depth_arr, local_captured_arr, local_count,
@@ -293,7 +299,8 @@ flux current_chunk_name = nil
 //   func_type, break_jumps, break_count, loop_start_pos, loop_depth,
 //   loop_break_local_count, loop_continue_local_count, string_intern_map,
 //   ensure_slots, ensure_messages, ensure_count, current_func_name,
-//   current_return_type, current_chunk_name]
+//   current_return_type, current_chunk_name, cur_chunk_variadic,
+//   cur_chunk_defaults]
 flux compiler_stack = []
 
 fn save_compiler() {
@@ -305,7 +312,8 @@ fn save_compiler() {
         func_type, break_jumps, break_count, loop_start_pos, loop_depth,
         loop_break_local_count, loop_continue_local_count, string_intern_map,
         ensure_slots, ensure_messages, ensure_count, current_func_name,
-        current_return_type, current_chunk_name
+        current_return_type, current_chunk_name, cur_chunk_variadic,
+        cur_chunk_defaults
     ]
     compiler_stack.push(state)
 }
@@ -338,12 +346,16 @@ fn restore_compiler() {
     current_func_name = state[23]
     current_return_type = state[24]
     current_chunk_name = state[25]
+    cur_chunk_variadic = state[26]
+    cur_chunk_defaults = state[27]
 }
 
 // Snapshot the current chunk into an array for serialization
-// Returns [code, c_lines, constants, local_names, chunk_name]
+// Returns [code, c_lines, constants, local_names, chunk_name,
+//          fn_has_variadic, default_values]
 fn snapshot_chunk() {
-    return [code, c_lines, constants, local_names, current_chunk_name]
+    return [code, c_lines, constants, local_names, current_chunk_name,
+            cur_chunk_variadic, cur_chunk_defaults]
 }
 
 // ============================================================================
@@ -2538,6 +2550,8 @@ fn parse_closure_literal() {
     string_intern_map = Map::new()
     current_return_type = ""
     current_chunk_name = nil
+    cur_chunk_variadic = false
+    cur_chunk_defaults = []
 
     // Reserve slot 0 for the closure itself (VM convention)
     add_local("")
@@ -2635,6 +2649,8 @@ fn init_sub_compiler() {
     ensure_count = 0
     current_func_name = ""
     current_return_type = ""
+    cur_chunk_variadic = false
+    cur_chunk_defaults = []
     return saved_stack
 }
 
@@ -3315,6 +3331,54 @@ fn parse_struct_destructure(kind: any, line: any) {
     }
 }
 
+// Parse a default parameter value (must be a literal — mirrors the C
+// compiler, which const-folds defaults at compile time). Returns a
+// tagged constant for the chunk's default_values table.
+fn parse_param_default(line: any) {
+    flux neg = false
+    if peek_text() == "-" {
+        advance()
+        neg = true
+    }
+    let t = peek()
+    if t == nil {
+        compiler_error("expected default parameter value", line)
+    }
+    if t.type == "integer" {
+        advance()
+        flux ival = parse_int(t.text)
+        if neg { ival = 0 - ival }
+        return make_int_const(ival)
+    }
+    if t.type == "float" {
+        advance()
+        flux fval = parse_float(t.text)
+        if neg { fval = 0.0 - fval }
+        return make_float_const(fval)
+    }
+    if neg {
+        compiler_error("expected number after '-' in default parameter value", line)
+    }
+    if t.type == "string" {
+        advance()
+        return make_string_const(t.text)
+    }
+    if t.type == "true" {
+        advance()
+        return make_bool_const(true)
+    }
+    if t.type == "false" {
+        advance()
+        return make_bool_const(false)
+    }
+    if t.type == "nil" {
+        advance()
+        return make_nil_const()
+    }
+    compiler_error("default parameter value must be a literal", line)
+    return make_nil_const()
+}
+
 fn parse_fn_declaration() {
     let line = current_line()
     expect("fn", nil)
@@ -3324,19 +3388,12 @@ fn parse_fn_declaration() {
 
     flux param_names_arr = []
     flux param_types_arr = []
+    flux param_defaults_arr = []
     flux has_variadic = false
+    flux seen_default = false
     if peek_text() != ")" {
-        let p = expect("identifier", nil).text
-        flux p_type = ""
-        // Consume optional type annotation
-        if peek_text() == ":" {
-            advance()
-            p_type = expect("identifier", nil).text
-        }
-        param_names_arr.push(p)
-        param_types_arr.push(p_type)
-        while peek_text() == "," {
-            advance()
+        flux more_params = true
+        while more_params {
             if peek_text() == "..." {
                 advance()
                 let vp = expect("identifier", nil).text
@@ -3349,14 +3406,28 @@ fn parse_fn_declaration() {
                 has_variadic = true
                 break
             }
-            let p2 = expect("identifier", nil).text
-            flux p2_type = ""
+            let p = expect("identifier", nil).text
+            flux p_type = ""
+            // Consume optional type annotation
             if peek_text() == ":" {
                 advance()
-                p2_type = expect("identifier", nil).text
+                p_type = expect("identifier", nil).text
             }
-            param_names_arr.push(p2)
-            param_types_arr.push(p2_type)
+            // Optional default value: = <literal>
+            if peek_text() == "=" {
+                advance()
+                param_defaults_arr.push(parse_param_default(line))
+                seen_default = true
+            } else { if seen_default {
+                compiler_error("required parameter cannot follow a parameter with a default value", line)
+            } }
+            param_names_arr.push(p)
+            param_types_arr.push(p_type)
+            if peek_text() == "," {
+                advance()
+            } else {
+                more_params = false
+            }
         }
     }
     expect(nil, ")")
@@ -3488,6 +3559,8 @@ fn parse_fn_declaration() {
     current_func_name = name
     current_return_type = fn_return_type
     current_chunk_name = name
+    cur_chunk_variadic = has_variadic
+    cur_chunk_defaults = param_defaults_arr
 
     // Reserve slot 0 for the function itself (VM convention)
     add_local("")
@@ -4524,18 +4597,12 @@ fn parse_impl_block() {
 
         flux param_names_arr = []
         flux param_types_arr = []
+        flux param_defaults_arr = []
         flux has_variadic = false
+        flux seen_default = false
         if peek_text() != ")" {
-            let p = expect("identifier", nil).text
-            flux p_type = ""
-            if peek_text() == ":" {
-                advance()
-                p_type = expect("identifier", nil).text
-            }
-            param_names_arr.push(p)
-            param_types_arr.push(p_type)
-            while peek_text() == "," {
-                advance()
+            flux more_params = true
+            while more_params {
                 if peek_text() == "..." {
                     advance()
                     let vp = expect("identifier", nil).text
@@ -4548,14 +4615,26 @@ fn parse_impl_block() {
                     has_variadic = true
                     break
                 }
-                let p2 = expect("identifier", nil).text
-                flux p2_type = ""
+                let p = expect("identifier", nil).text
+                flux p_type = ""
                 if peek_text() == ":" {
                     advance()
-                    p2_type = expect("identifier", nil).text
+                    p_type = expect("identifier", nil).text
                 }
-                param_names_arr.push(p2)
-                param_types_arr.push(p2_type)
+                if peek_text() == "=" {
+                    advance()
+                    param_defaults_arr.push(parse_param_default(line))
+                    seen_default = true
+                } else { if seen_default {
+                    compiler_error("required parameter cannot follow a parameter with a default value", line)
+                } }
+                param_names_arr.push(p)
+                param_types_arr.push(p_type)
+                if peek_text() == "," {
+                    advance()
+                } else {
+                    more_params = false
+                }
             }
         }
         expect(nil, ")")
@@ -4686,6 +4765,8 @@ fn parse_impl_block() {
         current_func_name = method_name
         current_return_type = m_return_type
         current_chunk_name = method_name
+        cur_chunk_variadic = has_variadic
+        cur_chunk_defaults = param_defaults_arr
 
         if first_param == 1 {
             // self occupies slot 0
@@ -4752,7 +4833,9 @@ fn parse_impl_block() {
 
         restore_compiler()
 
-        let fn_const = make_closure_const(arity, has_variadic, fn_snap)
+        // Match the C compiler: param_count includes self when present
+        // (the VM detects self via the chunk's slot-0 debug name).
+        let fn_const = make_closure_const(param_count, has_variadic, fn_snap)
         let fn_idx = add_constant(fn_const)
 
         emit_wide_op(OP_CLOSURE, OP_CLOSURE_16, fn_idx, line)
@@ -4891,7 +4974,8 @@ fn serialize_constant(c: any) {
 }
 
 fn serialize_chunk(ch: any) {
-    // ch = [code_arr, lines_arr, constants_arr, local_names_arr, chunk_name]
+    // ch = [code_arr, lines_arr, constants_arr, local_names_arr, chunk_name,
+    //       fn_has_variadic, default_values]
     let ch_code = ch[0]
     let ch_lines = ch[1]
     let ch_constants = ch[2]
@@ -4899,6 +4983,14 @@ fn serialize_chunk(ch: any) {
     flux ch_name = nil
     if len(ch) > 4 {
         ch_name = ch[4]
+    }
+    flux ch_variadic = false
+    if len(ch) > 5 {
+        ch_variadic = ch[5]
+    }
+    flux ch_defaults = []
+    if len(ch) > 6 {
+        ch_defaults = ch[6]
     }
 
     // Code
@@ -4941,17 +5033,29 @@ fn serialize_chunk(ch: any) {
     } else {
         write_u8(0)
     }
+
+    // Function call metadata: variadic flag + default parameter values
+    if ch_variadic {
+        write_u8(1)
+    } else {
+        write_u8(0)
+    }
+    let def_count = len(ch_defaults)
+    write_u32_le(def_count)
+    for i in 0..def_count {
+        serialize_constant(ch_defaults[i])
+    }
 }
 
 fn serialize_latc(ch: any) {
     ser_buf = Buffer::new(0)
 
-    // Header: "LATC" + version(1) + reserved(0)
+    // Header: "LATC" + version(2) + reserved(0)
     write_u8(76)    // 'L'
     write_u8(65)    // 'A'
     write_u8(84)    // 'T'
     write_u8(67)    // 'C'
-    write_u16_le(1) // format version
+    write_u16_le(2) // format version
     write_u16_le(0) // reserved
 
     serialize_chunk(ch)

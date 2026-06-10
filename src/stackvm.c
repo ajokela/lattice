@@ -2986,6 +2986,18 @@ static int stackvm_adjust_call_args(StackVM *vm, Chunk *fn_chunk, int arity, int
     return arg_count;
 }
 
+/* Expected stack-arg count (excluding the receiver) for a compiled
+ * "Type::method" closure. Methods declared with an explicit `self` first
+ * parameter include it in param_count, but `self` occupies slot 0 (the
+ * receiver slot), so it is not passed as a stack argument. */
+static int stackvm_method_arity(const LatValue *method_ref, const Chunk *fn_chunk) {
+    int arity = (int)method_ref->as.closure.param_count;
+    if (arity > 0 && fn_chunk->local_names && fn_chunk->local_name_cap > 0 && fn_chunk->local_names[0] &&
+        strcmp(fn_chunk->local_names[0], "self") == 0)
+        arity--;
+    return arity;
+}
+
 /* Dispatch pointer adapters for LatRuntime */
 static LatValue stackvm_dispatch_call_closure(void *vm_ptr, LatValue *closure, LatValue *args, int argc) {
     StackVM *vm = (StackVM *)vm_ptr;
@@ -4975,6 +4987,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     /* Found a compiled method - call it with self + args */
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+                    int m_arity = stackvm_method_arity(method_ref, fn_chunk);
+                    int m_argc = stackvm_adjust_call_args(vm, fn_chunk, m_arity, (int)arg_count);
+                    if (m_argc < 0) {
+                        char *err = vm->error;
+                        vm->error = NULL;
+                        VM_ERROR("%s", err);
+                        free(err);
+                        break;
+                    }
+                    (void)m_argc;
                     /* Rearrange stack: obj is already below args, use as slot 0 */
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
@@ -5190,15 +5212,24 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatValue *method_ref = env_get_ref(vm->env, key);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+                    int m_arity = stackvm_method_arity(method_ref, fn_chunk);
+                    int m_argc = stackvm_adjust_call_args(vm, fn_chunk, m_arity, (int)arg_count);
+                    if (m_argc < 0) {
+                        char *err = vm->error;
+                        vm->error = NULL;
+                        VM_ERROR("%s", err);
+                        free(err);
+                        break;
+                    }
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
                     stackvm_promote_frame_ephemerals(vm, frame);
                     /* Push self (deep clone of local) below args for the new frame. */
-                    LatValue *arg_base = vm->stack_top - arg_count;
+                    LatValue *arg_base = vm->stack_top - m_argc;
                     push(vm, value_nil());
-                    for (int i = arg_count; i > 0; i--) vm->stack_top[-1 - (arg_count - i)] = arg_base[i - 1];
+                    for (int i = m_argc; i > 0; i--) vm->stack_top[-1 - (m_argc - i)] = arg_base[i - 1];
                     *arg_base = value_deep_clone(obj);
                     StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
                     new_frame->chunk = fn_chunk;
@@ -5464,6 +5495,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatValue *method_ref = env_get_ref(vm->env, key);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+                    int m_arity = stackvm_method_arity(method_ref, fn_chunk);
+                    int m_argc = stackvm_adjust_call_args(vm, fn_chunk, m_arity, (int)arg_count);
+                    if (m_argc < 0) {
+                        char *err = vm->error;
+                        vm->error = NULL;
+                        VM_ERROR("%s", err);
+                        free(err);
+                        break;
+                    }
+                    (void)m_argc;
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
@@ -5662,14 +5703,23 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatValue *method_ref = env_get_ref(vm->env, key);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+                    int m_arity = stackvm_method_arity(method_ref, fn_chunk);
+                    int m_argc = stackvm_adjust_call_args(vm, fn_chunk, m_arity, (int)arg_count);
+                    if (m_argc < 0) {
+                        char *err = vm->error;
+                        vm->error = NULL;
+                        VM_ERROR("%s", err);
+                        free(err);
+                        break;
+                    }
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
                     stackvm_promote_frame_ephemerals(vm, frame);
-                    LatValue *arg_base = vm->stack_top - arg_count;
+                    LatValue *arg_base = vm->stack_top - m_argc;
                     push(vm, value_nil());
-                    for (int i = arg_count; i > 0; i--) vm->stack_top[-1 - (arg_count - i)] = arg_base[i - 1];
+                    for (int i = m_argc; i > 0; i--) vm->stack_top[-1 - (m_argc - i)] = arg_base[i - 1];
                     *arg_base = value_deep_clone(obj);
                     StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
                     new_frame->chunk = fn_chunk;
@@ -5918,6 +5968,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatValue *method_ref = env_get_ref(vm->env, key);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+                    int m_arity = stackvm_method_arity(method_ref, fn_chunk);
+                    int m_argc = stackvm_adjust_call_args(vm, fn_chunk, m_arity, (int)arg_count);
+                    if (m_argc < 0) {
+                        char *err = vm->error;
+                        vm->error = NULL;
+                        VM_ERROR("%s", err);
+                        free(err);
+                        break;
+                    }
+                    (void)m_argc;
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;

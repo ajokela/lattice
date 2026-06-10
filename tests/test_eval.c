@@ -5053,6 +5053,8 @@ static uint8_t *build_latc_image(const uint8_t *code, uint32_t code_len, const L
     }
     lb_u32(&b, 0);  /* local_name_count */
     lb_byte(&b, 0); /* has_name */
+    lb_byte(&b, 0); /* fn_has_variadic */
+    lb_u32(&b, 0);  /* default_count */
     *out_len = b.len;
     return b.d;
 }
