@@ -5380,3 +5380,49 @@ TEST(yaml_deep_nesting_rejected) {
                  "    yaml_parse(deep)\n"
                  "}\n");
 }
+
+/* ── Parser/lexer recursion limits (LAT-417) ── */
+TEST(parser_deep_paren_nesting_rejected) {
+    /* Tens of thousands of nested parentheses in the SOURCE would overflow the
+     * recursive-descent parser's C stack; it must reject them with an error. */
+    size_t n = 50000;
+    char *src = malloc(n * 2 + 64);
+    char *q = src;
+    memcpy(q, "fn main() { let x = ", 20);
+    q += 20;
+    for (size_t i = 0; i < n; i++) *q++ = '(';
+    *q++ = '1';
+    for (size_t i = 0; i < n; i++) *q++ = ')';
+    memcpy(q, " }", 3); /* includes NUL */
+    char *err = NULL;
+    int rc = run_source_ok(src, &err);
+    free(src);
+    free(err);
+    ASSERT(rc != 0); /* rejected, not a stack overflow */
+}
+
+TEST(lexer_deep_interp_nesting_rejected) {
+    /* Deeply nested string interpolation "${ "${ ... }" }" recurses through
+     * lex_one/lex_string_or_interp; it must be bounded, not overflow the stack. */
+    size_t n = 5000;
+    char *src = malloc(n * 5 + 64);
+    char *q = src;
+    memcpy(q, "fn main() { let s = ", 20);
+    q += 20;
+    for (size_t i = 0; i < n; i++) {
+        *q++ = '"';
+        *q++ = '$';
+        *q++ = '{';
+    }
+    *q++ = '1';
+    for (size_t i = 0; i < n; i++) {
+        *q++ = '}';
+        *q++ = '"';
+    }
+    memcpy(q, " }", 3); /* includes NUL */
+    char *err = NULL;
+    int rc = run_source_ok(src, &err);
+    free(src);
+    free(err);
+    ASSERT(rc != 0); /* rejected, not a stack overflow */
+}

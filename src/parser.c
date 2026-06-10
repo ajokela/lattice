@@ -12,8 +12,13 @@ Parser parser_new(LatVec *tokens) {
     p.tokens = (Token *)tokens->data;
     p.count = tokens->len;
     p.pos = 0;
+    p.depth = 0;
     return p;
 }
+
+/* Bound recursive-descent expression nesting so deeply nested untrusted source
+ * (e.g. thousands of '(' or '[') cannot overflow the C stack. */
+#define PARSER_MAX_DEPTH 1000
 
 /* ── Helpers ── */
 
@@ -531,9 +536,15 @@ static Expr *parse_or(Parser *p, char **err);
 static Expr *parse_nil_coalesce(Parser *p, char **err);
 
 static Expr *parse_expr(Parser *p, char **err) {
+    if (++p->depth > PARSER_MAX_DEPTH) {
+        if (!*err) *err = strdup("expression nesting too deep");
+        p->depth--;
+        return NULL;
+    }
     int line = (int)peek(p)->line;
     Expr *e = parse_nil_coalesce(p, err);
     if (e && e->line == 0) e->line = line;
+    p->depth--;
     return e;
 }
 

@@ -9,6 +9,7 @@ typedef struct {
     Token *tokens;
     size_t count;
     size_t pos;
+    int depth; /* expression-nesting depth, to bound recursion */
 } Parser;
 
 /* Create a parser from a LatVec of Token */
