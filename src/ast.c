@@ -391,20 +391,50 @@ void pattern_free(Pattern *p) {
 
 /* ── Clone (for lvalue AST expressions in desugaring) ── */
 
+/* Clone the subset of expressions that can appear in an assignment target
+ * (used by the compound-assignment desugar: `t op= v` => `t = t op v`).
+ * MUST return NULL for anything it cannot fully clone — composite cases
+ * propagate child failures rather than building nodes with NULL children,
+ * which the compilers and tree-walker would dereference (LAT-437). */
 Expr *expr_clone_ast(const Expr *e) {
     if (!e) return NULL;
     switch (e->tag) {
         case EXPR_IDENT: return expr_ident(strdup(e->as.str_val));
         case EXPR_FIELD_ACCESS: {
             Expr *obj = expr_clone_ast(e->as.field_access.object);
+            if (!obj) return NULL;
             return expr_field_access(obj, strdup(e->as.field_access.field));
         }
         case EXPR_INDEX: {
             Expr *obj = expr_clone_ast(e->as.index.object);
+            if (!obj) return NULL;
             Expr *idx = expr_clone_ast(e->as.index.index);
+            if (!idx) {
+                expr_free(obj);
+                return NULL;
+            }
             return expr_index(obj, idx);
         }
         case EXPR_INT_LIT: return expr_int_lit(e->as.int_val);
+        case EXPR_FLOAT_LIT: return expr_float_lit(e->as.float_val);
+        case EXPR_STRING_LIT: return expr_string_lit(strdup(e->as.str_val));
+        case EXPR_BOOL_LIT: return expr_bool_lit(e->as.bool_val);
+        case EXPR_NIL_LIT: return expr_nil_lit();
+        case EXPR_BINOP: {
+            Expr *left = expr_clone_ast(e->as.binop.left);
+            if (!left) return NULL;
+            Expr *right = expr_clone_ast(e->as.binop.right);
+            if (!right) {
+                expr_free(left);
+                return NULL;
+            }
+            return expr_binop(e->as.binop.op, left, right);
+        }
+        case EXPR_UNARYOP: {
+            Expr *operand = expr_clone_ast(e->as.unaryop.operand);
+            if (!operand) return NULL;
+            return expr_unaryop(e->as.unaryop.op, operand);
+        }
         default: return NULL;
     }
 }

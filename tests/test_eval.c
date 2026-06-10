@@ -269,6 +269,43 @@ TEST(eval_arithmetic_compound) {
                 "}\n");
 }
 
+TEST(compound_assign_map_element) {
+    /* LAT-437: gm[\"k\"] += 41 segfaulted all three backends — the +=
+     * desugar's expr_clone_ast returned an EXPR_INDEX node with a NULL
+     * index child for any non-int-literal key, which the compilers and
+     * tree-walker then dereferenced. */
+    ASSERT_RUNS("flux gm = Map::new()\n"
+                "gm[\"k\"] = 1\n"
+                "fn bump() {\n"
+                "    gm[\"k\"] += 41\n"
+                "}\n"
+                "fn main() {\n"
+                "    bump()\n"
+                "    assert(gm[\"k\"] == 42, \"expected 42, got: \" + to_string(gm[\"k\"]))\n"
+                "    flux m = Map::new()\n"
+                "    m[\"x\"] = 5\n"
+                "    m[\"x\"] *= 3\n"
+                "    assert(m[\"x\"] == 15, \"expected 15, got: \" + to_string(m[\"x\"]))\n"
+                "}\n");
+}
+
+TEST(compound_assign_computed_index) {
+    /* LAT-437: computed index expressions crashed the same way */
+    ASSERT_RUNS("fn main() {\n"
+                "    flux a = [1, 2, 3]\n"
+                "    flux i = 0\n"
+                "    a[i + 1] += 10\n"
+                "    assert(a[1] == 12, \"expected 12, got: \" + to_string(a[1]))\n"
+                "    a[-i + 2] -= 1\n"
+                "    assert(a[2] == 2, \"expected 2, got: \" + to_string(a[2]))\n"
+                "    flux m = Map::new()\n"
+                "    m[\"ab\"] = 1\n"
+                "    let pre = \"a\"\n"
+                "    m[pre + \"b\"] += 4\n"
+                "    assert(m[\"ab\"] == 5, \"expected 5, got: \" + to_string(m[\"ab\"]))\n"
+                "}\n");
+}
+
 TEST(eval_arithmetic_division) {
     ASSERT_RUNS("fn main() {\n"
                 "    let a = 100 / 4\n"
