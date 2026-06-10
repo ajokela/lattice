@@ -1,0 +1,42 @@
+// LAT-434: test blocks must be parsed and skipped in normal compilation
+
+print("start")
+
+test "top-level test block is skipped" {
+    assert(1 + 1 == 3, "this should never run")
+    print("should not print")
+}
+
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+test "addition works" {
+    assert(add(1, 2) == 3, "bad add")
+    if true {
+        while false {
+            print("nested braces inside test")
+        }
+    }
+}
+
+print("add: ${add(2, 3)}")
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+test "struct test with strings containing braces" {
+    let s = "{ not a real brace }"
+    print(s)
+}
+
+let p = Point { x: 4, y: 5 }
+print("point: ${p.x},${p.y}")
+
+test "final test block" {
+    print("never")
+}
+
+print("end")
