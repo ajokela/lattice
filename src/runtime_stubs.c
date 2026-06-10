@@ -187,6 +187,14 @@ void regchunk_set_local_name(RegChunk *c, size_t reg, const char *name) {
     stub_abort("regchunk_set_local_name");
 }
 
+/* Referenced by latc.c's regchunk_deserialize (the .rlatc loader), which is dead
+ * code in the .latc-only thin runtime — but its symbol must still resolve. */
+char *regchunk_verify(const RegChunk *c) {
+    (void)c;
+    stub_abort("regchunk_verify");
+    return NULL;
+}
+
 RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
     (void)vm;
     (void)chunk;
