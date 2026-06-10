@@ -348,7 +348,7 @@ $(TARGET): $(OBJS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # LSP server
 lsp: $(LSP_TARGET)
@@ -364,11 +364,15 @@ $(RUNTIME_TARGET): $(RUNTIME_OBJS)
 
 $(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Wno-unused-parameter -Wno-deprecated-declarations -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -Wno-unused-parameter -Wno-deprecated-declarations -c -o $@ $<
 
 $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Auto-generated header dependencies: without these, header edits (e.g. a
+# LATC_FORMAT bump) leave stale objects behind and incremental builds lie
+-include $(wildcard $(BUILD_DIR)/*.d $(BUILD_DIR)/ds/*.d $(BUILD_DIR)/vendor/*.d $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/fuzz/*.d)
 
 $(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
