@@ -5467,3 +5467,19 @@ TEST(buffer_negative_index_no_oob) {
     free(err);
     ASSERT(1); /* reaching here without a crash / ASan abort is the assertion */
 }
+
+/* ── Regex resource bounds (LAT-419) ── */
+TEST(regex_oversized_pattern_rejected) {
+    /* An oversized pattern is rejected before it can drive pathological
+     * backtracking / resource exhaustion. */
+    ASSERT_FAILS("fn main() {\n"
+                 "    let pat = \"a\".repeat(9000)\n"
+                 "    regex_match(pat, \"hello\")\n"
+                 "}\n");
+}
+TEST(regex_normal_still_works) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let r = regex_replace(\"o\", \"hello world\", \"0\")\n"
+                "    assert(r == \"hell0 w0rld\", \"regex_replace broke\")\n"
+                "}\n");
+}
