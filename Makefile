@@ -331,7 +331,7 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -446,6 +446,38 @@ test-latc: $(TARGET)
 	echo ""; \
 	echo "Results: $$PASS passed, $$FAIL failed"; \
 	if [ $$FAIL -gt 0 ]; then exit 1; fi
+
+# Bootstrap fixed point: the self-hosted compiler compiles itself (stage1),
+# stage1 compiles the compiler again (stage2), and stage1 == stage2 bit-for-bit.
+test-bootstrap: $(TARGET)
+	@printf "%-30s" "bootstrap:stage1..."; \
+	OUT=$$(./$(TARGET) compiler/latc.lat compiler/latc.lat /tmp/latc_stage1.latc 2>&1); \
+	if [ $$? -ne 0 ]; then \
+		echo "FAIL (stage1 compile)"; \
+		echo "  $$OUT"; \
+		exit 1; \
+	fi; \
+	echo "PASS"; \
+	printf "%-30s" "bootstrap:stage2..."; \
+	OUT=$$(./$(TARGET) /tmp/latc_stage1.latc compiler/latc.lat /tmp/latc_stage2.latc 2>&1); \
+	if [ $$? -ne 0 ]; then \
+		echo "FAIL (stage2 compile)"; \
+		echo "  $$OUT"; \
+		rm -f /tmp/latc_stage1.latc; \
+		exit 1; \
+	fi; \
+	echo "PASS"; \
+	printf "%-30s" "bootstrap:fixed-point..."; \
+	if cmp -s /tmp/latc_stage1.latc /tmp/latc_stage2.latc; then \
+		echo "PASS"; \
+		echo ""; \
+		echo "Bootstrap fixed point reached: stage1 == stage2"; \
+		rm -f /tmp/latc_stage1.latc /tmp/latc_stage2.latc; \
+	else \
+		echo "FAIL (stage1 != stage2)"; \
+		rm -f /tmp/latc_stage1.latc /tmp/latc_stage2.latc; \
+		exit 1; \
+	fi
 
 asan: CFLAGS += -fsanitize=address,undefined -g -O1
 asan: LDFLAGS += -fsanitize=address,undefined

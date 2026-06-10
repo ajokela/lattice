@@ -143,6 +143,8 @@ let OP_SET_SLICE_LOCAL = 110
 let OP_INDEX_LOCAL    = 111
 let OP_GET_FIELD_LOCAL = 112
 let OP_HALT           = 113
+let OP_INDEX_GLOBAL   = 114
+let OP_SET_INDEX_GLOBAL = 115
 
 // .latc constant tags
 let TAG_INT     = 0
@@ -161,21 +163,21 @@ flux tokens = []
 flux pos = 0
 
 fn peek() {
-    if pos >= len(tokens) {
+    if pos >= tokens.len() {
         return nil
     }
     return tokens[pos]
 }
 
 fn peek_type() {
-    if pos >= len(tokens) {
+    if pos >= tokens.len() {
         return "EOF"
     }
     return tokens[pos].type
 }
 
 fn peek_text() {
-    if pos >= len(tokens) {
+    if pos >= tokens.len() {
         return ""
     }
     return tokens[pos].text
@@ -219,7 +221,7 @@ fn match_tok(typ: any, text: any) {
 }
 
 fn current_line() {
-    if pos < len(tokens) {
+    if pos < tokens.len() {
         return tokens[pos].line
     }
     if pos > 0 {
@@ -384,7 +386,7 @@ fn emit_wide_op(op: any, op16: any, idx: any, line: any) {
 }
 
 fn add_constant(val: any) {
-    let idx = len(constants)
+    let idx = constants.len()
     if idx > 65535 {
         compiler_error("too many constants in one chunk", current_line())
     }
@@ -402,11 +404,11 @@ fn emit_jump(op: any, line: any) {
     emit_byte(op, line)
     emit_byte(255, line)
     emit_byte(255, line)
-    return len(code) - 2
+    return code.len() - 2
 }
 
 fn patch_jump(offset: any) {
-    let jump = len(code) - offset - 2
+    let jump = code.len() - offset - 2
     if jump > 65535 {
         compiler_error("jump offset too large", current_line())
     }
@@ -416,7 +418,7 @@ fn patch_jump(offset: any) {
 
 fn emit_loop(loop_start: any, line: any) {
     emit_byte(OP_LOOP, line)
-    let offset = len(code) - loop_start + 2
+    let offset = code.len() - loop_start + 2
     if offset > 65535 {
         compiler_error("loop body too large", current_line())
     }
@@ -525,7 +527,7 @@ fn end_scope_preserve_tos(line: any) {
 
 fn add_local(name: any) {
     let slot = local_count
-    if local_count >= len(local_name_arr) {
+    if local_count >= local_name_arr.len() {
         local_name_arr.push(name)
         local_depth_arr.push(scope_depth)
         local_captured_arr.push(false)
@@ -535,7 +537,7 @@ fn add_local(name: any) {
         local_captured_arr[local_count] = false
     }
     local_count = local_count + 1
-    while len(local_names) <= slot {
+    while local_names.len() <= slot {
         local_names.push(nil)
     }
     local_names[slot] = name
@@ -565,7 +567,7 @@ fn add_upvalue(index: any, is_local: any) {
     if upvalue_count >= 256 {
         compiler_error("too many upvalues in one function", current_line())
     }
-    if upvalue_count >= len(upvalue_index_arr) {
+    if upvalue_count >= upvalue_index_arr.len() {
         upvalue_index_arr.push(index)
         upvalue_islocal_arr.push(is_local)
     } else {
@@ -611,9 +613,14 @@ fn resolve_upvalue_in(stack_idx: any, name: any) {
 }
 
 fn resolve_upvalue(name: any) {
-    let stack_idx = len(compiler_stack) - 1
+    let stack_idx = compiler_stack.len() - 1
     return resolve_upvalue_in(stack_idx, name)
 }
+
+// Tracks the most recent global emit_variable_get so the '[' postfix handler
+// can rewrite GET_GLOBAL(_16) + OP_INDEX into OP_INDEX_GLOBAL (no container clone).
+flux vget_global_idx = 0
+flux vget_global_end = -1
 
 fn emit_variable_get(name: any, line: any) {
     let slot = resolve_local(name)
@@ -628,6 +635,8 @@ fn emit_variable_get(name: any, line: any) {
     }
     let idx = string_constant(name)
     emit_wide_op(OP_GET_GLOBAL, OP_GET_GLOBAL_16, idx, line)
+    vget_global_idx = idx
+    vget_global_end = code.len()
 }
 
 fn emit_variable_set(name: any, line: any) {
@@ -929,7 +938,7 @@ fn parse_postfix() {
             emit_bytes(OP_CALL, arg_count, line)
         } else { if pt == "[" || pt == "?[" {
             let optional = pt == "?["
-            let idx_code_pos = len(code)
+            let idx_code_pos = code.len()
             advance()
             flux end_jump = 0
             if optional {
@@ -949,19 +958,40 @@ fn parse_postfix() {
                 c_lines.pop()
                 c_lines.pop()
             }
+            // Fast path: global[expr] -> OP_INDEX_GLOBAL (no container clone)
+            flux is_global_obj = false
+            flux global_cidx = 0
+            if !optional && !is_local_obj && vget_global_end == idx_code_pos {
+                is_global_obj = true
+                global_cidx = vget_global_idx
+                // Remove the GET_GLOBAL / GET_GLOBAL_16 we already emitted
+                flux remove_n = 2
+                if global_cidx > 255 { remove_n = 3 }
+                flux ri = 0
+                while ri < remove_n {
+                    code.pop()
+                    c_lines.pop()
+                    ri = ri + 1
+                }
+            }
+            vget_global_end = -1
             parse_expression()
             expect(nil, "]")
             if is_local_obj {
                 emit_bytes(OP_INDEX_LOCAL, local_slot, line)
+            } else { if is_global_obj {
+                emit_byte(OP_INDEX_GLOBAL, line)
+                emit_byte((global_cidx >> 8) & 255, line)
+                emit_byte(global_cidx & 255, line)
             } else {
                 emit_byte(OP_INDEX, line)
-            }
+            } }
             if optional {
                 patch_jump(end_jump)
             }
         } else { if pt == "." || pt == "?." {
             let optional = pt == "?."
-            let receiver_code_pos = len(code)
+            let receiver_code_pos = code.len()
             advance()
             // Accept identifier or integer literal for field access (e.g. t.0 for tuples)
             flux field_name = ""
@@ -1100,11 +1130,11 @@ fn parse_postfix() {
 
 fn is_struct_literal_ahead() {
     // After '{', check for 'ident :' or empty '}'
-    if pos + 1 >= len(tokens) { return false }
+    if pos + 1 >= tokens.len() { return false }
     let next = tokens[pos + 1]
     if next.text == "}" { return true }
     if next.type != "identifier" { return false }
-    if pos + 2 >= len(tokens) { return false }
+    if pos + 2 >= tokens.len() { return false }
     return tokens[pos + 2].text == ":"
 }
 
@@ -1218,7 +1248,7 @@ fn parse_primary() {
     }
 
     // select expression
-    if t.type == "identifier" && t.text == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+    if t.type == "identifier" && t.text == "select" && pos + 1 < tokens.len() && tokens[pos + 1].text == "{" {
         parse_select()
         return
     }
@@ -1268,7 +1298,7 @@ fn parse_primary() {
 
     // freeze/thaw/clone builtins
     if t.text == "freeze" || t.text == "thaw" || t.text == "clone" {
-        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_freeze_thaw_clone(t.text, line)
             return
         }
@@ -1276,7 +1306,7 @@ fn parse_primary() {
 
     // sublimate(expr) — keyword token
     if t.type == "sublimate" {
-        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_sublimate_expr(line)
             return
         }
@@ -1284,7 +1314,7 @@ fn parse_primary() {
 
     // anneal(expr) |v| { body } — keyword token
     if t.type == "anneal" {
-        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_anneal_expr(line)
             return
         }
@@ -1292,7 +1322,7 @@ fn parse_primary() {
 
     // crystallize(expr) { body } — keyword token
     if t.type == "crystallize" {
-        if pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_crystallize_expr(line)
             return
         }
@@ -1300,27 +1330,27 @@ fn parse_primary() {
 
     // Phase system special forms: react/unreact/bond/unbond/seed/unseed
     if t.type == "identifier" {
-        if t.text == "react" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if t.text == "react" && pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_react_call(line)
             return
         }
-        if t.text == "unreact" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if t.text == "unreact" && pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_unreact_call(line)
             return
         }
-        if t.text == "bond" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if t.text == "bond" && pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_bond_call(line)
             return
         }
-        if t.text == "unbond" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if t.text == "unbond" && pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_unbond_call(line)
             return
         }
-        if t.text == "seed" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if t.text == "seed" && pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_seed_call(line)
             return
         }
-        if t.text == "unseed" && pos + 1 < len(tokens) && tokens[pos + 1].text == "(" {
+        if t.text == "unseed" && pos + 1 < tokens.len() && tokens[pos + 1].text == "(" {
             parse_unseed_call(line)
             return
         }
@@ -1446,7 +1476,7 @@ fn parse_freeze_thaw_clone(keyword: any, line: any) {
     let ident_name = ""
     if check_tok != nil {
         if check_tok.type == "identifier" {
-            if pos + 1 < len(tokens) {
+            if pos + 1 < tokens.len() {
                 if tokens[pos + 1].text == ")" {
                     is_simple_ident = true
                     ident_name = check_tok.text
@@ -1463,7 +1493,7 @@ fn parse_freeze_thaw_clone(keyword: any, line: any) {
         if !is_simple_ident {
             if check_tok != nil {
                 if check_tok.type == "identifier" {
-                    if pos + 3 < len(tokens) {
+                    if pos + 3 < tokens.len() {
                         if tokens[pos + 1].text == "." {
                             if tokens[pos + 2].type == "identifier" {
                                 if tokens[pos + 3].text == ")" {
@@ -1487,7 +1517,7 @@ fn parse_freeze_thaw_clone(keyword: any, line: any) {
             if !is_field_access {
                 if check_tok != nil {
                     if check_tok.type == "identifier" {
-                        if pos + 1 < len(tokens) {
+                        if pos + 1 < tokens.len() {
                             if tokens[pos + 1].text == "[" {
                                 is_index_access = true
                                 index_parent = check_tok.text
@@ -1589,7 +1619,7 @@ fn parse_sublimate_expr(line: any) {
     advance()  // consume 'sublimate'
     expect(nil, "(")
 
-    let is_simple_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    let is_simple_ident = peek_type() == "identifier" && pos + 1 < tokens.len() && tokens[pos + 1].text == ")"
     let ident_name = ""
     if is_simple_ident {
         ident_name = peek_text()
@@ -1614,7 +1644,7 @@ fn parse_anneal_expr(line: any) {
     advance()  // consume 'anneal'
     expect(nil, "(")
 
-    let is_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    let is_ident = peek_type() == "identifier" && pos + 1 < tokens.len() && tokens[pos + 1].text == ")"
     let ident_name = ""
     if is_ident {
         ident_name = peek_text()
@@ -1681,7 +1711,7 @@ fn parse_crystallize_expr(line: any) {
     advance()  // consume 'crystallize'
     expect(nil, "(")
 
-    let is_ident = peek_type() == "identifier" && pos + 1 < len(tokens) && tokens[pos + 1].text == ")"
+    let is_ident = peek_type() == "identifier" && pos + 1 < tokens.len() && tokens[pos + 1].text == ")"
     let ident_name = ""
     if is_ident {
         ident_name = peek_text()
@@ -1784,7 +1814,7 @@ fn parse_bond_call(line: any) {
     expect(nil, ")")
 
     // Emit one OP_BOND per dependency
-    let dep_count = len(dep_names)
+    let dep_count = dep_names.len()
     flux i = 0
     while i < dep_count {
         let dep_idx = string_constant(dep_names[i])
@@ -1814,7 +1844,7 @@ fn parse_unbond_call(line: any) {
     }
     expect(nil, ")")
 
-    let dep_count = len(dep_names)
+    let dep_count = dep_names.len()
     flux i = 0
     while i < dep_count {
         let dep_idx = string_constant(dep_names[i])
@@ -1970,9 +2000,9 @@ fn parse_match_expression() {
             // Check for enum variant destructuring: Ident::Ident(bindings...)
             // This must be checked BEFORE binding detection so that
             // e.g. Option::Some(x) is not mis-classified as a binding on "Option".
-            if pos + 2 < len(tokens) && tokens[pos + 1].text == "::" && tokens[pos + 2].type == "identifier" {
+            if pos + 2 < tokens.len() && tokens[pos + 1].text == "::" && tokens[pos + 2].type == "identifier" {
                 // Ident::Ident — check if followed by "(" (destructuring) or "=>" / "if" (plain enum match)
-                if pos + 3 < len(tokens) && tokens[pos + 3].text == "(" {
+                if pos + 3 < tokens.len() && tokens[pos + 3].text == "(" {
                     is_enum_destructure = true
                 }
                 // If not destructuring, the enum variant pattern (e.g. Color::Red)
@@ -1983,7 +2013,7 @@ fn parse_match_expression() {
             if !is_enum_destructure {
                 // An identifier that isn't _ is a binding pattern
                 // (it binds the scrutinee to a name, optionally with a guard)
-                if pos + 1 < len(tokens) {
+                if pos + 1 < tokens.len() {
                     let next_tok = tokens[pos + 1]
                     if next_tok.text == "if" || next_tok.text == "=>" {
                         is_binding = true
@@ -1994,7 +2024,7 @@ fn parse_match_expression() {
 
         if !is_binding && !is_enum_destructure && pat_tok.type == "integer" {
             // Check for range pattern: int..int
-            if pos + 1 < len(tokens) && tokens[pos + 1].type == ".." {
+            if pos + 1 < tokens.len() && tokens[pos + 1].type == ".." {
                 is_range = true
             }
         }
@@ -2032,7 +2062,7 @@ fn parse_match_expression() {
             }
             expect(nil, ")")
 
-            let bind_count = len(bind_names)
+            let bind_count = bind_names.len()
 
             // Stack: [S]
             emit_byte(OP_DUP, line)   // [S, S']
@@ -2494,7 +2524,7 @@ fn parse_closure_literal() {
     }
     expect(nil, "|")
 
-    let param_count = len(param_names_arr)
+    let param_count = param_names_arr.len()
     save_compiler()
 
     code = []
@@ -2689,7 +2719,7 @@ fn parse_scope() {
     // Token scanning to identify spans:
     flux spans = []  // [type, start_pos, end_pos] where type = "spawn" or "stmt"
     while pos < body_end {
-        if peek_type() == "spawn" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+        if peek_type() == "spawn" && pos + 1 < tokens.len() && tokens[pos + 1].text == "{" {
             let sp_start = pos
             advance()  // consume 'spawn'
             advance()  // consume '{'
@@ -2725,7 +2755,7 @@ fn parse_scope() {
                     if stmt_depth == 0 && pos < body_end {
                         let nt = peek()
                         if nt != nil {
-                            if nt.type == "spawn" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+                            if nt.type == "spawn" && pos + 1 < tokens.len() && tokens[pos + 1].text == "{" {
                                 found_end = true
                             }
                         }
@@ -2822,7 +2852,7 @@ fn parse_scope() {
 
     // Emit OP_SCOPE: spawn_count, sync_idx, [spawn_idx...]
     emit_byte(OP_SCOPE, line)
-    emit_byte(len(spawn_indices), line)
+    emit_byte(spawn_indices.len(), line)
     emit_byte(sync_idx, line)
     for si in 0..len(spawn_indices) {
         emit_byte(spawn_indices[si], line)
@@ -3023,10 +3053,10 @@ fn is_statement_start() {
     // @fluid / @crystal annotations before fn/struct
     if t.type == "@" || txt == "@" { return true }
     if t.type == "identifier" {
-        if txt == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+        if txt == "select" && pos + 1 < tokens.len() && tokens[pos + 1].text == "{" {
             return true
         }
-        if pos + 1 < len(tokens) {
+        if pos + 1 < tokens.len() {
             let next = tokens[pos + 1]
             if next.text == "=" { return true }
             if next.text == "+=" { return true }
@@ -3036,7 +3066,7 @@ fn is_statement_start() {
             if next.text == "%=" { return true }
             if next.text == "." {
                 flux j = pos + 1
-                while j < len(tokens) {
+                while j < tokens.len() {
                     let nt = tokens[j]
                     if nt.text == "=" || nt.text == "+=" || nt.text == "-=" || nt.text == "*=" || nt.text == "/=" || nt.text == "%=" {
                         return true
@@ -3157,7 +3187,7 @@ fn parse_statement() {
     }
 
     if t.type == "identifier" {
-        if txt == "select" && pos + 1 < len(tokens) && tokens[pos + 1].text == "{" {
+        if txt == "select" && pos + 1 < tokens.len() && tokens[pos + 1].text == "{" {
             parse_select()
             emit_byte(OP_POP, line)
             return
@@ -3213,7 +3243,7 @@ fn parse_array_destructure(kind: any, line: any) {
     expect(nil, "=")
     parse_expression()
 
-    let name_count = len(names)
+    let name_count = names.len()
     if scope_depth > 0 {
         // Local scope: store source as hidden local
         add_local("")
@@ -3260,7 +3290,7 @@ fn parse_struct_destructure(kind: any, line: any) {
     expect(nil, "=")
     parse_expression()
 
-    let name_count = len(names)
+    let name_count = names.len()
     if scope_depth > 0 {
         add_local("")
         let src_slot = local_count - 1
@@ -3298,7 +3328,10 @@ fn parse_fn_declaration() {
     let line = current_line()
     expect("fn", nil)
     let name = expect("identifier", nil).text
-    if name == "main" { has_main_fn = true; main_fn_line = line }
+    if name == "main" {
+        has_main_fn = true
+        main_fn_line = line
+    }
     expect(nil, "(")
 
     flux param_names_arr = []
@@ -3425,15 +3458,15 @@ fn parse_fn_declaration() {
             }
             advance()
         }
-        if len(contract_msg_arr) < len(contract_starts) {
+        if contract_msg_arr.len() < contract_starts.len() {
             contract_msg_arr.push("condition not met")
         }
     }
     // pos should now be at body_brace_pos
     pos = body_brace_pos
-    let contract_count = len(contract_starts)
+    let contract_count = contract_starts.len()
 
-    let param_count = len(param_names_arr)
+    let param_count = param_names_arr.len()
 
     save_compiler()
 
@@ -3604,7 +3637,7 @@ fn parse_while() {
     let outer_break_lc = loop_break_local_count
     let outer_continue_lc = loop_continue_local_count
 
-    let loop_begin = len(code)
+    let loop_begin = code.len()
     loop_start_pos = loop_begin
     loop_depth = scope_depth
     break_jumps = []
@@ -3656,7 +3689,7 @@ fn parse_loop_stmt() {
     let outer_break_lc = loop_break_local_count
     let outer_continue_lc = loop_continue_local_count
 
-    let loop_begin = len(code)
+    let loop_begin = code.len()
     loop_start_pos = loop_begin
     loop_depth = scope_depth
     break_jumps = []
@@ -3714,7 +3747,7 @@ fn parse_for() {
 
     loop_continue_local_count = local_count
 
-    let loop_begin = len(code)
+    let loop_begin = code.len()
     loop_start_pos = loop_begin
     loop_depth = scope_depth
     break_jumps = []
@@ -3776,7 +3809,7 @@ fn parse_break() {
         i = i - 1
     }
     let jump = emit_jump(OP_JUMP, line)
-    if break_count >= len(break_jumps) {
+    if break_count >= break_jumps.len() {
         break_jumps.push(jump)
     } else {
         break_jumps[break_count] = jump
@@ -3841,7 +3874,7 @@ fn is_slice_in_brackets() {
     // inside [...] (called right after "[" was consumed).
     flux scan_pos = pos
     flux depth = 0
-    while scan_pos < len(tokens) {
+    while scan_pos < tokens.len() {
         let tok = tokens[scan_pos]
         if tok.text == "[" || tok.text == "(" {
             depth = depth + 1
@@ -3900,7 +3933,7 @@ fn parse_compound_assignment_target(name: any, line: any) {
             let slice_start_pos = pos
             // Scan forward to find the matching ']' at depth 0
             flux scan_depth = 0
-            while pos < len(tokens) {
+            while pos < tokens.len() {
                 let t = tokens[pos]
                 if t.text == "[" || t.text == "(" {
                     scan_depth = scan_depth + 1
@@ -3979,7 +4012,44 @@ fn parse_compound_assignment_target(name: any, line: any) {
                     emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
                 }
             } else {
-                // Non-local: use OP_SET_INDEX
+                let up = resolve_upvalue(name)
+                if up < 0 {
+                    // Global: use OP_SET_INDEX_GLOBAL to mutate in place
+                    // (no whole-container clone + write-back)
+                    let gcidx = string_constant(name)
+                    parse_expression()
+                    expect(nil, "]")
+                    let op = advance().text
+                    if op == "=" {
+                        parse_expression()
+                        // Stack: [index, value]. Need [value, index].
+                        emit_byte(OP_SWAP, line)
+                        emit_byte(OP_SET_INDEX_GLOBAL, line)
+                        emit_byte((gcidx >> 8) & 255, line)
+                        emit_byte(gcidx & 255, line)
+                    } else {
+                        // Compound assignment: glob[i] += expr
+                        // Stack so far: [index]. Get current value first.
+                        emit_byte(OP_DUP, line)               // [index, index]
+                        emit_byte(OP_INDEX_GLOBAL, line)      // [index, current_val]
+                        emit_byte((gcidx >> 8) & 255, line)
+                        emit_byte(gcidx & 255, line)
+                        parse_expression()                    // [index, current_val, rhs]
+                        match op {
+                            "+=" => emit_byte(OP_ADD, line),
+                            "-=" => emit_byte(OP_SUB, line),
+                            "*=" => emit_byte(OP_MUL, line),
+                            "/=" => emit_byte(OP_DIV, line),
+                            _ => emit_byte(OP_MOD, line)
+                        }
+                        // Stack: [index, new_val]. Need [new_val, index].
+                        emit_byte(OP_SWAP, line)
+                        emit_byte(OP_SET_INDEX_GLOBAL, line)
+                        emit_byte((gcidx >> 8) & 255, line)
+                        emit_byte(gcidx & 255, line)
+                    }
+                } else {
+                // Upvalue: use OP_SET_INDEX
                 // VM expects stack: [value, object, index] (value deepest)
                 // Parse index, then ], =, then value. Then push object and index.
                 parse_expression()
@@ -4020,6 +4090,7 @@ fn parse_compound_assignment_target(name: any, line: any) {
                     emit_variable_set(name, line)
                 }
                 emit_byte(OP_POP, line)
+                }
             }
         }
     } }
@@ -4105,7 +4176,7 @@ fn parse_struct_declaration() {
     expect(nil, "}")
 
     // Emit struct metadata: array of field name strings as __struct_<Name>
-    let field_count = len(field_names_arr)
+    let field_count = field_names_arr.len()
     for i in 0..field_count {
         emit_constant(make_string_const(field_names_arr[i]), line)
     }
@@ -4175,7 +4246,7 @@ fn parse_defer() {
     emit_byte(scope_depth, line)
     emit_byte(255, line)
     emit_byte(255, line)
-    let jump = len(code) - 2
+    let jump = code.len() - 2
 
     expect(nil, "{")
     begin_scope()
@@ -4217,7 +4288,7 @@ fn parse_import() {
         emit_bytes(OP_IMPORT, path_idx, line)
 
         // For each selective name: DUP module map, GET_FIELD, check not nil, DEFINE
-        let sel_count = len(sel_names)
+        let sel_count = sel_names.len()
         for i in 0..sel_count {
             emit_byte(OP_DUP, line)
             let field_idx = string_constant(sel_names[i])
@@ -4286,7 +4357,7 @@ fn parse_from_import() {
     emit_bytes(OP_IMPORT, path_idx, line)
 
     // For each selective name: DUP module map, GET_FIELD, check not nil, DEFINE
-    let sel_count = len(sel_names)
+    let sel_count = sel_names.len()
     for i in 0..sel_count {
         emit_byte(OP_DUP, line)
         let field_idx = string_constant(sel_names[i])
@@ -4318,7 +4389,7 @@ fn parse_from_import() {
 fn path_basename(path: any) {
     // Find the last '/' to get the filename part
     flux last_slash = -1
-    let plen = len(path)
+    let plen = path.len()
     for i in 0..plen {
         if path[i] == "/" {
             last_slash = i
@@ -4329,7 +4400,7 @@ fn path_basename(path: any) {
         name = path.substring(last_slash + 1, plen)
     }
     // Strip .lat extension if present
-    let nlen = len(name)
+    let nlen = name.len()
     if nlen > 4 {
         if name.substring(nlen - 4, nlen) == ".lat" {
             name = name.substring(0, nlen - 4)
@@ -4363,7 +4434,7 @@ fn parse_use() {
         expect(nil, "}")
 
         // For each selective name: DUP module map, GET_FIELD, check not nil, DEFINE
-        let sel_count = len(sel_names)
+        let sel_count = sel_names.len()
         for i in 0..sel_count {
             emit_byte(OP_DUP, line)
             let field_idx = string_constant(sel_names[i])
@@ -4463,7 +4534,7 @@ fn parse_trait_declaration() {
     expect(nil, "}")
 
     // Emit trait metadata: __trait_<Name> = array of required method name strings
-    let method_count = len(method_names)
+    let method_count = method_names.len()
     for i in 0..method_count {
         emit_constant(make_string_const(method_names[i]), line)
     }
@@ -4603,14 +4674,14 @@ fn parse_impl_block() {
                 }
                 advance()
             }
-            if len(m_contract_msg_arr) < len(m_contract_starts) {
+            if m_contract_msg_arr.len() < m_contract_starts.len() {
                 m_contract_msg_arr.push("condition not met")
             }
         }
         pos = m_body_brace_pos
-        let m_contract_count = len(m_contract_starts)
+        let m_contract_count = m_contract_starts.len()
 
-        let param_count = len(param_names_arr)
+        let param_count = param_names_arr.len()
 
         // If first param is "self", it occupies slot 0 (the reserved slot)
         // and is excluded from arity
@@ -4746,7 +4817,7 @@ fn parse_impl_block() {
 // ============================================================================
 
 fn compile_program() {
-    let total_tokens = len(tokens)
+    let total_tokens = tokens.len()
     let bar = progress.new(total_tokens, "Compiling")
     let last_pos = 0
     while pos < total_tokens {
@@ -4813,7 +4884,7 @@ fn write_f64_le(val: any) {
 }
 
 fn write_string(str_val: any) {
-    let slen = len(str_val)
+    let slen = str_val.len()
     write_u32_le(slen)
     for i in 0..slen {
         ser_buf.push(ord(str_val[i]))
@@ -4853,33 +4924,33 @@ fn serialize_chunk(ch: any) {
     let ch_constants = ch[2]
     let ch_local_names = ch[3]
     flux ch_name = nil
-    if len(ch) > 4 {
+    if ch.len() > 4 {
         ch_name = ch[4]
     }
 
     // Code
-    let code_len = len(ch_code)
+    let code_len = ch_code.len()
     write_u32_le(code_len)
     for i in 0..code_len {
         write_u8(ch_code[i])
     }
 
     // Lines
-    let lines_len = len(ch_lines)
+    let lines_len = ch_lines.len()
     write_u32_le(lines_len)
     for i in 0..lines_len {
         write_u32_le(ch_lines[i])
     }
 
     // Constants
-    let const_len = len(ch_constants)
+    let const_len = ch_constants.len()
     write_u32_le(const_len)
     for i in 0..const_len {
         serialize_constant(ch_constants[i])
     }
 
     // Local names
-    let name_count = len(ch_local_names)
+    let name_count = ch_local_names.len()
     write_u32_le(name_count)
     for i in 0..name_count {
         if ch_local_names[i] == nil {
@@ -4920,7 +4991,7 @@ fn serialize_latc(ch: any) {
 
 fn main() {
     let argv = args()
-    if len(argv) < 3 {
+    if argv.len() < 3 {
         eprint("usage: clat compiler/latc.lat <input.lat> <output.latc>")
         exit(1)
     }

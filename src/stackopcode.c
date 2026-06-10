@@ -116,6 +116,8 @@ static const char *names[] = {
     [OP_INDEX_LOCAL] = "OP_INDEX_LOCAL",
     [OP_GET_FIELD_LOCAL] = "OP_GET_FIELD_LOCAL",
     [OP_HALT] = "OP_HALT",
+    [OP_INDEX_GLOBAL] = "OP_INDEX_GLOBAL",
+    [OP_SET_INDEX_GLOBAL] = "OP_SET_INDEX_GLOBAL",
 };
 
 const char *opcode_name(Opcode op) {

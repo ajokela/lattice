@@ -795,6 +795,17 @@ static void compile_expr(const Expr *e, int line) {
                     emit_bytes(OP_INDEX_LOCAL, (uint8_t)slot, line);
                     break;
                 }
+                /* Global fast path: borrow the global in env instead of cloning it */
+                if (resolve_upvalue(current, e->as.index.object->as.str_val) < 0) {
+                    size_t gidx = chunk_add_constant(current_chunk(), value_string(e->as.index.object->as.str_val));
+                    if (gidx <= 0xFFFF) {
+                        compile_expr(e->as.index.index, line);
+                        emit_byte(OP_INDEX_GLOBAL, line);
+                        emit_byte((uint8_t)((gidx >> 8) & 0xff), line);
+                        emit_byte((uint8_t)(gidx & 0xff), line);
+                        break;
+                    }
+                }
             }
             compile_expr(e->as.index.object, line);
             size_t end_jump = 0;
@@ -2250,11 +2261,22 @@ static void emit_index_write_back(Expr *node, int line) {
             compile_expr(node->as.index.index, line);
             emit_bytes(OP_SET_INDEX_LOCAL, (uint8_t)slot, line);
         } else {
-            /* Global/upvalue: get parent, set index, write back */
+            int upvalue = resolve_upvalue(current, name);
+            if (upvalue < 0) {
+                /* Global fast path: mutate global[index] in place */
+                size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
+                if (gidx <= 0xFFFF) {
+                    compile_expr(node->as.index.index, line);
+                    emit_byte(OP_SET_INDEX_GLOBAL, line);
+                    emit_byte((uint8_t)((gidx >> 8) & 0xff), line);
+                    emit_byte((uint8_t)(gidx & 0xff), line);
+                    return;
+                }
+            }
+            /* Upvalue (or overflowing constant pool): get parent, set index, write back */
             compile_expr(node->as.index.object, line);
             compile_expr(node->as.index.index, line);
             emit_byte(OP_SET_INDEX, line);
-            int upvalue = resolve_upvalue(current, name);
             if (upvalue >= 0) {
                 emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
             } else {
@@ -2420,6 +2442,18 @@ static void compile_stmt(const Stmt *s) {
                         compile_expr(target->as.index.index, line);
                         emit_bytes(OP_SET_INDEX_LOCAL, (uint8_t)slot, line);
                         break; /* OP_SET_INDEX_LOCAL pushes nothing, skip OP_POP */
+                    }
+                    /* Global fast path: mutate global[index] in place (no clone + write-back) */
+                    if (resolve_upvalue(current, target->as.index.object->as.str_val) < 0) {
+                        size_t gidx =
+                            chunk_add_constant(current_chunk(), value_string(target->as.index.object->as.str_val));
+                        if (gidx <= 0xFFFF) {
+                            compile_expr(target->as.index.index, line);
+                            emit_byte(OP_SET_INDEX_GLOBAL, line);
+                            emit_byte((uint8_t)((gidx >> 8) & 0xff), line);
+                            emit_byte((uint8_t)(gidx & 0xff), line);
+                            break; /* OP_SET_INDEX_GLOBAL pushes nothing, skip OP_POP */
+                        }
                     }
                 }
                 /* Nested index (e.g. m[i][j] = val): compile intermediate,
