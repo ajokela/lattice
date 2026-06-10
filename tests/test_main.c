@@ -141,13 +141,6 @@ int main(int argc, char *argv[]) {
         test_current_failed = 0;
         tests_run++;
         current_test_name = all_tests[i].name;
-#ifdef _WIN32
-        /* Trace each test name before running it (flushed) so a hard crash that
-         * even the SEH filter cannot survive still leaves the culprit as the
-         * last 'run:' line with no following 'ok:'. */
-        fprintf(stderr, "run: %s\n", all_tests[i].name);
-        fflush(stderr);
-#endif
         all_tests[i].fn();
         if (test_current_failed) {
             tests_failed++;
