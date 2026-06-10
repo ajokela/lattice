@@ -1,0 +1,200 @@
+// LAT-435: characterization test for fast-path opcode emission.
+// Run directly (C compiler) and via compiler/latc.lat — outputs must match.
+// Covers: OP_INC_LOCAL / OP_DEC_LOCAL (i = i +/- 1, i += 1, i -= 1 on locals),
+// OP_APPEND_STR_LOCAL (x = x + simple_operand on locals),
+// OP_ADD_INT / OP_SUB_INT / OP_MUL_INT / OP_LT_INT / OP_LTEQ_INT
+// (int-literal operands), and the patterns that must NOT take fast paths
+// (floats, globals, upvalues, complex right operands).
+
+// ── increment / decrement loops on locals ──
+fn count_up(n: any) {
+    flux i = 0
+    flux sum = 0
+    while i < n {
+        sum = sum + i
+        i = i + 1
+    }
+    return sum
+}
+
+fn count_down(n: any) {
+    flux i = n
+    flux hits = 0
+    while i > 0 {
+        hits = hits + 1
+        i = i - 1
+    }
+    return hits
+}
+
+fn compound_inc_dec(n: any) {
+    flux i = 0
+    flux j = n
+    while i < n {
+        i += 1
+        j -= 1
+    }
+    return i * 1000 + j
+}
+
+print(count_up(100))
+print(count_down(57))
+print(compound_inc_dec(42))
+
+// ── spelled-out add on locals (APPEND_STR_LOCAL int/float/string fallbacks) ──
+fn accumulate() {
+    flux total = 0
+    total = total + 5
+    total = total + 250
+    flux f = 1.25
+    f = f + 0.25
+    f = f + 2
+    f += 0.5
+    flux s = "a"
+    s = s + "b"
+    s += "c"
+    s = s + "${total}"
+    print(total)
+    print(f)
+    print(s)
+}
+accumulate()
+
+// ── i = i + 1 must NOT fast-path when expression continues ──
+fn no_fast_continuation() {
+    flux x = 10
+    x = x + 1 * 2     // x + (1*2) = 12
+    print(x)
+    x = x + 1 + 1     // left-assoc: 14
+    print(x)
+    flux y = 3
+    x = x + y - 1     // 16
+    print(x)
+    x = x + y * y     // x + 9 = 25
+    print(x)
+}
+no_fast_continuation()
+
+// ── right operand is a call / indexed value (no simple fast path) ──
+fn add_one(v: any) { return v + 1 }
+fn complex_rhs() {
+    flux x = 5
+    x = x + add_one(2)
+    print(x)
+    let arr = [10, 20]
+    x = x + arr[1]
+    print(x)
+}
+complex_rhs()
+
+// ── globals: no local fast paths may fire ──
+flux gcount = 0
+gcount = gcount + 1
+gcount = gcount + 1
+gcount += 1
+gcount -= 1
+print(gcount)
+
+flux gstr = "g"
+gstr = gstr + "h"
+gstr += "i"
+print(gstr)
+
+// ── upvalues: closure-captured vars take the generic path ──
+fn make_counter() {
+    flux c = 100
+    let inc = | | {
+        c = c + 1
+        return c
+    }
+    return inc
+}
+let counter = make_counter()
+print(counter())
+print(counter())
+
+// ── int-literal arithmetic (ADD_INT / SUB_INT / MUL_INT candidates) ──
+print(2 + 3)
+print(2 + 3 + 4)
+print(10 - 4)
+print(10 - 4 - 3)
+print(6 * 7)
+print(2 * 3 * 4)
+print(2 + 3 * 4)
+print(3 * 4 + 2)
+print(2 - 3 * 4)
+print((2 + 3) * 4)
+print(-5 + 3)
+print(2 + -5)
+print(1000 + 2000)
+print(1000 * 1000)
+print(200 - 500)
+
+// ── int-literal comparisons (LT_INT / LTEQ_INT candidates) ──
+print(2 < 3)
+print(3 < 2)
+print(3 <= 3)
+print(4 <= 3)
+print(2 + 3 < 3 * 2)
+print(2 + 4 <= 3 + 3)
+print(5 > 3)
+print(5 >= 6)
+
+// ── floats must NOT take int fast paths ──
+print(1.5 + 2)
+print(2 + 1.5)
+print(1.5 + 2.5)
+print(1.5 * 2)
+print(2 * 1.5)
+print(1.5 < 2)
+print(2 < 2.5)
+print(1.5 <= 1.5)
+print(7.5 - 0.5)
+
+// ── mixed literal/variable operands: variables are not provably int ──
+fn mixed_ops(n: any) {
+    print(n + 1)
+    print(1 + n)
+    print(n * 2)
+    print(n - 1)
+    print(n < 10)
+    print(n <= 7)
+    print(10 < n)
+}
+mixed_ops(7)
+
+// ── overflow wraps identically on fast and generic paths ──
+let big = 9223372036854775807
+print(big + 1)
+print(big * 2)
+let small = -9223372036854775807
+print(small - 2)
+
+// ── strings/bools never take int paths ──
+print("x" + 1)
+print(1 + "x")
+
+// ── shadowing: inner local gets its own slot ──
+fn shadowing() {
+    flux i = 1
+    i = i + 1
+    if true {
+        flux i = 10
+        i = i + 1
+        print(i)
+    }
+    print(i)
+}
+shadowing()
+
+// ── benchmark-shaped loop (small n) ──
+fn bench_loop(n: any) {
+    flux i = 0
+    flux sum = 0
+    while i < n {
+        sum = sum + i
+        i = i + 1
+    }
+    return sum
+}
+print(bench_loop(1000))

@@ -713,6 +713,52 @@ fn emit_return_type_check(line: any) {
 // Section 8: Expression parsing — precedence climbing
 // ============================================================================
 
+// Returns true if the code emitted from `start` to the end of the buffer is a
+// single instruction that provably pushes an Int (an int-literal load).  Used
+// to decide when the typeless int fast-path opcodes (OP_ADD_INT, OP_SUB_INT,
+// OP_MUL_INT, OP_LT_INT, OP_LTEQ_INT) are safe to emit.
+fn is_int_literal_region(start: any) {
+    let region_len = len(code) - start
+    if region_len == 2 {
+        if code[start] == OP_LOAD_INT8 { return true }
+        if code[start] == OP_CONSTANT {
+            let c = constants[code[start + 1]]
+            return c[0] == TAG_INT
+        }
+        return false
+    }
+    if region_len == 3 {
+        if code[start] == OP_CONSTANT_16 {
+            let c = constants[code[start + 1] * 256 + code[start + 2]]
+            return c[0] == TAG_INT
+        }
+    }
+    return false
+}
+
+// Returns true if the token at index p would extend the expression currently
+// being parsed (binary operator, postfix operator, struct literal, etc.).
+// Used by the assignment fast paths to ensure a candidate right-hand operand
+// is the complete top-level operand and not a prefix of a larger expression.
+fn is_expr_continuation(p: any) {
+    if p >= len(tokens) { return false }
+    let tt = tokens[p].type
+    // postfix: call, index, optional index, field, optional field, try-propagate
+    if tt == "(" || tt == "[" || tt == "?[" || tt == "." || tt == "?." || tt == "?" { return true }
+    // binary operators, lowest to highest precedence
+    if tt == "||" || tt == "&&" || tt == "??" { return true }
+    if tt == "==" || tt == "!=" { return true }
+    if tt == "<" || tt == ">" || tt == "<=" || tt == ">=" { return true }
+    if tt == "|" || tt == "^" || tt == "&" { return true }
+    if tt == "<<" || tt == ">>" { return true }
+    if tt == ".." || tt == "++" { return true }
+    if tt == "+" || tt == "-" { return true }
+    if tt == "*" || tt == "/" || tt == "%" { return true }
+    // struct literal / enum path after an identifier
+    if tt == "{" || tt == "::" { return true }
+    return false
+}
+
 fn parse_expression() {
     return parse_or()
 }
@@ -771,54 +817,69 @@ fn parse_equality() {
 
 fn parse_comparison() {
     let line = current_line()
-    parse_bitwise_or()
+    flux left_int = parse_bitwise_or()
     flux pt = peek_type()
     while pt == "<" || pt == ">" || pt == "<=" || pt == ">=" {
         let op = advance().text
-        parse_bitwise_or()
-        match op {
-            "<" => emit_byte(OP_LT, line),
-            ">" => emit_byte(OP_GT, line),
-            "<=" => emit_byte(OP_LTEQ, line),
-            _ => emit_byte(OP_GTEQ, line)
+        let right_int = parse_bitwise_or()
+        flux fast = false
+        if left_int == true {
+            if right_int == true { fast = true }
         }
+        if op == "<" {
+            if fast { emit_byte(OP_LT_INT, line) } else { emit_byte(OP_LT, line) }
+        } else { if op == "<=" {
+            if fast { emit_byte(OP_LTEQ_INT, line) } else { emit_byte(OP_LTEQ, line) }
+        } else { if op == ">" {
+            emit_byte(OP_GT, line)
+        } else {
+            emit_byte(OP_GTEQ, line)
+        } } }
+        left_int = false
         pt = peek_type()
     }
+    return left_int
 }
 
 fn parse_bitwise_or() {
     let line = current_line()
-    parse_bitwise_xor()
+    flux is_int = parse_bitwise_xor()
     while peek_type() == "|" {
         advance()
         parse_bitwise_xor()
         emit_byte(OP_BIT_OR, line)
+        is_int = false
     }
+    return is_int
 }
 
 fn parse_bitwise_xor() {
     let line = current_line()
-    parse_bitwise_and()
+    flux is_int = parse_bitwise_and()
     while peek_type() == "^" {
         advance()
         parse_bitwise_and()
         emit_byte(OP_BIT_XOR, line)
+        is_int = false
     }
+    return is_int
 }
 
 fn parse_bitwise_and() {
     let line = current_line()
-    parse_shift()
+    flux is_int = parse_shift()
     while peek_type() == "&" {
         advance()
         parse_shift()
         emit_byte(OP_BIT_AND, line)
+        is_int = false
     }
+    return is_int
 }
 
 fn parse_shift() {
     let line = current_line()
-    parse_range()
+    flux is_int = parse_range()
     flux pt = peek_type()
     while pt == "<<" || pt == ">>" {
         let op = advance().text
@@ -828,91 +889,119 @@ fn parse_shift() {
         } else {
             emit_byte(OP_RSHIFT, line)
         }
+        is_int = false
         pt = peek_type()
     }
+    return is_int
 }
 
 fn parse_range() {
     let line = current_line()
-    parse_concat()
+    flux is_int = parse_concat()
     if peek_type() == ".." {
         advance()
         parse_concat()
         emit_byte(OP_BUILD_RANGE, line)
+        is_int = false
     }
+    return is_int
 }
 
 fn parse_concat() {
     let line = current_line()
-    parse_term()
+    flux is_int = parse_term()
     while peek_type() == "++" {
         advance()
         parse_term()
         emit_byte(OP_CONCAT, line)
+        is_int = false
     }
+    return is_int
 }
 
 fn parse_term() {
     let line = current_line()
-    parse_factor()
+    flux left_int = parse_factor()
     flux pt = peek_type()
     while pt == "+" || pt == "-" {
         let op = advance().text
-        parse_factor()
-        if op == "+" {
-            emit_byte(OP_ADD, line)
-        } else {
-            emit_byte(OP_SUB, line)
+        let right_int = parse_factor()
+        flux fast = false
+        if left_int == true {
+            if right_int == true { fast = true }
         }
+        if op == "+" {
+            if fast { emit_byte(OP_ADD_INT, line) } else { emit_byte(OP_ADD, line) }
+        } else {
+            if fast { emit_byte(OP_SUB_INT, line) } else { emit_byte(OP_SUB, line) }
+        }
+        left_int = fast
         pt = peek_type()
     }
+    return left_int
 }
 
 fn parse_factor() {
     let line = current_line()
-    parse_unary()
+    flux left_int = parse_unary()
     flux pt = peek_type()
     while pt == "*" || pt == "/" || pt == "%" {
         let op = advance().text
-        parse_unary()
-        match op {
-            "*" => emit_byte(OP_MUL, line),
-            "/" => emit_byte(OP_DIV, line),
-            _ => emit_byte(OP_MOD, line)
+        let right_int = parse_unary()
+        flux fast = false
+        if left_int == true {
+            if right_int == true { fast = true }
+        }
+        if op == "*" {
+            if fast { emit_byte(OP_MUL_INT, line) } else { emit_byte(OP_MUL, line) }
+            left_int = fast
+        } else {
+            if op == "/" {
+                emit_byte(OP_DIV, line)
+            } else {
+                emit_byte(OP_MOD, line)
+            }
+            left_int = false
         }
         pt = peek_type()
     }
+    return left_int
 }
 
 fn parse_unary() {
     let line = current_line()
     if peek_type() == "-" {
         advance()
-        parse_unary()
+        let is_int = parse_unary()
         emit_byte(OP_NEG, line)
-        return
+        return is_int
     }
     if peek_type() == "!" {
         advance()
         parse_unary()
         emit_byte(OP_NOT, line)
-        return
+        return false
     }
     if peek_type() == "~" {
         advance()
-        parse_unary()
+        let is_int = parse_unary()
         emit_byte(OP_BIT_NOT, line)
-        return
+        return is_int
     }
-    parse_postfix()
+    return parse_postfix()
 }
 
 fn parse_postfix() {
     let line = current_line()
+    let prim_start = len(code)
     parse_primary()
+    flux is_int = is_int_literal_region(prim_start)
 
     loop {
         let pt = peek_type()
+        if pt == "(" || pt == "[" || pt == "?[" || pt == "." || pt == "?." || pt == "?" {
+            is_int = false
+        }
         if pt == "(" {
             advance()
             flux arg_count = 0
@@ -1096,6 +1185,7 @@ fn parse_postfix() {
             break
         } } } }
     }
+    return is_int
 }
 
 fn is_struct_literal_ahead() {
@@ -3811,6 +3901,38 @@ fn parse_assignment() {
     let op = advance().text
 
     if op == "=" {
+        // Fast paths mirroring the C compiler (stackcompiler.c STMT_ASSIGN):
+        //   x = x + 1  -> OP_INC_LOCAL    (local x, right operand is literal 1)
+        //   x = x - 1  -> OP_DEC_LOCAL
+        //   x = x + e  -> OP_APPEND_STR_LOCAL (local x; here e is restricted to
+        //                 a single-token operand that ends the expression)
+        // The token after the operand must not extend the expression, so the
+        // fast path consumes exactly what the generic parse would.
+        let slot = resolve_local(name)
+        if slot >= 0 && pos + 2 < len(tokens) {
+            let t0 = tokens[pos]
+            if t0.type == "identifier" && t0.text == name {
+                let t1 = tokens[pos + 1].type
+                let t2 = tokens[pos + 2]
+                if (t1 == "+" || t1 == "-") && t2.type == "integer" && t2.text == "1" && !is_expr_continuation(pos + 3) {
+                    pos = pos + 3
+                    if t1 == "+" {
+                        emit_bytes(OP_INC_LOCAL, slot, line)
+                    } else {
+                        emit_bytes(OP_DEC_LOCAL, slot, line)
+                    }
+                    return
+                }
+                if t1 == "+" && !is_expr_continuation(pos + 3) {
+                    if t2.type == "identifier" || t2.type == "integer" || t2.type == "float" || t2.type == "string" {
+                        pos = pos + 2
+                        parse_expression()
+                        emit_bytes(OP_APPEND_STR_LOCAL, slot, line)
+                        return
+                    }
+                }
+            }
+        }
         parse_expression()
         emit_variable_set_pop(name, line)
     } else {
@@ -3818,8 +3940,24 @@ fn parse_assignment() {
         if op == "+=" {
             let slot = resolve_local(name)
             if slot >= 0 {
+                // local += 1 -> OP_INC_LOCAL (mirrors the C compiler's desugared
+                // i = i + 1 detection)
+                if peek_type() == "integer" && peek_text() == "1" && !is_expr_continuation(pos + 1) {
+                    advance()
+                    emit_bytes(OP_INC_LOCAL, slot, line)
+                    return
+                }
                 parse_expression()
                 emit_bytes(OP_APPEND_STR_LOCAL, slot, line)
+                return
+            }
+        }
+        // Fast path: local -= 1 -> OP_DEC_LOCAL
+        if op == "-=" {
+            let slot = resolve_local(name)
+            if slot >= 0 && peek_type() == "integer" && peek_text() == "1" && !is_expr_continuation(pos + 1) {
+                advance()
+                emit_bytes(OP_DEC_LOCAL, slot, line)
                 return
             }
         }
