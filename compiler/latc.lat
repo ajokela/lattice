@@ -3177,6 +3177,7 @@ fn is_statement_start() {
     if txt == "trait" { return true }
     if txt == "throw" { return true }
     if t.type == "scope" { return true }
+    if t.type == "test" { return true }
     // @fluid / @crystal annotations before fn/struct
     if t.type == "@" || txt == "@" { return true }
     if t.type == "identifier" {
@@ -3298,6 +3299,11 @@ fn parse_statement() {
 
     if txt == "throw" {
         parse_throw()
+        return
+    }
+
+    if t.type == "test" {
+        parse_test_block()
         return
     }
 
@@ -4738,6 +4744,32 @@ fn parse_annotation() {
     } else {
         compiler_error("@" + ann_name + " annotation must precede fn or struct", line)
     } }
+}
+
+fn parse_test_block() {
+    // test "name" { ... } — tests only run under `clat test`.
+    // Normal compilation parses and skips them, emitting nothing
+    // (matches the C compiler, which ignores ITEM_TEST in normal mode).
+    let line = current_line()
+    advance()  // consume 'test'
+    if peek_type() != "string" {
+        compiler_error("expected string literal for test name", line)
+    }
+    advance()  // consume test name
+    expect(nil, "{")
+    // Skip body tokens with balanced-brace tracking. Braces inside
+    // string/interpolation tokens are not punctuation tokens, so only
+    // count tokens whose type is "{" or "}".
+    flux depth = 1
+    while depth > 0 {
+        let t = peek()
+        if t == nil {
+            compiler_error("unexpected end of input in test block", line)
+        }
+        if t.type == "{" { depth = depth + 1 }
+        if t.type == "}" { depth = depth - 1 }
+        advance()
+    }
 }
 
 fn parse_trait_declaration() {
