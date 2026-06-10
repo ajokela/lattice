@@ -4,6 +4,10 @@
 #include <string.h>
 #include "test_backend.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 /* Minimal test harness */
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -74,6 +78,25 @@ static void crash_handler(int sig) {
 }
 #endif
 
+#ifdef _WIN32
+/* Windows delivers crashes as SEH exceptions, which the POSIX signal() handler
+ * above does not catch — so a crashing test silently kills the runner with no
+ * name. Report the current test and the exception code (0xC0000005 access
+ * violation, 0xC00000FD stack overflow, ...) before the process dies. */
+static LONG WINAPI win_crash_filter(EXCEPTION_POINTERS *info) {
+    unsigned long code = (info && info->ExceptionRecord) ? (unsigned long)info->ExceptionRecord->ExceptionCode : 0;
+    const char *kind = "exception";
+    if (code == 0xC0000005UL) kind = "ACCESS_VIOLATION";
+    else if (code == 0xC00000FDUL) kind = "STACK_OVERFLOW";
+    else if (code == 0xC000008CUL) kind = "ARRAY_BOUNDS_EXCEEDED";
+    else if (code == 0xC0000094UL) kind = "INT_DIVIDE_BY_ZERO";
+    fprintf(stderr, "\n*** CRASH: SEH %s (0x%lx) during test: %s ***\n", kind, code,
+            current_test_name ? current_test_name : "(none)");
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER; /* terminate */
+}
+#endif
+
 int main(int argc, char *argv[]) {
 #ifndef LATTICE_HAS_ASAN
     signal(SIGSEGV, crash_handler);
@@ -82,6 +105,14 @@ int main(int argc, char *argv[]) {
 #ifdef SIGBUS
     signal(SIGBUS, crash_handler);
 #endif
+#endif
+
+#ifdef _WIN32
+    /* Reserve stack so the crash filter can still run after a stack overflow,
+     * then catch SEH crashes the POSIX handler misses. */
+    ULONG stack_guarantee = 32 * 1024;
+    SetThreadStackGuarantee(&stack_guarantee);
+    SetUnhandledExceptionFilter(win_crash_filter);
 #endif
 
     /* Parse --backend flag */
@@ -110,6 +141,13 @@ int main(int argc, char *argv[]) {
         test_current_failed = 0;
         tests_run++;
         current_test_name = all_tests[i].name;
+#ifdef _WIN32
+        /* Trace each test name before running it (flushed) so a hard crash that
+         * even the SEH filter cannot survive still leaves the culprit as the
+         * last 'run:' line with no following 'ok:'. */
+        fprintf(stderr, "run: %s\n", all_tests[i].name);
+        fflush(stderr);
+#endif
         all_tests[i].fn();
         if (test_current_failed) {
             tests_failed++;
