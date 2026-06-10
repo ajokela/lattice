@@ -47,43 +47,47 @@
 /* ── Fluid Heap ── */
 
 typedef struct FluidAlloc {
-    void              *ptr;
-    size_t             size;
-    bool               marked;
+    void *ptr;
+    size_t size;
+    bool marked;
     struct FluidAlloc *next;
 } FluidAlloc;
 
 typedef struct FluidHeap {
     FluidAlloc *allocs;
-    size_t      total_bytes;
-    size_t      alloc_count;
-    size_t      gc_threshold;
-    size_t      peak_bytes;
-    size_t      cumulative_bytes;
+    size_t total_bytes;
+    size_t alloc_count;
+    size_t gc_threshold;
+    size_t peak_bytes;
+    size_t cumulative_bytes;
 } FluidHeap;
 
 FluidHeap *fluid_heap_new(void);
-void       fluid_heap_free(FluidHeap *h);
-void      *fluid_alloc(FluidHeap *h, size_t size);
-bool       fluid_dealloc(FluidHeap *h, void *ptr);
-size_t     fluid_live_count(const FluidHeap *h);
-size_t     fluid_total_bytes(const FluidHeap *h);
+void fluid_heap_free(FluidHeap *h);
+void *fluid_alloc(FluidHeap *h, size_t size);
+bool fluid_dealloc(FluidHeap *h, void *ptr);
+/* Resize a block, keeping the heap's allocation tracking consistent (plain
+ * realloc() on a tracked block leaves a stale pointer that double-frees at
+ * teardown). If ptr is not tracked by this heap it is realloc()'d directly. */
+void *fluid_realloc(FluidHeap *h, void *ptr, size_t new_size);
+size_t fluid_live_count(const FluidHeap *h);
+size_t fluid_total_bytes(const FluidHeap *h);
 
 /* GC support: mark a specific pointer as reachable */
-bool       fluid_mark(FluidHeap *h, void *ptr);
+bool fluid_mark(FluidHeap *h, void *ptr);
 /* GC support: clear all marks */
-void       fluid_unmark_all(FluidHeap *h);
+void fluid_unmark_all(FluidHeap *h);
 /* GC support: sweep unmarked allocations, return count freed */
-size_t     fluid_sweep(FluidHeap *h);
+size_t fluid_sweep(FluidHeap *h);
 
 /* ── Arena Pages ── */
 
 #define ARENA_PAGE_SIZE 4096
 
 typedef struct ArenaPage {
-    uint8_t          *data;
-    size_t            used;
-    size_t            cap;
+    uint8_t *data;
+    size_t used;
+    size_t cap;
     struct ArenaPage *next;
 } ArenaPage;
 
@@ -93,34 +97,34 @@ typedef size_t RegionId;
 typedef size_t Epoch;
 
 typedef struct CrystalRegion {
-    RegionId    id;
-    Epoch       epoch;
-    ArenaPage  *pages;       /* linked list of arena pages */
-    size_t      total_bytes; /* total bytes used across all pages */
+    RegionId id;
+    Epoch epoch;
+    ArenaPage *pages;   /* linked list of arena pages */
+    size_t total_bytes; /* total bytes used across all pages */
 } CrystalRegion;
 
 /* ── Region Manager ── */
 
 typedef struct RegionManager {
     CrystalRegion **regions;
-    size_t          count;
-    size_t          cap;
-    size_t          next_id;
-    Epoch           current_epoch;
-    size_t          total_allocs;
-    size_t          peak_count;
-    size_t          cumulative_data_bytes;
+    size_t count;
+    size_t cap;
+    size_t next_id;
+    Epoch current_epoch;
+    size_t total_allocs;
+    size_t peak_count;
+    size_t cumulative_data_bytes;
 } RegionManager;
 
 RegionManager *region_manager_new(void);
-void           region_manager_free(RegionManager *rm);
-Epoch          region_advance_epoch(RegionManager *rm);
-Epoch          region_current_epoch(const RegionManager *rm);
+void region_manager_free(RegionManager *rm);
+Epoch region_advance_epoch(RegionManager *rm);
+Epoch region_current_epoch(const RegionManager *rm);
 CrystalRegion *region_create(RegionManager *rm);
-size_t         region_collect(RegionManager *rm, RegionId *reachable, size_t reachable_count);
-size_t         region_count(const RegionManager *rm);
-size_t         region_total_allocs(const RegionManager *rm);
-size_t         region_live_data_bytes(const RegionManager *rm);
+size_t region_collect(RegionManager *rm, RegionId *reachable, size_t reachable_count);
+size_t region_count(const RegionManager *rm);
+size_t region_total_allocs(const RegionManager *rm);
+size_t region_live_data_bytes(const RegionManager *rm);
 
 /* ── Arena allocation ── */
 
@@ -131,25 +135,25 @@ char *arena_strdup(CrystalRegion *r, const char *s);
 /* ── Bump Arena (ephemeral allocator) ── */
 
 typedef struct BumpArena {
-    ArenaPage  *pages;       /* current page pointer */
-    ArenaPage  *first_page;  /* head of chain (kept across resets) */
-    size_t      total_bytes;
+    ArenaPage *pages;      /* current page pointer */
+    ArenaPage *first_page; /* head of chain (kept across resets) */
+    size_t total_bytes;
 } BumpArena;
 
 BumpArena *bump_arena_new(void);
-void       bump_arena_free(BumpArena *ba);
-void       bump_arena_reset(BumpArena *ba);  /* reset all pages, keep chain */
-void      *bump_alloc(BumpArena *ba, size_t size);
-char      *bump_strdup(BumpArena *ba, const char *s);
+void bump_arena_free(BumpArena *ba);
+void bump_arena_reset(BumpArena *ba); /* reset all pages, keep chain */
+void *bump_alloc(BumpArena *ba, size_t size);
+char *bump_strdup(BumpArena *ba, const char *s);
 
 /* ── Dual Heap ── */
 
 typedef struct DualHeap {
-    FluidHeap     *fluid;
+    FluidHeap *fluid;
     RegionManager *regions;
 } DualHeap;
 
 DualHeap *dual_heap_new(void);
-void      dual_heap_free(DualHeap *dh);
+void dual_heap_free(DualHeap *dh);
 
 #endif /* MEMORY_H */

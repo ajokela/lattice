@@ -9,11 +9,11 @@ typedef LatMap Scope;
 
 /* Environment: a stack of scopes implementing lexical scoping */
 struct Env {
-    Scope  *scopes;
-    size_t  count;
-    size_t  cap;
-    size_t  refcount;
-    bool    arena_backed;
+    Scope *scopes;
+    size_t count;
+    size_t cap;
+    size_t refcount;
+    bool arena_backed;
 };
 
 /* Create a new environment with one (root) scope */
@@ -21,6 +21,11 @@ Env *env_new(void);
 
 /* Free the environment and all its scopes */
 void env_free(Env *env);
+
+/* Replace every bound value with a thread-independent (malloc-backed) deep copy.
+ * Call from a spawned thread before its thread-local heap is torn down so the
+ * env (freed later by the parent) does not reference freed memory. */
+void env_detach_values(Env *env);
 
 /* Increment reference count (for shared closure environments) */
 void env_retain(Env *env);

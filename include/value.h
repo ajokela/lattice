@@ -195,6 +195,9 @@ struct CrystalRegion *value_get_arena(void);
 void *lat_alloc_routed(size_t size);
 void *lat_calloc_routed(size_t count, size_t size);
 char *lat_strdup_routed(const char *s);
+/* Heap-aware realloc: avoids leaving a stale pointer in a fluid heap's tracking
+ * list (which double-frees at teardown). See value.c. */
+void *lat_realloc_routed(void *ptr, size_t new_size);
 
 /* ── Destructor ── */
 void value_free(LatValue *v);

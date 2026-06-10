@@ -345,6 +345,10 @@ static void *regvm_spawn_thread_fn(void *arg) {
         value_free(&result);
     }
 
+    /* Detach env values out of this thread's heap before freeing it — the parent
+     * frees the child env after join (see env_detach_values / LAT-420). */
+    if (task->child_vm->rt) env_detach_values(task->child_vm->rt->env);
+
     dual_heap_free(heap);
     return NULL;
 }
@@ -935,7 +939,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             LatValue val = rvm_clone_or_borrow(&args[0]);
             if (obj->as.array.len >= obj->as.array.cap) {
                 obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
-                obj->as.array.elems = realloc(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
+                obj->as.array.elems = lat_realloc_routed(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
             }
             obj->as.array.elems[obj->as.array.len++] = val;
             *result = value_unit();
@@ -1382,7 +1386,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             if (idx > (int64_t)obj->as.array.len) idx = (int64_t)obj->as.array.len;
             if (obj->as.array.len >= obj->as.array.cap) {
                 obj->as.array.cap = obj->as.array.cap ? obj->as.array.cap * 2 : 4;
-                obj->as.array.elems = realloc(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
+                obj->as.array.elems = lat_realloc_routed(obj->as.array.elems, obj->as.array.cap * sizeof(LatValue));
             }
             memmove(&obj->as.array.elems[idx + 1], &obj->as.array.elems[idx],
                     (obj->as.array.len - (size_t)idx) * sizeof(LatValue));
@@ -2472,7 +2476,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 if (ref->value.as.array.len >= ref->value.as.array.cap) {
                     ref->value.as.array.cap = ref->value.as.array.cap ? ref->value.as.array.cap * 2 : 4;
                     ref->value.as.array.elems =
-                        realloc(ref->value.as.array.elems, ref->value.as.array.cap * sizeof(LatValue));
+                        lat_realloc_routed(ref->value.as.array.elems, ref->value.as.array.cap * sizeof(LatValue));
                 }
                 ref->value.as.array.elems[ref->value.as.array.len++] = val;
                 *result = value_unit();
@@ -6035,7 +6039,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (new_len != old_len) {
             if (new_len > R[a].as.array.cap) {
                 size_t new_cap = new_len < 4 ? 4 : new_len * 2;
-                R[a].as.array.elems = realloc(R[a].as.array.elems, new_cap * sizeof(LatValue));
+                R[a].as.array.elems = lat_realloc_routed(R[a].as.array.elems, new_cap * sizeof(LatValue));
                 R[a].as.array.cap = new_cap;
             }
             size_t tail_start = slice_end;
@@ -6087,7 +6091,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (new_len != old_len) {
             if (new_len > R[a].as.array.cap) {
                 size_t new_cap = new_len < 4 ? 4 : new_len * 2;
-                R[a].as.array.elems = realloc(R[a].as.array.elems, new_cap * sizeof(LatValue));
+                R[a].as.array.elems = lat_realloc_routed(R[a].as.array.elems, new_cap * sizeof(LatValue));
                 R[a].as.array.cap = new_cap;
             }
             size_t tail_start = slice_end;

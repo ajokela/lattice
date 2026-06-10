@@ -1597,6 +1597,10 @@ static void *spawn_thread_fn(void *arg) {
         value_free(&result.value);
     }
 
+    /* Detach values the spawn stored in the child env out of this thread's heap
+     * before the parent frees that heap (see env_detach_values / LAT-420). */
+    env_detach_values(child->env);
+
     return NULL;
 }
 

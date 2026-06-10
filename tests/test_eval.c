@@ -5483,3 +5483,33 @@ TEST(regex_normal_still_works) {
                 "    assert(r == \"hell0 w0rld\", \"regex_replace broke\")\n"
                 "}\n");
 }
+
+/* ── Spawn-thread env value lifetime (LAT-420 / LAT-421) ── */
+TEST(spawn_freeze_ident_env_safe) {
+    /* freeze(arr) on an ident inside a spawn writes the frozen value back into
+     * the spawn's (cloned) env. That value's backing lived in the spawn thread's
+     * heap, which is freed at thread exit while the parent frees the env after
+     * join -> use-after-free (LAT-420). ASan flags it without env_detach_values. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn {\n"
+                "            let arr = [100, 200, 300, 400, 500, 600, 700, 800]\n"
+                "            ch.send(freeze(arr))\n"
+                "        }\n"
+                "    }\n"
+                "    let v = ch.recv()\n"
+                "    assert(v[0] == 100, \"spawn env value corrupted\")\n"
+                "}\n");
+}
+TEST(spawn_concurrent_globals_safe) {
+    /* Top-level `let` in a spawn body becomes a global stored in the spawn's
+     * env, backed by the spawn thread's heap; freeing the env after the heap
+     * was torn down double-freed (LAT-421). */
+    ASSERT_RUNS("fn main() {\n"
+                "    scope {\n"
+                "        spawn { let a = []; let i = 0; while i < 200 { a.push(\"p\" + to_string(i)); i = i + 1 } }\n"
+                "        spawn { let b = []; let j = 0; while j < 200 { b.push(\"q\" + to_string(j)); j = j + 1 } }\n"
+                "    }\n"
+                "}\n");
+}

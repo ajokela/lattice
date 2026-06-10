@@ -48,6 +48,15 @@ static void *lat_alloc(size_t size) {
     return malloc(size);
 }
 
+/* Grow a buffer in a heap-aware way. Plain realloc() on a fluid-heap-tracked
+ * allocation leaves a stale pointer in the heap's allocation list (the block is
+ * moved/freed by realloc), which double-frees at heap teardown. Route the
+ * resize through the active fluid heap so its tracking stays consistent. */
+void *lat_realloc_routed(void *ptr, size_t new_size) {
+    if (g_heap && !g_arena) return fluid_realloc(g_heap->fluid, ptr, new_size);
+    return realloc(ptr, new_size);
+}
+
 static void *lat_calloc(size_t count, size_t size) {
     if (count > 0 && size > SIZE_MAX / count) return NULL;
     if (g_arena) return arena_calloc(g_arena, count, size);

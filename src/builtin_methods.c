@@ -613,7 +613,8 @@ LatValue builtin_array_group_by(LatValue *obj, void *closure, BuiltinCallback cb
         if (existing && existing->type == VAL_ARRAY) {
             if (existing->as.array.len >= existing->as.array.cap) {
                 existing->as.array.cap = existing->as.array.cap ? existing->as.array.cap * 2 : 4;
-                existing->as.array.elems = realloc(existing->as.array.elems, existing->as.array.cap * sizeof(LatValue));
+                existing->as.array.elems =
+                    lat_realloc_routed(existing->as.array.elems, existing->as.array.cap * sizeof(LatValue));
             }
             existing->as.array.elems[existing->as.array.len++] = value_deep_clone(&obj->as.array.elems[i]);
         } else {
