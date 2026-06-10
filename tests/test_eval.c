@@ -5469,6 +5469,8 @@ TEST(buffer_negative_index_no_oob) {
 }
 
 /* ── Regex resource bounds (LAT-419) ── */
+/* POSIX regex is not available on Windows (regex_ops.c is guarded out). */
+#ifndef _WIN32
 TEST(regex_oversized_pattern_rejected) {
     /* An oversized pattern is rejected before it can drive pathological
      * backtracking / resource exhaustion. */
@@ -5483,6 +5485,7 @@ TEST(regex_normal_still_works) {
                 "    assert(r == \"hell0 w0rld\", \"regex_replace broke\")\n"
                 "}\n");
 }
+#endif /* !_WIN32 */
 
 /* ── Spawn-thread env value lifetime (LAT-420 / LAT-421) ── */
 TEST(spawn_freeze_ident_env_safe) {
