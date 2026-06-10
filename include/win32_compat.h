@@ -201,6 +201,10 @@ static inline char *realpath(const char *path, char *resolved) {
 }
 
 /* ── mkdtemp ── */
+/* mingw-w64 >= 12.0 declares mkdtemp() in <stdlib.h>; only provide a shim for
+ * older toolchains (e.g. distro cross-compilers) that lack it, otherwise this
+ * static definition conflicts with the system declaration. */
+#if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 12
 static inline char *mkdtemp(char *tmpl) {
     size_t len = strlen(tmpl);
     if (len < 6) return NULL;
@@ -211,6 +215,7 @@ static inline char *mkdtemp(char *tmpl) {
     }
     return NULL;
 }
+#endif
 
 /* ── basename / dirname ── */
 /* Custom implementations that handle both '/' and '\\' */
