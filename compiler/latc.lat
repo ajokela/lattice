@@ -709,6 +709,27 @@ fn emit_return_type_check(line: any) {
     emit_byte(err_idx, line)
 }
 
+// Emit runtime parameter type checks after params are bound as locals.
+// Mirrors the parameter-check loop of compile_function_body() in
+// src/stackcompiler.c: slot 0 is reserved (or holds self), params occupy
+// the following slots; unannotated, any-typed and variadic params are
+// skipped (variadic params get "" in the types array).
+fn emit_param_type_checks(fname: any, pnames: any, ptypes: any, first_param: any, line: any) {
+    let n = len(pnames)
+    for i in first_param..n {
+        let t = ptypes[i]
+        if t != "" && t != "any" && t != "Any" {
+            let err_msg = "function '" + fname + "' parameter '" + pnames[i] + "' expects type " + t + ", got %s"
+            let type_idx = add_constant(make_string_const(t))
+            let err_idx = add_constant(make_string_const(err_msg))
+            emit_byte(OP_CHECK_TYPE, line)
+            emit_byte(i + 1 - first_param, line)
+            emit_byte(type_idx, line)
+            emit_byte(err_idx, line)
+        }
+    }
+}
+
 // ============================================================================
 // Section 8: Expression parsing — precedence climbing
 // ============================================================================
@@ -3302,15 +3323,18 @@ fn parse_fn_declaration() {
     expect(nil, "(")
 
     flux param_names_arr = []
+    flux param_types_arr = []
     flux has_variadic = false
     if peek_text() != ")" {
         let p = expect("identifier", nil).text
+        flux p_type = ""
         // Consume optional type annotation
         if peek_text() == ":" {
             advance()
-            expect("identifier", nil)  // type name
+            p_type = expect("identifier", nil).text
         }
         param_names_arr.push(p)
+        param_types_arr.push(p_type)
         while peek_text() == "," {
             advance()
             if peek_text() == "..." {
@@ -3321,15 +3345,18 @@ fn parse_fn_declaration() {
                     expect("identifier", nil)
                 }
                 param_names_arr.push(vp)
+                param_types_arr.push("")  // variadic params are never checked
                 has_variadic = true
                 break
             }
             let p2 = expect("identifier", nil).text
+            flux p2_type = ""
             if peek_text() == ":" {
                 advance()
-                expect("identifier", nil)
+                p2_type = expect("identifier", nil).text
             }
             param_names_arr.push(p2)
+            param_types_arr.push(p2_type)
         }
     }
     expect(nil, ")")
@@ -3469,6 +3496,10 @@ fn parse_fn_declaration() {
     for i in 0..param_count {
         add_local(param_names_arr[i])
     }
+
+    // Emit runtime parameter type checks (before require contracts, like
+    // compile_function_body in src/stackcompiler.c)
+    emit_param_type_checks(name, param_names_arr, param_types_arr, 0, line)
 
     // Now compile contracts by backtracking to their saved positions
     let body_start_pos = pos  // save where the '{' is
@@ -4492,14 +4523,17 @@ fn parse_impl_block() {
         expect(nil, "(")
 
         flux param_names_arr = []
+        flux param_types_arr = []
         flux has_variadic = false
         if peek_text() != ")" {
             let p = expect("identifier", nil).text
+            flux p_type = ""
             if peek_text() == ":" {
                 advance()
-                expect("identifier", nil)
+                p_type = expect("identifier", nil).text
             }
             param_names_arr.push(p)
+            param_types_arr.push(p_type)
             while peek_text() == "," {
                 advance()
                 if peek_text() == "..." {
@@ -4510,15 +4544,18 @@ fn parse_impl_block() {
                         expect("identifier", nil)
                     }
                     param_names_arr.push(vp)
+                    param_types_arr.push("")  // variadic params are never checked
                     has_variadic = true
                     break
                 }
                 let p2 = expect("identifier", nil).text
+                flux p2_type = ""
                 if peek_text() == ":" {
                     advance()
-                    expect("identifier", nil)
+                    p2_type = expect("identifier", nil).text
                 }
                 param_names_arr.push(p2)
+                param_types_arr.push(p2_type)
             }
         }
         expect(nil, ")")
@@ -4643,7 +4680,10 @@ fn parse_impl_block() {
         ensure_slots = []
         ensure_messages = []
         ensure_count = 0
-        current_func_name = full_name
+        // Use the bare method name in runtime error messages — the C compiler
+        // passes method->name (not Type::name) to compile_function_body, so
+        // type-check/contract messages must match for .latc roundtrip parity
+        current_func_name = method_name
         current_return_type = m_return_type
         current_chunk_name = method_name
 
@@ -4658,6 +4698,10 @@ fn parse_impl_block() {
         for i in first_param..param_count {
             add_local(param_names_arr[i])
         }
+
+        // Emit runtime parameter type checks (before require contracts, like
+        // compile_function_body in src/stackcompiler.c)
+        emit_param_type_checks(method_name, param_names_arr, param_types_arr, first_param, line)
 
         // Compile contracts by backtracking
         let m_body_start_pos = pos
@@ -4675,7 +4719,7 @@ fn parse_impl_block() {
                 parse_expression()
                 let m_ok_jump = emit_jump(OP_JUMP_IF_TRUE, line)
                 emit_byte(OP_POP, line)
-                let m_full_msg = "require failed in '" + full_name + "': " + m_contract_msg_arr[mci]
+                let m_full_msg = "require failed in '" + method_name + "': " + m_contract_msg_arr[mci]
                 emit_constant(make_string_const(m_full_msg), line)
                 emit_byte(OP_THROW, line)
                 patch_jump(m_ok_jump)

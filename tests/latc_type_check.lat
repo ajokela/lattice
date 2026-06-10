@@ -1,0 +1,95 @@
+// Test: runtime type checks round-trip through self-hosted compiler
+// Covers parameter type checks (OP_CHECK_TYPE), return type checks
+// (OP_CHECK_RETURN_TYPE), and the any-type exemption
+
+fn typed_add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+fn bad_ret(x: Int) -> String {
+    return x + 1
+}
+
+fn any_param(a: any) -> Int {
+    return 42
+}
+
+fn untyped_ret(x: Int) {
+    return x * 2
+}
+
+// 1. Correct types pass the checks
+print("ok add: ${typed_add(2, 3)}")
+
+// 2. Parameter type violation is caught
+try {
+    let r = typed_add("nope", 1)
+    print("FAIL: no param error")
+} catch e {
+    let msg = e["message"]
+    print("caught: ${msg}")
+}
+
+// 3. Second parameter is checked too
+try {
+    let r = typed_add(1, "nope")
+    print("FAIL: no param error")
+} catch e {
+    let msg = e["message"]
+    print("caught: ${msg}")
+}
+
+// 4. Return type violation is caught
+try {
+    let r = bad_ret(1)
+    print("FAIL: no return error")
+} catch e {
+    let msg = e["message"]
+    print("caught: ${msg}")
+}
+
+// 5. any-typed params accept anything (no check emitted)
+print("any ok: ${any_param("str")}")
+print("any ok: ${any_param(1)}")
+
+// 6. Functions without a return annotation never check returns
+print("untyped ok: ${untyped_ret(21)}")
+
+// 7. Impl methods check their parameters and return types too
+trait Bumpable {
+    fn bump(self: any, by: Int) -> Int
+    fn bad_method_ret(self: any, x: Int) -> String
+}
+
+struct Counter {
+    n: Int
+}
+
+impl Bumpable for Counter {
+    fn bump(self: any, by: Int) -> Int {
+        return self.n + by
+    }
+
+    fn bad_method_ret(self: any, x: Int) -> String {
+        return x + 1
+    }
+}
+
+let c = Counter { n: 1 }
+print("method ok: ${c.bump(5)}")
+
+try {
+    let r = c.bump("no")
+    print("FAIL: no method param error")
+} catch e {
+    let msg = e["message"]
+    print("caught: ${msg}")
+}
+
+try {
+    let r = c.bad_method_ret(1)
+    print("FAIL: no method return error")
+} catch e {
+    let msg = e["message"]
+    print("caught: ${msg}")
+}
