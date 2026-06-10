@@ -22,6 +22,7 @@ static _Thread_local CrystalRegion *g_arena = NULL;
 #endif
 
 void value_set_heap(DualHeap *heap) { g_heap = heap; }
+DualHeap *value_get_heap(void) { return g_heap; }
 void value_set_arena(CrystalRegion *region) { g_arena = region; }
 CrystalRegion *value_get_arena(void) { return g_arena; }
 

@@ -4798,6 +4798,25 @@ TEST(scope_spawn_two_channels) {
                 "}\n");
 }
 
+TEST(scope_spawn_captured_writes_isolated) {
+    /* LAT-430: each spawn task runs on a deep clone of the environment, so
+     * writes to captured variables (index assignment or reassignment) stay in
+     * the task's own copy and must never crash. Channels are the supported
+     * way to communicate results out of a spawn. */
+    ASSERT_RUNS("fn main() {\n"
+                "    flux results = [\"x\", \"y\"]\n"
+                "    flux name = \"original\"\n"
+                "    scope {\n"
+                "        spawn { results[0] = \"task A\" }\n"
+                "        spawn { results[1] = \"task B\" }\n"
+                "        spawn { name = \"changed\" }\n"
+                "    }\n"
+                "    assert(results[0] == \"x\", \"index write must not propagate, got: \" + results[0])\n"
+                "    assert(results[1] == \"y\", \"index write must not propagate, got: \" + results[1])\n"
+                "    assert(name == \"original\", \"reassignment must not propagate, got: \" + name)\n"
+                "}\n");
+}
+
 TEST(scope_no_spawns_returns_value) {
     ASSERT_RUNS("fn main() {\n"
                 "    let x = scope {\n"

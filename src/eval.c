@@ -1512,7 +1512,15 @@ typedef struct {
 static Evaluator *create_child_evaluator(Evaluator *parent) {
     Evaluator *child = calloc(1, sizeof(Evaluator));
     if (!child) return NULL;
+    /* Clone the captured environment with no active fluid heap so the copies
+     * are plain-malloc'd and unowned (the same detached-ownership rule as
+     * value_detach). A heap-tracked clone would be freed from the spawn
+     * thread under ITS thread-local heap: lat_free misses that heap's
+     * registry, plain-frees the block, and the stale entry in the parent's
+     * registry double-frees at teardown (LAT-430). */
+    value_set_heap(NULL);
     child->env = env_clone(parent->env);
+    value_set_heap(parent->heap);
     child->mode = parent->mode;
     /* Share AST pointers (borrowed, immutable after parse) */
     child->struct_defs = lat_map_new(sizeof(StructDecl *));
@@ -1564,8 +1572,15 @@ static void free_child_evaluator(Evaluator *child) {
         }
     }
     lat_map_free(&child->module_paths);
+    /* Free the child's heap with no TLS heap active, then RESTORE the
+     * caller's heap — leaving it NULL made every later value_free on the
+     * calling thread bypass the fluid-heap registry, plain-freeing tracked
+     * blocks that the registry then double-freed at teardown (LAT-430). */
+    DualHeap *saved_heap = value_get_heap();
+    if (saved_heap == child->heap) saved_heap = NULL;
     value_set_heap(NULL);
     dual_heap_free(child->heap);
+    value_set_heap(saved_heap);
     lat_vec_free(&child->gc_roots);
     lat_vec_free(&child->saved_envs);
     free(child);

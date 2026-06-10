@@ -188,6 +188,7 @@ char *value_hash_key(const LatValue *v);
 struct DualHeap;
 struct CrystalRegion;
 void value_set_heap(struct DualHeap *heap);
+struct DualHeap *value_get_heap(void);
 void value_set_arena(struct CrystalRegion *region);
 struct CrystalRegion *value_get_arena(void);
 
