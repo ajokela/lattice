@@ -1,16 +1,24 @@
 // Test: scope/spawn round-trip through self-hosted compiler
 
 // Test 1: Basic scope with spawns
+// Spawned tasks run concurrently, so they must not print directly — they
+// send results over a channel and the (sorted) output is printed after the
+// scope joins, keeping the test output deterministic.
 fn test_basic_scope() {
     print("--- basic scope ---")
+    let ch = Channel::new()
     scope {
         spawn {
-            print("task A")
+            ch.send(freeze("task A"))
         }
         spawn {
-            print("task B")
+            ch.send(freeze("task B"))
         }
     }
+    flux msgs = [ch.recv(), ch.recv()]
+    let sorted = msgs.sort()
+    print(sorted[0])
+    print(sorted[1])
     print("after scope")
 }
 
@@ -47,33 +55,44 @@ fn test_scope_with_sync() {
     print("sync after")
 }
 
-// Test 5: Multiple spawns
+// Test 5: Multiple spawns (results sorted after join for determinism)
 fn test_many_spawns() {
     print("--- many spawns ---")
+    let ch = Channel::new()
     scope {
         spawn {
-            print("s1")
+            ch.send(freeze("s1"))
         }
         spawn {
-            print("s2")
+            ch.send(freeze("s2"))
         }
         spawn {
-            print("s3")
+            ch.send(freeze("s3"))
         }
     }
+    flux msgs = [ch.recv(), ch.recv(), ch.recv()]
+    let sorted = msgs.sort()
+    print(sorted[0])
+    print(sorted[1])
+    print(sorted[2])
     print("all spawns done")
 }
 
-// Test 6: Scope inside function
+// Test 6: Scope inside function (results sorted after join for determinism)
 fn run_tasks() {
+    let ch = Channel::new()
     scope {
         spawn {
-            print("fn spawn 1")
+            ch.send(freeze("fn spawn 1"))
         }
         spawn {
-            print("fn spawn 2")
+            ch.send(freeze("fn spawn 2"))
         }
     }
+    flux msgs = [ch.recv(), ch.recv()]
+    let sorted = msgs.sort()
+    print(sorted[0])
+    print(sorted[1])
 }
 
 fn test_scope_in_function() {
