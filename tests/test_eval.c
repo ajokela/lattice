@@ -5426,3 +5426,24 @@ TEST(lexer_deep_interp_nesting_rejected) {
     free(err);
     ASSERT(rc != 0); /* rejected, not a stack overflow */
 }
+
+/* ── YAML out-of-bounds read on trailing backslash (LAT-414) ── */
+#include "yaml_ops.h"
+TEST(yaml_trailing_backslash_no_oob) {
+    /* Quoted strings ending in a lone backslash made the scanner advance past
+     * the NUL terminator (out-of-bounds read), in both the flow-value and the
+     * mapping-detection scanners. ASan would flag the OOB here. */
+    const char *inputs[] = {
+        "\"ab\\",    /* top-level quoted scalar: "ab\          */
+        "[\"ab\\",   /* flow seq with quoted element: ["ab\    */
+        "{\"ab\\",   /* flow map with quoted key: {"ab\        */
+        "\"ab\\: x", /* quoted key in a mapping line: "ab\: x  */
+    };
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        char *err = NULL;
+        LatValue v = yaml_ops_parse(inputs[i], &err);
+        value_free(&v);
+        free(err);
+    }
+    ASSERT(1); /* reaching here without an ASan abort is the assertion */
+}

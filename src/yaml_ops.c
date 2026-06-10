@@ -205,7 +205,9 @@ static LatValue yaml_parse_flow_value(YamlParser *p) {
         char quote = p->src[p->pos++];
         size_t start = p->pos;
         while (p->src[p->pos] && p->src[p->pos] != quote) {
-            if (p->src[p->pos] == '\\') p->pos++;
+            /* Only skip the escaped char if one exists, so a string ending in a
+             * lone backslash does not advance past the NUL terminator. */
+            if (p->src[p->pos] == '\\' && p->src[p->pos + 1]) p->pos++;
             p->pos++;
         }
         char *s = strndup(p->src + start, p->pos - start);
@@ -448,7 +450,9 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
             if (p->src[scan] == '"' || p->src[scan] == '\'') {
                 char q = p->src[scan++];
                 while (p->src[scan] && p->src[scan] != q) {
-                    if (p->src[scan] == '\\') scan++;
+                    /* Only skip the escaped char if one exists (avoid running
+                     * past the NUL on a trailing backslash). */
+                    if (p->src[scan] == '\\' && p->src[scan + 1]) scan++;
                     scan++;
                 }
                 if (p->src[scan]) scan++;
