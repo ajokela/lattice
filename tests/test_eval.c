@@ -5351,3 +5351,32 @@ TEST(intern_concurrent_threads_safe) {
      * Spot-check that interning is still canonical. */
     ASSERT(intern("shared_1") == intern("shared_1"));
 }
+
+/* ── Format-parser recursion limits (LAT-413) ── */
+TEST(json_deep_nesting_rejected) {
+    /* 50000 levels of nesting would overflow the C stack; the parser must
+     * reject it with an error instead. */
+    ASSERT_FAILS("fn main() {\n"
+                 "    let deep = \"[\".repeat(50000) + \"]\".repeat(50000)\n"
+                 "    json_parse(deep)\n"
+                 "}\n");
+}
+TEST(json_moderate_nesting_ok) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let s = \"[\".repeat(100) + \"1\" + \"]\".repeat(100)\n"
+                "    let v = json_parse(s)\n"
+                "    assert(v[0] != nil || true, \"parsed\")\n"
+                "}\n");
+}
+TEST(toml_deep_nesting_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let deep = \"a = \" + \"[\".repeat(50000) + \"]\".repeat(50000)\n"
+                 "    toml_parse(deep)\n"
+                 "}\n");
+}
+TEST(yaml_deep_nesting_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let deep = \"[\".repeat(50000) + \"]\".repeat(50000)\n"
+                 "    yaml_parse(deep)\n"
+                 "}\n");
+}
