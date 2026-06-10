@@ -2613,7 +2613,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         }
 
         default:
-            /* Unsupported expression — silently produce unit rather than error */
+            /* Unsupported expression — record a compile error (first one wins) */
             if (!rc_error) {
                 char buf[128];
                 snprintf(buf, sizeof(buf), "unsupported expression type %d in regvm compiler", e->tag);
