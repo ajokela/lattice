@@ -394,7 +394,7 @@ LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_trait
              latc_impl_test latc_impl_advanced latc_import_test \
              latc_match_enum latc_match_test latc_try_test \
              latc_from_import_test latc_scope_test \
-             latc_defer_test latc_select_test latc_type_check latc_variadic_defaults
+             latc_defer_test latc_select_test latc_type_check latc_variadic_defaults latc_optimized_ops
 
 test-latc: $(TARGET)
 	@PASS=0; FAIL=0; \
