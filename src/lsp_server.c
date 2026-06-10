@@ -12,6 +12,19 @@
 #include <limits.h>
 #include <dirent.h>
 
+/* ── Safe accessors for untrusted JSON-RPC fields ──
+ * cJSON_GetObjectItem returns NULL for a missing key, and a present-but-wrong
+ * type has no valuestring; dereferencing either crashed the server on a
+ * malformed request. These return a default instead. */
+static const char *lsp_json_str(const cJSON *obj, const char *key) {
+    cJSON *item = cJSON_GetObjectItem((cJSON *)obj, key);
+    return (item && cJSON_IsString(item)) ? item->valuestring : NULL;
+}
+static int lsp_json_int(const cJSON *obj, const char *key, int dflt) {
+    cJSON *item = cJSON_GetObjectItem((cJSON *)obj, key);
+    return (item && cJSON_IsNumber(item)) ? item->valueint : dflt;
+}
+
 /* ── Keywords for completion ── */
 
 static const char *lattice_keywords[] = {
@@ -314,6 +327,7 @@ static char *extract_word_at(const char *text, int line, int col, int *out_col) 
 /* ── Document management ── */
 
 static LspDocument *find_document(LspServer *srv, const char *uri) {
+    if (!uri) return NULL;
     for (size_t i = 0; i < srv->doc_count; i++) {
         if (strcmp(srv->documents[i]->uri, uri) == 0) return srv->documents[i];
     }
@@ -321,10 +335,11 @@ static LspDocument *find_document(LspServer *srv, const char *uri) {
 }
 
 static LspDocument *add_document(LspServer *srv, const char *uri, const char *text, int version) {
+    if (!uri) return NULL;
     LspDocument *doc = calloc(1, sizeof(LspDocument));
     if (!doc) return NULL;
     doc->uri = strdup(uri);
-    doc->text = strdup(text);
+    doc->text = strdup(text ? text : "");
     doc->version = version;
 
     if (srv->doc_count >= srv->doc_cap) {
@@ -499,13 +514,14 @@ static void handle_did_open(LspServer *srv, cJSON *params) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
     if (!td) return;
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
-    const char *text = cJSON_GetObjectItem(td, "text")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
+    const char *text = lsp_json_str(td, "text");
     int version = 0;
     cJSON *ver = cJSON_GetObjectItem(td, "version");
     if (ver) version = ver->valueint;
 
     LspDocument *doc = add_document(srv, uri, text, version);
+    if (!doc) return;
     lsp_analyze_document(doc);
     publish_diagnostics(srv, doc);
 }
@@ -516,7 +532,7 @@ static void handle_did_change(LspServer *srv, cJSON *params) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
     if (!td) return;
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
     cJSON *ver = cJSON_GetObjectItem(td, "version");
     int version = ver ? ver->valueint : 0;
 
@@ -525,7 +541,8 @@ static void handle_did_change(LspServer *srv, cJSON *params) {
 
     /* Full sync: take the last content change */
     cJSON *last = cJSON_GetArrayItem(changes, cJSON_GetArraySize(changes) - 1);
-    const char *text = cJSON_GetObjectItem(last, "text")->valuestring;
+    const char *text = lsp_json_str(last, "text");
+    if (!text) return;
 
     LspDocument *doc = find_document(srv, uri);
     if (doc) {
@@ -545,7 +562,7 @@ static void handle_did_change(LspServer *srv, cJSON *params) {
 static void handle_did_close(LspServer *srv, cJSON *params) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
     if (!td) return;
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
 
     /* Clear diagnostics */
     cJSON *clear_params = cJSON_CreateObject();
@@ -962,12 +979,12 @@ static bool is_struct_name(const LspDocument *doc, const char *name) {
 static void handle_completion(LspServer *srv, cJSON *params, int id) {
     cJSON *td = cJSON_GetObjectItem(params, "textDocument");
     cJSON *pos = cJSON_GetObjectItem(params, "position");
-    const char *uri = td ? cJSON_GetObjectItem(td, "uri")->valuestring : NULL;
+    const char *uri = td ? lsp_json_str(td, "uri") : NULL;
 
     int line = 0, col = 0;
     if (pos) {
-        line = cJSON_GetObjectItem(pos, "line")->valueint;
-        col = cJSON_GetObjectItem(pos, "character")->valueint;
+        line = lsp_json_int(pos, "line", 0);
+        col = lsp_json_int(pos, "character", 0);
     }
 
     LspDocument *doc = uri ? find_document(srv, uri) : NULL;
@@ -1329,9 +1346,9 @@ static void handle_hover(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
-    int line = cJSON_GetObjectItem(pos, "line")->valueint;
-    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+    const char *uri = lsp_json_str(td, "uri");
+    int line = lsp_json_int(pos, "line", 0);
+    int col = lsp_json_int(pos, "character", 0);
 
     LspDocument *doc = find_document(srv, uri);
     if (!doc || !doc->text) {
@@ -1746,9 +1763,9 @@ static void handle_definition(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
-    int line = cJSON_GetObjectItem(pos, "line")->valueint;
-    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+    const char *uri = lsp_json_str(td, "uri");
+    int line = lsp_json_int(pos, "line", 0);
+    int col = lsp_json_int(pos, "character", 0);
 
     LspDocument *doc = find_document(srv, uri);
     if (!doc || !doc->text) {
@@ -1952,7 +1969,7 @@ static void handle_document_symbol(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
     LspDocument *doc = find_document(srv, uri);
 
     cJSON *symbols = cJSON_CreateArray();
@@ -2092,9 +2109,9 @@ static void handle_signature_help(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
-    int line = cJSON_GetObjectItem(pos, "line")->valueint;
-    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+    const char *uri = lsp_json_str(td, "uri");
+    int line = lsp_json_int(pos, "line", 0);
+    int col = lsp_json_int(pos, "character", 0);
 
     LspDocument *doc = find_document(srv, uri);
     if (!doc || !doc->text) {
@@ -2345,9 +2362,9 @@ static void handle_references(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
-    int line = cJSON_GetObjectItem(pos, "line")->valueint;
-    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+    const char *uri = lsp_json_str(td, "uri");
+    int line = lsp_json_int(pos, "line", 0);
+    int col = lsp_json_int(pos, "character", 0);
 
     LspDocument *doc = find_document(srv, uri);
     if (!doc || !doc->text) {
@@ -2385,9 +2402,9 @@ static void handle_prepare_rename(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
-    int line = cJSON_GetObjectItem(pos, "line")->valueint;
-    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+    const char *uri = lsp_json_str(td, "uri");
+    int line = lsp_json_int(pos, "line", 0);
+    int col = lsp_json_int(pos, "character", 0);
 
     LspDocument *doc = find_document(srv, uri);
     if (!doc || !doc->text) {
@@ -2458,9 +2475,9 @@ static void handle_rename(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
-    int line = cJSON_GetObjectItem(pos, "line")->valueint;
-    int col = cJSON_GetObjectItem(pos, "character")->valueint;
+    const char *uri = lsp_json_str(td, "uri");
+    int line = lsp_json_int(pos, "line", 0);
+    int col = lsp_json_int(pos, "character", 0);
     const char *new_name = new_name_node->valuestring;
 
     LspDocument *doc = find_document(srv, uri);
@@ -2545,7 +2562,7 @@ static void handle_formatting(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
     LspDocument *doc = find_document(srv, uri);
     if (!doc || !doc->text) {
         cJSON *resp = lsp_make_response(id, cJSON_CreateNull());
@@ -2803,7 +2820,7 @@ static void handle_code_action(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
     LspDocument *doc = find_document(srv, uri);
     cJSON *actions = cJSON_CreateArray();
 
@@ -2819,8 +2836,8 @@ static void handle_code_action(LspServer *srv, cJSON *params, int id) {
     if (range_node) {
         cJSON *rs = cJSON_GetObjectItem(range_node, "start");
         cJSON *re = cJSON_GetObjectItem(range_node, "end");
-        if (rs) range_start_line = cJSON_GetObjectItem(rs, "line")->valueint;
-        if (re) range_end_line = cJSON_GetObjectItem(re, "line")->valueint;
+        if (rs) range_start_line = lsp_json_int(rs, "line", 0);
+        if (re) range_end_line = lsp_json_int(re, "line", 0);
     }
 
     cJSON *diagnostics = cJSON_GetObjectItem(context, "diagnostics");
@@ -2836,7 +2853,7 @@ static void handle_code_action(LspServer *srv, cJSON *params, int id) {
         int diag_line = 0;
         if (diag_range) {
             cJSON *ds = cJSON_GetObjectItem(diag_range, "start");
-            if (ds) diag_line = cJSON_GetObjectItem(ds, "line")->valueint;
+            if (ds) diag_line = lsp_json_int(ds, "line", 0);
         }
 
         /* ── Code action: phase violation → add thaw() ── */
@@ -2936,8 +2953,8 @@ static void handle_code_action(LspServer *srv, cJSON *params, int id) {
                                 if (diag_range) {
                                     cJSON *ds = cJSON_GetObjectItem(diag_range, "start");
                                     cJSON *de = cJSON_GetObjectItem(diag_range, "end");
-                                    if (ds) start_col = cJSON_GetObjectItem(ds, "character")->valueint;
-                                    if (de) end_col = cJSON_GetObjectItem(de, "character")->valueint;
+                                    if (ds) start_col = lsp_json_int(ds, "character", 0);
+                                    if (de) end_col = lsp_json_int(de, "character", 0);
                                 }
                                 /* If range is zero-width, use the bad_name length */
                                 if (end_col <= start_col) end_col = start_col + (int)nlen;
@@ -3129,7 +3146,7 @@ static void handle_folding_range(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
     LspDocument *doc = find_document(srv, uri);
     cJSON *result = cJSON_CreateArray();
 
@@ -3162,7 +3179,7 @@ static void handle_semantic_tokens_full(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
     LspDocument *doc = find_document(srv, uri);
 
     cJSON *result = cJSON_CreateObject();
@@ -3192,7 +3209,7 @@ static void handle_inlay_hint(LspServer *srv, cJSON *params, int id) {
         return;
     }
 
-    const char *uri = cJSON_GetObjectItem(td, "uri")->valuestring;
+    const char *uri = lsp_json_str(td, "uri");
     LspDocument *doc = find_document(srv, uri);
     cJSON *result = cJSON_CreateArray();
 
@@ -3208,8 +3225,8 @@ static void handle_inlay_hint(LspServer *srv, cJSON *params, int id) {
     if (range_node) {
         cJSON *rs = cJSON_GetObjectItem(range_node, "start");
         cJSON *re = cJSON_GetObjectItem(range_node, "end");
-        if (rs) range_start = cJSON_GetObjectItem(rs, "line")->valueint;
-        if (re) range_end = cJSON_GetObjectItem(re, "line")->valueint;
+        if (rs) range_start = lsp_json_int(rs, "line", 0);
+        if (re) range_end = lsp_json_int(re, "line", 0);
     }
 
     /* Re-lex and re-parse to get AST */
