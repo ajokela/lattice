@@ -1,0 +1,105 @@
+// LAT-432 / LAT-433: variadic and default parameters must survive
+// self-hosted compilation (latc.lat) with the same behavior as the
+// C reference compiler.
+
+// --- Variadic functions (LAT-432) ---
+
+fn v(first: Int, ...rest: any) -> Int {
+    return first + len(rest)
+}
+
+print(v(1, 2, 3, 4))        // expect: 4 (1 + 3 extras)
+print(v(10))                // expect: 10 (exactly the min args, rest is empty)
+print(v(2, 5))              // expect: 3
+
+// Variadic-only function (variadic as first param)
+fn collect(...items: any) -> Int {
+    return len(items)
+}
+
+print(collect())            // expect: 0
+print(collect(1, 2, 3))     // expect: 3
+
+// Variadic args are a real array in the body
+fn sum_all(base: Int, ...nums: any) -> Int {
+    flux total = base
+    for n in nums {
+        total = total + n
+    }
+    return total
+}
+
+print(sum_all(100, 1, 2, 3))  // expect: 106
+print(sum_all(7))             // expect: 7
+
+// --- Default parameters (LAT-433) ---
+
+fn d(x: Int = 5) -> Int {
+    return x
+}
+
+print(d())                  // expect: 5 (default used)
+print(d(9))                 // expect: 9 (default overridden)
+
+fn greet(name: String, greeting: String = "hello", punct: String = "!") -> String {
+    return greeting + ", " + name + punct
+}
+
+print(greet("world"))                   // expect: hello, world!
+print(greet("world", "hi"))             // expect: hi, world!
+print(greet("world", "hey", "?"))       // expect: hey, world?
+
+// Mixed default types: negative number, float, bool, nil
+fn mixed(a: Int = -3, b: Float = 2.5, c: Bool = true, d2: any = nil) -> String {
+    return to_string(a) + "|" + to_string(b) + "|" + to_string(c) + "|" + to_string(d2)
+}
+
+print(mixed())              // expect: -3|2.5|true|nil
+print(mixed(1, 1.5, false, "x"))  // expect: 1|1.5|false|x
+
+// Defaults combined with a variadic tail
+fn combo(a: Int, b: Int = 20, ...rest: any) -> Int {
+    return a + b + len(rest)
+}
+
+print(combo(1))             // expect: 21
+print(combo(1, 2))          // expect: 3
+print(combo(1, 2, 3, 4))    // expect: 5
+
+// --- Impl method with a default param (LAT-433) ---
+
+trait Scalable {
+    fn scaled(self: any, factor: Int) -> Int
+}
+
+struct Box {
+    size: Int
+}
+
+impl Scalable for Box {
+    fn scaled(self: any, factor: Int = 2) -> Int {
+        return self.size * factor
+    }
+}
+
+let b = Box { size: 10 }
+print(b.scaled())           // expect: 20 (default factor)
+print(b.scaled(5))          // expect: 50
+
+// Impl method with variadic tail (LAT-432)
+trait Summing {
+    fn add_all(self: any) -> Int
+}
+
+impl Summing for Box {
+    fn add_all(self: any, ...extras: any) -> Int {
+        flux t = self.size
+        for e in extras {
+            t = t + e
+        }
+        return t
+    }
+}
+
+print(b.add_all())          // expect: 10
+print(b.add_all(1, 2, 3))   // expect: 16

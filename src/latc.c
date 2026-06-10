@@ -202,6 +202,41 @@ static void serialize_chunk(ByteBuf *bb, const Chunk *c) {
     } else {
         bb_write_u8(bb, 0);
     }
+
+    /* Function call metadata: variadic flag + default parameter values.
+     * Defaults are const-folded scalars, so the scalar constant tags suffice. */
+    bb_write_u8(bb, c->fn_has_variadic ? 1 : 0);
+    bb_write_u32_le(bb, (uint32_t)c->default_count);
+    for (int i = 0; i < c->default_count; i++) {
+        const LatValue *dv = c->default_values ? &c->default_values[i] : NULL;
+        if (!dv) {
+            bb_write_u8(bb, TAG_NIL);
+            continue;
+        }
+        switch (dv->type) {
+            case VAL_INT:
+                bb_write_u8(bb, TAG_INT);
+                bb_write_i64_le(bb, dv->as.int_val);
+                break;
+            case VAL_FLOAT:
+                bb_write_u8(bb, TAG_FLOAT);
+                bb_write_f64_le(bb, dv->as.float_val);
+                break;
+            case VAL_BOOL:
+                bb_write_u8(bb, TAG_BOOL);
+                bb_write_u8(bb, dv->as.bool_val ? 1 : 0);
+                break;
+            case VAL_STR: {
+                bb_write_u8(bb, TAG_STR);
+                uint32_t slen = (uint32_t)strlen(dv->as.str_val);
+                bb_write_u32_le(bb, slen);
+                bb_write_bytes(bb, dv->as.str_val, slen);
+                break;
+            }
+            case VAL_UNIT: bb_write_u8(bb, TAG_UNIT); break;
+            default: bb_write_u8(bb, TAG_NIL); break;
+        }
+    }
 }
 
 /* ── Deserialize a single chunk (recursive) ── */
@@ -427,6 +462,85 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
             c->name = cname;
         }
         /* If br_read_u8 fails, chunk name is optional — just skip */
+    }
+
+    /* Function call metadata: variadic flag + default parameter values */
+    {
+        uint8_t fn_variadic;
+        uint32_t default_count;
+        if (!br_read_u8(br, &fn_variadic) || !br_read_u32_le(br, &default_count)) {
+            *err = strdup("truncated: missing function call metadata");
+            chunk_free(c);
+            return NULL;
+        }
+        c->fn_has_variadic = (fn_variadic != 0);
+        if (default_count > 255) {
+            *err = strdup("invalid default parameter count");
+            chunk_free(c);
+            return NULL;
+        }
+        if (default_count > 0) {
+            c->default_values = malloc(default_count * sizeof(LatValue));
+            if (!c->default_values) {
+                chunk_free(c);
+                return NULL;
+            }
+            for (uint32_t i = 0; i < default_count; i++) {
+                uint8_t tag;
+                if (!br_read_u8(br, &tag)) {
+                    *err = strdup("truncated: missing default value tag");
+                    chunk_free(c);
+                    return NULL;
+                }
+                LatValue dv;
+                bool ok = true;
+                switch (tag) {
+                    case TAG_INT: {
+                        int64_t val;
+                        ok = br_read_i64_le(br, &val);
+                        if (ok) dv = value_int(val);
+                        break;
+                    }
+                    case TAG_FLOAT: {
+                        double val;
+                        ok = br_read_f64_le(br, &val);
+                        if (ok) dv = value_float(val);
+                        break;
+                    }
+                    case TAG_BOOL: {
+                        uint8_t val;
+                        ok = br_read_u8(br, &val);
+                        if (ok) dv = value_bool(val != 0);
+                        break;
+                    }
+                    case TAG_STR: {
+                        uint32_t slen;
+                        ok = br_read_u32_le(br, &slen);
+                        if (ok) {
+                            char *s = malloc((size_t)slen + 1);
+                            if (!s || !br_read_bytes(br, s, slen)) {
+                                free(s);
+                                ok = false;
+                            } else {
+                                s[slen] = '\0';
+                                dv = value_string_owned(s);
+                            }
+                        }
+                        break;
+                    }
+                    case TAG_NIL: dv = value_nil(); break;
+                    case TAG_UNIT: dv = value_unit(); break;
+                    default: ok = false; break;
+                }
+                if (!ok) {
+                    *err = strdup("truncated or invalid default parameter value");
+                    chunk_free(c);
+                    return NULL;
+                }
+                c->default_values[i] = dv;
+                c->default_count = (int)(i + 1);
+            }
+        }
     }
 
     return c;

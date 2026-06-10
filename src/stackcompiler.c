@@ -2796,6 +2796,9 @@ static void compile_function_body(FunctionType type, const char *name, Param *pa
     if (param_count > 0 && strcmp(params[0].name, "self") == 0) {
         free(func_comp.locals[0].name);
         func_comp.locals[0].name = strdup("self");
+        /* Record in the chunk's debug table too — the VM uses this to tell
+         * self-taking methods apart when adjusting call arguments. */
+        chunk_set_local_name(func_comp.chunk, 0, "self");
         first_param = 1;
     }
     func_comp.arity = (int)(param_count - first_param);

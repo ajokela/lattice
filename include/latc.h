@@ -7,9 +7,9 @@
 #include <stdint.h>
 
 #define LATC_MAGIC   "LATC"
-#define LATC_FORMAT   1
+#define LATC_FORMAT  2
 #define RLATC_MAGIC  "RLAT"
-#define RLATC_FORMAT  2
+#define RLATC_FORMAT 2
 
 /* Save a compiled chunk to a .latc file. Returns 0 on success, -1 on error. */
 int chunk_save(const Chunk *c, const char *path);
