@@ -170,6 +170,12 @@ typedef enum {
 
     /* Fallback to tree-walker */
     OP_HALT, /* Stop execution */
+
+    /* Global index fast paths (borrow the global in env — no container clone).
+     * Appended after OP_HALT so existing opcode values stay stable for the
+     * self-hosted compiler, which hardcodes opcode numbers. */
+    OP_INDEX_GLOBAL,     /* operand = BE16 name constant. Pop index. Push global[index] element. */
+    OP_SET_INDEX_GLOBAL, /* operand = BE16 name constant. Pop index, value. Mutate global[index] = value in place. */
 } Opcode;
 
 const char *opcode_name(Opcode op);

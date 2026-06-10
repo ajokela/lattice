@@ -446,6 +446,8 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
             return offset + 3;
         }
         case OP_HALT: return simple_instruction("OP_HALT", offset);
+        case OP_INDEX_GLOBAL: return constant_instruction_16("OP_INDEX_GLOBAL", c, offset);
+        case OP_SET_INDEX_GLOBAL: return constant_instruction_16("OP_SET_INDEX_GLOBAL", c, offset);
         default: fprintf(stderr, "Unknown opcode %d\n", op); return offset + 1;
     }
 }
@@ -592,6 +594,8 @@ static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
         case OP_GET_GLOBAL_16:
         case OP_SET_GLOBAL_16:
         case OP_DEFINE_GLOBAL_16:
+        case OP_INDEX_GLOBAL:
+        case OP_SET_INDEX_GLOBAL:
         case OP_CHECK_RETURN_TYPE: NEED(3); return 3;
         /* 4-byte */
         case OP_BUILD_ENUM:
@@ -679,7 +683,9 @@ static char *verify_instr_operands(const Chunk *c, size_t off, const uint8_t *is
         case OP_UNSEED: CK_STR(c->code[off + 1]); break;
         case OP_GET_GLOBAL_16:
         case OP_SET_GLOBAL_16:
-        case OP_DEFINE_GLOBAL_16: CK_STR(U16(off + 1)); break;
+        case OP_DEFINE_GLOBAL_16:
+        case OP_INDEX_GLOBAL:
+        case OP_SET_INDEX_GLOBAL: CK_STR(U16(off + 1)); break;
         case OP_INVOKE: CK_STR(c->code[off + 1]); break;
         case OP_INVOKE_LOCAL: CK_STR(c->code[off + 2]); break;
         case OP_INVOKE_GLOBAL:

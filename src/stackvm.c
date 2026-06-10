@@ -3158,6 +3158,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_INDEX_LOCAL] = &&lbl_OP_INDEX_LOCAL,
         [OP_GET_FIELD_LOCAL] = &&lbl_OP_GET_FIELD_LOCAL,
         [OP_HALT] = &&lbl_OP_HALT,
+        [OP_INDEX_GLOBAL] = &&lbl_OP_INDEX_GLOBAL,
+        [OP_SET_INDEX_GLOBAL] = &&lbl_OP_SET_INDEX_GLOBAL,
     };
 #endif
 
@@ -6211,6 +6213,217 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 VM_ERROR("invalid index operation: %s[%s]", ot, it);
                 break;
             }
+            break;
+        }
+
+        /* ── Index global (read): borrow the global in env, no container clone ── */
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_INDEX_GLOBAL:
+#endif
+        case OP_INDEX_GLOBAL: {
+            uint16_t cidx = READ_U16();
+            const char *gname = frame->chunk->constants[cidx].as.str_val;
+            size_t ghash = frame->chunk->const_hashes[cidx];
+            LatValue idx = pop(vm);
+            LatValue *obj = env_get_ref_prehashed(vm->env, gname, ghash);
+            if (!obj) {
+                value_free(&idx);
+                const char *sug = env_find_similar_name(vm->env, gname);
+                if (sug) {
+                    VM_ERROR("undefined variable '%s' (did you mean '%s'?)", gname, sug);
+                } else {
+                    VM_ERROR("undefined variable '%s'", gname);
+                }
+                break;
+            }
+
+            if (obj->type == VAL_ARRAY && idx.type == VAL_INT) {
+                int64_t i = idx.as.int_val;
+                if (i < 0 || (size_t)i >= obj->as.array.len) {
+                    VM_ERROR("array index out of bounds: %lld (len %zu)", (long long)i, obj->as.array.len);
+                    break;
+                }
+                push(vm, value_clone_fast(&obj->as.array.elems[i]));
+            } else if (obj->type == VAL_MAP && idx.type == VAL_STR) {
+                LatValue *found = lat_map_get(obj->as.map.map, idx.as.str_val);
+                if (found) push(vm, value_clone_fast(found));
+                else push(vm, value_nil());
+                value_free(&idx);
+            } else if (obj->type == VAL_STR && idx.type == VAL_INT) {
+                int64_t i = idx.as.int_val;
+                size_t len = strlen(obj->as.str_val);
+                if (i < 0 || (size_t)i >= len) {
+                    VM_ERROR("string index out of bounds");
+                    break;
+                }
+                char ch[2] = {obj->as.str_val[i], '\0'};
+                push(vm, value_string(ch));
+            } else if (obj->type == VAL_TUPLE && idx.type == VAL_INT) {
+                int64_t i = idx.as.int_val;
+                if (i < 0 || (size_t)i >= obj->as.tuple.len) {
+                    VM_ERROR("tuple index out of bounds");
+                    break;
+                }
+                push(vm, value_clone_fast(&obj->as.tuple.elems[i]));
+            } else if (obj->type == VAL_STR && idx.type == VAL_RANGE) {
+                int64_t start = idx.as.range.start;
+                int64_t end = idx.as.range.end;
+                size_t len = strlen(obj->as.str_val);
+                if (start < 0) start = 0;
+                if (end < 0) end = 0;
+                if ((size_t)start > len) start = (int64_t)len;
+                if ((size_t)end > len) end = (int64_t)len;
+                if (start >= end) {
+                    push(vm, value_string(""));
+                } else {
+                    size_t slice_len = (size_t)(end - start);
+                    char *slice = malloc(slice_len + 1);
+                    if (!slice) return STACKVM_RUNTIME_ERROR;
+                    memcpy(slice, obj->as.str_val + start, slice_len);
+                    slice[slice_len] = '\0';
+                    push(vm, value_string_owned(slice));
+                }
+            } else if (obj->type == VAL_ARRAY && idx.type == VAL_RANGE) {
+                int64_t start = idx.as.range.start;
+                int64_t end = idx.as.range.end;
+                size_t len = obj->as.array.len;
+                if (start < 0) start = 0;
+                if ((size_t)start > len) start = (int64_t)len;
+                if (end < 0) end = 0;
+                if ((size_t)end > len) end = (int64_t)len;
+                if (start >= end) {
+                    push(vm, value_array(NULL, 0));
+                } else {
+                    size_t slice_len = (size_t)(end - start);
+                    LatValue *elems = malloc(slice_len * sizeof(LatValue));
+                    if (!elems) return STACKVM_RUNTIME_ERROR;
+                    for (size_t si = 0; si < slice_len; si++)
+                        elems[si] = value_deep_clone(&obj->as.array.elems[start + si]);
+                    push(vm, value_array(elems, slice_len));
+                    free(elems);
+                }
+            } else if (obj->type == VAL_BUFFER && idx.type == VAL_INT) {
+                int64_t i = idx.as.int_val;
+                if (i < 0 || (size_t)i >= obj->as.buffer.len) {
+                    VM_ERROR("buffer index out of bounds: %lld (len %zu)", (long long)i, obj->as.buffer.len);
+                    break;
+                }
+                push(vm, value_int(obj->as.buffer.data[i]));
+            } else if (obj->type == VAL_REF) {
+                LatValue *inner = &obj->as.ref.ref->value;
+                if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
+                    int64_t i = idx.as.int_val;
+                    if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        VM_ERROR("array index out of bounds: %lld (len %zu)", (long long)i, inner->as.array.len);
+                        break;
+                    }
+                    push(vm, value_deep_clone(&inner->as.array.elems[i]));
+                } else if (inner->type == VAL_MAP && idx.type == VAL_STR) {
+                    LatValue *found = lat_map_get(inner->as.map.map, idx.as.str_val);
+                    if (found) push(vm, value_deep_clone(found));
+                    else push(vm, value_nil());
+                    value_free(&idx);
+                } else {
+                    const char *it = value_type_name(&idx);
+                    const char *innert = value_type_name(inner);
+                    value_free(&idx);
+                    VM_ERROR("invalid index operation: Ref<%s>[%s]", innert, it);
+                }
+                break;
+            } else {
+                const char *ot = value_type_name(obj);
+                const char *it = value_type_name(&idx);
+                value_free(&idx);
+                VM_ERROR("invalid index operation: %s[%s]", ot, it);
+                break;
+            }
+            break;
+        }
+
+        /* ── Set index on global: mutate the global in place (no clone + write-back) ── */
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_SET_INDEX_GLOBAL:
+#endif
+        case OP_SET_INDEX_GLOBAL: {
+            uint16_t cidx = READ_U16();
+            const char *gname = frame->chunk->constants[cidx].as.str_val;
+            size_t ghash = frame->chunk->const_hashes[cidx];
+            LatValue idx = pop(vm);
+            LatValue val = pop(vm);
+            stackvm_promote_value(&val);
+            LatValue *obj = env_get_ref_prehashed(vm->env, gname, ghash);
+            if (!obj) {
+                value_free(&idx);
+                value_free(&val);
+                const char *sug = env_find_similar_name(vm->env, gname);
+                if (sug) {
+                    VM_ERROR("undefined variable '%s' (did you mean '%s'?)", gname, sug);
+                } else {
+                    VM_ERROR("undefined variable '%s'", gname);
+                }
+                break;
+            }
+
+            /* Ref proxy: delegate set-index to inner value */
+            if (obj->type == VAL_REF) {
+                if (obj->phase == VTAG_CRYSTAL) {
+                    value_free(&val);
+                    value_free(&idx);
+                    VM_ERROR("cannot assign index on a frozen Ref");
+                    break;
+                }
+                LatValue *inner = &obj->as.ref.ref->value;
+                if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
+                    int64_t i = idx.as.int_val;
+                    if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        value_free(&val);
+                        VM_ERROR("array index out of bounds in assignment");
+                        break;
+                    }
+                    value_free(&inner->as.array.elems[i]);
+                    inner->as.array.elems[i] = val;
+                    break;
+                }
+                if (inner->type == VAL_MAP && idx.type == VAL_STR) {
+                    LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, idx.as.str_val);
+                    if (old) value_free(old);
+                    lat_map_set(inner->as.map.map, idx.as.str_val, &val);
+                    value_free(&idx);
+                    break;
+                }
+                value_free(&val);
+                value_free(&idx);
+                VM_ERROR("invalid index assignment on Ref");
+                break;
+            }
+            if (obj->type == VAL_ARRAY && idx.type == VAL_INT) {
+                int64_t i = idx.as.int_val;
+                if (i < 0 || (size_t)i >= obj->as.array.len) {
+                    value_free(&val);
+                    VM_ERROR("array index out of bounds in assignment");
+                    break;
+                }
+                value_free(&obj->as.array.elems[i]);
+                obj->as.array.elems[i] = val;
+            } else if (obj->type == VAL_MAP && idx.type == VAL_STR) {
+                lat_map_set(obj->as.map.map, idx.as.str_val, &val);
+                value_free(&idx);
+            } else if (obj->type == VAL_BUFFER && idx.type == VAL_INT) {
+                int64_t i = idx.as.int_val;
+                if (i < 0 || (size_t)i >= obj->as.buffer.len) {
+                    value_free(&val);
+                    VM_ERROR("buffer index out of bounds in assignment");
+                    break;
+                }
+                obj->as.buffer.data[i] = (uint8_t)(val.as.int_val & 0xFF);
+                value_free(&val);
+            } else {
+                value_free(&val);
+                value_free(&idx);
+                VM_ERROR("invalid index assignment");
+                break;
+            }
+            if (vm->rt->tracking_active) { stackvm_record_history(vm, gname, obj); }
             break;
         }
 
