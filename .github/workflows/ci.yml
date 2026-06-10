@@ -30,6 +30,9 @@ jobs:
       - name: Test thin runtime (.latc and .rlat roundtrips)
         run: make test-runtime
 
+      - name: Test self-hosted compiler bootstrap fixed point
+        run: make test-bootstrap
+
       - name: Build extensions
         run: |
           make ext-sqlite
