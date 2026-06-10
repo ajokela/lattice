@@ -4,6 +4,7 @@
 #include "builtins.h"
 #include "value.h"
 #include "http.h"
+#include "crypto_ops.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -248,9 +249,32 @@ static char *find_cached_package(const char *name, const char *version) {
  * static or from getenv — do NOT free. */
 static const char *get_registry_url(void) {
     const char *url = getenv("LATTICE_REGISTRY");
-    /* Only use LATTICE_REGISTRY if it looks like an HTTP(S) URL */
-    if (url && (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0)) return url;
+    if (url) {
+        if (strncmp(url, "https://", 8) == 0) return url;
+        if (strncmp(url, "http://", 7) == 0) {
+            /* Plain HTTP lets an on-path attacker substitute package contents,
+             * which are then executed. Require an explicit insecure opt-in. */
+            if (getenv("LATTICE_INSECURE_REGISTRY")) return url;
+            fprintf(stderr, "warning: ignoring insecure http:// LATTICE_REGISTRY "
+                            "(set LATTICE_INSECURE_REGISTRY=1 to allow); using default HTTPS registry\n");
+        }
+    }
     return PKG_DEFAULT_REGISTRY;
+}
+
+/* Compute the SHA-256 (hex) of an installed package's primary source file, for
+ * recording in / verifying against lattice.lock. Returns "" if unavailable. */
+static char *pkg_compute_checksum(const char *name) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "lat_modules/%s/main.lat", name);
+    if (!fs_file_exists(path)) snprintf(path, sizeof(path), "lat_modules/%s/lattice.toml", name);
+    char *content = builtin_read_file(path);
+    if (!content) return strdup("");
+    char *cerr = NULL;
+    char *sum = crypto_sha256(content, strlen(content), &cerr);
+    free(content);
+    free(cerr);
+    return sum ? sum : strdup("");
 }
 
 /* Fetch package version list from registry.
@@ -1394,6 +1418,13 @@ static const char *lock_find_version(const PkgLock *lock, const char *name) {
     return NULL;
 }
 
+static const char *lock_find_checksum(const PkgLock *lock, const char *name) {
+    for (size_t i = 0; i < lock->entry_count; i++) {
+        if (lock->entries[i].name && strcmp(lock->entries[i].name, name) == 0) return lock->entries[i].checksum;
+    }
+    return NULL;
+}
+
 int pkg_cmd_install(void) {
     if (!fs_file_exists("lattice.toml")) {
         fprintf(stderr, "error: no lattice.toml found. Run 'clat init' first.\n");
@@ -1529,16 +1560,31 @@ int pkg_cmd_install(void) {
                 }
             }
 
-            /* Add to lock */
-            if (lock.entry_count >= lock.entry_cap) {
-                lock.entry_cap *= 2;
-                lock.entries = realloc(lock.entries, lock.entry_cap * sizeof(PkgLockEntry));
+            /* Verify integrity against the existing lock (trust-on-first-use),
+             * then record the real checksum. */
+            char *new_sum = pkg_compute_checksum(dep_name);
+            const char *old_sum = have_lock ? lock_find_checksum(&existing_lock, dep_name) : NULL;
+            if (old_sum && *old_sum && strcmp(old_sum, new_sum) != 0) {
+                fprintf(stderr,
+                        "  error: integrity check failed for '%s' — content does not match lattice.lock checksum\n",
+                        dep_name);
+                char rmpath[PATH_MAX];
+                snprintf(rmpath, sizeof(rmpath), "lat_modules/%s", dep_name);
+                pkg_remove_tree(rmpath);
+                free(new_sum);
+                free(resolved_ver);
+            } else {
+                /* Add to lock */
+                if (lock.entry_count >= lock.entry_cap) {
+                    lock.entry_cap *= 2;
+                    lock.entries = realloc(lock.entries, lock.entry_cap * sizeof(PkgLockEntry));
+                }
+                PkgLockEntry *le = &lock.entries[lock.entry_count++];
+                le->name = strdup(dep_name);
+                le->version = resolved_ver;
+                le->source = strdup(pkg_source);
+                le->checksum = new_sum;
             }
-            PkgLockEntry *le = &lock.entries[lock.entry_count++];
-            le->name = strdup(dep_name);
-            le->version = resolved_ver;
-            le->source = strdup(pkg_source);
-            le->checksum = strdup("");
         } else {
             printf(" FAILED\n");
             fprintf(stderr, "  error: %s\n", fetch_err ? fetch_err : "unknown error");
