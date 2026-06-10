@@ -5447,3 +5447,23 @@ TEST(yaml_trailing_backslash_no_oob) {
     }
     ASSERT(1); /* reaching here without an ASan abort is the assertion */
 }
+
+/* ── Buffer negative-index OOB (LAT-418) ── */
+TEST(buffer_negative_index_no_oob) {
+    /* A negative index cast to size_t wraps huge, and `i + N` wrapped back small
+     * enough to pass the bounds check -> out-of-bounds read/write. Backends
+     * differ in whether they error or return nil, but none may touch memory out
+     * of bounds; ASan flags the OOB here if the guard is missing. */
+    char *err = NULL;
+    run_source_ok("fn main() {\n"
+                  "    flux b = Buffer::new(16)\n"
+                  "    let a = b.read_i16(-1)\n"
+                  "    let c = b.read_u32(-4)\n"
+                  "    let d = b.read_f64(-8)\n"
+                  "    b.write_u16(-1, 42)\n"
+                  "    b.write_u64(-2, 7)\n"
+                  "}\n",
+                  &err);
+    free(err);
+    ASSERT(1); /* reaching here without a crash / ASan abort is the assertion */
+}
