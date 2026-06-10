@@ -5317,3 +5317,37 @@ TEST(channel_send_survives_spawn_exit) {
                 "    assert(v[7] == 800, \"channel array corrupted (elem 7)\")\n"
                 "}\n");
 }
+
+/* ── Intern table thread-safety (LAT-412) ── */
+#include "intern.h"
+#include <pthread.h>
+static void *intern_stress_thread(void *arg) {
+    int base = *(int *)arg;
+    char buf[40];
+    for (int i = 0; i < 3000; i++) {
+        /* Distinct strings per thread force the table to grow repeatedly... */
+        snprintf(buf, sizeof(buf), "k_%d_%d", base, i);
+        intern(buf);
+        /* ...while shared strings contend on the same slots. */
+        snprintf(buf, sizeof(buf), "shared_%d", i % 600);
+        intern(buf);
+    }
+    return NULL;
+}
+TEST(intern_concurrent_threads_safe) {
+    /* Hammer the global intern table from several threads directly (isolating
+     * it from the VM's other spawn machinery). Without a lock, intern_grow()
+     * frees and rebuilds the entries array while peer threads read it — a data
+     * race / use-after-free that ASan catches here. */
+    enum { NTHREADS = 6 };
+    pthread_t th[NTHREADS];
+    int args[NTHREADS];
+    for (int t = 0; t < NTHREADS; t++) {
+        args[t] = t;
+        pthread_create(&th[t], NULL, intern_stress_thread, &args[t]);
+    }
+    for (int t = 0; t < NTHREADS; t++) pthread_join(th[t], NULL);
+    /* Reaching here without an ASan abort means the table stayed consistent.
+     * Spot-check that interning is still canonical. */
+    ASSERT(intern("shared_1") == intern("shared_1"));
+}
