@@ -2519,7 +2519,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 return true;
             }
             LatValue val = rvm_clone(&args[0]);
-            channel_send(obj->as.channel.ch, val);
+            if (!channel_send(obj->as.channel.ch, val)) {
+                vm->error = strdup("cannot send on a closed channel");
+                *result = value_unit();
+                return true;
+            }
             *result = value_unit();
             return true;
         }

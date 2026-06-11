@@ -2659,6 +2659,17 @@ static void test_channel_close_recv_unit(void) {
                   "1\nUnit");
 }
 
+/* Sending on a closed channel must be a runtime error on every backend
+ * (LAT-443: stackvm/regvm previously dropped the value silently). */
+static void test_channel_send_closed_errors(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let ch = Channel::new()\n"
+                              "    ch.close()\n"
+                              "    ch.send(freeze(1))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
 static void test_channel_crystal_only_send(void) {
     ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
                               "    let ch = Channel::new()\n"
@@ -12506,6 +12517,7 @@ void register_stdlib_tests(void) {
     register_test("test_channel_basic_send_recv", test_channel_basic_send_recv);
     register_test("test_scope_two_spawns_channels", test_scope_two_spawns_channels);
     register_test("test_channel_close_recv_unit", test_channel_close_recv_unit);
+    register_test("test_channel_send_closed_errors", test_channel_send_closed_errors);
     register_test("test_channel_crystal_only_send", test_channel_crystal_only_send);
     register_test("test_scope_no_spawns_sequential", test_scope_no_spawns_sequential);
     register_test("test_spawn_outside_scope", test_spawn_outside_scope);

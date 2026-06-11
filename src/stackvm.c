@@ -2246,7 +2246,11 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     push(vm, value_unit());
                     return true;
                 }
-                channel_send(obj->as.channel.ch, val);
+                if (!channel_send(obj->as.channel.ch, val)) {
+                    vm->error = strdup("cannot send on a closed channel");
+                    push(vm, value_unit());
+                    return true;
+                }
                 push(vm, value_unit());
                 return true;
             }
