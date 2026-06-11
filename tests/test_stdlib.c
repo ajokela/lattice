@@ -2679,6 +2679,59 @@ static void test_channel_crystal_only_send(void) {
                               "EVAL_ERROR:");
 }
 
+/* LAT-442: harmonized send rule — fluid scalars are copyable, allowed. */
+static void test_channel_send_fluid_scalar_ok(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let ch = Channel::new()\n"
+                  "    flux x = 7\n"
+                  "    ch.send(x)\n"
+                  "    print(ch.recv())\n"
+                  "}\n",
+                  "7");
+}
+
+/* LAT-442: unphased plain-data graphs deep-detach safely, allowed. */
+static void test_channel_send_unphased_array_ok(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let ch = Channel::new()\n"
+                  "    ch.send([1, 2, 3])\n"
+                  "    let v = ch.recv()\n"
+                  "    print(v[0])\n"
+                  "}\n",
+                  "1");
+}
+
+/* LAT-442: Refs share a non-atomically-refcounted cell across detach —
+ * rejected regardless of phase. */
+static void test_channel_send_ref_rejected(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let ch = Channel::new()\n"
+                              "    let r = Ref::new(42)\n"
+                              "    ch.send(r)\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
+/* LAT-442: closures share captured_env across detach — rejected even frozen. */
+static void test_channel_send_closure_rejected(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let ch = Channel::new()\n"
+                              "    let f = freeze(|x| { x })\n"
+                              "    ch.send(f)\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
+/* LAT-442: the walk must find shared-state kinds nested inside containers. */
+static void test_channel_send_array_containing_closure_rejected(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let ch = Channel::new()\n"
+                              "    let a = [|x| { x }]\n"
+                              "    ch.send(freeze(a))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
 static void test_scope_no_spawns_sequential(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    let x = scope {\n"
@@ -12519,6 +12572,12 @@ void register_stdlib_tests(void) {
     register_test("test_channel_close_recv_unit", test_channel_close_recv_unit);
     register_test("test_channel_send_closed_errors", test_channel_send_closed_errors);
     register_test("test_channel_crystal_only_send", test_channel_crystal_only_send);
+    register_test("test_channel_send_fluid_scalar_ok", test_channel_send_fluid_scalar_ok);
+    register_test("test_channel_send_unphased_array_ok", test_channel_send_unphased_array_ok);
+    register_test("test_channel_send_ref_rejected", test_channel_send_ref_rejected);
+    register_test("test_channel_send_closure_rejected", test_channel_send_closure_rejected);
+    register_test("test_channel_send_array_containing_closure_rejected",
+                  test_channel_send_array_containing_closure_rejected);
     register_test("test_scope_no_spawns_sequential", test_scope_no_spawns_sequential);
     register_test("test_spawn_outside_scope", test_spawn_outside_scope);
     register_test("test_channel_multiple_sends_fifo", test_channel_multiple_sends_fifo);

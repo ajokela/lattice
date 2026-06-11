@@ -2513,8 +2513,9 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
     /* ── Channel methods ── */
     if (obj->type == VAL_CHANNEL) {
         if (mhash == MHASH_send && strcmp(method, "send") == 0 && arg_count == 1) {
-            if (!value_is_crystal(&args[0]) && args[0].phase != VTAG_UNPHASED) {
-                vm->error = strdup("channel send requires crystal or unphased values");
+            const char *send_err = value_send_ineligible(&args[0]);
+            if (send_err) {
+                vm->error = strdup(send_err);
                 *result = value_unit();
                 return true;
             }

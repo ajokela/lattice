@@ -2240,9 +2240,10 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
         case VAL_CHANNEL: {
             if (mhash == MHASH_send && strcmp(method, "send") == 0 && arg_count == 1) {
                 LatValue val = pop(vm);
-                if (val.phase == VTAG_FLUID) {
+                const char *send_err = value_send_ineligible(&val);
+                if (send_err) {
                     value_free(&val);
-                    vm->error = strdup("channel.send: can only send crystal (immutable) values");
+                    vm->error = strdup(send_err);
                     push(vm, value_unit());
                     return true;
                 }

@@ -13207,10 +13207,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// @example ch.send(freeze(42))
         if (strcmp(method, "send") == 0) {
             if (arg_count != 1) return eval_err(strdup(".send() expects exactly 1 argument"));
-            if (!value_is_crystal(&args[0]) && args[0].type != VAL_INT && args[0].type != VAL_FLOAT &&
-                args[0].type != VAL_BOOL && args[0].type != VAL_UNIT) {
-                return eval_err(strdup("can only send crystal (frozen) values on a channel"));
-            }
+            const char *send_err = value_send_ineligible(&args[0]);
+            if (send_err) return eval_err(strdup(send_err));
             /* Deep-clone into malloc-backed memory (no heap/arena pointers) */
             DualHeap *saved_heap = ev->heap;
             value_set_heap(NULL);
