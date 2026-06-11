@@ -1,6 +1,21 @@
 #include "memory.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <assert.h>
+
+#ifndef __EMSCRIPTEN__
+#include <pthread.h>
+#endif
+
+/* Debug seal backstop (CbR Stage 2): POSIX-only, compiled out under NDEBUG.
+ * Windows would use VirtualProtect (deferred — gauntlet targets are POSIX);
+ * wasm has no mprotect (the same suite runs natively first). */
+#if !defined(NDEBUG) && !defined(_WIN32) && !defined(__EMSCRIPTEN__) && (defined(__unix__) || defined(__APPLE__))
+#define LATTICE_REGION_SEAL 1
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 /* ── Fluid Heap ── */
 
@@ -143,6 +158,32 @@ static void arena_page_free_list(ArenaPage *p) {
     }
 }
 
+/* CbR Stage 2: shared-region pages are page-aligned (and page-granular) so
+ * the debug seal can mprotect() them. posix_memalign memory is free()able,
+ * so arena_page_free_list works unchanged. Falls back to plain pages when
+ * the seal backstop is compiled out. */
+static ArenaPage *arena_page_new_aligned(size_t cap) {
+#ifdef LATTICE_REGION_SEAL
+    long ps_raw = sysconf(_SC_PAGESIZE);
+    size_t ps = ps_raw > 0 ? (size_t)ps_raw : 4096;
+    size_t span = (cap + ps - 1) & ~(ps - 1);
+    ArenaPage *p = malloc(sizeof(ArenaPage));
+    if (!p) return NULL;
+    void *data = NULL;
+    if (posix_memalign(&data, ps, span) != 0) {
+        free(p);
+        return NULL;
+    }
+    p->data = data;
+    p->used = 0;
+    p->cap = span;
+    p->next = NULL;
+    return p;
+#else
+    return arena_page_new(cap);
+#endif
+}
+
 /* ── Bump Arena ── */
 
 BumpArena *bump_arena_new(void) {
@@ -234,6 +275,197 @@ static void crystal_region_free(CrystalRegion *r) {
     free(r);
 }
 
+/* ── Shared crystal regions (Crystal-by-Reference, Stage 2) ──
+ *
+ * Dormant in Round A: nothing in any evaluator creates these yet; the only
+ * producers are value_freeze_to_region (itself uncalled by the language) and
+ * unit tests. See memory.h for the atomics/memory-ordering contract. */
+
+#ifndef __EMSCRIPTEN__
+static pthread_mutex_t g_shared_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
+#define SHARED_REG_LOCK()   pthread_mutex_lock(&g_shared_reg_mutex)
+#define SHARED_REG_UNLOCK() pthread_mutex_unlock(&g_shared_reg_mutex)
+#else
+#define SHARED_REG_LOCK()   ((void)0)
+#define SHARED_REG_UNLOCK() ((void)0)
+#endif
+
+/* Registry: stats, leak diagnostics, and process-exit teardown ONLY.
+ * Retain and non-final release never touch it. Plain malloc (never routed
+ * through lat_alloc) so no thread's FluidHeap ever tracks it. */
+static CrystalRegion **g_shared_regions = NULL;
+static size_t g_shared_count = 0;
+static size_t g_shared_cap = 0;
+static bool g_shared_atexit_registered = false;
+/* Atomic mirrors of the registry counts so the hot-path dormancy gate
+ * (crystal_region_shared_active) never takes the mutex. */
+static _Atomic size_t g_shared_live = 0;
+static _Atomic size_t g_shared_created = 0;
+
+static void crystal_region_unseal(CrystalRegion *r) {
+#ifdef LATTICE_REGION_SEAL
+    /* Unconditional for page-aligned regions — deliberately NOT gated on
+     * r->sealed: a partially failed seal (some pages already PROT_READ when
+     * a later page's mprotect fails) records sealed == false but leaves
+     * read-only pages behind; gating on the flag would skip them and free()
+     * would hand protected pages back to the allocator (delayed SIGSEGV on
+     * reuse). mprotect(PROT_READ|PROT_WRITE) on never-protected pages is
+     * harmless. */
+    if (!r->page_aligned) return;
+    for (ArenaPage *p = r->pages; p; p = p->next) { (void)mprotect(p->data, p->cap, PROT_READ | PROT_WRITE); }
+    r->sealed = false;
+#else
+    (void)r;
+#endif
+}
+
+void crystal_region_seal(CrystalRegion *r) {
+#ifdef LATTICE_REGION_SEAL
+    if (!r || !r->page_aligned || r->sealed) return;
+    bool ok = true;
+    for (ArenaPage *p = r->pages; p; p = p->next) {
+        if (mprotect(p->data, p->cap, PROT_READ) != 0) ok = false;
+    }
+    /* Best-effort backstop; correctness never depends on it. On partial
+     * failure (ok == false) some pages may remain PROT_READ — the
+     * unconditional unseal in crystal_region_destroy_shared restores them. */
+    r->sealed = ok;
+#else
+    (void)r;
+#endif
+}
+
+/* Frees a shared region's storage unconditionally (rc==0 path and process-
+ * exit teardown). O(1) per page: regions contain pure data, nothing to
+ * finalize. The unseal is unconditional (not gated on r->sealed) so pages
+ * left PROT_READ by a partially failed seal are restored before free(). */
+static void crystal_region_destroy_shared(CrystalRegion *r) {
+    crystal_region_unseal(r);
+    arena_page_free_list(r->pages);
+    free(r);
+}
+
+/* Debug global region counter + process-exit leak report (R29); also frees
+ * whatever is still registered so ASAN-built test binaries exit clean.
+ *
+ * Exit-time edges (all acceptable while the registry is empty at exit —
+ * Round A — and to be revisited when the evaluator holds handles):
+ *   - atexit handlers run LIFO: handlers registered EARLIER than this one
+ *     run AFTER it, so any such handler that value_free()s a shared handle
+ *     would release into a registry this teardown has already destroyed.
+ *   - A racing thread can be inside crystal_region_release with rc already
+ *     at zero but shared_registry_remove not yet run; this teardown could
+ *     then double-free that region. Threads must not be releasing handles
+ *     during exit.
+ *   - g_shared_atexit_registered is never reset, so a (hypothetical)
+ *     create-after-exit-teardown would not re-register; worst case is a
+ *     leak at exit, never a use-after-free. */
+static void shared_registry_atexit(void) {
+    SHARED_REG_LOCK();
+#ifndef NDEBUG
+    for (size_t i = 0; i < g_shared_count; i++) {
+        CrystalRegion *r = g_shared_regions[i];
+        fprintf(stderr, "lattice: leaked shared crystal region #%zu at exit (rc=%zu, %zu bytes)\n", r->id,
+                atomic_load_explicit(&r->rc, memory_order_relaxed), r->total_bytes);
+    }
+#endif
+    for (size_t i = 0; i < g_shared_count; i++) crystal_region_destroy_shared(g_shared_regions[i]);
+    free(g_shared_regions);
+    g_shared_regions = NULL;
+    g_shared_count = 0;
+    g_shared_cap = 0;
+    atomic_store_explicit(&g_shared_live, 0, memory_order_relaxed);
+    SHARED_REG_UNLOCK();
+}
+
+static void shared_registry_remove(CrystalRegion *r) {
+    SHARED_REG_LOCK();
+    for (size_t i = 0; i < g_shared_count; i++) {
+        if (g_shared_regions[i] == r) {
+            g_shared_regions[i] = g_shared_regions[g_shared_count - 1];
+            g_shared_count--;
+            break;
+        }
+    }
+    SHARED_REG_UNLOCK();
+}
+
+CrystalRegion *crystal_region_create_shared(void) {
+    CrystalRegion *r = calloc(1, sizeof(CrystalRegion));
+    if (!r) return NULL;
+    /* Low-bit tag soundness: malloc guarantees alignment, but the whole
+     * scheme rests on it — assert anyway. */
+    assert(((uintptr_t)r & 1u) == 0);
+    r->shared = true;
+#ifdef LATTICE_REGION_SEAL
+    r->page_aligned = true;
+#endif
+    r->id = atomic_fetch_add_explicit(&g_shared_created, 1, memory_order_relaxed);
+    r->pages = r->page_aligned ? arena_page_new_aligned(ARENA_PAGE_SIZE) : arena_page_new(ARENA_PAGE_SIZE);
+    if (!r->pages) {
+        free(r);
+        return NULL;
+    }
+    atomic_store_explicit(&r->rc, 1, memory_order_relaxed);
+
+    SHARED_REG_LOCK();
+    if (!g_shared_atexit_registered) {
+        atexit(shared_registry_atexit);
+        g_shared_atexit_registered = true;
+    }
+    if (g_shared_count >= g_shared_cap) {
+        size_t ncap = g_shared_cap ? g_shared_cap * 2 : 8;
+        CrystalRegion **n = realloc(g_shared_regions, ncap * sizeof(CrystalRegion *));
+        if (!n) {
+            SHARED_REG_UNLOCK();
+            crystal_region_destroy_shared(r);
+            return NULL;
+        }
+        g_shared_regions = n;
+        g_shared_cap = ncap;
+    }
+    g_shared_regions[g_shared_count++] = r;
+    SHARED_REG_UNLOCK();
+    atomic_fetch_add_explicit(&g_shared_live, 1, memory_order_relaxed);
+    return r;
+}
+
+void crystal_region_retain(CrystalRegion *r) {
+    assert(r && r->shared);
+    atomic_fetch_add_explicit(&r->rc, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&r->dbg_retains, 1, memory_order_relaxed);
+}
+
+void crystal_region_release(CrystalRegion *r) {
+    assert(r && r->shared);
+    atomic_fetch_add_explicit(&r->dbg_releases, 1, memory_order_relaxed);
+    if (atomic_fetch_sub_explicit(&r->rc, 1, memory_order_acq_rel) == 1) {
+        atomic_thread_fence(memory_order_acquire);
+        /* rc-ledger teardown assert (H16): creation ref + retains == releases */
+        assert(atomic_load_explicit(&r->dbg_retains, memory_order_relaxed) + 1 ==
+               atomic_load_explicit(&r->dbg_releases, memory_order_relaxed));
+        shared_registry_remove(r);
+        crystal_region_destroy_shared(r);
+        atomic_fetch_sub_explicit(&g_shared_live, 1, memory_order_relaxed);
+    }
+}
+
+size_t crystal_region_refcount(CrystalRegion *r) { return atomic_load_explicit(&r->rc, memory_order_acquire); }
+
+size_t crystal_region_dbg_retains(CrystalRegion *r) {
+    return atomic_load_explicit(&r->dbg_retains, memory_order_relaxed);
+}
+
+size_t crystal_region_dbg_releases(CrystalRegion *r) {
+    return atomic_load_explicit(&r->dbg_releases, memory_order_relaxed);
+}
+
+bool crystal_region_shared_active(void) { return atomic_load_explicit(&g_shared_live, memory_order_relaxed) != 0; }
+
+size_t crystal_region_live_count(void) { return atomic_load_explicit(&g_shared_live, memory_order_relaxed); }
+
+size_t crystal_region_created_total(void) { return atomic_load_explicit(&g_shared_created, memory_order_relaxed); }
+
 /* ── Arena allocation ── */
 
 void *arena_alloc(CrystalRegion *r, size_t size) {
@@ -251,7 +483,7 @@ void *arena_alloc(CrystalRegion *r, size_t size) {
 
     /* Need a new page — oversized allocs get a dedicated page */
     size_t page_cap = aligned > ARENA_PAGE_SIZE ? aligned : ARENA_PAGE_SIZE;
-    ArenaPage *np = arena_page_new(page_cap);
+    ArenaPage *np = r->page_aligned ? arena_page_new_aligned(page_cap) : arena_page_new(page_cap);
     np->next = r->pages;
     r->pages = np;
 

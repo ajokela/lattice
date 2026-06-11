@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <assert.h>
 
 _Static_assert(sizeof(LatValue) <= LAT_MAP_INLINE_MAX,
                "LatValue must fit in LAT_MAP_INLINE_MAX bytes for inline hashmap storage");
@@ -27,11 +28,15 @@ void value_set_arena(CrystalRegion *region) { g_arena = region; }
 CrystalRegion *value_get_arena(void) { return g_arena; }
 
 /* Deep-clone a value into thread-independent (malloc-backed) storage by
- * cloning with the thread-local heap/arena temporarily detached. The result's
- * region_id is REGION_NONE, so its backing survives the current thread's heap
- * teardown and is owned by whoever value_free()s it. Used when handing a value
- * across threads (e.g. through a channel), where the sender's fluid heap is
- * freed before the receiver reads the value. */
+ * cloning with the thread-local heap/arena temporarily detached. Force-copied
+ * nodes come back with region_id REGION_NONE; a shared crystal handle (CbR
+ * Stage 2) instead comes back as a retained alias keeping its tagged
+ * region_id — that is equally thread-independent, since shared-region pages
+ * are plain global malloc and never touch any thread's FluidHeap. Either
+ * way the result survives the current thread's heap teardown and is owned by
+ * whoever value_free()s it. Used when handing a value across threads (e.g.
+ * through a channel), where the sender's fluid heap is freed before the
+ * receiver reads the value. */
 LatValue value_detach(const LatValue *v) {
     DualHeap *saved_heap = g_heap;
     CrystalRegion *saved_arena = g_arena;
@@ -362,7 +367,24 @@ bool value_is_crystal(const LatValue *v) { return v->phase == VTAG_CRYSTAL; }
 
 /* ── Deep clone ── */
 
-LatValue value_deep_clone(const LatValue *v) {
+/* CbR Stage 2: shared-region handles are classified by the region-id tag AND
+ * phase == VTAG_CRYSTAL (a phase-anomalous handle copies safely rather than
+ * aliases — H11), plus the Round A dormancy gate: the tree-walker still
+ * mints odd NUMERIC region ids that would satisfy REGION_IS_SHARED_ID, so
+ * the borrow path must be unreachable unless a shared region actually
+ * exists (only unit tests create them this round). The gate is dropped in
+ * Round B when numeric ids retire. */
+static inline bool value_region_is_shared(const LatValue *v) {
+    return REGION_IS_SHARED_ID(v->region_id) && crystal_region_shared_active();
+}
+
+LatValue value_clone_impl(const LatValue *v, bool allow_share) {
+    /* Borrow fast path: aliasing a shared crystal is retain + bitwise copy. */
+    if (allow_share && v->phase == VTAG_CRYSTAL && value_region_is_shared(v)) {
+        crystal_region_retain(REGION_PTR(v->region_id));
+        return *v; /* bitwise handle copy */
+    }
+
     LatValue out = {.type = v->type, .phase = v->phase, .region_id = (size_t)-1};
 
     switch (v->type) {
@@ -381,7 +403,9 @@ LatValue value_deep_clone(const LatValue *v) {
             size_t len = v->as.array.len;
             size_t cap = v->as.array.cap;
             out.as.array.elems = lat_alloc(cap * sizeof(LatValue));
-            for (size_t i = 0; i < len; i++) { out.as.array.elems[i] = value_deep_clone(&v->as.array.elems[i]); }
+            for (size_t i = 0; i < len; i++) {
+                out.as.array.elems[i] = value_clone_impl(&v->as.array.elems[i], allow_share);
+            }
             out.as.array.len = len;
             out.as.array.cap = cap;
             break;
@@ -393,7 +417,7 @@ LatValue value_deep_clone(const LatValue *v) {
             out.as.strct.field_values = lat_alloc(fc * sizeof(LatValue));
             for (size_t i = 0; i < fc; i++) {
                 out.as.strct.field_names[i] = (char *)intern(v->as.strct.field_names[i]);
-                out.as.strct.field_values[i] = value_deep_clone(&v->as.strct.field_values[i]);
+                out.as.strct.field_values[i] = value_clone_impl(&v->as.strct.field_values[i], allow_share);
             }
             out.as.strct.field_count = fc;
             if (v->as.strct.field_phases) {
@@ -455,7 +479,7 @@ LatValue value_deep_clone(const LatValue *v) {
             if (v->as.enm.payload_count > 0) {
                 out.as.enm.payload = lat_alloc(v->as.enm.payload_count * sizeof(LatValue));
                 for (size_t i = 0; i < v->as.enm.payload_count; i++)
-                    out.as.enm.payload[i] = value_deep_clone(&v->as.enm.payload[i]);
+                    out.as.enm.payload[i] = value_clone_impl(&v->as.enm.payload[i], allow_share);
                 out.as.enm.payload_count = v->as.enm.payload_count;
             } else {
                 out.as.enm.payload = NULL;
@@ -480,7 +504,7 @@ LatValue value_deep_clone(const LatValue *v) {
                         dst->entries[i].state = MAP_OCCUPIED;
                         dst->entries[i].key = lat_strdup(src->entries[i].key);
                         LatValue *sv = (LatValue *)src->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
+                        LatValue cloned = value_clone_impl(sv, allow_share);
                         *(LatValue *)dst->entries[i].value = cloned;
                     } else if (src->entries[i].state == MAP_TOMBSTONE) {
                         dst->entries[i].state = MAP_TOMBSTONE;
@@ -494,7 +518,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 for (size_t i = 0; i < src->cap; i++) {
                     if (src->entries[i].state == MAP_OCCUPIED) {
                         LatValue *sv = (LatValue *)src->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
+                        LatValue cloned = value_clone_impl(sv, allow_share);
                         lat_map_set(out.as.map.map, src->entries[i].key, &cloned);
                     }
                 }
@@ -529,7 +553,7 @@ LatValue value_deep_clone(const LatValue *v) {
                         dst->entries[i].state = MAP_OCCUPIED;
                         dst->entries[i].key = lat_strdup(src->entries[i].key);
                         LatValue *sv = (LatValue *)src->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
+                        LatValue cloned = value_clone_impl(sv, allow_share);
                         *(LatValue *)dst->entries[i].value = cloned;
                     } else if (src->entries[i].state == MAP_TOMBSTONE) {
                         dst->entries[i].state = MAP_TOMBSTONE;
@@ -542,7 +566,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 for (size_t i = 0; i < src->cap; i++) {
                     if (src->entries[i].state == MAP_OCCUPIED) {
                         LatValue *sv = (LatValue *)src->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
+                        LatValue cloned = value_clone_impl(sv, allow_share);
                         lat_map_set(out.as.set.map, src->entries[i].key, &cloned);
                     }
                 }
@@ -552,7 +576,7 @@ LatValue value_deep_clone(const LatValue *v) {
         case VAL_TUPLE: {
             out.as.tuple.elems = lat_alloc(v->as.tuple.len * sizeof(LatValue));
             for (size_t i = 0; i < v->as.tuple.len; i++) {
-                out.as.tuple.elems[i] = value_deep_clone(&v->as.tuple.elems[i]);
+                out.as.tuple.elems[i] = value_clone_impl(&v->as.tuple.elems[i], allow_share);
             }
             out.as.tuple.len = v->as.tuple.len;
             break;
@@ -581,11 +605,36 @@ LatValue value_deep_clone(const LatValue *v) {
     return out;
 }
 
+LatValue value_deep_clone(const LatValue *v) { return value_clone_impl(v, true); }
+LatValue value_copy_out(const LatValue *v) { return value_clone_impl(v, false); } /* recursive force-copy */
+
+/* CbR Stage 2: privatize a possibly-shared handle before an in-place write.
+ * Keyed on value_region_is_shared: the region-id tag AND the
+ * crystal_region_shared_active() dormancy gate (any tagged handle gets a
+ * private copy while a shared region is live; the gate is removed in
+ * Round B when the tree-walker's numeric region ids retire). */
+void value_unshare(LatValue *v) {
+    if (value_region_is_shared(v)) {
+        LatValue priv = value_copy_out(v);
+        crystal_region_release(REGION_PTR(v->region_id));
+        *v = priv;
+    }
+}
+
 /* ── Freeze ── */
 
 static void val_dealloc(LatValue *v, void *ptr); /* defined in the Free section below */
 
 static void set_phase_recursive(LatValue *v, PhaseTag phase) {
+    /* CbR master invariant: shared region memory — including the phase tags
+     * stored inside it — is NEVER written after seal. A shared handle is
+     * already uniformly crystal, so re-freezing it is a no-op; any other
+     * phase write must value_unshare() first (debug assert, H9: no FLUID
+     * value ever carries a shared region_id). */
+    if (value_region_is_shared(v)) {
+        assert(phase == VTAG_CRYSTAL);
+        return;
+    }
     v->phase = phase;
     if (v->type == VAL_ARRAY) {
         for (size_t i = 0; i < v->as.array.len; i++) { set_phase_recursive(&v->as.array.elems[i], phase); }
@@ -641,19 +690,204 @@ LatValue value_freeze(LatValue v) {
     return v;
 }
 
+/* ── Freeze to shared region (Crystal-by-Reference, Stage 2) ──
+ *
+ * Dormant in Round A: no evaluator calls value_freeze_to_region yet; the
+ * only callers are unit tests. */
+
+/* Cheap recursive pre-scan: a value is UNSHAREABLE if it transitively
+ * contains a closure (either flavor), Ref, iterator, channel, or any
+ * sublimated member. Those kinds carry non-atomic foreign refcounts or
+ * thread-confined state, so excluding them is what keeps shared regions
+ * pure data (and the O(1) page free sound). REGION_EPHEMERAL-backed data is
+ * NOT a rejection — it force-copies into the region during
+ * materialization. */
+bool value_is_shareable(const LatValue *v) {
+    if (v->phase == VTAG_SUBLIMATED) return false;
+    switch (v->type) {
+        case VAL_CLOSURE:
+        case VAL_REF:
+        case VAL_ITERATOR:
+        case VAL_CHANNEL: return false;
+        case VAL_ARRAY:
+            for (size_t i = 0; i < v->as.array.len; i++) {
+                if (!value_is_shareable(&v->as.array.elems[i])) return false;
+            }
+            return true;
+        case VAL_TUPLE:
+            for (size_t i = 0; i < v->as.tuple.len; i++) {
+                if (!value_is_shareable(&v->as.tuple.elems[i])) return false;
+            }
+            return true;
+        case VAL_STRUCT:
+            for (size_t i = 0; i < v->as.strct.field_count; i++) {
+                if (!value_is_shareable(&v->as.strct.field_values[i])) return false;
+            }
+            return true;
+        case VAL_ENUM:
+            for (size_t i = 0; i < v->as.enm.payload_count; i++) {
+                if (!value_is_shareable(&v->as.enm.payload[i])) return false;
+            }
+            return true;
+        case VAL_MAP:
+            for (size_t i = 0; i < v->as.map.map->cap; i++) {
+                if (v->as.map.map->entries[i].state == MAP_OCCUPIED &&
+                    !value_is_shareable((const LatValue *)v->as.map.map->entries[i].value))
+                    return false;
+            }
+            return true;
+        case VAL_SET:
+            for (size_t i = 0; i < v->as.set.map->cap; i++) {
+                if (v->as.set.map->entries[i].state == MAP_OCCUPIED &&
+                    !value_is_shareable((const LatValue *)v->as.set.map->entries[i].value))
+                    return false;
+            }
+            return true;
+        default: return true; /* INT, FLOAT, BOOL, UNIT, NIL, RANGE, STR, BUFFER */
+    }
+}
+
+/* Regionization size threshold (design §2.8 item 2): scalars and short
+ * strings skip regionization and stay legacy crystals — copying them is
+ * cheaper than refcount traffic. */
+#define REGION_SHARE_MIN_STR_LEN 32
+
+static bool value_worth_regionizing(const LatValue *v) {
+    switch (v->type) {
+        case VAL_INT:
+        case VAL_FLOAT:
+        case VAL_BOOL:
+        case VAL_UNIT:
+        case VAL_NIL:
+        case VAL_RANGE: return false;
+        case VAL_STR: {
+            if (!v->as.str_val) return false;
+            size_t len = v->as.str_len ? v->as.str_len : strlen(v->as.str_val);
+            return len >= REGION_SHARE_MIN_STR_LEN;
+        }
+        default: return true;
+    }
+}
+
+/* Rewritten region tagger (replaces eval.c's set_region_id_recursive for the
+ * shared path, fixing H8). Runs after materialization, BEFORE seal. Stamps
+ * the tagged region id and a uniform VTAG_CRYSTAL phase onto every node,
+ * covering arrays, structs, maps, sets, enum payloads, tuples (the case the
+ * old tagger was missing), buffers and strings, and normalizes stale phase
+ * metadata (key_phases/field_phases) since everything inside a region is
+ * uniformly crystal. Closures/refs/iterators/channels are excluded up front
+ * by the shareability scan, so the old ObjUpvalue** type-confusion can never
+ * recur (debug assert). Interned strings keep REGION_INTERNED. */
+static void region_tag_recursive(LatValue *v, size_t tagged_rid) {
+    assert(v->type != VAL_CLOSURE && v->type != VAL_REF && v->type != VAL_ITERATOR && v->type != VAL_CHANNEL);
+    v->phase = VTAG_CRYSTAL;
+    if (!(v->type == VAL_STR && v->region_id == REGION_INTERNED)) v->region_id = tagged_rid;
+    switch (v->type) {
+        case VAL_ARRAY:
+            for (size_t i = 0; i < v->as.array.len; i++) region_tag_recursive(&v->as.array.elems[i], tagged_rid);
+            break;
+        case VAL_TUPLE:
+            for (size_t i = 0; i < v->as.tuple.len; i++) region_tag_recursive(&v->as.tuple.elems[i], tagged_rid);
+            break;
+        case VAL_STRUCT:
+            for (size_t i = 0; i < v->as.strct.field_count; i++)
+                region_tag_recursive(&v->as.strct.field_values[i], tagged_rid);
+            /* Normalize stale per-field phases: uniformly crystal. */
+            if (v->as.strct.field_phases) {
+                for (size_t i = 0; i < v->as.strct.field_count; i++) v->as.strct.field_phases[i] = VTAG_CRYSTAL;
+            }
+            break;
+        case VAL_MAP:
+            for (size_t i = 0; i < v->as.map.map->cap; i++) {
+                if (v->as.map.map->entries[i].state == MAP_OCCUPIED)
+                    region_tag_recursive((LatValue *)v->as.map.map->entries[i].value, tagged_rid);
+            }
+            /* Drop stale per-key phases (the freeze-except → refreeze bug):
+             * NULL means all keys inherit the map phase. Ownership is mixed:
+             * the LatMap header was lat_alloc'd while g_arena pointed at this
+             * region (arena memory, freed wholesale with the pages), but
+             * lat_map_new callocs the entries array and lat_map_set strdups
+             * keys with plain malloc (src/ds/hashmap.c) — those must be freed
+             * here or they leak. Same idiom as set_phase_recursive's LAT-441
+             * normalization: lat_map_free releases entries + keys; the
+             * arena-backed header is left for the region (val_dealloc would
+             * no-op on it anyway since region_id is already tagged). */
+            if (v->as.map.key_phases) {
+                lat_map_free(v->as.map.key_phases);
+                v->as.map.key_phases = NULL;
+            }
+            break;
+        case VAL_SET:
+            for (size_t i = 0; i < v->as.set.map->cap; i++) {
+                if (v->as.set.map->entries[i].state == MAP_OCCUPIED)
+                    region_tag_recursive((LatValue *)v->as.set.map->entries[i].value, tagged_rid);
+            }
+            break;
+        case VAL_ENUM:
+            for (size_t i = 0; i < v->as.enm.payload_count; i++)
+                region_tag_recursive(&v->as.enm.payload[i], tagged_rid);
+            break;
+        default: break; /* scalars, STR, BUFFER: no children */
+    }
+}
+
+bool value_freeze_to_region(LatValue *v) {
+    /* Idempotent refreeze of an already-shared crystal: same handle, O(1).
+     * The consumed input and the produced output are the same reference, so
+     * no retain is needed (net rc change zero). */
+    if (v->phase == VTAG_CRYSTAL && value_region_is_shared(v)) return true;
+
+    /* Unshareable or too small: today's tag flip — legacy crystal, full
+     * pass-by-value semantics (safe fallback retiring H6/H7/H22/H23). */
+    if (!value_is_shareable(v) || !value_worth_regionizing(v)) {
+        *v = value_freeze(*v);
+        return false;
+    }
+
+    CrystalRegion *r = crystal_region_create_shared();
+    if (!r) {
+        *v = value_freeze(*v);
+        return false;
+    }
+
+    /* Materialize: arena-clone with FORCE-COPY (allow_share=false) so nested
+     * shared crystals are copied INTO the new region and nested legacy
+     * crystals likewise — no region ever points at another region
+     * (self-contained: refcounting is trivially cycle-free). */
+    CrystalRegion *saved_arena = g_arena;
+    g_arena = r;
+    LatValue clone = value_clone_impl(v, false);
+    g_arena = saved_arena;
+
+    region_tag_recursive(&clone, REGION_TAG(r));
+    crystal_region_seal(r); /* debug backstop: stray writes now segfault */
+
+    value_free(v); /* free the original (releases any nested shared handles) */
+    *v = clone;
+    return true;
+}
+
 /* ── Thaw ── */
 
 LatValue value_thaw(const LatValue *v) {
     if (v->type == VAL_REF) {
         /* Thaw breaks sharing: new LatRef with deep-cloned inner */
-        LatValue inner_clone = value_deep_clone(&v->as.ref.ref->value);
+        LatValue inner_clone = value_copy_out(&v->as.ref.ref->value);
         set_phase_recursive(&inner_clone, VTAG_FLUID);
         LatValue result = value_ref(inner_clone);
         value_free(&inner_clone);
         result.phase = VTAG_FLUID;
         return result;
     }
-    LatValue cloned = value_deep_clone(v);
+    /* CbR Stage 2 (R18): thaw always takes a private force-copy and marks it
+     * fluid — shared region memory (including its phase tags) is never
+     * written, so every other alias on any thread observes nothing. There is
+     * deliberately no rc==1 in-place fast path: arena-interleaved buffers
+     * cannot be realloc'd/grown. (value_copy_out == value_deep_clone when no
+     * shared handle is involved, so legacy behavior is bit-identical. The
+     * consumed handle is released by the caller's value_free of the
+     * original, per the existing non-consuming const* contract.) */
+    LatValue cloned = value_copy_out(v);
     set_phase_recursive(&cloned, VTAG_FLUID);
     return cloned;
 }
@@ -1130,6 +1364,16 @@ static void val_dealloc(LatValue *v, void *ptr) {
 
 void value_free(LatValue *v) {
     if (v->region_id != (size_t)-1) {
+        /* CbR Stage 2: a shared-region handle owns one reference on its
+         * region — drop it. CRITICAL asymmetry (H11): this release branch
+         * keys on the region-id tag ALONE, NOT on phase, so a tag-flipped
+         * handle (sublimated, or marked fluid before its guard) still
+         * releases and cannot leak; the borrow branch in value_clone_impl
+         * keys on tag AND phase so a phase-anomalous handle copies safely
+         * rather than aliases. The memset below zeroes the handle, keeping
+         * same-handle double-free forgiving (a zero region_id is never
+         * classified shared). */
+        if (value_region_is_shared(v)) crystal_region_release(REGION_PTR(v->region_id));
         memset(v, 0, sizeof(*v)); /* arena owns everything */
         return;
     }

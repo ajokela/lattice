@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 /*
  * ── Dual-Heap Memory Architecture ──
@@ -101,6 +102,19 @@ typedef struct CrystalRegion {
     Epoch epoch;
     ArenaPage *pages;   /* linked list of arena pages */
     size_t total_bytes; /* total bytes used across all pages */
+    /* ── Shared crystal regions (Crystal-by-Reference, Stage 2) ──
+     * The fields below are zero on legacy RegionManager regions (which are
+     * calloc'd) and are only used by regions from
+     * crystal_region_create_shared(). */
+    _Atomic size_t rc; /* shared-region refcount (0 = legacy region) */
+    bool shared;       /* process-global refcounted region, never RegionManager-owned */
+    bool page_aligned; /* pages are page-aligned (required for the debug seal) */
+    bool sealed;       /* debug backstop: pages are mprotect(PROT_READ)ed */
+    /* rc-ledger (H16 verification): total retains (excluding the creation
+     * reference) and total releases; the final release asserts
+     * retains + 1 == releases in debug builds. */
+    _Atomic size_t dbg_retains;
+    _Atomic size_t dbg_releases;
 } CrystalRegion;
 
 /* ── Region Manager ── */
@@ -131,6 +145,57 @@ size_t region_live_data_bytes(const RegionManager *rm);
 void *arena_alloc(CrystalRegion *r, size_t size);
 void *arena_calloc(CrystalRegion *r, size_t count, size_t size);
 char *arena_strdup(CrystalRegion *r, const char *s);
+
+/* ── Shared crystal regions (Crystal-by-Reference, Stage 2) ──
+ *
+ * Sealed, atomically-refcounted, process-global regions backing shared
+ * crystal values (see REGION_IS_SHARED_ID in value.h). Pages are plain
+ * global malloc — never routed through any thread's FluidHeap — so they
+ * survive sender-thread teardown and the last release may safely run on a
+ * different thread than the one that created the region.
+ *
+ * Atomics / memory-ordering contract (design §2.7). The memory-order choice
+ * here is deliberate — relaxed retain, acq_rel release plus an acquire
+ * fence on the rc==0 path — and stronger-reasoned than the channel refcount
+ * precedent (src/channel.c uses __atomic_add_fetch/__atomic_sub_fetch
+ * builtins with SEQ_CST throughout; this code uses C11 stdatomic with the
+ * minimal orders the refcount idiom actually requires):
+ *   - retain: fetch_add(relaxed) — bumping an already-owned reference needs
+ *     no ordering. A retain must HAPPEN-BEFORE the handle becomes visible
+ *     to another thread; the channel mutex and pthread_create provide that
+ *     edge — retain/release themselves only guarantee the count, not
+ *     publication.
+ *   - release: fetch_sub(acq_rel) + acquire fence, then an O(1) page-list
+ *     free when rc hits zero — the release half orders each thread's prior
+ *     uses of the region before its decrement, and the acquire half/fence
+ *     makes all of them visible to the freeing thread. The O(1) free is
+ *     sound only because regions contain pure data (no channels/refs/
+ *     iterators/envs to finalize).
+ *
+ * The mutex-protected global registry behind these functions exists ONLY
+ * for stats, leak diagnostics, and process-exit teardown; retain and
+ * non-final release never touch it. It lives in memory.c so it is linked
+ * by ALL targets (clat, clat-run, wasm_api, LSP/DAP). On wasm
+ * (single-threaded) the atomics compile to plain ops and the registry
+ * mutex compiles away. */
+CrystalRegion *crystal_region_create_shared(void); /* rc = 1, registered */
+void crystal_region_retain(CrystalRegion *r);
+void crystal_region_release(CrystalRegion *r); /* frees region at rc == 0 */
+/* Debug backstop: mprotect(PROT_READ) the region's pages so any stray write
+ * after seal segfaults loudly. No-op when unsupported (Windows/wasm) or in
+ * NDEBUG builds; r->sealed reports whether the seal was applied. */
+void crystal_region_seal(CrystalRegion *r);
+size_t crystal_region_refcount(CrystalRegion *r);
+size_t crystal_region_dbg_retains(CrystalRegion *r);
+size_t crystal_region_dbg_releases(CrystalRegion *r);
+/* Round A dormancy gate: true while any shared region is live. While the
+ * tree-walker's legacy numeric region ids (which can be odd) still
+ * circulate, every consumer of REGION_IS_SHARED_ID must ALSO check this
+ * gate; it is constant false in evaluator runs until Round B retires the
+ * numeric ids (then the gate check can be dropped). */
+bool crystal_region_shared_active(void);
+size_t crystal_region_live_count(void);    /* registry: live shared regions */
+size_t crystal_region_created_total(void); /* registry: ever created */
 
 /* ── Bump Arena (ephemeral allocator) ── */
 

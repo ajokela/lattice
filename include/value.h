@@ -128,6 +128,27 @@ _Static_assert(sizeof(LatValue) == 72 || sizeof(void *) != 8,
 #endif
 #endif
 
+/* ── Shared crystal region handles (Crystal-by-Reference, Stage 2) ──
+ *
+ * A shared crystal is a VTAG_CRYSTAL value whose region_id is a low-bit-
+ * tagged CrystalRegion* — its backing store lives entirely inside one
+ * sealed, refcounted, process-global region and is aliased by O(1) bitwise
+ * handle copy + retain. A legacy crystal (region_id == REGION_NONE) keeps
+ * today's full pass-by-value clone semantics.
+ *
+ * Tag soundness: CrystalRegion* is malloc'd (>= 8-byte aligned), so its low
+ * bit is always 0 and ptr|1 is unambiguous. The odd sentinels REGION_NONE
+ * (-1) and REGION_INTERNED (-3) are excluded by name; the even sentinels
+ * REGION_EPHEMERAL (-2) and REGION_CONST (-4) fail the bit test. A
+ * memset-zeroed handle (region_id == 0) has the low bit clear and is never
+ * classified shared, keeping same-handle double-free forgiving. The
+ * predicate is alignment-based (not address-range), so it is sound on
+ * wasm32 and Windows. */
+typedef struct CrystalRegion CrystalRegion;
+#define REGION_IS_SHARED_ID(rid) (((rid) & 1u) == 1u && (rid) != REGION_NONE && (rid) != REGION_INTERNED)
+#define REGION_PTR(rid)          ((CrystalRegion *)((rid) & ~(size_t)1))
+#define REGION_TAG(ptr)          (((size_t)(ptr)) | 1u)
+
 /* Ref: reference-counted shared mutable wrapper */
 struct LatRef {
     LatValue value;
@@ -169,6 +190,27 @@ bool value_is_crystal(const LatValue *v);
 
 /* ── Deep operations ── */
 LatValue value_deep_clone(const LatValue *v);
+/* Clone walker shared by value_deep_clone/value_copy_out. allow_share=true
+ * may alias a shared crystal region (retain + bitwise handle copy);
+ * allow_share=false force-copies recursively. allow_share is threaded
+ * through the recursion as a parameter (never TLS) so reentrant evaluation
+ * cannot observe or corrupt it. */
+LatValue value_clone_impl(const LatValue *v, bool allow_share);
+/* Recursive force-copy: guaranteed physically independent, REGION_NONE. */
+LatValue value_copy_out(const LatValue *v);
+/* If *v is a shared-region handle, replace it with a private force-copy and
+ * release the original. Required before ANY in-place write to a possibly
+ * shared handle. No-op otherwise. */
+void value_unshare(LatValue *v);
+/* Cheap recursive pre-scan: false if v transitively contains a closure, Ref,
+ * iterator, channel, or any sublimated member (those kinds never regionize). */
+bool value_is_shareable(const LatValue *v);
+/* Freeze *v in place. Shareable values (above a small size threshold)
+ * materialize into a new sealed shared region and *v becomes a shared-region
+ * handle (returns true). Unshareable/small values fall back to today's
+ * value_freeze tag flip — legacy crystal, REGION_NONE (returns false).
+ * Refreezing an already-shared crystal is an O(1) no-op (returns true). */
+bool value_freeze_to_region(LatValue *v);
 /* Deep-clone into thread-independent (malloc-backed) storage; see value.c. */
 LatValue value_detach(const LatValue *v);
 /* Returns NULL if v may be sent over a channel, else a static error message
