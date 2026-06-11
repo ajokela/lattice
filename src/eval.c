@@ -696,6 +696,24 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
         /* Ref unwrap: delegate indexing to the inner value */
         if (parent->type == VAL_REF) parent = &parent->as.ref.ref->value;
 
+        /* LAT-441: phase guard — resolve_lvalue is only used for writes
+         * (index assignment and in-place mutating methods), so reject
+         * resolution through a crystal/sublimated container.  Map keys with
+         * an explicit non-crystal key_phases entry (freeze-except) stay
+         * writable. */
+        if (parent->phase == VTAG_CRYSTAL || parent->phase == VTAG_SUBLIMATED) {
+            bool exempt = false;
+            if (parent->type == VAL_MAP && idxr.value.type == VAL_STR && parent->as.map.key_phases) {
+                PhaseTag *kp = lat_map_get(parent->as.map.key_phases, idxr.value.as.str_val);
+                if (kp && *kp != VTAG_CRYSTAL) exempt = true;
+            }
+            if (!exempt) {
+                value_free(&idxr.value);
+                lat_asprintf(err, "cannot modify a %s value", parent->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                return NULL;
+            }
+        }
+
         if (parent->type == VAL_MAP) {
             if (idxr.value.type != VAL_STR) {
                 value_free(&idxr.value);
@@ -7618,6 +7636,27 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         }
 
         case EXPR_METHOD_CALL: {
+            /* LAT-441: reject mutating builtin methods on crystal/sublimated
+             * receivers BEFORE any inline mutation handler below runs (this
+             * also keeps lat_map_remove from freeing arena-region memory of a
+             * frozen map). The name pre-filter avoids resolving lvalues for
+             * obviously non-mutating calls. */
+            {
+                const char *_m = expr->as.method_call.method;
+                if (builtin_method_mutates(VAL_ARRAY, _m) || builtin_method_mutates(VAL_MAP, _m) ||
+                    builtin_method_mutates(VAL_SET, _m) || builtin_method_mutates(VAL_BUFFER, _m)) {
+                    char *lv_err = NULL;
+                    LatValue *recv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
+                    if (lv_err) free(lv_err);
+                    if (recv && (recv->phase == VTAG_CRYSTAL || recv->phase == VTAG_SUBLIMATED) &&
+                        builtin_method_mutates(recv->type, _m)) {
+                        char *err = NULL;
+                        lat_asprintf(&err, "cannot call mutating method '%s' on a %s value", _m,
+                                     recv->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                        return eval_err(err);
+                    }
+                }
+            }
             /* Handle .push() specially - needs to mutate the binding in env */
             if (strcmp(expr->as.method_call.method, "push") == 0 && expr->as.method_call.object->tag == EXPR_IDENT &&
                 expr->as.method_call.arg_count == 1) {
@@ -8829,6 +8868,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             }
                         }
                     } else if (val.type == VAL_MAP) {
+                        /* LAT-441: freeze-except on an already fully-crystal map must
+                         * not punch new mutability holes — exempted keys keep their
+                         * current effective phase (explicit entry, else the parent's
+                         * phase). */
+                        bool was_crystal = (val.phase == VTAG_CRYSTAL);
                         /* Lazy-allocate key_phases */
                         if (!val.as.map.key_phases) {
                             val.as.map.key_phases = calloc(1, sizeof(LatMap));
@@ -8850,11 +8894,17 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                                 LatValue *vp = (LatValue *)val.as.map.map->entries[i].value;
                                 *vp = value_freeze(*vp);
                                 phase = VTAG_CRYSTAL;
+                            } else if (was_crystal) {
+                                PhaseTag *cur = lat_map_get(val.as.map.key_phases, key);
+                                phase = cur ? *cur : VTAG_CRYSTAL;
                             } else {
                                 phase = VTAG_FLUID;
                             }
                             lat_map_set(val.as.map.key_phases, key, &phase);
                         }
+                        /* LAT-441: the map itself becomes crystal; keys missing from
+                         * key_phases (including keys inserted later) inherit it. */
+                        val.phase = VTAG_CRYSTAL;
                     } else {
                         for (size_t j = 0; j < expr->as.freeze.except_count; j++) free(except_names[j]);
                         free(except_names);
@@ -10533,6 +10583,14 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 LatValue *buf_chk = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &buf_chk_err);
                 if (buf_chk_err) free(buf_chk_err);
                 if (buf_chk && buf_chk->type == VAL_BUFFER) {
+                    /* LAT-441: phase guard — frozen/sublimated buffers are immutable */
+                    if (buf_chk->phase == VTAG_CRYSTAL || buf_chk->phase == VTAG_SUBLIMATED) {
+                        value_free(&valr.value);
+                        char *berr = NULL;
+                        lat_asprintf(&berr, "cannot modify a %s value",
+                                     buf_chk->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                        return eval_err(berr);
+                    }
                     EvalResult buf_idxr = eval_expr(ev, stmt->as.assign.target->as.index.index);
                     if (!IS_OK(buf_idxr)) {
                         value_free(&valr.value);
@@ -10750,15 +10808,26 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     value_free(&valr.value);
                     return eval_err(strdup("cannot assign index on a frozen Ref"));
                 }
-                if (parent && parent->type == VAL_MAP && parent->phase == VTAG_CRYSTAL) {
-                    value_free(&valr.value);
-                    return eval_err(strdup("cannot assign to key of frozen map"));
-                }
-                if (parent && parent->type == VAL_MAP && parent->as.map.key_phases) {
+                if (parent && parent->type == VAL_MAP && (parent->phase == VTAG_CRYSTAL || parent->as.map.key_phases)) {
+                    /* LAT-441: a crystal map blocks key writes unless the key has
+                     * an explicit non-crystal key_phases entry (freeze-except); a
+                     * non-crystal map blocks only explicitly frozen keys. */
+                    bool parent_crystal = parent->phase == VTAG_CRYSTAL;
+                    LatMap *kphases = parent->as.map.key_phases; /* stable heap ptr */
+                    if (parent_crystal && !kphases) {
+                        value_free(&valr.value);
+                        return eval_err(strdup("cannot assign to key of frozen map"));
+                    }
                     EvalResult kidxr = eval_expr(ev, stmt->as.assign.target->as.index.index);
                     if (IS_OK(kidxr) && kidxr.value.type == VAL_STR) {
-                        PhaseTag *kp = (PhaseTag *)lat_map_get(parent->as.map.key_phases, kidxr.value.as.str_val);
-                        if (kp && *kp == VTAG_CRYSTAL) {
+                        PhaseTag *kp = (PhaseTag *)lat_map_get(kphases, kidxr.value.as.str_val);
+                        if (parent_crystal) {
+                            if (!kp || *kp == VTAG_CRYSTAL) {
+                                value_free(&kidxr.value);
+                                value_free(&valr.value);
+                                return eval_err(strdup("cannot assign to key of frozen map"));
+                            }
+                        } else if (kp && *kp == VTAG_CRYSTAL) {
                             char *err = NULL;
                             lat_asprintf(&err, "cannot assign to frozen key '%s'", kidxr.value.as.str_val);
                             value_free(&kidxr.value);
@@ -10766,7 +10835,8 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                             return eval_err(err);
                         }
                     }
-                    value_free(&kidxr.value);
+                    if (IS_OK(kidxr)) value_free(&kidxr.value);
+                    else free(kidxr.error);
                 }
             }
             value_free(target);

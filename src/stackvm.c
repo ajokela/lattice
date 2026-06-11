@@ -443,6 +443,24 @@ static inline void stackvm_promote_frame_ephemerals(StackVM *vm, StackCallFrame 
     }
 }
 
+/* LAT-441: returns an error message if writing obj[idx] is forbidden by
+ * the phase system, else NULL. Consults map key_phases so freeze-except
+ * exempt keys stay writable. */
+static const char *phase_check_index_write(const LatValue *obj, const LatValue *idx) {
+    if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
+        if (obj->type == VAL_MAP && idx->type == VAL_STR && obj->as.map.key_phases) {
+            PhaseTag *kp = lat_map_get(obj->as.map.key_phases, idx->as.str_val);
+            if (kp && *kp != VTAG_CRYSTAL) return NULL; /* exempt key */
+        }
+        return obj->phase == VTAG_CRYSTAL ? "cannot modify a frozen value" : "cannot modify a sublimated value";
+    }
+    if (obj->type == VAL_MAP && idx->type == VAL_STR && obj->as.map.key_phases) {
+        PhaseTag *kp = lat_map_get(obj->as.map.key_phases, idx->as.str_val);
+        if (kp && *kp == VTAG_CRYSTAL) return "cannot modify a frozen key";
+    }
+    return NULL;
+}
+
 /* ── Closure invocation helper for builtins ──
  * Calls a compiled closure from within the StackVM using a temporary wrapper chunk.
  * Returns the closure's return value. */
@@ -1187,6 +1205,26 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
 static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *method, int arg_count,
                                    const char *var_name) {
     uint32_t mhash = method_hash(method);
+
+    /* LAT-441: reject mutating builtin methods on crystal/sublimated receivers
+     * before any method body runs. */
+    if ((obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) && builtin_method_mutates(obj->type, method)) {
+        for (int i = 0; i < arg_count; i++) {
+            LatValue a = pop(vm);
+            value_free(&a);
+        }
+        char *err = NULL;
+        if (var_name && obj->phase == VTAG_CRYSTAL)
+            lat_asprintf(&err,
+                         "cannot call mutating method '%s' on crystal value '%s' (use thaw(%s) to make it mutable)",
+                         method, var_name, var_name);
+        else
+            lat_asprintf(&err, "cannot call mutating method '%s' on a %s value", method,
+                         obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+        vm->error = err;
+        push(vm, value_unit());
+        return true;
+    }
 
     switch (obj->type) {
         /* Array methods */
@@ -4658,6 +4696,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 VM_ERROR("invalid index assignment on Ref");
                 break;
             }
+            /* LAT-441: phase guard (consults map key_phases for freeze-except) */
+            {
+                const char *perr = phase_check_index_write(&obj, &idx);
+                if (perr) {
+                    value_free(&obj);
+                    value_free(&idx);
+                    value_free(&val);
+                    VM_ERROR("%s", perr);
+                    break;
+                }
+            }
             if (obj.type == VAL_ARRAY && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
                 if (i < 0 || (size_t)i >= obj.as.array.len) {
@@ -4829,6 +4878,29 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 }
                 push(vm, obj);
             } else if (obj.type == VAL_MAP) {
+                /* LAT-441: phase guard (consults key_phases for freeze-except) */
+                if (obj.phase == VTAG_CRYSTAL || obj.phase == VTAG_SUBLIMATED) {
+                    bool exempt = false;
+                    if (obj.as.map.key_phases) {
+                        PhaseTag *kp = lat_map_get(obj.as.map.key_phases, field_name);
+                        if (kp && *kp != VTAG_CRYSTAL) exempt = true;
+                    }
+                    if (!exempt) {
+                        const char *pname = obj.phase == VTAG_CRYSTAL ? "frozen" : "sublimated";
+                        value_free(&obj);
+                        value_free(&val);
+                        VM_ERROR("cannot modify a %s value", pname);
+                        break;
+                    }
+                } else if (obj.as.map.key_phases) {
+                    PhaseTag *kp = lat_map_get(obj.as.map.key_phases, field_name);
+                    if (kp && *kp == VTAG_CRYSTAL) {
+                        value_free(&obj);
+                        value_free(&val);
+                        VM_ERROR("cannot modify frozen key '%s'", field_name);
+                        break;
+                    }
+                }
                 lat_map_set(obj.as.map.map, field_name, &val);
                 push(vm, obj);
             } else {
@@ -6054,28 +6126,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 VM_ERROR("invalid index assignment on Ref");
                 break;
             }
-            /* Phase check: reject mutation on crystal/sublimated values */
-            if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
-                /* Check per-field phases for structs/maps with partial freeze */
-                bool field_frozen = false;
-                if (obj->type == VAL_MAP && idx.type == VAL_STR && obj->as.map.key_phases) {
-                    PhaseTag *kp = lat_map_get(obj->as.map.key_phases, idx.as.str_val);
-                    if (kp && *kp == VTAG_CRYSTAL) field_frozen = true;
-                }
-                if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED || field_frozen) {
+            /* LAT-441: phase guard — rejects mutation on crystal/sublimated
+             * values and on explicitly frozen keys, while keeping
+             * freeze-except exempt keys writable. */
+            {
+                const char *perr = phase_check_index_write(obj, &idx);
+                if (perr) {
                     value_free(&val);
                     value_free(&idx);
-                    VM_ERROR("cannot modify a %s value", obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
-                    break;
-                }
-            }
-            /* Check per-key phase on non-frozen maps */
-            if (obj->type == VAL_MAP && idx.type == VAL_STR && obj->as.map.key_phases) {
-                PhaseTag *kp = lat_map_get(obj->as.map.key_phases, idx.as.str_val);
-                if (kp && *kp == VTAG_CRYSTAL) {
-                    value_free(&val);
-                    value_free(&idx);
-                    VM_ERROR("cannot modify frozen key '%s'", idx.as.str_val);
+                    VM_ERROR("%s", perr);
                     break;
                 }
             }
@@ -6400,6 +6459,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 value_free(&idx);
                 VM_ERROR("invalid index assignment on Ref");
                 break;
+            }
+            /* LAT-441: phase guard (obj is borrowed — free only val/idx) */
+            {
+                const char *perr = phase_check_index_write(obj, &idx);
+                if (perr) {
+                    value_free(&val);
+                    value_free(&idx);
+                    VM_ERROR("%s", perr);
+                    break;
+                }
             }
             if (obj->type == VAL_ARRAY && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
@@ -7279,6 +7348,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     }
                 }
             } else if (val.type == VAL_MAP) {
+                /* LAT-441: freeze-except on an already fully-crystal map must not
+                 * punch new mutability holes — exempted keys keep their current
+                 * effective phase (explicit entry, else the parent's phase). */
+                bool was_crystal = (val.phase == VTAG_CRYSTAL);
                 if (!val.as.map.key_phases) {
                     val.as.map.key_phases = calloc(1, sizeof(LatMap));
                     if (!val.as.map.key_phases) {
@@ -7302,11 +7375,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         LatValue *vp = (LatValue *)val.as.map.map->entries[i].value;
                         *vp = value_freeze(*vp);
                         phase = VTAG_CRYSTAL;
+                    } else if (was_crystal) {
+                        PhaseTag *cur = lat_map_get(val.as.map.key_phases, key);
+                        phase = cur ? *cur : VTAG_CRYSTAL;
                     } else {
                         phase = VTAG_FLUID;
                     }
                     lat_map_set(val.as.map.key_phases, key, &phase);
                 }
+                /* LAT-441: the map itself becomes crystal; keys missing from
+                 * key_phases (including keys inserted later) inherit it. */
+                val.phase = VTAG_CRYSTAL;
             }
 
             /* Write back and push result */

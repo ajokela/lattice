@@ -2685,6 +2685,189 @@ TEST(phase_freeze_except_map_blocks_frozen_key) {
                  "}\n");
 }
 
+/* ── LAT-441 Stage 0: phase-guard enforcement matrix ──
+ * These tests pin down where freeze() guards are missing across backends.
+ * Many are EXPECTED TO FAIL until the follow-up guard tasks land. */
+
+TEST(phase_frozen_array_index_assign_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux a = [1, 2, 3]\n"
+                 "    freeze(a)\n"
+                 "    a[0] = 99\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_global_array_index_assign_rejected) {
+    ASSERT_FAILS("flux g = [1, 2, 3]\n"
+                 "fn main() {\n"
+                 "    freeze(g)\n"
+                 "    g[0] = 99\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_map_index_assign_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"k\"] = 1\n"
+                 "    freeze(m)\n"
+                 "    m[\"k\"] = 2\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_map_dot_assign_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"k\"] = 1\n"
+                 "    freeze(m)\n"
+                 "    m.k = 2\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_global_map_index_assign_rejected) {
+    ASSERT_FAILS("flux gm = Map::new()\n"
+                 "fn main() {\n"
+                 "    gm[\"k\"] = 1\n"
+                 "    freeze(gm)\n"
+                 "    gm[\"k\"] = 2\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_buffer_index_assign_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux b = Buffer::new(4)\n"
+                 "    freeze(b)\n"
+                 "    b[0] = 255\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_buffer_write_u8_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux b = Buffer::new(4)\n"
+                 "    freeze(b)\n"
+                 "    b.write_u8(0, 255)\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_buffer_fill_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux b = Buffer::new(4)\n"
+                 "    freeze(b)\n"
+                 "    b.fill(0)\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_buffer_resize_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux b = Buffer::new(4)\n"
+                 "    freeze(b)\n"
+                 "    b.resize(8)\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_buffer_read_ok) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux b = Buffer::new(4)\n"
+                "    b.write_u8(0, 7)\n"
+                "    freeze(b)\n"
+                "    assert(b.read_u8(0) == 7)\n"
+                "    assert(b.len() == 4)\n"
+                "}\n");
+}
+
+TEST(phase_frozen_array_push_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux a = [1]\n"
+                 "    freeze(a)\n"
+                 "    a.push(2)\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_map_remove_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"k\"] = 1\n"
+                 "    freeze(m)\n"
+                 "    m.remove(\"k\")\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_set_add_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux s = Set::new()\n"
+                 "    freeze(s)\n"
+                 "    s.add(1)\n"
+                 "}\n");
+}
+
+TEST(phase_frozen_nested_array_assign_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux a = [[1, 2], [3, 4]]\n"
+                 "    freeze(a)\n"
+                 "    a[0][1] = 99\n"
+                 "}\n");
+}
+
+/* Refreeze normalization: a full freeze() must close freeze-except holes. */
+TEST(phase_refreeze_closes_except_holes) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"host\"] = \"h\"\n"
+                 "    m[\"retries\"] = 0\n"
+                 "    freeze(m) except [\"retries\"]\n"
+                 "    freeze(m)\n"
+                 "    m[\"retries\"] = 5\n"
+                 "}\n");
+}
+
+/* Thaw after freeze restores mutability (guards must not over-trigger). */
+TEST(phase_thaw_after_freeze_allows_mutation) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux a = [1, 2, 3]\n"
+                "    freeze(a)\n"
+                "    flux b = thaw(a)\n"
+                "    b[0] = 99\n"
+                "    assert(b[0] == 99)\n"
+                "}\n");
+}
+
+/* Freeze-except still works after the guards land. */
+TEST(phase_freeze_except_exempt_key_still_ok) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"host\"] = \"h\"\n"
+                "    m[\"retries\"] = 0\n"
+                "    freeze(m) except [\"retries\"]\n"
+                "    m[\"retries\"] = 5\n"
+                "    assert(m[\"retries\"] == 5)\n"
+                "}\n");
+}
+
+/* Writing a NEW key (not present at freeze time) into a freeze-except map
+ * must be rejected: key_phases has no entry for it, so it inherits the map's
+ * crystal phase. NOTE: the tree-walker currently ALLOWS this (unsound);
+ * recorded as a divergence to be fixed by the upcoming guards. */
+TEST(phase_freeze_except_new_key_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"host\"] = \"h\"\n"
+                 "    freeze(m) except [\"host\"]\n"
+                 "    m[\"fresh\"] = 1\n"
+                 "}\n");
+}
+
+/* freeze(m) except [...] on an already fully-crystal map must not punch a
+ * mutability hole into it. The tree-walker accepts the freeze call but keeps
+ * the key frozen (write still errors) — pinned here as the reference. */
+TEST(phase_freeze_except_on_crystal_parent) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"k\"] = 1\n"
+                 "    freeze(m)\n"
+                 "    freeze(m) except [\"k\"]\n"
+                 "    m[\"k\"] = 2\n"
+                 "}\n");
+}
+
 /* ── Borrow + Pressure Interaction ── */
 
 TEST(phase_borrow_with_pressure) {

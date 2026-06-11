@@ -1639,6 +1639,40 @@ LatValue builtin_enum_is_variant(LatValue *obj, LatValue *args, int arg_count, c
 }
 
 /* ========================================================================
+ * Mutating-method classifier
+ * ======================================================================== */
+
+/* LAT-441: central list of receiver-mutating builtin methods, used by all
+ * three backends to reject dispatch on crystal/sublimated receivers.
+ * Methods that return modified copies without touching the receiver
+ * (e.g. Array.sort, Array.reverse, Set.union, Buffer.slice) are NOT listed. */
+bool builtin_method_mutates(ValueType type, const char *method) {
+    switch (type) {
+        case VAL_ARRAY:
+            /* push/pop/insert/remove_at mutate in place (implemented inline in
+             * each backend); sort/sort_by/reverse/filter/map return copies. */
+            return strcmp(method, "push") == 0 || strcmp(method, "pop") == 0 || strcmp(method, "insert") == 0 ||
+                   strcmp(method, "remove_at") == 0;
+        case VAL_MAP:
+            /* set/remove/merge mutate the receiver; map/filter return copies. */
+            return strcmp(method, "set") == 0 || strcmp(method, "remove") == 0 || strcmp(method, "merge") == 0;
+        case VAL_SET:
+            /* add/remove/clear mutate; union/intersection/difference/
+             * symmetric_difference return new sets. */
+            return strcmp(method, "add") == 0 || strcmp(method, "remove") == 0 || strcmp(method, "clear") == 0;
+        case VAL_BUFFER:
+            /* push, push_u16, push_u32 */
+            if (strcmp(method, "push") == 0 || strcmp(method, "push_u16") == 0 || strcmp(method, "push_u32") == 0)
+                return true;
+            /* write_u8/write_u16/write_u32/write_u64/write_i64 */
+            if (strncmp(method, "write_", 6) == 0) return true;
+            /* clear/fill/resize; read_*, slice, to_* are non-mutating. */
+            return strcmp(method, "clear") == 0 || strcmp(method, "fill") == 0 || strcmp(method, "resize") == 0;
+        default: return false;
+    }
+}
+
+/* ========================================================================
  * Method name suggestions for typo errors
  * ======================================================================== */
 

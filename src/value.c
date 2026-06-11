@@ -584,6 +584,8 @@ LatValue value_deep_clone(const LatValue *v) {
 
 /* ── Freeze ── */
 
+static void val_dealloc(LatValue *v, void *ptr); /* defined in the Free section below */
+
 static void set_phase_recursive(LatValue *v, PhaseTag phase) {
     v->phase = phase;
     if (v->type == VAL_ARRAY) {
@@ -608,6 +610,14 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
                 LatValue *mv = (LatValue *)v->as.map.map->entries[i].value;
                 set_phase_recursive(mv, phase);
             }
+        }
+        /* LAT-441: a full freeze/thaw overrides any earlier freeze-except
+         * holes — drop per-key phase tracking so all keys inherit the
+         * parent phase (NULL key_phases == inherit). */
+        if (v->as.map.key_phases) {
+            lat_map_free(v->as.map.key_phases);
+            val_dealloc(v, v->as.map.key_phases);
+            v->as.map.key_phases = NULL;
         }
     } else if (v->type == VAL_ENUM) {
         for (size_t i = 0; i < v->as.enm.payload_count; i++) set_phase_recursive(&v->as.enm.payload[i], phase);

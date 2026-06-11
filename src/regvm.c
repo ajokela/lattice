@@ -888,6 +888,19 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
 static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, LatValue *args, int arg_count,
                                LatValue *result, const char *var_name) {
     uint32_t mhash = method_hash(method);
+    /* LAT-441: reject mutating builtin methods on crystal/sublimated receivers
+     * before any method body runs. */
+    if ((obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) && builtin_method_mutates(obj->type, method)) {
+        if (var_name && obj->phase == VTAG_CRYSTAL)
+            lat_asprintf(&vm->error,
+                         "cannot call mutating method '%s' on crystal value '%s' (use thaw(%s) to make it mutable)",
+                         method, var_name, var_name);
+        else
+            lat_asprintf(&vm->error, "cannot call mutating method '%s' on a %s value", method,
+                         obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+        *result = value_unit();
+        return true;
+    }
     if (obj->type == VAL_ARRAY) {
         if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
              (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
@@ -3606,7 +3619,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             bool blocked = true;
             if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
                 PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
-                if (!kp || *kp != VTAG_CRYSTAL) blocked = false;
+                /* LAT-441: a key missing from key_phases inherits the parent's
+                 * CRYSTAL phase — only an explicit non-crystal entry exempts it. */
+                if (kp && *kp != VTAG_CRYSTAL) blocked = false;
             }
             if (blocked) RVM_ERROR("cannot modify a frozen value");
         }
@@ -5958,7 +5973,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             bool blocked = true;
             if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
                 PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);
-                if (!kp || *kp != VTAG_CRYSTAL) blocked = false;
+                /* LAT-441: a key missing from key_phases inherits the parent's
+                 * CRYSTAL phase — only an explicit non-crystal entry exempts it. */
+                if (kp && *kp != VTAG_CRYSTAL) blocked = false;
             }
             if (blocked) RVM_ERROR("cannot modify a frozen value");
         }
@@ -6729,6 +6746,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 }
             }
         } else if (val.type == VAL_MAP) {
+            /* LAT-441: freeze-except on an already fully-crystal map must not
+             * punch new mutability holes — exempted keys keep their current
+             * effective phase (explicit entry, else the parent's phase). */
+            bool was_crystal = (val.phase == VTAG_CRYSTAL);
             if (!val.as.map.key_phases) {
                 val.as.map.key_phases = calloc(1, sizeof(LatMap));
                 if (!val.as.map.key_phases) RVM_ERROR("out of memory");
@@ -6749,11 +6770,17 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     LatValue *vp = (LatValue *)val.as.map.map->entries[bi].value;
                     *vp = value_freeze(*vp);
                     phase = VTAG_CRYSTAL;
+                } else if (was_crystal) {
+                    PhaseTag *cur = lat_map_get(val.as.map.key_phases, key);
+                    phase = cur ? *cur : VTAG_CRYSTAL;
                 } else {
                     phase = VTAG_FLUID;
                 }
                 lat_map_set(val.as.map.key_phases, key, &phase);
             }
+            /* LAT-441: the map itself becomes crystal; keys missing from
+             * key_phases (including keys inserted later) inherit it. */
+            val.phase = VTAG_CRYSTAL;
         }
 
         /* Write back */

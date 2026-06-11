@@ -155,6 +155,13 @@ LatValue builtin_enum_enum_name(LatValue *obj, LatValue *args, int arg_count, ch
 LatValue builtin_enum_payload(LatValue *obj, LatValue *args, int arg_count, char **error);
 LatValue builtin_enum_is_variant(LatValue *obj, LatValue *args, int arg_count, char **error);
 
+/* ── Mutating-method classifier ── */
+
+/* LAT-441: returns true if the named builtin method mutates its receiver in
+ * place for the given receiver type. Used by all three backends to reject
+ * mutating method dispatch on crystal/sublimated receivers. */
+bool builtin_method_mutates(ValueType type, const char *method);
+
 /* ── Method name suggestion for typo errors ── */
 
 /* Given a type and a misspelled method name, return the closest valid method
