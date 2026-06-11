@@ -112,6 +112,7 @@ for f in \
     src/regex_ops.c src/format_ops.c src/path_ops.c src/crypto_ops.c \
     src/array_ops.c src/channel.c src/http.c src/toml_ops.c src/yaml_ops.c \
     src/ext.c src/stackopcode.c src/chunk.c src/stackvm.c \
+    src/regopcode.c src/regvm.c \
     src/runtime.c src/intern.c src/latc.c src/builtin_methods.c \
     src/iterator.c src/gc.c src/progress.c; do
     RUNTIME_SRCS="$RUNTIME_SRCS $f"
