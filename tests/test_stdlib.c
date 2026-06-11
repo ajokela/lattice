@@ -2722,6 +2722,18 @@ static void test_channel_send_closure_rejected(void) {
                               "EVAL_ERROR:");
 }
 
+/* LAT-442: a capturing closure is the actual hazard — captured_env is
+ * shared, not copied, across value_detach. */
+static void test_channel_send_capturing_closure_rejected(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let ch = Channel::new()\n"
+                              "    flux n = 1\n"
+                              "    let f = freeze(|x| { x + n })\n"
+                              "    ch.send(f)\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
 /* LAT-442: the walk must find shared-state kinds nested inside containers. */
 static void test_channel_send_array_containing_closure_rejected(void) {
     ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
@@ -12576,6 +12588,7 @@ void register_stdlib_tests(void) {
     register_test("test_channel_send_unphased_array_ok", test_channel_send_unphased_array_ok);
     register_test("test_channel_send_ref_rejected", test_channel_send_ref_rejected);
     register_test("test_channel_send_closure_rejected", test_channel_send_closure_rejected);
+    register_test("test_channel_send_capturing_closure_rejected", test_channel_send_capturing_closure_rejected);
     register_test("test_channel_send_array_containing_closure_rejected",
                   test_channel_send_array_containing_closure_rejected);
     register_test("test_scope_no_spawns_sequential", test_scope_no_spawns_sequential);

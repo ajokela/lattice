@@ -46,39 +46,39 @@ LatValue value_detach(const LatValue *v) {
 /* LAT-442: kinds that value_detach SHARES rather than copies (non-atomic
  * refcount on the same LatRef cell, shared captured_env, shared iterator
  * state) must never cross a channel. Walk the graph looking for them. */
-static const char *find_unsendable_kind(const LatValue *v) {
+static const char *find_unsendable_msg(const LatValue *v) {
     switch (v->type) {
-        case VAL_REF: return "Ref";
-        case VAL_CLOSURE: return "closure";
-        case VAL_ITERATOR: return "iterator";
+        case VAL_REF: return "cannot send a value containing a Ref on a channel";
+        case VAL_CLOSURE: return "cannot send a value containing a closure on a channel";
+        case VAL_ITERATOR: return "cannot send a value containing an iterator on a channel";
         case VAL_ARRAY:
             for (size_t i = 0; i < v->as.array.len; i++) {
-                const char *r = find_unsendable_kind(&v->as.array.elems[i]);
+                const char *r = find_unsendable_msg(&v->as.array.elems[i]);
                 if (r) return r;
             }
             return NULL;
         case VAL_TUPLE:
             for (size_t i = 0; i < v->as.tuple.len; i++) {
-                const char *r = find_unsendable_kind(&v->as.tuple.elems[i]);
+                const char *r = find_unsendable_msg(&v->as.tuple.elems[i]);
                 if (r) return r;
             }
             return NULL;
         case VAL_STRUCT:
             for (size_t i = 0; i < v->as.strct.field_count; i++) {
-                const char *r = find_unsendable_kind(&v->as.strct.field_values[i]);
+                const char *r = find_unsendable_msg(&v->as.strct.field_values[i]);
                 if (r) return r;
             }
             return NULL;
         case VAL_ENUM:
             for (size_t i = 0; i < v->as.enm.payload_count; i++) {
-                const char *r = find_unsendable_kind(&v->as.enm.payload[i]);
+                const char *r = find_unsendable_msg(&v->as.enm.payload[i]);
                 if (r) return r;
             }
             return NULL;
         case VAL_MAP:
             for (size_t i = 0; i < v->as.map.map->cap; i++) {
                 if (v->as.map.map->entries[i].state == MAP_OCCUPIED) {
-                    const char *r = find_unsendable_kind((const LatValue *)v->as.map.map->entries[i].value);
+                    const char *r = find_unsendable_msg((const LatValue *)v->as.map.map->entries[i].value);
                     if (r) return r;
                 }
             }
@@ -86,11 +86,13 @@ static const char *find_unsendable_kind(const LatValue *v) {
         case VAL_SET:
             for (size_t i = 0; i < v->as.set.map->cap; i++) {
                 if (v->as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    const char *r = find_unsendable_kind((const LatValue *)v->as.set.map->entries[i].value);
+                    const char *r = find_unsendable_msg((const LatValue *)v->as.set.map->entries[i].value);
                     if (r) return r;
                 }
             }
             return NULL;
+        /* VAL_CHANNEL: channel cloning is a refcount retain that is safe to
+         * share across threads, so channels-in-values are sendable. */
         default: return NULL;
     }
 }
@@ -99,13 +101,7 @@ const char *value_send_ineligible(const LatValue *v) {
     bool scalar = v->type == VAL_INT || v->type == VAL_FLOAT || v->type == VAL_BOOL || v->type == VAL_UNIT;
     if (v->phase == VTAG_SUBLIMATED) return "cannot send a sublimated value on a channel";
     if (v->phase == VTAG_FLUID && !scalar) return "can only send crystal (frozen) values on a channel";
-    const char *kind = find_unsendable_kind(v);
-    if (kind) {
-        if (kind[0] == 'R') return "cannot send a value containing a Ref on a channel";
-        if (kind[0] == 'c') return "cannot send a value containing a closure on a channel";
-        return "cannot send a value containing an iterator on a channel";
-    }
-    return NULL;
+    return find_unsendable_msg(v);
 }
 
 static void *lat_alloc(size_t size) {
