@@ -909,19 +909,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
-            if (value_is_crystal(obj)) {
-                if (var_name)
-                    lat_asprintf(&vm->error, "cannot push to crystal array '%s' (use thaw(%s) to make it mutable)",
-                                 var_name, var_name);
-                else vm->error = strdup("cannot push to a crystal array");
-                *result = value_unit();
-                return true;
-            }
-            if (obj->phase == VTAG_SUBLIMATED) {
-                vm->error = strdup("cannot push to a sublimated array");
-                *result = value_unit();
-                return true;
-            }
+            /* Phase check handled by the top-level mutating-method guard above. */
             /* Check pressure constraints */
             {
                 if (vm->rt && vm->rt->pressure_count > 0) {
@@ -959,19 +947,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
-            if (value_is_crystal(obj)) {
-                if (var_name)
-                    lat_asprintf(&vm->error, "cannot pop from crystal array '%s' (use thaw(%s) to make it mutable)",
-                                 var_name, var_name);
-                else vm->error = strdup("cannot pop from a crystal array");
-                *result = value_unit();
-                return true;
-            }
-            if (obj->phase == VTAG_SUBLIMATED) {
-                vm->error = strdup("cannot pop from a sublimated array");
-                *result = value_unit();
-                return true;
-            }
+            /* Phase check handled by the top-level mutating-method guard above. */
             /* Check pressure constraints */
             {
                 if (vm->rt && vm->rt->pressure_count > 0) {
@@ -3625,6 +3601,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
             if (blocked) RVM_ERROR("cannot modify a frozen value");
         }
+        /* Sublimated parents never carry key_phases (freeze-except only produces
+         * crystal parents), so no exemption consult is needed here. */
         if (R[a].phase == VTAG_SUBLIMATED) RVM_ERROR("cannot modify a sublimated value");
         /* Per-key phase check for non-frozen maps */
         if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
@@ -5979,6 +5957,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
             if (blocked) RVM_ERROR("cannot modify a frozen value");
         }
+        /* Sublimated parents never carry key_phases (freeze-except only produces
+         * crystal parents), so no exemption consult is needed here. */
         if (R[a].phase == VTAG_SUBLIMATED) RVM_ERROR("cannot modify a sublimated value");
         if (R[a].type == VAL_MAP && R[b].type == VAL_STR && R[a].as.map.key_phases) {
             PhaseTag *kp = lat_map_get(R[a].as.map.key_phases, R[b].as.str_val);

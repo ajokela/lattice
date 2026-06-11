@@ -1236,20 +1236,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 return true;
             }
             if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
-                /* Check phase: crystal and sublimated values are immutable */
-                if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
-                    LatValue val = pop(vm);
-                    value_free(&val);
-                    const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
-                    char *err = NULL;
-                    if (var_name && obj->phase == VTAG_CRYSTAL)
-                        lat_asprintf(&err, "cannot push to %s array '%s' (use thaw(%s) to make it mutable)", phase_name,
-                                     var_name, var_name);
-                    else lat_asprintf(&err, "cannot push to %s array", phase_name);
-                    vm->error = err;
-                    push(vm, value_unit());
-                    return true;
-                }
+                /* Phase check handled by the top-level mutating-method guard above. */
                 /* Check pressure constraint */
                 const char *pmode = stackvm_find_pressure(vm, var_name);
                 if (pressure_blocks_grow(pmode)) {
@@ -1273,18 +1260,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 return true;
             }
             if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
-                /* Check phase: crystal and sublimated values are immutable */
-                if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
-                    const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
-                    char *err = NULL;
-                    if (var_name && obj->phase == VTAG_CRYSTAL)
-                        lat_asprintf(&err, "cannot pop from %s array '%s' (use thaw(%s) to make it mutable)",
-                                     phase_name, var_name, var_name);
-                    else lat_asprintf(&err, "cannot pop from %s array", phase_name);
-                    vm->error = err;
-                    push(vm, value_unit());
-                    return true;
-                }
+                /* Phase check handled by the top-level mutating-method guard above. */
                 /* Check pressure constraint */
                 const char *pmode = stackvm_find_pressure(vm, var_name);
                 if (pressure_blocks_shrink(pmode)) {
@@ -1901,22 +1877,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 return true;
             }
             if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) {
-                /* Check phase: crystal and sublimated values are immutable */
-                if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
-                    LatValue val = pop(vm);
-                    LatValue key = pop(vm);
-                    value_free(&val);
-                    value_free(&key);
-                    const char *phase_name = obj->phase == VTAG_CRYSTAL ? "crystal" : "sublimated";
-                    char *err = NULL;
-                    if (var_name && obj->phase == VTAG_CRYSTAL)
-                        lat_asprintf(&err, "cannot set on %s map '%s' (use thaw(%s) to make it mutable)", phase_name,
-                                     var_name, var_name);
-                    else lat_asprintf(&err, "cannot set on %s map", phase_name);
-                    vm->error = err;
-                    push(vm, value_unit());
-                    return true;
-                }
+                /* Phase check handled by the top-level mutating-method guard above. */
                 LatValue val = pop(vm);
                 LatValue key = pop(vm);
                 if (key.type == VAL_STR) {
@@ -4839,10 +4800,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             if (obj.type == VAL_STRUCT) {
                 /* Check overall struct phase (only if no per-field phases set) */
                 if ((obj.phase == VTAG_CRYSTAL || obj.phase == VTAG_SUBLIMATED) && !obj.as.strct.field_phases) {
+                    const char *pname = obj.phase == VTAG_CRYSTAL ? "frozen" : "sublimated";
                     value_free(&obj);
                     value_free(&val);
-                    VM_ERROR("cannot assign to field '%s' on a %s struct", field_name,
-                             obj.phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                    VM_ERROR("cannot assign to field '%s' on a %s struct", field_name, pname);
                     break;
                 }
                 /* Check per-field phase constraints (alloy types) */

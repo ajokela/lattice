@@ -7651,8 +7651,17 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (recv && (recv->phase == VTAG_CRYSTAL || recv->phase == VTAG_SUBLIMATED) &&
                         builtin_method_mutates(recv->type, _m)) {
                         char *err = NULL;
-                        lat_asprintf(&err, "cannot call mutating method '%s' on a %s value", _m,
-                                     recv->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                        if (expr->as.method_call.object->tag == EXPR_IDENT && recv->phase == VTAG_CRYSTAL) {
+                            /* Match the VM backends' hint when the receiver is a named variable. */
+                            const char *_vn = expr->as.method_call.object->as.str_val;
+                            lat_asprintf(&err,
+                                         "cannot call mutating method '%s' on crystal value '%s' (use thaw(%s) to make "
+                                         "it mutable)",
+                                         _m, _vn, _vn);
+                        } else {
+                            lat_asprintf(&err, "cannot call mutating method '%s' on a %s value", _m,
+                                         recv->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                        }
                         return eval_err(err);
                     }
                 }
