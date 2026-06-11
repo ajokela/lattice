@@ -761,7 +761,7 @@ fix config = forge {
 
 ### Concurrency
 
-Lattice provides structured concurrency with `scope` blocks, `spawn` tasks, and channels. Each spawned task runs on its own thread with an independent garbage collector. Only crystal (frozen) values can be sent across channels — the phase system guarantees data-race safety at the language level.
+Lattice provides structured concurrency with `scope` blocks, `spawn` tasks, and channels. Each spawned task runs on its own thread with an independent garbage collector. Values sent across channels are deep-copied and must be crystal (frozen), unphased, or scalar — fluid containers are rejected, and values containing Refs, closures, or iterators can never be sent — so the phase system guarantees data-race safety at the language level.
 
 **Channels** are created with `Channel::new()` and support `.send()`, `.recv()`, and `.close()`:
 
@@ -787,7 +787,9 @@ let b = ch2.recv()
 
 Key rules:
 - `spawn` inside a `scope` runs on a new thread; `spawn` outside runs synchronously
-- `.send()` requires the value to be crystal (frozen) or a primitive type (Int, Float, Bool, Unit)
+- `.send()` requires the value to be crystal (frozen), unphased, or a primitive type (Int, Float, Bool, Unit); fluid containers are rejected
+- `.send()` rejects any value containing a Ref, closure, or iterator (these cannot be safely copied across threads)
+- `.send()` on a closed channel is a runtime error
 - `.recv()` blocks until a value is available, or returns Unit if the channel is closed and empty
 - Channels cannot be frozen
 - Errors in spawned tasks propagate to the parent scope
@@ -1580,7 +1582,7 @@ print("escaped: \${not interpolated}") // escaped: ${not interpolated}
 
 | Method | Description |
 |--------|-------------|
-| `.send(val)` | Send a crystal value on the channel |
+| `.send(val)` | Send a value on the channel (crystal/unphased/scalar; errors if the channel is closed) |
 | `.recv()` | Receive a value (blocks until available, Unit if closed) |
 | `.close()` | Close the channel |
 
