@@ -1,0 +1,50 @@
+// LAT-440: nested index assignment in the self-hosted compiler.
+// test-latc compares this program's output when compiled by latc.lat
+// against a direct run by the C compiler.
+
+flux g = [[1, 2], [3, 4]]
+
+fn test_global_nested() {
+    g[0][1] = 99
+    g[1][0] += 10
+    print(g[0][1])
+    print(g[1][0])
+}
+
+fn test_local_nested() {
+    flux a = [[0, 0], [0, 0]]
+    a[1][1] = 7
+    a[1][1] += 3
+    print(a[1][1])
+}
+
+fn test_three_level() {
+    flux a = [[[1]]]
+    a[0][0][0] = 42
+    print(a[0][0][0])
+}
+
+fn test_array_in_map() {
+    flux m = Map::new()
+    m["k"] = [1, 2, 3]
+    m["k"][0] = 5
+    m["k"][2] += 4
+    print(m["k"][0])
+    print(m["k"][2])
+}
+
+fn test_computed_indices() {
+    flux a = [[1, 2, 3], [4, 5, 6]]
+    flux i = 0
+    a[i + 1][i * 2] = 8
+    print(a[1][0])
+}
+
+fn main() {
+    test_global_nested()
+    test_local_nested()
+    test_three_level()
+    test_array_in_map()
+    test_computed_indices()
+    print("ALL PASSED")
+}

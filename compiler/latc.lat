@@ -4117,6 +4117,154 @@ fn parse_assignment() {
     }
 }
 
+// LAT-440: nested index assignment support ------------------------------
+
+// Token index of the ']' matching the '[' at tokens[start].
+fn find_matching_bracket(start: any) {
+    flux depth = 0
+    flux i = start
+    while i < tokens.len() {
+        let tt = tokens[i].type
+        if tt == "[" || tt == "?[" {
+            depth = depth + 1
+        }
+        if tt == "]" {
+            depth = depth - 1
+            if depth == 0 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    compiler_error("unmatched '[' in index expression", current_line())
+    return -1
+}
+
+// From a '[' at tokens[start], count consecutive [..] groups. Returns the
+// group count (>= 2) only when the chain is a nested assignment target
+// (ends at an assignment operator); otherwise 0 so the caller falls
+// through to the existing single-level path.
+fn index_chain_depth(start: any) {
+    flux i = start
+    flux depth = 0
+    while i < tokens.len() && tokens[i].type == "[" {
+        let close = find_matching_bracket(i)
+        depth = depth + 1
+        i = close + 1
+    }
+    if depth < 2 {
+        return 0
+    }
+    if i >= tokens.len() {
+        return 0
+    }
+    let t = tokens[i].type
+    if t == "=" || t == "+=" || t == "-=" || t == "*=" || t == "/=" || t == "%=" {
+        return depth
+    }
+    return 0
+}
+
+// Re-emit the index expression whose first token is at index start.
+// Saves and restores pos, so it can be called out of stream order.
+fn emit_index_span(start: any) {
+    let saved = pos
+    pos = start
+    parse_expression()
+    pos = saved
+}
+
+// Compile a nested index assignment g[i0][i1]..[iN-1] OP= value (depth >= 2).
+// Mirrors the C compiler's emit_index_write_back (stackcompiler.c): assign at
+// the innermost level, then write each modified intermediate back up to the
+// root variable. Index expressions are re-emitted from their token spans, so
+// (exactly like the C compiler) they are evaluated more than once.
+fn parse_nested_index_assignment(name: any, depth: any, line: any) {
+    // Record the first inner token of each [..] group; leave pos at the operator.
+    flux spans = []
+    flux i = pos
+    flux k = 0
+    while k < depth {
+        spans.push(i + 1)
+        i = find_matching_bracket(i) + 1
+        k = k + 1
+    }
+    pos = i
+    let op = advance().text
+
+    if op == "=" {
+        parse_expression()                          // [v]
+    } else {
+        // Compound: read the current value, then apply the operator to the rhs.
+        emit_variable_get(name, line)               // [g]
+        k = 0
+        while k < depth {
+            emit_index_span(spans[k])
+            emit_byte(OP_INDEX, line)
+            k = k + 1
+        }                                           // [cur]
+        parse_expression()                          // [cur, rhs]
+        match op {
+            "+=" => emit_byte(OP_ADD, line),
+            "-=" => emit_byte(OP_SUB, line),
+            "*=" => emit_byte(OP_MUL, line),
+            "/=" => emit_byte(OP_DIV, line),
+            _ => emit_byte(OP_MOD, line)
+        }                                           // [v]
+    }
+
+    // Innermost assignment: [v] -> [modified innermost container].
+    // OP_SET_INDEX expects [val, obj, idx] (val deepest) and pushes obj'.
+    emit_variable_get(name, line)                   // [v, g]
+    k = 0
+    while k < depth - 1 {
+        emit_index_span(spans[k])
+        emit_byte(OP_INDEX, line)                   // [v, g[i0]..[ik]]
+        k = k + 1
+    }
+    emit_index_span(spans[depth - 1])               // [v, obj, idx]
+    emit_byte(OP_SET_INDEX, line)                   // [obj']
+
+    // Write-back chain for intermediate levels (depth-2 .. 1).
+    flux lvl = depth - 2
+    while lvl >= 1 {
+        emit_variable_get(name, line)               // [child', g]
+        flux m = 0
+        while m < lvl {
+            emit_index_span(spans[m])
+            emit_byte(OP_INDEX, line)
+            m = m + 1
+        }                                           // [child', parent]
+        emit_index_span(spans[lvl])                 // [child', parent, idx]
+        emit_byte(OP_SET_INDEX, line)               // [parent']
+        lvl = lvl - 1
+    }
+
+    // Root write-back: stack holds the modified g[i0]; store it into g.
+    let slot = resolve_local(name)
+    if slot >= 0 {
+        emit_index_span(spans[0])                   // [val, idx]
+        emit_bytes(OP_SET_INDEX_LOCAL, slot, line)
+        return
+    }
+    let up = resolve_upvalue(name)
+    if up < 0 {
+        let gcidx = string_constant(name)
+        emit_index_span(spans[0])                   // [val, idx]
+        emit_byte(OP_SET_INDEX_GLOBAL, line)
+        emit_byte((gcidx >> 8) & 255, line)
+        emit_byte(gcidx & 255, line)
+        return
+    }
+    // Upvalue root: same idiom as the single-level upvalue path —
+    // [val, obj, idx] -> OP_SET_INDEX -> write modified obj back.
+    emit_variable_get(name, line)                   // [val, obj]
+    emit_index_span(spans[0])                       // [val, obj, idx]
+    emit_byte(OP_SET_INDEX, line)                   // [obj']
+    emit_variable_set(name, line)
+    emit_byte(OP_POP, line)
+}
+
 fn is_slice_in_brackets() {
     // Scan forward from current pos to see if there's a ".." at depth 0
     // inside [...] (called right after "[" was consumed).
@@ -4174,6 +4322,14 @@ fn parse_compound_assignment_target(name: any, line: any) {
         // SET_FIELD leaves modified object on stack — write it back to variable
         emit_variable_set_pop(name, line)
     } else { if peek_text() == "[" {
+        // LAT-440: nested chains (g[i][j].. OP= v) take a dedicated path.
+        // index_chain_depth returns 0 for single-level targets, slices, and
+        // non-assignment expressions, so existing paths are untouched.
+        let chain_depth = index_chain_depth(pos)
+        if chain_depth >= 2 {
+            parse_nested_index_assignment(name, chain_depth, line)
+            return
+        }
         advance()
         if is_slice_in_brackets() {
             // Slice assignment: name[start..end] = value
