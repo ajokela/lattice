@@ -4119,7 +4119,8 @@ fn parse_assignment() {
 
 // LAT-440: nested index assignment support ------------------------------
 
-// Token index of the ']' matching the '[' at tokens[start].
+// Token index of the ']' matching the '[' or '?[' at tokens[start].
+// '?[' is treated as an open bracket because it closes with ']'.
 fn find_matching_bracket(start: any) {
     flux depth = 0
     flux i = start
@@ -4144,6 +4145,8 @@ fn find_matching_bracket(start: any) {
 // group count (>= 2) only when the chain is a nested assignment target
 // (ends at an assignment operator); otherwise 0 so the caller falls
 // through to the existing single-level path.
+// Note: ?[ chains are excluded (loop condition checks type == "[" only) and
+// fall through to the existing single-level path.
 fn index_chain_depth(start: any) {
     flux i = start
     flux depth = 0
@@ -4209,7 +4212,8 @@ fn parse_nested_index_assignment(name: any, depth: any, line: any) {
             "-=" => emit_byte(OP_SUB, line),
             "*=" => emit_byte(OP_MUL, line),
             "/=" => emit_byte(OP_DIV, line),
-            _ => emit_byte(OP_MOD, line)
+            "%=" => emit_byte(OP_MOD, line),
+            _ => compiler_error("unexpected compound operator in nested index assignment: " + op, line)
         }                                           // [v]
     }
 
