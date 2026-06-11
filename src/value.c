@@ -405,6 +405,34 @@ LatValue value_deep_clone(const LatValue *v) {
         }
         case VAL_MAP: {
             LatMap *src = v->as.map.map;
+            if (src->cmi && !g_arena && !g_heap && !v->as.map.key_phases) {
+                /* Crystallized map (stack VM path: plain malloc territory):
+                 * clone the whole CMI block with one memcpy + pointer rebase,
+                 * then deep-clone each dense entry's value in place. Preserves
+                 * the optimized layout across clones (pass-by-value, write-
+                 * backs). Guarded off the tree-walker heap/arena paths so GC
+                 * tracking assumptions there are untouched. */
+                LatMapEntry *dense = NULL;
+                CrystalMapHeader *blk = lat_map_cmi_clone_block(src, &dense);
+                if (blk) {
+                    LatMap *dst = malloc(sizeof(LatMap));
+                    if (!dst) {
+                        free(blk);
+                    } else {
+                        *dst = *src;
+                        dst->cmi = blk;
+                        dst->entries = dense;
+                        for (uint64_t i = 0; i < blk->n; i++) {
+                            LatValue tmp = *(LatValue *)dense[i].value;
+                            *(LatValue *)dense[i].value = value_deep_clone(&tmp);
+                        }
+                        out.as.map.map = dst;
+                        out.as.map.key_phases = NULL;
+                        break;
+                    }
+                }
+                /* alloc failure: fall through to the rebuild path below */
+            }
             if (g_arena) {
                 /* Arena mode: build map internals through lat_alloc/lat_calloc
                  * so everything goes into the arena. No rehashing possible. */
@@ -413,6 +441,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 dst->cap = src->cap;
                 dst->count = src->count; /* preserve tombstone count for probe chains */
                 dst->live = src->live;
+                dst->cmi = NULL; /* arena clones always use the sparse layout */
                 dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
                 for (size_t i = 0; i < src->cap; i++) {
                     dst->entries[i].value = dst->entries[i]._ibuf;
@@ -462,6 +491,7 @@ LatValue value_deep_clone(const LatValue *v) {
                 dst->cap = src->cap;
                 dst->count = src->count; /* preserve tombstone count for probe chains */
                 dst->live = src->live;
+                dst->cmi = NULL; /* sets are never crystallized in v1 */
                 dst->entries = lat_calloc(src->cap, sizeof(LatMapEntry));
                 for (size_t i = 0; i < src->cap; i++) {
                     dst->entries[i].value = dst->entries[i]._ibuf;
@@ -571,12 +601,80 @@ LatValue value_freeze(LatValue v) {
     return v;
 }
 
+/* ── Crystallized layout (freeze-time read optimization) ── */
+
+/* Minimum live keys before a frozen map is rebuilt into the CMI layout.
+ * Protects tight freeze/thaw loops on small values; below this the build
+ * cost cannot amortize. */
+#define CMI_MIN_KEYS 16
+
+void value_crystallize(LatValue *v) {
+    switch (v->type) {
+        case VAL_ARRAY:
+            for (size_t i = 0; i < v->as.array.len; i++) value_crystallize(&v->as.array.elems[i]);
+            break;
+        case VAL_STRUCT:
+            for (size_t i = 0; i < v->as.strct.field_count; i++) value_crystallize(&v->as.strct.field_values[i]);
+            break;
+        case VAL_TUPLE:
+            for (size_t i = 0; i < v->as.tuple.len; i++) value_crystallize(&v->as.tuple.elems[i]);
+            break;
+        case VAL_ENUM:
+            for (size_t i = 0; i < v->as.enm.payload_count; i++) value_crystallize(&v->as.enm.payload[i]);
+            break;
+        case VAL_MAP: {
+            LatMap *m = v->as.map.map;
+            /* Recurse into nested values FIRST (their LatMap* pointers stay
+             * stable inside the inline value buffers after the dense copy). */
+            for (size_t i = 0; i < m->cap; i++)
+                if (m->entries[i].state == MAP_OCCUPIED) value_crystallize((LatValue *)m->entries[i].value);
+            /* Eligibility: fully frozen, no per-key phases (partial freezes
+             * keep the sparse layout), plain-malloc residency (stack VM path;
+             * never arena/fluid-heap-tracked), LatValue payloads only. */
+            if (v->phase == VTAG_CRYSTAL && !v->as.map.key_phases && v->region_id == REGION_NONE && !m->cmi &&
+                m->value_size == sizeof(LatValue) && m->live >= CMI_MIN_KEYS && !g_arena && !g_heap) {
+                lat_map_crystallize(m); /* failure = stay sparse, semantics identical */
+            }
+            break;
+        }
+        /* VAL_SET shares LatMap but is excluded in v1. VAL_REF (shared
+         * mutable wrapper) is deliberately skipped. */
+        default: break;
+    }
+}
+
+void value_decrystallize(LatValue *v) {
+    switch (v->type) {
+        case VAL_ARRAY:
+            for (size_t i = 0; i < v->as.array.len; i++) value_decrystallize(&v->as.array.elems[i]);
+            break;
+        case VAL_STRUCT:
+            for (size_t i = 0; i < v->as.strct.field_count; i++) value_decrystallize(&v->as.strct.field_values[i]);
+            break;
+        case VAL_TUPLE:
+            for (size_t i = 0; i < v->as.tuple.len; i++) value_decrystallize(&v->as.tuple.elems[i]);
+            break;
+        case VAL_ENUM:
+            for (size_t i = 0; i < v->as.enm.payload_count; i++) value_decrystallize(&v->as.enm.payload[i]);
+            break;
+        case VAL_MAP: {
+            LatMap *m = v->as.map.map;
+            if (m->cmi) lat_map_decrystallize(m);
+            for (size_t i = 0; i < m->cap; i++)
+                if (m->entries[i].state == MAP_OCCUPIED) value_decrystallize((LatValue *)m->entries[i].value);
+            break;
+        }
+        default: break;
+    }
+}
+
 /* ── Thaw ── */
 
 LatValue value_thaw(const LatValue *v) {
     if (v->type == VAL_REF) {
         /* Thaw breaks sharing: new LatRef with deep-cloned inner */
         LatValue inner_clone = value_deep_clone(&v->as.ref.ref->value);
+        value_decrystallize(&inner_clone); /* mutable values use the sparse layout */
         set_phase_recursive(&inner_clone, VTAG_FLUID);
         LatValue result = value_ref(inner_clone);
         value_free(&inner_clone);
@@ -584,6 +682,11 @@ LatValue value_thaw(const LatValue *v) {
         return result;
     }
     LatValue cloned = value_deep_clone(v);
+    /* value_deep_clone preserves the crystallized layout (cmi); a thawed map
+     * must be mutable again, so rebuild the standard open-addressing table.
+     * Dense order == original scan order, so the rebuilt table is laid out
+     * exactly as today's thaw produces. */
+    value_decrystallize(&cloned);
     set_phase_recursive(&cloned, VTAG_FLUID);
     return cloned;
 }

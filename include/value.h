@@ -164,6 +164,14 @@ LatValue value_detach(const LatValue *v);
 LatValue value_freeze(LatValue v);
 LatValue value_thaw(const LatValue *v);
 
+/* ── Crystallized layout (freeze-time read optimization) ──
+ * Rebuild eligible frozen maps (recursively) into the read-optimized CMI
+ * layout / back into the standard open-addressing layout. Crystallize is a
+ * no-op for partially frozen maps (key_phases), small maps, and any value not
+ * in plain-malloc residency. See ds/hashmap.h. */
+void value_crystallize(LatValue *v);
+void value_decrystallize(LatValue *v);
+
 /* ── Display ── */
 /* Writes display representation to stdout */
 void value_print(const LatValue *v, FILE *out);

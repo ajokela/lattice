@@ -205,6 +205,7 @@ static Env *env_clone_arena(const Env *env) {
         dst->cap = src->cap;
         dst->count = src->count; /* preserve tombstone count for probe chains */
         dst->live = src->live;
+        dst->cmi = NULL; /* env scopes are never crystallized */
         dst->entries = lat_calloc_routed(src->cap, sizeof(LatMapEntry));
         for (size_t j = 0; j < src->cap; j++) {
             /* Point value to inline buffer for all entries */

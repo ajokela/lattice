@@ -1,0 +1,136 @@
+// Frozen-vs-fluid map READ benchmark (crystallized-layout design baseline).
+//
+// Builds string-keyed maps at sizes 8 / 64 / 1000 / 65536, then measures on
+// the SAME map first while fluid, then after freeze():
+//   lookup_hit  — m[k] for keys present
+//   lookup_miss — m[k] for keys absent (-> nil)
+//   has_hit     — m.has(k), key present   (maps spell "contains" as .has;
+//                 .contains is the array/set method)
+//   has_miss    — m.has(k), key absent
+//   iter        — full `for k in m` iteration
+//
+// Lookups cycle a pre-built probe-key array (sampled at a stride for the 64k
+// map) enough times for ~3M lookups / ~2M iteration visits per segment.
+// Timing is wall-clock ms via time(). Each RESULT line carries ops, ms and a
+// semantic checksum so the harness can verify frozen == fluid behavior.
+//
+// NOTE: integer-keyed maps are not supported in Lattice (m[1] = 10 fails with
+// "invalid index assignment"; only VAL_STR indexes a VAL_MAP), so there is no
+// int-key scenario.
+
+fn bench_size(size: Int, target_ops: Int, iter_target: Int) {
+  // ── build map ──
+  flux m = Map::new()
+  flux i = 0
+  while i < size {
+    m["key_${i}"] = i * 3 + 1
+    i = i + 1
+  }
+
+  // ── probe keys: hits (sampled at stride to cover the table) ──
+  flux nprobe = size
+  if nprobe > 1024 { nprobe = 1024 }
+  let stride = size / nprobe
+  flux hit_keys = []
+  flux miss_keys = []
+  i = 0
+  while i < nprobe {
+    hit_keys.push("key_${i * stride}")
+    miss_keys.push("nokey_${i * stride}")
+    i = i + 1
+  }
+  let rounds = target_ops / nprobe
+  let iter_rounds = iter_target / size + 1
+
+  flux phase_names = ["fluid", "frozen"]
+  flux p = 0
+  while p < 2 {
+    let phase = phase_names[p]
+    if p == 1 {
+      freeze(m)
+    }
+
+    // lookup_hit
+    flux checksum = 0
+    flux r = 0
+    flux t0 = time()
+    while r < rounds {
+      i = 0
+      while i < nprobe {
+        checksum = checksum + m[hit_keys[i]]
+        i = i + 1
+      }
+      r = r + 1
+    }
+    flux t1 = time()
+    print("RESULT lookup_hit ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
+
+    // lookup_miss
+    checksum = 0
+    r = 0
+    t0 = time()
+    while r < rounds {
+      i = 0
+      while i < nprobe {
+        let v = m[miss_keys[i]]
+        if v == nil { checksum = checksum + 1 }
+        i = i + 1
+      }
+      r = r + 1
+    }
+    t1 = time()
+    print("RESULT lookup_miss ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
+
+    // has_hit
+    checksum = 0
+    r = 0
+    t0 = time()
+    while r < rounds {
+      i = 0
+      while i < nprobe {
+        if m.has(hit_keys[i]) { checksum = checksum + 1 }
+        i = i + 1
+      }
+      r = r + 1
+    }
+    t1 = time()
+    print("RESULT has_hit ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
+
+    // has_miss
+    checksum = 0
+    r = 0
+    t0 = time()
+    while r < rounds {
+      i = 0
+      while i < nprobe {
+        if m.has(miss_keys[i]) { checksum = checksum + 1 }
+        i = i + 1
+      }
+      r = r + 1
+    }
+    t1 = time()
+    print("RESULT has_miss ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
+
+    // iter
+    checksum = 0
+    r = 0
+    t0 = time()
+    while r < iter_rounds {
+      for k in m {
+        checksum = checksum + 1
+      }
+      r = r + 1
+    }
+    t1 = time()
+    print("RESULT iter ${size} ${phase} ops=${iter_rounds * size} ms=${t1 - t0} checksum=${checksum}")
+
+    p = p + 1
+  }
+}
+
+fn main() {
+  bench_size(8, 3000000, 2000000)
+  bench_size(64, 3000000, 2000000)
+  bench_size(1000, 3000000, 2000000)
+  bench_size(65536, 3000000, 2000000)
+}
