@@ -271,7 +271,8 @@ TEST_SRCS = $(TEST_DIR)/test_main.c \
             $(TEST_DIR)/test_latc.c \
             $(TEST_DIR)/test_debugger.c \
             $(TEST_DIR)/test_doc_gen.c \
-            $(TEST_DIR)/test_formatter.c
+            $(TEST_DIR)/test_formatter.c \
+            $(TEST_DIR)/test_transfer.c
 
 TEST_OBJS   = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/tests/%.o)
 TEST_TARGET = $(BUILD_DIR)/test_runner
