@@ -1654,8 +1654,11 @@ bool builtin_method_mutates(ValueType type, const char *method) {
             return strcmp(method, "push") == 0 || strcmp(method, "pop") == 0 || strcmp(method, "insert") == 0 ||
                    strcmp(method, "remove_at") == 0;
         case VAL_MAP:
-            /* set/remove/merge mutate the receiver; map/filter return copies. */
-            return strcmp(method, "set") == 0 || strcmp(method, "remove") == 0 || strcmp(method, "merge") == 0;
+            /* set/remove/merge mutate the receiver; map/filter return copies.
+             * 'delete' is a regvm-only alias of remove — must be covered here
+             * so that frozen-receiver guards fire on all three backends. */
+            return strcmp(method, "set") == 0 || strcmp(method, "remove") == 0 || strcmp(method, "merge") == 0 ||
+                   strcmp(method, "delete") == 0;
         case VAL_SET:
             /* add/remove/clear mutate; union/intersection/difference/
              * symmetric_difference return new sets. */

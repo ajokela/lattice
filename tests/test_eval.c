@@ -2686,8 +2686,8 @@ TEST(phase_freeze_except_map_blocks_frozen_key) {
 }
 
 /* ── LAT-441 Stage 0: phase-guard enforcement matrix ──
- * These tests pin down where freeze() guards are missing across backends.
- * Many are EXPECTED TO FAIL until the follow-up guard tasks land. */
+ * These tests pin the enforced freeze() guard behavior across all three
+ * backends.  All guards have landed; every test here must pass. */
 
 TEST(phase_frozen_array_index_assign_rejected) {
     ASSERT_FAILS("fn main() {\n"
@@ -2791,6 +2791,17 @@ TEST(phase_frozen_map_remove_rejected) {
                  "}\n");
 }
 
+/* 'delete' is a regvm-only alias of map.remove; the guard must cover it
+ * (on the other backends this errors as an unknown method — also a fail). */
+TEST(phase_frozen_map_delete_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"k\"] = 1\n"
+                 "    freeze(m)\n"
+                 "    m.delete(\"k\")\n"
+                 "}\n");
+}
+
 TEST(phase_frozen_set_add_rejected) {
     ASSERT_FAILS("fn main() {\n"
                  "    flux s = Set::new()\n"
@@ -2839,13 +2850,14 @@ TEST(phase_freeze_except_exempt_key_still_ok) {
                 "    freeze(m) except [\"retries\"]\n"
                 "    m[\"retries\"] = 5\n"
                 "    assert(m[\"retries\"] == 5)\n"
+                "    m[\"retries\"] += 2\n"
+                "    assert(m[\"retries\"] == 7)\n"
                 "}\n");
 }
 
 /* Writing a NEW key (not present at freeze time) into a freeze-except map
  * must be rejected: key_phases has no entry for it, so it inherits the map's
- * crystal phase. NOTE: the tree-walker currently ALLOWS this (unsound);
- * recorded as a divergence to be fixed by the upcoming guards. */
+ * crystal phase.  This is now enforced on all three backends. */
 TEST(phase_freeze_except_new_key_rejected) {
     ASSERT_FAILS("fn main() {\n"
                  "    flux m = Map::new()\n"
