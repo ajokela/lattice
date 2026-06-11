@@ -12,31 +12,37 @@
  * Lattice uses a dual-heap design separating mutable (fluid) and immutable
  * (crystal) memory:
  *
- *   FluidHeap     – GC-managed allocations for mutable (flux-phase) values.
- *                   Mark-sweep collection via gc_cycle in eval.c.
+ *   FluidHeap     – GC-managed allocations for mutable (flux-phase) values
+ *                   AND for legacy (unshareable / below-threshold) crystal
+ *                   values.  Mark-sweep collection via gc_cycle in eval.c.
  *
- *   RegionManager – Arena-based region allocator for frozen (crystal-phase)
- *                   values.  Each freeze creates a new region with a page-
- *                   based arena.  Deep-cloning into the arena gives cache
- *                   locality and O(1) bulk deallocation.
+ *   Shared crystal regions – Sealed, refcounted, process-global arena
+ *                   regions backing shareable frozen values (Crystal-by-
+ *                   Reference).  Each shareable freeze materializes one
+ *                   region; aliases are O(1) retains and the last release
+ *                   frees the pages.  RegionManager survives as a library
+ *                   (DualHeap structure, unit tests) but the evaluator no
+ *                   longer creates regions through it.
  *
- * Invariants
+ * Invariants (Round B contract)
  * ----------
  * 1. Heap Separation
- *    Arena-backed crystal values have completely independent pointers from
- *    the fluid heap.  Freeze deep-clones into the arena, then frees the
- *    original fluid pointers.
+ *    Shared-region values have completely independent pointers from the
+ *    fluid heap (freeze force-copies into the region's arena, then frees
+ *    the original fluid pointers).  Legacy crystals (region_id ==
+ *    REGION_NONE) live in the fluid heap and are traversed/marked like any
+ *    fluid value — their immutability is enforced by phase tags alone.
  *
  * 2. GC Safety
- *    Crystal region pointers are never subject to fluid sweep.  The mark
- *    phase records reachable region IDs; the sweep phase only frees
- *    unmarked fluid allocations.  Crystal values with a valid region_id
- *    are skipped during fluid marking (early return in gc_mark_value).
+ *    Shared-region pointers are never subject to fluid sweep.  Values with
+ *    a tagged region_id are skipped during fluid marking (early return in
+ *    gc_mark_value): the region is sealed and self-contained.
  *
  * 3. Lifecycle
- *    Every reachable crystal value has a region_id that appears in the
- *    reachable set passed to region_collect.  Unreachable crystal regions
- *    are freed when they are absent from the reachable set.
+ *    Shared regions are reclaimed by refcount alone (handle value_free →
+ *    crystal_region_release).  The GC never frees regions; in debug builds
+ *    it can only REPORT registry regions invisible from its roots
+ *    (crystal_region_report_unreachable).
  *
  * 4. Environment Coverage
  *    During GC, all live environments are marked — both the current
@@ -188,14 +194,21 @@ void crystal_region_seal(CrystalRegion *r);
 size_t crystal_region_refcount(CrystalRegion *r);
 size_t crystal_region_dbg_retains(CrystalRegion *r);
 size_t crystal_region_dbg_releases(CrystalRegion *r);
-/* Round A dormancy gate: true while any shared region is live. While the
- * tree-walker's legacy numeric region ids (which can be odd) still
- * circulate, every consumer of REGION_IS_SHARED_ID must ALSO check this
- * gate; it is constant false in evaluator runs until Round B retires the
- * numeric ids (then the gate check can be dropped). */
+/* True while any shared region is live. Round B retired the tree-walker's
+ * numeric region ids, so REGION_IS_SHARED_ID is sound on its own and this
+ * is no longer consulted as a gate — it survives for stats/diagnostics. */
 bool crystal_region_shared_active(void);
-size_t crystal_region_live_count(void);    /* registry: live shared regions */
-size_t crystal_region_created_total(void); /* registry: ever created */
+size_t crystal_region_live_count(void);      /* registry: live shared regions */
+size_t crystal_region_created_total(void);   /* registry: ever created */
+size_t crystal_region_peak_count(void);      /* registry: max simultaneous live */
+size_t crystal_region_live_data_bytes(void); /* registry: bytes in live regions */
+/* Debug leak detector (R28): count — and, if out != NULL, report — live
+ * shared regions whose REGION_TAG'd ids are absent from the supplied
+ * reachable set. NEVER frees anything: refcounting is the sole reclaimer;
+ * a region can legitimately be invisible to the GC roots (history
+ * snapshots, module cache, channel buffers, sibling-thread evaluators), so
+ * this is advisory only. */
+size_t crystal_region_report_unreachable(const size_t *reachable_tagged_ids, size_t count, void *out_file);
 
 /* ── Bump Arena (ephemeral allocator) ── */
 

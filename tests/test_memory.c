@@ -847,7 +847,18 @@ TEST(region_scalars_and_short_strings_stay_legacy) {
     ASSERT_EQ_INT(crystal_region_live_count(), base);
 }
 
+/* The LATTICE_FORCE_COPY=1 differential oracle disables the borrow fast
+ * path process-wide. Tests that assert aliasing MECHANICS (retain counts,
+ * bitwise handle identity, region sharing) are definitionally inapplicable
+ * under it and skip; semantics tests must pass unchanged in both modes —
+ * that asymmetry is the oracle's contract. */
+static bool cbr_force_copy_active(void) {
+    const char *e = getenv("LATTICE_FORCE_COPY");
+    return e && *e && strcmp(e, "0") != 0;
+}
+
 TEST(region_borrow_clone_retains_same_backing) {
+    if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_freeze_to_region(&arr));
@@ -894,6 +905,7 @@ TEST(region_copy_out_is_independent) {
 }
 
 TEST(region_unshare_privatizes_handle) {
+    if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_freeze_to_region(&arr));
@@ -921,6 +933,7 @@ TEST(region_unshare_privatizes_handle) {
 }
 
 TEST(region_value_free_releases_and_double_free_forgiving) {
+    if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_freeze_to_region(&arr));
@@ -940,6 +953,7 @@ TEST(region_value_free_releases_and_double_free_forgiving) {
 }
 
 TEST(region_shared_inside_fluid_container_rc_balance) {
+    if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue inner = cbr_make_array();
     ASSERT(value_freeze_to_region(&inner));
@@ -973,6 +987,7 @@ TEST(region_shared_inside_fluid_container_rc_balance) {
 }
 
 TEST(region_detach_borrows_shared_handle) {
+    if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_freeze_to_region(&arr));
@@ -1071,4 +1086,526 @@ TEST(region_registry_counts_live_and_created) {
     crystal_region_release(b);
     ASSERT_EQ_INT(crystal_region_live_count(), base_live);
     ASSERT_EQ_INT(crystal_region_created_total(), base_created + 2);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LAT-449 Round B: tree-walker rc/lifecycle tests (TDD — RED until the
+ * Round B switch lands)
+ *
+ * These run Lattice source through the TREE-WALK evaluator directly
+ * (regardless of the --backend the suite was invoked with) and assert the
+ * Round B contract against the shared-region registry:
+ *
+ *   - a tree-walker freeze of a shareable container MATERIALIZES exactly one
+ *     shared region (crystal_region_created_total / live_count advance);
+ *   - aliasing a shared crystal is an O(1) retain — never a second region;
+ *   - refreeze of an already-shared crystal reuses the region (idempotence);
+ *   - scope exit releases; evaluator teardown leaves the registry at
+ *     baseline (C3: the atexit teardown assumes an empty registry);
+ *   - retired numeric region ids (R8): no evaluator value may carry a
+ *     region_id that satisfies REGION_IS_SHARED_ID unless it is a genuine
+ *     tagged CrystalRegion pointer.
+ *
+ * Until the switch, the evaluator's freeze path still mints legacy
+ * RegionManager numeric ids and never touches the shared registry, so the
+ * registry-count assertions below fail first (cleanly — the REGION_PTR
+ * dereferences are sequenced after them and never execute on the old code).
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#include "lexer.h"
+#include "parser.h"
+#include "eval.h"
+
+/* Lex+parse only (REPL-style persistence tests run several programs on one
+ * persistent evaluator; tokens/programs must stay alive until it is freed). */
+static bool cbr_rb_parse(const char *source, LatVec *tokens_out, Program *prog_out) {
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    *tokens_out = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        fprintf(stderr, "  cbr_rb_parse lex error: %s\n", lex_err);
+        free(lex_err);
+        lat_vec_free(tokens_out);
+        return false;
+    }
+    Parser parser = parser_new(tokens_out);
+    char *parse_err = NULL;
+    *prog_out = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        fprintf(stderr, "  cbr_rb_parse parse error: %s\n", parse_err);
+        free(parse_err);
+        program_free(prog_out);
+        for (size_t i = 0; i < tokens_out->len; i++) token_free(lat_vec_get(tokens_out, i));
+        lat_vec_free(tokens_out);
+        return false;
+    }
+    return true;
+}
+
+/* Run source through the tree-walk evaluator; returns the live Evaluator so
+ * callers can inspect bindings/registry while root bindings are still
+ * retained. Mirrors run_with_stats in test_eval.c. no_regions mirrors the
+ * --no-regions CLI flag (legacy tag-flip baseline mode, R38). */
+static Evaluator *cbr_rb_eval_opt(const char *source, LatVec *tokens_out, Program *prog_out, bool no_regions) {
+    if (!cbr_rb_parse(source, tokens_out, prog_out)) return NULL;
+
+    Evaluator *ev = evaluator_new();
+    if (no_regions) evaluator_set_no_regions(ev, true);
+    char *eval_err = evaluator_run(ev, prog_out);
+    if (eval_err) {
+        fprintf(stderr, "  cbr_rb_eval eval error: %s\n", eval_err);
+        free(eval_err);
+        evaluator_free(ev);
+        program_free(prog_out);
+        for (size_t i = 0; i < tokens_out->len; i++) token_free(lat_vec_get(tokens_out, i));
+        lat_vec_free(tokens_out);
+        return NULL;
+    }
+    return ev;
+}
+
+static Evaluator *cbr_rb_eval(const char *source, LatVec *tokens_out, Program *prog_out) {
+    return cbr_rb_eval_opt(source, tokens_out, prog_out, false);
+}
+
+static void cbr_rb_cleanup(Evaluator *ev, LatVec *tokens, Program *prog) {
+    evaluator_free(ev);
+    program_free(prog);
+    for (size_t i = 0; i < tokens->len; i++) token_free(lat_vec_get(tokens, i));
+    lat_vec_free(tokens);
+}
+
+/* RED until Round B: a top-level fix binding of a large array materializes
+ * exactly one live shared region; evaluator teardown releases it. */
+TEST(cbr_rb_freeze_materializes_live_region) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("fix g = [1, 2, 3, \"a fairly long string to clear any size threshold 0123456789\"]\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    /* The freeze created one shared region, kept live by the root binding. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    /* Teardown releases the binding's reference: registry back to baseline
+     * before the memory.c atexit hook runs (C3). */
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Round B: `let h = g` on a shared crystal retains the SAME
+ * region (one region total) and each live binding holds one reference. */
+TEST(cbr_rb_alias_is_retain_not_new_region) {
+    if (cbr_force_copy_active()) return;
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("fix g = [1, 2, 3, \"alias retain probe long string 0123456789\"]\n"
+                                "let h = g\n"
+                                "let k = h\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    /* Three bindings, ONE region. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    /* env_get deep-clones — post-switch the borrow fast path makes that a
+     * retained alias of the same region. (These dereferences only run once
+     * the count assertions above pass, i.e. on Round B code.) */
+    LatValue vg, vh;
+    ASSERT(env_get(ev->env, "g", &vg));
+    ASSERT(env_get(ev->env, "h", &vh));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    ASSERT(REGION_IS_SHARED_ID(vh.region_id));
+    ASSERT(REGION_PTR(vg.region_id) == REGION_PTR(vh.region_id));
+    ASSERT(vg.phase == VTAG_CRYSTAL);
+
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    size_t rc_with_handles = crystal_region_refcount(r);
+    /* At least the 3 root bindings + our 2 test handles. */
+    ASSERT(rc_with_handles >= 5);
+    value_free(&vg);
+    value_free(&vh);
+    /* Releasing our handles drops the rc by exactly 2 (rc ledger balance). */
+    ASSERT_EQ_INT(crystal_region_refcount(r), rc_with_handles - 2);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Round B: freeze(g) on an already-shared crystal is idempotent at
+ * the region level — no second region; g and g2 share one region (C-level
+ * companion to the cbr_pin_double_freeze_idempotent semantics pin). */
+TEST(cbr_rb_refreeze_shares_single_region) {
+    if (cbr_force_copy_active()) return;
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("fix g = [4, 5, \"refreeze single region long string 0123456789\"]\n"
+                                "let g2 = freeze(g)\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg, vg2;
+    ASSERT(env_get(ev->env, "g", &vg));
+    ASSERT(env_get(ev->env, "g2", &vg2));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    ASSERT(REGION_PTR(vg.region_id) == REGION_PTR(vg2.region_id));
+    value_free(&vg);
+    value_free(&vg2);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Round B: regions created by freezes inside a function body are
+ * refcount-released the moment the bindings go out of scope — no GC cycle
+ * needed (R28: region_collect is demoted to a leak detector). */
+TEST(cbr_rb_scope_exit_releases_region) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("fn work() {\n"
+                                "    fix local = [1, 2, \"scope exit release long string 0123456789\"]\n"
+                                "    let alias = local\n"
+                                "}\n"
+                                "fn main() {\n"
+                                "    work()\n"
+                                "    work()\n"
+                                "}\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    /* Two calls -> two regions created; both released at scope exit while
+     * the evaluator is still alive. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 2);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* GREEN today AND after the switch (R8 numeric-id-retirement pin): an
+ * UNSHAREABLE freeze (struct holding a closure) must fall back to a bare
+ * tag-flip crystal — no shared region, and no handle the evaluator hands
+ * out may carry a region_id satisfying the shared-bit predicate. Today this
+ * holds only because env_get's deep clone resets region_id to REGION_NONE;
+ * the legacy binding itself carries an odd RegionManager id (1, 3, ...)
+ * that would trip REGION_IS_SHARED_ID — the transitional hazard C1 forbids.
+ * Post-switch env_get aliases instead of cloning, so this test then directly
+ * guards that unshareable values are never regionized or tagged shared. */
+TEST(cbr_rb_unshareable_fallback_no_shared_bit) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("struct Counter { n: Int, bump: Fn }\n"
+                                "fix g = Counter { n: 1, bump: |x| { x } }\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    LatValue vg;
+    ASSERT(env_get(ev->env, "g", &vg));
+    ASSERT(vg.phase == VTAG_CRYSTAL);
+    /* No numeric region id may ever satisfy the shared predicate. */
+    ASSERT(!REGION_IS_SHARED_ID(vg.region_id));
+    value_free(&vg);
+
+    /* Unshareable freeze never touches the shared registry. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Round B: end-to-end freeze/alias/thaw churn is rc-balanced —
+ * per-iteration regions die with their bindings, persistent globals keep
+ * exactly one region live, and teardown empties the registry (exercises the
+ * memory.c rc-ledger assert on every release). */
+TEST(cbr_rb_churn_rc_balanced_teardown_empty) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("fix a = [1, 2, 3, \"persistent global long string 0123456789\"]\n"
+                                "let b = a\n"
+                                "fn churn(n: Int) -> Int {\n"
+                                "    flux total = 0\n"
+                                "    for i in 0..n {\n"
+                                "        fix local = [i, i + 1, \"churn local long string 0123456789\"]\n"
+                                "        let alias = local\n"
+                                "        flux t = thaw(alias)\n"
+                                "        total = total + t[0]\n"
+                                "    }\n"
+                                "    return total\n"
+                                "}\n"
+                                "fn main() {\n"
+                                "    let r = churn(10)\n"
+                                "    assert(r == 45, \"churn wrong\")\n"
+                                "}\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    /* 1 persistent region (a/b) + 10 churn iterations created-and-released. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 11);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LAT-449 Round B hardening pass: rc-observing matrix tests that could not
+ * be written pre-switch (forge/grow/bond region accounting, --no-regions
+ * baseline, REPL persistence, channel teardown, leak-detector advisory).
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* (e) EXPR_FORGE result freeze materializes exactly one shared region with
+ * a correct rc; teardown releases it. */
+TEST(cbr_rb_forge_result_shared_region) {
+    if (cbr_force_copy_active()) return; /* asserts handle-tag mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("let r = forge {\n"
+                                "    flux acc = []\n"
+                                "    acc.push(\"forge region long padding string 0123456789\")\n"
+                                "    acc.push(42)\n"
+                                "    acc\n"
+                                "}\n"
+                                "let ralias = r\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vr;
+    ASSERT(env_get(ev->env, "r", &vr));
+    ASSERT(vr.phase == VTAG_CRYSTAL);
+    ASSERT(REGION_IS_SHARED_ID(vr.region_id));
+    value_free(&vr);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* (e) grow() (seed-validated freeze) materializes a shared region for a
+ * shareable container; teardown releases. */
+TEST(cbr_rb_grow_seed_freeze_shared_region) {
+    if (cbr_force_copy_active()) return; /* asserts handle-tag mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("flux cfg = [8080, \"grow region long padding string 0123456789\"]\n"
+                                "seed(cfg, |v| { v[0] > 0 })\n"
+                                "grow(\"cfg\")\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vc;
+    ASSERT(env_get(ev->env, "cfg", &vc));
+    ASSERT(vc.phase == VTAG_CRYSTAL);
+    ASSERT(REGION_IS_SHARED_ID(vc.region_id));
+    value_free(&vc);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* (b) bond mirror cascade region accounting: cascading onto a shareable
+ * container dep materializes exactly ONE region for it; a scalar target and
+ * an unshareable (closure) dep never touch the registry; refreezing an
+ * already-crystal dep short-circuits (no extra region). */
+TEST(cbr_rb_bond_mirror_cascade_regions) {
+    if (cbr_force_copy_active()) return; /* asserts handle-tag/aliasing mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("flux t = 1\n"
+                                "flux dep = [7, 8, \"bond cascade region long padding string 0123456789\"]\n"
+                                "flux f = |x| { x }\n"
+                                "bond(t, dep)\n"
+                                "bond(t, f)\n"
+                                "freeze(t)\n"
+                                "let again = freeze(dep)\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    /* Exactly one region: dep (shareable container). t is a scalar (below
+     * threshold, legacy tag flip), f is a closure (unshareable), and the
+     * explicit refreeze of the cascaded dep is idempotent. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vd, va;
+    ASSERT(env_get(ev->env, "dep", &vd));
+    ASSERT(env_get(ev->env, "again", &va));
+    ASSERT(vd.phase == VTAG_CRYSTAL);
+    ASSERT(REGION_IS_SHARED_ID(vd.region_id));
+    /* Refreeze aliased the same region. */
+    ASSERT(REGION_PTR(vd.region_id) == REGION_PTR(va.region_id));
+    LatValue vf;
+    ASSERT(env_get(ev->env, "f", &vf));
+    ASSERT(vf.phase == VTAG_CRYSTAL);
+    ASSERT(!REGION_IS_SHARED_ID(vf.region_id)); /* unshareable: legacy crystal */
+    value_free(&vd);
+    value_free(&va);
+    value_free(&vf);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* (R38) --no-regions baseline: the registry is never touched, freeze is the
+ * legacy tag flip (region_id == REGION_NONE), and aliasing semantics are
+ * v0.4-identical (asserted inside the script). */
+TEST(cbr_rb_no_regions_registry_untouched) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval_opt("fix a = [1, 2, 3, \"no-regions long padding string 0123456789\"]\n"
+                                    "let b = a\n"
+                                    "flux t = thaw(b)\n"
+                                    "fn main() {\n"
+                                    "    t[0] = 99\n"
+                                    "    assert(a[0] == 1, \"a mutated\")\n"
+                                    "    assert(b[0] == 1, \"b mutated\")\n"
+                                    "    assert(phase_of(a) == \"crystal\", \"a not crystal\")\n"
+                                    "}\n",
+                                    &tokens, &prog, /*no_regions=*/true);
+    ASSERT(ev != NULL);
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    LatValue va;
+    ASSERT(env_get(ev->env, "a", &va));
+    ASSERT(va.phase == VTAG_CRYSTAL);
+    ASSERT(!REGION_IS_SHARED_ID(va.region_id)); /* legacy tag-flip crystal */
+    value_free(&va);
+
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* (d) REPL persistence: a persistent evaluator across four separate
+ * programs — freeze on "line" 1, alias on line 2, thaw+mutate on line 3,
+ * original intact on line 4; registry balanced at teardown. */
+TEST(cbr_rb_repl_persistence_across_programs) {
+    size_t base_live = crystal_region_live_count();
+
+    const char *lines[4] = {
+        "fix d = [1, 2, 3, \"repl persistent long padding string 0123456789\"]\n",
+        "let a = d\n",
+        "flux t = thaw(a)\nt[0] = 99\n",
+        "assert(d[0] == 1, \"d mutated across REPL lines\")\n"
+        "assert(a[0] == 1, \"alias mutated across REPL lines\")\n"
+        "assert(t[0] == 99, \"thawed write lost\")\n",
+    };
+    LatVec tokens[4];
+    Program progs[4];
+    Evaluator *ev = evaluator_new();
+    for (int i = 0; i < 4; i++) {
+        ASSERT(cbr_rb_parse(lines[i], &tokens[i], &progs[i]));
+        char *err = evaluator_run(ev, &progs[i]);
+        if (err) fprintf(stderr, "  repl line %d error: %s\n", i + 1, err);
+        ASSERT(err == NULL);
+    }
+
+    /* One region (d/a alias it); still live while the evaluator persists. */
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    evaluator_free(ev);
+    for (int i = 0; i < 4; i++) {
+        program_free(&progs[i]);
+        for (size_t j = 0; j < tokens[i].len; j++) token_free(lat_vec_get(&tokens[i], j));
+        lat_vec_free(&tokens[i]);
+    }
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* (f) buffered-channel teardown with shared crystals: a sender thread exits
+ * before the receiver drains; some frozen containers die IN the channel
+ * buffer at channel teardown, the drained one dies with its binding. The
+ * registry must return to baseline either way (cross-thread rc balance). */
+TEST(cbr_rb_channel_teardown_releases_shared) {
+    size_t base_live = crystal_region_live_count();
+
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval("fn main() {\n"
+                                "    let ch = Channel::new(4)\n"
+                                "    scope {\n"
+                                "        spawn {\n"
+                                "            fix one = [1, \"channel teardown long padding string 0123456789\"]\n"
+                                "            fix two = [2, \"channel teardown long padding string 0123456789\"]\n"
+                                "            fix three = [3, \"channel teardown long padding string 0123456789\"]\n"
+                                "            ch.send(one)\n"
+                                "            ch.send(two)\n"
+                                "            ch.send(three)\n"
+                                "        }\n"
+                                "    }\n"
+                                "    let got = ch.recv()\n"
+                                "    assert(got[0] == 1, \"recv wrong\")\n"
+                                "}\n",
+                                &tokens, &prog);
+    ASSERT(ev != NULL);
+
+    /* main() returned: bindings dead, channel collected; nothing pinned. */
+    cbr_rb_cleanup(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* (h) leak-detector advisory (R28): a live region absent from a reachable
+ * set is COUNTED but never freed — the report is advisory only. */
+TEST(cbr_rb_report_unreachable_is_advisory) {
+    size_t base_live = crystal_region_live_count();
+
+    LatValue arr = cbr_make_array();
+    ASSERT(value_freeze_to_region(&arr));
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    /* Empty reachable set: our region (at least) is reported... */
+    size_t unreachable = crystal_region_report_unreachable(NULL, 0, NULL);
+    ASSERT(unreachable >= 1);
+    /* ...but NOT freed: the handle is still valid and rc-owned. */
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+    ASSERT(arr.as.array.len == 2);
+
+    /* With the region's tagged id in the reachable set it is not counted. */
+    size_t tag = arr.region_id;
+    size_t still = crystal_region_report_unreachable(&tag, 1, NULL);
+    ASSERT(still == unreachable - 1);
+
+    value_free(&arr);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 }

@@ -223,12 +223,17 @@ static void gc_mark_env_value(LatValue *v, void *ctx) {
  * IDs into the supplied vector.
  */
 static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions) {
-    /* Arena-backed values: record the region as reachable and skip traversal.
-     * All child pointers reside in the same region, so no fluid marking needed.
-     * (Compiled bytecode closures now carry region_id == REGION_NONE; their
-     * upvalue count lives in as.closure.upvalue_count.) */
+    /* Region-backed / interned / const values: skip traversal — their
+     * storage is never in the fluid heap. Shared crystal handles (tagged
+     * region_id) are deliberately not traversed: the region is sealed and
+     * self-contained, owned by refcount, and rooted by whoever holds the
+     * handle — the fluid GC must never free or relocate its pages (it
+     * can't: they are plain global malloc, not fluid-heap-tracked). The
+     * tagged ids are collected only for the debug leak detector.
+     * (Legacy crystals — unshareable or below-threshold freezes — carry
+     * region_id == REGION_NONE and fall through to normal marking.) */
     if (v->region_id != REGION_NONE && v->region_id != REGION_EPHEMERAL) {
-        lat_vec_push(reachable_regions, &v->region_id);
+        if (REGION_IS_SHARED_ID(v->region_id)) lat_vec_push(reachable_regions, &v->region_id);
         return;
     }
     switch (v->type) {
@@ -309,9 +314,12 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
 #ifndef NDEBUG
 #include <assert.h>
 /*
- * Debug assertion: verify that no crystal value's heap pointers appear
- * in the fluid alloc list.  Violation would mean freeze didn't properly
- * untrack the pointer, risking a double-free during sweep.
+ * Debug assertion (Round B contract): crystal values are either fluid-heap
+ * legacy crystals (region_id == REGION_NONE — skipped here, traversed and
+ * marked like any fluid value) or sealed region-backed handles whose
+ * pointers must NEVER appear in the fluid alloc list (H9/C2: region pages
+ * are arena memory; fluid tracking of one would mean a sweep could free
+ * sealed storage out from under every alias).
  */
 static bool ptr_in_fluid(FluidHeap *fh, void *ptr) {
     if (!ptr) return false;
@@ -375,9 +383,6 @@ static void gc_cycle(Evaluator *ev) {
     FluidHeap *fh = ev->heap->fluid;
     LatVec reachable_regions = lat_vec_new(sizeof(RegionId));
 
-    /* 0. Advance epoch — groups frozen values by GC generation */
-    if (!ev->no_regions) region_advance_epoch(ev->heap->regions);
-
     /* 1. Clear all marks */
     fluid_unmark_all(fh);
 
@@ -402,16 +407,28 @@ static void gc_cycle(Evaluator *ev) {
     size_t swept_fluid = fluid_sweep(fh);
     ev->stats.gc_bytes_swept += fluid_before - fh->total_bytes;
 
-    /* 6. Collect unreachable crystal regions */
-    size_t swept_regions = 0;
-    if (!ev->no_regions) {
-        swept_regions = region_collect(ev->heap->regions, (RegionId *)reachable_regions.data, reachable_regions.len);
+    /* 6. Shared crystal regions are reclaimed by refcount alone (R28) —
+     * the GC frees nothing region-side. In debug builds it can REPORT
+     * live registry regions invisible from the GC roots, but a region can
+     * be legitimately held outside them (history snapshots, module cache,
+     * channel buffers, sibling-thread evaluators), so the report is
+     * advisory and opt-in via LATTICE_REGION_LEAK_REPORT. */
+#ifndef NDEBUG
+    {
+        static int leak_report = -1;
+        if (leak_report < 0) {
+            const char *e = getenv("LATTICE_REGION_LEAK_REPORT");
+            leak_report = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+        }
+        if (leak_report)
+            crystal_region_report_unreachable((const size_t *)reachable_regions.data, reachable_regions.len, stderr);
     }
+#endif
 
-    /* 7. Update stats */
+    /* 7. Update stats (gc_swept_regions stays 0: refcount is the sole
+     * region reclaimer since Round B) */
     ev->stats.gc_cycles++;
     ev->stats.gc_swept_fluid += swept_fluid;
-    ev->stats.gc_swept_regions += swept_regions;
 
     lat_vec_free(&reachable_regions);
 
@@ -434,81 +451,29 @@ static void gc_maybe_collect(Evaluator *ev) {
 }
 
 /*
- * Recursively set region_id on a value and all nested values.
- * Must walk into closure captured environments so that GC knows
- * every arena pointer belongs to this region.
- */
-static void set_region_id_env(Env *env, RegionId rid);
-
-static void set_region_id_recursive(LatValue *v, RegionId rid) {
-    v->region_id = rid;
-    switch (v->type) {
-        case VAL_ARRAY:
-            for (size_t i = 0; i < v->as.array.len; i++) set_region_id_recursive(&v->as.array.elems[i], rid);
-            break;
-        case VAL_STRUCT:
-            for (size_t i = 0; i < v->as.strct.field_count; i++)
-                set_region_id_recursive(&v->as.strct.field_values[i], rid);
-            break;
-        case VAL_CLOSURE:
-            if (v->as.closure.captured_env) set_region_id_env(v->as.closure.captured_env, rid);
-            break;
-        case VAL_MAP:
-            if (v->as.map.map) {
-                for (size_t i = 0; i < v->as.map.map->cap; i++) {
-                    if (v->as.map.map->entries[i].state == MAP_OCCUPIED) {
-                        LatValue *mv = (LatValue *)v->as.map.map->entries[i].value;
-                        set_region_id_recursive(mv, rid);
-                    }
-                }
-            }
-            break;
-        case VAL_ENUM:
-            for (size_t i = 0; i < v->as.enm.payload_count; i++) set_region_id_recursive(&v->as.enm.payload[i], rid);
-            break;
-        case VAL_SET:
-            if (v->as.set.map) {
-                for (size_t i = 0; i < v->as.set.map->cap; i++) {
-                    if (v->as.set.map->entries[i].state == MAP_OCCUPIED) {
-                        LatValue *sv = (LatValue *)v->as.set.map->entries[i].value;
-                        set_region_id_recursive(sv, rid);
-                    }
-                }
-            }
-            break;
-        default: break;
-    }
-}
-
-static void set_region_id_env_value(LatValue *v, void *ctx) {
-    RegionId rid = *(RegionId *)ctx;
-    set_region_id_recursive(v, rid);
-}
-
-static void set_region_id_env(Env *env, RegionId rid) { env_iter_values(env, set_region_id_env_value, &rid); }
-
-/*
- * Freeze support: deep-clone value into a new arena-backed region,
- * set region_id recursively, free the original fluid-heap value,
- * and replace it with the arena clone.
+ * Whole-binding freeze support (Round B, LAT-449): materialize the value
+ * into a refcounted shared crystal region via value_freeze_to_region.
+ * Unshareable values (closures/refs/iterators/channels/sublimated members)
+ * and below-threshold values (scalars, short strings) fall back internally
+ * to the bare value_freeze tag flip — a legacy crystal that stays in the
+ * fluid heap with v0.4.1-identical pass-by-value semantics.
  *
- * In no-regions baseline mode, crystal values stay in the fluid heap.
+ * Numeric RegionManager region ids are fully retired: this helper was the
+ * process's only minting site (region_create + set_region_id_recursive);
+ * shared handles now carry tagged CrystalRegion pointers exclusively.
+ *
+ * In no-regions baseline mode crystals stay in the fluid heap — callers
+ * pre-flip with value_freeze, so returning early preserves the legacy
+ * tag-flip behavior.
  */
 static void freeze_to_region(Evaluator *ev, LatValue *v) {
     if (ev->no_regions) return;
-
-    CrystalRegion *region = region_create(ev->heap->regions);
-
-    value_set_arena(region);
-    LatValue clone = value_deep_clone(v);
-    value_set_arena(NULL);
-
-    ev->heap->regions->cumulative_data_bytes += region->total_bytes;
-
-    set_region_id_recursive(&clone, region->id);
-
-    value_free(v);
-    *v = clone;
+    bool was_shared = (v->phase == VTAG_CRYSTAL && REGION_IS_SHARED_ID(v->region_id));
+    if (value_freeze_to_region(v) && !was_shared) {
+        /* Account materialized bytes for --mem-stats (idempotent refreeze
+         * of an already-shared handle creates nothing — skip). */
+        ev->heap->regions->cumulative_data_bytes += REGION_PTR(v->region_id)->total_bytes;
+    }
 }
 
 /* Record a history snapshot for a tracked variable */
@@ -1061,6 +1026,11 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
         } else if (!decl->params[i].default_value) required++;
     }
     size_t max_positional = has_variadic ? decl->param_count - 1 : decl->param_count;
+    /* call_fn owns args: on success they are moved into the callee scope, so
+     * every error return BEFORE consumption must free them here (the caller
+     * only frees the array itself). Previously the leaked values were
+     * silently reclaimed at fluid-heap teardown; a leaked shared-crystal
+     * handle would instead pin its region's refcount forever (C2). */
     if (arg_count < required || (!has_variadic && arg_count > max_positional)) {
         char *err = NULL;
         if (has_variadic)
@@ -1070,6 +1040,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             lat_asprintf(&err, "function '%s' expects %zu to %zu arguments, got %zu", decl->name, required,
                          max_positional, arg_count);
         else lat_asprintf(&err, "function '%s' expects %zu arguments, got %zu", decl->name, required, arg_count);
+        for (size_t i = 0; i < arg_count; i++) value_free(&args[i]);
         return eval_err(err);
     }
     /* Phase constraint enforcement */
@@ -1080,6 +1051,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             char *err = NULL;
             lat_asprintf(&err, "function '%s' parameter '%s' requires %s argument, got %s", decl->name,
                          decl->params[i].name, ast_phase_name(decl->params[i].ty.phase), phase_tag_name(args[i].phase));
+            for (size_t j = 0; j < arg_count; j++) value_free(&args[j]);
             return eval_err(err);
         }
     }
@@ -1095,11 +1067,13 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
                 if (tsug) {
                     lat_asprintf(&err, "function '%s' parameter '%s' expects type %s, got %s (did you mean '%s'?)",
                                  decl->name, decl->params[i].name, tyname, value_type_display(&args[i]), tsug);
+                    for (size_t j = 0; j < arg_count; j++) value_free(&args[j]);
                     return eval_err(err);
                 }
             }
             lat_asprintf(&err, "function '%s' parameter '%s' expects type %s, got %s", decl->name, decl->params[i].name,
                          tyname, value_type_display(&args[i]));
+            for (size_t j = 0; j < arg_count; j++) value_free(&args[j]);
             return eval_err(err);
         }
     }
@@ -1107,6 +1081,7 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
     if (!ev_push_frame(ev, decl->name)) {
         char *err = NULL;
         lat_asprintf(&err, "maximum recursion depth exceeded (limit: %zu)", ev->max_call_depth);
+        for (size_t i = 0; i < arg_count; i++) value_free(&args[i]);
         return eval_err(err);
     }
     stats_scope_push(&ev->stats);
@@ -1117,6 +1092,9 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
             size_t rest_count = (arg_count > i) ? arg_count - i : 0;
             LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
             if (!rest_elems && rest_count > 0) {
+                /* args[0..i-1] were consumed by env_define and are freed by
+                 * env_pop_scope; the rest are still ours — free them. */
+                for (size_t j = i; j < arg_count; j++) value_free(&args[j]);
                 env_pop_scope(ev->env);
                 stats_scope_pop(&ev->stats);
                 return eval_err(strdup("out of memory"));
@@ -1180,12 +1158,12 @@ static EvalResult call_fn(Evaluator *ev, const FnDecl *decl, LatValue *args, siz
                 return cc;
             }
             if (cc.value.type == VAL_CLOSURE) {
-                LatValue arg = value_deep_clone(&ret_val);
-                LatValue call_args[1] = {arg};
+                /* call_closure CONSUMES call_args (moved into the callee scope
+                 * and freed by env_pop_scope) — do NOT free the clone here. */
+                LatValue call_args[1] = {value_deep_clone(&ret_val)};
                 EvalResult er = call_closure(ev, cc.value.as.closure.param_names, cc.value.as.closure.param_count,
                                              cc.value.as.closure.body, cc.value.as.closure.captured_env, call_args, 1,
                                              cc.value.as.closure.default_values, cc.value.as.closure.has_variadic);
-                value_free(&arg);
                 value_free(&cc.value);
                 if (!IS_OK(er)) {
                     if (IS_OK(result)) value_free(&result.value);
@@ -1300,12 +1278,17 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
         if (!default_values || !default_values[i]) required++;
     }
     size_t max_positional = has_variadic ? param_count - 1 : param_count;
+    /* call_closure owns args: on success they are moved into the callee scope,
+     * so every error return BEFORE consumption must free them here (the caller
+     * only frees the array itself). A leaked shared-crystal handle would
+     * otherwise pin its region's refcount forever (mirrors call_fn). */
     if (arg_count < required || (!has_variadic && arg_count > max_positional)) {
         char *err = NULL;
         if (has_variadic) lat_asprintf(&err, "closure expects at least %zu arguments, got %zu", required, arg_count);
         else if (required < max_positional)
             lat_asprintf(&err, "closure expects %zu to %zu arguments, got %zu", required, max_positional, arg_count);
         else lat_asprintf(&err, "closure expects %zu arguments, got %zu", param_count, arg_count);
+        for (size_t i = 0; i < arg_count; i++) value_free(&args[i]);
         return eval_err(err);
     }
     stats_closure_call(&ev->stats);
@@ -1336,6 +1319,9 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
             LatValue *rest_elems = malloc(rest_count * sizeof(LatValue));
             if (!rest_elems && rest_count > 0) {
                 Env *dummy;
+                /* args[0..i-1] were consumed by env_define and are freed by
+                 * env_pop_scope; the rest are still ours — free them. */
+                for (size_t j = i; j < arg_count; j++) value_free(&args[j]);
                 env_pop_scope(ev->env);
                 stats_scope_pop(&ev->stats);
                 ev->env = saved;
@@ -1635,12 +1621,24 @@ static void *spawn_thread_fn(void *arg) {
 
 #endif /* __EMSCRIPTEN__ */
 
-/* Dispatch wrapper so eval can use iter_map_transform/iter_filter with closures */
+/* Dispatch wrapper so eval can use iter_map_transform/iter_filter with closures.
+ * Contract: like the VM dispatchers (stackvm_iter_callback clones via
+ * value_clone_fast, regvm_iter_callback via rvm_clone_or_borrow), the CALLER
+ * RETAINS ownership of args. call_closure CONSUMES its args, so pass deep
+ * clones and leave the caller's handles untouched. */
 static LatValue eval_dispatch_call_closure(void *ctx, LatValue *closure, LatValue *args, int argc) {
     Evaluator *ev = (Evaluator *)ctx;
+    LatValue stack_args[4];
+    LatValue *cloned = stack_args;
+    if (argc > 4) {
+        cloned = malloc((size_t)argc * sizeof(LatValue));
+        if (!cloned) return value_nil();
+    }
+    for (int i = 0; i < argc; i++) cloned[i] = value_deep_clone(&args[i]);
     EvalResult r = call_closure(ev, closure->as.closure.param_names, closure->as.closure.param_count,
-                                closure->as.closure.body, closure->as.closure.captured_env, args, (size_t)argc,
+                                closure->as.closure.body, closure->as.closure.captured_env, cloned, (size_t)argc,
                                 closure->as.closure.default_values, closure->as.closure.has_variadic);
+    if (cloned != stack_args) free(cloned);
     if (IS_OK(r)) return r.value;
     /* On error, return nil and discard */
     if (IS_ERR(r)) free(r.error);
@@ -8849,6 +8847,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         except_names[i] = strdup(er.value.as.str_val);
                         value_free(&er.value);
                     }
+                    /* H9/C2: refreeze-except on an already-shared crystal
+                     * would mutate field_phases/key_phases and entry values
+                     * INSIDE the sealed region — privatize the working copy
+                     * first. The result deliberately stays a legacy crystal
+                     * (exempt keys must remain writable; shared maps never
+                     * carry key_phases). */
+                    value_unshare(&val);
                     if (val.type == VAL_STRUCT) {
                         /* Lazy-allocate field_phases */
                         if (!val.as.strct.field_phases) {
@@ -9075,7 +9080,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             stats_deep_clone(&ev->stats);
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
             if (!IS_OK(er)) return er;
-            LatValue cloned = value_deep_clone(&er.value);
+            /* clone() contractually returns a physically independent copy —
+             * force-copy so a shared crystal never comes back as a retained
+             * alias (R19). */
+            LatValue cloned = value_copy_out(&er.value);
             value_free(&er.value);
             return eval_ok(cloned);
         }
@@ -9262,6 +9270,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (saved_phase != VTAG_FLUID) {
                 LatValue cur;
                 if (env_get(ev->env, name, &cur)) {
+                    /* H9: if the body refroze the binding into a shared
+                     * region and the saved phase is SUBLIMATED, stamping it
+                     * onto a shared handle would permit child mutation of
+                     * sealed memory — privatize first. (saved_phase ==
+                     * CRYSTAL is a no-op on a shared handle and stays
+                     * shared.) */
+                    if (saved_phase != VTAG_CRYSTAL) value_unshare(&cur);
                     cur = value_freeze(cur);
                     cur.phase = saved_phase;
                     env_set(ev->env, name, cur);
@@ -9281,6 +9296,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     lat_asprintf(&err, "sublimate(): undefined variable '%s'", name);
                     return eval_err(err);
                 }
+                /* H9/H11: privatize a shared handle first — a sublimated
+                 * value permits child mutation, which must never reach
+                 * sealed region memory. */
+                value_unshare(&val);
                 val.phase = VTAG_SUBLIMATED; /* Only set top-level phase, don't recurse */
                 LatValue ret = value_deep_clone(&val);
                 env_set(ev->env, name, val);
@@ -9294,6 +9313,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             }
             EvalResult er = eval_expr(ev, expr->as.freeze_expr);
             if (!IS_OK(er)) return er;
+            value_unshare(&er.value); /* H9/H11: see ident path above */
             er.value.phase = VTAG_SUBLIMATED;
             return eval_ok(er.value);
         }
@@ -10501,7 +10521,13 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
             if (ev->mode == MODE_CASUAL) {
                 switch (stmt->as.binding.phase) {
-                    case PHASE_FLUID: vr.value.phase = VTAG_FLUID; break;
+                    case PHASE_FLUID:
+                        /* H9: `flux y = frozen` may hold a retained shared
+                         * handle — privatize before the fluid flip so no
+                         * FLUID handle ever views sealed region memory. */
+                        value_unshare(&vr.value);
+                        vr.value.phase = VTAG_FLUID;
+                        break;
                     case PHASE_CRYSTAL:
                         stats_freeze(&ev->stats);
                         {
@@ -10523,6 +10549,10 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                             value_free(&vr.value);
                             return eval_err(err);
                         }
+                        /* Crystals error above, so a shared handle (always
+                         * crystal) cannot reach this flip — unshare anyway
+                         * as belt-and-suspenders (no-op when not shared). */
+                        value_unshare(&vr.value);
                         vr.value.phase = VTAG_FLUID;
                         break;
                     case PHASE_CRYSTAL:
@@ -11070,9 +11100,13 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 /* Bind named elements */
                 for (size_t i = 0; i < name_count; i++) {
                     LatValue elem = value_deep_clone(&vr.value.as.array.elems[i]);
-                    /* Apply phase */
-                    if (stmt->as.destructure.phase == PHASE_FLUID) elem.phase = VTAG_FLUID;
-                    else if (stmt->as.destructure.phase == PHASE_CRYSTAL) {
+                    /* Apply phase. H9: an element extracted from a shared
+                     * crystal source is a retained alias — privatize before
+                     * any fluid flip. */
+                    if (stmt->as.destructure.phase == PHASE_FLUID) {
+                        value_unshare(&elem);
+                        elem.phase = VTAG_FLUID;
+                    } else if (stmt->as.destructure.phase == PHASE_CRYSTAL) {
                         stats_freeze(&ev->stats);
                         elem = value_freeze(elem);
                         freeze_to_region(ev, &elem);
@@ -11142,8 +11176,11 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         return eval_err(err);
                     }
 
-                    if (stmt->as.destructure.phase == PHASE_FLUID) elem.phase = VTAG_FLUID;
-                    else if (stmt->as.destructure.phase == PHASE_CRYSTAL) {
+                    /* H9: see array path above — unshare before fluid flip. */
+                    if (stmt->as.destructure.phase == PHASE_FLUID) {
+                        value_unshare(&elem);
+                        elem.phase = VTAG_FLUID;
+                    } else if (stmt->as.destructure.phase == PHASE_CRYSTAL) {
                         stats_freeze(&ev->stats);
                         elem = value_freeze(elem);
                         freeze_to_region(ev, &elem);
@@ -11265,7 +11302,20 @@ static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
 }
 
 /* ── Method calls ── */
-
+/*
+ * OWNERSHIP CONTRACT (C2, LAT-449 Round B): `obj` and `args[]` are
+ * UNRETAINED BITWISE BORROWS — the EXPR_METHOD_CALL caller passes its own
+ * values by value and frees them itself after this returns. Therefore this
+ * function (and everything it tail-calls) must NEVER:
+ *   - value_free obj or any args[i] (that would over-release a shared
+ *     crystal region handle: premature destroy -> UAF for every alias), nor
+ *   - store obj/args[i] anywhere that outlives the call without going
+ *     through value_deep_clone (which retains shared handles correctly).
+ * Plain bitwise `LatValue it = obj` copies are permitted ONLY for
+ * unshareable kinds whose refcount is bumped explicitly (VAL_ITERATOR).
+ * Violations are policed by the rc-ledger assert in memory.c and the
+ * LATTICE_FORCE_COPY=1 differential oracle (make test-force-copy).
+ */
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method, LatValue *args, size_t arg_count) {
     /* ── Enum methods ── */
     if (obj.type == VAL_ENUM) {
@@ -11791,10 +11841,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                     value_free(&val);
                     break;
                 }
+                /* call_closure CONSUMES val (freed via env_pop_scope) — do not free it here */
                 EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
                                              args[0].as.closure.body, args[0].as.closure.captured_env, &val, 1,
                                              args[0].as.closure.default_values, args[0].as.closure.has_variadic);
-                value_free(&val);
                 if (!IS_OK(cr)) {
                     for (size_t fi = 0; fi < len; fi++) value_free(&elems[fi]);
                     free(elems);
@@ -11824,11 +11874,12 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                     value_free(&val);
                     break;
                 }
+                /* Pass a clone to the predicate (call_closure CONSUMES it);
+                 * keep val for the result array when the predicate passes. */
                 LatValue carg = value_deep_clone(&val);
                 EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
                                              args[0].as.closure.body, args[0].as.closure.captured_env, &carg, 1,
                                              args[0].as.closure.default_values, args[0].as.closure.has_variadic);
-                value_free(&carg);
                 if (!IS_OK(cr)) {
                     value_free(&val);
                     for (size_t fi = 0; fi < len; fi++) value_free(&elems[fi]);
@@ -11864,12 +11915,11 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                     value_free(&val);
                     break;
                 }
+                /* call_closure CONSUMES cargs (acc and val) — do not free them here */
                 LatValue cargs[2] = {acc, val};
                 EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
                                              args[0].as.closure.body, args[0].as.closure.captured_env, cargs, 2,
                                              args[0].as.closure.default_values, args[0].as.closure.has_variadic);
-                value_free(&acc);
-                value_free(&val);
                 if (!IS_OK(cr)) return cr;
                 acc = cr.value;
             }
@@ -11885,10 +11935,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                     value_free(&val);
                     return eval_ok(value_bool(false));
                 }
+                /* call_closure CONSUMES val — do not free it here */
                 EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
                                              args[0].as.closure.body, args[0].as.closure.captured_env, &val, 1,
                                              args[0].as.closure.default_values, args[0].as.closure.has_variadic);
-                value_free(&val);
                 if (!IS_OK(cr)) return cr;
                 bool truthy = value_is_truthy(&cr.value);
                 value_free(&cr.value);
@@ -11905,10 +11955,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                     value_free(&val);
                     return eval_ok(value_bool(true));
                 }
+                /* call_closure CONSUMES val — do not free it here */
                 EvalResult cr = call_closure(ev, args[0].as.closure.param_names, args[0].as.closure.param_count,
                                              args[0].as.closure.body, args[0].as.closure.captured_env, &val, 1,
                                              args[0].as.closure.default_values, args[0].as.closure.has_variadic);
-                value_free(&val);
                 if (!IS_OK(cr)) return cr;
                 bool truthy = value_is_truthy(&cr.value);
                 value_free(&cr.value);
@@ -13994,9 +14044,13 @@ const MemoryStats *evaluator_stats(const Evaluator *ev) {
     s->fluid_peak_bytes = ev->heap->fluid->peak_bytes;
     s->fluid_live_bytes = ev->heap->fluid->total_bytes;
     s->fluid_cumulative_bytes = ev->heap->fluid->cumulative_bytes;
-    s->region_peak_count = ev->heap->regions->peak_count;
-    s->region_live_count = ev->heap->regions->count;
-    s->region_live_data_bytes = region_live_data_bytes(ev->heap->regions);
+    /* Round B: region stats come from the shared-crystal registry (the
+     * evaluator no longer creates RegionManager regions). The registry is
+     * process-global; cumulative bytes stay per-evaluator (accumulated by
+     * freeze_to_region into the otherwise-idle RegionManager field). */
+    s->region_peak_count = crystal_region_peak_count();
+    s->region_live_count = crystal_region_live_count();
+    s->region_live_data_bytes = crystal_region_live_data_bytes();
     s->region_cumulative_data_bytes = ev->heap->regions->cumulative_data_bytes;
 #if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
     struct rusage ru;

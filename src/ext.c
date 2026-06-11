@@ -18,6 +18,19 @@
 #endif
 
 /* ── LatExtValue: thin wrapper around LatValue ── */
+/*
+ * Crystal-by-Reference boundary contract (LAT-449 Round B, H20):
+ * previously-compiled extensions inspect and free LatValues with pre-CbR
+ * assumptions (every value is privately owned; value_free never touches a
+ * refcount). Therefore NO shared-region handle may ever cross into an
+ * extension: every value handed out below (args marshalled in
+ * ext_call_native, lat_ext_array_get/lat_ext_map_get results, values copied
+ * into extension-built containers) goes through value_copy_out, which
+ * recursively force-copies and yields region_id == REGION_NONE. The return
+ * direction (extension result -> evaluator) is built exclusively from
+ * lat_ext_* constructors over those copies, so it can never carry a shared
+ * handle either. The extra copies are an accepted perf tax by design.
+ */
 
 struct LatExtValue {
     LatValue val;
@@ -88,7 +101,9 @@ LatExtValue *lat_ext_nil(void) {
 
 LatExtValue *lat_ext_array(LatExtValue **elems, size_t len) {
     LatValue *vals = len > 0 ? malloc(len * sizeof(LatValue)) : NULL;
-    for (size_t i = 0; i < len; i++) { vals[i] = value_deep_clone(&elems[i]->val); }
+    /* copy-out, not deep_clone: never let a retained shared-region alias
+     * into an extension-owned container (see boundary contract above). */
+    for (size_t i = 0; i < len; i++) { vals[i] = value_copy_out(&elems[i]->val); }
     LatExtValue *ev = malloc(sizeof(LatExtValue));
     if (!ev) {
         free(vals);
@@ -108,7 +123,7 @@ LatExtValue *lat_ext_map_new(void) {
 
 void lat_ext_map_set(LatExtValue *map, const char *key, LatExtValue *val) {
     if (map->val.type != VAL_MAP) return;
-    LatValue v = value_deep_clone(&val->val);
+    LatValue v = value_copy_out(&val->val); /* H20: no shared handles cross the boundary */
     lat_map_set(map->val.as.map.map, key, &v);
 }
 
@@ -156,7 +171,7 @@ LatExtValue *lat_ext_array_get(const LatExtValue *v, size_t index) {
     if (v->val.type != VAL_ARRAY || index >= v->val.as.array.len) return NULL;
     LatExtValue *ev = malloc(sizeof(LatExtValue));
     if (!ev) return NULL;
-    ev->val = value_deep_clone(&v->val.as.array.elems[index]);
+    ev->val = value_copy_out(&v->val.as.array.elems[index]); /* H20 outbound copy */
     return ev;
 }
 
@@ -166,7 +181,7 @@ LatExtValue *lat_ext_map_get(const LatExtValue *v, const char *key) {
     if (!found) return NULL;
     LatExtValue *ev = malloc(sizeof(LatExtValue));
     if (!ev) return NULL;
-    ev->val = value_deep_clone(found);
+    ev->val = value_copy_out(found); /* H20 outbound copy */
     return ev;
 }
 
@@ -191,20 +206,29 @@ void lat_ext_free(LatExtValue *v) {
 LatValue ext_call_native(void *fn_ptr, LatValue *args, size_t argc) {
     LatExtFn fn = (LatExtFn)fn_ptr;
 
-    /* Wrap args as LatExtValue pointers (stack-allocated wrappers) */
+    /* Wrap args as LatExtValue pointers. H20: COPY OUT, do not hand the
+     * caller's values across the boundary bitwise — the old bitwise borrow
+     * would let an extension that stores or frees an arg escape an
+     * unretained alias of a shared crystal region (C2 over-release / UAF).
+     * The copies are owned here and freed after the call regardless of what
+     * the extension did with the wrappers' contents. */
     LatExtValue *ext_args_storage = argc > 0 ? malloc(argc * sizeof(LatExtValue)) : NULL;
     LatExtValue **ext_args = argc > 0 ? malloc(argc * sizeof(LatExtValue *)) : NULL;
     for (size_t i = 0; i < argc; i++) {
-        ext_args_storage[i].val = args[i];
+        ext_args_storage[i].val = value_copy_out(&args[i]);
         ext_args[i] = &ext_args_storage[i];
     }
 
     LatExtValue *result = fn(ext_args, argc);
 
+    for (size_t i = 0; i < argc; i++) value_free(&ext_args_storage[i].val);
     free(ext_args);
     free(ext_args_storage);
 
     if (!result) return value_nil();
+    /* Inbound (extension -> evaluator) is the safe direction: results are
+     * built from lat_ext_* constructors over copied-out values and can never
+     * carry a shared handle; a plain deep clone suffices. */
     LatValue ret = value_deep_clone(&result->val);
     lat_ext_free(result);
     return ret;

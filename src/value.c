@@ -367,20 +367,31 @@ bool value_is_crystal(const LatValue *v) { return v->phase == VTAG_CRYSTAL; }
 
 /* ── Deep clone ── */
 
-/* CbR Stage 2: shared-region handles are classified by the region-id tag AND
- * phase == VTAG_CRYSTAL (a phase-anomalous handle copies safely rather than
- * aliases — H11), plus the Round A dormancy gate: the tree-walker still
- * mints odd NUMERIC region ids that would satisfy REGION_IS_SHARED_ID, so
- * the borrow path must be unreachable unless a shared region actually
- * exists (only unit tests create them this round). The gate is dropped in
- * Round B when numeric ids retire. */
-static inline bool value_region_is_shared(const LatValue *v) {
-    return REGION_IS_SHARED_ID(v->region_id) && crystal_region_shared_active();
+/* CbR Stage 2 (Round B): shared-region handles are classified by the
+ * region-id tag alone plus phase == VTAG_CRYSTAL (a phase-anomalous handle
+ * copies safely rather than aliases — H11). The Round A dormancy gate
+ * (crystal_region_shared_active) is gone: the tree-walker no longer mints
+ * numeric region ids, so any id satisfying REGION_IS_SHARED_ID is a genuine
+ * tagged CrystalRegion pointer. */
+static inline bool value_region_is_shared(const LatValue *v) { return REGION_IS_SHARED_ID(v->region_id); }
+
+/* LATTICE_FORCE_COPY=1 differential oracle (design H16 / C2 detection net):
+ * disables the borrow fast path so every clone is a physical deep copy.
+ * Running the full suite under it and diffing outputs bit-for-bit flushes
+ * out any site that depends on aliasing where it shouldn't (or vice versa).
+ * Read once into a static — the env cannot change mid-process. */
+static bool clone_force_copy(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("LATTICE_FORCE_COPY");
+        mode = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return mode == 1;
 }
 
 LatValue value_clone_impl(const LatValue *v, bool allow_share) {
     /* Borrow fast path: aliasing a shared crystal is retain + bitwise copy. */
-    if (allow_share && v->phase == VTAG_CRYSTAL && value_region_is_shared(v)) {
+    if (allow_share && !clone_force_copy() && v->phase == VTAG_CRYSTAL && value_region_is_shared(v)) {
         crystal_region_retain(REGION_PTR(v->region_id));
         return *v; /* bitwise handle copy */
     }
@@ -609,10 +620,9 @@ LatValue value_deep_clone(const LatValue *v) { return value_clone_impl(v, true);
 LatValue value_copy_out(const LatValue *v) { return value_clone_impl(v, false); } /* recursive force-copy */
 
 /* CbR Stage 2: privatize a possibly-shared handle before an in-place write.
- * Keyed on value_region_is_shared: the region-id tag AND the
- * crystal_region_shared_active() dormancy gate (any tagged handle gets a
- * private copy while a shared region is live; the gate is removed in
- * Round B when the tree-walker's numeric region ids retire). */
+ * Keyed on value_region_is_shared (the region-id tag alone since Round B):
+ * a tagged handle gets a private force-copy and drops its region
+ * reference; anything else is left untouched. */
 void value_unshare(LatValue *v) {
     if (value_region_is_shared(v)) {
         LatValue priv = value_copy_out(v);
@@ -681,6 +691,11 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
     }
     /* VAL_BUFFER: just set phase tag (no nested values) */
     else if (v->type == VAL_REF) {
+        /* Refs are SHARED cells (value_clone_impl retains the same LatRef
+         * even in copy-out mode), so a thaw can reach a shared crystal
+         * handle stored inside one. Privatize it first: the inner handle
+         * must not be tag-flipped fluid over sealed region memory (H9). */
+        if (phase != VTAG_CRYSTAL) value_unshare(&v->as.ref.ref->value);
         set_phase_recursive(&v->as.ref.ref->value, phase);
     }
 }
@@ -692,8 +707,8 @@ LatValue value_freeze(LatValue v) {
 
 /* ── Freeze to shared region (Crystal-by-Reference, Stage 2) ──
  *
- * Dormant in Round A: no evaluator calls value_freeze_to_region yet; the
- * only callers are unit tests. */
+ * Live since Round B: the tree-walker's whole-binding freeze sites all
+ * funnel through value_freeze_to_region (eval.c freeze_to_region helper). */
 
 /* Cheap recursive pre-scan: a value is UNSHAREABLE if it transitively
  * contains a closure (either flavor), Ref, iterator, channel, or any

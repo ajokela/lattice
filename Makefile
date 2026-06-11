@@ -339,7 +339,7 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -390,6 +390,20 @@ test-all-backends: $(TEST_TARGET) $(LSP_TARGET)
 	@echo "=== stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
 	@echo "=== tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
 	@echo "=== regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
+
+# LAT-449 Round B differential oracle: LATTICE_FORCE_COPY=1 disables the
+# Crystal-by-Reference borrow fast path in value_clone_impl (every clone is a
+# physical deep copy) while freeze still materializes shared regions and
+# value_free still releases them — rc traffic without aliasing. Program
+# semantics must be bit-identical to a normal run; any divergence is an
+# aliasing bug (a retained handle treated as a private copy, or a missed
+# value_unshare). A handful of test_memory.c tests that assert the aliasing
+# MECHANISM itself (handle identity, retain counts) self-skip under the
+# oracle — see cbr_force_copy_active().
+test-force-copy: $(TEST_TARGET) $(LSP_TARGET)
+	@echo "=== FORCE_COPY oracle: stack-vm ===" && LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend stack-vm
+	@echo "=== FORCE_COPY oracle: tree-walk ===" && LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend tree-walk
+	@echo "=== FORCE_COPY oracle: regvm ===" && LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
 LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_traits latc_traits_codegen \
              latc_expressions latc_variables latc_control_flow latc_functions \

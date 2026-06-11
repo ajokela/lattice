@@ -41,6 +41,23 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Test (LATTICE_FORCE_COPY differential oracle, all backends)
+        run: make test-force-copy
+
+      - name: Test aliasing matrix under --no-regions (legacy tag-flip baseline)
+        run: |
+          ./clat tests/cbr_alias_matrix.lat
+          ./clat --no-regions tests/cbr_alias_matrix.lat
+          ./clat --regvm tests/cbr_alias_matrix.lat
+          ./clat --tree-walk tests/cbr_alias_matrix.lat
+          ./clat --tree-walk --no-regions tests/cbr_alias_matrix.lat
+          ./clat --gc-stress tests/cbr_alias_matrix.lat
+          ./clat --regvm --gc-stress tests/cbr_alias_matrix.lat
+          # NOTE: --tree-walk --gc-stress is excluded: freeze-except/anneal/
+          # grow crash under it on PRE-Round-B main too (pre-existing
+          # gc-stress rooting bug in the tree-walker, tracked separately).
+          LATTICE_FORCE_COPY=1 ./clat --tree-walk tests/cbr_alias_matrix.lat
+
   extensions:
     name: Extension Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

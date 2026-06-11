@@ -277,9 +277,9 @@ static void crystal_region_free(CrystalRegion *r) {
 
 /* ── Shared crystal regions (Crystal-by-Reference, Stage 2) ──
  *
- * Dormant in Round A: nothing in any evaluator creates these yet; the only
- * producers are value_freeze_to_region (itself uncalled by the language) and
- * unit tests. See memory.h for the atomics/memory-ordering contract. */
+ * Live since Round B: the tree-walker's whole-binding freeze sites create
+ * these via value_freeze_to_region; aliases retain, the last value_free
+ * releases. See memory.h for the atomics/memory-ordering contract. */
 
 #ifndef __EMSCRIPTEN__
 static pthread_mutex_t g_shared_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -297,10 +297,11 @@ static CrystalRegion **g_shared_regions = NULL;
 static size_t g_shared_count = 0;
 static size_t g_shared_cap = 0;
 static bool g_shared_atexit_registered = false;
-/* Atomic mirrors of the registry counts so the hot-path dormancy gate
- * (crystal_region_shared_active) never takes the mutex. */
+/* Atomic mirrors of the registry counts so hot-path queries
+ * (crystal_region_shared_active, live/peak counts) never take the mutex. */
 static _Atomic size_t g_shared_live = 0;
 static _Atomic size_t g_shared_created = 0;
+static _Atomic size_t g_shared_peak = 0;
 
 static void crystal_region_unseal(CrystalRegion *r) {
 #ifdef LATTICE_REGION_SEAL
@@ -348,11 +349,16 @@ static void crystal_region_destroy_shared(CrystalRegion *r) {
 /* Debug global region counter + process-exit leak report (R29); also frees
  * whatever is still registered so ASAN-built test binaries exit clean.
  *
- * Exit-time edges (all acceptable while the registry is empty at exit —
- * Round A — and to be revisited when the evaluator holds handles):
- *   - atexit handlers run LIFO: handlers registered EARLIER than this one
- *     run AFTER it, so any such handler that value_free()s a shared handle
- *     would release into a registry this teardown has already destroyed.
+ * Round B (C3) contract — the evaluator now holds live handles at runtime:
+ *   - Tree-walker teardown (evaluator_free / REPL exit / test cleanup_run)
+ *     MUST release every env binding, GC root, history snapshot and module
+ *     cache entry BEFORE process exit, so the registry is empty when this
+ *     handler runs on a normal exit. main.c frees the evaluator on every
+ *     return path and registers no other atexit handlers, so LIFO ordering
+ *     cannot release into a destroyed registry.
+ *   - The lattice exit() builtin terminates with live handles still bound;
+ *     the loop below frees their regions (safe — nothing runs after) and
+ *     the !NDEBUG report fires. Expected/benign for explicit exit().
  *   - A racing thread can be inside crystal_region_release with rc already
  *     at zero but shared_registry_remove not yet run; this teardown could
  *     then double-free that region. Threads must not be releasing handles
@@ -426,7 +432,11 @@ CrystalRegion *crystal_region_create_shared(void) {
     }
     g_shared_regions[g_shared_count++] = r;
     SHARED_REG_UNLOCK();
-    atomic_fetch_add_explicit(&g_shared_live, 1, memory_order_relaxed);
+    size_t live = atomic_fetch_add_explicit(&g_shared_live, 1, memory_order_relaxed) + 1;
+    /* Track peak (racy CAS loop; relaxed is fine for a stat). */
+    size_t peak = atomic_load_explicit(&g_shared_peak, memory_order_relaxed);
+    while (live > peak && !atomic_compare_exchange_weak_explicit(&g_shared_peak, &peak, live, memory_order_relaxed,
+                                                                 memory_order_relaxed)) {}
     return r;
 }
 
@@ -465,6 +475,43 @@ bool crystal_region_shared_active(void) { return atomic_load_explicit(&g_shared_
 size_t crystal_region_live_count(void) { return atomic_load_explicit(&g_shared_live, memory_order_relaxed); }
 
 size_t crystal_region_created_total(void) { return atomic_load_explicit(&g_shared_created, memory_order_relaxed); }
+
+size_t crystal_region_peak_count(void) { return atomic_load_explicit(&g_shared_peak, memory_order_relaxed); }
+
+size_t crystal_region_live_data_bytes(void) {
+    size_t bytes = 0;
+    SHARED_REG_LOCK();
+    for (size_t i = 0; i < g_shared_count; i++) bytes += g_shared_regions[i]->total_bytes;
+    SHARED_REG_UNLOCK();
+    return bytes;
+}
+
+/* R28 debug leak detector: report live regions whose tagged id is absent
+ * from the reachable set the GC collected. Advisory only — see memory.h. */
+size_t crystal_region_report_unreachable(const size_t *reachable_tagged_ids, size_t count, void *out_file) {
+    FILE *out = (FILE *)out_file;
+    size_t unreachable = 0;
+    SHARED_REG_LOCK();
+    for (size_t i = 0; i < g_shared_count; i++) {
+        CrystalRegion *r = g_shared_regions[i];
+        size_t tag = ((size_t)r) | 1u; /* REGION_TAG without the value.h dependency */
+        bool found = false;
+        for (size_t j = 0; j < count; j++) {
+            if (reachable_tagged_ids[j] == tag) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            unreachable++;
+            if (out)
+                fprintf(out, "lattice: shared crystal region #%zu (rc=%zu, %zu bytes) not visible from GC roots\n",
+                        r->id, atomic_load_explicit(&r->rc, memory_order_relaxed), r->total_bytes);
+        }
+    }
+    SHARED_REG_UNLOCK();
+    return unreachable;
+}
 
 /* ── Arena allocation ── */
 

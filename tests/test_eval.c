@@ -851,8 +851,11 @@ static void cleanup_run(Evaluator *ev, LatVec *tokens, Program *prog) {
     lat_vec_free(tokens);
 }
 
-/* Test: freeze properly untracks from fluid heap (stats show region registration) */
+/* Test: freeze properly untracks from fluid heap (Round B: shared regions
+ * are refcount-released the moment each iteration's bindings die — no GC
+ * sweep involved, so assert the registry returns to baseline). */
 TEST(eval_gc_freeze_untracks) {
+    size_t base_live = crystal_region_live_count();
     LatVec tokens;
     Program prog;
     Evaluator *ev = run_with_stats("fn main() {\n"
@@ -871,14 +874,18 @@ TEST(eval_gc_freeze_untracks) {
     /* gc_stress ran cycles — the dual-heap assertion inside gc_cycle
      * would have fired if any crystal pointer remained in fluid heap */
     ASSERT(stats->gc_cycles > 0);
-    /* Frozen values go out of scope each iteration; regions collected */
-    ASSERT(stats->gc_swept_regions >= 1);
+    /* Frozen values went out of scope each iteration; every per-iteration
+     * region was refcount-released (rc-balance smoke test). */
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 
     cleanup_run(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 }
 
-/* Test: freeze values, drop references, GC collects the regions */
+/* Test: freeze values, drop references — Round B: every region dies with
+ * its binding via refcount; the registry is back at baseline mid-run. */
 TEST(eval_gc_region_lifecycle) {
+    size_t base_live = crystal_region_live_count();
     LatVec tokens;
     Program prog;
     Evaluator *ev = run_with_stats("fn main() {\n"
@@ -892,10 +899,12 @@ TEST(eval_gc_region_lifecycle) {
 
     const MemoryStats *stats = evaluator_stats(ev);
     ASSERT(stats->freezes >= 20);
-    /* Frozen values go out of scope each iteration; regions should be collected */
-    ASSERT(stats->gc_swept_regions >= 1);
+    /* Frozen values went out of scope each iteration; rc released each
+     * region without any GC involvement. */
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 
     cleanup_run(ev, &tokens, &prog);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 }
 
 /* Test: heavy freeze/thaw stress under gc_stress */
@@ -1098,25 +1107,35 @@ TEST(eval_arena_freeze_nested) {
                 "}\n");
 }
 
-/* Test: arena-backed values survive multiple GC cycles */
+/* Test: region-backed values survive multiple GC cycles; the binding's
+ * region is live while the evaluator is, and teardown empties the registry
+ * (C3: empty-registry-at-exit for the tree-walker). */
 TEST(eval_arena_survives_gc) {
+    size_t base_live = crystal_region_live_count();
     LatVec tokens;
     Program prog;
-    Evaluator *ev = run_with_stats("fn main() {\n"
-                                   "    fix persistent = [10, 20, 30]\n"
+    /* Top-level binding: stays live in the root scope after the run so the
+     * region is still retained when we snapshot stats (a main()-local would
+     * be rc-released at scope exit under Round B). */
+    Evaluator *ev = run_with_stats("fix persistent = [10, 20, 30]\n"
+                                   "fn main() {\n"
                                    "    for i in 0..100 {\n"
                                    "        let temp = [i, i * 2]\n"
                                    "    }\n"
-                                   "    print(thaw(persistent))\n"
+                                   "    print(persistent[0] + persistent[2])\n"
                                    "}\n",
                                    &tokens, &prog);
     ASSERT(ev != NULL);
 
     const MemoryStats *stats = evaluator_stats(ev);
     ASSERT(stats->gc_cycles > 0);
+    /* Repointed stat: registry-backed live count (the `persistent` binding
+     * holds its region while ev is alive)... */
     ASSERT(stats->region_live_count >= 1);
 
     cleanup_run(ev, &tokens, &prog);
+    /* ...and evaluator teardown releases it. */
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 }
 
 /* ── Helper: run source with gc_stress and capture stdout ── */
@@ -1245,11 +1264,13 @@ TEST(eval_arena_closure_captured_env_gc) {
     cleanup_run(ev, &tokens, &prog);
 }
 
-/* Test: an unreachable frozen closure's region IS collected.
- * The closure captures an array and is frozen, but is never returned
- * from the function — so when the function returns, the region becomes
- * unreachable and should be swept.  Expected output: "ok"              */
+/* Test: a frozen CLOSURE is unshareable (Round B) — it never gets a shared
+ * region and stays a legacy fluid-heap crystal, fully traversed by the GC
+ * (captured env included; previously masked by the region skip) and
+ * reclaimed by mark/sweep once unreachable. Expected output: "ok" */
 TEST(eval_arena_closure_region_collected) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
     LatVec tokens;
     Program prog;
     Evaluator *ev;
@@ -1274,10 +1295,12 @@ TEST(eval_arena_closure_region_collected) {
     ASSERT_EQ_STR(output, "ok");
 
     const MemoryStats *stats = evaluator_stats(ev);
-    /* GC must have run */
+    /* GC must have run (500 gc_stress iterations traverse the frozen
+     * closure's captured env without tripping the dual-heap assert) */
     ASSERT(stats->gc_cycles > 0);
-    /* The frozen closure's region should have been swept */
-    ASSERT(stats->gc_swept_regions >= 1);
+    /* Unshareable freeze: no shared region was ever created for it. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 
     free(output);
     cleanup_run(ev, &tokens, &prog);
@@ -5768,4 +5791,443 @@ TEST(spawn_concurrent_globals_safe) {
                 "        spawn { let b = []; let j = 0; while j < 200 { b.push(\"q\" + to_string(j)); j = j + 1 } }\n"
                 "    }\n"
                 "}\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LAT-449 Round B: Crystal-by-Reference semantics pins
+ *
+ * These are SEMANTICS PINS, not feature tests. They encode the observable
+ * isolation model of v0.4/v0.5 deep-copy crystals and MUST pass both BEFORE
+ * the Round B tree-walker switch (deep-copy crystals everywhere) and AFTER
+ * it (tree-walker freezes shareable containers into refcounted shared
+ * regions; aliases are O(1) retains). They also run unchanged on the stack
+ * VM and regvm backends, which keep deep-copy semantics until Stages 3/4 —
+ * passing there is the cross-backend compatibility assertion.
+ *
+ * If any of these breaks after the switch, an alias escaped: a retained
+ * handle was treated as a private copy (missed value_unshare / copy-out) or
+ * vice versa. Companion rc/lifecycle tests (which are RED until the switch
+ * lands) live in tests/test_memory.c under the same LAT-449 banner.
+ *
+ * All strings are padded past any regionization size threshold so the
+ * shared-region path actually triggers post-switch.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* (a) alias-then-thaw isolation, local bindings. thaw(ident) thaws the
+ * BINDING in place (write-back) and returns a fluid value; the alias chain
+ * a -> b must not observe mutations of the thawed copy. */
+TEST(cbr_pin_alias_then_thaw_local_isolation) {
+    ASSERT_RUNS("fn main() {\n"
+                "    fix a = [1, 2, 3, \"a fairly long string to clear any size threshold 0123456789\"]\n"
+                "    let b = a\n"
+                "    flux c = thaw(b)\n"
+                "    c[0] = 99\n"
+                "    assert(a[0] == 1, \"a mutated through alias\")\n"
+                "    assert(b[0] == 1, \"b mutated through alias\")\n"
+                "    assert(c[0] == 99, \"c write lost\")\n"
+                "    assert(phase_of(a) == \"crystal\", \"a phase changed\")\n"
+                "    assert(phase_of(b) == \"fluid\", \"thaw(ident) write-back semantics changed\")\n"
+                "    assert(phase_of(c) == \"fluid\", \"c not fluid\")\n"
+                "}\n");
+}
+
+/* (a) alias-then-thaw isolation, global frozen binding read from a fn. */
+TEST(cbr_pin_alias_then_thaw_global_isolation) {
+    ASSERT_RUNS("fix G = [10, 20, 30, \"global frozen long string 0123456789012345\"]\n"
+                "fn reader() -> Int {\n"
+                "    return G[1]\n"
+                "}\n"
+                "fn main() {\n"
+                "    let alias = G\n"
+                "    assert(reader() == 20, \"reader wrong\")\n"
+                "    flux t = thaw(alias)\n"
+                "    t[1] = 999\n"
+                "    assert(G[1] == 20, \"global mutated through alias\")\n"
+                "    assert(reader() == 20, \"reader sees mutation\")\n"
+                "    assert(phase_of(G) == \"crystal\", \"global phase changed\")\n"
+                "}\n");
+}
+
+/* (a) alias-then-thaw isolation, crystal stored in a struct field of a
+ * FLUID parent (shared handle inside fluid container). */
+TEST(cbr_pin_alias_then_thaw_struct_field_in_fluid_parent) {
+    ASSERT_RUNS(
+        "struct Holder { payload: Any, label: String }\n"
+        "fn main() {\n"
+        "    flux h = Holder { payload: freeze([1, 2, 3, \"payload long string 0123456789\"]), label: \"holder\" }\n"
+        "    let fld = h.payload\n"
+        "    flux t = thaw(clone(fld))\n"
+        "    t[0] = 42\n"
+        "    assert(h.payload[0] == 1, \"parent field mutated\")\n"
+        "    assert(fld[0] == 1, \"extracted field mutated\")\n"
+        "    assert(t[0] == 42, \"thawed copy write lost\")\n"
+        "}\n");
+}
+
+/* (a) alias-then-thaw isolation, frozen map value aliased then thawed. */
+TEST(cbr_pin_alias_then_thaw_map_value_isolation) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux mm = Map::new()\n"
+                "    mm[\"data\"] = freeze([7, 8, 9, \"map value long string 0123456789\"])\n"
+                "    fix fm = mm\n"
+                "    let al = fm\n"
+                "    flux tv = thaw(al)\n"
+                "    tv[\"data\"] = [0]\n"
+                "    assert(fm[\"data\"][0] == 7, \"frozen map mutated\")\n"
+                "    assert(al[\"data\"][0] == 7, \"alias map mutated\")\n"
+                "}\n");
+}
+
+/* (a) alias-then-thaw isolation, nested containers: a clone of a crystal is
+ * physically independent (clone() must copy-out, never alias — R19). */
+TEST(cbr_pin_alias_then_thaw_nested_containers) {
+    ASSERT_RUNS("fn main() {\n"
+                "    fix big = [[1, 2], [3, 4], \"padding string to be big enough 0123456789\"]\n"
+                "    let alias = big\n"
+                "    flux cl = thaw(clone(big))\n"
+                "    cl[0][0] = 77\n"
+                "    assert(big[0][0] == 1, \"nested element mutated through clone\")\n"
+                "    assert(alias[0][0] == 1, \"alias nested element mutated\")\n"
+                "    assert(cl[0][0] == 77, \"clone write lost\")\n"
+                "}\n");
+}
+
+/* (e) partial thaw: thaw(s.field) on a frozen struct returns a fluid COPY of
+ * the field; the parent and every alias of it stay fully frozen and intact
+ * (copy-on-write — the shared region must never be written through). */
+TEST(cbr_pin_partial_thaw_leaves_aliases_frozen) {
+    ASSERT_RUNS("struct Inner { tag: String }\n"
+                "fn main() {\n"
+                "    fix s = Inner { tag: \"another long frozen tag value 0123456789\" }\n"
+                "    let salias = s\n"
+                "    flux t = thaw(s.tag)\n"
+                "    t = t + \" mutated\"\n"
+                "    assert(s.tag == \"another long frozen tag value 0123456789\", \"parent mutated\")\n"
+                "    assert(salias.tag == \"another long frozen tag value 0123456789\", \"alias mutated\")\n"
+                "    assert(phase_of(s) == \"crystal\", \"parent phase changed\")\n"
+                "    assert(phase_of(salias) == \"crystal\", \"alias phase changed\")\n"
+                "}\n");
+}
+
+/* anneal rebinding (ident path): the binding is thawed/transformed/refrozen
+ * in place; a pre-anneal alias must keep observing the OLD value (post-
+ * switch: the old region, released only when the alias dies). */
+TEST(cbr_pin_anneal_rebinding_alias_sees_old_value) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux tmp = Map::new()\n"
+                "    tmp[\"k\"] = [1, 2, 3]\n"
+                "    tmp[\"j\"] = \"long value string 01234567890123456789\"\n"
+                "    fix m = tmp\n"
+                "    let alias = m\n"
+                "    anneal(m) |x| {\n"
+                "        x[\"k\"] = [9, 9]\n"
+                "        x\n"
+                "    }\n"
+                "    assert(m[\"k\"][0] == 9, \"anneal did not apply\")\n"
+                "    assert(alias[\"k\"][0] == 1, \"alias saw anneal mutation\")\n"
+                "    assert(phase_of(m) == \"crystal\", \"m not refrozen\")\n"
+                "    assert(phase_of(alias) == \"crystal\", \"alias phase changed\")\n"
+                "}\n");
+}
+
+/* anneal general-expression path: result is a fresh crystal; the source
+ * crystal is untouched. */
+TEST(cbr_pin_anneal_expr_path_isolated) {
+    ASSERT_RUNS("fn main() {\n"
+                "    fix base = [1, 2, \"anneal expr path long string 0123456789\"]\n"
+                "    let out = anneal(clone(base)) |x| {\n"
+                "        x[0] = 100\n"
+                "        x\n"
+                "    }\n"
+                "    assert(out[0] == 100, \"anneal expr result wrong\")\n"
+                "    assert(base[0] == 1, \"base mutated by anneal expr\")\n"
+                "    assert(phase_of(out) == \"crystal\", \"out not crystal\")\n"
+                "    assert(phase_of(base) == \"crystal\", \"base phase changed\")\n"
+                "}\n");
+}
+
+/* (c) shareability fallback: a struct holding a method closure is
+ * UNSHAREABLE — freeze must fall back to a legacy (tag-flip) crystal with
+ * semantics bit-identical to v0.4.1: phase_of, aliasing, thaw isolation and
+ * field reads all unchanged. */
+TEST(cbr_pin_shareability_fallback_closure_struct) {
+    ASSERT_RUNS("struct Counter { n: Int, bump: Fn }\n"
+                "fn main() {\n"
+                "    flux c = Counter { n: 1, bump: |self| { self.n + 1 } }\n"
+                "    fix fc = c\n"
+                "    let alias = fc\n"
+                "    assert(phase_of(fc) == \"crystal\", \"fc not crystal\")\n"
+                "    assert(alias.n == 1, \"alias n wrong\")\n"
+                "    flux th = thaw(alias)\n"
+                "    th.n = 50\n"
+                "    assert(fc.n == 1, \"fc mutated through thawed alias\")\n"
+                "    let b = fc.bump\n"
+                "}\n");
+}
+
+/* (b) double-freeze idempotence: freeze(freeze(x)) is the same value, no
+ * error. The rc/region companion (refreeze of an already-shared crystal
+ * creates no second region) is in test_memory.c. */
+TEST(cbr_pin_double_freeze_idempotent) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux a = [1, 2, 3]\n"
+                "    let f1 = freeze(a)\n"
+                "    let f2 = freeze(f1)\n"
+                "    assert(phase_of(f1) == \"crystal\", \"f1 not crystal\")\n"
+                "    assert(phase_of(f2) == \"crystal\", \"f2 not crystal\")\n"
+                "    assert(f2[1] == 2, \"f2 contents wrong\")\n"
+                "    fix g = [4, 5, \"double freeze long string 0123456789\"]\n"
+                "    let g2 = freeze(g)\n"
+                "    assert(g2[0] == 4, \"g2 contents wrong\")\n"
+                "    assert(phase_of(g) == \"crystal\", \"g phase changed\")\n"
+                "}\n");
+}
+
+/* freeze-except interaction: a freeze-except map stays a LEGACY crystal
+ * (per-key phase holes are unshareable); exempt-key writes on the owner
+ * still work after aliasing and the alias is isolated from them. */
+TEST(cbr_pin_freeze_except_alias_exempt_key) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"cfg\"] = \"stable long configuration value 0123456789\"\n"
+                "    m[\"retries\"] = 0\n"
+                "    freeze(m) except [\"retries\"]\n"
+                "    let malias = m\n"
+                "    m[\"retries\"] = 5\n"
+                "    assert(m[\"retries\"] == 5, \"exempt write failed\")\n"
+                "    assert(malias[\"retries\"] == 0, \"alias saw exempt write\")\n"
+                "    assert(malias[\"cfg\"] == \"stable long configuration value 0123456789\", \"alias cfg wrong\")\n"
+                "}\n");
+}
+
+/* (d) crystal handle stored inside a FLUID container: pushing/cloning the
+ * fluid parent must not corrupt or double-release the frozen element (C2
+ * interior-node ownership). rc-balance companion in test_memory.c. */
+TEST(cbr_pin_crystal_inside_fluid_container) {
+    ASSERT_RUNS("struct Inner { tag: String }\n"
+                "fn main() {\n"
+                "    fix frozen_thing = Inner { tag: \"frozen inner payload string 0123456789\" }\n"
+                "    flux arr = [frozen_thing, frozen_thing]\n"
+                "    let arr2 = clone(arr)\n"
+                "    arr.push(frozen_thing)\n"
+                "    assert(arr.len() == 3, \"push failed\")\n"
+                "    assert(arr2.len() == 2, \"clone tracked the push\")\n"
+                "    assert(arr2[0].tag == \"frozen inner payload string 0123456789\", \"clone content wrong\")\n"
+                "    assert(arr[2].tag == \"frozen inner payload string 0123456789\", \"pushed content wrong\")\n"
+                "}\n");
+}
+
+/* borrow(): scoped mutation thaws a working copy and refreezes on exit; a
+ * pre-borrow alias keeps the original value (R36 restore-path audit). */
+TEST(cbr_pin_borrow_restore_alias_isolation) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let data = freeze([1, 2, 3])\n"
+                "    let dalias = data\n"
+                "    borrow(data) {\n"
+                "        data.push(4)\n"
+                "    }\n"
+                "    assert(data.len() == 4, \"borrow push lost\")\n"
+                "    assert(dalias.len() == 3, \"alias saw borrow mutation\")\n"
+                "    assert(phase_of(data) == \"crystal\", \"data not restored to crystal\")\n"
+                "}\n");
+}
+
+/* sublimate on a thawed copy of a frozen alias: the phase flip must apply to
+ * the private handle only, never to shared region memory (R36 item 1). */
+TEST(cbr_pin_sublimate_alias_isolation) {
+    ASSERT_RUNS("fn main() {\n"
+                "    fix src = [1, 2, \"sublimate probe long string 0123456789\"]\n"
+                "    let salias = src\n"
+                "    flux data = thaw(salias)\n"
+                "    sublimate(data)\n"
+                "    assert(phase_of(data) == \"sublimated\", \"data not sublimated\")\n"
+                "    assert(phase_of(src) == \"crystal\", \"src phase changed\")\n"
+                "    assert(src[0] == 1, \"src content changed\")\n"
+                "}\n");
+}
+
+/* flux binding initialized FROM a frozen value (H9 hazard: the fluid flip
+ * must copy out, not re-tag a shared handle): the new fluid binding is a
+ * private copy. */
+TEST(cbr_pin_flux_binding_from_frozen_value) {
+    ASSERT_RUNS("fn main() {\n"
+                "    fix base = [5, 6, 7, \"flux-from-frozen long string 0123456789\"]\n"
+                "    flux y = base\n"
+                "    y[0] = 50\n"
+                "    assert(base[0] == 5, \"base mutated through flux binding\")\n"
+                "    assert(phase_of(y) == \"fluid\", \"y not fluid\")\n"
+                "    assert(phase_of(base) == \"crystal\", \"base phase changed\")\n"
+                "}\n");
+}
+
+/* fix-destructuring with a frozen element (C2: destructure extracts elements
+ * by bitwise copy — exactly one owner may release). NOTE: flux-destructuring
+ * a crystal ELEMENT diverges across backends today (tree-walk thaws it, VMs
+ * keep it crystal), so only the backend-uniform fix/read parts are pinned. */
+TEST(cbr_pin_fix_destructure_frozen_element) {
+    ASSERT_RUNS("fn main() {\n"
+                "    fix inner = [1, 2, \"destructure elem long string 0123456789\"]\n"
+                "    let pair = [inner, 4]\n"
+                "    fix [p, q] = pair\n"
+                "    assert(phase_of(p) == \"crystal\", \"p not crystal\")\n"
+                "    assert(p[1] == 2, \"p content wrong\")\n"
+                "    assert(q == 4, \"q wrong\")\n"
+                "    assert(inner[0] == 1, \"inner changed by destructure\")\n"
+                "}\n");
+}
+
+/* spawn/channel (R27): N spawned tasks read one frozen dataset; a whole
+ * frozen container crosses a channel. Post-switch this exercises retain-
+ * before-visibility and cross-thread last-release; semantics unchanged. */
+TEST(cbr_pin_spawn_readers_share_frozen_dataset) {
+    ASSERT_RUNS("fn main() {\n"
+                "    fix dataset = [1, 2, 3, 4, 5, \"shared frozen dataset long string 0123456789\"]\n"
+                "    let ch = Channel::new(4)\n"
+                "    scope {\n"
+                "        spawn { ch.send(dataset[0]) }\n"
+                "        spawn { ch.send(dataset[1]) }\n"
+                "        spawn { ch.send(dataset[2]) }\n"
+                "    }\n"
+                "    flux total = 0\n"
+                "    total = total + ch.recv()\n"
+                "    total = total + ch.recv()\n"
+                "    total = total + ch.recv()\n"
+                "    assert(total == 6, \"spawn readers wrong: ${total}\")\n"
+                "    assert(phase_of(dataset) == \"crystal\", \"dataset phase changed\")\n"
+                "    let ch2 = Channel::new(1)\n"
+                "    scope {\n"
+                "        spawn { ch2.send(dataset) }\n"
+                "    }\n"
+                "    let got = ch2.recv()\n"
+                "    assert(got[1] == 2, \"container recv wrong\")\n"
+                "}\n");
+}
+
+/* REPL-style sequential reuse at the top level: freeze on one \"line\",
+ * alias on the next, thaw+mutate later; the original stays intact (the
+ * persistent-evaluator path binds these in the root scope). */
+TEST(cbr_pin_repl_style_sequential_reuse) {
+    ASSERT_RUNS("fix g = [1, 2, 3, \"top level frozen long string 0123456789\"]\n"
+                "let a = g\n"
+                "flux t = thaw(a)\n"
+                "fn main() {\n"
+                "    t[0] = 99\n"
+                "    assert(g[0] == 1, \"g mutated\")\n"
+                "    assert(phase_of(g) == \"crystal\", \"g not crystal\")\n"
+                "    assert(t[0] == 99, \"t write lost\")\n"
+                "}\n");
+}
+
+/* Mutation rejection is unchanged for shared crystals: writes through any
+ * alias of a frozen container still error (the guard must fire BEFORE any
+ * unshare/copy-out logic). */
+TEST(cbr_pin_frozen_mutation_still_rejected_through_alias) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    fix a = [1, 2, 3, \"reject write long string 0123456789\"]\n"
+                 "    let b = a\n"
+                 "    b[0] = 9\n"
+                 "}\n");
+    ASSERT_FAILS("struct Cfg { host: String, port: Int }\n"
+                 "fn main() {\n"
+                 "    fix s = Cfg { host: \"example.com with a long suffix 0123456789\", port: 8080 }\n"
+                 "    let alias = s\n"
+                 "    alias.port = 9090\n"
+                 "}\n");
+}
+
+/* Mutating builtin methods on a shared frozen MAP are rejected by the
+ * blanket builtin_method_mutates guard (LAT-441) BEFORE the inline map.set
+ * handler could write into sealed region memory; same for index assignment
+ * through an alias. */
+TEST(cbr_pin_frozen_map_mutating_methods_rejected) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux tmp = Map::new()\n"
+                 "    tmp[\"k\"] = \"frozen map set long padding string 0123456789\"\n"
+                 "    fix m = tmp\n"
+                 "    let alias = m\n"
+                 "    alias.set(\"k\", \"overwrite\")\n"
+                 "}\n");
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux tmp = Map::new()\n"
+                 "    tmp[\"k\"] = \"frozen map index long padding string 0123456789\"\n"
+                 "    fix m = tmp\n"
+                 "    let alias = m\n"
+                 "    alias[\"k\"] = \"overwrite\"\n"
+                 "}\n");
+    ASSERT_FAILS("fn main() {\n"
+                 "    flux tmp = Map::new()\n"
+                 "    tmp[\"k\"] = \"frozen map remove long padding string 0123456789\"\n"
+                 "    fix m = tmp\n"
+                 "    m.remove(\"k\")\n"
+                 "}\n");
+}
+
+/* freeze/thaw churn in a loop: post-switch every iteration creates and
+ * releases a region; any rc imbalance trips the ledger/ASan. Semantically a
+ * pure pin (sum is data-dependent on isolation). */
+TEST(cbr_pin_freeze_thaw_churn_isolated) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux total = 0\n"
+                "    for i in 0..20 {\n"
+                "        fix local = [i, i + 1, \"churn iteration long string 0123456789\"]\n"
+                "        let alias = local\n"
+                "        flux t = thaw(alias)\n"
+                "        t[0] = t[0] + 1\n"
+                "        total = total + local[0] + t[0]\n"
+                "    }\n"
+                "    assert(total == 400, \"churn total wrong: ${total}\")\n"
+                "}\n");
+}
+
+/* Iterator adaptors hand each element to a user closure via call_closure,
+ * which CONSUMES its args (env_define binds them; env_pop_scope frees them).
+ * The eval.c iterator methods used to value_free the consumed handle again —
+ * an rc underflow on shared CrystalRegions (assertion/abort), and a silent
+ * pre-existing double-free for plain heap strings. */
+TEST(cbr_iter_closure_over_frozen_strings) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux arr = [\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", "
+                "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]\n"
+                "    let frozen = freeze(arr)\n"
+                "    let r = iter(frozen).map(|x| { x }).collect()\n"
+                "    assert(r.len() == 2, \"map len\")\n"
+                "    assert(r[0] == \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"map elem\")\n"
+                "    let f = iter(frozen).filter(|x| { x.starts_with(\"a\") }).collect()\n"
+                "    assert(f.len() == 1, \"filter len\")\n"
+                "    let red = iter(frozen).reduce(|acc, x| { acc + x.len() }, 0)\n"
+                "    assert(red == 80, \"reduce sum: ${red}\")\n"
+                "    assert(iter(frozen).any(|x| { x.starts_with(\"b\") }), \"any\")\n"
+                "    assert(iter(frozen).all(|x| { x.len() == 40 }), \"all\")\n"
+                "}\n");
+}
+
+TEST(cbr_iter_closure_over_fluid_strings) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux arr = [\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", "
+                "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]\n"
+                "    let r = iter(arr).map(|x| { x }).collect()\n"
+                "    assert(r.len() == 2, \"map len\")\n"
+                "    let f = iter(arr).filter(|x| { x.starts_with(\"a\") }).collect()\n"
+                "    assert(f.len() == 1, \"filter len\")\n"
+                "    let red = iter(arr).reduce(|acc, x| { acc + x.len() }, 0)\n"
+                "    assert(red == 80, \"reduce sum: ${red}\")\n"
+                "    assert(iter(arr).any(|x| { x.starts_with(\"b\") }), \"any\")\n"
+                "    assert(iter(arr).all(|x| { x.len() == 40 }), \"all\")\n"
+                "}\n");
+}
+
+/* call_closure must release its (consumed-on-success) args on early-error
+ * paths such as arity mismatch — callers are forbidden from freeing them, so
+ * a leaked shared-crystal handle would pin its region forever. Pin the path
+ * via a callable struct field invoked with the wrong arity.
+ * Tree-walk only: the VMs do not enforce arity on callable struct fields. */
+TEST(phase_contract_wrong_arity_no_leak) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    ASSERT_FAILS("struct Holder { f: Fn }\n"
+                 "fn main() {\n"
+                 "    fix data = [\"cccccccccccccccccccccccccccccccccccccccc\", "
+                 "\"dddddddddddddddddddddddddddddddddddddddd\"]\n"
+                 "    let h = Holder { f: |self, a| { a } }\n"
+                 "    h.f(data, data, data)\n"
+                 "}\n");
 }
