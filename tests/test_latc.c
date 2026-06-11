@@ -2014,3 +2014,273 @@ TEST(latc_stack_subchunk_preserves_param_count) {
     ASSERT_STACK_ROUNDTRIP(source);
     ASSERT_STACK_ROUNDTRIP_MEM(source);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * CbR Stage 1 (LAT-446): closure upvalue_count migration.
+ * Every closure value — runtime instance, prototype constant, or
+ * deserialized prototype — must carry region_id == REGION_NONE.  The
+ * compiled-closure upvalue count lives in as.closure.upvalue_count.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static const char *UV_MIGRATION_SRC = "fn make_counter() {\n"
+                                      "    flux count = 0\n"
+                                      "    let inc = |n| {\n"
+                                      "        count = count + n\n"
+                                      "        count\n"
+                                      "    }\n"
+                                      "    inc\n"
+                                      "}\n"
+                                      "let counter = make_counter()\n"
+                                      "let r1 = counter(5)\n"
+                                      "let r2 = counter(7)\n"
+                                      "let plain = |x| { x * 2 }\n"
+                                      "let r3 = plain(21)\n";
+
+/* Lex + parse helper.  Returns 0 on success. */
+static int uv_parse(const char *source, LatVec *tokens_out, Program *prog_out) {
+    Lexer lex = lexer_new(source);
+    char *lex_err = NULL;
+    *tokens_out = lexer_tokenize(&lex, &lex_err);
+    if (lex_err) {
+        free(lex_err);
+        lat_vec_free(tokens_out);
+        return 1;
+    }
+    Parser parser = parser_new(tokens_out);
+    char *parse_err = NULL;
+    *prog_out = parser_parse(&parser, &parse_err);
+    if (parse_err) {
+        free(parse_err);
+        return 1;
+    }
+    return 0;
+}
+
+static void uv_parse_cleanup(LatVec *tokens, Program *prog) {
+    program_free(prog);
+    for (size_t i = 0; i < tokens->len; i++) token_free(lat_vec_get(tokens, i));
+    lat_vec_free(tokens);
+}
+
+/* Recursively check every VAL_CLOSURE constant in a stack Chunk. */
+static int uv_check_chunk_prototypes(const Chunk *c) {
+    for (size_t i = 0; i < c->const_len; i++) {
+        const LatValue *v = &c->constants[i];
+        if (v->type != VAL_CLOSURE) continue;
+        if (v->region_id != REGION_NONE) return 1;
+        if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) {
+            if (uv_check_chunk_prototypes((const Chunk *)v->as.closure.native_fn)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Recursively check every VAL_CLOSURE constant in a RegChunk. */
+static int uv_check_regchunk_prototypes(const RegChunk *c) {
+    for (size_t i = 0; i < c->const_len; i++) {
+        const LatValue *v = &c->constants[i];
+        if (v->type != VAL_CLOSURE) continue;
+        if (v->region_id != REGION_NONE) return 1;
+        if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) {
+            if (uv_check_regchunk_prototypes((const RegChunk *)v->as.closure.native_fn)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Shared assertions on the global env after running UV_MIGRATION_SRC. */
+#define UV_ASSERT_GLOBALS(env)                                        \
+    do {                                                              \
+        LatValue *_counter = env_get_ref((env), "counter");           \
+        ASSERT(_counter != NULL);                                     \
+        ASSERT(_counter->type == VAL_CLOSURE);                        \
+        ASSERT(_counter->region_id == REGION_NONE);                   \
+        ASSERT(_counter->as.closure.upvalue_count == 1);              \
+        ASSERT(_counter->as.closure.captured_env != NULL);            \
+        LatValue *_plain = env_get_ref((env), "plain");               \
+        ASSERT(_plain != NULL);                                       \
+        ASSERT(_plain->type == VAL_CLOSURE);                          \
+        ASSERT(_plain->region_id == REGION_NONE);                     \
+        ASSERT(_plain->as.closure.upvalue_count == 0);                \
+        LatValue *_r1 = env_get_ref((env), "r1");                     \
+        LatValue *_r2 = env_get_ref((env), "r2");                     \
+        LatValue *_r3 = env_get_ref((env), "r3");                     \
+        ASSERT(_r1 && _r1->type == VAL_INT && _r1->as.int_val == 5);  \
+        ASSERT(_r2 && _r2->type == VAL_INT && _r2->as.int_val == 12); \
+        ASSERT(_r3 && _r3->type == VAL_INT && _r3->as.int_val == 42); \
+    } while (0)
+
+TEST(closure_upvalue_count_stackvm) {
+    LatVec tokens;
+    Program prog;
+    ASSERT(uv_parse(UV_MIGRATION_SRC, &tokens, &prog) == 0);
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+    char *comp_err = NULL;
+    Chunk *chunk = stack_compile(&prog, &comp_err);
+    if (!chunk) {
+        free(comp_err);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(chunk != NULL);
+    }
+
+    /* Prototype constants must carry REGION_NONE */
+    if (uv_check_chunk_prototypes(chunk)) {
+        chunk_free(chunk);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(0 && "stack prototype constant has region_id != REGION_NONE");
+    }
+
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    StackVM vm;
+    stackvm_init(&vm, &rt);
+    LatValue result;
+    StackVMResult res = stackvm_run(&vm, chunk, &result);
+    if (res != STACKVM_OK) {
+        fprintf(stderr, "  stackvm error: %s\n", vm.error ? vm.error : "(unknown)");
+        stackvm_free(&vm);
+        lat_runtime_free(&rt);
+        chunk_free(chunk);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(res == STACKVM_OK);
+    }
+    value_free(&result);
+
+    /* Runtime closure instances stored in globals carry the count in the
+     * dedicated field and REGION_NONE in region_id; upvalues still work
+     * (r1/r2 prove the captured `count` flows through calls). */
+    UV_ASSERT_GLOBALS(vm.env);
+
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
+    chunk_free(chunk);
+    uv_parse_cleanup(&tokens, &prog);
+}
+
+TEST(closure_upvalue_count_latc_roundtrip) {
+    LatVec tokens;
+    Program prog;
+    ASSERT(uv_parse(UV_MIGRATION_SRC, &tokens, &prog) == 0);
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+    char *comp_err = NULL;
+    Chunk *chunk = stack_compile(&prog, &comp_err);
+    if (!chunk) {
+        free(comp_err);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(chunk != NULL);
+    }
+
+    /* Serialize + deserialize: the .latc format must not change, and loaded
+     * prototypes must come back with region_id == REGION_NONE. */
+    size_t data_len;
+    uint8_t *data = chunk_serialize(chunk, &data_len);
+    chunk_free(chunk);
+    ASSERT(data != NULL);
+    char *deser_err = NULL;
+    Chunk *loaded = chunk_deserialize(data, data_len, &deser_err);
+    free(data);
+    if (!loaded) {
+        fprintf(stderr, "  deserialize error: %s\n", deser_err ? deser_err : "(unknown)");
+        free(deser_err);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(loaded != NULL);
+    }
+    if (uv_check_chunk_prototypes(loaded)) {
+        chunk_free(loaded);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(0 && "loaded prototype constant has region_id != REGION_NONE");
+    }
+
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    StackVM vm;
+    stackvm_init(&vm, &rt);
+    LatValue result;
+    StackVMResult res = stackvm_run(&vm, loaded, &result);
+    if (res != STACKVM_OK) {
+        fprintf(stderr, "  stackvm error: %s\n", vm.error ? vm.error : "(unknown)");
+        stackvm_free(&vm);
+        lat_runtime_free(&rt);
+        chunk_free(loaded);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(res == STACKVM_OK);
+    }
+    value_free(&result);
+
+    UV_ASSERT_GLOBALS(vm.env);
+
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
+    chunk_free(loaded);
+    uv_parse_cleanup(&tokens, &prog);
+}
+
+TEST(closure_upvalue_count_regvm) {
+    LatVec tokens;
+    Program prog;
+    ASSERT(uv_parse(UV_MIGRATION_SRC, &tokens, &prog) == 0);
+
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+    char *comp_err = NULL;
+    RegChunk *chunk = reg_compile(&prog, &comp_err);
+    if (!chunk) {
+        free(comp_err);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(chunk != NULL);
+    }
+
+    /* RegVM prototypes now carry the count in upvalue_count, not region_id */
+    if (uv_check_regchunk_prototypes(chunk)) {
+        regchunk_free(chunk);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(0 && "regvm prototype constant has region_id != REGION_NONE");
+    }
+
+    /* .rlatc round-trip must preserve the count byte-identically */
+    size_t data_len;
+    uint8_t *data = regchunk_serialize(chunk, &data_len);
+    regchunk_free(chunk);
+    ASSERT(data != NULL);
+    char *deser_err = NULL;
+    RegChunk *loaded = regchunk_deserialize(data, data_len, &deser_err);
+    free(data);
+    if (!loaded) {
+        fprintf(stderr, "  regvm deserialize error: %s\n", deser_err ? deser_err : "(unknown)");
+        free(deser_err);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(loaded != NULL);
+    }
+    if (uv_check_regchunk_prototypes(loaded)) {
+        regchunk_free(loaded);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(0 && "loaded regvm prototype has region_id != REGION_NONE");
+    }
+
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    RegVM rvm;
+    regvm_init(&rvm, &rt);
+    LatValue result;
+    RegVMResult res = regvm_run(&rvm, loaded, &result);
+    if (res != REGVM_OK) {
+        fprintf(stderr, "  regvm error: %s\n", rvm.error ? rvm.error : "(unknown)");
+        regvm_free(&rvm);
+        lat_runtime_free(&rt);
+        regchunk_free(loaded);
+        uv_parse_cleanup(&tokens, &prog);
+        ASSERT(res == REGVM_OK);
+    }
+    value_free(&result);
+
+    UV_ASSERT_GLOBALS(rvm.env);
+
+    regvm_free(&rvm);
+    lat_runtime_free(&rt);
+    regchunk_free(loaded);
+    uv_parse_cleanup(&tokens, &prog);
+}

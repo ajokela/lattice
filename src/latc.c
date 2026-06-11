@@ -717,8 +717,8 @@ static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
                     bb_write_u8(bb, TAG_CLOSURE);
                     bb_write_u32_le(bb, (uint32_t)v->as.closure.param_count);
                     bb_write_u8(bb, v->as.closure.has_variadic ? 1 : 0);
-                    /* RegVM stores upvalue count in region_id */
-                    bb_write_u32_le(bb, (uint32_t)v->region_id);
+                    /* RegVM prototype's upvalue count (same byte on disk as before) */
+                    bb_write_u32_le(bb, v->as.closure.upvalue_count);
                     serialize_regchunk(bb, (const RegChunk *)v->as.closure.native_fn);
                 } else {
                     bb_write_u8(bb, TAG_NIL);
@@ -876,7 +876,8 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
                     regchunk_free(c);
                     return NULL;
                 }
-                /* RegVM stores upvalue count in region_id */
+                /* RegVM prototype's upvalue count (in-memory it now lives in
+                 * as.closure.upvalue_count, not region_id) */
                 if (!br_read_u32_le(br, &upvalue_count)) {
                     *err = strdup("truncated closure upvalue count");
                     regchunk_free(c);
@@ -891,7 +892,8 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
                 memset(&fn_val, 0, sizeof(fn_val));
                 fn_val.type = VAL_CLOSURE;
                 fn_val.phase = VTAG_UNPHASED;
-                fn_val.region_id = (size_t)upvalue_count;
+                fn_val.region_id = REGION_NONE;
+                fn_val.as.closure.upvalue_count = upvalue_count;
                 fn_val.as.closure.param_names = NULL;
                 fn_val.as.closure.param_count = (size_t)param_count;
                 fn_val.as.closure.body = NULL;

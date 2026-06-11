@@ -285,6 +285,7 @@ static inline LatValue value_clone_fast(const LatValue *src) {
                  * param_names pointer. */
                 LatValue v = *src;
                 v.as.closure.param_names = NULL;
+                v.region_id = REGION_NONE; /* upvalue_count carries the count now */
                 return v;
             }
             return value_deep_clone(src);
@@ -4102,7 +4103,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
                 /* Get upvalues from the callee closure */
                 ObjUpvalue **callee_upvalues = (ObjUpvalue **)callee->as.closure.captured_env;
-                size_t callee_upvalue_count = callee->region_id != REGION_NONE ? callee->region_id : 0;
+                size_t callee_upvalue_count = callee->as.closure.upvalue_count;
 
                 StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
                 new_frame->chunk = fn_chunk;
@@ -4154,7 +4155,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
              * We pack them into the closure's captured_env as a hack. */
             fn_val.as.closure.captured_env = (Env *)upvalues;
             fn_val.as.closure.has_variadic = (upvalue_count > 0);
-            fn_val.region_id = (size_t)upvalue_count;
+            fn_val.as.closure.upvalue_count = upvalue_count;
+            fn_val.region_id = REGION_NONE;
 
             /* Track the chunk so it gets freed */
             if (fn_val.as.closure.native_fn) { /* Don't double-track - the chunk is in the constant pool already */
@@ -4190,7 +4192,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
             fn_val.as.closure.captured_env = (Env *)upvalues;
             fn_val.as.closure.has_variadic = (upvalue_count > 0);
-            fn_val.region_id = (size_t)upvalue_count;
+            fn_val.as.closure.upvalue_count = upvalue_count;
+            fn_val.region_id = REGION_NONE;
             push(vm, fn_val);
             break;
         }
@@ -4918,7 +4921,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                         (void)adjusted;
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
@@ -4970,7 +4973,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                             /* Bytecode closure in struct field — inject self */
                             Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
                             ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                            size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                            size_t uv_count = field->as.closure.upvalue_count;
                             if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                                 VM_ERROR("stack overflow (too many nested calls)");
                                 break;
@@ -5047,8 +5050,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->chunk = fn_chunk;
                     new_frame->ip = fn_chunk->code;
                     new_frame->slots = obj; /* self is in slot 0 */
-                    new_frame->upvalues = NULL;
-                    new_frame->upvalue_count = 0;
+                    new_frame->upvalues = (ObjUpvalue **)method_ref->as.closure.captured_env;
+                    new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
                     /* Method not found - error with suggestion */
@@ -5138,7 +5141,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     }
                     arg_count = (uint8_t)adjusted;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
@@ -5197,7 +5200,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         /* Bytecode closure — inject [closure, self] below args */
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
@@ -5275,8 +5278,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->chunk = fn_chunk;
                     new_frame->ip = fn_chunk->code;
                     new_frame->slots = arg_base;
-                    new_frame->upvalues = NULL;
-                    new_frame->upvalue_count = 0;
+                    new_frame->upvalues = (ObjUpvalue **)method_ref->as.closure.captured_env;
+                    new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
                     /* Method not found - error with suggestion */
@@ -5433,7 +5436,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     /* Recalculate obj pointer — vm_adjust may have pushed defaults */
                     obj = vm->stack_top - arg_count - 1;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
@@ -5480,7 +5483,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
@@ -5558,8 +5561,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->chunk = fn_chunk;
                     new_frame->ip = fn_chunk->code;
                     new_frame->slots = obj;
-                    new_frame->upvalues = NULL;
-                    new_frame->upvalue_count = 0;
+                    new_frame->upvalues = (ObjUpvalue **)method_ref->as.closure.captured_env;
+                    new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
                     for (int i = 0; i < arg_count; i++) {
@@ -5636,7 +5639,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     }
                     arg_count = (uint8_t)adjusted;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
@@ -5690,7 +5693,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
@@ -5765,8 +5768,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->chunk = fn_chunk;
                     new_frame->ip = fn_chunk->code;
                     new_frame->slots = arg_base;
-                    new_frame->upvalues = NULL;
-                    new_frame->upvalue_count = 0;
+                    new_frame->upvalues = (ObjUpvalue **)method_ref->as.closure.captured_env;
+                    new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
                     for (int i = 0; i < arg_count; i++) {
@@ -5907,7 +5910,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     arg_count = (uint8_t)adjusted;
                     obj = vm->stack_top - arg_count - 1;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
                     if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
@@ -5953,7 +5956,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
@@ -6030,8 +6033,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->chunk = fn_chunk;
                     new_frame->ip = fn_chunk->code;
                     new_frame->slots = obj;
-                    new_frame->upvalues = NULL;
-                    new_frame->upvalue_count = 0;
+                    new_frame->upvalues = (ObjUpvalue **)method_ref->as.closure.captured_env;
+                    new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
                     for (int i = 0; i < arg_count; i++) {

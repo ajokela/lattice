@@ -75,7 +75,9 @@ struct LatValue {
             Env *captured_env;            /* owned, deep-cloned */
             struct Expr **default_values; /* borrowed, param_count entries, NULL for required */
             bool has_variadic;
-            void *native_fn; /* when non-NULL and body==NULL, native extension function */
+            uint32_t upvalue_count; /* compiled bytecode closures: # of ObjUpvalue* in captured_env
+                                     * (fits in padding before native_fn; LatValue size unchanged) */
+            void *native_fn;        /* when non-NULL and body==NULL, native extension function */
         } closure;
         struct {
             int64_t start;
@@ -117,6 +119,14 @@ struct LatValue {
         } iterator;
     } as;
 };
+
+/* upvalue_count must fit in pre-existing padding: LatValue must not grow. */
+#ifdef __STDC_VERSION__
+#if __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(LatValue) == 72 || sizeof(void *) != 8,
+               "LatValue grew — closure.upvalue_count must live in padding");
+#endif
+#endif
 
 /* Ref: reference-counted shared mutable wrapper */
 struct LatRef {

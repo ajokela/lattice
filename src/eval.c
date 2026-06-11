@@ -225,15 +225,11 @@ static void gc_mark_env_value(LatValue *v, void *ctx) {
 static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions) {
     /* Arena-backed values: record the region as reachable and skip traversal.
      * All child pointers reside in the same region, so no fluid marking needed.
-     * Note: compiled bytecode closures repurpose region_id as upvalue count,
-     * so exclude them from this check. */
+     * (Compiled bytecode closures now carry region_id == REGION_NONE; their
+     * upvalue count lives in as.closure.upvalue_count.) */
     if (v->region_id != REGION_NONE && v->region_id != REGION_EPHEMERAL) {
-        bool is_compiled_closure =
-            (v->type == VAL_CLOSURE && v->as.closure.body == NULL && v->as.closure.native_fn != NULL);
-        if (!is_compiled_closure) {
-            lat_vec_push(reachable_regions, &v->region_id);
-            return;
-        }
+        lat_vec_push(reachable_regions, &v->region_id);
+        return;
     }
     switch (v->type) {
         case VAL_STR:

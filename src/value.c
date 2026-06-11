@@ -435,9 +435,8 @@ LatValue value_deep_clone(const LatValue *v) {
             }
             out.as.closure.default_values = v->as.closure.default_values; /* borrowed */
             out.as.closure.has_variadic = v->as.closure.has_variadic;
+            out.as.closure.upvalue_count = v->as.closure.upvalue_count;
             out.as.closure.native_fn = v->as.closure.native_fn; /* shared, not owned */
-            /* Compiled bytecode closures store upvalue count in region_id */
-            if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) out.region_id = v->region_id;
             break;
         }
         case VAL_UNIT: break;

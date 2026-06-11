@@ -418,6 +418,7 @@ static inline LatValue rvm_clone(const LatValue *src) {
                  * here prevents a heap-use-after-free where two register
                  * clones could end up sharing the same param_names pointer. */
                 v.as.closure.param_names = NULL;
+                v.region_id = REGION_NONE; /* upvalue_count carries the count now */
                 return v;
             }
             return value_deep_clone(src);
@@ -2691,7 +2692,7 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
     for (int i = 0; i < argc; i++) { new_regs[1 + i] = rvm_clone_or_borrow(&args[i]); }
 
     ObjUpvalue **upvals = (ObjUpvalue **)closure->as.closure.captured_env;
-    size_t uv_count = closure->region_id != (size_t)-1 ? closure->region_id : 0;
+    size_t uv_count = closure->as.closure.upvalue_count;
 
     int saved_base = vm->frame_count;
     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
@@ -3880,7 +3881,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Set up upvalues */
         ObjUpvalue **upvals = (ObjUpvalue **)func->as.closure.captured_env;
-        size_t uv_count = func->region_id != (size_t)-1 ? func->region_id : 0;
+        size_t uv_count = func->as.closure.upvalue_count;
 
         /* Push new frame */
         RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
@@ -3978,7 +3979,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Process upvalue descriptors that follow the CLOSURE instruction */
         /* Each upvalue descriptor is encoded as a MOVE instruction:
          * A=1 means local, A=0 means upvalue; B=index */
-        size_t uv_count = fn_proto.region_id; /* upvalue count stored by compiler */
+        size_t uv_count = fn_proto.as.closure.upvalue_count; /* stored by compiler/loader */
         ObjUpvalue **upvals = NULL;
 
         if (uv_count > 0) {
@@ -4019,8 +4020,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 }
             }
             closure.as.closure.captured_env = (Env *)upvals;
-            closure.region_id = uv_count;
         }
+        closure.as.closure.upvalue_count = (uint32_t)uv_count;
 
         reg_set(&R[a], closure);
         DISPATCH();
@@ -4237,7 +4238,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     for (int i = 0; i < argc; i++) { new_regs[1 + i] = rvm_clone(&R[args_base + i]); }
 
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
 
                     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
                     new_frame->chunk = fn_chunk;
@@ -4283,7 +4284,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     for (int i = 0; i < argc; i++) { new_regs[2 + i] = rvm_clone(&R[args_base + i]); }
 
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
 
                     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
                     new_frame->chunk = fn_chunk;
@@ -4322,7 +4323,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 for (int i = 0; i < argc; i++) { new_regs[1 + i] = rvm_clone(&R[args_base + i]); }
 
                 ObjUpvalue **upvals = (ObjUpvalue **)impl_fn.as.closure.captured_env;
-                size_t uv_count = impl_fn.region_id != (size_t)-1 ? impl_fn.region_id : 0;
+                size_t uv_count = impl_fn.as.closure.upvalue_count;
 
                 RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
                 new_frame->chunk = fn_chunk;
@@ -6194,7 +6195,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         }
                         /* Save upvalue info BEFORE freeing the closure */
                         ObjUpvalue **upvals = (ObjUpvalue **)closure.as.closure.captured_env;
-                        size_t uv_count = closure.region_id != (size_t)-1 ? closure.region_id : 0;
+                        size_t uv_count = closure.as.closure.upvalue_count;
 
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
@@ -6270,7 +6271,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         for (int ai = 0; ai < argc; ai++) new_regs[1 + ai] = rvm_clone(&R[args_base + ai]);
 
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                        size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                        size_t uv_count = field->as.closure.upvalue_count;
 
                         RegCallFrame *nf = &vm->frames[vm->frame_count++];
                         nf->chunk = fn_chunk;
@@ -6405,7 +6406,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     for (int i = 0; i < argc; i++) { new_regs[1 + i] = rvm_clone(&R[args_base + i]); }
 
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
 
                     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
                     new_frame->chunk = fn_chunk;
@@ -6451,7 +6452,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     for (int i = 0; i < argc; i++) { new_regs[2 + i] = rvm_clone(&R[args_base + i]); }
 
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                    size_t uv_count = field->region_id != (size_t)-1 ? field->region_id : 0;
+                    size_t uv_count = field->as.closure.upvalue_count;
 
                     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
                     new_frame->chunk = fn_chunk;
@@ -6489,7 +6490,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     for (int i = 0; i < argc; i++) { new_regs[1 + i] = rvm_clone(&R[args_base + i]); }
 
                     ObjUpvalue **upvals = (ObjUpvalue **)impl_fn.as.closure.captured_env;
-                    size_t uv_count = impl_fn.region_id != (size_t)-1 ? impl_fn.region_id : 0;
+                    size_t uv_count = impl_fn.as.closure.upvalue_count;
 
                     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
                     new_frame->chunk = fn_chunk;
@@ -6990,7 +6991,7 @@ static size_t reg_instr_words(const RegChunk *c, size_t i, char **err) {
                 *err = reg_verify_failf("ROP_CLOSURE at word %zu references non-function constant %u", i, bx);
                 return 0;
             }
-            size_t uv = c->constants[bx].region_id; /* upvalue count, set by deserializer */
+            size_t uv = c->constants[bx].as.closure.upvalue_count; /* set by compiler/deserializer */
             size_t words = 1 + uv;
             if (uv > c->code_len || words > avail) {
                 *err = reg_verify_failf("ROP_CLOSURE at word %zu has out-of-range upvalue count", i);

@@ -123,13 +123,10 @@ void gc_mark_ptr(GC *gc, void *ptr) {
 void gc_mark_value(GC *gc, LatValue *val) {
     if (!val) return;
 
-    /* Skip values not in the normal heap — arena-backed, ephemeral, interned, const */
-    if (val->region_id != REGION_NONE) {
-        /* Exception: compiled bytecode closures repurpose region_id as upvalue count */
-        bool is_compiled_closure =
-            (val->type == VAL_CLOSURE && val->as.closure.body == NULL && val->as.closure.native_fn != NULL);
-        if (!is_compiled_closure) return;
-    }
+    /* Skip values not in the normal heap — arena-backed, ephemeral, interned, const.
+     * (Compiled bytecode closures now carry region_id == REGION_NONE; their
+     * upvalue count lives in as.closure.upvalue_count.) */
+    if (val->region_id != REGION_NONE) return;
 
     switch (val->type) {
         case VAL_STR: gc_mark_ptr(gc, val->as.str_val); break;
@@ -304,13 +301,10 @@ static size_t gc_sweep(GC *gc) {
 static void gc_gray_push_value(GC *gc, LatValue *val) {
     if (!val) return;
 
-    /* Skip values not in the normal heap (arena, ephemeral, interned, const) */
-    if (val->region_id != REGION_NONE) {
-        /* Exception: compiled bytecode closures repurpose region_id as upvalue count */
-        bool is_compiled_closure =
-            (val->type == VAL_CLOSURE && val->as.closure.body == NULL && val->as.closure.native_fn != NULL);
-        if (!is_compiled_closure) return;
-    }
+    /* Skip values not in the normal heap (arena, ephemeral, interned, const).
+     * (Compiled bytecode closures now carry region_id == REGION_NONE; their
+     * upvalue count lives in as.closure.upvalue_count.) */
+    if (val->region_id != REGION_NONE) return;
 
     switch (val->type) {
         /* Primitives: no heap allocations, skip */

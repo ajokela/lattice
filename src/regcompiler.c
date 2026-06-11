@@ -886,7 +886,8 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     LatValue closure_val;
                     closure_val.type = VAL_CLOSURE;
                     closure_val.phase = VTAG_UNPHASED;
-                    closure_val.region_id = 2; /* upvalue count */
+                    closure_val.region_id = REGION_NONE;
+                    closure_val.as.closure.upvalue_count = 2;
                     closure_val.as.closure.body = NULL;
                     closure_val.as.closure.native_fn = (void *)fn_chunk;
                     closure_val.as.closure.captured_env = NULL;
@@ -1612,7 +1613,8 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             memset(&fn_val, 0, sizeof(fn_val));
             fn_val.type = VAL_CLOSURE;
             fn_val.phase = VTAG_UNPHASED;
-            fn_val.region_id = upvalue_count; /* encode upvalue count for runtime */
+            fn_val.region_id = REGION_NONE;
+            fn_val.as.closure.upvalue_count = (uint32_t)upvalue_count;
             fn_val.as.closure.body = NULL;
             fn_val.as.closure.native_fn = fn_chunk;
             fn_val.as.closure.param_count = e->as.closure.param_count;
@@ -3364,7 +3366,8 @@ static void compile_function_body(RegFuncType type, const char *name, Param *par
     memset(&fn_val, 0, sizeof(fn_val));
     fn_val.type = VAL_CLOSURE;
     fn_val.phase = VTAG_UNPHASED;
-    fn_val.region_id = upvalue_count; /* encode upvalue count for runtime */
+    fn_val.region_id = REGION_NONE;
+    fn_val.as.closure.upvalue_count = (uint32_t)upvalue_count;
     fn_val.as.closure.body = NULL;
     fn_val.as.closure.native_fn = fn_chunk;
     fn_val.as.closure.param_count = param_count;
@@ -3544,7 +3547,8 @@ RegChunk *reg_compile(const Program *prog, char **error) {
                     memset(&fn_val, 0, sizeof(fn_val));
                     fn_val.type = VAL_CLOSURE;
                     fn_val.phase = VTAG_UNPHASED;
-                    fn_val.region_id = upvalue_count; /* encode upvalue count for runtime */
+                    fn_val.region_id = REGION_NONE;
+                    fn_val.as.closure.upvalue_count = (uint32_t)upvalue_count;
                     fn_val.as.closure.body = NULL;
                     fn_val.as.closure.native_fn = fn_chunk;
                     fn_val.as.closure.param_count = method->param_count;
@@ -3736,7 +3740,8 @@ static RegChunk *reg_compile_internal(const Program *prog, char **error, bool au
                     memset(&fn_val, 0, sizeof(fn_val));
                     fn_val.type = VAL_CLOSURE;
                     fn_val.phase = VTAG_UNPHASED;
-                    fn_val.region_id = uvc; /* encode upvalue count for runtime */
+                    fn_val.region_id = REGION_NONE;
+                    fn_val.as.closure.upvalue_count = (uint32_t)uvc;
                     fn_val.as.closure.body = NULL;
                     fn_val.as.closure.native_fn = fn_chunk;
                     fn_val.as.closure.param_count = method->param_count;

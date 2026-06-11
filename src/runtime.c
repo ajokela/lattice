@@ -3844,6 +3844,7 @@ static LatValue native_progress_term_width(LatValue *args, int ac) {
 
 static void mod_set_native(LatValue *mod, const char *name, VMNativeFn fn) {
     LatValue v;
+    memset(&v, 0, sizeof v);
     v.type = VAL_CLOSURE;
     v.phase = VTAG_UNPHASED;
     v.as.closure.param_names = NULL;
@@ -4141,6 +4142,7 @@ bool rt_try_builtin_import(const char *name, LatValue *out) {
 static void rt_register_native(LatRuntime *rt, const char *name, VMNativeFn fn, int arity) {
     (void)arity;
     LatValue v;
+    memset(&v, 0, sizeof v);
     v.type = VAL_CLOSURE;
     v.phase = VTAG_UNPHASED;
     v.as.closure.param_names = NULL;
