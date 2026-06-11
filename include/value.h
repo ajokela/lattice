@@ -161,6 +161,9 @@ bool value_is_crystal(const LatValue *v);
 LatValue value_deep_clone(const LatValue *v);
 /* Deep-clone into thread-independent (malloc-backed) storage; see value.c. */
 LatValue value_detach(const LatValue *v);
+/* Returns NULL if v may be sent over a channel, else a static error message
+ * (harmonized send-eligibility rule shared by all three backends). */
+const char *value_send_ineligible(const LatValue *v);
 LatValue value_freeze(LatValue v);
 LatValue value_thaw(const LatValue *v);
 
