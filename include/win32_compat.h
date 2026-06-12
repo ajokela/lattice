@@ -32,8 +32,13 @@ typedef ptrdiff_t ssize_t;
 /* ── mkdir compat (MinGW mkdir takes 1 arg) ── */
 #define mkdir(path, mode) _mkdir(path)
 
-/* ── strndup (MinGW lacks it) ── */
-static inline char *strndup(const char *s, size_t n) {
+/* ── strndup ──
+ * Older mingw-w64 runtimes lack strndup; newer ones (as shipped by current
+ * MSYS2) declare it in <string.h>, where a same-named static shim collides
+ * under -Werror. A prefixed shim plus a name-mapping macro compiles against
+ * both: call sites resolve to the shim either way, and the library's own
+ * declaration (when present) is simply left unused. */
+static inline char *lat_win32_strndup(const char *s, size_t n) {
     size_t len = strlen(s);
     if (len > n) len = n;
     char *dup = (char *)malloc(len + 1);
@@ -42,6 +47,7 @@ static inline char *strndup(const char *s, size_t n) {
     dup[len] = '\0';
     return dup;
 }
+#define strndup lat_win32_strndup
 
 /* ── localtime_r / gmtime_r ── */
 static inline struct tm *localtime_r(const time_t *timep, struct tm *result) {
