@@ -1,0 +1,10 @@
+# ThreadSanitizer suppressions for `make tsan` (Stage 5, LAT-457).
+#
+# Scope discipline: only document-and-suppress races that are OUTSIDE the
+# crystal-by-reference concurrency story; everything CbR-related must be
+# fixed, not suppressed. Keep each entry annotated with a ticket reference.
+#
+# (Currently empty: the PIC data races flagged by the Stage 5 inventory were
+# fixed by making PIC entries relaxed-atomic packed words — see
+# include/inline_cache.h — and the LatRef cell races by LAT-450's per-cell
+# lock + atomic refcount.)

@@ -58,6 +58,19 @@ jobs:
           # gc-stress rooting bug in the tree-walker, tracked separately).
           LATTICE_FORCE_COPY=1 ./clat --tree-walk tests/cbr_alias_matrix.lat
 
+      - name: Test concurrency matrix (Stage 5, all backends)
+        run: |
+          ./clat tests/cbr_concurrency_matrix.lat
+          ./clat --no-regions tests/cbr_concurrency_matrix.lat
+          ./clat --regvm tests/cbr_concurrency_matrix.lat
+          ./clat --tree-walk tests/cbr_concurrency_matrix.lat
+          ./clat --tree-walk --no-regions tests/cbr_concurrency_matrix.lat
+          ./clat --gc-stress tests/cbr_concurrency_matrix.lat
+          ./clat --regvm --gc-stress tests/cbr_concurrency_matrix.lat
+          # --tree-walk --gc-stress excluded: same pre-existing tree-walker
+          # gc-stress rooting bug as the aliasing matrix above.
+          LATTICE_FORCE_COPY=1 ./clat --tree-walk tests/cbr_concurrency_matrix.lat
+
   extensions:
     name: Extension Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

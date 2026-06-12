@@ -747,16 +747,20 @@ void stackvm_free(StackVM *vm) {
         uv = next;
     }
 
-    /* Free upvalue arrays in frames */
-    for (size_t i = 0; i < vm->frame_count; i++) {
-        StackCallFrame *f = &vm->frames[i];
-        for (size_t j = 0; j < f->upvalue_count; j++) {
-            if (f->upvalues[j] && f->upvalues[j]->location == &f->upvalues[j]->closed)
-                value_free(&f->upvalues[j]->closed);
-            free(f->upvalues[j]);
-        }
-        free(f->upvalues);
-    }
+    /* LAT-448 (Stage 5): frames never OWN their upvalue pointers — OP_CALL
+     * and every method-dispatch site alias the callee closure's
+     * captured_env directly, value_clone shallow-shares that array, and
+     * recursive frames of one closure all hold the SAME ObjUpvalue** array
+     * (with capture_upvalue dedup additionally sharing individual
+     * ObjUpvalues across closures). The per-frame free that used to live
+     * here double-freed against the open_upvalues walk above and across
+     * aliasing frames on abnormal abort. Teardown now matches the unwind
+     * discipline used everywhere else (OP_RETURN, stackvm_unwind_release,
+     * regvm's rvm_close_frame_upvalues/regvm_free): close/free ONLY the
+     * open_upvalues list and drop frame pointers. Closure-owned upvalue
+     * storage leaks here exactly as it does on the NORMAL path (value_free
+     * deliberately skips bytecode captured_env) — abort-path parity, not a
+     * regression. */
 
     /* Free function chunks */
     for (size_t i = 0; i < vm->fn_chunk_count; i++) chunk_free(vm->fn_chunks[i]);
@@ -824,7 +828,20 @@ StackVM *stackvm_clone_for_thread(StackVM *parent) {
     /* Create a child runtime with cloned env + fresh phase arrays */
     LatRuntime *child_rt = calloc(1, sizeof(LatRuntime));
     if (!child_rt) return NULL;
+    /* Stage 5 (LAT-457): clone the child env DETACHED (TLS heap/arena
+     * masked). A nested scope runs this on a SPAWNED thread whose own
+     * DualHeap dies at thread exit — heap-backed grandchild env values
+     * would then be freed twice: once by the grandchild's
+     * env_detach_values (lat_free falls back to plain free() for pointers
+     * its own heap doesn't track) and again by this thread's
+     * dual_heap_free. Malloc-backed clones have a single owner. */
+    DualHeap *s5_heap = value_get_heap();
+    CrystalRegion *s5_arena = value_get_arena();
+    value_set_heap(NULL);
+    value_set_arena(NULL);
     child_rt->env = env_clone(parent->rt->env);
+    value_set_heap(s5_heap);
+    value_set_arena(s5_arena);
     child_rt->struct_meta = parent->rt->struct_meta; /* shared read-only */
     child_rt->script_dir = parent->rt->script_dir ? strdup(parent->rt->script_dir) : NULL;
     child_rt->prog_argc = parent->rt->prog_argc;
@@ -895,16 +912,9 @@ void stackvm_free_child(StackVM *child) {
         uv = next;
     }
 
-    /* Free upvalue arrays in frames */
-    for (size_t i = 0; i < child->frame_count; i++) {
-        StackCallFrame *f = &child->frames[i];
-        for (size_t j = 0; j < f->upvalue_count; j++) {
-            if (f->upvalues[j] && f->upvalues[j]->location == &f->upvalues[j]->closed)
-                value_free(&f->upvalues[j]->closed);
-            free(f->upvalues[j]);
-        }
-        free(f->upvalues);
-    }
+    /* LAT-448 (Stage 5): no per-frame upvalue frees — frames only alias
+     * closure-owned upvalue storage. See the matching comment in
+     * stackvm_free; regvm_free_child is the reference shape. */
 
     /* Free child-owned fn_chunks */
     for (size_t i = 0; i < child->fn_chunk_count; i++) chunk_free(child->fn_chunks[i]);
@@ -2585,32 +2595,49 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
             LatRef *ref = obj->as.ref.ref;
             LatValue *inner = &ref->value;
 
+            /* LAT-450 (Stage 5): the cell is shared bitwise across spawn
+             * threads; hold the per-cell lock for the whole method window
+             * (every return below unlocks first). Bare interior pointers
+             * handed out by the lvalue/index prongs are NOT covered -
+             * that pre-existing aliasing class is LAT-458. */
+            ref_lock(ref);
+
             /* Ref-specific: get() with 0 args */
             if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 0) {
                 push(vm, value_deep_clone(inner));
+                ref_unlock(ref);
                 return true;
             }
             /* Ref-specific: deref() alias for get() */
             if (mhash == MHASH_deref && strcmp(method, "deref") == 0 && arg_count == 0) {
                 push(vm, value_deep_clone(inner));
+                ref_unlock(ref);
                 return true;
             }
             /* Ref-specific: set(v) with 1 arg */
             if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 1) {
                 if (obj->phase == VTAG_CRYSTAL) {
                     runtime_error(vm, "cannot set on a frozen Ref");
+                    ref_unlock(ref);
                     return true;
                 }
-                value_free(inner);
-                *inner = stackvm_peek(vm, 0)[0];
+                /* STORE direction (Stage 5 review): the cell outlives a
+                 * spawned writer, so the stored copy must be detached
+                 * (malloc-backed) — a clone on the writer's TLS heap is
+                 * freed at thread join and dangles inside the cell. */
+                LatValue incoming = stackvm_peek(vm, 0)[0];
                 vm->stack_top--;
-                *inner = value_deep_clone(inner);
+                value_free(inner);
+                *inner = value_detach(&incoming);
+                value_free(&incoming);
                 push(vm, value_unit());
+                ref_unlock(ref);
                 return true;
             }
             /* Ref-specific: inner_type() */
             if (mhash == MHASH_inner_type && strcmp(method, "inner_type") == 0 && arg_count == 0) {
                 push(vm, value_string(value_type_name(inner)));
+                ref_unlock(ref);
                 return true;
             }
 
@@ -2621,18 +2648,21 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     LatValue key = stackvm_peek(vm, 0)[0];
                     if (key.type != VAL_STR) {
                         push(vm, value_nil());
+                        ref_unlock(ref);
                         return true;
                     }
                     LatValue *found = lat_map_get(inner->as.map.map, key.as.str_val);
                     value_free(&key);
                     vm->stack_top--;
                     push(vm, found ? value_deep_clone(found) : value_nil());
+                    ref_unlock(ref);
                     return true;
                 }
                 /* set(k, v) with 2 args -> Map proxy */
                 if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) {
                     if (obj->phase == VTAG_CRYSTAL) {
                         runtime_error(vm, "cannot set on a frozen Ref");
+                        ref_unlock(ref);
                         return true;
                     }
                     LatValue val2 = stackvm_peek(vm, 0)[0];
@@ -2642,12 +2672,15 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     if (key.type == VAL_STR) {
                         LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, key.as.str_val);
                         if (old) value_free(old);
-                        lat_map_set(inner->as.map.map, key.as.str_val, &val2);
-                    } else {
-                        value_free(&val2);
+                        /* STORE direction (Stage 5 review): detach — see
+                         * Ref.set above. */
+                        LatValue stored = value_detach(&val2);
+                        lat_map_set(inner->as.map.map, key.as.str_val, &stored);
                     }
+                    value_free(&val2);
                     value_free(&key);
                     push(vm, value_unit());
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_has && strcmp(method, "has") == 0 && arg_count == 1) {
@@ -2656,6 +2689,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     bool found = key.type == VAL_STR && lat_map_contains(inner->as.map.map, key.as.str_val);
                     value_free(&key);
                     push(vm, value_bool(found));
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
@@ -2672,12 +2706,16 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     }
                     value_free(&needle);
                     push(vm, value_bool(found));
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
                     size_t n = lat_map_len(inner->as.map.map);
                     LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-                    if (!elems) return false;
+                    if (!elems) {
+                        ref_unlock(ref);
+                        return false;
+                    }
                     size_t ei = 0;
                     for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                         if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2686,12 +2724,16 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     LatValue arr = value_array(elems, ei);
                     free(elems);
                     push(vm, arr);
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
                     size_t n = lat_map_len(inner->as.map.map);
                     LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-                    if (!elems) return false;
+                    if (!elems) {
+                        ref_unlock(ref);
+                        return false;
+                    }
                     size_t ei = 0;
                     for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                         if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2701,12 +2743,16 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     LatValue arr = value_array(elems, ei);
                     free(elems);
                     push(vm, arr);
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
                     size_t n = lat_map_len(inner->as.map.map);
                     LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-                    if (!elems) return false;
+                    if (!elems) {
+                        ref_unlock(ref);
+                        return false;
+                    }
                     size_t ei = 0;
                     for (size_t i = 0; i < inner->as.map.map->cap; i++) {
                         if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2718,17 +2764,20 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     LatValue arr = value_array(elems, ei);
                     free(elems);
                     push(vm, arr);
+                    ref_unlock(ref);
                     return true;
                 }
                 if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                      (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                     arg_count == 0) {
                     push(vm, value_int((int64_t)lat_map_len(inner->as.map.map)));
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1) {
                     if (obj->phase == VTAG_CRYSTAL) {
                         runtime_error(vm, "cannot merge into a frozen Ref");
+                        ref_unlock(ref);
                         return true;
                     }
                     LatValue other = stackvm_peek(vm, 0)[0];
@@ -2736,7 +2785,9 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     if (other.type == VAL_MAP) {
                         for (size_t i = 0; i < other.as.map.map->cap; i++) {
                             if (other.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
-                            LatValue cloned = value_deep_clone((LatValue *)other.as.map.map->entries[i].value);
+                            /* STORE direction (Stage 5 review): detach — see
+                             * Ref.set above. */
+                            LatValue cloned = value_detach((LatValue *)other.as.map.map->entries[i].value);
                             LatValue *old =
                                 (LatValue *)lat_map_get(inner->as.map.map, other.as.map.map->entries[i].key);
                             if (old) value_free(old);
@@ -2745,6 +2796,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     }
                     value_free(&other);
                     push(vm, value_unit());
+                    ref_unlock(ref);
                     return true;
                 }
             }
@@ -2754,37 +2806,47 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                 if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
                     if (obj->phase == VTAG_CRYSTAL) {
                         runtime_error(vm, "cannot push to a frozen Ref");
+                        ref_unlock(ref);
                         return true;
                     }
                     LatValue val2 = stackvm_peek(vm, 0)[0];
                     vm->stack_top--;
+                    /* STORE direction (Stage 5 review): detach — see Ref.set
+                     * above. */
+                    LatValue stored = value_detach(&val2);
+                    value_free(&val2);
                     if (inner->as.array.len >= inner->as.array.cap) {
                         size_t old_cap = inner->as.array.cap;
                         inner->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
                         inner->as.array.elems =
                             lat_realloc_routed(inner->as.array.elems, inner->as.array.cap * sizeof(LatValue));
                     }
-                    inner->as.array.elems[inner->as.array.len++] = val2;
+                    inner->as.array.elems[inner->as.array.len++] = stored;
                     push(vm, value_unit());
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
                     if (obj->phase == VTAG_CRYSTAL) {
                         runtime_error(vm, "cannot pop from a frozen Ref");
+                        ref_unlock(ref);
                         return true;
                     }
                     if (inner->as.array.len == 0) {
                         runtime_error(vm, "pop on empty array");
+                        ref_unlock(ref);
                         return true;
                     }
                     LatValue popped = inner->as.array.elems[--inner->as.array.len];
                     push(vm, popped);
+                    ref_unlock(ref);
                     return true;
                 }
                 if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                      (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                     arg_count == 0) {
                     push(vm, value_int((int64_t)inner->as.array.len));
+                    ref_unlock(ref);
                     return true;
                 }
                 if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
@@ -2799,9 +2861,11 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     }
                     value_free(&needle);
                     push(vm, value_bool(found));
+                    ref_unlock(ref);
                     return true;
                 }
             }
+            ref_unlock(ref);
         } break;
 
         case VAL_ITERATOR: {
@@ -7915,7 +7979,13 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     /* Launch all spawn threads */
                     for (uint8_t i = 0; i < spawn_count; i++) {
                         if (!tasks[i].child_vm) continue;
-                        pthread_create(&tasks[i].thread, NULL, stackvm_spawn_thread_fn, &tasks[i]);
+                        /* Stage 5 (LAT-457): 8MB stacks for spawn threads
+                         * (platform default overflows on recursion). */
+                        pthread_attr_t sp_attr;
+                        pthread_attr_init(&sp_attr);
+                        pthread_attr_setstacksize(&sp_attr, 8 * 1024 * 1024);
+                        pthread_create(&tasks[i].thread, &sp_attr, stackvm_spawn_thread_fn, &tasks[i]);
+                        pthread_attr_destroy(&sp_attr);
                     }
 
                     /* Join all threads */

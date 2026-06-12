@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include "ds/hashmap.h"
 
+#ifndef __EMSCRIPTEN__
+#include <pthread.h> /* LatRef per-cell lock (LAT-450); winpthreads on Windows */
+#endif
+
 /* Runtime phase tag */
 typedef enum { VTAG_FLUID, VTAG_CRYSTAL, VTAG_UNPHASED, VTAG_SUBLIMATED } PhaseTag;
 
@@ -149,10 +153,33 @@ typedef struct CrystalRegion CrystalRegion;
 #define REGION_PTR(rid)          ((CrystalRegion *)((rid) & ~(size_t)1))
 #define REGION_TAG(ptr)          (((size_t)(ptr)) | 1u)
 
-/* Ref: reference-counted shared mutable wrapper */
+/* Ref: reference-counted shared mutable wrapper.
+ *
+ * LAT-450 (CbR Stage 5): cells are shared BITWISE across threads —
+ * value_clone_impl retains the same LatRef even in copy-out mode, and
+ * spawn's env_clone carries cells into child evaluators/VMs — so the cell
+ * is the one mutable object that legitimately crosses thread boundaries.
+ * Two disciplines make that sound:
+ *
+ *   - refcount is atomic, with the CrystalRegion ordering contract
+ *     (relaxed retain — a retain only happens while holding a live handle,
+ *     so visibility piggybacks on whatever published the handle; acq_rel
+ *     release + acquire fence before destruction). See include/memory.h.
+ *   - `lock` (recursive) guards `value` across every compound window that
+ *     reads-then-writes the cell: value_unshare + phase walk (thaw/freeze
+ *     via set_phase_recursive), set()'s free+assign, the privatize+mutate
+ *     method proxies, and clone-out reads (get/deref). Recursive because a
+ *     cell can reach itself (r.set([r])). Cross-cell lock-order inversion
+ *     (two refs mutually containing each other, thawed concurrently) is a
+ *     documented limitation. Bare interior pointers handed out by lvalue
+ *     resolution outlive any lock scope and are NOT covered — that
+ *     pre-existing aliasing class (single-threaded too) is LAT-458. */
 struct LatRef {
     LatValue value;
-    size_t refcount;
+    _Atomic size_t refcount;
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_t lock;
+#endif
 };
 
 /* ── Constructors ── */
@@ -182,6 +209,11 @@ LatValue value_buffer_alloc(size_t cap);
 LatValue value_ref(LatValue inner);
 void ref_retain(LatRef *r);
 void ref_release(LatRef *r);
+/* LAT-450: take/release the per-cell lock around any compound read/write of
+ * r->value (no-ops on single-threaded wasm). Recursive: safe to re-enter on
+ * the same cell (ref cycles through set_phase_recursive). */
+void ref_lock(LatRef *r);
+void ref_unlock(LatRef *r);
 LatValue value_iterator(LatValue (*next_fn)(void *, bool *), void *state, void (*free_fn)(void *));
 
 /* ── Phase helpers ── */
@@ -206,6 +238,10 @@ LatValue value_copy_out(const LatValue *v);
  * release the original. Required before ANY in-place write to a possibly
  * shared handle. No-op otherwise. */
 void value_unshare(LatValue *v);
+/* value_unshare with the TLS heap/arena masked off (malloc-backed private
+ * copy, the value_detach discipline). Required when the privatized copy
+ * lands in a shared LatRef cell that outlives the calling thread. */
+void value_unshare_detached(LatValue *v);
 /* Cheap recursive pre-scan: false if v transitively contains a closure, Ref,
  * iterator, channel, or any sublimated member (those kinds never regionize). */
 bool value_is_shareable(const LatValue *v);

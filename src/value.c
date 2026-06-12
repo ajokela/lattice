@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <stdatomic.h> /* LAT-450: atomic LatRef refcount */
 
 _Static_assert(sizeof(LatValue) <= LAT_MAP_INLINE_MAX,
                "LatValue must fit in LAT_MAP_INLINE_MAX bytes for inline hashmap storage");
@@ -343,21 +344,56 @@ LatValue value_ref(LatValue inner) {
     LatRef *r = malloc(sizeof(LatRef));
     if (!r) return value_nil();
     r->value = value_deep_clone(&inner);
-    r->refcount = 1;
+    atomic_init(&r->refcount, 1);
+#ifndef __EMSCRIPTEN__
+    /* LAT-450: recursive — set_phase_recursive can re-enter the same cell
+     * through a ref cycle (r.set([r])). */
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&r->lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+#endif
     val.as.ref.ref = r;
     return val;
 }
 
+/* LAT-450 (CbR Stage 5): cells cross threads via spawn env_clone, so the
+ * count is atomic with the CrystalRegion memory-ordering contract — relaxed
+ * retain (a retain only happens while holding a live handle; publication of
+ * the handle — pthread_create, channel mutex — provides the visibility
+ * edge), acq_rel release + acquire fence before destruction. See
+ * include/memory.h "Atomics / memory-ordering contract". */
 void ref_retain(LatRef *r) {
-    if (r) r->refcount++;
+    if (r) atomic_fetch_add_explicit(&r->refcount, 1, memory_order_relaxed);
 }
 
 void ref_release(LatRef *r) {
     if (!r) return;
-    if (--r->refcount == 0) {
+    if (atomic_fetch_sub_explicit(&r->refcount, 1, memory_order_acq_rel) == 1) {
+        atomic_thread_fence(memory_order_acquire);
+#ifndef __EMSCRIPTEN__
+        pthread_mutex_destroy(&r->lock);
+#endif
         value_free(&r->value);
         free(r);
     }
+}
+
+void ref_lock(LatRef *r) {
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_lock(&r->lock);
+#else
+    (void)r;
+#endif
+}
+
+void ref_unlock(LatRef *r) {
+#ifndef __EMSCRIPTEN__
+    pthread_mutex_unlock(&r->lock);
+#else
+    (void)r;
+#endif
 }
 
 /* ── Phase helpers ── */
@@ -648,6 +684,24 @@ void value_unshare(LatValue *v) {
     }
 }
 
+/* LAT-450 (Stage 5): value_unshare into thread-independent (malloc-backed)
+ * storage — the TLS heap/arena are masked off for the private copy, the
+ * value_detach discipline. Required whenever the privatized copy lands in a
+ * shared LatRef cell that outlives the calling thread (spawn children free
+ * their DualHeap/arena at join, so a heap-tracked private copy would dangle
+ * inside the cell). Used by set_phase_recursive's VAL_REF branch and every
+ * ref-proxy unshare-before-write in the VMs. */
+void value_unshare_detached(LatValue *v) {
+    if (!value_region_is_shared(v)) return;
+    DualHeap *saved_heap = g_heap;
+    CrystalRegion *saved_arena = g_arena;
+    g_heap = NULL;
+    g_arena = NULL;
+    value_unshare(v);
+    g_heap = saved_heap;
+    g_arena = saved_arena;
+}
+
 /* ── Freeze ── */
 
 static void val_dealloc(LatValue *v, void *ptr); /* defined in the Free section below */
@@ -711,9 +765,27 @@ static void set_phase_recursive(LatValue *v, PhaseTag phase) {
         /* Refs are SHARED cells (value_clone_impl retains the same LatRef
          * even in copy-out mode), so a thaw can reach a shared crystal
          * handle stored inside one. Privatize it first: the inner handle
-         * must not be tag-flipped fluid over sealed region memory (H9). */
-        if (phase != VTAG_CRYSTAL) value_unshare(&v->as.ref.ref->value);
-        set_phase_recursive(&v->as.ref.ref->value, phase);
+         * must not be tag-flipped fluid over sealed region memory (H9).
+         *
+         * LAT-450 (Stage 5): the cell crosses threads via spawn env_clone,
+         * and value_unshare is a non-atomic check/copy/release/store window
+         * — two concurrent thaws of containers holding the same cell
+         * double-released the cell's single region retain and tore the
+         * write. The per-cell lock serializes the whole unshare + phase
+         * walk (recursive mutex, so ref cycles re-enter safely). Bare
+         * interior pointers from lvalue resolution are NOT covered: that
+         * pre-existing aliasing class is LAT-458. */
+        LatRef *cell = v->as.ref.ref;
+        ref_lock(cell);
+        if (phase != VTAG_CRYSTAL && REGION_IS_SHARED_ID(cell->value.region_id)) {
+            /* Privatize DETACHED (malloc-backed): the cell outlives the
+             * thawing thread (spawn children free their FluidHeap/arena at
+             * join), so the private copy must never land on thread-local
+             * storage. */
+            value_unshare_detached(&cell->value);
+        }
+        set_phase_recursive(&cell->value, phase);
+        ref_unlock(cell);
     }
 }
 
@@ -915,8 +987,12 @@ bool value_freeze_to_region(LatValue *v) {
 
 LatValue value_thaw(const LatValue *v) {
     if (v->type == VAL_REF) {
-        /* Thaw breaks sharing: new LatRef with deep-cloned inner */
+        /* Thaw breaks sharing: new LatRef with deep-cloned inner.
+         * LAT-450: hold the cell lock across the clone-out so a sibling
+         * thread's unshare/set window can't free the value under us. */
+        ref_lock(v->as.ref.ref);
         LatValue inner_clone = value_copy_out(&v->as.ref.ref->value);
+        ref_unlock(v->as.ref.ref);
         set_phase_recursive(&inner_clone, VTAG_FLUID);
         LatValue result = value_ref(inner_clone);
         value_free(&inner_clone);

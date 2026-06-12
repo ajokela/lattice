@@ -115,8 +115,13 @@ int main(int argc, char *argv[]) {
     SetUnhandledExceptionFilter(win_crash_filter);
 #endif
 
-    /* Parse --backend flag */
+    /* Parse --backend / --filter flags */
+    const char *name_filter = NULL;
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+            name_filter = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
             i++;
             if (strcmp(argv[i], "tree-walk") == 0) {
@@ -138,6 +143,7 @@ int main(int argc, char *argv[]) {
     printf("Running %d tests (backend: %s)...\n\n", test_count, backend_name(test_backend));
 
     for (int i = 0; i < test_count; i++) {
+        if (name_filter && !strstr(all_tests[i].name, name_filter)) continue;
         test_current_failed = 0;
         tests_run++;
         current_test_name = all_tests[i].name;

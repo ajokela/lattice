@@ -168,9 +168,26 @@ char *arena_strdup(CrystalRegion *r, const char *s);
  * minimal orders the refcount idiom actually requires):
  *   - retain: fetch_add(relaxed) — bumping an already-owned reference needs
  *     no ordering. A retain must HAPPEN-BEFORE the handle becomes visible
- *     to another thread; the channel mutex and pthread_create provide that
- *     edge — retain/release themselves only guarantee the count, not
- *     publication.
+ *     to another thread; retain/release themselves only guarantee the
+ *     count, not publication. Visibility piggybacks on whichever edge
+ *     published the handle — the complete set of publication edges in this
+ *     codebase (Stage 5, LAT-457):
+ *       1. channel_send/channel_recv: ch->mutex (src/channel.c) — the
+ *          sender's value_detach borrow-retain happens-before the enqueue
+ *          under the mutex, and the receiver dequeues under the same mutex;
+ *       2. spawn/scope: pthread_create — every retain minted by
+ *          env_clone/export on the spawning thread happens-before the
+ *          child runs (eval.c spawn_thread_fn, stackvm/regvm
+ *          *_clone_for_thread + *_spawn_thread_fn);
+ *       3. scope exit: pthread_join — every release/handle the child wrote
+ *          happens-before the parent frees the child evaluator/VM;
+ *       4. select: the per-waiter mutex/cond registered via
+ *          channel_add_waiter (signaled under ch->mutex by send/close).
+ *     The same contract covers LatRef.refcount (include/value.h, LAT-450):
+ *     ref cells cross threads only through edge 2 (env_clone retains on the
+ *     spawning thread before pthread_create publishes the child), and the
+ *     cell's CONTENTS are additionally guarded by the per-cell recursive
+ *     mutex because — unlike sealed region pages — they remain mutable.
  *   - release: fetch_sub(acq_rel) + acquire fence, then an O(1) page-list
  *     free when rc hits zero — the release half orders each thread's prior
  *     uses of the region before its decrement, and the acquire half/fence

@@ -9517,9 +9517,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
             }
 
-            /* Launch all spawn threads */
+            /* Launch all spawn threads.
+             * Stage 5 (LAT-457): 8MB stacks — the platform default (512KB on
+             * macOS pthreads) overflows on recursive spawned code, especially
+             * under sanitizers. */
             for (size_t i = 0; i < task_idx; i++) {
-                pthread_create(&tasks[i].thread, NULL, spawn_thread_fn, &tasks[i]);
+                pthread_attr_t sp_attr;
+                pthread_attr_init(&sp_attr);
+                pthread_attr_setstacksize(&sp_attr, 8 * 1024 * 1024);
+                pthread_create(&tasks[i].thread, &sp_attr, spawn_thread_fn, &tasks[i]);
+                pthread_attr_destroy(&sp_attr);
             }
 
             /* Join all threads */
@@ -11316,6 +11323,148 @@ static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
  * Violations are policed by the rc-ledger assert in memory.c and the
  * LATTICE_FORCE_COPY=1 differential oracle (make test-force-copy).
  */
+/* LAT-450 (Stage 5): Ref method dispatch runs under the per-cell lock —
+ * the LatRef cell is shared bitwise across spawned evaluators (env_clone
+ * retains the same cell), so every compound read/write of ref->value must
+ * be serialized against sibling-thread thaw/unshare windows (see
+ * include/value.h). The caller takes the lock; enter ONLY with it held.
+ * Bare interior pointers from resolve_lvalue's Ref unwraps are NOT
+ * covered — that pre-existing aliasing class is LAT-458. */
+static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatValue *args, size_t arg_count) {
+    LatRef *ref = obj.as.ref.ref;
+    LatValue *inner = &ref->value;
+
+    /* Ref-specific methods */
+    /// @method Ref.get() -> Any
+    /// @category Ref Methods
+    /// Return a deep clone of the wrapped value.
+    /// @example r.get()
+    if (strcmp(method, "get") == 0 && arg_count == 0) { return eval_ok(value_deep_clone(inner)); }
+    /// @method Ref.deref() -> Any
+    /// @category Ref Methods
+    /// Alias for get(). Return a deep clone of the wrapped value.
+    /// @example r.deref()
+    if (strcmp(method, "deref") == 0 && arg_count == 0) { return eval_ok(value_deep_clone(inner)); }
+    /// @method Ref.set(value: Any) -> Unit
+    /// @category Ref Methods
+    /// Replace the inner value (all holders see the change).
+    /// @example r.set(42)
+    if (strcmp(method, "set") == 0 && arg_count == 1) {
+        if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+        value_free(inner);
+        /* STORE direction (Stage 5 review): the cell outlives a spawned
+         * writer, so the stored copy must be detached (malloc-backed) — a
+         * clone on the writer's TLS heap is freed at thread join and
+         * dangles inside the cell. */
+        *inner = value_detach(&args[0]);
+        return eval_ok(value_unit());
+    }
+    /// @method Ref.inner_type() -> String
+    /// @category Ref Methods
+    /// Return the type name of the wrapped value.
+    /// @example r.inner_type()
+    if (strcmp(method, "inner_type") == 0 && arg_count == 0) { return eval_ok(value_string(value_type_name(inner))); }
+
+    /* Map proxy (when inner is VAL_MAP) */
+    if (inner->type == VAL_MAP) {
+        if (strcmp(method, "get") == 0 && arg_count == 1) {
+            if (args[0].type != VAL_STR) return eval_ok(value_nil());
+            LatValue *found = lat_map_get(inner->as.map.map, args[0].as.str_val);
+            return eval_ok(found ? value_deep_clone(found) : value_nil());
+        }
+        if (strcmp(method, "set") == 0 && arg_count == 2) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (args[0].type != VAL_STR) return eval_err(strdup(".set() key must be a string"));
+            LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, args[0].as.str_val);
+            if (old) value_free(old);
+            /* STORE direction (Stage 5 review): detach — see Ref.set above. */
+            LatValue cloned = value_detach(&args[1]);
+            lat_map_set(inner->as.map.map, args[0].as.str_val, &cloned);
+            return eval_ok(value_unit());
+        }
+        if (strcmp(method, "has") == 0 && arg_count == 1) {
+            bool found = args[0].type == VAL_STR && lat_map_contains(inner->as.map.map, args[0].as.str_val);
+            return eval_ok(value_bool(found));
+        }
+        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+            bool found = false;
+            for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
+                if (value_eq(mv, &args[0])) {
+                    found = true;
+                    break;
+                }
+            }
+            return eval_ok(value_bool(found));
+        }
+        if (strcmp(method, "keys") == 0 && arg_count == 0) {
+            size_t n = lat_map_len(inner->as.map.map);
+            LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
+            size_t ei = 0;
+            for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                elems[ei++] = value_string(inner->as.map.map->entries[i].key);
+            }
+            LatValue arr = value_array(elems, ei);
+            free(elems);
+            return eval_ok(arr);
+        }
+        if (strcmp(method, "values") == 0 && arg_count == 0) {
+            size_t n = lat_map_len(inner->as.map.map);
+            LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
+            size_t ei = 0;
+            for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
+                elems[ei++] = value_deep_clone(mv);
+            }
+            LatValue arr = value_array(elems, ei);
+            free(elems);
+            return eval_ok(arr);
+        }
+        if (strcmp(method, "entries") == 0 && arg_count == 0) {
+            size_t n = lat_map_len(inner->as.map.map);
+            LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
+            if (!elems) return eval_err(strdup("out of memory"));
+            size_t ei = 0;
+            for (size_t i = 0; i < inner->as.map.map->cap; i++) {
+                if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue pair[2];
+                pair[0] = value_string(inner->as.map.map->entries[i].key);
+                pair[1] = value_deep_clone((LatValue *)inner->as.map.map->entries[i].value);
+                elems[ei++] = value_array(pair, 2);
+            }
+            LatValue arr = value_array(elems, ei);
+            free(elems);
+            return eval_ok(arr);
+        }
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+            return eval_ok(value_int((int64_t)lat_map_len(inner->as.map.map)));
+        }
+    }
+
+    /* Array proxy */
+    if (inner->type == VAL_ARRAY) {
+        if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0)
+            return eval_ok(value_int((int64_t)inner->as.array.len));
+        if (strcmp(method, "contains") == 0 && arg_count == 1) {
+            for (size_t i = 0; i < inner->as.array.len; i++) {
+                if (value_eq(&inner->as.array.elems[i], &args[0])) return eval_ok(value_bool(true));
+            }
+            return eval_ok(value_bool(false));
+        }
+    }
+
+    char *rerr = NULL;
+    const char *rsug = builtin_find_similar_method(VAL_REF, method);
+    if (rsug) lat_asprintf(&rerr, "Ref has no method '%s' (did you mean '%s'?)", method, rsug);
+    else lat_asprintf(&rerr, "Ref has no method '%s'", method);
+    return eval_err(rerr);
+}
+
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method, LatValue *args, size_t arg_count) {
     /* ── Enum methods ── */
     if (obj.type == VAL_ENUM) {
@@ -13461,135 +13610,11 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
 
     /* ── Ref methods ── */
     if (obj.type == VAL_REF) {
-        LatRef *ref = obj.as.ref.ref;
-        LatValue *inner = &ref->value;
-
-        /* Ref-specific methods */
-        /// @method Ref.get() -> Any
-        /// @category Ref Methods
-        /// Return a deep clone of the wrapped value.
-        /// @example r.get()
-        if (strcmp(method, "get") == 0 && arg_count == 0) { return eval_ok(value_deep_clone(inner)); }
-        /// @method Ref.deref() -> Any
-        /// @category Ref Methods
-        /// Alias for get(). Return a deep clone of the wrapped value.
-        /// @example r.deref()
-        if (strcmp(method, "deref") == 0 && arg_count == 0) { return eval_ok(value_deep_clone(inner)); }
-        /// @method Ref.set(value: Any) -> Unit
-        /// @category Ref Methods
-        /// Replace the inner value (all holders see the change).
-        /// @example r.set(42)
-        if (strcmp(method, "set") == 0 && arg_count == 1) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
-            value_free(inner);
-            *inner = value_deep_clone(&args[0]);
-            return eval_ok(value_unit());
-        }
-        /// @method Ref.inner_type() -> String
-        /// @category Ref Methods
-        /// Return the type name of the wrapped value.
-        /// @example r.inner_type()
-        if (strcmp(method, "inner_type") == 0 && arg_count == 0) {
-            return eval_ok(value_string(value_type_name(inner)));
-        }
-
-        /* Map proxy (when inner is VAL_MAP) */
-        if (inner->type == VAL_MAP) {
-            if (strcmp(method, "get") == 0 && arg_count == 1) {
-                if (args[0].type != VAL_STR) return eval_ok(value_nil());
-                LatValue *found = lat_map_get(inner->as.map.map, args[0].as.str_val);
-                return eval_ok(found ? value_deep_clone(found) : value_nil());
-            }
-            if (strcmp(method, "set") == 0 && arg_count == 2) {
-                if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
-                if (args[0].type != VAL_STR) return eval_err(strdup(".set() key must be a string"));
-                LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, args[0].as.str_val);
-                if (old) value_free(old);
-                LatValue cloned = value_deep_clone(&args[1]);
-                lat_map_set(inner->as.map.map, args[0].as.str_val, &cloned);
-                return eval_ok(value_unit());
-            }
-            if (strcmp(method, "has") == 0 && arg_count == 1) {
-                bool found = args[0].type == VAL_STR && lat_map_contains(inner->as.map.map, args[0].as.str_val);
-                return eval_ok(value_bool(found));
-            }
-            if (strcmp(method, "contains") == 0 && arg_count == 1) {
-                bool found = false;
-                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
-                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
-                    LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
-                    if (value_eq(mv, &args[0])) {
-                        found = true;
-                        break;
-                    }
-                }
-                return eval_ok(value_bool(found));
-            }
-            if (strcmp(method, "keys") == 0 && arg_count == 0) {
-                size_t n = lat_map_len(inner->as.map.map);
-                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-                if (!elems) return eval_err(strdup("out of memory"));
-                size_t ei = 0;
-                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
-                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
-                    elems[ei++] = value_string(inner->as.map.map->entries[i].key);
-                }
-                LatValue arr = value_array(elems, ei);
-                free(elems);
-                return eval_ok(arr);
-            }
-            if (strcmp(method, "values") == 0 && arg_count == 0) {
-                size_t n = lat_map_len(inner->as.map.map);
-                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-                if (!elems) return eval_err(strdup("out of memory"));
-                size_t ei = 0;
-                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
-                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
-                    LatValue *mv = (LatValue *)inner->as.map.map->entries[i].value;
-                    elems[ei++] = value_deep_clone(mv);
-                }
-                LatValue arr = value_array(elems, ei);
-                free(elems);
-                return eval_ok(arr);
-            }
-            if (strcmp(method, "entries") == 0 && arg_count == 0) {
-                size_t n = lat_map_len(inner->as.map.map);
-                LatValue *elems = malloc((n > 0 ? n : 1) * sizeof(LatValue));
-                if (!elems) return eval_err(strdup("out of memory"));
-                size_t ei = 0;
-                for (size_t i = 0; i < inner->as.map.map->cap; i++) {
-                    if (inner->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
-                    LatValue pair[2];
-                    pair[0] = value_string(inner->as.map.map->entries[i].key);
-                    pair[1] = value_deep_clone((LatValue *)inner->as.map.map->entries[i].value);
-                    elems[ei++] = value_array(pair, 2);
-                }
-                LatValue arr = value_array(elems, ei);
-                free(elems);
-                return eval_ok(arr);
-            }
-            if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
-                return eval_ok(value_int((int64_t)lat_map_len(inner->as.map.map)));
-            }
-        }
-
-        /* Array proxy */
-        if (inner->type == VAL_ARRAY) {
-            if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0)
-                return eval_ok(value_int((int64_t)inner->as.array.len));
-            if (strcmp(method, "contains") == 0 && arg_count == 1) {
-                for (size_t i = 0; i < inner->as.array.len; i++) {
-                    if (value_eq(&inner->as.array.elems[i], &args[0])) return eval_ok(value_bool(true));
-                }
-                return eval_ok(value_bool(false));
-            }
-        }
-
-        char *rerr = NULL;
-        const char *rsug = builtin_find_similar_method(VAL_REF, method);
-        if (rsug) lat_asprintf(&rerr, "Ref has no method '%s' (did you mean '%s'?)", method, rsug);
-        else lat_asprintf(&rerr, "Ref has no method '%s'", method);
-        return eval_err(rerr);
+        LatRef *cell = obj.as.ref.ref;
+        ref_lock(cell); /* LAT-450: see eval_ref_method_locked */
+        EvalResult rr = eval_ref_method_locked(obj, method, args, arg_count);
+        ref_unlock(cell);
+        return rr;
     }
 
     char *err = NULL;

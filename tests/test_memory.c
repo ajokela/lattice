@@ -11,6 +11,16 @@
 #include <sys/wait.h>
 #endif
 
+/* Stage 5 (LAT-457): fork() from a TSan-instrumented process that has
+ * already run multi-threaded tests is unsupported (the child inherits TSan
+ * runtime state from a threaded parent and aborts), so fork-based tests
+ * self-skip under ThreadSanitizer. */
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define LAT_TSAN_BUILD 1
+#endif
+#endif
+
 /* Import test macros from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
 extern int test_current_failed;
@@ -2847,6 +2857,9 @@ TEST(cbr_s4_rvm_exception_unwind_releases_abandoned_slots) {
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 TEST(cbr_s4_rvm_upvalue_close_is_move_not_clone_leak) {
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+#ifdef LAT_TSAN_BUILD
+    return; /* fork() unsupported under TSan (see header note) */
+#endif
     pid_t pid = fork();
     ASSERT(pid >= 0);
     if (pid == 0) {
@@ -2951,4 +2964,429 @@ TEST(cbr_s4_rvm_clone_is_physical_copy) {
 
     cbr_s4_rvm_cleanup(&s);
     ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Crystal-by-Reference Stage 5 (LAT-457): concurrency hardening
+ *
+ * Thread-death orderings, ref-cell cross-thread safety (LAT-450), and
+ * stack-VM abnormal-abort teardown (LAT-448). Language-level `scope {}`
+ * always joins its spawns before continuing, so the death orderings below
+ * are NECESSARILY C-level pthread tests (like the LAT-452 abandoned-buffer
+ * test above). The language-level concurrency battery lives in
+ * tests/cbr_concurrency_matrix.lat and runs under `make tsan`.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include "channel.h"
+
+/* ── Thread-death ordering 1: receiver dies FIRST ──
+ * A receiver drains part of the buffer and exits; the sender keeps sending
+ * into a channel whose only consumer is already dead; the channel's last
+ * ref is then released on a third thread. Every buffered retain must drain
+ * exactly once, off the minting thread. */
+#define CBR_S5_SENDS 48
+#define CBR_S5_RECVS 16
+
+typedef struct {
+    LatChannel *ch;
+    const LatValue *handle;
+    int count;
+} CbrS5Ctx;
+
+static void *cbr_s5_sender_thread(void *arg) {
+    CbrS5Ctx *ctx = arg;
+    for (int i = 0; i < ctx->count; i++) {
+        LatValue alias = value_deep_clone(ctx->handle);
+        channel_send(ctx->ch, alias);
+    }
+    return NULL;
+}
+
+static void *cbr_s5_recv_n_thread(void *arg) {
+    CbrS5Ctx *ctx = arg;
+    for (int i = 0; i < ctx->count; i++) {
+        bool ok = false;
+        LatValue v = channel_recv(ctx->ch, &ok);
+        if (ok) value_free(&v);
+    }
+    return NULL;
+}
+
+static void *cbr_s5_release_thread(void *arg) {
+    channel_release((LatChannel *)arg);
+    return NULL;
+}
+
+/* Receiver thread drains all and releases the channel's LAST ref. */
+static void *cbr_s5_drain_all_release_thread(void *arg) {
+    CbrS5Ctx *ctx = arg;
+    for (int i = 0; i < ctx->count; i++) {
+        bool ok = false;
+        LatValue v = channel_recv(ctx->ch, &ok);
+        if (ok) value_free(&v);
+    }
+    channel_release(ctx->ch);
+    return NULL;
+}
+
+TEST(cbr_s5_receiver_dies_first_sender_continues) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    LatValue arr = cbr_make_array();
+    ASSERT(value_freeze_to_region(&arr));
+    CrystalRegion *r = REGION_PTR(arr.region_id);
+
+    LatChannel *ch = channel_new();
+    ASSERT(ch != NULL);
+
+    pthread_t sender, receiver;
+    CbrS5Ctx sctx = {ch, &arr, CBR_S5_SENDS};
+    CbrS5Ctx rctx = {ch, NULL, CBR_S5_RECVS};
+    pthread_create(&sender, NULL, cbr_s5_sender_thread, &sctx);
+    pthread_create(&receiver, NULL, cbr_s5_recv_n_thread, &rctx);
+
+    /* Receiver dies first (joins after a partial drain)... */
+    pthread_join(receiver, NULL);
+    /* ...the sender finishes into a consumer-less channel and dies too. */
+    pthread_join(sender, NULL);
+
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1 + (CBR_S5_SENDS - CBR_S5_RECVS));
+
+    /* Last channel ref released on yet another thread (buffered teardown). */
+    pthread_t releaser;
+    pthread_create(&releaser, NULL, cbr_s5_release_thread, ch);
+    pthread_join(releaser, NULL);
+
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+    value_free(&arr);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* ── Thread-death ordering 2: sender dies FIRST, receiver drains AFTER ──
+ * The sender is joined (dead) before the receiver thread even starts; the
+ * receiver then drains every buffered handle minted by the dead thread and
+ * releases the channel's last ref itself. */
+TEST(cbr_s5_sender_dies_first_receiver_drains_after) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    LatValue arr = cbr_make_array();
+    ASSERT(value_freeze_to_region(&arr));
+    CrystalRegion *r = REGION_PTR(arr.region_id);
+
+    LatChannel *ch = channel_new();
+    ASSERT(ch != NULL);
+
+    pthread_t sender;
+    CbrS5Ctx sctx = {ch, &arr, CBR_S5_SENDS};
+    pthread_create(&sender, NULL, cbr_s5_sender_thread, &sctx);
+    pthread_join(sender, NULL); /* sender fully dead */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1 + CBR_S5_SENDS);
+
+    pthread_t drainer;
+    CbrS5Ctx dctx = {ch, NULL, CBR_S5_SENDS};
+    pthread_create(&drainer, NULL, cbr_s5_drain_all_release_thread, &dctx);
+    pthread_join(drainer, NULL);
+
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+    value_free(&arr);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* ── Thread-death ordering 3: the channel OUTLIVES both threads ──
+ * Sender and (partial) receiver both die; main then drains the remainder
+ * with try_recv, closes, and releases — all teardown on a thread that
+ * never sent or received concurrently. */
+TEST(cbr_s5_channel_outlives_both_threads) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    LatValue arr = cbr_make_array();
+    ASSERT(value_freeze_to_region(&arr));
+    CrystalRegion *r = REGION_PTR(arr.region_id);
+
+    LatChannel *ch = channel_new();
+    ASSERT(ch != NULL);
+
+    pthread_t sender, receiver;
+    CbrS5Ctx sctx = {ch, &arr, CBR_S5_SENDS};
+    CbrS5Ctx rctx = {ch, NULL, CBR_S5_RECVS};
+    pthread_create(&sender, NULL, cbr_s5_sender_thread, &sctx);
+    pthread_create(&receiver, NULL, cbr_s5_recv_n_thread, &rctx);
+    pthread_join(sender, NULL);
+    pthread_join(receiver, NULL);
+
+    /* Both threads dead; channel + buffered handles owned by main alone. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1 + (CBR_S5_SENDS - CBR_S5_RECVS));
+    channel_close(ch);
+
+    int drained = 0;
+    LatValue v;
+    bool closed = false;
+    while (channel_try_recv(ch, &v, &closed)) {
+        value_free(&v);
+        drained++;
+    }
+    ASSERT_EQ_INT(drained, CBR_S5_SENDS - CBR_S5_RECVS);
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+
+    channel_release(ch);
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+    value_free(&arr);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* ── LAT-450 prong 2: LatRef.refcount must be atomic ──
+ * Ref cells cross threads bitwise via spawn env_clone (value_clone_impl
+ * retains the same LatRef even in copy-out mode). Concurrent clone/drop of
+ * handles to ONE cell must neither lose counts (leak / premature free) nor
+ * corrupt the cell. RED with the pre-Stage-5 plain `size_t refcount++/--`. */
+#define CBR_S5_REF_THREADS 4
+#define CBR_S5_REF_ITERS   20000
+
+static void *cbr_s5_ref_churn_thread(void *arg) {
+    const LatValue *refv = arg;
+    for (int i = 0; i < CBR_S5_REF_ITERS; i++) {
+        LatValue c = value_deep_clone(refv); /* ref_retain */
+        value_free(&c);                      /* ref_release */
+    }
+    return NULL;
+}
+
+TEST(cbr_s5_ref_cell_concurrent_clone_drop_refcount_atomic) {
+    LatValue inner = value_int(7);
+    LatValue refv = value_ref(inner);
+    value_free(&inner);
+    ASSERT(refv.type == VAL_REF);
+    ASSERT_EQ_INT((long long)refv.as.ref.ref->refcount, 1);
+
+    pthread_t threads[CBR_S5_REF_THREADS];
+    for (int i = 0; i < CBR_S5_REF_THREADS; i++) pthread_create(&threads[i], NULL, cbr_s5_ref_churn_thread, &refv);
+    for (int i = 0; i < CBR_S5_REF_THREADS; i++) pthread_join(threads[i], NULL);
+
+    /* Exactly our handle's count survives; the cell is intact. */
+    ASSERT_EQ_INT((long long)refv.as.ref.ref->refcount, 1);
+    ASSERT(refv.as.ref.ref->value.type == VAL_INT);
+    ASSERT_EQ_INT(refv.as.ref.ref->value.as.int_val, 7);
+    value_free(&refv);
+}
+
+/* ── LAT-450 prong 1: concurrent thaw of a ref-containing container ──
+ * The container holds a Ref whose cell holds the region's single retain.
+ * value_thaw -> set_phase_recursive(FLUID) -> VAL_REF branch runs
+ * value_unshare(&cell->value): an unsynchronized check/copy/release/store
+ * window on the SHARED cell. Two threads in that window double-release the
+ * cell's one retain (premature region free, cross-thread UAF) and tear the
+ * cell write. RED (ASan UAF / rc underflow) before the per-cell lock. */
+#define CBR_S5_THAW_THREADS 4
+#define CBR_S5_THAW_ITERS   400
+
+static void *cbr_s5_ref_thaw_thread(void *arg) {
+    const LatValue *container = arg;
+    for (int i = 0; i < CBR_S5_THAW_ITERS; i++) {
+        LatValue c = value_deep_clone(container); /* shares the LatRef cell */
+        LatValue t = value_thaw(&c);              /* VAL_REF unshare window */
+        value_free(&t);
+        value_free(&c);
+    }
+    return NULL;
+}
+
+TEST(cbr_s5_ref_thaw_concurrent_unshare_single_release) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    LatValue arr = cbr_make_array();
+    ASSERT(value_freeze_to_region(&arr));
+    CrystalRegion *r = REGION_PTR(arr.region_id);
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+
+    /* Ref::new deep-clones its argument: the cell borrows (+1 retain). */
+    LatValue refv = value_ref(arr);
+    ASSERT_EQ_INT(crystal_region_refcount(r), 2);
+
+    /* Container so thaw reaches the cell through set_phase_recursive (a
+     * direct thaw(ref) is the safe private-copy path — the trap the design
+     * notes warn about). value_array takes ownership of refv. */
+    LatValue elems[1] = {refv};
+    LatValue container = value_array(elems, 1);
+
+    pthread_t threads[CBR_S5_THAW_THREADS];
+    for (int i = 0; i < CBR_S5_THAW_THREADS; i++) pthread_create(&threads[i], NULL, cbr_s5_ref_thaw_thread, &container);
+    for (int i = 0; i < CBR_S5_THAW_THREADS; i++) pthread_join(threads[i], NULL);
+
+    /* The cell's single region retain was released by exactly ONE winning
+     * unshare; only our arr handle remains. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+    ASSERT(container.as.array.elems[0].type == VAL_REF);
+    ASSERT(container.as.array.elems[0].as.ref.ref->value.phase == VTAG_FLUID);
+
+    value_free(&container);
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+    value_free(&arr);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* ── Safe-by-design pin: concurrent thaw of SEPARATE handles ──
+ * Each thread thaws its own clone (own retain) of one shared region —
+ * value_thaw is copy-out + release-own-retain and needs no cell lock.
+ * Pins that the Stage 5 ref-cell fix didn't perturb the common path. */
+static void *cbr_s5_alias_thaw_thread(void *arg) {
+    const LatValue *handle = arg;
+    for (int i = 0; i < CBR_S5_THAW_ITERS; i++) {
+        LatValue c = value_deep_clone(handle); /* region retain */
+        LatValue t = value_thaw(&c);           /* private fluid copy */
+        if (t.phase != VTAG_FLUID) abort();
+        value_free(&t);
+        value_free(&c); /* releases this thread's retain */
+    }
+    return NULL;
+}
+
+TEST(cbr_s5_concurrent_thaw_of_aliases_rc_balanced) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    LatValue arr = cbr_make_array();
+    ASSERT(value_freeze_to_region(&arr));
+    CrystalRegion *r = REGION_PTR(arr.region_id);
+
+    pthread_t threads[CBR_S5_THAW_THREADS];
+    for (int i = 0; i < CBR_S5_THAW_THREADS; i++) pthread_create(&threads[i], NULL, cbr_s5_alias_thaw_thread, &arr);
+    for (int i = 0; i < CBR_S5_THAW_THREADS; i++) pthread_join(threads[i], NULL);
+
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+    ASSERT(arr.phase == VTAG_CRYSTAL);
+    value_free(&arr);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* ── LAT-450 Stage 5 review: ref-proxy STORE direction ──
+ * A spawned thread that STORES through a shared Ref (set / push / map set /
+ * merge) must place the stored copy in thread-independent (malloc-backed)
+ * storage: the spawn's DualHeap is freed at join, so a clone made with the
+ * writer's TLS heap active dangles inside the cell when the parent reads
+ * after the scope. RED (ASan heap-use-after-free) before the value_detach /
+ * value_unshare_detached treatment of the locked ref-method store windows.
+ *
+ * Runs the stack VM and register VM directly. The tree-walker is
+ * deliberately NOT exercised: the remaining FREE direction (a spawn's
+ * value_free of the OLD inner leaves the origin thread's DualHeap
+ * bookkeeping stale — teardown double-free) still crashes it and is
+ * tracked as the LAT-450 Stage 5 review follow-up ticket. */
+static const char *cbr_s5_ref_store_src =
+    "let r = Ref::new([0])\n"
+    "flux round = 0\n"
+    "while round < 25 {\n"
+    "    scope {\n"
+    "        spawn { r.set([round, round + 1]) }\n"
+    "        spawn { r.push(round) }\n"
+    "    }\n"
+    "    let g = r.get()\n"
+    "    assert(g[0] == round, \"spawn-stored head lost after join\")\n"
+    "    round = round + 1\n"
+    "}\n"
+    "let m = Ref::new(Map::new())\n"
+    "let extra = Map::new()\n"
+    "extra[\"merged\"] = \"merged value padded string 0123456789\"\n"
+    "scope {\n"
+    "    spawn { m.set(\"k\", \"spawn stored string 0123456789\") }\n"
+    "    spawn { m.merge(extra) }\n"
+    "}\n"
+    "let got = m.get(\"k\")\n"
+    "assert(got == \"spawn stored string 0123456789\", \"map store lost\")\n"
+    "let got2 = m.get(\"merged\")\n"
+    "assert(got2 == \"merged value padded string 0123456789\", \"merge store lost\")\n"
+    /* A MAP built inside the spawn and r.set() into the cell: on the regvm
+     * this is the rvm_clone default arm (value_deep_clone -> TLS heap), the
+     * arm the array/string cases above don't reach (their rvm_clone arms are
+     * plain malloc/strdup). RED on BOTH VMs before the fix. */
+    "let r2 = Ref::new(0)\n"
+    "flux round2 = 0\n"
+    "while round2 < 25 {\n"
+    "    scope {\n"
+    "        spawn {\n"
+    "            flux m2 = Map::new()\n"
+    "            m2[\"a\"] = \"padded string value 0123456789 0123456789\"\n"
+    "            r2.set(m2)\n"
+    "        }\n"
+    "    }\n"
+    "    let g2 = r2.get(\"a\")\n"
+    "    assert(g2 == \"padded string value 0123456789 0123456789\", \"spawn-stored map value lost\")\n"
+    "    round2 = round2 + 1\n"
+    "}\n";
+
+TEST(cbr_s5_vm_ref_store_from_spawn_survives_join) {
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, cbr_s5_ref_store_src));
+    cbr_s3_vm_cleanup(&s);
+}
+
+TEST(cbr_s5_rvm_ref_store_from_spawn_survives_join) {
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, cbr_s5_ref_store_src));
+    cbr_s4_rvm_cleanup(&s);
+}
+#endif /* !_WIN32 && !__EMSCRIPTEN__ */
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LAT-448 (folded into Stage 5): stack-VM abnormal-abort teardown
+ *
+ * stackvm_free / stackvm_free_child must not free frame->upvalues: frames
+ * only ALIAS the callee closure's captured_env (OP_CALL stores it directly;
+ * value_clone shallow-shares it; capture_upvalue dedups ObjUpvalues across
+ * closures). The per-frame frees double-freed (a) against the open_upvalues
+ * list, (b) across recursive frames of one closure, (c) across closures
+ * sharing individual upvalues. Each repro errors at runtime with live
+ * upvalue-carrying frames; before the fix all three are heap-use-after-free
+ * crashes under ASan inside stackvm_free.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* (a) Uncaught error inside a capturing closure: the frame's ObjUpvalue is
+ * still on open_upvalues — freed by the list walk, then again by the frame
+ * walk. */
+TEST(cbr_s5_lat448_abort_open_upvalue_no_double_free) {
+    CbrS3VM s;
+    ASSERT(!cbr_s3_vm_run(&s, "fn outer() -> int {\n"
+                              "    flux x = 10\n"
+                              "    let f = |n| { return x / n }\n"
+                              "    return f(0)\n"
+                              "}\n"
+                              "outer()\n"));
+}
+
+/* (b) Recursive frames of the SAME closure alias one ObjUpvalue** array:
+ * the frame walk freed it once per live frame. */
+TEST(cbr_s5_lat448_abort_recursive_frames_share_upvalue_array) {
+    CbrS3VM s;
+    ASSERT(!cbr_s3_vm_run(&s, "fn outer() -> int {\n"
+                              "    flux x = 10\n"
+                              "    flux rec = |n| { return 0 }\n"
+                              "    rec = |n| {\n"
+                              "        if n == 0 { return x / 0 }\n"
+                              "        return rec(n - 1)\n"
+                              "    }\n"
+                              "    return rec(2)\n"
+                              "}\n"
+                              "outer()\n"));
+}
+
+/* (c) Upvalue already CLOSED (factory frame returned), error at recursion
+ * depth 3: open_upvalues is empty, isolating the shared-array double-free —
+ * guards against a partial fix that only dedups against the open list. */
+TEST(cbr_s5_lat448_abort_closed_upvalue_recursive_frames) {
+    CbrS3VM s;
+    ASSERT(!cbr_s3_vm_run(&s, "fn make() -> any {\n"
+                              "    flux x = 10\n"
+                              "    flux rec = |n| { return 0 }\n"
+                              "    rec = |n| {\n"
+                              "        if n == 0 { return x / 0 }\n"
+                              "        return rec(n - 1)\n"
+                              "    }\n"
+                              "    return rec\n"
+                              "}\n"
+                              "let g = make()\n"
+                              "g(2)\n"));
 }

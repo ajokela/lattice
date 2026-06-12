@@ -30,6 +30,16 @@
 #include "runtime.h"
 #include "test_backend.h"
 
+/* Stage 5 (LAT-457): fork() from a TSan-instrumented process that has
+ * already run multi-threaded tests is unsupported (the child inherits TSan
+ * runtime state from a threaded parent and aborts), so fork-based tests
+ * self-skip under ThreadSanitizer. */
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define LAT_TSAN_BUILD 1
+#endif
+#endif
+
 /* Import test harness from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
 extern int test_current_failed;
@@ -1261,6 +1271,9 @@ static void test_tcp_listen_close(void) {
 #ifndef _WIN32
 /* 81. test_tcp_connect_write_read - full loopback send/receive */
 static void test_tcp_connect_write_read(void) {
+#ifdef LAT_TSAN_BUILD
+    return; /* fork() unsupported under TSan (see header note) */
+#endif
     char *err = NULL;
 
     /* Listen on a random port — use port 0 and read back the assigned port */

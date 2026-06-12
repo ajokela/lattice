@@ -25,17 +25,30 @@
 #define PIC_DIRECT_SLOTS 64                     /* Direct-mapped cache slots per chunk */
 #define PIC_DIRECT_MASK  (PIC_DIRECT_SLOTS - 1) /* Must be power-of-2 - 1 */
 
-/* A single cache entry: (type_tag, method_hash) -> handler_id */
-typedef struct {
-    uint8_t type_tag;     /* ValueType of the receiver */
-    uint32_t method_hash; /* djb2 hash of the method name */
-    uint16_t handler_id;  /* Cached handler index (0 = empty/miss) */
-} PICEntry;
+/* ── Thread-safety (Stage 5 / LAT-457) ──
+ *
+ * Chunks are SHARED across spawn threads (spawn sub-chunks and fn-chunk
+ * constants are passed by pointer to child VMs), so PIC reads and writes
+ * race between sibling threads. Each entry is therefore a single packed
+ * 64-bit word accessed with relaxed atomics:
+ *
+ *     [63..48] type_tag   [47..16] method_hash   [15..0] handler_id
+ *
+ * Word 0 == empty (handler_id 0 is never stored: pic_update is only called
+ * with a real handler id or PIC_NOT_BUILTIN). Relaxed is sufficient: the
+ * handler id is a PURE FUNCTION of (type_tag, mhash), so a stale or lost
+ * write can only cause a cache miss and re-resolve - never a wrong
+ * dispatch - and word-sized atomicity rules out torn reads. The lazily
+ * allocated slots array is published with a release CAS and consumed with
+ * acquire loads (a losing allocator frees its block). */
+typedef uint64_t PICWord;
 
-/* Per-call-site inline cache */
+#define PIC_PACK(tag, mhash, hid) (((uint64_t)(tag) << 48) | ((uint64_t)(mhash) << 16) | (uint64_t)(hid))
+#define PIC_KEY_MASK              (~(uint64_t)0xFFFF)
+
+/* Per-call-site inline cache: PIC_SIZE packed entry words. */
 typedef struct {
-    PICEntry entries[PIC_SIZE];
-    uint8_t count; /* Number of valid entries (0..PIC_SIZE) */
+    PICWord entries[PIC_SIZE];
 } PICSlot;
 
 /* Direct-mapped PIC table: fixed-size array of PICSlots, lazily allocated.
@@ -51,7 +64,8 @@ typedef struct {
 /* Initialize a PIC table (lazy — no allocation). */
 static inline void pic_table_init(PICTable *t) { t->slots = NULL; }
 
-/* Free a PIC table. */
+/* Free a PIC table (teardown is single-threaded: a chunk is only freed
+ * after every thread that could touch it has been joined). */
 static inline void pic_table_free(PICTable *t) {
     if (t->slots) {
         free(t->slots);
@@ -59,53 +73,60 @@ static inline void pic_table_free(PICTable *t) {
     }
 }
 
-/* Ensure the PIC table is allocated. Returns the slots pointer. */
+/* Ensure the PIC table is allocated. Returns the slots pointer.
+ * Race-safe lazy init: the winning thread publishes its calloc'd block
+ * with a release CAS; losers free theirs and adopt the winner's. */
 static inline PICSlot *pic_table_ensure(PICTable *t) {
-    if (!t->slots) { t->slots = (PICSlot *)calloc(PIC_DIRECT_SLOTS, sizeof(PICSlot)); }
-    return t->slots;
+    PICSlot *s = (PICSlot *)__atomic_load_n(&t->slots, __ATOMIC_ACQUIRE);
+    if (!s) {
+        PICSlot *fresh = (PICSlot *)calloc(PIC_DIRECT_SLOTS, sizeof(PICSlot));
+        if (!fresh) return NULL;
+        PICSlot *expected = NULL;
+        if (__atomic_compare_exchange_n(&t->slots, &expected, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            s = fresh;
+        } else {
+            free(fresh);
+            s = expected;
+        }
+    }
+    return s;
 }
 
 /* Get the PIC slot for a given instruction offset.
  * Returns NULL if the table hasn't been allocated yet. */
 static inline PICSlot *pic_slot_for(PICTable *t, size_t ip_offset) {
-    if (!t->slots) return NULL;
-    return &t->slots[ip_offset & PIC_DIRECT_MASK];
+    PICSlot *s = (PICSlot *)__atomic_load_n(&t->slots, __ATOMIC_ACQUIRE);
+    if (!s) return NULL;
+    return &s[ip_offset & PIC_DIRECT_MASK];
 }
 
 /* Look up (type_tag, method_hash) in a PIC slot.
  * Returns the handler_id on hit, or 0 on miss. */
 static inline uint16_t pic_lookup(const PICSlot *slot, uint8_t type_tag, uint32_t mhash) {
-    for (int i = 0; i < slot->count; i++) {
-        if (slot->entries[i].type_tag == type_tag && slot->entries[i].method_hash == mhash) {
-            return slot->entries[i].handler_id;
-        }
+    uint64_t key = PIC_PACK(type_tag, mhash, 0);
+    for (int i = 0; i < PIC_SIZE; i++) {
+        uint64_t w = __atomic_load_n(&slot->entries[i], __ATOMIC_RELAXED);
+        if (w == 0) return 0; /* first empty word ends the slot */
+        if ((w & PIC_KEY_MASK) == key) return (uint16_t)(w & 0xFFFF);
     }
     return 0;
 }
 
-/* Update a PIC slot with a new entry.  If full, evicts the oldest entry
- * (FIFO replacement). */
+/* Update a PIC slot with a new entry: refresh a matching key, fill the
+ * first empty word, or overwrite a key-chosen victim when full (the
+ * eviction policy is a perf detail; concurrent racers may lose an update,
+ * which only costs a later re-resolve). */
 static inline void pic_update(PICSlot *slot, uint8_t type_tag, uint32_t mhash, uint16_t handler_id) {
-    /* Check if already present — update in place */
-    for (int i = 0; i < slot->count; i++) {
-        if (slot->entries[i].type_tag == type_tag && slot->entries[i].method_hash == mhash) {
-            slot->entries[i].handler_id = handler_id;
+    uint64_t key = PIC_PACK(type_tag, mhash, 0);
+    uint64_t word = PIC_PACK(type_tag, mhash, handler_id);
+    for (int i = 0; i < PIC_SIZE; i++) {
+        uint64_t w = __atomic_load_n(&slot->entries[i], __ATOMIC_RELAXED);
+        if (w == 0 || (w & PIC_KEY_MASK) == key) {
+            __atomic_store_n(&slot->entries[i], word, __ATOMIC_RELAXED);
             return;
         }
     }
-    /* Not present — add or evict */
-    if (slot->count < PIC_SIZE) {
-        slot->entries[slot->count].type_tag = type_tag;
-        slot->entries[slot->count].method_hash = mhash;
-        slot->entries[slot->count].handler_id = handler_id;
-        slot->count++;
-    } else {
-        /* FIFO eviction: shift entries down, add at end */
-        for (int i = 0; i < PIC_SIZE - 1; i++) slot->entries[i] = slot->entries[i + 1];
-        slot->entries[PIC_SIZE - 1].type_tag = type_tag;
-        slot->entries[PIC_SIZE - 1].method_hash = mhash;
-        slot->entries[PIC_SIZE - 1].handler_id = handler_id;
-    }
+    __atomic_store_n(&slot->entries[mhash & (PIC_SIZE - 1)], word, __ATOMIC_RELAXED);
 }
 
 /*

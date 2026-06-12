@@ -1,0 +1,246 @@
+// Crystal-by-Reference Stage 5 (LAT-457): concurrency matrix.
+//
+// Language-level companion to tests/cbr_alias_matrix.lat (which is entirely
+// single-threaded): spawn trees, channel churn, concurrent refreeze/thaw of
+// one shared region, the LAT-450 ref-cell thaw race, and select racing
+// close / select-with-timeout under churn. Every case must produce the same
+// output on every backend and oracle mode:
+//
+//   ./clat tests/cbr_concurrency_matrix.lat               (stack VM)
+//   ./clat --tree-walk tests/cbr_concurrency_matrix.lat
+//   ./clat --regvm tests/cbr_concurrency_matrix.lat
+//   ./clat --no-regions tests/cbr_concurrency_matrix.lat  (legacy baseline)
+//   LATTICE_FORCE_COPY=1 ./clat tests/cbr_concurrency_matrix.lat
+//
+// `make tsan` runs this file under ThreadSanitizer on all three backends.
+// NOTE: scope{} runs its non-spawn statements BEFORE launching the spawn
+// threads and always joins them — so every race window below is built
+// between SIBLING spawns, never between a spawn and the enclosing scope.
+
+fix dataset = [11, 22, "concurrency matrix padded string 0123456789 0123456789"]
+
+// ── Case 1: channel churn (senders/receivers sharing one crystal) ──
+// Tree-walker churn coverage lives here (the C-level stress tests only
+// cover the stack VM and register VM).
+
+fn cm_sender(ch: any, n: any) {
+    for i in 0..n {
+        let a = dataset
+        ch.send(a)
+    }
+}
+
+fn cm_receiver(ch: any, n: any, done: any) {
+    flux acc = 0
+    for i in 0..n {
+        let v = ch.recv()
+        acc = acc + v[0]
+    }
+    done.send(acc)
+}
+
+fn case_churn() {
+    let done = Channel::new(2)
+    let ch = Channel::new(64)
+    scope {
+        spawn { cm_sender(ch, 30) }
+        spawn { cm_sender(ch, 30) }
+        spawn { cm_receiver(ch, 30, done) }
+        spawn { cm_receiver(ch, 30, done) }
+    }
+    let total = done.recv() + done.recv()
+    assert(total == 60 * dataset[0], "churn sum wrong: ${total}")
+    print("case_churn: OK")
+}
+
+// ── Case 2: deep spawn tree ──
+// scope-inside-spawn recursion: each level re-clones the env (crystal
+// handles cross thread boundaries N levels deep) and the leaves report
+// through one shared channel.
+
+fn cm_tree(depth: any, out: any) {
+    if depth == 0 {
+        assert(dataset[0] == 11, "crystal corrupted at leaf")
+        out.send(dataset[1])
+        return
+    }
+    scope {
+        spawn { cm_tree(depth - 1, out) }
+        spawn { cm_tree(depth - 1, out) }
+    }
+}
+
+fn case_spawn_tree() {
+    let out = Channel::new(16)
+    scope {
+        spawn { cm_tree(3, out) }
+    }
+    flux total = 0
+    for i in 0..8 {
+        total = total + out.recv()
+    }
+    assert(total == 8 * dataset[1], "spawn tree sum wrong: ${total}")
+    print("case_spawn_tree: OK")
+}
+
+// ── Case 3: concurrent refreeze of aliases of ONE shared crystal ──
+// freeze() of an already-shared crystal is an idempotent retain (never a
+// write into sealed region memory); hammer it from siblings.
+
+fn cm_refreezer(n: any) {
+    flux i = 0
+    while i < n {
+        let a = freeze(dataset)
+        assert(a[0] == 11, "refreeze corrupted alias")
+        i = i + 1
+    }
+}
+
+fn case_concurrent_refreeze() {
+    scope {
+        spawn { cm_refreezer(40) }
+        spawn { cm_refreezer(40) }
+        spawn { cm_refreezer(40) }
+    }
+    assert(dataset[0] == 11, "refreeze corrupted the original")
+    print("case_concurrent_refreeze: OK")
+}
+
+// ── Case 4: concurrent privatize/thaw of aliases ──
+// Each spawn repeatedly takes a flux copy (unshare) and a thawed clone of
+// its own alias handle; releases of the one region race across threads.
+
+fn cm_privatizer(n: any) {
+    flux i = 0
+    while i < n {
+        flux mine = dataset
+        mine[0] = 99
+        assert(mine[0] == 99, "flux copy not writable")
+        flux t = thaw(clone(dataset))
+        t[1] = 77
+        assert(t[1] == 77, "thawed clone not writable")
+        i = i + 1
+    }
+}
+
+fn case_concurrent_privatize() {
+    scope {
+        spawn { cm_privatizer(30) }
+        spawn { cm_privatizer(30) }
+        spawn { cm_privatizer(30) }
+    }
+    assert(dataset[0] == 11, "privatize wrote through the shared region")
+    assert(dataset[1] == 22, "privatize wrote through the shared region")
+    print("case_concurrent_privatize: OK")
+}
+
+// ── Case 5: LAT-450 — concurrent thaw of a ref-containing container ──
+// env_clone shares the LatRef cell bitwise into every spawn; thawing a
+// CONTAINER holding the ref reaches set_phase_recursive's VAL_REF branch
+// (value_unshare of the cell's single region retain) on all threads at
+// once. Direct thaw(ref) is the safe private-copy path — the container
+// form is the trap. Crashed under ASan before the Stage 5 per-cell lock.
+
+fn case_ref_thaw() {
+    let r = Ref::new(dataset)
+    let box = [r, 1, 2]
+    flux round = 0
+    while round < 10 {
+        scope {
+            spawn { flux a = thaw(box) }
+            spawn { flux b = thaw(box) }
+            spawn { flux c = thaw(box) }
+            spawn { flux d = thaw(box) }
+        }
+        round = round + 1
+    }
+    let inner = r.deref()
+    assert(inner[0] == 11, "ref cell corrupted by concurrent thaw")
+    print("case_ref_thaw: OK")
+}
+
+// ── Case 6: select racing channel close ──
+// A selector spawn registers/unregisters waiters in a timeout loop while a
+// sibling sends and closes the channel: poll/register/re-poll vs the close
+// broadcast (channel.c waiter list) is the exercised window.
+
+fn cm_closer(ch: any, n: any) {
+    for i in 0..n {
+        ch.send(freeze(i))
+    }
+    ch.close()
+}
+
+fn cm_selector(ch: any, n: any, done: any) {
+    flux got = 0
+    while got < n {
+        let v = select {
+            x from ch => { 1 }
+            timeout(1) => { 0 }
+        }
+        got = got + v
+    }
+    done.send(got)
+}
+
+fn case_select_vs_close() {
+    flux round = 0
+    while round < 10 {
+        let ch = Channel::new(8)
+        let done = Channel::new(1)
+        scope {
+            spawn { cm_closer(ch, 5) }
+            spawn { cm_selector(ch, 5, done) }
+        }
+        assert(done.recv() == 5, "selector lost a value racing close")
+        round = round + 1
+    }
+    print("case_select_vs_close: OK")
+}
+
+// ── Case 7: select-with-timeout under churn ──
+// Two senders block on small buffers while a selector multiplexes both
+// channels with a timeout arm: waiter signaling under sustained pressure.
+
+fn cm_sender7(ch: any, n: any) {
+    for i in 0..n {
+        ch.send(freeze(7))
+    }
+}
+
+fn cm_mux(a: any, b: any, n: any, done: any) {
+    flux got = 0
+    while got < n {
+        let v = select {
+            x from a => { 1 }
+            y from b => { 1 }
+            timeout(1) => { 0 }
+        }
+        got = got + v
+    }
+    done.send(got)
+}
+
+fn case_select_timeout_churn() {
+    let a = Channel::new(4)
+    let b = Channel::new(4)
+    let done = Channel::new(1)
+    scope {
+        spawn { cm_sender7(a, 40) }
+        spawn { cm_sender7(b, 40) }
+        spawn { cm_mux(a, b, 80, done) }
+    }
+    assert(done.recv() == 80, "mux dropped values under churn")
+    print("case_select_timeout_churn: OK")
+}
+
+fn main() {
+    case_churn()
+    case_spawn_tree()
+    case_concurrent_refreeze()
+    case_concurrent_privatize()
+    case_ref_thaw()
+    case_select_vs_close()
+    case_select_timeout_churn()
+    print("cbr_concurrency_matrix: OK")
+}

@@ -242,7 +242,19 @@ RegVM *regvm_clone_for_thread(RegVM *parent) {
     /* Create a child runtime with cloned env + fresh caches */
     LatRuntime *child_rt = calloc(1, sizeof(LatRuntime));
     if (!child_rt) return NULL;
+    /* Stage 5 (LAT-457): clone the child env DETACHED (TLS heap/arena
+     * masked) — nested scopes run this on a spawned thread whose DualHeap
+     * dies at join; heap-backed grandchild env values would be double-freed
+     * (grandchild env_detach_values' plain free + this thread's
+     * dual_heap_free). Mirrors eval.c create_child_evaluator (LAT-430) and
+     * stackvm_clone_for_thread. */
+    DualHeap *s5_heap = value_get_heap();
+    CrystalRegion *s5_arena = value_get_arena();
+    value_set_heap(NULL);
+    value_set_arena(NULL);
     child_rt->env = env_clone(parent->rt->env);
+    value_set_heap(s5_heap);
+    value_set_arena(s5_arena);
     child_rt->struct_meta = parent->rt->struct_meta; /* shared read-only */
     child_rt->script_dir = parent->rt->script_dir ? strdup(parent->rt->script_dir) : NULL;
     child_rt->prog_argc = parent->rt->prog_argc;
@@ -2472,13 +2484,19 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         }
     }
 
-    /* ── Ref methods ── */
+    /* ── Ref methods ──
+     * LAT-450 (Stage 5): the LatRef cell is shared bitwise across spawn
+     * threads, so every compound read/write of ref->value below holds the
+     * per-cell lock (see include/value.h). Locks are taken per window and
+     * released before every return. */
     if (obj->type == VAL_REF) {
         LatRef *ref = obj->as.ref.ref;
         if (((mhash == MHASH_get && strcmp(method, "get") == 0) ||
              (mhash == MHASH_deref && strcmp(method, "deref") == 0)) &&
             arg_count == 0) {
+            ref_lock(ref);
             *result = value_deep_clone(&ref->value);
+            ref_unlock(ref);
             return true;
         }
         if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 1 && arg_count == 1) {
@@ -2486,20 +2504,32 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 *result = value_unit();
                 return true;
             }
+            ref_lock(ref);
             value_free(&ref->value);
-            ref->value = rvm_clone(&args[0]);
+            /* STORE direction (Stage 5 review): the cell outlives a spawned
+             * writer, so the stored copy must be detached (malloc-backed) —
+             * an rvm_clone on the writer's TLS heap is freed at thread join
+             * and dangles inside the cell. */
+            ref->value = value_detach(&args[0]);
+            ref_unlock(ref);
             *result = value_unit();
             return true;
         }
         if (mhash == MHASH_inner_type && strcmp(method, "inner_type") == 0 && arg_count == 0) {
+            ref_lock(ref);
             *result = value_string(value_type_name(&ref->value));
+            ref_unlock(ref);
             return true;
         }
-        /* Proxy: delegate to inner value's methods if applicable */
+        /* Proxy: delegate to inner value's methods if applicable.
+         * The whole proxy region runs under the cell lock (LAT-450);
+         * every return unlocks first. */
+        ref_lock(ref);
         if (ref->value.type == VAL_MAP) {
             if (mhash == MHASH_get && strcmp(method, "get") == 0 && arg_count == 1 && args[0].type == VAL_STR) {
                 LatValue *val = lat_map_get(ref->value.as.map.map, args[0].as.str_val);
                 *result = val ? value_deep_clone(val) : value_nil();
+                ref_unlock(ref);
                 return true;
             }
             if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2 && args[0].type == VAL_STR) {
@@ -2507,24 +2537,32 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                     /* CbR Stage 4 (LAT-456): the phase guard checks only the
                      * Ref HANDLE — the inner value may be a borrowed shared
                      * crystal (stored via ref.set). Privatize before any
-                     * in-place write to it. */
-                    value_unshare(&ref->value);
-                    LatValue cloned = rvm_clone(&args[1]);
+                     * in-place write to it. Stage 5 review: both the
+                     * privatized copy and the stored clone must be DETACHED
+                     * (malloc-backed) — the cell outlives a spawned writer's
+                     * TLS heap. */
+                    value_unshare_detached(&ref->value);
+                    LatValue cloned = value_detach(&args[1]);
                     lat_map_set(ref->value.as.map.map, args[0].as.str_val, &cloned);
                 }
                 *result = value_unit();
+                ref_unlock(ref);
                 return true;
             }
             if (((mhash == MHASH_has && strcmp(method, "has") == 0) ||
                  (mhash == MHASH_contains && strcmp(method, "contains") == 0)) &&
                 arg_count == 1 && args[0].type == VAL_STR) {
                 *result = value_bool(lat_map_get(ref->value.as.map.map, args[0].as.str_val) != NULL);
+                ref_unlock(ref);
                 return true;
             }
             if (mhash == MHASH_keys && strcmp(method, "keys") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *keys = malloc(cap * sizeof(LatValue));
-                if (!keys) return 0;
+                if (!keys) {
+                    ref_unlock(ref);
+                    return 0;
+                }
                 size_t cnt = 0;
                 for (size_t i = 0; i < cap; i++) {
                     if (ref->value.as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -2532,12 +2570,16 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 }
                 *result = value_array(keys, cnt);
                 free(keys);
+                ref_unlock(ref);
                 return true;
             }
             if (mhash == MHASH_values && strcmp(method, "values") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *vals = malloc(cap * sizeof(LatValue));
-                if (!vals) return 0;
+                if (!vals) {
+                    ref_unlock(ref);
+                    return 0;
+                }
                 size_t cnt = 0;
                 for (size_t i = 0; i < cap; i++) {
                     if (ref->value.as.map.map->entries[i].state == MAP_OCCUPIED)
@@ -2545,12 +2587,16 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 }
                 *result = value_array(vals, cnt);
                 free(vals);
+                ref_unlock(ref);
                 return true;
             }
             if (mhash == MHASH_entries && strcmp(method, "entries") == 0 && arg_count == 0) {
                 size_t cap = ref->value.as.map.map->cap;
                 LatValue *entries = malloc(cap * sizeof(LatValue));
-                if (!entries) return 0;
+                if (!entries) {
+                    ref_unlock(ref);
+                    return 0;
+                }
                 size_t cnt = 0;
                 for (size_t i = 0; i < cap; i++) {
                     if (ref->value.as.map.map->entries[i].state != MAP_OCCUPIED) continue;
@@ -2561,24 +2607,28 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 }
                 *result = value_array(entries, cnt);
                 free(entries);
+                ref_unlock(ref);
                 return true;
             }
             if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                  (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                 arg_count == 0) {
                 *result = value_int((int64_t)lat_map_len(ref->value.as.map.map));
+                ref_unlock(ref);
                 return true;
             }
             if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1 && args[0].type == VAL_MAP) {
                 if (obj->phase != VTAG_CRYSTAL) {
-                    value_unshare(&ref->value); /* LAT-456: see ref set */
+                    /* LAT-456 + Stage 5 review: detached, see ref map set */
+                    value_unshare_detached(&ref->value);
                     for (size_t i = 0; i < args[0].as.map.map->cap; i++) {
                         if (args[0].as.map.map->entries[i].state != MAP_OCCUPIED) continue;
-                        LatValue v = rvm_clone((LatValue *)args[0].as.map.map->entries[i].value);
+                        LatValue v = value_detach((LatValue *)args[0].as.map.map->entries[i].value);
                         lat_map_set(ref->value.as.map.map, args[0].as.map.map->entries[i].key, &v);
                     }
                 }
                 *result = value_unit();
+                ref_unlock(ref);
                 return true;
             }
         }
@@ -2586,9 +2636,10 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
                 /* CbR Stage 4 (LAT-456): privatize a borrowed shared inner
                  * before the in-place append — realloc of region-interior
-                 * elems would corrupt the sealed region. */
-                value_unshare(&ref->value);
-                LatValue val = rvm_clone(&args[0]);
+                 * elems would corrupt the sealed region. Stage 5 review:
+                 * detached, see ref set. */
+                value_unshare_detached(&ref->value);
+                LatValue val = value_detach(&args[0]);
                 if (ref->value.as.array.len >= ref->value.as.array.cap) {
                     ref->value.as.array.cap = ref->value.as.array.cap ? ref->value.as.array.cap * 2 : 4;
                     ref->value.as.array.elems =
@@ -2596,24 +2647,29 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 }
                 ref->value.as.array.elems[ref->value.as.array.len++] = val;
                 *result = value_unit();
+                ref_unlock(ref);
                 return true;
             }
             if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
                 /* CbR Stage 4 (LAT-456): pop MOVES the element out — from a
                  * shared region that would hand out an unretained interior
-                 * handle. Privatize first. */
-                value_unshare(&ref->value);
+                 * handle. Privatize first. Stage 5 review: detached — the
+                 * privatized inner stays IN the cell after the move-out and
+                 * must not land on the popping thread's TLS heap. */
+                value_unshare_detached(&ref->value);
                 if (ref->value.as.array.len == 0) {
                     *result = value_nil();
                 } else {
                     *result = ref->value.as.array.elems[--ref->value.as.array.len];
                 }
+                ref_unlock(ref);
                 return true;
             }
             if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                  (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                 arg_count == 0) {
                 *result = value_int((int64_t)ref->value.as.array.len);
+                ref_unlock(ref);
                 return true;
             }
             if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
@@ -2625,9 +2681,12 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                     }
                 }
                 *result = value_bool(found);
+                ref_unlock(ref);
                 return true;
             }
         }
+        /* No proxy matched — fall through to the generic paths. */
+        ref_unlock(ref);
     }
 
     /* ── Channel methods ── */
@@ -3704,20 +3763,35 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             if (idx < 0 || (size_t)idx >= R[b].as.buffer.len) RVM_ERROR("buffer index out of bounds");
             reg_set(&R[a], value_int((int64_t)R[b].as.buffer.data[idx]));
         } else if (R[b].type == VAL_REF) {
-            /* Proxy indexing on Ref inner value */
+            /* Proxy indexing on Ref inner value (cell lock: LAT-450; every
+             * RVM_ERROR exit unlocks first). */
             LatRef *ref = R[b].as.ref.ref;
+            ref_lock(ref);
             if (ref->value.type == VAL_MAP) {
-                if (R[c].type != VAL_STR) RVM_ERROR("map key must be a string");
+                if (R[c].type != VAL_STR) {
+                    ref_unlock(ref);
+                    RVM_ERROR("map key must be a string");
+                }
                 LatValue *val = lat_map_get(ref->value.as.map.map, R[c].as.str_val);
                 reg_set(&R[a], val ? rvm_clone(val) : value_nil());
+                ref_unlock(ref);
             } else if (ref->value.type == VAL_ARRAY) {
-                if (R[c].type != VAL_INT) RVM_ERROR("array index must be an integer");
+                if (R[c].type != VAL_INT) {
+                    ref_unlock(ref);
+                    RVM_ERROR("array index must be an integer");
+                }
                 int64_t idx = R[c].as.int_val;
                 if (idx < 0) idx += (int64_t)ref->value.as.array.len;
-                if (idx < 0 || (size_t)idx >= ref->value.as.array.len) RVM_ERROR("array index out of bounds");
+                if (idx < 0 || (size_t)idx >= ref->value.as.array.len) {
+                    ref_unlock(ref);
+                    RVM_ERROR("array index out of bounds");
+                }
                 reg_set(&R[a], rvm_clone(&ref->value.as.array.elems[idx]));
+                ref_unlock(ref);
             } else {
-                RVM_ERROR("cannot index Ref(%s)", value_type_name(&ref->value));
+                const char *tn = value_type_name(&ref->value);
+                ref_unlock(ref);
+                RVM_ERROR("cannot index Ref(%s)", tn);
             }
         } else {
             RVM_ERROR("cannot index %s", value_type_name(&R[b]));
@@ -3780,21 +3854,39 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             LatRef *ref = R[a].as.ref.ref;
             /* CbR Stage 4 (LAT-456): the Ref handle's phase guard does not
              * cover a borrowed shared INNER — privatize before the in-place
-             * write. */
-            value_unshare(&ref->value);
+             * write. LAT-450 (Stage 5): the unshare+write window holds the
+             * cell lock; every RVM_ERROR exit unlocks first. Stage 5 review:
+             * the privatized copy AND the stored clone must be DETACHED
+             * (malloc-backed) — the cell outlives a spawned writer's TLS
+             * heap. */
+            ref_lock(ref);
+            value_unshare_detached(&ref->value);
             if (ref->value.type == VAL_MAP) {
-                if (R[b].type != VAL_STR) RVM_ERROR("map key must be a string");
-                LatValue cloned = rvm_clone(&R[c]);
+                if (R[b].type != VAL_STR) {
+                    ref_unlock(ref);
+                    RVM_ERROR("map key must be a string");
+                }
+                LatValue cloned = value_detach(&R[c]);
                 lat_map_set(ref->value.as.map.map, R[b].as.str_val, &cloned);
+                ref_unlock(ref);
             } else if (ref->value.type == VAL_ARRAY) {
-                if (R[b].type != VAL_INT) RVM_ERROR("array index must be an integer");
+                if (R[b].type != VAL_INT) {
+                    ref_unlock(ref);
+                    RVM_ERROR("array index must be an integer");
+                }
                 int64_t idx = R[b].as.int_val;
                 if (idx < 0) idx += (int64_t)ref->value.as.array.len;
-                if (idx < 0 || (size_t)idx >= ref->value.as.array.len) RVM_ERROR("array index out of bounds");
+                if (idx < 0 || (size_t)idx >= ref->value.as.array.len) {
+                    ref_unlock(ref);
+                    RVM_ERROR("array index out of bounds");
+                }
                 value_free(&ref->value.as.array.elems[idx]);
-                ref->value.as.array.elems[idx] = rvm_clone(&R[c]);
+                ref->value.as.array.elems[idx] = value_detach(&R[c]);
+                ref_unlock(ref);
             } else {
-                RVM_ERROR("cannot set index on Ref(%s)", value_type_name(&ref->value));
+                const char *tn = value_type_name(&ref->value);
+                ref_unlock(ref);
+                RVM_ERROR("cannot set index on Ref(%s)", tn);
             }
         } else {
             RVM_ERROR("cannot set index on %s", value_type_name(&R[a]));
@@ -5742,7 +5834,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     /* Launch all spawn threads */
                     for (uint8_t i = 0; i < spawn_count; i++) {
                         if (!tasks[i].child_vm) continue;
-                        pthread_create(&tasks[i].thread, NULL, regvm_spawn_thread_fn, &tasks[i]);
+                        /* Stage 5 (LAT-457): 8MB stacks for spawn threads
+                         * (platform default overflows on recursion). */
+                        pthread_attr_t sp_attr;
+                        pthread_attr_init(&sp_attr);
+                        pthread_attr_setstacksize(&sp_attr, 8 * 1024 * 1024);
+                        pthread_create(&tasks[i].thread, &sp_attr, regvm_spawn_thread_fn, &tasks[i]);
+                        pthread_attr_destroy(&sp_attr);
                     }
 
                     /* Join all threads */
@@ -6163,10 +6261,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* Proxy: set index on inner value */
             LatRef *ref = R[a].as.ref.ref;
             if (value_is_crystal(&R[a])) RVM_ERROR("cannot mutate a frozen Ref");
-            value_unshare(&ref->value); /* LAT-456: shared inner, see SETINDEX */
+            ref_lock(ref); /* LAT-450: unshare+write under the cell lock */
+            /* LAT-456 + Stage 5 review: detached unshare/clone — the cell
+             * outlives a spawned writer's TLS heap (see SETINDEX). */
+            value_unshare_detached(&ref->value);
             if (ref->value.type == VAL_MAP) {
                 if (R[b].type == VAL_STR) {
-                    LatValue cloned = rvm_clone(&R[c]);
+                    LatValue cloned = value_detach(&R[c]);
                     lat_map_set(ref->value.as.map.map, R[b].as.str_val, &cloned);
                 }
             } else if (ref->value.type == VAL_ARRAY) {
@@ -6175,10 +6276,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     if (idx < 0) idx += (int64_t)ref->value.as.array.len;
                     if (idx >= 0 && (size_t)idx < ref->value.as.array.len) {
                         value_free(&ref->value.as.array.elems[idx]);
-                        ref->value.as.array.elems[idx] = rvm_clone(&R[c]);
+                        ref->value.as.array.elems[idx] = value_detach(&R[c]);
                     }
                 }
             }
+            ref_unlock(ref);
         }
         DISPATCH();
     }

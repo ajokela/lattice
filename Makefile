@@ -478,7 +478,8 @@ test-latc: $(TARGET)
 # (register VM), execute each with clat-run, and diff against direct
 # execution of the source on the corresponding backend.
 RUNTIME_TESTS = latc_expressions latc_variables latc_control_flow latc_functions \
-                latc_data_structures latc_error_handling latc_string_interp
+                latc_data_structures latc_error_handling latc_string_interp \
+                latc_cbr_freeze_alias
 
 test-runtime: $(TARGET) $(RUNTIME_TARGET)
 	@PASS=0; FAIL=0; \
@@ -555,10 +556,26 @@ asan-all: clean $(TEST_TARGET) $(LSP_TARGET)
 	@echo "=== asan: regvm ===" ; ./$(BUILD_DIR)/test_runner --backend regvm; \
 	 rc=$$?; if [ $$rc -gt 128 ]; then exit $$rc; fi
 
+# Stage 5 (LAT-457): the TSan gate runs the full suite on all three
+# backends plus the CbR alias and concurrency matrices through an
+# instrumented clat. abort_on_error=0 makes a red run fail with TSan's
+# exit code instead of SIGABRT-at-exit; suppressions (documented, scoped
+# to non-CbR noise only) live in tests/tsan.supp. fork()-based tests
+# self-skip under TSan (LAT_TSAN_BUILD in tests/).
+TSAN_OPTS = abort_on_error=0 suppressions=$(CURDIR)/tests/tsan.supp
 tsan: CFLAGS += -fsanitize=thread -g -O1
 tsan: LDFLAGS += -fsanitize=thread
-tsan: clean $(TEST_TARGET) $(LSP_TARGET)
-	./$(BUILD_DIR)/test_runner
+tsan: clean $(TEST_TARGET) $(LSP_TARGET) $(TARGET)
+	@echo "=== tsan: tests (stack-vm) ===" && TSAN_OPTIONS="$(TSAN_OPTS)" ./$(BUILD_DIR)/test_runner --backend stack-vm
+	@echo "=== tsan: tests (tree-walk) ===" && TSAN_OPTIONS="$(TSAN_OPTS)" ./$(BUILD_DIR)/test_runner --backend tree-walk
+	@echo "=== tsan: tests (regvm) ===" && TSAN_OPTIONS="$(TSAN_OPTS)" ./$(BUILD_DIR)/test_runner --backend regvm
+	@for b in "" "--tree-walk" "--regvm"; do \
+		echo "=== tsan: cbr_alias_matrix $$b ==="; \
+		TSAN_OPTIONS="$(TSAN_OPTS)" ./$(TARGET) $$b tests/cbr_alias_matrix.lat || exit 1; \
+		echo "=== tsan: cbr_concurrency_matrix $$b ==="; \
+		TSAN_OPTIONS="$(TSAN_OPTS)" ./$(TARGET) $$b tests/cbr_concurrency_matrix.lat || exit 1; \
+	done; \
+	echo "tsan: ALL GREEN"
 
 coverage: CFLAGS += -fprofile-instr-generate -fcoverage-mapping -g -O0
 coverage: LDFLAGS += -fprofile-instr-generate

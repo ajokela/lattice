@@ -1,0 +1,47 @@
+// Thin-runtime roundtrip test (Stage 5 / LAT-457): freeze + alias + thaw
+// through the .latc (stack VM) and .rlat (register VM) serializers, executed
+// by clat-run. Distilled from tests/cbr_alias_matrix.lat so the runtime
+// binary exercises regionization: materialize, alias-retain, thaw isolation,
+// double-freeze idempotence, clone escape hatch.
+
+fix g = [1, 2, "runtime freeze alias padded string 0123456789 0123456789"]
+
+fn main() {
+    // Aliasing a shared crystal: same contents through every handle.
+    let a = g
+    let b = a
+    print(a[0])
+    print(b[1])
+    print(b[2])
+
+    // Double-freeze is idempotent.
+    let c = freeze(a)
+    print(c[0] + c[1])
+
+    // Thaw isolation: a private fluid copy never writes through the region.
+    flux mine = thaw(clone(g))
+    mine[0] = 99
+    mine.push(4)
+    print(mine[0])
+    print(mine.len())
+    print(g[0])
+    print(g.len())
+
+    // flux-from-frozen privatizes before mutation.
+    flux other = g
+    other[1] = 42
+    print(other[1])
+    print(g[1])
+
+    // Freeze a locally built container and alias it across a call.
+    fix local = [10, 20, "second region padded string 0123456789 0123456789 xx"]
+    let sum = pick(local)
+    print(sum)
+
+    print("latc_cbr_freeze_alias: OK")
+}
+
+fn pick(arr: any) -> int {
+    let alias = arr
+    return alias[0] + alias[1]
+}
