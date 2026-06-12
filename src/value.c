@@ -389,9 +389,26 @@ static bool clone_force_copy(void) {
     return mode == 1;
 }
 
+bool value_clone_force_copy_active(void) { return clone_force_copy(); }
+
+/* CbR Stage 3: primitives are EXCLUDED from the borrow fast path. Interior
+ * scalars inside a region carry the shared tag (region_tag_recursive stamps
+ * every node), but a borrowed scalar would be an rc liability the VMs cannot
+ * honor — value_free_inline (stackvm/regvm hot paths) never releases
+ * primitive types, and the *_INT fast opcodes abandon popped slots without
+ * any free. Copying a scalar with region_id = REGION_NONE is cheaper than
+ * the rc traffic anyway and preserves the system-wide invariant that scalar
+ * handles own nothing (mirrors value_worth_regionizing's scalar exemption).
+ * rc-neutral for the tree-walker: no retain taken, and value_free of a
+ * REGION_NONE scalar releases nothing. */
+static inline bool value_type_is_primitive(ValueType t) {
+    return t == VAL_INT || t == VAL_FLOAT || t == VAL_BOOL || t == VAL_UNIT || t == VAL_NIL || t == VAL_RANGE;
+}
+
 LatValue value_clone_impl(const LatValue *v, bool allow_share) {
     /* Borrow fast path: aliasing a shared crystal is retain + bitwise copy. */
-    if (allow_share && !clone_force_copy() && v->phase == VTAG_CRYSTAL && value_region_is_shared(v)) {
+    if (allow_share && !clone_force_copy() && v->phase == VTAG_CRYSTAL && value_region_is_shared(v) &&
+        !value_type_is_primitive(v->type)) {
         crystal_region_retain(REGION_PTR(v->region_id));
         return *v; /* bitwise handle copy */
     }
@@ -872,6 +889,18 @@ bool value_freeze_to_region(LatValue *v) {
     CrystalRegion *saved_arena = g_arena;
     g_arena = r;
     LatValue clone = value_clone_impl(v, false);
+    /* CbR Stage 3: a TOP-LEVEL interned string would keep REGION_INTERNED
+     * through the clone and region_tag_recursive would never stamp the
+     * shared tag on it — leaving an empty pinned region (rc=1, 0 bytes,
+     * leaked) and a handle that doesn't participate in rc. Copy the bytes
+     * into the region so the handle carries the tag. (Interior interned
+     * strings are fine: their parent container node carries the tag.) The
+     * stack VM interns every constant-pool/concat string <= 64 bytes, so
+     * this is the common case for `fix s = "literal"` there. */
+    if (clone.type == VAL_STR && clone.region_id == REGION_INTERNED) {
+        clone.as.str_val = lat_strdup(clone.as.str_val); /* arena-routed: g_arena == r */
+        clone.region_id = REGION_NONE;                   /* taggable below */
+    }
     g_arena = saved_arena;
 
     region_tag_recursive(&clone, REGION_TAG(r));

@@ -778,6 +778,13 @@ bench-stress: $(TARGET)
 bench-all: $(TARGET)
 	@bash scripts/run-benchmarks.sh
 
+# Crystal-by-Reference Stage 3 smoke gate: fix-binding freeze of a 10k-element
+# array x1000 iterations on the default stack VM must stay within a generous
+# multiple of the pre-Stage-3 baseline (baked into the script). Catches
+# accidental O(n^2) freeze behavior, not microbenchmark noise.
+bench-freeze-gate: $(TARGET)
+	python3 scripts/bench_freeze_gate.py
+
 ext-pg:
 	$(MAKE) -C extensions/pg
 

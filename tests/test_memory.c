@@ -561,11 +561,11 @@ TEST(fluid_mark_nonexistent_returns_false) {
 /* ══════════════════════════════════════════════════════════════════════════
  * Shared crystal regions (Crystal-by-Reference Stage 2, Round A)
  *
- * These tests exercise the dormant shared-region primitives directly.
- * Nothing in the evaluators calls them yet — they create the only shared
- * region ids that exist in the process, and every test releases all of them
- * before returning (the crystal_region_shared_active() dormancy gate must
- * read false again before any .lat evaluation runs).
+ * These tests exercise the shared-region primitives directly (no VM).
+ * Since Round B the tree-walker mints shared handles on every whole-binding
+ * freeze, and since Stage 3 the stack VM does too — the invariant that
+ * still matters here: every test releases all of the regions it creates
+ * before returning (registry back to baseline).
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /* Helper: a long string that clears the regionization size threshold. */
@@ -1609,3 +1609,655 @@ TEST(cbr_rb_report_unreachable_is_advisory) {
     value_free(&arr);
     ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LAT-452 / Stage 3: STACK VM rc/lifecycle tests (TDD — RED until the
+ * Stage 3 stack-VM switch lands)
+ *
+ * These run Lattice source through the STACK VM directly (stack_compile +
+ * stackvm_run, regardless of the --backend the suite was invoked with) and
+ * assert the Stage 3 contract against the shared-region registry:
+ *
+ *   - OP_FREEZE / OP_FREEZE_VAR of a shareable container MATERIALIZES
+ *     exactly one shared region (created_total/live_count advance);
+ *   - aliasing through GET_GLOBAL/GET_LOCAL/call args is an O(1) retain —
+ *     never a second region (value_clone_fast borrow branch, S3-R1);
+ *   - channel send of a shared crystal is +1 retain per buffered handle,
+ *     not a copy (S3-R10); teardown of an undrained channel releases;
+ *   - spawn/scope export retains and the joined threads release (S3-R11);
+ *   - steal-pattern extraction and OP_APPEND_STR_LOCAL never pin a region
+ *     (S3-R4/R7);
+ *   - stackvm_free returns the registry to baseline (C2/C4 rc balance).
+ *
+ * Until the switch, the VM's freeze path is a bare value_freeze tag flip
+ * that never touches the shared registry, so the created/live-count
+ * assertions fail first (cleanly — REGION_PTR dereferences are sequenced
+ * after them and never execute on pre-Stage-3 code).
+ *
+ * Companion semantics pins (GREEN before AND after) live in test_eval.c
+ * under the cbr_s3_pin_* banner. Mirrors the cbr_rb_* tree-walker block
+ * above, including the cbr_force_copy_active() self-skip convention for
+ * tests that assert aliasing MECHANICS (retain counts, handle identity).
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#include "stackcompiler.h"
+#include "stackvm.h"
+#include "runtime.h"
+
+/* A live stack-VM run: kept alive so tests can inspect vm.env globals and
+ * registry state while root bindings still hold their retains. */
+typedef struct {
+    LatVec tokens;
+    Program prog;
+    Chunk *chunk;
+    LatRuntime rt;
+    StackVM vm;
+} CbrS3VM;
+
+/* Run source through the stack VM. Returns false (with everything torn
+ * down) on any compile/runtime error. On success the VM stays live until
+ * cbr_s3_vm_cleanup. no_regions mirrors the --no-regions CLI baseline flag
+ * (rt.no_regions in main.c). */
+static bool cbr_s3_vm_run_opt(CbrS3VM *s, const char *source, bool no_regions) {
+    if (!cbr_rb_parse(source, &s->tokens, &s->prog)) return false;
+
+    /* The VM backend never runs with a tree-walker TLS heap/arena. */
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    s->chunk = stack_compile(&s->prog, &comp_err);
+    if (!s->chunk) {
+        fprintf(stderr, "  cbr_s3_vm compile error: %s\n", comp_err ? comp_err : "(unknown)");
+        free(comp_err);
+        program_free(&s->prog);
+        for (size_t i = 0; i < s->tokens.len; i++) token_free(lat_vec_get(&s->tokens, i));
+        lat_vec_free(&s->tokens);
+        return false;
+    }
+
+    lat_runtime_init(&s->rt);
+    s->rt.no_regions = no_regions;
+    stackvm_init(&s->vm, &s->rt);
+    LatValue result;
+    StackVMResult res = stackvm_run(&s->vm, s->chunk, &result);
+    if (res != STACKVM_OK) {
+        fprintf(stderr, "  cbr_s3_vm runtime error: %s\n", s->vm.error ? s->vm.error : "(unknown)");
+        stackvm_free(&s->vm);
+        lat_runtime_free(&s->rt);
+        chunk_free(s->chunk);
+        program_free(&s->prog);
+        for (size_t i = 0; i < s->tokens.len; i++) token_free(lat_vec_get(&s->tokens, i));
+        lat_vec_free(&s->tokens);
+        return false;
+    }
+    value_free(&result);
+    return true;
+}
+
+static bool cbr_s3_vm_run(CbrS3VM *s, const char *source) { return cbr_s3_vm_run_opt(s, source, false); }
+
+static void cbr_s3_vm_cleanup(CbrS3VM *s) {
+    stackvm_free(&s->vm);
+    lat_runtime_free(&s->rt);
+    chunk_free(s->chunk);
+    program_free(&s->prog);
+    for (size_t i = 0; i < s->tokens.len; i++) token_free(lat_vec_get(&s->tokens, i));
+    lat_vec_free(&s->tokens);
+}
+
+/* RED until Stage 3: a top-level fix binding of a shareable container on the
+ * stack VM materializes exactly one live shared region (OP_FREEZE ->
+ * value_freeze_to_region, S3-R2); stackvm_free releases the global's
+ * retain and returns the registry to baseline. */
+TEST(cbr_s3_vm_freeze_materializes_live_region) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fix g = [1, 2, 3, \"vm freeze materialize padded string 0123456789 0123456789\"]\n"));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3: global aliases of a shared crystal are retains of the
+ * SAME region (one region total); env_get handles borrow (S3-R1) and the
+ * rc ledger balances when they are released. */
+TEST(cbr_s3_vm_alias_is_retain_not_new_region) {
+    if (cbr_force_copy_active()) return; /* asserts aliasing mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fix g = [1, 2, 3, \"vm alias retain padded string 0123456789 0123456789\"]\n"
+                             "let h = g\n"
+                             "let k = h\n"));
+
+    /* Three global bindings, ONE region. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg, vh;
+    ASSERT(env_get(s.vm.env, "g", &vg));
+    ASSERT(env_get(s.vm.env, "h", &vh));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    ASSERT(REGION_IS_SHARED_ID(vh.region_id));
+    ASSERT(REGION_PTR(vg.region_id) == REGION_PTR(vh.region_id));
+    ASSERT(vg.phase == VTAG_CRYSTAL);
+
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    size_t rc_with_handles = crystal_region_refcount(r);
+    /* At least the 3 global bindings + our 2 test handles. */
+    ASSERT(rc_with_handles >= 5);
+    value_free(&vg);
+    value_free(&vh);
+    ASSERT_EQ_INT(crystal_region_refcount(r), rc_with_handles - 2);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3: regions minted by fix bindings inside a function frame
+ * are released when the frame's slots are popped (eager value_free
+ * discipline) — no region survives main()'s return. */
+TEST(cbr_s3_vm_scope_exit_releases_region) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fn work() {\n"
+                             "    fix local = [1, 2, \"vm scope exit padded string 0123456789 0123456789\"]\n"
+                             "    let alias = local\n"
+                             "}\n"
+                             "fn main() {\n"
+                             "    work()\n"
+                             "    work()\n"
+                             "}\n"));
+
+    /* Two calls -> two regions created; both released at frame exit while
+     * the VM is still alive. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 2);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3 (S3-R4): steal-pattern extraction in a loop — struct
+ * field, tuple member, map value and array element pulled out of a frozen
+ * global through dying stack temporaries — must be rc-balanced: exactly one
+ * region, rc back to (binding + our handle) after the run, registry at
+ * baseline after teardown. A missed steal guard over-releases (ASan/ledger
+ * abort) or leaks retains (rc inflated, region pinned past cleanup). */
+TEST(cbr_s3_vm_steal_extraction_rc_balanced) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s,
+                         "struct Cfg { host: String, items: any }\n"
+                         "fix g = Cfg { host: \"vm steal rc padded string 0123456789 0123456789\", items: [1, 2, 3] }\n"
+                         "fn main() {\n"
+                         "    flux acc = 0\n"
+                         "    for i in 0..20 {\n"
+                         "        let h = g.host\n"
+                         "        let it = g.items\n"
+                         "        let e = g.items[0]\n"
+                         "        acc = acc + it[1] + e + h.len()\n"
+                         "    }\n"
+                         "    assert(acc == 20 * (2 + 1 + g.host.len()), \"steal loop sum wrong: ${acc}\")\n"
+                         "}\n"));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg;
+    ASSERT(env_get(s.vm.env, "g", &vg));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    /* Exactly the global binding + our handle: nothing extracted in the
+     * loop may still hold a retain. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 2);
+    value_free(&vg);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3 (S3-R10): channel send of a shared crystal is +1 retain
+ * per buffered handle, NOT a deep copy; an undrained channel torn down at
+ * VM free releases its buffered retains (rc balance with zero recvs). The
+ * channel is a global so the buffered handles are still live after the run. */
+TEST(cbr_s3_vm_channel_send_is_retain_then_teardown_releases) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fix g = [1, 2, 3, \"vm channel retain padded string 0123456789 0123456789\"]\n"
+                             "let ch = Channel::new(2)\n"
+                             "fn main() {\n"
+                             "    ch.send(g)\n"
+                             "    ch.send(g)\n"
+                             "}\n"));
+
+    /* One region; two sends buffered, never received. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg;
+    ASSERT(env_get(s.vm.env, "g", &vg));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    /* global binding + 2 buffered handles + our handle = 4 retains. A
+     * deep-copy send would show exactly 2 here. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 4);
+    value_free(&vg);
+
+    /* Teardown frees the channel global -> channel_release value_frees the
+     * buffered handles -> registry back to baseline. */
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3 (S3-R11): spawn/scope export of a frozen global retains;
+ * joined threads release. After the scope, the only retains left are the
+ * global binding (+ our probe handle); thread teardown on the child side
+ * must be rc-balanced even though releases run on other threads. */
+TEST(cbr_s3_vm_spawn_export_retains_and_releases) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fix dataset = [1, 1, 1, \"vm spawn export padded string 0123456789 0123456789\"]\n"
+                             "fn main() {\n"
+                             "    let ch = Channel::new(3)\n"
+                             "    scope {\n"
+                             "        spawn { ch.send(dataset[0]) }\n"
+                             "        spawn { ch.send(dataset[1]) }\n"
+                             "        spawn { ch.send(dataset[2]) }\n"
+                             "    }\n"
+                             "    let total = ch.recv() + ch.recv() + ch.recv()\n"
+                             "    assert(total == 3, \"spawn reader sum wrong\")\n"
+                             "}\n"));
+
+    /* Reading a frozen dataset from N threads creates ONE region, ever. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vd;
+    ASSERT(env_get(s.vm.env, "dataset", &vd));
+    ASSERT(REGION_IS_SHARED_ID(vd.region_id));
+    CrystalRegion *r = REGION_PTR(vd.region_id);
+    /* Global binding + our handle only: every spawn-export retain was
+     * released when its thread was torn down. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 2);
+    value_free(&vd);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3 (S3-R10/C4 sender-death ordering): a spawned thread
+ * freezes containers, sends them, and dies (its FluidHeap torn down) before
+ * the parent drains one of three; the remaining buffered handles die with
+ * the channel at main()'s return. live_count must already be back to
+ * baseline BEFORE VM teardown — nothing may pin a region. */
+TEST(cbr_s3_vm_sender_death_then_partial_drain) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fn main() {\n"
+                             "    let ch = Channel::new(4)\n"
+                             "    scope {\n"
+                             "        spawn {\n"
+                             "            fix one = [1, \"vm sender death padded string 0123456789 0123456789\"]\n"
+                             "            fix two = [2, \"vm sender death padded string 0123456789 0123456789\"]\n"
+                             "            fix three = [3, \"vm sender death padded string 0123456789 0123456789\"]\n"
+                             "            ch.send(one)\n"
+                             "            ch.send(two)\n"
+                             "            ch.send(three)\n"
+                             "        }\n"
+                             "    }\n"
+                             "    let got = ch.recv()\n"
+                             "    assert(got[0] == 1, \"recv wrong\")\n"
+                             "}\n"));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 3);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3 (S3-R7): OP_APPEND_STR_LOCAL fed from a shared frozen
+ * string must privatize without leaking the retain — a missed release in
+ * the append handler's region-owned branch pins the region forever (rc
+ * inflated while live, registry not at baseline after teardown). */
+TEST(cbr_s3_vm_append_str_local_does_not_pin_region) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fix g = \"vm append no-pin base string padded 0123456789 0123456789\"\n"
+                             "fn main() {\n"
+                             "    flux total = 0\n"
+                             "    for i in 0..10 {\n"
+                             "        flux st = g\n"
+                             "        st += \"x\"\n"
+                             "        total = total + st.len()\n"
+                             "    }\n"
+                             "    assert(total == 10 * (g.len() + 1), \"append totals wrong\")\n"
+                             "}\n"));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg;
+    ASSERT(env_get(s.vm.env, "g", &vg));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    /* Global binding + our handle: the 10 appended locals must each have
+     * released their borrow. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 2);
+    value_free(&vg);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 3 (S3-R12): select arms receiving shared crystals — the
+ * fired arm's binding takes ownership of the buffered retain (handle
+ * transfer, no extra rc traffic) and the arm scope releases it; default arm
+ * paths leave no received-but-unbound handles. Registry at baseline before
+ * and after teardown. */
+TEST(cbr_s3_vm_select_arm_handle_transfer_rc_balanced) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fix payload = [7, 8, \"vm select transfer padded string 0123456789 0123456789\"]\n"
+                             "fn main() {\n"
+                             "    let ch = Channel::new(2)\n"
+                             "    ch.send(payload)\n"
+                             "    let got = select {\n"
+                             "        v from ch => { v[0] }\n"
+                             "    }\n"
+                             "    assert(got == 7, \"select recv wrong\")\n"
+                             "    let dflt = select {\n"
+                             "        v from ch => { v[0] }\n"
+                             "        default => { -1 }\n"
+                             "    }\n"
+                             "    assert(dflt == -1, \"default arm not taken\")\n"
+                             "    ch.send(payload)\n"
+                             "    let timed = select {\n"
+                             "        v from ch => { v[1] }\n"
+                             "        timeout(50) => { -2 }\n"
+                             "    }\n"
+                             "    assert(timed == 8, \"ready arm beat timeout\")\n"
+                             "}\n"));
+
+    /* One region (the payload); both selected handles released with their
+     * arm scopes. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* LAT-452 thread-stress (S3-R15 pulled forward / work item 4): six threads
+ * churn ONE shared region's atomic rc through the full VM concurrency
+ * surface — 4 sender spawns alias the frozen dataset and send the crystal
+ * itself through a channel 25 times each (100 retain+enqueue transfers),
+ * while 2 receiver spawns concurrently drain, index, and drop the handles
+ * (releases on threads that never created the region). After the scope
+ * joins, rc must have drained back to exactly the global binding (+ our
+ * probe); registry to baseline after teardown. Under ASan this is the C4
+ * safety-story test: any over/under-release on the cross-thread paths
+ * (send detach, recv move, iteration-scoped frees, child env teardown)
+ * surfaces here. */
+TEST(cbr_s3_vm_thread_stress_channel_churn_rc_drains) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fix dataset = [3, 4, \"vm thread stress padded string 0123456789 0123456789\"]\n"
+                             "let done = Channel::new(2)\n"
+                             "fn sender(ch: any) {\n"
+                             "    for i in 0..25 {\n"
+                             "        let a = dataset\n"
+                             "        ch.send(a)\n"
+                             "    }\n"
+                             "}\n"
+                             "fn receiver(ch: any) {\n"
+                             "    flux acc = 0\n"
+                             "    for i in 0..50 {\n"
+                             "        let v = ch.recv()\n"
+                             "        acc = acc + v[0]\n"
+                             "    }\n"
+                             "    done.send(acc)\n"
+                             "}\n"
+                             "fn main() {\n"
+                             "    let ch = Channel::new(128)\n"
+                             "    scope {\n"
+                             "        spawn { sender(ch) }\n"
+                             "        spawn { sender(ch) }\n"
+                             "        spawn { sender(ch) }\n"
+                             "        spawn { sender(ch) }\n"
+                             "        spawn { receiver(ch) }\n"
+                             "        spawn { receiver(ch) }\n"
+                             "    }\n"
+                             "    let total = done.recv() + done.recv()\n"
+                             "    assert(total == 100 * dataset[0], \"stress sum wrong: ${total}\")\n"
+                             "}\n"));
+
+    /* 100 cross-thread transfers of one dataset: ONE region, ever. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vd;
+    ASSERT(env_get(s.vm.env, "dataset", &vd));
+    ASSERT(REGION_IS_SHARED_ID(vd.region_id));
+    CrystalRegion *r = REGION_PTR(vd.region_id);
+    /* Global binding + our probe handle: every sender alias, buffered
+     * handle, receiver binding and spawn-export retain has drained. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 2);
+    value_free(&vd);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include "channel.h"
+
+/* LAT-452 C-level channel teardown stress (S3-R10/C4): N pthreads
+ * concurrently retain+send aliases of one shared crystal into a channel
+ * that is never drained, then the channel's LAST reference is released on
+ * yet another child thread — the buffered crystal handles are freed
+ * entirely off the thread that minted the region (channel_release ->
+ * value_free -> tag-keyed crystal_region_release, atomic). Exact rc
+ * arithmetic: each send is clone(+1) + detach-borrow(+1) + free(-1) =
+ * one buffer-owned retain. */
+#define CBR_S3_STRESS_SENDERS 4
+#define CBR_S3_STRESS_SENDS   64
+
+typedef struct {
+    LatChannel *ch;
+    const LatValue *handle;
+} CbrS3SendCtx;
+
+static void *cbr_s3_sender_thread(void *arg) {
+    CbrS3SendCtx *ctx = arg;
+    for (int i = 0; i < CBR_S3_STRESS_SENDS; i++) {
+        LatValue alias = value_deep_clone(ctx->handle); /* borrow: retain */
+        channel_send(ctx->ch, alias);                   /* detach borrows (+1), frees alias (-1) */
+    }
+    return NULL;
+}
+
+static void *cbr_s3_release_thread(void *arg) {
+    channel_release((LatChannel *)arg); /* last ref: buffered teardown HERE */
+    return NULL;
+}
+
+TEST(cbr_s3_channel_abandoned_buffered_release_on_child_thread) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    LatValue arr = cbr_make_array();
+    ASSERT(value_freeze_to_region(&arr));
+    ASSERT(REGION_IS_SHARED_ID(arr.region_id));
+    CrystalRegion *r = REGION_PTR(arr.region_id);
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+
+    LatChannel *ch = channel_new();
+    ASSERT(ch != NULL);
+
+    pthread_t senders[CBR_S3_STRESS_SENDERS];
+    CbrS3SendCtx ctx = {ch, &arr};
+    for (int i = 0; i < CBR_S3_STRESS_SENDERS; i++) pthread_create(&senders[i], NULL, cbr_s3_sender_thread, &ctx);
+    for (int i = 0; i < CBR_S3_STRESS_SENDERS; i++) pthread_join(senders[i], NULL);
+
+    /* Our handle + one retain per buffered (never-drained) handle. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1 + CBR_S3_STRESS_SENDERS * CBR_S3_STRESS_SENDS);
+
+    /* Abandon the channel: hand its last ref to a child thread. */
+    pthread_t releaser;
+    pthread_create(&releaser, NULL, cbr_s3_release_thread, ch);
+    pthread_join(releaser, NULL);
+
+    /* Every buffered retain released off-thread; only ours remains. */
+    ASSERT_EQ_INT(crystal_region_refcount(r), 1);
+    value_free(&arr);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+#endif /* !_WIN32 && !__EMSCRIPTEN__ */
+
+/* GREEN today AND after Stage 3 (S3-R13 boundary pin, unshareable side):
+ * an UNSHAREABLE fix binding (struct holding a closure) on the stack VM
+ * stays a legacy tag-flip crystal — no region is ever created, and no
+ * handle the VM hands out may satisfy the shared-bit predicate. Mirrors
+ * cbr_rb_unshareable_fallback_no_shared_bit on the tree-walker. */
+TEST(cbr_s3_vm_unshareable_fallback_no_shared_bit) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "struct Counter { n: Int, bump: Fn }\n"
+                             "fix g = Counter { n: 1, bump: |x| { x } }\n"));
+
+    LatValue vg;
+    ASSERT(env_get(s.vm.env, "g", &vg));
+    ASSERT(vg.phase == VTAG_CRYSTAL);
+    ASSERT(!REGION_IS_SHARED_ID(vg.region_id));
+    value_free(&vg);
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* LAT-452 follow-up regression pin (RED before the unwind-release fix):
+ * exception-unwind paths that reset vm->stack_top past live slots
+ * (stackvm_handle_error / stackvm_handle_native_error / OP_THROW caught
+ * branch / OP_TRY_UNWRAP err branch / stackvm_call_closure error path)
+ * abandoned those slots without value_free — every abandoned shared-crystal
+ * handle orphaned a region retain, pinning the region forever. Loop all
+ * three unwind shapes (catch-mid-expression, callee-frame unwind,
+ * `?`-propagation) with shared aliases live at unwind time: the registry
+ * must be back at baseline as soon as main() returns, and stay there after
+ * teardown. Pre-fix this pinned the region with rc in the hundreds. */
+TEST(cbr_s3_vm_exception_unwind_releases_abandoned_slots) {
+    if (cbr_force_copy_active()) return; /* asserts retain/release mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run(&s, "fn risky(a: any) {\n"
+                             "    let alias = a\n"
+                             "    let boom = [1][5]\n"
+                             "    return alias\n"
+                             "}\n"
+                             "fn err_result() {\n"
+                             "    flux m = Map::new()\n"
+                             "    m[\"tag\"] = \"err\"\n"
+                             "    m[\"error\"] = \"nope\"\n"
+                             "    return m\n"
+                             "}\n"
+                             "fn unwrapper(a: any) {\n"
+                             "    let alias = a\n"
+                             "    let v = err_result()?\n"
+                             "    return v\n"
+                             "}\n"
+                             "fn main() {\n"
+                             "    let pad = \"unwind padding string 0123456789 0123456789 0123456789\"\n"
+                             "    fix shared = [pad, pad, pad, pad]\n"
+                             "    flux i = 0\n"
+                             "    while i < 60 {\n"
+                             "        try {\n"
+                             "            let pair = [shared, [9][9]]\n"
+                             "        } catch e {\n"
+                             "        }\n"
+                             "        try {\n"
+                             "            let r = risky(shared)\n"
+                             "        } catch e {\n"
+                             "        }\n"
+                             "        let u = unwrapper(shared)\n"
+                             "        i = i + 1\n"
+                             "    }\n"
+                             "}\n"));
+
+    /* main() returned and `shared` (a main local) was released at frame
+     * exit: no abandoned-slot orphan may keep the region alive. */
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+/* LAT-452 follow-up (--no-regions inheritance): spawned children are built
+ * by stackvm_clone_for_thread (spawn/scope in stackvm.c AND async_iter via
+ * runtime.c) with a fresh calloc'd LatRuntime — before the fix the
+ * parent's no_regions flag was not copied, so a `fix` inside `spawn`
+ * regionized even under --no-regions baseline mode. Pin: with no_regions
+ * set, a child-side freeze must create ZERO shared regions. */
+TEST(cbr_s3_vm_no_regions_inherited_by_spawned_children) {
+    size_t base_created = crystal_region_created_total();
+    size_t base_live = crystal_region_live_count();
+
+    CbrS3VM s;
+    ASSERT(cbr_s3_vm_run_opt(
+        &s,
+        "fn main() {\n"
+        "    let ch = Channel::new(2)\n"
+        "    scope {\n"
+        "        spawn {\n"
+        "            fix local = [1, 2, 3, \"no-regions child padded string 0123456789 0123456789\"]\n"
+        "            ch.send(local[0])\n"
+        "        }\n"
+        "    }\n"
+        "    let v = ch.recv()\n"
+        "    assert(v == 1, \"spawn result wrong\")\n"
+        "}\n",
+        /*no_regions=*/true));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s3_vm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+#endif /* !_WIN32 && !__EMSCRIPTEN__ */

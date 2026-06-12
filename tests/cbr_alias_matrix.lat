@@ -1,0 +1,195 @@
+// LAT-449 Round B: Crystal-by-Reference aliasing-semantics matrix (smoke).
+//
+// Self-asserting: any divergence aborts with a nonzero exit. This file MUST
+// produce identical results under every execution mode — that equivalence IS
+// the test:
+//
+//   ./clat tests/cbr_alias_matrix.lat                         (stack VM, shared-region crystals)
+//   ./clat --tree-walk tests/cbr_alias_matrix.lat             (shared-region crystals)
+//   ./clat --no-regions tests/cbr_alias_matrix.lat            (legacy tag-flip baseline, v0.4 semantics)
+//   ./clat --tree-walk --no-regions tests/cbr_alias_matrix.lat
+//   ./clat --tree-walk --gc-stress tests/cbr_alias_matrix.lat (GC at every allocation point)
+//   LATTICE_FORCE_COPY=1 ./clat --tree-walk tests/cbr_alias_matrix.lat  (borrow path disabled)
+//
+// Strings are padded past any regionization size threshold so the shared
+// path actually triggers where it is enabled.
+
+struct Cfg { host: String, port: Int }
+
+fn alias_thaw_isolation() {
+    fix a = [1, 2, 3, "alias matrix long padding string 0123456789"]
+    let b = a
+    flux c = thaw(b)
+    c[0] = 99
+    assert(a[0] == 1, "a mutated through alias")
+    assert(b[0] == 1, "b mutated through alias")
+    assert(c[0] == 99, "c write lost")
+    assert(phase_of(a) == "crystal", "a phase changed")
+}
+
+fn double_freeze_idempotent() {
+    fix g = [4, 5, "double freeze long padding string 0123456789"]
+    let g2 = freeze(g)
+    assert(g2[0] == 4, "refreeze changed value")
+    assert(phase_of(g) == "crystal", "g not crystal")
+    assert(phase_of(g2) == "crystal", "g2 not crystal")
+}
+
+fn freeze_except_exempt_key() {
+    flux m = Map::new()
+    m["host"] = "localhost padded out to a long string 0123456789"
+    m["score"] = 1
+    freeze(m) except ["score"]
+    m["score"] = 2
+    assert(m["score"] == 2, "exempt key write lost")
+    assert(m["host"] == "localhost padded out to a long string 0123456789", "frozen key changed")
+}
+
+fn flux_from_frozen() {
+    fix base = [5, 6, 7, "flux-from-frozen long padding string 0123456789"]
+    flux y = base
+    y[0] = 50
+    assert(base[0] == 5, "base mutated through flux binding")
+    assert(phase_of(y) == "fluid", "y not fluid")
+}
+
+fn destructure_isolation() {
+    fix src = [10, 20, "destructure long padding string 0123456789"]
+    let alias = src
+    flux [x, y, s] = thaw(alias)
+    x = x + 1
+    assert(x == 11, "destructured elem write lost")
+    assert(src[0] == 10, "src mutated through destructure")
+}
+
+fn sublimate_isolation() {
+    fix src = [1, 2, "sublimate long padding string 0123456789"]
+    let salias = src
+    flux data = thaw(salias)
+    sublimate(data)
+    assert(phase_of(data) == "sublimated", "data not sublimated")
+    assert(phase_of(src) == "crystal", "src phase changed")
+    assert(src[0] == 1, "src content changed")
+}
+
+fn anneal_rebinding() {
+    flux tmp = Map::new()
+    tmp["k"] = [1, 2, 3]
+    tmp["j"] = "anneal long padding string 01234567890123456789"
+    fix m = tmp
+    let alias = m
+    anneal(m) |x| {
+        x["k"] = [9, 9]
+        x
+    }
+    assert(m["k"][0] == 9, "anneal did not apply")
+    assert(alias["k"][0] == 1, "alias saw anneal mutation")
+    assert(phase_of(m) == "crystal", "m not refrozen")
+}
+
+fn bond_mirror_cascade() {
+    // mirror onto a shareable container dep
+    flux mir_t = 1
+    flux mir_dep = [7, 8, "bond mirror long padding string 0123456789"]
+    bond(mir_t, mir_dep)
+    freeze(mir_t)
+    assert(phase_of(mir_dep) == "crystal", "mirror cascade did not freeze dep")
+    assert(mir_dep[0] == 7, "dep content changed by cascade")
+}
+
+fn bond_mirror_already_frozen_short_circuit() {
+    // dep already crystal by cascade time: must short-circuit without error.
+    // (Variable names are unique per matrix function: the regvm tracks
+    // bond/phase state by NAME across frames — pre-existing quirk.)
+    flux sc_t = 1
+    flux sc_dep = [1, "bond short-circuit long padding string 0123456789"]
+    bond(sc_t, sc_dep)
+    freeze(sc_dep)
+    let sc_alias = sc_dep
+    freeze(sc_t)
+    assert(phase_of(sc_dep) == "crystal", "dep lost crystal phase")
+    assert(sc_alias[0] == 1, "alias corrupted by cascade short-circuit")
+}
+
+fn bond_inverse_thaw() {
+    flux inv_t = 1
+    flux inv_dep = [3, 4, "bond inverse long padding string 0123456789"]
+    bond(inv_t, inv_dep, "inverse")
+    freeze(inv_dep)
+    let inv_alias = inv_dep
+    freeze(inv_t)
+    assert(phase_of(inv_dep) == "fluid", "inverse cascade did not thaw dep")
+    inv_dep[0] = 30
+    assert(inv_dep[0] == 30, "thawed dep not writable")
+    assert(inv_alias[0] == 3, "alias saw write through inverse-thawed dep")
+}
+
+fn forge_result_frozen() {
+    let r = forge {
+        flux acc = []
+        acc.push("forge result long padding string 0123456789")
+        acc.push(42)
+        acc
+    }
+    assert(phase_of(r) == "crystal", "forge result not crystal")
+    let ralias = r
+    flux tr = thaw(ralias)
+    tr[1] = 0
+    assert(r[1] == 42, "forge result mutated through thawed alias")
+}
+
+fn grow_seed_freeze() {
+    flux cfg = [8080, "grow seed long padding string 0123456789"]
+    seed(cfg, |v| { v[0] > 0 })
+    grow("cfg")
+    assert(phase_of(cfg) == "crystal", "grow did not freeze")
+    let galias = cfg
+    assert(galias[0] == 8080, "alias content wrong after grow")
+}
+
+fn clone_independence() {
+    fix orig = [1, 2, "clone independence long padding string 0123456789"]
+    flux cp = thaw(clone(orig))
+    cp[0] = 77
+    assert(orig[0] == 1, "orig mutated through clone")
+}
+
+fn struct_alias_isolation() {
+    fix s = Cfg { host: "example.com padded to a long string 0123456789", port: 8080 }
+    let alias = s
+    flux t = thaw(alias)
+    t.port = 9090
+    assert(s.port == 8080, "struct mutated through thawed alias")
+    assert(alias.port == 8080, "struct alias mutated")
+}
+
+fn churn() {
+    flux total = 0
+    for i in 0..10 {
+        fix local = [i, i + 1, "churn iteration long padding string 0123456789"]
+        let alias = local
+        flux t = thaw(alias)
+        t[0] = t[0] + 1
+        total = total + local[0] + t[0]
+    }
+    assert(total == 100, "churn total wrong: ${total}")
+}
+
+fn main() {
+    alias_thaw_isolation()
+    double_freeze_idempotent()
+    freeze_except_exempt_key()
+    flux_from_frozen()
+    destructure_isolation()
+    sublimate_isolation()
+    anneal_rebinding()
+    bond_mirror_cascade()
+    bond_mirror_already_frozen_short_circuit()
+    bond_inverse_thaw()
+    forge_result_frozen()
+    grow_seed_freeze()
+    clone_independence()
+    struct_alias_isolation()
+    churn()
+    print("cbr_alias_matrix: OK")
+}

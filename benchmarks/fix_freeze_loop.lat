@@ -1,0 +1,32 @@
+// Benchmark: fix-binding freeze cost (Crystal-by-Reference Stage 3 regression gate)
+//
+// Every `fix x = <container>` emits OP_FREEZE (stackcompiler.c) — after Stage 3
+// that converts an O(n) tag walk into an O(n) one-time region materialization.
+// This benchmark times exactly that path: 1000 fix bindings of a fresh
+// 10k-element array. The clone() per iteration is the unavoidable cost of
+// producing a fresh fluid container to freeze (a refreeze of an already-shared
+// crystal is O(1) and would not exercise materialization).
+//
+// Wired into make bench / scripts/run-benchmarks.sh automatically (benchmarks/*.lat)
+// and into the hard regression gate `make bench-freeze-gate`
+// (scripts/bench_freeze_gate.py, baseline captured on main pre-Stage-3).
+
+fn main() {
+    flux base = []
+    for i in 0..10000 {
+        base.push(i)
+    }
+    // A long string member so the array clears REGION_SHARE_MIN_STR_LEN-style
+    // thresholds no matter how shareability heuristics are tuned later.
+    base.push("fix freeze loop benchmark padding string 0123456789 0123456789")
+
+    let t0 = time()
+    flux checksum = 0
+    for iter in 0..1000 {
+        fix f = clone(base)
+        checksum = checksum + f[iter % 10000]
+    }
+    let elapsed = time() - t0
+    print("fix-freeze x1000 of 10k array: checksum=${checksum}")
+    print("elapsed: ${elapsed}ms")
+}

@@ -8,17 +8,17 @@
  * Named typedefs for the anonymous structs in stackvm.h/regvm.h. */
 
 typedef struct {
-    char     *phase;
-    LatValue  value;
-    int       line;
-    char     *fn_name;
+    char *phase;
+    LatValue value;
+    int line;
+    char *fn_name;
 } RTPhaseSnap;
 
 typedef struct {
-    char        *name;
+    char *name;
     RTPhaseSnap *snapshots;
-    size_t       snap_count;
-    size_t       snap_cap;
+    size_t snap_count;
+    size_t snap_cap;
 } RTTrackedVar;
 
 typedef struct {
@@ -27,23 +27,23 @@ typedef struct {
 } RTPressure;
 
 typedef struct {
-    char     *var_name;
+    char *var_name;
     LatValue *callbacks;
-    size_t    cb_count;
-    size_t    cb_cap;
+    size_t cb_count;
+    size_t cb_cap;
 } RTReaction;
 
 typedef struct {
-    char    *target;
-    char   **deps;
-    char   **dep_strategies;
-    size_t   dep_count;
-    size_t   dep_cap;
+    char *target;
+    char **deps;
+    char **dep_strategies;
+    size_t dep_count;
+    size_t dep_cap;
 } RTBond;
 
 typedef struct {
-    char     *var_name;
-    LatValue  contract;
+    char *var_name;
+    LatValue contract;
 } RTSeed;
 
 /* ── LatRuntime: shared services consumed by both VMs ── */
@@ -54,15 +54,15 @@ typedef enum {
 } RTBackend;
 
 typedef struct LatRuntime {
-    Env  *env;            /* Global environment (native functions + globals) */
-    Env  *struct_meta;    /* Struct metadata (name -> field names array) */
-    char *error;          /* Error accumulator (set by natives, read by VMs) */
+    Env *env;         /* Global environment (native functions + globals) */
+    Env *struct_meta; /* Struct metadata (name -> field names array) */
+    char *error;      /* Error accumulator (set by natives, read by VMs) */
 
     /* Phase system: tracked variable history */
     RTTrackedVar *tracked_vars;
     size_t tracked_count;
     size_t tracked_cap;
-    bool   tracking_active;
+    bool tracking_active;
 
     /* Phase system: pressure constraints */
     RTPressure *pressures;
@@ -85,25 +85,30 @@ typedef struct LatRuntime {
     size_t seed_cap;
 
     /* Module system */
-    char  *script_dir;
+    char *script_dir;
     LatMap module_cache;
     LatMap required_files;
     LatMap loaded_extensions;
 
     /* Program arguments */
-    int    prog_argc;
+    int prog_argc;
     char **prog_argv;
+
+    /* CbR Stage 3: --no-regions baseline mode for the VM backends. When set,
+     * whole-binding freezes stay legacy tag flips (no shared-region
+     * materialization). Default false. Mirrors Evaluator.no_regions. */
+    bool no_regions;
 
     /* VM dispatch -- set by whichever VM is currently executing.
      * These allow runtime functions (natives, phase system) to call back
      * into the active VM without knowing its concrete type. */
     RTBackend backend;
-    void    *active_vm;
+    void *active_vm;
     LatValue (*call_closure)(void *vm, LatValue *closure, LatValue *args, int argc);
-    bool     (*find_local_value)(void *vm, const char *name, LatValue *out);
-    int      (*current_line)(void *vm);
-    bool     (*get_var_by_name)(void *vm, const char *name, LatValue *out);
-    bool     (*set_var_by_name)(void *vm, const char *name, LatValue val);
+    bool (*find_local_value)(void *vm, const char *name, LatValue *out);
+    int (*current_line)(void *vm);
+    bool (*get_var_by_name)(void *vm, const char *name, LatValue *out);
+    bool (*set_var_by_name)(void *vm, const char *name, LatValue val);
 } LatRuntime;
 
 /* ── Lifecycle ── */
@@ -114,13 +119,13 @@ void lat_runtime_free(LatRuntime *rt);
 bool rt_try_builtin_import(const char *name, LatValue *out);
 
 /* ── Thread-local current runtime ── */
-void        lat_runtime_set_current(LatRuntime *rt);
+void lat_runtime_set_current(LatRuntime *rt);
 LatRuntime *lat_runtime_current(void);
 
 /* ── Phase system (shared between VMs) ── */
-void  rt_record_history(LatRuntime *rt, const char *name, LatValue *val);
-void  rt_fire_reactions(LatRuntime *rt, const char *name, const char *phase);
-void  rt_freeze_cascade(LatRuntime *rt, const char *target_name);
+void rt_record_history(LatRuntime *rt, const char *name, LatValue *val);
+void rt_fire_reactions(LatRuntime *rt, const char *name, const char *phase);
+void rt_freeze_cascade(LatRuntime *rt, const char *target_name);
 char *rt_validate_seeds(LatRuntime *rt, const char *name, LatValue *val, bool consume);
 
 #endif /* RUNTIME_H */

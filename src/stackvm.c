@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <assert.h>
 #ifdef _WIN32
 #include "win32_compat.h"
 #endif
@@ -147,6 +148,31 @@ static StackVMResult runtime_error(StackVM *vm, const char *fmt, ...) {
     return STACKVM_RUNTIME_ERROR;
 }
 
+static void close_upvalues(StackVM *vm, LatValue *last); /* defined below */
+
+/* CbR Stage 3 (LAT-452): release every live stack slot in [new_top,
+ * vm->stack_top) before resetting the stack pointer during exception
+ * unwinding. Pre-Stage-3 these abandoned slots were a plain heap leak;
+ * post-Stage-3 each abandoned slot that holds a shared-crystal handle
+ * orphans a region retain, pinning the region forever. The stack owns its
+ * slots (every push transfers ownership of a clone or a freshly built
+ * value; OP_POP/OP_RETURN value_free them), so the walk mirrors exactly
+ * what the skipped OP_POP/OP_RETURN cleanup would have done. Open upvalues
+ * above the new top are closed first (clone-out), matching OP_RETURN's
+ * discipline, so escaped closures keep their captures. value_free is
+ * release-on-tag with memset, making the walk exactly-once by
+ * construction. The final assignment preserves the pre-existing reset
+ * semantics for the (defensive) case where the stack is already below the
+ * target. */
+static void stackvm_unwind_release(StackVM *vm, LatValue *new_top) {
+    close_upvalues(vm, new_top);
+    while (vm->stack_top > new_top) {
+        vm->stack_top--;
+        value_free(vm->stack_top);
+    }
+    vm->stack_top = new_top;
+}
+
 /* Try to route a runtime error through exception handlers.
  * If a handler exists, unwinds to it, pushes the error string, and returns STACKVM_OK
  * (caller should `break` to continue the StackVM loop).
@@ -165,7 +191,8 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
         StackExceptionHandler h = vm->handlers[--vm->handler_count];
         while (vm->frame_count - 1 > h.frame_index) vm->frame_count--;
         *frame_ptr = &vm->frames[vm->frame_count - 1];
-        vm->stack_top = h.stack_top;
+        /* Release abandoned slots BEFORE the err_map push below (LAT-452). */
+        stackvm_unwind_release(vm, h.stack_top);
         (*frame_ptr)->ip = h.ip;
         push(vm, err_map);
         return STACKVM_OK;
@@ -188,7 +215,8 @@ static StackVMResult stackvm_handle_native_error(StackVM *vm, StackCallFrame **f
         StackExceptionHandler h = vm->handlers[--vm->handler_count];
         while (vm->frame_count - 1 > h.frame_index) vm->frame_count--;
         *frame_ptr = &vm->frames[vm->frame_count - 1];
-        vm->stack_top = h.stack_top;
+        /* Release abandoned slots BEFORE the err_map push below (LAT-452). */
+        stackvm_unwind_release(vm, h.stack_top);
         (*frame_ptr)->ip = h.ip;
         push(vm, err_map);
         return STACKVM_OK;
@@ -237,6 +265,24 @@ static ObjUpvalue *capture_upvalue(StackVM *vm, LatValue *local) {
 /* Fast-path clone: flat copy for primitives, strdup for strings,
  * full deep clone only for compound types. */
 static inline LatValue value_clone_fast(const LatValue *src) {
+    /* CbR Stage 3 (S3-R1): borrow fast path — aliasing a shared crystal is
+     * retain + O(1) bitwise handle copy. MUST come before the per-arm
+     * region_id = REGION_NONE resets below, which would orphan the retain.
+     * Primitives are excluded: interior scalars carry the shared tag, but
+     * the VM frees them via value_free_inline (which never releases) and the
+     * *_INT fast opcodes abandon popped slots — the scalar arm below copies
+     * them with region_id = REGION_NONE instead (same exclusion as
+     * value_clone_impl's borrow branch). Honors the LATTICE_FORCE_COPY
+     * differential oracle through the SAME gate as value.c (one source of
+     * truth); under the oracle a shared handle delegates to value_deep_clone
+     * (a phase-preserving physical copy — the local STR arm below would
+     * intern it and drop the crystal phase). */
+    if (src->phase == VTAG_CRYSTAL && REGION_IS_SHARED_ID(src->region_id) &&
+        !(src->type <= VAL_BOOL || src->type == VAL_UNIT || src->type == VAL_NIL || src->type == VAL_RANGE)) {
+        if (value_clone_force_copy_active()) return value_deep_clone(src);
+        crystal_region_retain(REGION_PTR(src->region_id));
+        return *src; /* bitwise handle copy */
+    }
     switch (src->type) {
         case VAL_INT:
         case VAL_FLOAT:
@@ -418,7 +464,13 @@ static inline LatValue stackvm_ephemeral_concat(StackVM *vm, const char *a, size
     return value_string_owned_len(buf, result_len);
 }
 
-/* If value is ephemeral, promote to malloc (or intern if short string). */
+/* If value is ephemeral, promote to malloc (or intern if short string).
+ *
+ * C6 (CbR Stage 3, S3-R6): promotion keys EXACTLY on REGION_EPHEMERAL
+ * ((size_t)-2, even — it can never satisfy REGION_IS_SHARED_ID's odd-bit
+ * test), so shared-region handles pass through untouched BY CONSTRUCTION and
+ * their tags are never rewritten. Any future region_id assignment added to
+ * this machinery must be preceded by a REGION_IS_SHARED_ID release check. */
 static inline void stackvm_promote_value(LatValue *v) {
     if (v->region_id == REGION_EPHEMERAL) {
         /* Try interning short strings to avoid a full deep-clone.
@@ -444,6 +496,23 @@ static inline void stackvm_promote_frame_ephemerals(StackVM *vm, StackCallFrame 
     }
 }
 
+/* CbR Stage 3 (S3-R2): whole-binding freeze. Materializes shareable values
+ * into a refcounted shared crystal region via value_freeze_to_region (with
+ * its built-in shareability scan and size-threshold fallback to the legacy
+ * value_freeze tag flip — scalars and short strings stay legacy crystals).
+ * Refreezing an already-shared handle is an O(1) no-op. REGION_EPHEMERAL-
+ * backed inputs force-copy into the region during materialization (the
+ * arena-clone reads the still-live bump arena; value_free of the ephemeral
+ * original is a no-op memset). In --no-regions baseline mode crystals keep
+ * the v0.4.1 tag-flip behavior. Mirrors eval.c's freeze_to_region helper. */
+static inline void stackvm_freeze_value(StackVM *vm, LatValue *v) {
+    if (vm->rt->no_regions) {
+        *v = value_freeze(*v);
+        return;
+    }
+    value_freeze_to_region(v);
+}
+
 /* LAT-441: returns an error message if writing obj[idx] is forbidden by
  * the phase system, else NULL. Consults map key_phases so freeze-except
  * exempt keys stay writable. */
@@ -451,6 +520,13 @@ static const char *phase_check_index_write(const LatValue *obj, const LatValue *
     if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
         if (obj->type == VAL_MAP && idx->type == VAL_STR && obj->as.map.key_phases) {
             PhaseTag *kp = lat_map_get(obj->as.map.key_phases, idx->as.str_val);
+            /* CbR Stage 3: an exempt (writable) key implies the map is a
+             * legacy crystal — shared maps never carry key_phases
+             * (region_tag_recursive strips them at materialization). If
+             * this assert ever fires, a freeze path regionized without
+             * normalizing key_phases and the write below would hit sealed
+             * region memory. */
+            assert(!(kp && *kp != VTAG_CRYSTAL) || !REGION_IS_SHARED_ID(obj->region_id));
             if (kp && *kp != VTAG_CRYSTAL) return NULL; /* exempt key */
         }
         return obj->phase == VTAG_CRYSTAL ? "cannot modify a frozen value" : "cannot modify a sublimated value";
@@ -475,11 +551,28 @@ static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *a
     vm->call_wrapper.code[1] = (uint8_t)arg_count;
 
     /* Push closure + args onto the stack for the wrapper to invoke */
+    LatValue *entry_top = vm->stack_top;
     push(vm, value_clone_fast(closure));
     for (int i = 0; i < arg_count; i++) push(vm, value_clone_fast(&args[i]));
 
-    LatValue result;
-    stackvm_run(vm, &vm->call_wrapper, &result);
+    /* value_nil-initialized: stackvm_run writes *result only on OP_HALT/
+     * OP_RETURN; on a runtime error (e.g. a panicking callback) the caller
+     * still value_frees the returned value. */
+    LatValue result = value_nil();
+    StackVMResult res = stackvm_run(vm, &vm->call_wrapper, &result);
+    if (res != STACKVM_OK) {
+        /* The nested run errored before the wrapper's OP_RETURN cleanup: the
+         * closure + arg clones we pushed (plus any callee temporaries) are
+         * still on the stack and would be abandoned when the error
+         * propagates — release them down to our entry point (LAT-452).
+         * Disjoint from the handler-unwind walks: a handler that catches
+         * this error sits at or below entry_top, so the ranges never
+         * overlap (exactly-once). On success OP_RETURN already restored
+         * vm->stack_top to entry_top and this is a no-op. The > guard keeps
+         * us from RAISING the pointer if a cross-run handler unwind already
+         * dropped the stack below our entry point. */
+        if (vm->stack_top > entry_top) stackvm_unwind_release(vm, entry_top);
+    }
     return result;
 }
 
@@ -739,6 +832,11 @@ StackVM *stackvm_clone_for_thread(StackVM *parent) {
     child_rt->module_cache = lat_map_new(sizeof(LatValue));
     child_rt->required_files = lat_map_new(sizeof(bool));
     child_rt->loaded_extensions = lat_map_new(sizeof(LatValue));
+    /* CbR Stage 3: --no-regions baseline mode must be inherited by spawned
+     * children (spawn/scope here and async_iter via runtime.c), or a `fix`
+     * inside the child would regionize while the parent runs legacy
+     * tag-flip crystals. Mirrors eval.c's evaluator_clone propagation. */
+    child_rt->no_regions = parent->rt->no_regions;
 
     StackVM *child = calloc(1, sizeof(StackVM));
     if (!child) return NULL;
@@ -3016,6 +3114,12 @@ static LatValue stackvm_dispatch_call_closure(void *vm_ptr, LatValue *closure, L
 }
 
 StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
+    /* Always initialize *result: error paths return without writing it, and
+     * several callers value_free it unconditionally. An uninitialized
+     * LatValue whose garbage region_id happens to satisfy REGION_IS_SHARED_ID
+     * would be "released" as a shared-region handle (CbR Stage 3 turned this
+     * latent bug into a crash: BUS in crystal_region_release). */
+    *result = value_nil();
     /* Set up stack overflow recovery */
     if (setjmp(vm->overflow_jmp) != 0) {
         /* Returned here via longjmp from push() on stack overflow */
@@ -4716,14 +4820,29 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             const char *interned_name = intern(field_name);
             LatValue obj = pop(vm);
 
+            /* CbR Stage 3 (S3-R4, C2): the steal pattern below bitwise-
+             * extracts the element and writes VAL_NIL INTO the container.
+             * On a shared-region container both halves are unsound: the NIL
+             * write hits sealed region memory (mprotect tripwire / cross-
+             * thread corruption) and the stolen handle owns no retain while
+             * value_free(&obj) drops the container's. Guarded prongs clone
+             * the element instead (value_clone_fast = O(1) retain for
+             * compounds, REGION_NONE copy for scalars), skip the NIL write,
+             * then release the container — retain strictly before release. */
+            bool obj_shared = REGION_IS_SHARED_ID(obj.region_id);
+
             if (obj.type == VAL_STRUCT) {
                 bool found = false;
                 for (size_t i = 0; i < obj.as.strct.field_count; i++) {
                     if (obj.as.strct.field_names[i] == interned_name) {
-                        /* Steal the value from the dying struct */
-                        LatValue stolen = obj.as.strct.field_values[i];
-                        obj.as.strct.field_values[i] = (LatValue){.type = VAL_NIL};
-                        push(vm, stolen);
+                        if (obj_shared) {
+                            push(vm, value_clone_fast(&obj.as.strct.field_values[i]));
+                        } else {
+                            /* Steal the value from the dying struct */
+                            LatValue stolen = obj.as.strct.field_values[i];
+                            obj.as.strct.field_values[i] = (LatValue){.type = VAL_NIL};
+                            push(vm, stolen);
+                        }
                         found = true;
                         break;
                     }
@@ -4737,10 +4856,14 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             } else if (obj.type == VAL_MAP) {
                 LatValue *val = lat_map_get(obj.as.map.map, field_name);
                 if (val) {
-                    /* Steal the value from the dying map */
-                    LatValue stolen = *val;
-                    val->type = VAL_NIL;
-                    push(vm, stolen);
+                    if (obj_shared) {
+                        push(vm, value_clone_fast(val));
+                    } else {
+                        /* Steal the value from the dying map */
+                        LatValue stolen = *val;
+                        val->type = VAL_NIL;
+                        push(vm, stolen);
+                    }
                 } else {
                     push(vm, value_nil());
                 }
@@ -4750,9 +4873,13 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 char *end;
                 long idx = strtol(field_name, &end, 10);
                 if (*end == '\0' && idx >= 0 && (size_t)idx < obj.as.tuple.len) {
-                    LatValue stolen = obj.as.tuple.elems[idx];
-                    obj.as.tuple.elems[idx] = (LatValue){.type = VAL_NIL};
-                    push(vm, stolen);
+                    if (obj_shared) {
+                        push(vm, value_clone_fast(&obj.as.tuple.elems[idx]));
+                    } else {
+                        LatValue stolen = obj.as.tuple.elems[idx];
+                        obj.as.tuple.elems[idx] = (LatValue){.type = VAL_NIL};
+                        push(vm, stolen);
+                    }
                 } else {
                     value_free(&obj);
                     VM_ERROR("tuple has no field '%s'", field_name);
@@ -4768,8 +4895,14 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         LatValue *elems = malloc(obj.as.enm.payload_count * sizeof(LatValue));
                         if (!elems) return STACKVM_RUNTIME_ERROR;
                         for (size_t i = 0; i < obj.as.enm.payload_count; i++) {
-                            elems[i] = obj.as.enm.payload[i];
-                            obj.as.enm.payload[i] = (LatValue){.type = VAL_NIL};
+                            if (obj_shared) {
+                                /* One retain per extracted handle (sound:
+                                 * regions are self-contained, incl. tuples). */
+                                elems[i] = value_clone_fast(&obj.as.enm.payload[i]);
+                            } else {
+                                elems[i] = obj.as.enm.payload[i];
+                                obj.as.enm.payload[i] = (LatValue){.type = VAL_NIL};
+                            }
                         }
                         push(vm, value_array(elems, obj.as.enm.payload_count));
                         free(elems);
@@ -4928,7 +5061,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                         stackvm_promote_frame_ephemerals(vm, frame);
                         /* Replace the map on the stack with a closure placeholder
-                         * so OP_RETURN can clean up properly. */
+                         * so OP_RETURN can clean up properly.
+                         * CbR Stage 3 (S3-R4): unreachable for shared
+                         * containers BY CONSTRUCTION — a closure field makes
+                         * the container unshareable (value_is_shareable), so
+                         * this in-place overwrite never touches a region. */
+                        assert(!REGION_IS_SHARED_ID(obj->region_id));
                         LatValue closure_copy = value_deep_clone(field);
                         value_free(obj);
                         *obj = closure_copy;
@@ -4979,6 +5117,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                 break;
                             }
                             stackvm_promote_frame_ephemerals(vm, frame);
+                            /* CbR Stage 3 (S3-R4): see map prong above. */
+                            assert(!REGION_IS_SHARED_ID(obj->region_id));
                             LatValue self_copy = value_deep_clone(obj);
                             LatValue closure_copy = value_deep_clone(field);
                             /* Shift args up by 1 to make room for self */
@@ -6736,7 +6876,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 /* Unwind stack */
                 while (vm->frame_count - 1 > h.frame_index) { vm->frame_count--; }
                 frame = &vm->frames[vm->frame_count - 1];
-                vm->stack_top = h.stack_top;
+                /* Release abandoned slots BEFORE the err_map push (LAT-452). */
+                stackvm_unwind_release(vm, h.stack_top);
                 frame->ip = h.ip;
                 push(vm, err_map);
             } else {
@@ -6779,7 +6920,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                             *result = err_map;
                             return STACKVM_OK;
                         }
-                        vm->stack_top = frame->slots;
+                        /* Release the abandoned frame (callee + args + locals
+                         * + temporaries) instead of bare-resetting past it
+                         * (LAT-452); upvalues were closed above. */
+                        stackvm_unwind_release(vm, frame->slots);
                         push(vm, err_map);
                         frame = &vm->frames[vm->frame_count - 1];
                         break;
@@ -6866,8 +7010,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 VM_ERROR("cannot freeze a channel");
                 break;
             }
-            LatValue frozen = value_freeze(val);
-            push(vm, frozen);
+            /* CbR Stage 3 (S3-R2): materialize into a shared region (legacy
+             * tag-flip fallback for unshareable/small values inside). */
+            stackvm_freeze_value(vm, &val);
+            push(vm, val);
             break;
         }
 
@@ -6887,7 +7033,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_CLONE: {
             LatValue val = pop(vm);
-            LatValue cloned = value_deep_clone(&val);
+            /* CbR Stage 3 (S3-R3): clone() is the contractual physically-
+             * independent copy and the documented region-pinning escape
+             * hatch — a deep_clone here would alias a shared handle. */
+            LatValue cloned = value_copy_out(&val);
             value_free(&val);
             push(vm, cloned);
             break;
@@ -6897,6 +7046,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         lbl_OP_MARK_FLUID:
 #endif
         case OP_MARK_FLUID: {
+            /* CbR Stage 3 (S3-R5, H11): flux-from-frozen must privatize — a
+             * FLUID view over sealed region memory would let later writers
+             * mutate the region. Unshare-first, then flip phase. */
+            value_unshare(stackvm_peek(vm, 0));
             stackvm_peek(vm, 0)->phase = VTAG_FLUID;
             break;
         }
@@ -7156,7 +7309,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (r != STACKVM_OK) return r;
                 break;
             }
-            LatValue frozen = value_freeze(val);
+            /* CbR Stage 3 (S3-R2): materialized handle starts at rc=1; the
+             * two deep clones below (ret + write_back's slot store) are O(1)
+             * retains and value_free(&frozen) is the matching release — net
+             * rc=2 for two live handles. */
+            stackvm_freeze_value(vm, &val);
+            LatValue frozen = val;
             LatValue ret = value_deep_clone(&frozen);
             stackvm_write_back(vm, frame, loc_type, loc_slot, var_name, frozen);
             value_free(&frozen);
@@ -7206,6 +7364,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             uint8_t loc_slot = READ_BYTE();
             const char *var_name = frame->chunk->constants[name_idx].as.str_val;
             LatValue val = pop(vm);
+            /* CbR Stage 3 (S3-R5, H9/H11): see OP_SUBLIMATE. */
+            value_unshare(&val);
             val.phase = VTAG_SUBLIMATED;
             LatValue ret = value_deep_clone(&val);
             stackvm_write_back(vm, frame, loc_type, loc_slot, var_name, val);
@@ -7224,6 +7384,9 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_SUBLIMATE: {
             LatValue val = pop(vm);
+            /* CbR Stage 3 (S3-R5, H9/H11): sublimated values permit child
+             * mutation and must never be views of shared region memory. */
+            value_unshare(&val);
             val.phase = VTAG_SUBLIMATED;
             push(vm, val);
             break;
@@ -7286,6 +7449,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
             }
+
+            /* CbR Stage 3 (S3-R8, C5/H9): once sharing is live the working
+             * copy above is a RETAINED ALIAS when the variable is already a
+             * shared crystal (re-freeze-except on crystal parents is
+             * supported) — the field_phases/key_phases/entry mutations below
+             * would write INTO the sealed region. Privatize first; the
+             * result deliberately stays a legacy crystal (exempt keys must
+             * remain writable; shared maps never carry key_phases). Mirrors
+             * eval.c's Round B pattern. */
+            value_unshare(&val);
 
             if (val.type == VAL_STRUCT) {
                 if (!val.as.strct.field_phases) {
@@ -7388,6 +7561,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
             }
+
+            /* CbR Stage 3 (S3-R8, C5/H9): per-field freezes stay legacy
+             * tag-flips and must never materialize, but the working copy
+             * must be privatized before the in-place field/key_phases
+             * surgery below (see OP_FREEZE_EXCEPT). */
+            value_unshare(&parent);
 
             if (parent.type == VAL_STRUCT && field_name.type == VAL_STR) {
                 const char *fname = field_name.as.str_val;
@@ -8248,6 +8427,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     memcpy(buf, local->as.str_val, ll);
                     memcpy(buf + ll, rp, rl);
                     buf[ll + rl] = '\0';
+                    /* CbR Stage 3 (S3-R7): a shared-region STR handle owns a
+                     * retain — release it before the region_id rewrite below
+                     * or the region is pinned forever (the bytes were just
+                     * copied out; the region itself is never written). The
+                     * ephemeral/interned/const sentinels own nothing. */
+                    if (REGION_IS_SHARED_ID(local->region_id)) crystal_region_release(REGION_PTR(local->region_id));
                     local->as.str_val = buf;
                     local->region_id = REGION_NONE;
                 }

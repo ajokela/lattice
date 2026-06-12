@@ -6231,3 +6231,352 @@ TEST(phase_contract_wrong_arity_no_leak) {
                  "    h.f(data, data, data)\n"
                  "}\n");
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * LAT-452 / Stage 3: stack-VM-shaped Crystal-by-Reference semantics pins
+ *
+ * The Stage 2 aliasing matrix above already runs on all three backends.
+ * These add the shapes whose CODE PATHS are VM-specific: steal-pattern
+ * extraction (OP_GET_FIELD / OP_INDEX bitwise-steal from a dying stack
+ * temporary), freeze of ephemeral-arena-backed strings (OP_ADD into
+ * vm->ephemeral), OP_APPEND_STR_LOCAL, OP_MARK_FLUID/OP_SUBLIMATE on
+ * aliased frozen data, spawn/scope export + channel transfer of whole
+ * frozen containers, select arms with crystal payloads, and the
+ * fix-binding-in-loop freeze-cost path.
+ *
+ * Like the cbr_pin_* block they are SEMANTICS PINS: GREEN today on all
+ * three deep-copy backends and they MUST stay green after the Stage 3
+ * stack-VM switch (shared regions + retain/release). A failure after the
+ * switch means a steal guard / unshare / copy-out was missed and an alias
+ * escaped. rc/lifecycle companions (RED until Stage 3 lands) live in
+ * tests/test_memory.c under the cbr_s3_vm_* banner.
+ *
+ * Strings are padded past the 32-byte REGION_SHARE_MIN_STR_LEN threshold
+ * so sharing actually triggers post-switch.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Steal pattern, struct prong: OP_GET_FIELD on a global frozen struct goes
+ * GET_GLOBAL (clone -> stack temp) then GET_FIELD, which bitwise-steals the
+ * field from the dying temp and NILs the slot. On a shared container that
+ * NIL write would hit sealed region memory and the stolen node would own no
+ * retain (C2) — the original must stay intact through any extraction. */
+TEST(cbr_s3_pin_steal_field_from_frozen_struct) {
+    ASSERT_RUNS(
+        "struct Cfg { host: String, port: Int }\n"
+        "fix G = Cfg { host: \"frozen struct host value padded 0123456789 0123456789\", port: 8080 }\n"
+        "fn main() {\n"
+        "    let h = G.host\n"
+        "    let p = G.port\n"
+        "    flux t = thaw(clone(h))\n"
+        "    t = t + \" mutated\"\n"
+        "    assert(G.host == \"frozen struct host value padded 0123456789 0123456789\", \"parent field mutated\")\n"
+        "    assert(h == \"frozen struct host value padded 0123456789 0123456789\", \"extracted copy mutated\")\n"
+        "    assert(p == 8080, \"port wrong\")\n"
+        "    assert(phase_of(G) == \"crystal\", \"G phase changed\")\n"
+        "}\n");
+}
+
+/* Steal pattern, tuple prong (the H8 case: tuples were the kind the old
+ * region tagger missed; OP_GET_FIELD .N extraction steals tuple members). */
+TEST(cbr_s3_pin_steal_member_from_frozen_tuple) {
+    ASSERT_RUNS(
+        "fix T = ([1, 2], \"frozen tuple member padded string 0123456789 0123456789\", 7)\n"
+        "fn main() {\n"
+        "    let a = T.0\n"
+        "    let s = T.1\n"
+        "    flux t = thaw(clone(a))\n"
+        "    t[0] = 99\n"
+        "    assert(T.0[0] == 1, \"tuple member mutated\")\n"
+        "    assert(a[0] == 1, \"extracted member mutated\")\n"
+        "    assert(s == \"frozen tuple member padded string 0123456789 0123456789\", \"string member wrong\")\n"
+        "    assert(T.2 == 7, \"scalar member wrong\")\n"
+        "    assert(phase_of(T) == \"crystal\", \"T phase changed\")\n"
+        "}\n");
+}
+
+/* Element extraction from a frozen map global (OP_INDEX family: clone-then-
+ * free order, retain must precede the container release post-switch). */
+TEST(cbr_s3_pin_steal_value_from_frozen_map) {
+    ASSERT_RUNS("flux tmp = Map::new()\n"
+                "tmp[\"data\"] = [3, 4, 5]\n"
+                "tmp[\"pad\"] = \"frozen map value padded string 0123456789 0123456789\"\n"
+                "fix M = tmp\n"
+                "fn main() {\n"
+                "    let v = M[\"data\"]\n"
+                "    flux t = thaw(clone(v))\n"
+                "    t[0] = 77\n"
+                "    assert(M[\"data\"][0] == 3, \"map value mutated\")\n"
+                "    assert(v[0] == 3, \"extracted value mutated\")\n"
+                "    assert(M[\"pad\"] == \"frozen map value padded string 0123456789 0123456789\", \"pad wrong\")\n"
+                "}\n");
+}
+
+/* Steal pattern, enum-payload prong: match destructuring extracts the
+ * payload from a frozen enum twice — the first extraction must not corrupt
+ * the variant (the OP_GET_FIELD enum prong NILs the dying payload slot). */
+TEST(cbr_s3_pin_steal_payload_from_frozen_enum) {
+    ASSERT_RUNS(
+        "enum Box { Item(any), Empty }\n"
+        "fix B = Box::Item([5, 6, \"frozen enum payload padded string 0123456789 0123456789\"])\n"
+        "fn main() {\n"
+        "    flux got = 0\n"
+        "    match B {\n"
+        "        Box::Item(payload) => {\n"
+        "            flux t = thaw(clone(payload))\n"
+        "            t[0] = 99\n"
+        "            assert(payload[0] == 5, \"extracted payload mutated\")\n"
+        "            got = payload[0]\n"
+        "        }\n"
+        "        Box::Empty => { got = -1 }\n"
+        "    }\n"
+        "    assert(got == 5, \"match extraction wrong\")\n"
+        "    match B {\n"
+        "        Box::Item(payload2) => { assert(payload2[0] == 5, \"payload corrupted by first extraction\") }\n"
+        "        Box::Empty => { assert(false, \"enum variant corrupted\") }\n"
+        "    }\n"
+        "    assert(phase_of(B) == \"crystal\", \"B phase changed\")\n"
+        "}\n");
+}
+
+/* Freeze of a string BUILT BY CONCATENATION in a loop: on the stack VM the
+ * value is ephemeral-arena-backed (OP_ADD into vm->ephemeral); freeze must
+ * force-copy it out of the arena (never seal arena memory into a region),
+ * and aliases/thawed copies stay isolated. Note thaw(clone(..)) — thaw of a
+ * bare ident is write-back and would flip the alias binding itself. */
+TEST(cbr_s3_pin_freeze_of_loop_concat_string) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux s = \"seed:\"\n"
+                "    for i in 0..20 {\n"
+                "        s += \"chunk\" + to_string(i)\n"
+                "    }\n"
+                "    fix f = s\n"
+                "    let alias = f\n"
+                "    flux t = thaw(clone(alias))\n"
+                "    t += \"!extra\"\n"
+                "    assert(f == alias, \"alias diverged\")\n"
+                "    assert(f.len() > 32, \"not past threshold\")\n"
+                "    assert(t.len() == f.len() + 6, \"thawed append lost\")\n"
+                "    assert(phase_of(f) == \"crystal\", \"f not crystal\")\n"
+                "    let g = freeze(\"prefix \" + s + \" suffix built from concat 0123456789\")\n"
+                "    assert(g.len() == s.len() + 43, \"freeze of concat expr wrong: ${g.len()} vs ${s.len()}\")\n"
+                "    assert(phase_of(g) == \"crystal\", \"g not crystal\")\n"
+                "}\n");
+}
+
+/* OP_APPEND_STR_LOCAL fed from a frozen global (S3-R7): `flux s = G` then
+ * `s += ..` in a loop reaches the in-place append handler with a value that
+ * post-switch starts life as a shared STR handle — the append must privatize
+ * (copy + release), never write through or pin the region. The frozen
+ * global must be byte-identical afterwards. (No phase assert on s: the
+ * post-append phase of a flux-from-crystal local diverges across backends
+ * today — content isolation is the uniform contract.) */
+TEST(cbr_s3_pin_append_str_local_from_frozen_global) {
+    ASSERT_RUNS("fix G = \"a long frozen base string for append local 0123456789 0123456789\"\n"
+                "fn main() {\n"
+                "    flux s = G\n"
+                "    for i in 0..10 {\n"
+                "        s += \"x\"\n"
+                "    }\n"
+                "    assert(s.len() == G.len() + 10, \"append length wrong\")\n"
+                "    assert(G == \"a long frozen base string for append local 0123456789 0123456789\", \"frozen global "
+                "mutated by append\")\n"
+                "    assert(phase_of(G) == \"crystal\", \"G phase changed\")\n"
+                "}\n");
+}
+
+/* OP_MARK_FLUID and OP_SUBLIMATE on locals initialized from a frozen GLOBAL
+ * (GET_GLOBAL hands the VM a shared handle post-switch; both opcodes flip
+ * phase on the peeked/popped value and must unshare first — S3-R5/H11). */
+TEST(cbr_s3_pin_mark_fluid_and_sublimate_from_frozen_global) {
+    ASSERT_RUNS("fix G = [1, 2, 3, \"mark fluid global padded string 0123456789 0123456789\"]\n"
+                "fn main() {\n"
+                "    flux y = G\n"
+                "    y[0] = 50\n"
+                "    assert(G[0] == 1, \"G mutated through flux local\")\n"
+                "    assert(phase_of(y) == \"fluid\", \"y not fluid\")\n"
+                "    flux z = G\n"
+                "    sublimate(z)\n"
+                "    assert(phase_of(z) == \"sublimated\", \"z not sublimated\")\n"
+                "    assert(phase_of(G) == \"crystal\", \"G phase changed by sublimate\")\n"
+                "    assert(G[1] == 2, \"G content changed\")\n"
+                "}\n");
+}
+
+/* Spawn writes to channels while the parent holds aliases: a WHOLE frozen
+ * container and a single element cross channels from spawned threads
+ * (stackvm_export_locals_to_env / channel_send detach path); the parent's
+ * pre-spawn alias and the global must be untouched by mutations of a thawed
+ * copy of the received value. */
+TEST(cbr_s3_pin_spawn_channel_send_parent_holds_alias) {
+    ASSERT_RUNS("fix DATASET = [10, 20, 30, \"spawn channel parent alias padded string 0123456789 0123456789\"]\n"
+                "fn main() {\n"
+                "    let parent_alias = DATASET\n"
+                "    let ch_whole = Channel::new(1)\n"
+                "    let ch_elem = Channel::new(1)\n"
+                "    scope {\n"
+                "        spawn { ch_whole.send(DATASET) }\n"
+                "        spawn { ch_elem.send(DATASET[1]) }\n"
+                "    }\n"
+                "    let whole = ch_whole.recv()\n"
+                "    let elem = ch_elem.recv()\n"
+                "    flux t = thaw(clone(whole))\n"
+                "    t[0] = 999\n"
+                "    assert(whole[0] + elem == 30, \"recv values wrong\")\n"
+                "    assert(t[0] == 999, \"thawed write lost\")\n"
+                "    assert(parent_alias[0] == 10, \"parent alias mutated\")\n"
+                "    assert(DATASET[0] == 10, \"dataset mutated\")\n"
+                "    assert(phase_of(DATASET) == \"crystal\", \"dataset phase changed\")\n"
+                "}\n");
+}
+
+/* Select arms with crystal payloads (S3-R12): ready arm, default arm and
+ * timeout arm; the received handle binds into the arm scope and a thawed
+ * copy of it must be isolated from the frozen global. */
+TEST(cbr_s3_pin_select_with_crystal_payloads) {
+    ASSERT_RUNS("fix PAYLOAD = [7, 8, \"select crystal payload padded string 0123456789 0123456789\"]\n"
+                "fn main() {\n"
+                "    let ch = Channel::new(2)\n"
+                "    ch.send(PAYLOAD)\n"
+                "    let got = select {\n"
+                "        v from ch => { v }\n"
+                "    }\n"
+                "    assert(got[0] == 7, \"select recv wrong\")\n"
+                "    flux t = thaw(clone(got))\n"
+                "    t[0] = 99\n"
+                "    assert(PAYLOAD[0] == 7, \"payload mutated through select arm\")\n"
+                "    let dflt = select {\n"
+                "        v from ch => { v[1] }\n"
+                "        default => { -1 }\n"
+                "    }\n"
+                "    assert(dflt == -1, \"default arm not taken\")\n"
+                "    ch.send(PAYLOAD)\n"
+                "    let timed = select {\n"
+                "        v from ch => { v[1] }\n"
+                "        timeout(50) => { -2 }\n"
+                "    }\n"
+                "    assert(timed == 8, \"ready arm beat timeout\")\n"
+                "    let timed2 = select {\n"
+                "        v from ch => { v[1] }\n"
+                "        timeout(10) => { -2 }\n"
+                "    }\n"
+                "    assert(timed2 == -2, \"timeout arm not taken\")\n"
+                "    assert(phase_of(PAYLOAD) == \"crystal\", \"payload phase changed\")\n"
+                "}\n");
+}
+
+/* Aliases outliving their origin binding: (1) a channel-buffered alias keeps
+ * the PRE-ANNEAL value after the parent rebinds (post-switch: the old region
+ * stays live via the buffered retain alone); (2) a frozen local sent from a
+ * returning function frame; (3) a frozen local sent from a spawned thread
+ * whose heap is torn down before the parent drains (sender-death ordering,
+ * C4). */
+TEST(cbr_s3_pin_buffered_alias_outlives_rebinding_and_sender) {
+    ASSERT_RUNS("fn produce(ch: any) {\n"
+                "    fix local = [1, 2, \"outlive producer frame padded string 0123456789 0123456789\"]\n"
+                "    ch.send(local)\n"
+                "}\n"
+                "fn main() {\n"
+                "    flux tmp = Map::new()\n"
+                "    tmp[\"k\"] = [1, 2]\n"
+                "    tmp[\"pad\"] = \"rebinding outlive padded string 0123456789 0123456789\"\n"
+                "    fix m = tmp\n"
+                "    let ch = Channel::new(3)\n"
+                "    scope {\n"
+                "        spawn { ch.send(m) }\n"
+                "    }\n"
+                "    anneal(m) |x| {\n"
+                "        x[\"k\"] = [9]\n"
+                "        x\n"
+                "    }\n"
+                "    let old = ch.recv()\n"
+                "    assert(old[\"k\"][0] == 1, \"buffered alias lost pre-anneal value\")\n"
+                "    assert(m[\"k\"][0] == 9, \"anneal did not apply\")\n"
+                "    assert(phase_of(m) == \"crystal\", \"m not refrozen\")\n"
+                "    produce(ch)\n"
+                "    scope {\n"
+                "        spawn {\n"
+                "            fix tlocal = [5, 6, \"outlive spawn thread padded string 0123456789 0123456789\"]\n"
+                "            ch.send(tlocal)\n"
+                "        }\n"
+                "    }\n"
+                "    let a = ch.recv()\n"
+                "    let b = ch.recv()\n"
+                "    assert(a[0] == 1, \"value did not outlive producer frame\")\n"
+                "    assert(b[0] == 5, \"value did not outlive sender thread\")\n"
+                "}\n");
+}
+
+/* fix-binding-in-loop (the S3-R14 freeze-cost path, semantics side): every
+ * iteration freezes a fresh container (OP_FREEZE from stackcompiler's fix
+ * lowering), aliases it, passes the alias to a function, and proves the
+ * frozen binding is isolated from a thawed clone. Post-switch this churns
+ * one region per iteration — any rc imbalance trips the ledger/ASan. */
+TEST(cbr_s3_pin_fix_binding_in_loop) {
+    ASSERT_RUNS("fn sum2(a: any) -> Int {\n"
+                "    return a[0] + a[1]\n"
+                "}\n"
+                "fn main() {\n"
+                "    flux total = 0\n"
+                "    for i in 0..50 {\n"
+                "        flux b = []\n"
+                "        for j in 0..40 { b.push(i + j) }\n"
+                "        b.push(\"fix in loop padded string 0123456789 0123456789\")\n"
+                "        fix f = b\n"
+                "        let alias = f\n"
+                "        total = total + sum2(alias)\n"
+                "        flux t = thaw(clone(f))\n"
+                "        t[0] = -1000\n"
+                "        assert(f[0] == i, \"frozen loop binding mutated\")\n"
+                "    }\n"
+                "    assert(total == 49 * 50 + 50, \"fix-in-loop total wrong: ${total}\")\n"
+                "}\n");
+}
+
+/* Exception-unwind paths must not pin shared regions (LAT-452 follow-up):
+ * every unwind shape that resets the VM stack pointer past live slots —
+ * (1) catch-mid-expression with a shared alias on the stack at throw time,
+ * (2) callee-frame unwind (a function that throws with shared args + locals
+ * live in its frame), and (3) `?`-propagation early return — must RELEASE
+ * the abandoned slots, not orphan their region retains. Semantics side:
+ * the loop must simply run clean on all three backends; the rc/registry
+ * regression pin (red before the fix) lives in tests/test_memory.c as
+ * cbr_s3_vm_exception_unwind_releases_abandoned_slots. */
+TEST(cbr_s3_catch_does_not_pin_regions) {
+    ASSERT_RUNS("fn risky(a: any) {\n"
+                "    let alias = a\n"
+                "    let boom = [1][5]\n"
+                "    return alias\n"
+                "}\n"
+                "fn err_result() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"tag\"] = \"err\"\n"
+                "    m[\"error\"] = \"nope\"\n"
+                "    return m\n"
+                "}\n"
+                "fn unwrapper(a: any) {\n"
+                "    let alias = a\n"
+                "    let v = err_result()?\n"
+                "    return v\n"
+                "}\n"
+                "fn main() {\n"
+                "    let pad = \"unwind padding string 0123456789 0123456789 0123456789\"\n"
+                "    fix shared = [pad, pad, pad, pad]\n"
+                "    flux i = 0\n"
+                "    while i < 300 {\n"
+                "        try {\n"
+                "            let pair = [shared, [9][9]]\n"
+                "        } catch e {\n"
+                "        }\n"
+                "        try {\n"
+                "            let r = risky(shared)\n"
+                "        } catch e {\n"
+                "        }\n"
+                "        let u = unwrapper(shared)\n"
+                "        i = i + 1\n"
+                "    }\n"
+                "    assert(i == 300, \"unwind loop did not finish\")\n"
+                "    assert(shared[0] == \"unwind padding string 0123456789 0123456789 0123456789\", \"shared "
+                "corrupted by unwinds\")\n"
+                "    assert(phase_of(shared) == \"crystal\", \"shared phase changed\")\n"
+                "}\n");
+}

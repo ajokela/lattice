@@ -278,6 +278,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
 
         LatRuntime rrt;
         lat_runtime_init(&rrt);
+        rrt.no_regions = no_regions_mode;
         if (script_dir) rrt.script_dir = strdup(script_dir);
         rrt.prog_argc = saved_argc;
         rrt.prog_argv = saved_argv;
@@ -330,6 +331,7 @@ static int run_source(const char *source, bool show_stats, const char *script_di
 
     LatRuntime rt;
     lat_runtime_init(&rt);
+    rt.no_regions = no_regions_mode;
     if (script_dir) rt.script_dir = strdup(script_dir);
     rt.prog_argc = saved_argc;
     rt.prog_argv = saved_argv;
@@ -458,6 +460,7 @@ static int run_latc_file(const char *path) {
 
         LatRuntime rt;
         lat_runtime_init(&rt);
+        rt.no_regions = no_regions_mode;
         rt.prog_argc = saved_argc;
         rt.prog_argv = saved_argv;
 
@@ -494,6 +497,7 @@ static int run_latc_file(const char *path) {
 
     LatRuntime rt;
     lat_runtime_init(&rt);
+    rt.no_regions = no_regions_mode;
     rt.prog_argc = saved_argc;
     rt.prog_argv = saved_argv;
 
@@ -579,6 +583,7 @@ static void repl(void) {
 
     LatRuntime rt;
     lat_runtime_init(&rt);
+    rt.no_regions = no_regions_mode;
     rt.prog_argc = saved_argc;
     rt.prog_argv = saved_argv;
 
@@ -729,6 +734,7 @@ static void repl_regvm(void) {
 
     LatRuntime rt;
     lat_runtime_init(&rt);
+    rt.no_regions = no_regions_mode;
     rt.prog_argc = saved_argc;
     rt.prog_argv = saved_argv;
 
