@@ -339,7 +339,7 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -801,6 +801,13 @@ bench-all: $(TARGET)
 # accidental O(n^2) freeze behavior, not microbenchmark noise.
 bench-freeze-gate: $(TARGET)
 	python3 scripts/bench_freeze_gate.py
+
+# Crystal-by-Reference Stage 6 (LAT-459) accounting suite: read/alias/arg-pass/
+# channel/spawn/freeze-loop workloads, normal vs LATTICE_FORCE_COPY=1, on all
+# three backends, plus the value_worth_regionizing threshold sweep. Writes
+# benchmarks/RESULTS.md.
+bench-cbr: $(TARGET)
+	python3 scripts/bench_cbr.py
 
 ext-pg:
 	$(MAKE) -C extensions/pg

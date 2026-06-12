@@ -47,7 +47,7 @@ struct LatChannel;
 struct LatValue {
     ValueType type;
     PhaseTag phase;
-    size_t region_id;                 /* Crystal region ID ((size_t)-1 = not in a region) */
+    size_t region_id;                 /* sentinel below, or tagged CrystalRegion* (REGION_IS_SHARED_ID) */
 #define REGION_NONE      ((size_t)-1) /* normal malloc (not in any arena) */
 #define REGION_EPHEMERAL ((size_t)-2) /* in ephemeral bump arena */
 #define REGION_INTERNED  ((size_t)-3) /* interned string — never cloned or freed */

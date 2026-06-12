@@ -389,6 +389,29 @@ fn process(data: any) {
 
 In strict mode, the phase checker validates that the initializer's phase matches the annotation. Mismatches produce a compile-time error.
 
+### Crystal Sharing
+
+Freezing does more than forbid mutation. A frozen container — array, map, struct, set, tuple, buffer, or long string — is stored once, and every subsequent copy shares it by reference: assigning, passing to functions, returning, sending over channels, and spawning threads over frozen data are all O(1), regardless of size.
+
+```lattice
+fix dataset = freeze(build_huge_array())
+scope {
+    spawn { consume(dataset) }  // shares the frozen data — no copy
+    spawn { consume(dataset) }
+}
+```
+
+Under the hood there are two kinds of frozen value: those stored in shared immutable storage, and those that simply carry an immutability tag and keep ordinary copy semantics. Values containing closures, Refs, iterators, or channels (or any sublimated member) fall in the second class, as do scalars and strings under 32 bytes (copying those is cheaper than sharing). The two are semantically identical — a program can never observe which kind it has.
+
+| Operation | Behavior |
+|-----------|----------|
+| `freeze(container)` | One-time copy into shared storage — measured ≈1.9x the cost of a plain (`--no-regions`) freeze over a clone+freeze loop of 10k-element arrays, paid once (see `benchmarks/RESULTS.md`) |
+| copy / pass / return / send / spawn | O(1) share |
+| `thaw(v)` | Always a fresh mutable copy — other aliases are unaffected |
+| `clone(v)` | Always a guaranteed physical copy — use it to detach a small piece, since keeping one shared element alive otherwise keeps its whole frozen structure alive |
+
+`clat --no-regions` disables sharing wholesale (every freeze behaves like a plain tag flip), and `LATTICE_FORCE_COPY=1` makes every would-be share a deep copy — a debugging oracle: program output must be identical with and without it. Full measurements live in `benchmarks/RESULTS.md` (regenerate with `make bench-cbr`).
+
 ### Control Flow
 
 **if/else** — expression-based, returns a value:

@@ -1,0 +1,27 @@
+// CBR Stage 6 (LAT-459): argument-pass throughput. Calls a function 100,000
+// times passing one frozen 20-key map. Shared mode: per-call retain.
+// LATTICE_FORCE_COPY=1: per-call deep clone of the whole map (keys + values,
+// including a >=32-byte payload string per entry so values regionize too).
+//
+// Driver: scripts/bench_cbr.py (make bench-cbr). Expected checksum below.
+
+fn lookup(m: any, k: any) -> Int {
+    return m[k]
+}
+
+fn main() {
+    flux base = Map::new()
+    for i in 0..20 {
+        base["key_${i}_padded_to_force_regionizable_string_length"] = i
+    }
+    fix data = freeze(base)
+
+    let t0 = time()
+    flux sum = 0
+    for i in 0..100000 {
+        sum = sum + lookup(data, "key_${i % 20}_padded_to_force_regionizable_string_length")
+    }
+    let elapsed = time() - t0
+    print("arg-pass x100000 of frozen 20-key map: checksum=${sum}")
+    print("elapsed: ${elapsed}ms")
+}

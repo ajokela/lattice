@@ -1,0 +1,78 @@
+// CBR Stage 6 (LAT-459): threshold sweep for value_worth_regionizing
+// (src/value.c). Measures freeze+alias+read cycles per element size:
+//   strings  8..256 bytes  (REGION_SHARE_MIN_STR_LEN cutoff is 32)
+//   arrays   0..64 elements (no element-count cutoff exists: containers
+//                            always regionize — this validates that choice)
+//
+// Each cycle: clone a fresh fluid value, fix-bind it (freeze → regionize or
+// stay legacy), then take A aliases and read each. Below the string cutoff an
+// alias is a strdup; at/above it is a region retain. Two alias ratios are
+// measured (1 freeze : 8 aliases and 1 freeze : 64 aliases) because the
+// regionizing trade is freeze-cost (one-time region materialization) against
+// per-alias cost (strdup/deep-clone vs retain).
+//
+// Driver: scripts/bench_cbr.py --sweep parses the per-size lines.
+
+fn bench_str(size: any, cycles: any, aliases: any) {
+    flux pad = "x".repeat(size)
+    let t0 = time()
+    flux acc = 0
+    for c in 0..cycles {
+        fix s = clone(pad)
+        for a in 0..aliases {
+            let h = s
+            acc = acc + len(h)
+        }
+    }
+    let elapsed = time() - t0
+    print("sweep str size=${size} aliases=${aliases} elapsed=${elapsed}ms checksum=${acc}")
+}
+
+fn bench_arr(n: any, cycles: any, aliases: any) {
+    flux base = []
+    for i in 0..n {
+        base.push(i)
+    }
+    let t0 = time()
+    flux acc = 0
+    for c in 0..cycles {
+        fix f = clone(base)
+        for a in 0..aliases {
+            let h = f
+            acc = acc + len(h)
+        }
+    }
+    let elapsed = time() - t0
+    print("sweep arr n=${n} aliases=${aliases} elapsed=${elapsed}ms checksum=${acc}")
+}
+
+fn sweep_strings(cycles: any, aliases: any) {
+    bench_str(8, cycles, aliases)
+    bench_str(16, cycles, aliases)
+    bench_str(24, cycles, aliases)
+    bench_str(32, cycles, aliases)
+    bench_str(40, cycles, aliases)
+    bench_str(48, cycles, aliases)
+    bench_str(64, cycles, aliases)
+    bench_str(128, cycles, aliases)
+    bench_str(256, cycles, aliases)
+}
+
+fn sweep_arrays(cycles: any, aliases: any) {
+    bench_arr(0, cycles, aliases)
+    bench_arr(1, cycles, aliases)
+    bench_arr(2, cycles, aliases)
+    bench_arr(4, cycles, aliases)
+    bench_arr(8, cycles, aliases)
+    bench_arr(16, cycles, aliases)
+    bench_arr(32, cycles, aliases)
+    bench_arr(64, cycles, aliases)
+}
+
+fn main() {
+    sweep_strings(20000, 8)
+    sweep_strings(5000, 64)
+    sweep_arrays(20000, 8)
+    sweep_arrays(5000, 64)
+    print("sweep done")
+}

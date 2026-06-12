@@ -1,0 +1,27 @@
+// CBR Stage 6 (LAT-459): alias throughput — the headline crystal-by-reference
+// win. 20,000 aliases of one frozen 10k-element array, one element read per
+// alias. Shared mode: each alias is a region retain + bitwise handle copy.
+// LATTICE_FORCE_COPY=1: each alias deep-clones all 10k elements.
+//
+// NOTE: shared-mode times sit near the 1ms clock resolution on the VMs, so
+// the reported ratio is a LOWER BOUND there.
+//
+// Driver: scripts/bench_cbr.py (make bench-cbr). Expected checksum below.
+
+fn main() {
+    flux base = []
+    for i in 0..10000 {
+        base.push(i)
+    }
+    fix data = clone(base)
+
+    let t0 = time()
+    flux sum = 0
+    for i in 0..20000 {
+        let a = data
+        sum = sum + a[i % 10000]
+    }
+    let elapsed = time() - t0
+    print("alias x20000 of frozen 10k array: checksum=${sum}")
+    print("elapsed: ${elapsed}ms")
+}

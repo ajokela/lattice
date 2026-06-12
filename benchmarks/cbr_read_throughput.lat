@@ -1,0 +1,27 @@
+// CBR Stage 6 (LAT-459): read throughput over one frozen 100k-element array.
+//
+// Sharing should be ~NEUTRAL here on the VM backends: element reads were
+// never clones (ints are exempt from regionizing), so normal vs
+// LATTICE_FORCE_COPY=1 pins the no-regression claim for pure read workloads.
+// NOTE: the tree-walker's force-copy cell is an oracle artifact, not a legacy
+// baseline — under LATTICE_FORCE_COPY=1 the tree-walker re-clones the whole
+// crystal on every access through its env-lookup clone gate (O(n) per read).
+//
+// Driver: scripts/bench_cbr.py (make bench-cbr). Expected checksum below.
+
+fn main() {
+    flux base = []
+    for i in 0..100000 {
+        base.push(i)
+    }
+    fix data = clone(base)
+
+    let t0 = time()
+    flux sum = 0
+    for v in data {
+        sum = sum + v
+    }
+    let elapsed = time() - t0
+    print("read frozen 100k array: checksum=${sum}")
+    print("elapsed: ${elapsed}ms")
+}

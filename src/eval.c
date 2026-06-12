@@ -8629,7 +8629,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
         /// @builtin freeze(val: Any) -> Any
         /// @category Phase Transitions
-        /// Transition a value to the crystal (immutable) phase.
+        /// Transition a value to the crystal (immutable) phase. Frozen
+        /// containers are stored once and shared by reference, so later
+        /// copies, argument passes, and channel sends are O(1). Values
+        /// containing closures, Refs, iterators, or channels — and scalars
+        /// or short strings — keep plain copy semantics; behavior is
+        /// identical either way.
         /// @example freeze([1, 2, 3])  // crystal [1, 2, 3]
         case EXPR_FREEZE: {
             stats_freeze(&ev->stats);
@@ -9035,6 +9040,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         /// @builtin thaw(val: Any) -> Any
         /// @category Phase Transitions
         /// Transition a crystal value back to the flux (mutable) phase.
+        /// Always produces a fresh mutable copy — other aliases of the
+        /// frozen value are unaffected.
         /// @example thaw(freeze([1, 2]))  // flux [1, 2]
         case EXPR_THAW: {
             stats_thaw(&ev->stats);
@@ -9074,7 +9081,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
         /// @builtin clone(val: Any) -> Any
         /// @category Phase Transitions
-        /// Create a deep copy of a value.
+        /// Create a deep copy of a value. The copy is guaranteed to be
+        /// physically independent, even when the source is frozen data
+        /// shared by reference — use it to detach a small piece of a
+        /// large frozen structure.
         /// @example clone(my_array)  // independent copy
         case EXPR_CLONE: {
             stats_deep_clone(&ev->stats);

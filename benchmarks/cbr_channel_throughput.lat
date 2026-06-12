@@ -1,0 +1,47 @@
+// CBR Stage 6 (LAT-459): channel throughput — producer/consumer streaming one
+// frozen 1k-element payload 5,000 times through a buffered channel.
+// Shared mode: each send is a retain (measured at retain-cost during Stage 5).
+// LATTICE_FORCE_COPY=1: each send/recv deep-copies the 1k payload.
+//
+// Driver: scripts/bench_cbr.py (make bench-cbr). Expected checksum below.
+
+fn build_payload() -> any {
+    flux b = []
+    for i in 0..1000 {
+        b.push(i)
+    }
+    return clone(b)
+}
+
+fix payload = build_payload()
+
+fn producer(ch: any, n: any) {
+    for i in 0..n {
+        let p = payload
+        ch.send(p)
+    }
+}
+
+fn consumer(ch: any, n: any, done: any) {
+    flux acc = 0
+    for i in 0..n {
+        let v = ch.recv()
+        acc = acc + v[i % 1000]
+    }
+    done.send(acc)
+}
+
+fn main() {
+    let n = 5000
+    let ch = Channel::new(64)
+    let done = Channel::new(1)
+    let t0 = time()
+    scope {
+        spawn { producer(ch, n) }
+        spawn { consumer(ch, n, done) }
+    }
+    let total = done.recv()
+    let elapsed = time() - t0
+    print("channel x5000 sends of frozen 1k payload: checksum=${total}")
+    print("elapsed: ${elapsed}ms")
+}

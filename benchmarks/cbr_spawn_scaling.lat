@@ -1,0 +1,72 @@
+// CBR Stage 6 (LAT-459): spawn scaling — 32 spawns each aliasing and fully
+// summing ONE frozen 10k-element dataset. Shared mode: each spawn's alias is
+// a retain; all threads read the same sealed region. LATTICE_FORCE_COPY=1:
+// each spawn deep-copies the 10k dataset before reading it.
+//
+// Driver: scripts/bench_cbr.py (make bench-cbr). Expected checksum below.
+
+fn build_dataset() -> any {
+    flux b = []
+    for i in 0..10000 {
+        b.push(i)
+    }
+    return clone(b)
+}
+
+fix dataset = build_dataset()
+
+fn worker(out: any) {
+    let local = dataset
+    flux acc = 0
+    for v in local {
+        acc = acc + v
+    }
+    out.send(acc)
+}
+
+fn main() {
+    let k = 32
+    let out = Channel::new(32)
+    let t0 = time()
+    scope {
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+        spawn { worker(out) }
+    }
+    flux total = 0
+    for i in 0..k {
+        total = total + out.recv()
+    }
+    let elapsed = time() - t0
+    print("spawn x32 reading frozen 10k dataset: checksum=${total}")
+    print("elapsed: ${elapsed}ms")
+}

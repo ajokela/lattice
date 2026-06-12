@@ -8,6 +8,42 @@ All load-bearing claims verified. Writing the final design document now.
 
 ---
 
+## Status (2026-06-11) — Stages 0–6 complete
+
+All six stages are implemented and green across all three backends (suite 1987 ×3, ASan, TSAN, differential force-copy oracle, Windows/wasm/clat-run platform gates).
+
+**Commits per stage:**
+
+| Stage | Commits | Tickets |
+|---|---|---|
+| 0 — Phase-guard hardening | `7342137`, `a491d97`, `de96339`; channel-send reconciliation `d95efce`, `5219777`, `6406919`, `4d80ec4` | LAT-441, LAT-442, LAT-443 |
+| 1 — Closure `upvalue_count` migration | `6e81f18` | LAT-446 |
+| 2 — Refcounted regions + tree-walker | `4900d0f` (Round A, dormant infra), `6d50d03` (Round B, sharing live) | LAT-449 |
+| 3 — Stack VM | `65bbdf7` | LAT-452 |
+| 4 — Register VM | `cf77625` | LAT-456 |
+| 5 — Concurrency hardening | `afcf0fd` | LAT-457, LAT-448, LAT-450 |
+| 6 — Perf validation + docs | benchmark suite (`make bench-cbr`, `scripts/bench_cbr.py`, `benchmarks/cbr_*.lat`), results in `benchmarks/RESULTS.md`, README/doc updates | LAT-459 |
+
+**Measured results (Stage 6, M3 Max, commit `afcf0fd`; full tables in `benchmarks/RESULTS.md`, regenerate with `make bench-cbr`):** aliasing a frozen 10k array is ≥1252x faster on the stack VM and ≥1256x on the regvm (shared cells at clock resolution — lower bounds), 6.2x on the tree-walker; arg-pass of a frozen map 5.9x/4.8x/11.4x (stack/tree/regvm); channel streaming of frozen payloads 9.2–14.5x; spawn over a frozen 10k dataset 138x on the tree-walker (the VMs were already cheap: 2–3x); plain reads are sharing-neutral on the VMs. The cost case: the fix-freeze loop (1000 clone+freeze+read iterations over a fresh 10k array) runs 270 ms on the stack VM (`benchmarks/RESULTS.md`) vs 146 ms under `--no-regions` (measured separately — the FORCE_COPY oracle still materializes, so it cannot serve as the tag-flip baseline) — ≈1.9x for the whole iteration, with the freeze-op-only ratio somewhat higher since the per-iteration clone cost is common to both; one-time, and within the `make bench-freeze-gate` budget (190 ms baseline x3.0). The threshold sweep is consistent with `value_worth_regionizing`: below the 32-byte string cutoff both modes execute identical legacy code (the sweep cannot distinguish them there — sub-cutoff deltas in RESULTS.md are harness noise); sharing wins appear from 32 bytes up and grow with alias count; arrays win at every size (even 1-element arrays at 64 aliases: 32 ms vs 51 ms), supporting the no-cutoff always-regionize container policy. A `--variant` rebuild sweep of `REGION_SHARE_MIN_STR_LEN` (supported by `scripts/bench_cbr.py`) is the rigorous cutoff validation and has not been run for the checked-in RESULTS.md.
+
+**Deviations from this design:**
+
+1. **Default-on, not flag-first.** §4 Stage 6 planned shipping behind `LATTICE_SHARE_CRYSTALS=1` for one release before flipping the default. Instead, sharing went default-on as each backend landed (Stages 2–4), with `--no-regions` as the wholesale opt-out and the force-copy oracle as the permanent safety net. The formal rollout decision is recorded in LAT-459.
+2. **Oracle spelling.** The differential oracle env var is `LATTICE_FORCE_COPY=1` (disables the borrow fast paths; semantics must be bit-identical), not `LATTICE_SHARE_CRYSTALS`. It is exercised in CI via `make test-force-copy`.
+3. **Freeze-except representation.** H3 stated freeze-except parents "stay FLUID". The implementation kept the crystal-parent model: a freeze-except parent is `VTAG_CRYSTAL` with the exempted entries recorded fluid in `key_phases`/`field_phases`. Such parents are always *legacy* crystals — an exempt (writable) entry implies the container never regionizes, and `region_tag_recursive` strips `key_phases` at materialization, so the predicate's invariant holds (asserted in `phase_check_index_write`).
+4. **Scalars excluded from regionization.** §2.8 item 2's mitigation is codified as `value_worth_regionizing` (src/value.c): scalars/ranges never regionize, and strings under `REGION_SHARE_MIN_STR_LEN` (32 bytes) stay legacy — copying them is cheaper than refcount traffic. Validated by the Stage 6 threshold sweep.
+
+**Open follow-ups:**
+
+- LAT-453 — tree-walker `--gc-stress` crashes on freeze-except/anneal/grow patterns (pre-existing)
+- LAT-454 — `OP_APPEND_STR_LOCAL` lacks crystal phase check (`+=` on frozen string locals)
+- LAT-455 — `--stats` is a no-op on the stack VM backend
+- LAT-458 — verify Ref-proxy mutators unshare borrowed inner values (stackvm + tree-walker)
+- LAT-460 — cross-thread Ref mutation: free-direction double-free (tree-walker) + design decision
+- LAT-459 — rollout decision (user call; documented in the ticket)
+
+---
+
 ## 0. Verification of load-bearing claims (performed against the working tree)
 
 Before synthesis, I re-verified the judges' most consequential findings against `/Users/alexjokela/projects/lattice`:
