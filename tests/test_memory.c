@@ -13,6 +13,16 @@ static bool cbr_sharing_killed(void) {
     return e && e[0] == '0' && e[1] == '\0';
 }
 
+/* MinGW has no setenv/unsetenv; _putenv_s covers both (empty value removes).
+ * Local to this test TU on purpose — production code never sets env vars. */
+#ifdef _WIN32
+static int setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && getenv(name)) return 0;
+    return _putenv_s(name, value);
+}
+static int unsetenv(const char *name) { return _putenv_s(name, ""); }
+#endif
+
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <pthread.h>
 #include <unistd.h>
