@@ -4,6 +4,15 @@
 #include "memory.h"
 #include "value.h"
 
+/* LAT-459: tests asserting sharing MECHANICS (regions created, rc movement)
+ * self-skip when the runtime kill switch disables materialization — the
+ * suite must be green under LATTICE_SHARE_CRYSTALS=0 just as it is under
+ * the FORCE_COPY oracle. Semantics pins never skip. */
+static bool cbr_sharing_killed(void) {
+    const char *e = getenv("LATTICE_SHARE_CRYSTALS");
+    return e && e[0] == '0' && e[1] == '\0';
+}
+
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <pthread.h>
 #include <unistd.h>
@@ -650,6 +659,7 @@ TEST(region_shared_rc_ledger_counts) {
 }
 
 TEST(region_freeze_to_region_materializes_array) {
+    if (cbr_sharing_killed()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_is_shareable(&arr));
@@ -677,6 +687,7 @@ TEST(region_freeze_to_region_materializes_array) {
 }
 
 TEST(region_freeze_to_region_covers_all_pure_kinds) {
+    if (cbr_sharing_killed()) return;
     size_t base = crystal_region_live_count();
 
     LatValue m = value_map_new();
@@ -727,6 +738,7 @@ TEST(region_freeze_to_region_covers_all_pure_kinds) {
 }
 
 TEST(region_tagger_normalizes_phase_metadata) {
+    if (cbr_sharing_killed()) return;
     size_t base = crystal_region_live_count();
 
     /* Struct with stale per-field phases. */
@@ -775,6 +787,7 @@ TEST(region_tagger_normalizes_phase_metadata) {
 }
 
 TEST(region_freeze_idempotent_same_handle) {
+    if (cbr_sharing_killed()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_freeze_to_region(&arr));
@@ -831,6 +844,7 @@ TEST(region_shareability_scan_rejects_impure_kinds) {
 }
 
 TEST(region_scalars_and_short_strings_stay_legacy) {
+    if (cbr_sharing_killed()) return;
     size_t base = crystal_region_live_count();
 
     LatValue i = value_int(42);
@@ -868,6 +882,7 @@ static bool cbr_force_copy_active(void) {
 }
 
 TEST(region_borrow_clone_retains_same_backing) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
@@ -892,6 +907,7 @@ TEST(region_borrow_clone_retains_same_backing) {
 }
 
 TEST(region_copy_out_is_independent) {
+    if (cbr_sharing_killed()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_freeze_to_region(&arr));
@@ -915,6 +931,7 @@ TEST(region_copy_out_is_independent) {
 }
 
 TEST(region_unshare_privatizes_handle) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
@@ -943,6 +960,7 @@ TEST(region_unshare_privatizes_handle) {
 }
 
 TEST(region_value_free_releases_and_double_free_forgiving) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
@@ -963,6 +981,7 @@ TEST(region_value_free_releases_and_double_free_forgiving) {
 }
 
 TEST(region_shared_inside_fluid_container_rc_balance) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue inner = cbr_make_array();
@@ -997,6 +1016,7 @@ TEST(region_shared_inside_fluid_container_rc_balance) {
 }
 
 TEST(region_detach_borrows_shared_handle) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
@@ -1015,6 +1035,7 @@ TEST(region_detach_borrows_shared_handle) {
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 TEST(region_seal_tripwire_blocks_stray_writes) {
+    if (cbr_sharing_killed()) return;
     size_t base = crystal_region_live_count();
     LatValue arr = cbr_make_array();
     ASSERT(value_freeze_to_region(&arr));
@@ -1188,6 +1209,7 @@ static void cbr_rb_cleanup(Evaluator *ev, LatVec *tokens, Program *prog) {
 /* RED until Round B: a top-level fix binding of a large array materializes
  * exactly one live shared region; evaluator teardown releases it. */
 TEST(cbr_rb_freeze_materializes_live_region) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -1207,9 +1229,44 @@ TEST(cbr_rb_freeze_materializes_live_region) {
     ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 }
 
+/* LAT-459 rollout: LATTICE_SHARE_CRYSTALS=0 is a process-wide runtime kill
+ * switch — every freeze becomes a plain tag flip (no regions), semantics
+ * unchanged. Equivalent to --no-regions without the CLI. Read live, so
+ * setenv/unsetenv inside one process toggles it deterministically. */
+TEST(cbr_share_crystals_env_kill_switch) {
+    /* Save and restore the caller's setting — the whole suite may be running
+     * under the kill switch deliberately. */
+    const char *prior = getenv("LATTICE_SHARE_CRYSTALS");
+    char saved[32] = {0};
+    if (prior) snprintf(saved, sizeof saved, "%s", prior);
+
+    size_t base_created = crystal_region_created_total();
+    const char *src = "fix g = [1, 2, 3, \"a fairly long string to clear any size threshold 0123456789\"]\n";
+
+    setenv("LATTICE_SHARE_CRYSTALS", "0", 1);
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = cbr_rb_eval(src, &tokens, &prog);
+    ASSERT(ev != NULL);
+    /* Kill switch on: no region materialized, freeze fell back to tag flip. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    cbr_rb_cleanup(ev, &tokens, &prog);
+
+    /* Any other value (or unset) leaves sharing on. */
+    setenv("LATTICE_SHARE_CRYSTALS", "1", 1);
+    ev = cbr_rb_eval(src, &tokens, &prog);
+    ASSERT(ev != NULL);
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    cbr_rb_cleanup(ev, &tokens, &prog);
+
+    if (prior) setenv("LATTICE_SHARE_CRYSTALS", saved, 1);
+    else unsetenv("LATTICE_SHARE_CRYSTALS");
+}
+
 /* RED until Round B: `let h = g` on a shared crystal retains the SAME
  * region (one region total) and each live binding holds one reference. */
 TEST(cbr_rb_alias_is_retain_not_new_region) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1254,6 +1311,7 @@ TEST(cbr_rb_alias_is_retain_not_new_region) {
  * the region level — no second region; g and g2 share one region (C-level
  * companion to the cbr_pin_double_freeze_idempotent semantics pin). */
 TEST(cbr_rb_refreeze_shares_single_region) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1284,6 +1342,7 @@ TEST(cbr_rb_refreeze_shares_single_region) {
  * refcount-released the moment the bindings go out of scope — no GC cycle
  * needed (R28: region_collect is demoted to a leak detector). */
 TEST(cbr_rb_scope_exit_releases_region) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -1349,6 +1408,7 @@ TEST(cbr_rb_unshareable_fallback_no_shared_bit) {
  * exactly one region live, and teardown empties the registry (exercises the
  * memory.c rc-ledger assert on every release). */
 TEST(cbr_rb_churn_rc_balanced_teardown_empty) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -1390,6 +1450,7 @@ TEST(cbr_rb_churn_rc_balanced_teardown_empty) {
 /* (e) EXPR_FORGE result freeze materializes exactly one shared region with
  * a correct rc; teardown releases it. */
 TEST(cbr_rb_forge_result_shared_region) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts handle-tag mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1422,6 +1483,7 @@ TEST(cbr_rb_forge_result_shared_region) {
 /* (e) grow() (seed-validated freeze) materializes a shared region for a
  * shareable container; teardown releases. */
 TEST(cbr_rb_grow_seed_freeze_shared_region) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts handle-tag mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1452,6 +1514,7 @@ TEST(cbr_rb_grow_seed_freeze_shared_region) {
  * an unshareable (closure) dep never touch the registry; refreezing an
  * already-crystal dep short-circuits (no extra region). */
 TEST(cbr_rb_bond_mirror_cascade_regions) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts handle-tag/aliasing mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1531,6 +1594,7 @@ TEST(cbr_rb_no_regions_registry_untouched) {
  * programs — freeze on "line" 1, alias on line 2, thaw+mutate on line 3,
  * original intact on line 4; registry balanced at teardown. */
 TEST(cbr_rb_repl_persistence_across_programs) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
 
     const char *lines[4] = {
@@ -1598,6 +1662,7 @@ TEST(cbr_rb_channel_teardown_releases_shared) {
 /* (h) leak-detector advisory (R28): a live region absent from a reachable
  * set is COUNTED but never freed — the report is advisory only. */
 TEST(cbr_rb_report_unreachable_is_advisory) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
 
     LatValue arr = cbr_make_array();
@@ -1722,6 +1787,7 @@ static void cbr_s3_vm_cleanup(CbrS3VM *s) {
  * value_freeze_to_region, S3-R2); stackvm_free releases the global's
  * retain and returns the registry to baseline. */
 TEST(cbr_s3_vm_freeze_materializes_live_region) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -1739,6 +1805,7 @@ TEST(cbr_s3_vm_freeze_materializes_live_region) {
  * SAME region (one region total); env_get handles borrow (S3-R1) and the
  * rc ledger balances when they are released. */
 TEST(cbr_s3_vm_alias_is_retain_not_new_region) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts aliasing mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1776,6 +1843,7 @@ TEST(cbr_s3_vm_alias_is_retain_not_new_region) {
  * are released when the frame's slots are popped (eager value_free
  * discipline) — no region survives main()'s return. */
 TEST(cbr_s3_vm_scope_exit_releases_region) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -1805,6 +1873,7 @@ TEST(cbr_s3_vm_scope_exit_releases_region) {
  * baseline after teardown. A missed steal guard over-releases (ASan/ledger
  * abort) or leaks retains (rc inflated, region pinned past cleanup). */
 TEST(cbr_s3_vm_steal_extraction_rc_balanced) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1845,6 +1914,7 @@ TEST(cbr_s3_vm_steal_extraction_rc_balanced) {
  * VM free releases its buffered retains (rc balance with zero recvs). The
  * channel is a global so the buffered handles are still live after the run. */
 TEST(cbr_s3_vm_channel_send_is_retain_then_teardown_releases) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1881,6 +1951,7 @@ TEST(cbr_s3_vm_channel_send_is_retain_then_teardown_releases) {
  * global binding (+ our probe handle); thread teardown on the child side
  * must be rc-balanced even though releases run on other threads. */
 TEST(cbr_s3_vm_spawn_export_retains_and_releases) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1921,6 +1992,7 @@ TEST(cbr_s3_vm_spawn_export_retains_and_releases) {
  * the channel at main()'s return. live_count must already be back to
  * baseline BEFORE VM teardown — nothing may pin a region. */
 TEST(cbr_s3_vm_sender_death_then_partial_drain) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -1953,6 +2025,7 @@ TEST(cbr_s3_vm_sender_death_then_partial_drain) {
  * the append handler's region-owned branch pins the region forever (rc
  * inflated while live, registry not at baseline after teardown). */
 TEST(cbr_s3_vm_append_str_local_does_not_pin_region) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -1991,6 +2064,7 @@ TEST(cbr_s3_vm_append_str_local_does_not_pin_region) {
  * paths leave no received-but-unbound handles. Registry at baseline before
  * and after teardown. */
 TEST(cbr_s3_vm_select_arm_handle_transfer_rc_balanced) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -2037,6 +2111,7 @@ TEST(cbr_s3_vm_select_arm_handle_transfer_rc_balanced) {
  * (send detach, recv move, iteration-scoped frees, child env teardown)
  * surfaces here. */
 TEST(cbr_s3_vm_thread_stress_channel_churn_rc_drains) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -2123,6 +2198,7 @@ static void *cbr_s3_release_thread(void *arg) {
 }
 
 TEST(cbr_s3_channel_abandoned_buffered_release_on_child_thread) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
 
@@ -2361,6 +2437,7 @@ static void cbr_s4_rvm_cleanup(CbrS4RVM *s) {
  * rvm_freeze_value -> value_freeze_to_region); regvm_free releases the env
  * binding's and frame-0's retains and returns the registry to baseline. */
 TEST(cbr_s4_rvm_freeze_materializes_live_region) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -2383,6 +2460,7 @@ TEST(cbr_s4_rvm_freeze_materializes_live_region) {
  * SAME region (one region total); env_get handles borrow and the rc ledger
  * balances when they are released. */
 TEST(cbr_s4_rvm_alias_is_retain_not_new_region) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts aliasing mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -2422,6 +2500,7 @@ TEST(cbr_s4_rvm_alias_is_retain_not_new_region) {
  * are released when the frame's registers are freed at ROP_RETURN — no
  * region survives main()'s return. */
 TEST(cbr_s4_rvm_scope_exit_releases_region) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -2451,6 +2530,7 @@ TEST(cbr_s4_rvm_scope_exit_releases_region) {
  * strip the shared region tag, or every native-call arg cleanup
  * (value_free on a tagged VAL_INT) over-releases the region (UAF). */
 TEST(cbr_s4_rvm_extraction_rc_balanced) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -2524,6 +2604,7 @@ TEST(cbr_s4_rvm_scalar_extraction_no_overrelease) {
  * buffered handle, NOT a deep copy; an undrained channel torn down at VM
  * free releases its buffered retains. */
 TEST(cbr_s4_rvm_channel_send_is_retain_then_teardown_releases) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -2562,6 +2643,7 @@ TEST(cbr_s4_rvm_channel_send_is_retain_then_teardown_releases) {
 /* RED until Stage 4: spawn/scope export of a frozen global retains; joined
  * threads release. After the scope, no spawn-export retain survives. */
 TEST(cbr_s4_rvm_spawn_export_retains_and_releases) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -2604,6 +2686,7 @@ TEST(cbr_s4_rvm_spawn_export_retains_and_releases) {
  * the remaining buffered handles die with the channel at main()'s return.
  * live_count must be back at baseline BEFORE VM teardown. */
 TEST(cbr_s4_rvm_sender_death_then_partial_drain) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -2637,6 +2720,7 @@ TEST(cbr_s4_rvm_sender_death_then_partial_drain) {
  * Also exercises the uninitialized-result class at SELECT's sub-chunk
  * evaluation (ch_val/to_val) once release-on-tag is hot. */
 TEST(cbr_s4_rvm_select_arm_handle_transfer_rc_balanced) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
 
@@ -2678,6 +2762,7 @@ TEST(cbr_s4_rvm_select_arm_handle_transfer_rc_balanced) {
  * send the crystal itself, receivers drain, index and drop the handles on
  * other threads. After the scope joins, rc must have drained back. */
 TEST(cbr_s4_rvm_thread_stress_channel_churn_rc_drains) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
     size_t base_created = crystal_region_created_total();
@@ -2856,6 +2941,7 @@ TEST(cbr_s4_rvm_exception_unwind_releases_abandoned_slots) {
  * report clean. */
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 TEST(cbr_s4_rvm_upvalue_close_is_move_not_clone_leak) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
 #ifdef LAT_TSAN_BUILD
     return; /* fork() unsupported under TSan (see header note) */
@@ -3031,6 +3117,7 @@ static void *cbr_s5_drain_all_release_thread(void *arg) {
 }
 
 TEST(cbr_s5_receiver_dies_first_sender_continues) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
 
@@ -3069,6 +3156,7 @@ TEST(cbr_s5_receiver_dies_first_sender_continues) {
  * receiver then drains every buffered handle minted by the dead thread and
  * releases the channel's last ref itself. */
 TEST(cbr_s5_sender_dies_first_receiver_drains_after) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
 
@@ -3100,6 +3188,7 @@ TEST(cbr_s5_sender_dies_first_receiver_drains_after) {
  * with try_recv, closes, and releases — all teardown on a thread that
  * never sent or received concurrently. */
 TEST(cbr_s5_channel_outlives_both_threads) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
 
@@ -3195,6 +3284,7 @@ static void *cbr_s5_ref_thaw_thread(void *arg) {
 }
 
 TEST(cbr_s5_ref_thaw_concurrent_unshare_single_release) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
 
@@ -3246,6 +3336,7 @@ static void *cbr_s5_alias_thaw_thread(void *arg) {
 }
 
 TEST(cbr_s5_concurrent_thaw_of_aliases_rc_balanced) {
+    if (cbr_sharing_killed()) return;
     if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
     size_t base_live = crystal_region_live_count();
 

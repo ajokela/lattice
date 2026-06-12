@@ -935,6 +935,19 @@ static void region_tag_recursive(LatValue *v, size_t tagged_rid) {
     }
 }
 
+/* Runtime kill switch (LAT-459 rollout decision): LATTICE_SHARE_CRYSTALS=0
+ * disables region materialization process-wide, making every freeze a plain
+ * tag flip — equivalent to --no-regions but available without touching the
+ * command line (embedded hosts, clat-run, CI bisection). Read live rather
+ * than cached: getenv is cheap next to the O(n) materialization it gates,
+ * and a live read keeps the switch testable and toggleable in-process.
+ * Already-shared handles remain valid and refcounted when the switch is
+ * flipped mid-process; only NEW freezes stop materializing. */
+static bool share_disabled_by_env(void) {
+    const char *e = getenv("LATTICE_SHARE_CRYSTALS");
+    return e && e[0] == '0' && e[1] == '\0';
+}
+
 bool value_freeze_to_region(LatValue *v) {
     /* Idempotent refreeze of an already-shared crystal: same handle, O(1).
      * The consumed input and the produced output are the same reference, so
@@ -943,7 +956,7 @@ bool value_freeze_to_region(LatValue *v) {
 
     /* Unshareable or too small: today's tag flip — legacy crystal, full
      * pass-by-value semantics (safe fallback retiring H6/H7/H22/H23). */
-    if (!value_is_shareable(v) || !value_worth_regionizing(v)) {
+    if (share_disabled_by_env() || !value_is_shareable(v) || !value_worth_regionizing(v)) {
         *v = value_freeze(*v);
         return false;
     }

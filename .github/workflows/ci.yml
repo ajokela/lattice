@@ -44,6 +44,12 @@ jobs:
       - name: Test (LATTICE_FORCE_COPY differential oracle, all backends)
         run: make test-force-copy
 
+      - name: Test (LATTICE_SHARE_CRYSTALS=0 runtime kill switch, all backends)
+        run: |
+          LATTICE_SHARE_CRYSTALS=0 ./build/test_runner
+          LATTICE_SHARE_CRYSTALS=0 ./build/test_runner --backend tree-walk
+          LATTICE_SHARE_CRYSTALS=0 ./build/test_runner --backend regvm
+
       - name: Test aliasing matrix under --no-regions (legacy tag-flip baseline)
         run: |
           ./clat tests/cbr_alias_matrix.lat

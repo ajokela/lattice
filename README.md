@@ -410,7 +410,7 @@ Under the hood there are two kinds of frozen value: those stored in shared immut
 | `thaw(v)` | Always a fresh mutable copy — other aliases are unaffected |
 | `clone(v)` | Always a guaranteed physical copy — use it to detach a small piece, since keeping one shared element alive otherwise keeps its whole frozen structure alive |
 
-`clat --no-regions` disables sharing wholesale (every freeze behaves like a plain tag flip), and `LATTICE_FORCE_COPY=1` makes every would-be share a deep copy — a debugging oracle: program output must be identical with and without it. Full measurements live in `benchmarks/RESULTS.md` (regenerate with `make bench-cbr`).
+Two switches disable sharing wholesale, making every freeze behave like a plain tag flip: the `clat --no-regions` flag, and the `LATTICE_SHARE_CRYSTALS=0` environment variable (a runtime kill switch that also works for embedded hosts and `clat-run`). Separately, `LATTICE_FORCE_COPY=1` makes every would-be share a deep copy — a debugging oracle: program output must be identical with and without it. Full measurements live in `benchmarks/RESULTS.md` (regenerate with `make bench-cbr`).
 
 ### Control Flow
 

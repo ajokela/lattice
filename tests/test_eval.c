@@ -19,6 +19,15 @@
 #include "regopcode.h"
 #include "test_backend.h"
 
+/* LAT-459: tests asserting sharing MECHANICS (regions created, rc movement)
+ * self-skip when the runtime kill switch disables materialization — the
+ * suite must be green under LATTICE_SHARE_CRYSTALS=0 just as it is under
+ * the FORCE_COPY oracle. Semantics pins never skip. */
+static bool cbr_sharing_killed(void) {
+    const char *e = getenv("LATTICE_SHARE_CRYSTALS");
+    return e && e[0] == '0' && e[1] == '\0';
+}
+
 /* Import test macros from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
 extern int test_current_failed;
@@ -1111,6 +1120,7 @@ TEST(eval_arena_freeze_nested) {
  * region is live while the evaluator is, and teardown empties the registry
  * (C3: empty-registry-at-exit for the tree-walker). */
 TEST(eval_arena_survives_gc) {
+    if (cbr_sharing_killed()) return;
     size_t base_live = crystal_region_live_count();
     LatVec tokens;
     Program prog;
