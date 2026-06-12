@@ -98,6 +98,14 @@ static LONG WINAPI win_crash_filter(EXCEPTION_POINTERS *info) {
 #endif
 
 int main(int argc, char *argv[]) {
+#ifdef SIGPIPE
+    /* A test peer (LSP subprocess, socket, popen'd child) dying mid-write
+     * must surface as an EPIPE write failure inside that one test — which
+     * its asserts then report — not as SIGPIPE silently killing the whole
+     * runner with exit 141 and no diagnostics (seen on loaded CI runners
+     * when clat-lsp won the shutdown/exit race). */
+    signal(SIGPIPE, SIG_IGN);
+#endif
 #ifndef LATTICE_HAS_ASAN
     signal(SIGSEGV, crash_handler);
     signal(SIGFPE, crash_handler);

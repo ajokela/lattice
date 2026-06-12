@@ -8,6 +8,7 @@
 #else
 #include <unistd.h>
 #include <libgen.h>
+#include <signal.h>
 #endif
 #include <limits.h>
 
@@ -51,6 +52,12 @@ static char *find_eval_path(void) {
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+
+#ifndef _WIN32
+    /* A dying client must surface as EPIPE on write (and EOF on stdin), not
+     * as SIGPIPE killing the server mid-state. */
+    signal(SIGPIPE, SIG_IGN);
+#endif
 
     /* Disable buffering on stdout for LSP */
     setvbuf(stdout, NULL, _IONBF, 0);

@@ -3074,13 +3074,22 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 #define CASE(label) L_##label:
 
 #else
-    /* Switch-based dispatch */
+    /* Switch-based dispatch.
+     * DISPATCH() must be a goto, NOT `continue`: RVM_ERROR expands to
+     * `do { ...; DISPATCH(); } while (0)`, and a `continue` inside that
+     * do-while binds to the do-while itself — after a HANDLED error
+     * (try/catch) control would fall out of the macro and back into the
+     * faulting opcode's remaining code (e.g. the array read whose bounds
+     * check just failed), with frame/R already repointed at the catch
+     * frame. Computed-goto builds never hit this (their DISPATCH is a
+     * goto already); switch builds (Windows native, MSVC) crashed. */
     for (;;) {
+    regvm_switch_dispatch:;
         RegInstr instr = READ_INSTR();
         switch (REG_GET_OP(instr)) {
 
 #define CASE(label) case ROP_##label:
-#define DISPATCH()  continue
+#define DISPATCH()  goto regvm_switch_dispatch
 
 #endif
 

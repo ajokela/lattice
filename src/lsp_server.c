@@ -3429,7 +3429,7 @@ void lsp_server_free(LspServer *srv) {
 
 /* Main message loop */
 void lsp_server_run(LspServer *srv) {
-    while (!srv->shutdown) {
+    for (;;) {
         cJSON *msg = lsp_read_message(stdin);
         if (!msg) break; /* EOF */
 
@@ -3441,6 +3441,25 @@ void lsp_server_run(LspServer *srv) {
         int id = id_node ? id_node->valueint : -1;
 
         if (!method) {
+            cJSON_Delete(msg);
+            continue;
+        }
+
+        /* After shutdown the server must keep reading until the exit
+         * notification (or EOF) — exiting right after the shutdown response
+         * races the client's exit write and SIGPIPEs it (LSP spec: shutdown
+         * only prepares; exit terminates). Requests in between get
+         * InvalidRequest; notifications are dropped. */
+        if (srv->shutdown) {
+            if (strcmp(method, "exit") == 0) {
+                cJSON_Delete(msg);
+                break;
+            }
+            if (id >= 0) {
+                cJSON *resp = lsp_make_error(id, -32600, "Invalid Request: server is shutting down");
+                lsp_write_response(resp, stdout);
+                cJSON_Delete(resp);
+            }
             cJSON_Delete(msg);
             continue;
         }
