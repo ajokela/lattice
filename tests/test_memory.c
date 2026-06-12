@@ -1642,6 +1642,7 @@ TEST(cbr_rb_report_unreachable_is_advisory) {
 
 #include "stackcompiler.h"
 #include "stackvm.h"
+#include "regvm.h"
 #include "runtime.h"
 
 /* A live stack-VM run: kept alive so tests can inspect vm.env globals and
@@ -2261,3 +2262,693 @@ TEST(cbr_s3_vm_no_regions_inherited_by_spawned_children) {
     ASSERT_EQ_INT(crystal_region_live_count(), base_live);
 }
 #endif /* !_WIN32 && !__EMSCRIPTEN__ */
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Crystal-by-Reference Stage 4 (LAT-456): register-VM rc-lifecycle tests
+ *
+ * RED before Stage 4: the regvm's freeze paths are bare value_freeze tag
+ * flips that never touch the shared-region registry, so the created/live
+ * assertions fail first. After Stage 4 the regvm mirrors the stack VM:
+ *   - ROP_FREEZE/FREEZE_VAR materialize shared regions (rvm_freeze_value),
+ *   - rvm_clone borrows shared crystal handles (retain + bitwise copy),
+ *   - unwind paths release abandoned register windows AND close their
+ *     upvalues first (rvm_unwind_frames),
+ *   - regvm_free returns the registry to baseline.
+ *
+ * One regvm-specific wrinkle vs the cbr_s3_vm_* battery: top-level chunks
+ * end in ROP_HALT, which leaves frame 0's registers LIVE until regvm_free —
+ * a top-level `fix g = ...` statement's temp register keeps one extra
+ * retain alongside the env binding. Refcount assertions therefore use
+ * bounded ranges + exact-decrement probes instead of the stack VM's exact
+ * constants (derived empirically per the Stage 3 ledger note).
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* A live register-VM run. The RegVM struct embeds a ~1MB register file
+ * (REGVM_REG_MAX * REGVM_FRAMES_MAX LatValues), so it is heap-allocated
+ * rather than embedded in the test struct. */
+typedef struct {
+    LatVec tokens;
+    Program prog;
+    RegChunk *chunk;
+    LatRuntime rt;
+    RegVM *vm;
+} CbrS4RVM;
+
+static bool cbr_s4_rvm_run_opt(CbrS4RVM *s, const char *source, bool no_regions) {
+    if (!cbr_rb_parse(source, &s->tokens, &s->prog)) return false;
+
+    /* The VM backends never run with a tree-walker TLS heap/arena. */
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    char *comp_err = NULL;
+    s->chunk = reg_compile(&s->prog, &comp_err);
+    if (!s->chunk) {
+        fprintf(stderr, "  cbr_s4_rvm compile error: %s\n", comp_err ? comp_err : "(unknown)");
+        free(comp_err);
+        program_free(&s->prog);
+        for (size_t i = 0; i < s->tokens.len; i++) token_free(lat_vec_get(&s->tokens, i));
+        lat_vec_free(&s->tokens);
+        return false;
+    }
+
+    lat_runtime_init(&s->rt);
+    s->rt.no_regions = no_regions;
+    s->vm = calloc(1, sizeof(RegVM));
+    if (!s->vm) return false;
+    regvm_init(s->vm, &s->rt);
+    LatValue result;
+    RegVMResult res = regvm_run(s->vm, s->chunk, &result);
+    if (res != REGVM_OK) {
+        fprintf(stderr, "  cbr_s4_rvm runtime error: %s\n", s->vm->error ? s->vm->error : "(unknown)");
+        regvm_free(s->vm);
+        free(s->vm);
+        lat_runtime_free(&s->rt);
+        regchunk_free(s->chunk);
+        program_free(&s->prog);
+        for (size_t i = 0; i < s->tokens.len; i++) token_free(lat_vec_get(&s->tokens, i));
+        lat_vec_free(&s->tokens);
+        return false;
+    }
+    value_free(&result);
+    return true;
+}
+
+static bool cbr_s4_rvm_run(CbrS4RVM *s, const char *source) { return cbr_s4_rvm_run_opt(s, source, false); }
+
+static void cbr_s4_rvm_cleanup(CbrS4RVM *s) {
+    regvm_free(s->vm);
+    free(s->vm);
+    lat_runtime_free(&s->rt);
+    regchunk_free(s->chunk);
+    program_free(&s->prog);
+    for (size_t i = 0; i < s->tokens.len; i++) token_free(lat_vec_get(&s->tokens, i));
+    lat_vec_free(&s->tokens);
+}
+
+/* RED until Stage 4: a top-level fix binding of a shareable container on the
+ * register VM materializes exactly one live shared region (ROP_FREEZE ->
+ * rvm_freeze_value -> value_freeze_to_region); regvm_free releases the env
+ * binding's and frame-0's retains and returns the registry to baseline. */
+TEST(cbr_s4_rvm_freeze_materializes_live_region) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix g = [1, 2, 3, \"rvm freeze materialize padded string 0123456789 0123456789\"]\n"));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    /* Under the FORCE_COPY oracle no alias is a retain, and regvm's
+     * DEFINEGLOBAL stores a CLONE of the register (unlike the stack VM's
+     * pop-move) — the env binding is then a physical copy and the register's
+     * sole handle dies on the next overwrite, so the live-count assertion
+     * only holds with borrowing enabled. */
+    if (!cbr_force_copy_active()) { ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1); }
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4: global aliases of a shared crystal are retains of the
+ * SAME region (one region total); env_get handles borrow and the rc ledger
+ * balances when they are released. */
+TEST(cbr_s4_rvm_alias_is_retain_not_new_region) {
+    if (cbr_force_copy_active()) return; /* asserts aliasing mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix g = [1, 2, 3, \"rvm alias retain padded string 0123456789 0123456789\"]\n"
+                              "let h = g\n"
+                              "let k = h\n"));
+
+    /* Three global bindings, ONE region. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg, vh;
+    ASSERT(env_get(s.vm->env, "g", &vg));
+    ASSERT(env_get(s.vm->env, "h", &vh));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    ASSERT(REGION_IS_SHARED_ID(vh.region_id));
+    ASSERT(REGION_PTR(vg.region_id) == REGION_PTR(vh.region_id));
+    ASSERT(vg.phase == VTAG_CRYSTAL);
+
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    size_t rc_with_handles = crystal_region_refcount(r);
+    /* At least the 3 global bindings + our 2 test handles (frame-0 temp
+     * registers may add a bounded number more — see banner). */
+    ASSERT(rc_with_handles >= 5);
+    ASSERT(rc_with_handles <= 8);
+    value_free(&vg);
+    value_free(&vh);
+    ASSERT_EQ_INT(crystal_region_refcount(r), rc_with_handles - 2);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4: regions minted by fix bindings inside a function frame
+ * are released when the frame's registers are freed at ROP_RETURN — no
+ * region survives main()'s return. */
+TEST(cbr_s4_rvm_scope_exit_releases_region) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fn work() {\n"
+                              "    fix local = [1, 2, \"rvm scope exit padded string 0123456789 0123456789\"]\n"
+                              "    let alias = local\n"
+                              "}\n"
+                              "fn main() {\n"
+                              "    work()\n"
+                              "    work()\n"
+                              "}\n"));
+
+    /* Two calls -> two regions created; both released at frame exit while
+     * the VM is still alive. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 2);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4: extraction in a loop — struct field, array element and
+ * interior SCALAR pulled out of a frozen global through registers that are
+ * overwritten/freed each iteration — must be rc-balanced. The scalar leg is
+ * the regvm-specific C2 hazard: rvm_clone_or_borrow's primitive prong must
+ * strip the shared region tag, or every native-call arg cleanup
+ * (value_free on a tagged VAL_INT) over-releases the region (UAF). */
+TEST(cbr_s4_rvm_extraction_rc_balanced) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(
+        &s, "struct Cfg { host: String, items: any }\n"
+            "fix g = Cfg { host: \"rvm steal rc padded string 0123456789 0123456789\", items: [1, 2, 3] }\n"
+            "fn main() {\n"
+            "    flux acc = 0\n"
+            "    for i in 0..20 {\n"
+            "        let h = g.host\n"
+            "        let it = g.items\n"
+            "        let e = g.items[0]\n"
+            "        let es = to_string(e)\n"
+            "        acc = acc + it[1] + e + h.len()\n"
+            "    }\n"
+            "    assert(acc == 20 * (2 + 1 + g.host.len()), \"steal loop sum wrong: ${acc}\")\n"
+            "}\n"));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg;
+    ASSERT(env_get(s.vm->env, "g", &vg));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    /* Global binding + our handle + bounded frame-0 temps. Nothing the loop
+     * extracted may still hold a retain (a leak shows up as ~20-60 here). */
+    size_t rc = crystal_region_refcount(r);
+    ASSERT(rc >= 2);
+    ASSERT(rc <= 5);
+    value_free(&vg);
+    ASSERT_EQ_INT(crystal_region_refcount(r), rc - 1);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* Semantics pin, runs in BOTH oracle modes: interior scalars of a shared
+ * frozen container flow through native calls, arithmetic, iteration and
+ * array stores without corrupting the region rc (the C2 over-release class
+ * crashes or trips the ledger here pre-fix; post-fix this is bit-identical
+ * under LATTICE_FORCE_COPY=1). */
+TEST(cbr_s4_rvm_scalar_extraction_no_overrelease) {
+    size_t base_live = crystal_region_live_count();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix nums = [10, 20, 30, 40, \"rvm scalar extraction padded 0123456789 0123456789\"]\n"
+                              "fn main() {\n"
+                              "    flux total = 0\n"
+                              "    flux sink = [0]\n"
+                              "    for i in 0..50 {\n"
+                              "        let a = nums[0]\n"
+                              "        let b = nums[i % 4]\n"
+                              "        let sb = to_string(b)\n"
+                              "        sink[0] = b\n"
+                              "        total = total + a + sink[0]\n"
+                              "    }\n"
+                              "    for j in 0..4 {\n"
+                              "        total = total + nums[j]\n"
+                              "    }\n"
+                              "    assert(total == 500 + 1230 + 100, \"scalar totals wrong: ${total}\")\n"
+                              "}\n"));
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4: channel send of a shared crystal is +1 retain per
+ * buffered handle, NOT a deep copy; an undrained channel torn down at VM
+ * free releases its buffered retains. */
+TEST(cbr_s4_rvm_channel_send_is_retain_then_teardown_releases) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix g = [1, 2, 3, \"rvm channel retain padded string 0123456789 0123456789\"]\n"
+                              "let ch = Channel::new(2)\n"
+                              "fn main() {\n"
+                              "    ch.send(g)\n"
+                              "    ch.send(g)\n"
+                              "}\n"));
+
+    /* One region; two sends buffered, never received. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vg;
+    ASSERT(env_get(s.vm->env, "g", &vg));
+    ASSERT(REGION_IS_SHARED_ID(vg.region_id));
+    CrystalRegion *r = REGION_PTR(vg.region_id);
+    /* global binding + 2 buffered handles + our handle (+ bounded frame-0
+     * temps). A deep-copy send would miss the 2 buffered retains. */
+    size_t rc = crystal_region_refcount(r);
+    ASSERT(rc >= 4);
+    ASSERT(rc <= 7);
+    value_free(&vg);
+    ASSERT_EQ_INT(crystal_region_refcount(r), rc - 1);
+
+    /* Teardown frees the channel global -> channel_release value_frees the
+     * buffered handles -> registry back to baseline. */
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+/* RED until Stage 4: spawn/scope export of a frozen global retains; joined
+ * threads release. After the scope, no spawn-export retain survives. */
+TEST(cbr_s4_rvm_spawn_export_retains_and_releases) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix dataset = [1, 1, 1, \"rvm spawn export padded string 0123456789 0123456789\"]\n"
+                              "fn main() {\n"
+                              "    let ch = Channel::new(3)\n"
+                              "    scope {\n"
+                              "        spawn { ch.send(dataset[0]) }\n"
+                              "        spawn { ch.send(dataset[1]) }\n"
+                              "        spawn { ch.send(dataset[2]) }\n"
+                              "    }\n"
+                              "    let total = ch.recv() + ch.recv() + ch.recv()\n"
+                              "    assert(total == 3, \"spawn reader sum wrong\")\n"
+                              "}\n"));
+
+    /* Reading a frozen dataset from N threads creates ONE region, ever. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vd;
+    ASSERT(env_get(s.vm->env, "dataset", &vd));
+    ASSERT(REGION_IS_SHARED_ID(vd.region_id));
+    CrystalRegion *r = REGION_PTR(vd.region_id);
+    /* Global binding + our handle + bounded frame-0 temps: every
+     * spawn-export retain was released when its thread was torn down. */
+    size_t rc = crystal_region_refcount(r);
+    ASSERT(rc >= 2);
+    ASSERT(rc <= 5);
+    value_free(&vd);
+    ASSERT_EQ_INT(crystal_region_refcount(r), rc - 1);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4 (sender-death ordering): a spawned thread freezes
+ * containers, sends them, and dies before the parent drains one of three;
+ * the remaining buffered handles die with the channel at main()'s return.
+ * live_count must be back at baseline BEFORE VM teardown. */
+TEST(cbr_s4_rvm_sender_death_then_partial_drain) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fn main() {\n"
+                              "    let ch = Channel::new(4)\n"
+                              "    scope {\n"
+                              "        spawn {\n"
+                              "            fix one = [1, \"rvm sender death padded string 0123456789 0123456789\"]\n"
+                              "            fix two = [2, \"rvm sender death padded string 0123456789 0123456789\"]\n"
+                              "            fix three = [3, \"rvm sender death padded string 0123456789 0123456789\"]\n"
+                              "            ch.send(one)\n"
+                              "            ch.send(two)\n"
+                              "            ch.send(three)\n"
+                              "        }\n"
+                              "    }\n"
+                              "    let got = ch.recv()\n"
+                              "    assert(got[0] == 1, \"recv wrong\")\n"
+                              "}\n"));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 3);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4: select arms receiving shared crystals — the fired
+ * arm's binding takes ownership of the buffered retain and the arm scope
+ * releases it; default/timeout arms leave no received-but-unbound handles.
+ * Also exercises the uninitialized-result class at SELECT's sub-chunk
+ * evaluation (ch_val/to_val) once release-on-tag is hot. */
+TEST(cbr_s4_rvm_select_arm_handle_transfer_rc_balanced) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix payload = [7, 8, \"rvm select transfer padded string 0123456789 0123456789\"]\n"
+                              "fn main() {\n"
+                              "    let ch = Channel::new(2)\n"
+                              "    ch.send(payload)\n"
+                              "    let got = select {\n"
+                              "        v from ch => { v[0] }\n"
+                              "    }\n"
+                              "    assert(got == 7, \"select recv wrong\")\n"
+                              "    let dflt = select {\n"
+                              "        v from ch => { v[0] }\n"
+                              "        default => { -1 }\n"
+                              "    }\n"
+                              "    assert(dflt == -1, \"default arm not taken\")\n"
+                              "    ch.send(payload)\n"
+                              "    let timed = select {\n"
+                              "        v from ch => { v[1] }\n"
+                              "        timeout(50) => { -2 }\n"
+                              "    }\n"
+                              "    assert(timed == 8, \"ready arm beat timeout\")\n"
+                              "}\n"));
+
+    /* One region (the payload); both selected handles released with their
+     * arm scopes. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    /* live+1 needs the env binding to be a retain — see the freeze test's
+     * oracle note (regvm DEFINEGLOBAL clones, it does not move). */
+    if (!cbr_force_copy_active()) { ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1); }
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4 thread-stress: six threads churn ONE shared region's
+ * atomic rc through the full regvm concurrency surface — senders alias and
+ * send the crystal itself, receivers drain, index and drop the handles on
+ * other threads. After the scope joins, rc must have drained back. */
+TEST(cbr_s4_rvm_thread_stress_channel_churn_rc_drains) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix dataset = [3, 4, \"rvm thread stress padded string 0123456789 0123456789\"]\n"
+                              "let done = Channel::new(2)\n"
+                              "fn sender(ch: any) {\n"
+                              "    for i in 0..25 {\n"
+                              "        let a = dataset\n"
+                              "        ch.send(a)\n"
+                              "    }\n"
+                              "}\n"
+                              "fn receiver(ch: any) {\n"
+                              "    flux acc = 0\n"
+                              "    for i in 0..50 {\n"
+                              "        let v = ch.recv()\n"
+                              "        acc = acc + v[0]\n"
+                              "    }\n"
+                              "    done.send(acc)\n"
+                              "}\n"
+                              "fn main() {\n"
+                              "    let ch = Channel::new(128)\n"
+                              "    scope {\n"
+                              "        spawn { sender(ch) }\n"
+                              "        spawn { sender(ch) }\n"
+                              "        spawn { sender(ch) }\n"
+                              "        spawn { sender(ch) }\n"
+                              "        spawn { receiver(ch) }\n"
+                              "        spawn { receiver(ch) }\n"
+                              "    }\n"
+                              "    let total = done.recv() + done.recv()\n"
+                              "    assert(total == 100 * dataset[0], \"stress sum wrong: ${total}\")\n"
+                              "}\n"));
+
+    /* 100 cross-thread transfers of one dataset: ONE region, ever. */
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created + 1);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live + 1);
+
+    LatValue vd;
+    ASSERT(env_get(s.vm->env, "dataset", &vd));
+    ASSERT(REGION_IS_SHARED_ID(vd.region_id));
+    CrystalRegion *r = REGION_PTR(vd.region_id);
+    /* Every sender alias, buffered handle, receiver binding and
+     * spawn-export retain has drained (bounded frame-0 temps remain). */
+    size_t rc = crystal_region_refcount(r);
+    ASSERT(rc >= 2);
+    ASSERT(rc <= 5);
+    value_free(&vd);
+    ASSERT_EQ_INT(crystal_region_refcount(r), rc - 1);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until Stage 4 (--no-regions inheritance): spawned children are built
+ * by regvm_clone_for_thread with a fresh calloc'd LatRuntime — the parent's
+ * no_regions flag must be copied, so a `fix` inside `spawn` stays a legacy
+ * tag flip under --no-regions baseline mode. */
+TEST(cbr_s4_rvm_no_regions_inherited_by_spawned_children) {
+    size_t base_created = crystal_region_created_total();
+    size_t base_live = crystal_region_live_count();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run_opt(
+        &s,
+        "fn main() {\n"
+        "    let ch = Channel::new(2)\n"
+        "    scope {\n"
+        "        spawn {\n"
+        "            fix local = [1, 2, 3, \"no-regions rvm child padded string 0123456789 0123456789\"]\n"
+        "            ch.send(local[0])\n"
+        "        }\n"
+        "    }\n"
+        "    let v = ch.recv()\n"
+        "    assert(v == 1, \"spawn result wrong\")\n"
+        "}\n",
+        /*no_regions=*/true));
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+#endif /* !_WIN32 && !__EMSCRIPTEN__ */
+
+/* GREEN today AND after Stage 4: an UNSHAREABLE fix binding (struct holding
+ * a closure) on the regvm stays a legacy tag-flip crystal — no region is
+ * ever created, and no handle the VM hands out may satisfy the shared-bit
+ * predicate. */
+TEST(cbr_s4_rvm_unshareable_fallback_no_shared_bit) {
+    size_t base_live = crystal_region_live_count();
+    size_t base_created = crystal_region_created_total();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "struct Counter { n: Int, bump: Fn }\n"
+                              "fix g = Counter { n: 1, bump: |x| { x } }\n"));
+
+    LatValue vg;
+    ASSERT(env_get(s.vm->env, "g", &vg));
+    ASSERT(vg.phase == VTAG_CRYSTAL);
+    ASSERT(!REGION_IS_SHARED_ID(vg.region_id));
+    value_free(&vg);
+
+    ASSERT_EQ_INT(crystal_region_created_total(), base_created);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* RED until the Stage 4 unwind fix: exception-unwind paths that pop frames
+ * (rvm_handle_error / ROP_THROW caught branch / ROP_TRY_UNWRAP err branch /
+ * regvm_call_closure error path) must release the abandoned register
+ * windows — every abandoned shared-crystal handle would otherwise orphan a
+ * region retain, pinning the region forever. Loops all three unwind shapes
+ * with shared aliases live at unwind time. */
+TEST(cbr_s4_rvm_exception_unwind_releases_abandoned_slots) {
+    if (cbr_force_copy_active()) return; /* asserts retain/release mechanics */
+    size_t base_live = crystal_region_live_count();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fn risky(a: any) {\n"
+                              "    let alias = a\n"
+                              "    let boom = [1][5]\n"
+                              "    return alias\n"
+                              "}\n"
+                              "fn err_result() {\n"
+                              "    flux m = Map::new()\n"
+                              "    m[\"tag\"] = \"err\"\n"
+                              "    m[\"error\"] = \"nope\"\n"
+                              "    return m\n"
+                              "}\n"
+                              "fn unwrapper(a: any) {\n"
+                              "    let alias = a\n"
+                              "    let v = err_result()?\n"
+                              "    return v\n"
+                              "}\n"
+                              "fn main() {\n"
+                              "    let pad = \"rvm unwind padding string 0123456789 0123456789 0123456789\"\n"
+                              "    fix shared = [pad, pad, pad, pad]\n"
+                              "    flux i = 0\n"
+                              "    while i < 60 {\n"
+                              "        try {\n"
+                              "            let pair = [shared, [9][9]]\n"
+                              "        } catch e {\n"
+                              "        }\n"
+                              "        try {\n"
+                              "            let r = risky(shared)\n"
+                              "        } catch e {\n"
+                              "        }\n"
+                              "        let u = unwrapper(shared)\n"
+                              "        i = i + 1\n"
+                              "    }\n"
+                              "}\n"));
+
+    /* main() returned and `shared` (a main local) was released at frame
+     * exit: no abandoned-register orphan may keep the region alive. */
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* Stage 4 upvalue-close discipline (ROP_RETURN): closing an upvalue over a
+ * register is an ownership MOVE (bitwise transfer + nil), not clone+nil —
+ * the old clone+nil shape leaked the original register value on every close
+ * (post-borrow: an orphaned region retain per close ON TOP of the closed
+ * copy's retain). The closure must still read its captured frozen data
+ * correctly after the frame pops, and rc growth per close is bounded by the
+ * SINGLE pinned retain owned by the (intentionally leaked, stack-VM-parity)
+ * closed ObjUpvalue — NOT two. Closed-over shared crystals pin their region
+ * until process exit in BOTH VMs (no ObjUpvalue refcounting), so the whole
+ * scenario runs in a forked child to keep the parent registry's atexit
+ * report clean. */
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+TEST(cbr_s4_rvm_upvalue_close_is_move_not_clone_leak) {
+    if (cbr_force_copy_active()) return; /* asserts retain-count mechanics */
+    pid_t pid = fork();
+    ASSERT(pid >= 0);
+    if (pid == 0) {
+        /* Child: silence the (expected) leaked-region atexit report. */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, 1);
+            dup2(devnull, 2);
+        }
+        size_t base_live = crystal_region_live_count();
+        size_t base_created = crystal_region_created_total();
+        CbrS4RVM s;
+        if (!cbr_s4_rvm_run(&s, "fix g = [5, 6, \"rvm upvalue close padded string 0123456789 0123456789\"]\n"
+                                "fn mk() {\n"
+                                "    let captured = g\n"
+                                "    let f = |i| { captured[i] }\n"
+                                "    return f\n"
+                                "}\n"
+                                "fn main() {\n"
+                                "    flux total = 0\n"
+                                "    for i in 0..8 {\n"
+                                "        let f = mk()\n"
+                                "        total = total + f(0)\n"
+                                "    }\n"
+                                "    assert(total == 40, \"closure sums wrong: ${total}\")\n"
+                                "}\n"))
+            _exit(10);
+        if (crystal_region_created_total() != base_created + 1) _exit(11);
+        if (crystal_region_live_count() != base_live + 1) _exit(12);
+        LatValue vg;
+        if (!env_get(s.vm->env, "g", &vg)) _exit(13);
+        if (!REGION_IS_SHARED_ID(vg.region_id)) _exit(14);
+        CrystalRegion *r = REGION_PTR(vg.region_id);
+        size_t rc = crystal_region_refcount(r);
+        /* binding + probe + bounded frame-0 temps + exactly ONE pinned
+         * retain per close (8 closes). The clone+nil shape pinned TWO per
+         * close (~16 extra) — reject that band. */
+        if (rc < 2 + 8) _exit(15);
+        if (rc > 4 + 8) _exit(16);
+        value_free(&vg);
+        cbr_s4_rvm_cleanup(&s);
+        /* Bounded pin: the dead closures' closed upvalues keep the ONE
+         * region alive past teardown (stack-VM parity), never more. */
+        if (crystal_region_live_count() > base_live + 1) _exit(17);
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
+        fprintf(stderr, "  upvalue-close child failed: exited=%d code=%d\n", WIFEXITED(status),
+                WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+#endif /* !_WIN32 && !__EMSCRIPTEN__ */
+
+/* Semantics pin (both oracle modes): flux-from-frozen must privatize before
+ * the phase flip (ROP_MARKFLUID unshare) — mutating the flux copy must not
+ * write through a shared handle into sealed region memory. */
+TEST(cbr_s4_rvm_flux_from_frozen_mutation_isolated) {
+    size_t base_live = crystal_region_live_count();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix g = [1, 2, 3, \"rvm flux isolation padded string 0123456789 0123456789\"]\n"
+                              "fn main() {\n"
+                              "    flux mine = g\n"
+                              "    mine[0] = 99\n"
+                              "    mine.push(4)\n"
+                              "    assert(mine[0] == 99, \"flux copy not writable\")\n"
+                              "    assert(g[0] == 1, \"frozen original mutated through flux alias!\")\n"
+                              "    assert(g.len() == 4, \"frozen original resized through flux alias!\")\n"
+                              "}\n"));
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}
+
+/* Semantics pin (both oracle modes): clone() of a shared crystal is the
+ * contractual region-pinning escape hatch — a guaranteed PHYSICAL copy
+ * (value_copy_out), thawable and mutable without touching the original. */
+TEST(cbr_s4_rvm_clone_is_physical_copy) {
+    size_t base_live = crystal_region_live_count();
+
+    CbrS4RVM s;
+    ASSERT(cbr_s4_rvm_run(&s, "fix g = [1, 2, \"rvm clone escape hatch padded string 0123456789 0123456789\"]\n"
+                              "fn main() {\n"
+                              "    flux mine = thaw(clone(g))\n"
+                              "    mine[0] = 42\n"
+                              "    assert(mine[0] == 42, \"clone not mutable after thaw\")\n"
+                              "    assert(g[0] == 1, \"clone aliased the frozen original!\")\n"
+                              "}\n"));
+
+    /* The clone must not be a retained alias: probe that g's region rc is
+     * unaffected by the (already-freed) clone. */
+    LatValue vg;
+    ASSERT(env_get(s.vm->env, "g", &vg));
+    if (!cbr_force_copy_active() && REGION_IS_SHARED_ID(vg.region_id)) {
+        CrystalRegion *r = REGION_PTR(vg.region_id);
+        size_t rc = crystal_region_refcount(r);
+        ASSERT(rc <= 4); /* binding + probe + bounded frame-0 temps */
+    }
+    value_free(&vg);
+
+    cbr_s4_rvm_cleanup(&s);
+    ASSERT_EQ_INT(crystal_region_live_count(), base_live);
+}

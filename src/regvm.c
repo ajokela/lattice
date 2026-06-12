@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <assert.h>
 #ifdef _WIN32
 #include "win32_compat.h"
 #endif
@@ -249,6 +250,11 @@ RegVM *regvm_clone_for_thread(RegVM *parent) {
     child_rt->module_cache = lat_map_new(sizeof(LatValue));
     child_rt->required_files = lat_map_new(sizeof(bool));
     child_rt->loaded_extensions = lat_map_new(sizeof(LatValue));
+    /* CbR Stage 4 (LAT-456): spawned children (ROP_SCOPE spawns and
+     * async_iter regvm children via runtime.c) inherit the --no-regions
+     * baseline flag — a `fix` inside `spawn` must not regionize when the
+     * parent runs in baseline mode. Mirrors stackvm_clone_for_thread. */
+    child_rt->no_regions = parent->rt->no_regions;
 
     RegVM *child = calloc(1, sizeof(RegVM));
     if (!child) return NULL;
@@ -365,6 +371,24 @@ static void *regvm_spawn_thread_fn(void *arg) {
 #define RVM_IS_PRIMITIVE(v) \
     ((v).type <= VAL_BOOL || (v).type == VAL_UNIT || (v).type == VAL_NIL || (v).type == VAL_RANGE)
 
+/* CbR Stage 4 (LAT-456): the fast int opcodes raw-write their destination
+ * register, but compile-time register reuse (free_reg/alloc_reg across loop
+ * iterations) can leave a HEAP value — or a borrowed shared-crystal handle —
+ * in the destination. Clobbering its type field orphans the allocation (the
+ * later value_free_inline short-circuits on the new primitive type and never
+ * releases): a silent heap leak pre-Stage-4, permanent region pinning after.
+ * Release the old value first, computing operands BEFORE the free in case
+ * dest aliases an operand. Primitive old values keep today's zero-cost path. */
+#define RVM_FAST_DEST_RELEASE(reg)         \
+    do {                                   \
+        if (!RVM_IS_PRIMITIVE(reg)) {      \
+            PhaseTag ph_ = (reg).phase;    \
+            value_free(&(reg));            \
+            (reg).phase = ph_;             \
+            (reg).region_id = REGION_NONE; \
+        }                                  \
+    } while (0)
+
 /* Borrowed-string check: REGION_CONST and REGION_INTERNED strings can be
  * bitwise-copied between registers without strdup.  value_free skips
  * non-REGION_NONE values, so the register doesn't own the pointer.
@@ -379,12 +403,39 @@ static inline LatValue rvm_clone(const LatValue *src);
  * Handles primitives (bitwise copy) and borrowed strings (bitwise copy).
  * Falls through to rvm_clone() only for heap-owning types. */
 static inline LatValue rvm_clone_or_borrow(const LatValue *src) {
-    if (RVM_IS_PRIMITIVE(*src)) return *src;
+    if (RVM_IS_PRIMITIVE(*src)) {
+        /* CbR Stage 4 (LAT-456): STRIP the region tag. Interior scalars of a
+         * shared crystal region carry the shared region_id, and value_free
+         * releases on the tag ALONE regardless of type — a bitwise copy
+         * would put an UNRETAINED shared-tagged scalar into a register, and
+         * every plain value_free on it (native-call arg cleanup, defer
+         * copy-back) would over-release the region (rc underflow, UAF).
+         * Same scalar exclusion as value_clone_fast's primitive arm. */
+        LatValue v = *src;
+        v.region_id = REGION_NONE;
+        return v;
+    }
     if (RVM_IS_BORROWED_STR(*src)) return *src;
     return rvm_clone(src);
 }
 
 static inline LatValue rvm_clone(const LatValue *src) {
+    /* CbR Stage 4 (LAT-456, mirrors stackvm.c value_clone_fast): borrow fast
+     * path — aliasing a shared crystal is retain + O(1) bitwise handle copy.
+     * MUST come before the per-arm region_id = REGION_NONE resets below,
+     * which would orphan the retain, and before the STR arm, whose interning
+     * would DROP the crystal phase on a shared string. Primitives are
+     * excluded (see rvm_clone_or_borrow's strip rationale). Closures never
+     * carry a shared tag (excluded from regions by the shareability scan;
+     * their VTAG_UNPHASED also fails the phase gate). Honors the
+     * LATTICE_FORCE_COPY differential oracle through the SAME gate as
+     * value_clone_impl; under the oracle a shared handle delegates to
+     * value_deep_clone (a phase-preserving physical copy). */
+    if (src->phase == VTAG_CRYSTAL && REGION_IS_SHARED_ID(src->region_id) && !RVM_IS_PRIMITIVE(*src)) {
+        if (value_clone_force_copy_active()) return value_deep_clone(src);
+        crystal_region_retain(REGION_PTR(src->region_id));
+        return *src; /* bitwise handle copy */
+    }
     switch (src->type) {
         case VAL_INT:
         case VAL_FLOAT:
@@ -402,8 +453,16 @@ static inline LatValue rvm_clone(const LatValue *src) {
             /* Use cached length when available to avoid strlen */
             size_t slen = src->as.str_len ? src->as.str_len : strlen(src->as.str_val);
             /* Try interning short strings on escape (e.g. ephemeral → global).
-             * Avoids strdup and enables pointer-equality comparisons. */
-            if (slen <= INTERN_THRESHOLD) return value_string_interned(src->as.str_val);
+             * Avoids strdup and enables pointer-equality comparisons.
+             * LAT-456: preserve the source phase — value_string_interned
+             * returns an UNPHASED value, which silently dropped the crystal
+             * phase of short legacy-crystal strings (reachable once the
+             * FORCE_COPY oracle materializes non-interned crystal copies). */
+            if (slen <= INTERN_THRESHOLD) {
+                LatValue iv = value_string_interned(src->as.str_val);
+                iv.phase = src->phase;
+                return iv;
+            }
             v.as.str_val = strdup(src->as.str_val);
             v.as.str_len = slen; /* preserve cached length */
             v.region_id = REGION_NONE;
@@ -504,6 +563,66 @@ static LatValue regvm_build_error_map(RegVM *vm, const char *message) {
     return err_map;
 }
 
+/* ── CbR Stage 4 (LAT-456): freeze + unwind discipline ── */
+
+/* Freeze *v in place. With regions enabled, shareable values materialize
+ * into a refcounted shared crystal region via value_freeze_to_region (with
+ * its built-in shareability scan and size-threshold fallback to the legacy
+ * value_freeze tag flip — scalars and short strings stay legacy crystals).
+ * Refreezing an already-shared handle is an O(1) no-op. In --no-regions
+ * baseline mode crystals keep the legacy tag-flip behavior. Mirrors
+ * stackvm_freeze_value / eval.c's freeze_to_region helper. */
+static inline void rvm_freeze_value(RegVM *vm, LatValue *v) {
+    if (vm->rt->no_regions) {
+        *v = value_freeze(*v);
+        return;
+    }
+    value_freeze_to_region(v);
+}
+
+/* Close any open upvalues whose location points into the register window
+ * starting at base. Closing is an ownership MOVE (bitwise transfer + nil),
+ * not clone+nil: the register is about to be discarded, so the transfer is
+ * rc-neutral — no retain, no release, and the old clone+nil shape's leak of
+ * the original value (post-borrow: an orphaned region retain per close) is
+ * gone. At most one open ObjUpvalue exists per location (ROP_CLOSURE's
+ * capture reuses existing entries), so the move cannot starve a second
+ * upvalue of the same register. */
+static void rvm_close_frame_upvalues(RegVM *vm, LatValue *base) {
+    LatValue *end = base + REGVM_REG_MAX;
+    ObjUpvalue **prev = &vm->open_upvalues;
+    while (*prev) {
+        ObjUpvalue *uv = *prev;
+        if (uv->location >= base && uv->location < end) {
+            uv->closed = *uv->location;
+            *uv->location = value_nil();
+            uv->location = &uv->closed;
+            *prev = uv->next;
+        } else {
+            prev = &uv->next;
+        }
+    }
+}
+
+/* Pop and release frames down to target_frame_count. Mirrors
+ * stackvm_unwind_release (LAT-452): open upvalues into the discarded
+ * windows are closed FIRST (matching ROP_RETURN's discipline, so escaped
+ * closures keep their captures), then every register in the window is
+ * released — abandoning a window without the release would orphan one
+ * region retain per shared-crystal handle left in it, pinning the region
+ * forever. value_free is release-on-tag with memset and the windows are
+ * nil-initialized, so the walk is exactly-once by construction even though
+ * it covers all REGVM_REG_MAX slots while frames only init max_reg. */
+static void rvm_unwind_frames(RegVM *vm, int target_frame_count) {
+    while (vm->frame_count > target_frame_count) {
+        RegCallFrame *f = &vm->frames[vm->frame_count - 1];
+        rvm_close_frame_upvalues(vm, f->regs);
+        for (int i = 0; i < REGVM_REG_MAX; i++) value_free_inline(&f->regs[i]);
+        vm->frame_count--;
+        vm->reg_stack_top -= REGVM_REG_MAX;
+    }
+}
+
 /* Error handler that routes through exception handlers when available.
  * Used inside the dispatch loop via RVM_ERROR macro.
  * Returns REGVM_OK if handled (execution continues), error otherwise. */
@@ -520,13 +639,8 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
         free(inner);
         RegHandler h = vm->handlers[--vm->handler_count];
 
-        /* Unwind frames */
-        while (vm->frame_count - 1 > (int)h.frame_index) {
-            RegCallFrame *uf = &vm->frames[vm->frame_count - 1];
-            for (int i = 0; i < REGVM_REG_MAX; i++) value_free_inline(&uf->regs[i]);
-            vm->frame_count--;
-            vm->reg_stack_top -= REGVM_REG_MAX;
-        }
+        /* Unwind frames (close upvalues + release abandoned registers) */
+        rvm_unwind_frames(vm, (int)h.frame_index + 1);
 
         *frame_ptr = &vm->frames[vm->frame_count - 1];
         *R_ptr = (*frame_ptr)->regs;
@@ -566,6 +680,11 @@ static LatValue regvm_iter_callback(void *ctx, LatValue *closure, LatValue *args
 
 /* Run a sub-chunk within the current VM (pushes a new frame, doesn't reset state) */
 static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
+    /* CbR Stage 4 (LAT-456): never leave *result uninitialized on an error
+     * return — callers value_free it, and a garbage region_id satisfying
+     * REGION_IS_SHARED_ID would reach crystal_region_release (the exact
+     * stackvm_run bug class Stage 3 fixed). */
+    *result = value_nil();
     if (vm->frame_count >= REGVM_FRAMES_MAX) return rvm_error(vm, "call stack overflow");
     size_t new_base = vm->reg_stack_top;
     if (new_base + REGVM_REG_MAX > REGVM_REG_MAX * REGVM_FRAMES_MAX) return rvm_error(vm, "register stack overflow");
@@ -586,13 +705,10 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
 
     RegVMResult res = regvm_dispatch(vm, saved_base, result);
 
-    /* Clean up any frames left by HALT (which doesn't pop the frame) */
-    while (vm->frame_count > saved_base) {
-        RegCallFrame *f = &vm->frames[vm->frame_count - 1];
-        for (int i = 0; i < (int)f->reg_count; i++) value_free_inline(&f->regs[i]);
-        vm->frame_count--;
-        vm->reg_stack_top -= REGVM_REG_MAX;
-    }
+    /* Clean up any frames left by HALT (which doesn't pop the frame).
+     * rvm_unwind_frames also closes upvalues + releases the full window
+     * (LAT-456). */
+    rvm_unwind_frames(vm, saved_base);
 
     return res;
 }
@@ -2388,6 +2504,11 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             }
             if (mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2 && args[0].type == VAL_STR) {
                 if (obj->phase != VTAG_CRYSTAL) {
+                    /* CbR Stage 4 (LAT-456): the phase guard checks only the
+                     * Ref HANDLE — the inner value may be a borrowed shared
+                     * crystal (stored via ref.set). Privatize before any
+                     * in-place write to it. */
+                    value_unshare(&ref->value);
                     LatValue cloned = rvm_clone(&args[1]);
                     lat_map_set(ref->value.as.map.map, args[0].as.str_val, &cloned);
                 }
@@ -2450,6 +2571,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             }
             if (mhash == MHASH_merge && strcmp(method, "merge") == 0 && arg_count == 1 && args[0].type == VAL_MAP) {
                 if (obj->phase != VTAG_CRYSTAL) {
+                    value_unshare(&ref->value); /* LAT-456: see ref set */
                     for (size_t i = 0; i < args[0].as.map.map->cap; i++) {
                         if (args[0].as.map.map->entries[i].state != MAP_OCCUPIED) continue;
                         LatValue v = rvm_clone((LatValue *)args[0].as.map.map->entries[i].value);
@@ -2462,6 +2584,10 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         }
         if (ref->value.type == VAL_ARRAY) {
             if (mhash == MHASH_push && strcmp(method, "push") == 0 && arg_count == 1) {
+                /* CbR Stage 4 (LAT-456): privatize a borrowed shared inner
+                 * before the in-place append — realloc of region-interior
+                 * elems would corrupt the sealed region. */
+                value_unshare(&ref->value);
                 LatValue val = rvm_clone(&args[0]);
                 if (ref->value.as.array.len >= ref->value.as.array.cap) {
                     ref->value.as.array.cap = ref->value.as.array.cap ? ref->value.as.array.cap * 2 : 4;
@@ -2473,6 +2599,10 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 return true;
             }
             if (mhash == MHASH_pop && strcmp(method, "pop") == 0 && arg_count == 0) {
+                /* CbR Stage 4 (LAT-456): pop MOVES the element out — from a
+                 * shared region that would hand out an unretained interior
+                 * handle. Privatize first. */
+                value_unshare(&ref->value);
                 if (ref->value.as.array.len == 0) {
                     *result = value_nil();
                 } else {
@@ -2707,13 +2837,9 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
     LatValue ret;
     RegVMResult res = regvm_dispatch(vm, saved_base, &ret);
     if (res != REGVM_OK) {
-        /* Unwind any frames left by the failed dispatch back to saved_base */
-        while (vm->frame_count > saved_base) {
-            RegCallFrame *uf = &vm->frames[vm->frame_count - 1];
-            for (int i = 0; i < REGVM_REG_MAX; i++) value_free_inline(&uf->regs[i]);
-            vm->frame_count--;
-            vm->reg_stack_top -= REGVM_REG_MAX;
-        }
+        /* Unwind any frames left by the failed dispatch back to saved_base
+         * (closes upvalues + releases abandoned registers, LAT-456) */
+        rvm_unwind_frames(vm, saved_base);
         /* Propagate vm->error to rt->error so runtime-level callers
          * (e.g. rt_fire_reactions) can see and wrap the error */
         if (vm->error && !vm->rt->error) {
@@ -2726,6 +2852,10 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
 }
 
 static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
+    /* CbR Stage 4 (LAT-456): error returns never write *result; callers
+     * value_free it. Nil-init so a garbage region_id can't reach
+     * crystal_region_release. */
+    *result = value_nil();
     RegCallFrame *frame = &vm->frames[vm->frame_count - 1];
 
     LatValue *R = frame->regs; /* Register base pointer */
@@ -3005,8 +3135,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             size_t total = lb + lc;
             /* Optimization: when dest == left operand (s = s + x pattern) and
              * the left string is a plain malloc'd buffer, realloc in-place to
-             * avoid copying the entire left side + an extra free. */
+             * avoid copying the entire left side + an extra free.
+             * CbR Stage 4 (LAT-456/H24): the REGION_NONE gate excludes shared
+             * crystal handles by construction (shared tags are odd pointers),
+             * so they take the else branch where reg_set's value_free releases
+             * the old retain. Any future region_id assignment in this fast
+             * path must be preceded by a REGION_IS_SHARED_ID release check. */
             if (a == b && R[b].region_id == REGION_NONE && b != c) {
+                assert(!REGION_IS_SHARED_ID(R[b].region_id));
                 char *buf = realloc(R[b].as.str_val, total + 1);
                 memcpy(buf + lb, R[c].as.str_val, lc);
                 buf[total] = '\0';
@@ -3331,7 +3467,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint16_t bx = REG_GET_Bx(instr);
         const char *name = frame->chunk->constants[bx].as.str_val;
-        if (!env_set(vm->env, name, rvm_clone(&R[a]))) {
+        LatValue gset = rvm_clone(&R[a]);
+        if (!env_set(vm->env, name, gset)) {
+            /* LAT-456: env_set does not consume on failure — release the
+             * clone (a borrowed retain for shared crystals) before erroring. */
+            value_free(&gset);
             const char *sug = env_find_similar_name(vm->env, name);
             if (sug) RVM_ERROR("undefined variable '%s' (did you mean '%s'?)", name, sug);
             else RVM_ERROR("undefined variable '%s'", name);
@@ -3638,6 +3778,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[a].type == VAL_REF) {
             /* Proxy: set index on inner value */
             LatRef *ref = R[a].as.ref.ref;
+            /* CbR Stage 4 (LAT-456): the Ref handle's phase guard does not
+             * cover a borrowed shared INNER — privatize before the in-place
+             * write. */
+            value_unshare(&ref->value);
             if (ref->value.type == VAL_MAP) {
                 if (R[b].type != VAL_STR) RVM_ERROR("map key must be a string");
                 LatValue cloned = rvm_clone(&R[c]);
@@ -3908,29 +4052,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         LatValue ret_val = (b > 0) ? rvm_clone_or_borrow(&R[a]) : value_unit();
         uint8_t dest_reg = frame->caller_result_reg;
 
-        /* Close any open upvalues that point into this frame's registers */
-        {
-            LatValue *frame_base = frame->regs;
-            LatValue *frame_end = frame_base + REGVM_REG_MAX;
-            ObjUpvalue **prev = &vm->open_upvalues;
-            while (*prev) {
-                ObjUpvalue *uv = *prev;
-                if (uv->location >= frame_base && uv->location < frame_end) {
-                    /* Close this upvalue: clone value into uv->closed.
-                     * Must use rvm_clone (not bitwise copy) so that
-                     * uv->closed owns independent heap allocations.
-                     * Otherwise frame cleanup frees shared pointers
-                     * (e.g. closure param_names), leaving uv->closed
-                     * with dangling references (heap-use-after-free). */
-                    uv->closed = rvm_clone(uv->location);
-                    *uv->location = value_nil(); /* prevent double-free */
-                    uv->location = &uv->closed;
-                    *prev = uv->next;
-                } else {
-                    prev = &uv->next;
-                }
-            }
-        }
+        /* Close any open upvalues that point into this frame's registers.
+         * CbR Stage 4 (LAT-456): closing is an ownership MOVE (bitwise
+         * transfer + nil), replacing the old clone+nil shape, which leaked
+         * the original register value on every close (post-borrow that
+         * orphaned a region retain, pinning shared regions). The historical
+         * "independent heap allocations" concern is obsolete: runtime
+         * closures carry param_names = NULL since the prototype-ownership
+         * change, and the moved value is nil'd in the register so frame
+         * cleanup cannot double-free it. */
+        rvm_close_frame_upvalues(vm, frame->regs);
 
         /* Clean up current frame's registers (bounded by reg_count) */
         for (int i = 0; i < (int)frame->reg_count; i++) value_free_inline(&frame->regs[i]);
@@ -4351,7 +4482,12 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
         if (R[b].type == VAL_CHANNEL) RVM_ERROR("cannot freeze a channel");
-        LatValue frozen = value_freeze(rvm_clone(&R[b]));
+        /* CbR Stage 4 (LAT-456): clone-first (the register source stays
+         * live, unlike the stack VM's pop), then materialize into a shared
+         * region with the no_regions fallback. Re-freezing an already
+         * shared R[b] is a retain + O(1) idempotent no-op. */
+        LatValue frozen = rvm_clone(&R[b]);
+        rvm_freeze_value(vm, &frozen);
         reg_set(&R[a], frozen);
         DISPATCH();
     }
@@ -4367,7 +4503,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     CASE(CLONE) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
-        reg_set(&R[a], value_deep_clone(&R[b]));
+        /* CbR Stage 4 (LAT-456): clone() contractually guarantees a
+         * PHYSICAL copy — it is the documented region-pinning escape hatch.
+         * value_deep_clone would return a retained alias for a shared
+         * crystal; value_copy_out force-copies recursively. */
+        reg_set(&R[a], value_copy_out(&R[b]));
         DISPATCH();
     }
 
@@ -4441,6 +4581,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             int64_t start = R[b].as.range.start;
             int64_t end = R[b].as.range.end;
             int64_t current_val = start + idx;
+            /* LAT-456: the loop var may have been reassigned to a heap or
+             * shared value inside the body — release before the raw write. */
+            RVM_FAST_DEST_RELEASE(R[a]);
             if (current_val >= end) {
                 /* Done — range iteration produces only primitives (nil/int),
                  * so skip reg_set overhead and assign directly. */
@@ -4467,6 +4610,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
     CASE(MARKFLUID) {
         uint8_t a = REG_GET_A(instr);
+        /* CbR Stage 4 (LAT-456): a FLUID handle must never view shared
+         * region memory (H9) — later in-place writers would mutate the
+         * sealed region. Privatize first (no-op for non-shared values). */
+        value_unshare(&R[a]);
         R[a].phase = VTAG_FLUID;
         DISPATCH();
     }
@@ -4670,13 +4817,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Unwind to handler */
         RegHandler h = vm->handlers[--vm->handler_count];
 
-        /* Clean up frames between current and handler frame */
-        while (vm->frame_count - 1 > (int)h.frame_index) {
-            RegCallFrame *f = &vm->frames[vm->frame_count - 1];
-            for (int i = 0; i < REGVM_REG_MAX; i++) value_free_inline(&f->regs[i]);
-            vm->frame_count--;
-            vm->reg_stack_top -= REGVM_REG_MAX;
-        }
+        /* Clean up frames between current and handler frame (closes
+         * upvalues + releases abandoned registers, LAT-456) */
+        rvm_unwind_frames(vm, (int)h.frame_index + 1);
 
         frame = &vm->frames[vm->frame_count - 1];
         R = frame->regs;
@@ -4702,9 +4845,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     LatValue err_val = rvm_clone(&R[a]);
                     uint8_t dest_reg = frame->caller_result_reg;
 
-                    for (int i = 0; i < REGVM_REG_MAX; i++) value_free_inline(&frame->regs[i]);
-                    vm->frame_count--;
-                    vm->reg_stack_top -= REGVM_REG_MAX;
+                    rvm_unwind_frames(vm, vm->frame_count - 1);
 
                     if (vm->frame_count == base_frame) {
                         *result = err_val;
@@ -4726,9 +4867,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             } else if (strcmp(R[a].as.enm.variant_name, "Err") == 0) {
                 LatValue err_val = rvm_clone(&R[a]);
                 uint8_t dest_reg = frame->caller_result_reg;
-                for (int i = 0; i < REGVM_REG_MAX; i++) value_free_inline(&frame->regs[i]);
-                vm->frame_count--;
-                vm->reg_stack_top -= REGVM_REG_MAX;
+                rvm_unwind_frames(vm, vm->frame_count - 1);
                 if (vm->frame_count == base_frame) {
                     *result = err_val;
                     return REGVM_OK;
@@ -4875,8 +5014,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     value_free(&gval);
                     RVM_ERROR("%s", seed_err);
                 }
-                LatValue frozen = value_freeze(rvm_clone(&gval));
+                /* CbR Stage 4 (LAT-456): materialize with no_regions
+                 * fallback. The borrowed gval handle is cloned (retain for
+                 * shared inputs) and released; env_set takes ownership of
+                 * the rc=1 materialized handle. Refreezing an already
+                 * shared global is retain + O(1) no-op. */
+                LatValue frozen = rvm_clone(&gval);
                 value_free(&gval);
+                rvm_freeze_value(vm, &frozen);
                 env_set(vm->env, var_name, frozen);
                 rt_freeze_cascade(vm->rt, var_name);
                 if (vm->rt->error) {
@@ -4903,13 +5048,22 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* Validate seed contracts */
             char *seed_err = rt_validate_seeds(vm->rt, var_name, target, consume_seeds);
             if (seed_err) { RVM_ERROR("%s", seed_err); }
-            LatValue frozen = value_freeze(rvm_clone(target));
+            /* CbR Stage 4 (LAT-456): materialized handle starts at rc=1 and
+             * is stored in *target; the env-sync deep clone below becomes an
+             * O(1) retain for shared handles. */
+            LatValue frozen = rvm_clone(target);
+            rvm_freeze_value(vm, &frozen);
             value_free(target);
             *target = frozen;
             /* Sync to env for cascade/reactions (locals aren't in env) */
             if (loc_type != 2) { /* not already global */
-                if (!env_set(vm->env, var_name, value_deep_clone(&frozen)))
-                    env_define(vm->env, var_name, value_deep_clone(&frozen));
+                /* LAT-456: env_set does NOT take ownership on failure — the old
+                 * two-clone idiom leaked the first clone whenever the
+                 * variable was not yet in env (a silent deep-copy leak that
+                 * borrowing turns into a pinned region retain). Clone once
+                 * and let whichever call succeeds consume it. */
+                LatValue sync = value_deep_clone(&frozen);
+                if (!env_set(vm->env, var_name, sync)) env_define(vm->env, var_name, sync);
             }
             rt_freeze_cascade(vm->rt, var_name);
             if (vm->rt->error) {
@@ -4964,8 +5118,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             *target = thawed;
             /* Sync to env for cascade/reactions */
             if (loc_type != 2) {
-                if (!env_set(vm->env, var_name, value_deep_clone(&thawed)))
-                    env_define(vm->env, var_name, value_deep_clone(&thawed));
+                /* LAT-456: clone once — env_set does not consume on failure */
+                LatValue sync = value_deep_clone(&thawed);
+                if (!env_set(vm->env, var_name, sync)) env_define(vm->env, var_name, sync);
             }
             rt_fire_reactions(vm->rt, var_name, "fluid");
             /* Record history for tracked variables after phase change */
@@ -4990,6 +5145,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (loc_type == 2) {
             LatValue gval;
             if (env_get(vm->env, var_name, &gval)) {
+                /* CbR Stage 4 (LAT-456): env_get returns a borrowed handle
+                 * for shared globals — privatize before the phase flip
+                 * (sublimated values never view shared memory, H11). */
+                value_unshare(&gval);
                 gval.phase = VTAG_SUBLIMATED;
                 env_set(vm->env, var_name, gval);
                 rt_fire_reactions(vm->rt, var_name, "sublimated");
@@ -4997,11 +5156,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             DISPATCH();
         }
         if (target) {
+            value_unshare(target); /* LAT-456: H11, see global prong */
             target->phase = VTAG_SUBLIMATED;
             /* Sync to env */
             if (loc_type != 2) {
-                if (!env_set(vm->env, var_name, value_deep_clone(target)))
-                    env_define(vm->env, var_name, value_deep_clone(target));
+                /* LAT-456: clone once — env_set does not consume on failure */
+                LatValue sync = value_deep_clone(target);
+                if (!env_set(vm->env, var_name, sync)) env_define(vm->env, var_name, sync);
             }
             rt_fire_reactions(vm->rt, var_name, "sublimated");
         }
@@ -5010,6 +5171,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
     CASE(SUBLIMATE) {
         uint8_t a = REG_GET_A(instr);
+        /* CbR Stage 4 (LAT-456): sublimated values are non-copyable and
+         * must never be views of shared memory (H11). */
+        value_unshare(&R[a]);
         R[a].phase = VTAG_SUBLIMATED;
         DISPATCH();
     }
@@ -5899,36 +6063,46 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
     CASE(ADD_INT) {
         uint8_t a = REG_GET_A(instr), b = REG_GET_B(instr), c = REG_GET_C(instr);
+        int64_t res = R[b].as.int_val + R[c].as.int_val;
+        RVM_FAST_DEST_RELEASE(R[a]);
         R[a].type = VAL_INT;
-        R[a].as.int_val = R[b].as.int_val + R[c].as.int_val;
+        R[a].as.int_val = res;
         DISPATCH();
     }
 
     CASE(SUB_INT) {
         uint8_t a = REG_GET_A(instr), b = REG_GET_B(instr), c = REG_GET_C(instr);
+        int64_t res = R[b].as.int_val - R[c].as.int_val;
+        RVM_FAST_DEST_RELEASE(R[a]);
         R[a].type = VAL_INT;
-        R[a].as.int_val = R[b].as.int_val - R[c].as.int_val;
+        R[a].as.int_val = res;
         DISPATCH();
     }
 
     CASE(MUL_INT) {
         uint8_t a = REG_GET_A(instr), b = REG_GET_B(instr), c = REG_GET_C(instr);
+        int64_t res = R[b].as.int_val * R[c].as.int_val;
+        RVM_FAST_DEST_RELEASE(R[a]);
         R[a].type = VAL_INT;
-        R[a].as.int_val = R[b].as.int_val * R[c].as.int_val;
+        R[a].as.int_val = res;
         DISPATCH();
     }
 
     CASE(LT_INT) {
         uint8_t a = REG_GET_A(instr), b = REG_GET_B(instr), c = REG_GET_C(instr);
+        bool lt_res = R[b].as.int_val < R[c].as.int_val;
+        RVM_FAST_DEST_RELEASE(R[a]);
         R[a].type = VAL_BOOL;
-        R[a].as.bool_val = R[b].as.int_val < R[c].as.int_val;
+        R[a].as.bool_val = lt_res;
         DISPATCH();
     }
 
     CASE(LTEQ_INT) {
         uint8_t a = REG_GET_A(instr), b = REG_GET_B(instr), c = REG_GET_C(instr);
+        bool lteq_res = R[b].as.int_val <= R[c].as.int_val;
+        RVM_FAST_DEST_RELEASE(R[a]);
         R[a].type = VAL_BOOL;
-        R[a].as.bool_val = R[b].as.int_val <= R[c].as.int_val;
+        R[a].as.bool_val = lteq_res;
         DISPATCH();
     }
 
@@ -5989,6 +6163,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* Proxy: set index on inner value */
             LatRef *ref = R[a].as.ref.ref;
             if (value_is_crystal(&R[a])) RVM_ERROR("cannot mutate a frozen Ref");
+            value_unshare(&ref->value); /* LAT-456: shared inner, see SETINDEX */
             if (ref->value.type == VAL_MAP) {
                 if (R[b].type == VAL_STR) {
                     LatValue cloned = rvm_clone(&R[c]);
@@ -6612,6 +6787,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t b_ki = REG_GET_B(instr);
         const char *field_name = frame->chunk->constants[b_ki].as.str_val;
 
+        /* CbR Stage 4 (LAT-456): this handler performs in-place surgery on
+         * R[a] (field_values writes, field_phases/key_phases allocation) —
+         * privatize a shared parent first. Per-field freezes inside the
+         * now-private parent stay legacy value_freeze tag flips (Stage 3
+         * decision). Shared maps never carry key_phases (stripped at
+         * materialization), so after the unshare all writes are safe. */
+        value_unshare(&R[a]);
+
         if (R[a].type == VAL_STRUCT) {
             size_t fi = (size_t)-1;
             for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
@@ -6646,6 +6829,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b_ki = REG_GET_B(instr);
         const char *field_name = frame->chunk->constants[b_ki].as.str_val;
+
+        /* CbR Stage 4 (LAT-456, H12 copy-on-partial-thaw): the whole parent
+         * copies out of a shared region before its field_phases/key_phases
+         * are mutated in place. Legacy-crystal parents are untouched. */
+        value_unshare(&R[a]);
 
         if (R[a].type == VAL_STRUCT) {
             if (!R[a].as.strct.field_phases) {
@@ -6702,6 +6890,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 break;
             }
         }
+
+        /* CbR Stage 4 (LAT-456): post-borrow all three acquisition prongs
+         * return a retained ALIAS for a shared parent (freeze-except on an
+         * already-crystal map is legal per LAT-441) — privatize the working
+         * copy before the field_phases/key_phases/entry surgery below.
+         * FREEZE_EXCEPT parents remain legacy tag-flip crystals (Stage 3
+         * decision). */
+        value_unshare(&val);
 
         /* Collect except field names from registers */
         if (val.type == VAL_STRUCT) {
@@ -6893,6 +7089,7 @@ static void regvm_setup_dispatch(RegVM *vm) {
 }
 
 RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
+    *result = value_nil(); /* LAT-456: defined on every error return */
     /* Set up runtime dispatch so native functions can call back into regvm */
     regvm_setup_dispatch(vm);
 
@@ -6922,6 +7119,7 @@ RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
 
 /* REPL variant: reuses existing frame 0 registers (preserves globals/locals) */
 RegVMResult regvm_run_repl(RegVM *vm, RegChunk *chunk, LatValue *result) {
+    *result = value_nil(); /* LAT-456: defined on every error return */
     /* Set up runtime dispatch so native functions can call back into regvm */
     regvm_setup_dispatch(vm);
     RegCallFrame *frame = &vm->frames[0];

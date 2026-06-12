@@ -108,13 +108,14 @@ void rt_fire_reactions(LatRuntime *rt, const char *name, const char *phase) {
     }
 }
 
-/* CbR Stage 3 (H21): whole-binding freezes reached through the runtime
- * (bond mirror cascades, grow()) regionize on the STACK VM only — the regvm
- * stays deep-copy until Stage 4 and must never see a shared handle; the
- * tree-walker has its own freeze_to_region helper in eval.c. --no-regions
- * keeps the legacy tag flip. */
+/* CbR Stage 4 (H21, LAT-456): whole-binding freezes reached through the
+ * runtime (bond mirror cascades, grow()) regionize on BOTH VM backends —
+ * the stack VM (Stage 3) and the register VM (Stage 4); the tree-walker
+ * has its own freeze_to_region helper in eval.c (it uses Evaluator, not
+ * LatRuntime, so it never reaches this gate). --no-regions keeps the
+ * legacy tag flip. */
 static void rt_freeze_value(LatRuntime *rt, LatValue *v) {
-    if (rt->backend == RT_BACKEND_STACK_VM && !rt->no_regions) {
+    if ((rt->backend == RT_BACKEND_STACK_VM || rt->backend == RT_BACKEND_REG_VM) && !rt->no_regions) {
         value_freeze_to_region(v);
     } else {
         *v = value_freeze(*v);
@@ -601,7 +602,7 @@ static LatValue native_grow(LatValue *args, int ac) {
         return value_nil();
     }
 
-    /* Freeze (CbR Stage 3: regionize on the stack VM, see rt_freeze_value) */
+    /* Freeze (CbR Stage 4: regionize on both VM backends, see rt_freeze_value) */
     rt_freeze_value(current_rt, &val);
     LatValue frozen = val;
     LatValue ret = value_deep_clone(&frozen);
