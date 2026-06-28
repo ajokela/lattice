@@ -51,6 +51,20 @@ static int hex_digit(char c) {
     return -1;
 }
 
+/* Read exactly 4 hex digits at p->pos, returning the value (0..0xFFFF) and
+ * advancing pos past them. Returns -1 (and leaves pos wherever it stopped) if a
+ * non-hex digit is encountered. */
+static int jp_parse_hex4(JsonParser *p) {
+    int cp = 0;
+    for (int i = 0; i < 4; i++) {
+        int d = hex_digit(p->src[p->pos]);
+        if (d < 0) return -1;
+        cp = (cp << 4) | d;
+        p->pos++;
+    }
+    return cp;
+}
+
 static LatValue jp_parse_string(JsonParser *p) {
     /* Opening " already verified by caller; consume it */
     p->pos++; /* skip '"' */
@@ -68,9 +82,10 @@ static LatValue jp_parse_string(JsonParser *p) {
         if (c == '"') {
             p->pos++; /* consume closing quote */
             buf[len] = '\0';
-            LatValue v = value_string(buf);
-            free(buf);
-            return v;
+            /* Transfer ownership of buf and carry the explicit length so that an
+             * embedded NUL (from a \u0000 escape) is preserved instead of being
+             * truncated by a strlen-based string constructor. */
+            return value_string_owned_len(buf, len);
         }
         if (c == '\\') {
             p->pos++;
@@ -91,38 +106,91 @@ static LatValue jp_parse_string(JsonParser *p) {
                 case 'r': c = '\r'; break;
                 case 't': c = '\t'; break;
                 case 'u': {
-                    /* \uXXXX - parse 4 hex digits */
-                    int codepoint = 0;
-                    for (int i = 0; i < 4; i++) {
-                        int d = hex_digit(p->src[p->pos]);
-                        if (d < 0) {
-                            jp_error(p, "invalid \\uXXXX escape");
-                            free(buf);
-                            return value_unit();
-                        }
-                        codepoint = (codepoint << 4) | d;
-                        p->pos++;
+                    /* \uXXXX - parse 4 hex digits into a UTF-16 code unit. */
+                    int codepoint = jp_parse_hex4(p);
+                    if (codepoint < 0) {
+                        jp_error(p, "invalid \\uXXXX escape");
+                        free(buf);
+                        return value_unit();
                     }
-                    /* Encode as UTF-8 (or just ASCII for codepoints < 128) */
+                    /* Combine UTF-16 surrogate pairs into a single code point so
+                     * non-BMP characters become one valid 4-byte UTF-8 sequence
+                     * instead of two lone-surrogate (WTF-8) sequences. */
+                    if (codepoint >= 0xD800 && codepoint <= 0xDBFF) {
+                        /* High surrogate: look for a following \uDCxx low surrogate. */
+                        if (p->src[p->pos] == '\\' && p->src[p->pos + 1] == 'u') {
+                            size_t save = p->pos;
+                            p->pos += 2;
+                            int lo = jp_parse_hex4(p);
+                            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                                codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (lo - 0xDC00);
+                            } else {
+                                /* Not a low surrogate: rewind and emit U+FFFD. */
+                                p->pos = save;
+                                codepoint = 0xFFFD;
+                            }
+                        } else {
+                            codepoint = 0xFFFD; /* lone high surrogate */
+                        }
+                    } else if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
+                        codepoint = 0xFFFD; /* lone low surrogate */
+                    }
+                    /* Encode the (possibly combined) code point as UTF-8. NOTE: a
+                     * \u0000 escape inserts a real NUL byte here; the string is
+                     * built with an explicit length (value_string_owned_len) so it
+                     * is preserved rather than truncated. */
                     if (codepoint < 0x80) {
                         if (len + 1 >= cap) {
                             cap *= 2;
-                            buf = realloc(buf, cap);
+                            char *nb = realloc(buf, cap);
+                            if (!nb) {
+                                jp_error(p, "out of memory");
+                                free(buf);
+                                return value_unit();
+                            }
+                            buf = nb;
                         }
                         buf[len++] = (char)codepoint;
                     } else if (codepoint < 0x800) {
                         if (len + 2 >= cap) {
                             cap *= 2;
-                            buf = realloc(buf, cap);
+                            char *nb = realloc(buf, cap);
+                            if (!nb) {
+                                jp_error(p, "out of memory");
+                                free(buf);
+                                return value_unit();
+                            }
+                            buf = nb;
                         }
                         buf[len++] = (char)(0xC0 | (codepoint >> 6));
                         buf[len++] = (char)(0x80 | (codepoint & 0x3F));
-                    } else {
+                    } else if (codepoint < 0x10000) {
                         if (len + 3 >= cap) {
                             cap *= 2;
-                            buf = realloc(buf, cap);
+                            char *nb = realloc(buf, cap);
+                            if (!nb) {
+                                jp_error(p, "out of memory");
+                                free(buf);
+                                return value_unit();
+                            }
+                            buf = nb;
                         }
                         buf[len++] = (char)(0xE0 | (codepoint >> 12));
+                        buf[len++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                        buf[len++] = (char)(0x80 | (codepoint & 0x3F));
+                    } else {
+                        if (len + 4 >= cap) {
+                            cap *= 2;
+                            char *nb = realloc(buf, cap);
+                            if (!nb) {
+                                jp_error(p, "out of memory");
+                                free(buf);
+                                return value_unit();
+                            }
+                            buf = nb;
+                        }
+                        buf[len++] = (char)(0xF0 | (codepoint >> 18));
+                        buf[len++] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
                         buf[len++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
                         buf[len++] = (char)(0x80 | (codepoint & 0x3F));
                     }
@@ -138,7 +206,13 @@ static LatValue jp_parse_string(JsonParser *p) {
         }
         if (len + 1 >= cap) {
             cap *= 2;
-            buf = realloc(buf, cap);
+            char *nb = realloc(buf, cap);
+            if (!nb) {
+                jp_error(p, "out of memory");
+                free(buf);
+                return value_unit();
+            }
+            buf = nb;
         }
         buf[len++] = c;
     }
@@ -250,7 +324,15 @@ static LatValue jp_parse_array(JsonParser *p) {
 
         if (len >= cap) {
             cap *= 2;
-            elems = realloc(elems, cap * sizeof(LatValue));
+            LatValue *ne = realloc(elems, cap * sizeof(LatValue));
+            if (!ne) {
+                jp_error(p, "out of memory");
+                value_free(&elem);
+                for (size_t i = 0; i < len; i++) value_free(&elems[i]);
+                free(elems);
+                return value_unit();
+            }
+            elems = ne;
         }
         elems[len++] = elem;
 

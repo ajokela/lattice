@@ -351,7 +351,15 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
                         if (p->src[p->pos] == '\n' || p->src[p->pos] == '\r' || p->src[p->pos] == '\0') {
                             if (p->src[p->pos] == '\r') p->pos++;
                             if (p->src[p->pos] == '\n') p->pos++;
-                            LatValue val = yaml_parse_node(p, next_indent + 1);
+                            LatValue val;
+                            if (p->depth >= YAML_MAX_DEPTH) {
+                                yaml_error(p, "maximum nesting depth exceeded");
+                                val = value_nil();
+                            } else {
+                                p->depth++;
+                                val = yaml_parse_node(p, next_indent + 1);
+                                p->depth--;
+                            }
                             lat_map_set(map_elem.as.map.map, stripped_key2, &val);
                         } else {
                             char *raw2 = yaml_read_line_value(p);
@@ -428,7 +436,15 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
                     if (p->src[p->pos] == '\n' || p->src[p->pos] == '\r' || p->src[p->pos] == '\0') {
                         if (p->src[p->pos] == '\r') p->pos++;
                         if (p->src[p->pos] == '\n') p->pos++;
-                        LatValue val = yaml_parse_node(p, cur_indent + 1);
+                        LatValue val;
+                        if (p->depth >= YAML_MAX_DEPTH) {
+                            yaml_error(p, "maximum nesting depth exceeded");
+                            val = value_nil();
+                        } else {
+                            p->depth++;
+                            val = yaml_parse_node(p, cur_indent + 1);
+                            p->depth--;
+                        }
                         lat_map_set(map.as.map.map, stripped_key, &val);
                     } else if (p->src[p->pos] == '[' || p->src[p->pos] == '{') {
                         LatValue val = yaml_parse_flow_value(p);

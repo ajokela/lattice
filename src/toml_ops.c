@@ -455,8 +455,13 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
                 if (arr_val->as.array.len >= arr_val->as.array.cap) {
                     size_t old_cap = arr_val->as.array.cap;
                     arr_val->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
+                    /* The elems buffer originates from value_array() -> lat_alloc(),
+                     * i.e. it is tracked by the active fluid heap. A raw realloc()
+                     * would move/free the tracked block and leave a stale pointer in
+                     * the heap tracker, double-freeing at teardown. Route the resize
+                     * through the heap-aware reallocator. */
                     arr_val->as.array.elems =
-                        realloc(arr_val->as.array.elems, arr_val->as.array.cap * sizeof(LatValue));
+                        lat_realloc_routed(arr_val->as.array.elems, arr_val->as.array.cap * sizeof(LatValue));
                 }
                 arr_val->as.array.elems[arr_val->as.array.len] = new_entry;
                 current_table = arr_val->as.array.elems[arr_val->as.array.len].as.map.map;

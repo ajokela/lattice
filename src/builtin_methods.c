@@ -1103,7 +1103,13 @@ LatValue builtin_map_has(LatValue *obj, LatValue *args, int arg_count, char **er
 LatValue builtin_map_remove(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    if (args[0].type == VAL_STR) lat_map_remove(obj->as.map.map, args[0].as.str_val);
+    if (args[0].type == VAL_STR) {
+        /* lat_map_remove only frees the key, not the inline value payload — free
+         * the stored LatValue first to avoid leaking its heap data. */
+        LatValue *old = (LatValue *)lat_map_get(obj->as.map.map, args[0].as.str_val);
+        if (old) value_free(old);
+        lat_map_remove(obj->as.map.map, args[0].as.str_val);
+    }
     return value_unit();
 }
 
@@ -1184,6 +1190,10 @@ LatValue builtin_buffer_write_u8(LatValue *obj, LatValue *args, int arg_count, c
         *error = strdup("Buffer.write_u8: index out of bounds");
         return value_unit();
     }
+    if (args[1].type != VAL_INT) {
+        *error = strdup("Buffer.write_u8: value must be an Int");
+        return value_unit();
+    }
     obj->as.buffer.data[args[0].as.int_val] = (uint8_t)(args[1].as.int_val & 0xFF);
     return value_unit();
 }
@@ -1203,6 +1213,10 @@ LatValue builtin_buffer_write_u16(LatValue *obj, LatValue *args, int arg_count, 
     (void)arg_count;
     if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 2 > obj->as.buffer.len) {
         *error = strdup("Buffer.write_u16: index out of bounds");
+        return value_unit();
+    }
+    if (args[1].type != VAL_INT) {
+        *error = strdup("Buffer.write_u16: value must be an Int");
         return value_unit();
     }
     size_t i = (size_t)args[0].as.int_val;
@@ -1228,6 +1242,10 @@ LatValue builtin_buffer_write_u32(LatValue *obj, LatValue *args, int arg_count, 
     (void)arg_count;
     if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 4 > obj->as.buffer.len) {
         *error = strdup("Buffer.write_u32: index out of bounds");
+        return value_unit();
+    }
+    if (args[1].type != VAL_INT) {
+        *error = strdup("Buffer.write_u32: value must be an Int");
         return value_unit();
     }
     size_t i = (size_t)args[0].as.int_val;
@@ -1316,6 +1334,10 @@ LatValue builtin_buffer_write_u64(LatValue *obj, LatValue *args, int arg_count, 
         *error = strdup("Buffer.write_u64: index out of bounds");
         return value_unit();
     }
+    if (args[1].type != VAL_INT) {
+        *error = strdup("Buffer.write_u64: value must be an Int");
+        return value_unit();
+    }
     size_t i = (size_t)args[0].as.int_val;
     uint64_t v = (uint64_t)args[1].as.int_val;
     obj->as.buffer.data[i] = (uint8_t)(v & 0xFF);
@@ -1345,6 +1367,10 @@ LatValue builtin_buffer_write_i64(LatValue *obj, LatValue *args, int arg_count, 
     (void)arg_count;
     if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
         *error = strdup("Buffer.write_i64: index out of bounds");
+        return value_unit();
+    }
+    if (args[1].type != VAL_INT) {
+        *error = strdup("Buffer.write_i64: value must be an Int");
         return value_unit();
     }
     size_t i = (size_t)args[0].as.int_val;
@@ -1456,6 +1482,10 @@ LatValue builtin_set_remove(LatValue *obj, LatValue *args, int arg_count, char *
     (void)arg_count;
     (void)error;
     char *key = value_hash_key(&args[0]);
+    /* Free the stored element value before removing: lat_map_remove only frees
+     * the key, not the inline LatValue payload. */
+    LatValue *old = (LatValue *)lat_map_get(obj->as.set.map, key);
+    if (old) value_free(old);
     lat_map_remove(obj->as.set.map, key);
     free(key);
     return value_unit();
@@ -1592,6 +1622,13 @@ LatValue builtin_set_clear(LatValue *obj, LatValue *args, int arg_count, char **
     (void)args;
     (void)arg_count;
     (void)error;
+    /* lat_map_free only frees keys, not the inline LatValue payloads (which hold
+     * value_deep_clone copies). Free each stored element first to avoid leaking
+     * every element — mirrors how value_free handles VAL_SET. */
+    for (size_t i = 0; i < obj->as.set.map->cap; i++) {
+        if (obj->as.set.map->entries[i].state == MAP_OCCUPIED)
+            value_free((LatValue *)obj->as.set.map->entries[i].value);
+    }
     lat_map_free(obj->as.set.map);
     *obj->as.set.map = lat_map_new(sizeof(LatValue));
     return value_unit();

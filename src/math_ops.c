@@ -12,6 +12,29 @@ static double to_double(const LatValue *v) {
     return v->as.float_val;
 }
 
+/* Helper: NaN/inf/range-checked conversion of a double to int64_t. Returns
+ * false (and sets *err to msg) when d is NaN/inf or outside the representable
+ * int64 range, so callers can raise a clean runtime error instead of relying on
+ * the undefined behaviour of an out-of-range float->int cast. The bounds use
+ * 2^63 (exactly representable as a double): any d with -2^63 <= d < 2^63
+ * truncates to a value that fits in int64_t. */
+static bool checked_double_to_int(double d, int64_t *out, char **err, const char *msg) {
+    if (isnan(d) || isinf(d) || d < -9223372036854775808.0 || d >= 9223372036854775808.0) {
+        *err = strdup(msg);
+        return false;
+    }
+    *out = (int64_t)d;
+    return true;
+}
+
+/* Helper: build a full-width (64-bit) random value from rand(), which only
+ * yields RAND_MAX bits per call. Used for the full-width random_int() range. */
+static uint64_t math_rand_u64(void) {
+    uint64_t r = 0;
+    for (int i = 0; i < 64; i += 15) r = (r << 15) | ((uint64_t)rand() & 0x7FFFu);
+    return r;
+}
+
 /* ── abs ── */
 
 LatValue math_abs(const LatValue *v, char **err) {
@@ -23,9 +46,7 @@ LatValue math_abs(const LatValue *v, char **err) {
         }
         return value_int(x < 0 ? -x : x);
     }
-    if (v->type == VAL_FLOAT) {
-        return value_float(fabs(v->as.float_val));
-    }
+    if (v->type == VAL_FLOAT) { return value_float(fabs(v->as.float_val)); }
     *err = strdup("abs() expects Int or Float");
     return value_unit();
 }
@@ -33,11 +54,12 @@ LatValue math_abs(const LatValue *v, char **err) {
 /* ── floor ── */
 
 LatValue math_floor(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_int(v->as.int_val);
-    }
+    if (v->type == VAL_INT) { return value_int(v->as.int_val); }
     if (v->type == VAL_FLOAT) {
-        return value_int((int64_t)floor(v->as.float_val));
+        int64_t r;
+        if (!checked_double_to_int(floor(v->as.float_val), &r, err, "floor(): value out of Int range"))
+            return value_unit();
+        return value_int(r);
     }
     *err = strdup("floor() expects Int or Float");
     return value_unit();
@@ -46,11 +68,12 @@ LatValue math_floor(const LatValue *v, char **err) {
 /* ── ceil ── */
 
 LatValue math_ceil(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_int(v->as.int_val);
-    }
+    if (v->type == VAL_INT) { return value_int(v->as.int_val); }
     if (v->type == VAL_FLOAT) {
-        return value_int((int64_t)ceil(v->as.float_val));
+        int64_t r;
+        if (!checked_double_to_int(ceil(v->as.float_val), &r, err, "ceil(): value out of Int range"))
+            return value_unit();
+        return value_int(r);
     }
     *err = strdup("ceil() expects Int or Float");
     return value_unit();
@@ -59,11 +82,12 @@ LatValue math_ceil(const LatValue *v, char **err) {
 /* ── round ── */
 
 LatValue math_round(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_int(v->as.int_val);
-    }
+    if (v->type == VAL_INT) { return value_int(v->as.int_val); }
     if (v->type == VAL_FLOAT) {
-        return value_int((int64_t)round(v->as.float_val));
+        int64_t r;
+        if (!checked_double_to_int(round(v->as.float_val), &r, err, "round(): value out of Int range"))
+            return value_unit();
+        return value_int(r);
     }
     *err = strdup("round() expects Int or Float");
     return value_unit();
@@ -91,8 +115,7 @@ LatValue math_sqrt(const LatValue *v, char **err) {
 /* ── pow ── */
 
 LatValue math_pow(const LatValue *base, const LatValue *exp, char **err) {
-    if ((base->type != VAL_INT && base->type != VAL_FLOAT) ||
-        (exp->type != VAL_INT && exp->type != VAL_FLOAT)) {
+    if ((base->type != VAL_INT && base->type != VAL_FLOAT) || (exp->type != VAL_INT && exp->type != VAL_FLOAT)) {
         *err = strdup("pow() expects (Int|Float, Int|Float)");
         return value_unit();
     }
@@ -103,33 +126,43 @@ LatValue math_pow(const LatValue *base, const LatValue *exp, char **err) {
         int64_t e = exp->as.int_val;
 
         /* Negative exponents produce fractional results -> use float */
-        if (e < 0) {
-            return value_float(pow((double)b, (double)e));
-        }
+        if (e < 0) { return value_float(pow((double)b, (double)e)); }
 
-        /* Integer power with overflow detection */
-        int64_t result = 1;
-        int64_t base_val = b;
+        /* Integer power with overflow detection. Track the magnitude and sign
+         * separately in unsigned arithmetic so the checks stay well-defined even
+         * for base == INT64_MIN (where llabs(INT64_MIN) would be UB). */
+        uint64_t result_mag = 1;
+        bool result_neg = false;
+        uint64_t base_mag = (b < 0) ? -(uint64_t)b : (uint64_t)b; /* |b|, exact for INT64_MIN */
+        bool base_neg = (b < 0);
         int64_t exp_val = e;
         while (exp_val > 0) {
             if (exp_val & 1) {
-                /* Check for overflow: result * base_val */
-                if (base_val != 0 && (result > INT64_MAX / llabs(base_val) ||
-                    result < INT64_MIN / llabs(base_val))) {
-                    /* Overflow: fall through to float */
+                /* result *= base_val, in magnitude/sign form */
+                if (base_mag != 0 && result_mag > UINT64_MAX / base_mag) {
+                    /* Magnitude overflow: fall through to float */
                     return value_float(pow((double)b, (double)e));
                 }
-                result *= base_val;
+                result_mag *= base_mag;
+                result_neg ^= base_neg;
             }
             exp_val >>= 1;
             if (exp_val > 0) {
-                if (base_val != 0 && llabs(base_val) > INT64_MAX / llabs(base_val)) {
+                if (base_mag != 0 && base_mag > UINT64_MAX / base_mag) {
                     return value_float(pow((double)b, (double)e));
                 }
-                base_val *= base_val;
+                base_mag *= base_mag;
+                base_neg = false; /* a square is always non-negative */
             }
         }
-        return value_int(result);
+        /* Convert magnitude+sign back to int64_t, checking it fits the range. */
+        if (result_neg) {
+            if (result_mag > (uint64_t)INT64_MAX + 1u) return value_float(pow((double)b, (double)e));
+            if (result_mag == (uint64_t)INT64_MAX + 1u) return value_int(INT64_MIN);
+            return value_int(-(int64_t)result_mag);
+        }
+        if (result_mag > (uint64_t)INT64_MAX) return value_float(pow((double)b, (double)e));
+        return value_int((int64_t)result_mag);
     }
 
     /* At least one Float: use floating-point pow */
@@ -141,8 +174,7 @@ LatValue math_pow(const LatValue *base, const LatValue *exp, char **err) {
 /* ── min ── */
 
 LatValue math_min(const LatValue *a, const LatValue *b, char **err) {
-    if ((a->type != VAL_INT && a->type != VAL_FLOAT) ||
-        (b->type != VAL_INT && b->type != VAL_FLOAT)) {
+    if ((a->type != VAL_INT && a->type != VAL_FLOAT) || (b->type != VAL_INT && b->type != VAL_FLOAT)) {
         *err = strdup("min() expects (Int|Float, Int|Float)");
         return value_unit();
     }
@@ -151,9 +183,7 @@ LatValue math_min(const LatValue *a, const LatValue *b, char **err) {
     if (a->type == VAL_INT && b->type == VAL_INT) {
         return value_int(a->as.int_val < b->as.int_val ? a->as.int_val : b->as.int_val);
     }
-    if (a->type == VAL_FLOAT && b->type == VAL_FLOAT) {
-        return value_float(fmin(a->as.float_val, b->as.float_val));
-    }
+    if (a->type == VAL_FLOAT && b->type == VAL_FLOAT) { return value_float(fmin(a->as.float_val, b->as.float_val)); }
 
     /* Mixed: promote to Float */
     double da = to_double(a);
@@ -164,8 +194,7 @@ LatValue math_min(const LatValue *a, const LatValue *b, char **err) {
 /* ── max ── */
 
 LatValue math_max(const LatValue *a, const LatValue *b, char **err) {
-    if ((a->type != VAL_INT && a->type != VAL_FLOAT) ||
-        (b->type != VAL_INT && b->type != VAL_FLOAT)) {
+    if ((a->type != VAL_INT && a->type != VAL_FLOAT) || (b->type != VAL_INT && b->type != VAL_FLOAT)) {
         *err = strdup("max() expects (Int|Float, Int|Float)");
         return value_unit();
     }
@@ -174,9 +203,7 @@ LatValue math_max(const LatValue *a, const LatValue *b, char **err) {
     if (a->type == VAL_INT && b->type == VAL_INT) {
         return value_int(a->as.int_val > b->as.int_val ? a->as.int_val : b->as.int_val);
     }
-    if (a->type == VAL_FLOAT && b->type == VAL_FLOAT) {
-        return value_float(fmax(a->as.float_val, b->as.float_val));
-    }
+    if (a->type == VAL_FLOAT && b->type == VAL_FLOAT) { return value_float(fmax(a->as.float_val, b->as.float_val)); }
 
     /* Mixed: promote to Float */
     double da = to_double(a);
@@ -215,8 +242,16 @@ LatValue math_random_int(const LatValue *low, const LatValue *high, char **err) 
         seeded = true;
     }
 
-    /* Compute range, avoiding overflow for large spans */
-    uint64_t range = (uint64_t)(hi - lo) + 1;
+    /* Compute the span in unsigned arithmetic to avoid the signed overflow of
+     * hi - lo (e.g. lo == INT64_MIN, hi == INT64_MAX). span is the count of
+     * representable values minus one. */
+    uint64_t span = (uint64_t)hi - (uint64_t)lo;
+    if (span == UINT64_MAX) {
+        /* Full-width range [INT64_MIN, INT64_MAX]: every 64-bit value is valid.
+         * (Adding 1 to span here would wrap to 0 and make rand() % 0 a SIGFPE.) */
+        return value_int((int64_t)math_rand_u64());
+    }
+    uint64_t range = span + 1;
     int64_t result = lo + (int64_t)((uint64_t)rand() % range);
     return value_int(result);
 }
@@ -281,12 +316,8 @@ LatValue math_log10(const LatValue *v, char **err) {
 /* ── sin ── */
 
 LatValue math_sin(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(sin((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(sin(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(sin((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(sin(v->as.float_val)); }
     *err = strdup("sin() expects Int or Float");
     return value_unit();
 }
@@ -294,12 +325,8 @@ LatValue math_sin(const LatValue *v, char **err) {
 /* ── cos ── */
 
 LatValue math_cos(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(cos((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(cos(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(cos((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(cos(v->as.float_val)); }
     *err = strdup("cos() expects Int or Float");
     return value_unit();
 }
@@ -307,12 +334,8 @@ LatValue math_cos(const LatValue *v, char **err) {
 /* ── tan ── */
 
 LatValue math_tan(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(tan((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(tan(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(tan((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(tan(v->as.float_val)); }
     *err = strdup("tan() expects Int or Float");
     return value_unit();
 }
@@ -320,8 +343,7 @@ LatValue math_tan(const LatValue *v, char **err) {
 /* ── atan2 ── */
 
 LatValue math_atan2(const LatValue *y, const LatValue *x, char **err) {
-    if ((y->type != VAL_INT && y->type != VAL_FLOAT) ||
-        (x->type != VAL_INT && x->type != VAL_FLOAT)) {
+    if ((y->type != VAL_INT && y->type != VAL_FLOAT) || (x->type != VAL_INT && x->type != VAL_FLOAT)) {
         *err = strdup("atan2() expects (Int|Float, Int|Float)");
         return value_unit();
     }
@@ -333,8 +355,7 @@ LatValue math_atan2(const LatValue *y, const LatValue *x, char **err) {
 /* ── clamp ── */
 
 LatValue math_clamp(const LatValue *val, const LatValue *lo, const LatValue *hi, char **err) {
-    if ((val->type != VAL_INT && val->type != VAL_FLOAT) ||
-        (lo->type != VAL_INT && lo->type != VAL_FLOAT) ||
+    if ((val->type != VAL_INT && val->type != VAL_FLOAT) || (lo->type != VAL_INT && lo->type != VAL_FLOAT) ||
         (hi->type != VAL_INT && hi->type != VAL_FLOAT)) {
         *err = strdup("clamp() expects (Int|Float, Int|Float, Int|Float)");
         return value_unit();
@@ -361,25 +382,17 @@ LatValue math_clamp(const LatValue *val, const LatValue *lo, const LatValue *hi,
 
 /* ── math_pi ── */
 
-LatValue math_pi(void) {
-    return value_float(3.14159265358979323846);
-}
+LatValue math_pi(void) { return value_float(3.14159265358979323846); }
 
 /* ── math_e ── */
 
-LatValue math_e(void) {
-    return value_float(2.71828182845904523536);
-}
+LatValue math_e(void) { return value_float(2.71828182845904523536); }
 
 /* ── asin ── */
 
 LatValue math_asin(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(asin((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(asin(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(asin((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(asin(v->as.float_val)); }
     *err = strdup("asin() expects Int or Float");
     return value_unit();
 }
@@ -387,12 +400,8 @@ LatValue math_asin(const LatValue *v, char **err) {
 /* ── acos ── */
 
 LatValue math_acos(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(acos((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(acos(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(acos((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(acos(v->as.float_val)); }
     *err = strdup("acos() expects Int or Float");
     return value_unit();
 }
@@ -400,12 +409,8 @@ LatValue math_acos(const LatValue *v, char **err) {
 /* ── atan ── */
 
 LatValue math_atan(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(atan((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(atan(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(atan((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(atan(v->as.float_val)); }
     *err = strdup("atan() expects Int or Float");
     return value_unit();
 }
@@ -413,12 +418,8 @@ LatValue math_atan(const LatValue *v, char **err) {
 /* ── exp ── */
 
 LatValue math_exp(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(exp((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(exp(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(exp((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(exp(v->as.float_val)); }
     *err = strdup("exp() expects Int or Float");
     return value_unit();
 }
@@ -487,12 +488,8 @@ LatValue math_lcm(const LatValue *a, const LatValue *b, char **err) {
 /* ── is_nan ── */
 
 LatValue math_is_nan(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_bool(false);
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_bool(isnan(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_bool(false); }
+    if (v->type == VAL_FLOAT) { return value_bool(isnan(v->as.float_val)); }
     *err = strdup("is_nan() expects Int or Float");
     return value_unit();
 }
@@ -500,12 +497,8 @@ LatValue math_is_nan(const LatValue *v, char **err) {
 /* ── is_inf ── */
 
 LatValue math_is_inf(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_bool(false);
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_bool(isinf(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_bool(false); }
+    if (v->type == VAL_FLOAT) { return value_bool(isinf(v->as.float_val)); }
     *err = strdup("is_inf() expects Int or Float");
     return value_unit();
 }
@@ -513,12 +506,8 @@ LatValue math_is_inf(const LatValue *v, char **err) {
 /* ── sinh ── */
 
 LatValue math_sinh(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(sinh((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(sinh(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(sinh((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(sinh(v->as.float_val)); }
     *err = strdup("sinh() expects Int or Float");
     return value_unit();
 }
@@ -526,12 +515,8 @@ LatValue math_sinh(const LatValue *v, char **err) {
 /* ── cosh ── */
 
 LatValue math_cosh(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(cosh((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(cosh(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(cosh((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(cosh(v->as.float_val)); }
     *err = strdup("cosh() expects Int or Float");
     return value_unit();
 }
@@ -539,12 +524,8 @@ LatValue math_cosh(const LatValue *v, char **err) {
 /* ── tanh ── */
 
 LatValue math_tanh(const LatValue *v, char **err) {
-    if (v->type == VAL_INT) {
-        return value_float(tanh((double)v->as.int_val));
-    }
-    if (v->type == VAL_FLOAT) {
-        return value_float(tanh(v->as.float_val));
-    }
+    if (v->type == VAL_INT) { return value_float(tanh((double)v->as.int_val)); }
+    if (v->type == VAL_FLOAT) { return value_float(tanh(v->as.float_val)); }
     *err = strdup("tanh() expects Int or Float");
     return value_unit();
 }
@@ -552,8 +533,7 @@ LatValue math_tanh(const LatValue *v, char **err) {
 /* ── lerp ── */
 
 LatValue math_lerp(const LatValue *a, const LatValue *b, const LatValue *t, char **err) {
-    if ((a->type != VAL_INT && a->type != VAL_FLOAT) ||
-        (b->type != VAL_INT && b->type != VAL_FLOAT) ||
+    if ((a->type != VAL_INT && a->type != VAL_FLOAT) || (b->type != VAL_INT && b->type != VAL_FLOAT) ||
         (t->type != VAL_INT && t->type != VAL_FLOAT)) {
         *err = strdup("lerp() expects (Int|Float, Int|Float, Int|Float)");
         return value_unit();
