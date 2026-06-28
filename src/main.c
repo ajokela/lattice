@@ -609,6 +609,14 @@ static void repl(void) {
             break;
         }
 
+        /* Bound the fixed accumulation buffer: a pasted/very long line must not
+         * overflow it. +2 leaves room for the separating '\n' and the NUL. */
+        if (strlen(accumulated) + strlen(line) + 2 >= sizeof(accumulated)) {
+            fprintf(stderr, "error: REPL input too long (max %zu bytes); resetting buffer\n", sizeof(accumulated) - 1);
+            accumulated[0] = '\0';
+            free(line);
+            continue;
+        }
         if (accumulated[0] != '\0') strcat(accumulated, "\n");
         strcat(accumulated, line);
 
@@ -760,6 +768,14 @@ static void repl_regvm(void) {
             break;
         }
 
+        /* Bound the fixed accumulation buffer: a pasted/very long line must not
+         * overflow it. +2 leaves room for the separating '\n' and the NUL. */
+        if (strlen(accumulated) + strlen(line) + 2 >= sizeof(accumulated)) {
+            fprintf(stderr, "error: REPL input too long (max %zu bytes); resetting buffer\n", sizeof(accumulated) - 1);
+            accumulated[0] = '\0';
+            free(line);
+            continue;
+        }
         if (accumulated[0] != '\0') strcat(accumulated, "\n");
         strcat(accumulated, line);
 
@@ -897,6 +913,14 @@ static void repl_tree_walk(void) {
             break;
         }
 
+        /* Bound the fixed accumulation buffer: a pasted/very long line must not
+         * overflow it. +2 leaves room for the separating '\n' and the NUL. */
+        if (strlen(accumulated) + strlen(line) + 2 >= sizeof(accumulated)) {
+            fprintf(stderr, "error: REPL input too long (max %zu bytes); resetting buffer\n", sizeof(accumulated) - 1);
+            accumulated[0] = '\0';
+            free(line);
+            continue;
+        }
         if (accumulated[0] != '\0') strcat(accumulated, "\n");
         strcat(accumulated, line);
 
