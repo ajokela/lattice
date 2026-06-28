@@ -262,17 +262,20 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     const char *suffix = ".so";
 #endif
 
-    /* Build search paths */
+    /* Build search paths.
+     *
+     * SECURITY (LAT-520 / M13): never implicitly prefer the current working
+     * directory. Searching a CWD-relative "./extensions/" first lets an
+     * attacker who controls the directory clat happens to run in plant a
+     * malicious library that is silently loaded as code (classic library
+     * planting -> arbitrary code execution). The trusted, user/system-owned
+     * extension directories are searched FIRST. The CWD-relative location is
+     * consulted only when the user explicitly opts in via
+     * LATTICE_EXT_ALLOW_CWD, and even then it is tried LAST. */
     char paths[5][1024];
     int path_count = 0;
 
-    /* 1. ./extensions/<name><suffix> */
-    snprintf(paths[path_count++], sizeof(paths[0]), "./extensions/%s%s", name, suffix);
-
-    /* 2. ./extensions/<name>/<name><suffix> */
-    snprintf(paths[path_count++], sizeof(paths[0]), "./extensions/%s/%s%s", name, name, suffix);
-
-    /* 3. ~/.lattice/ext/<name><suffix> */
+    /* 1. ~/.lattice/ext/<name><suffix>  (per-user install directory) */
 #ifdef _WIN32
     const char *home = win32_home_dir();
 #else
@@ -280,9 +283,17 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
 #endif
     if (home) { snprintf(paths[path_count++], sizeof(paths[0]), "%s/.lattice/ext/%s%s", home, name, suffix); }
 
-    /* 4. $LATTICE_EXT_PATH/<name><suffix> */
+    /* 2. $LATTICE_EXT_PATH/<name><suffix>  (explicit user-provided directory) */
     const char *ext_path = getenv("LATTICE_EXT_PATH");
     if (ext_path) { snprintf(paths[path_count++], sizeof(paths[0]), "%s/%s%s", ext_path, name, suffix); }
+
+    /* 3. CWD-relative ./extensions/ — OPT-IN ONLY, never an implicit
+     *    preference, and always tried after the trusted directories above. */
+    bool allow_cwd = getenv("LATTICE_EXT_ALLOW_CWD") != NULL;
+    if (allow_cwd) {
+        snprintf(paths[path_count++], sizeof(paths[0]), "./extensions/%s%s", name, suffix);
+        snprintf(paths[path_count++], sizeof(paths[0]), "./extensions/%s/%s%s", name, name, suffix);
+    }
 
     /* Try each path */
 #ifdef _WIN32
@@ -302,8 +313,8 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
     if (!handle) {
         lat_asprintf(err,
                      "require_ext: cannot find extension '%s' "
-                     "(searched ./extensions/, ./extensions/%s/, ~/.lattice/ext/, $LATTICE_EXT_PATH)",
-                     name, name);
+                     "(searched ~/.lattice/ext/, $LATTICE_EXT_PATH%s)",
+                     name, allow_cwd ? ", ./extensions/ (LATTICE_EXT_ALLOW_CWD)" : "");
         return value_nil();
     }
 
@@ -340,6 +351,10 @@ LatValue ext_load(Evaluator *ev, const char *name, char **err) {
         param_names[0] = pname;
         LatValue closure = value_closure(param_names, 1, NULL, NULL, NULL, true);
         closure.as.closure.native_fn = (void *)ctx.reg.fns[i];
+        /* value_closure deep-copies the param name strings, so the originals
+         * are no longer needed here. Free them to avoid a per-function leak
+         * (LAT-527 / L20). */
+        free(pname);
         free(param_names);
 
         lat_map_set(map.as.map.map, ctx.reg.names[i], &closure);

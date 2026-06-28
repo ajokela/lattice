@@ -377,19 +377,23 @@ $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 $(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# LAT-520: require_ext() no longer searches the CWD-relative ./extensions/ by
+# default (library-planting hardening). The in-tree test extensions live in
+# ./extensions/<name>/; the test runner executes from the trusted repo root, so
+# it opts in explicitly via LATTICE_EXT_ALLOW_CWD=1.
 test: $(TEST_TARGET) $(LSP_TARGET)
-	./$(BUILD_DIR)/test_runner
+	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner
 
 test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
-	./$(BUILD_DIR)/test_runner --backend tree-walk
+	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend tree-walk
 
 test-regvm: $(TEST_TARGET) $(LSP_TARGET)
-	./$(BUILD_DIR)/test_runner --backend regvm
+	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
 test-all-backends: $(TEST_TARGET) $(LSP_TARGET)
-	@echo "=== stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
-	@echo "=== tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
-	@echo "=== regvm ===" && ./$(BUILD_DIR)/test_runner --backend regvm
+	@echo "=== stack-vm ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend stack-vm
+	@echo "=== tree-walk ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend tree-walk
+	@echo "=== regvm ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
 # LAT-449 Round B differential oracle: LATTICE_FORCE_COPY=1 disables the
 # Crystal-by-Reference borrow fast path in value_clone_impl (every clone is a

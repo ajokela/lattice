@@ -37,7 +37,6 @@ static char *hex_encode(const unsigned char *hash, unsigned int len) {
 #include <openssl/rand.h>
 
 char *crypto_sha256(const char *data, size_t len, char **err) {
-    (void)err;
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (!ctx) {
         *err = strdup("sha256: failed to create digest context");
@@ -46,16 +45,20 @@ char *crypto_sha256(const char *data, size_t len, char **err) {
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int hash_len = 0;
 
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, hash, &hash_len);
+    /* Check every EVP_* return code: on internal failure propagate a clean
+     * error instead of silently returning a bogus/empty digest (LAT-526). */
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 || EVP_DigestUpdate(ctx, data, len) != 1 ||
+        EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        *err = strdup("sha256: digest computation failed");
+        return NULL;
+    }
     EVP_MD_CTX_free(ctx);
 
     return hex_encode(hash, hash_len);
 }
 
 char *crypto_md5(const char *data, size_t len, char **err) {
-    (void)err;
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (!ctx) {
         *err = strdup("md5: failed to create digest context");
@@ -64,16 +67,20 @@ char *crypto_md5(const char *data, size_t len, char **err) {
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int hash_len = 0;
 
-    EVP_DigestInit_ex(ctx, EVP_md5(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, hash, &hash_len);
+    /* Check every EVP_* return code: on internal failure propagate a clean
+     * error instead of silently returning a bogus/empty digest (LAT-526). */
+    if (EVP_DigestInit_ex(ctx, EVP_md5(), NULL) != 1 || EVP_DigestUpdate(ctx, data, len) != 1 ||
+        EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        *err = strdup("md5: digest computation failed");
+        return NULL;
+    }
     EVP_MD_CTX_free(ctx);
 
     return hex_encode(hash, hash_len);
 }
 
 char *crypto_sha512(const char *data, size_t len, char **err) {
-    (void)err;
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (!ctx) {
         *err = strdup("sha512: failed to create digest context");
@@ -82,9 +89,14 @@ char *crypto_sha512(const char *data, size_t len, char **err) {
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int hash_len = 0;
 
-    EVP_DigestInit_ex(ctx, EVP_sha512(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, hash, &hash_len);
+    /* Check every EVP_* return code: on internal failure propagate a clean
+     * error instead of silently returning a bogus/empty digest (LAT-526). */
+    if (EVP_DigestInit_ex(ctx, EVP_sha512(), NULL) != 1 || EVP_DigestUpdate(ctx, data, len) != 1 ||
+        EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        *err = strdup("sha512: digest computation failed");
+        return NULL;
+    }
     EVP_MD_CTX_free(ctx);
 
     return hex_encode(hash, hash_len);
@@ -666,11 +678,50 @@ char *crypto_base64_decode(const char *data, size_t len, size_t *out_len, char *
         int c = b64_decode_char((unsigned char)data[i + 2]);
         int d = b64_decode_char((unsigned char)data[i + 3]);
 
-        /* Check for invalid characters (but not padding) */
-        if (a < 0 || b < 0 || (c < 0 && c != -2) || (d < 0 && d != -2)) {
+        int last_group = (i + 4 == len);
+
+        /* Strict validation (LAT-525): the first two symbols of every group
+         * must be real base64 characters — never padding, never invalid. */
+        if (a < 0 || b < 0) {
             free(out);
             *err = strdup("base64_decode: invalid character in input");
             return NULL;
+        }
+
+        /* The remaining two symbols may be padding ('=', encoded as -2), but
+         * padding is only ever valid as canonical trailing padding in the
+         * final group: "xx==" or "xxx=". Reject '=' that appears in any
+         * earlier group, a mid-group '=' (c is padding while d is not), or
+         * any non-padding invalid byte. */
+        if (c == -2 || d == -2) {
+            if (!last_group || (c == -2 && d != -2)) {
+                free(out);
+                *err = strdup("base64_decode: invalid '=' padding");
+                return NULL;
+            }
+        }
+        if ((c < 0 && c != -2) || (d < 0 && d != -2)) {
+            free(out);
+            *err = strdup("base64_decode: invalid character in input");
+            return NULL;
+        }
+
+        /* Reject non-canonical (malleable) encodings whose discarded padding
+         * bits are non-zero. */
+        if (c == -2) {
+            /* "xx==": one output byte; the low 4 bits of b must be zero. */
+            if ((b & 0x0F) != 0) {
+                free(out);
+                *err = strdup("base64_decode: non-canonical trailing bits");
+                return NULL;
+            }
+        } else if (d == -2) {
+            /* "xxx=": two output bytes; the low 2 bits of c must be zero. */
+            if ((c & 0x03) != 0) {
+                free(out);
+                *err = strdup("base64_decode: non-canonical trailing bits");
+                return NULL;
+            }
         }
 
         /* Treat padding as 0 for the arithmetic */
