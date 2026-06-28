@@ -478,6 +478,15 @@ static bool registry_download_package(const char *name, const char *version, con
 /* High-level: fetch a package from the HTTP registry, caching in ~/.lattice/packages/.
  * On success, copies the package into lat_modules/<name>/ and returns true. */
 static bool fetch_from_registry(const char *name, const char *version, char **err) {
+    /* The package name becomes a path component (cache/<name>, lat_modules/<name>),
+     * so reject anything that could traverse the filesystem before any I/O. */
+    if (!pkg_name_is_valid(name)) {
+        size_t elen = strlen(name ? name : "") + 64;
+        *err = malloc(elen);
+        if (*err) snprintf(*err, elen, "invalid package name '%s'", name ? name : "");
+        return false;
+    }
+
     /* Step 1: Query available versions */
     size_t ver_count = 0;
     char **versions = registry_fetch_versions(name, &ver_count, err);
@@ -503,6 +512,19 @@ static bool fetch_from_registry(const char *name, const char *version, char **er
         size_t elen = strlen(name) + strlen(version) + 80;
         *err = malloc(elen);
         snprintf(*err, elen, "no version of '%s' satisfies constraint '%s'", name, version);
+        return false;
+    }
+
+    /* The resolved version is a registry-controlled string that is about to be
+     * used as a filesystem path component (cache/<name>/<version> and the
+     * lat_modules layout). A malicious registry could return a version like
+     * "../../etc/foo" or one containing '/', enabling path traversal / arbitrary
+     * file write. Reject anything that is not a safe single path component. */
+    if (!pkg_path_component_is_safe(resolved)) {
+        size_t elen = strlen(name) + strlen(resolved) + 96;
+        *err = malloc(elen);
+        if (*err) snprintf(*err, elen, "registry returned unsafe version string '%s' for package '%s'", resolved, name);
+        free(resolved);
         return false;
     }
 

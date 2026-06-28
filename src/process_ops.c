@@ -16,37 +16,91 @@
 #else
 #include <unistd.h>
 #include <sys/wait.h>
+#include <poll.h>
 #endif
 
 #ifndef _WIN32
-/* Read all data from a file descriptor into a heap-allocated string.
- * Returns NULL on allocation failure. */
-static char *read_all_fd(int fd) {
-    size_t cap = 1024;
-    size_t len = 0;
-    char *buf = malloc(cap);
-    if (!buf) return NULL;
+/* Drain two pipe fds CONCURRENTLY into heap-allocated, NUL-terminated strings.
+ *
+ * Reading one pipe fully to EOF before touching the other deadlocks when the
+ * child fills the second pipe (the OS buffer is only ~64KB): the child blocks
+ * writing while the parent blocks reading the first pipe. poll() lets us service
+ * whichever fd has data ready, so neither side stalls.
+ *
+ * Each *out is set to a heap string ("" worth of bytes plus a terminator), or to
+ * NULL on allocation failure for that stream (callers substitute ""). The caller
+ * owns the fds and closes them. */
+static void drain_two_fds(int fd_a, int fd_b, char **out_a, char **out_b) {
+    struct fd_state {
+        int fd;
+        char *buf;
+        size_t cap;
+        size_t len;
+        bool done;
+    } st[2];
+    int fds[2] = {fd_a, fd_b};
 
-    for (;;) {
-        ssize_t n = read(fd, buf + len, cap - len);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            break;
+    for (int i = 0; i < 2; i++) {
+        st[i].fd = fds[i];
+        st[i].len = 0;
+        st[i].cap = 1024;
+        st[i].done = false;
+        st[i].buf = malloc(st[i].cap);
+        if (!st[i].buf) st[i].done = true; /* give up on this stream only */
+    }
+
+    while (!(st[0].done && st[1].done)) {
+        struct pollfd pfds[2];
+        int map[2];
+        nfds_t n = 0;
+        for (int i = 0; i < 2; i++) {
+            if (st[i].done) continue;
+            pfds[n].fd = st[i].fd;
+            pfds[n].events = POLLIN;
+            pfds[n].revents = 0;
+            map[n] = i;
+            n++;
         }
         if (n == 0) break;
-        len += (size_t)n;
-        if (len == cap) {
-            cap *= 2;
-            char *tmp = realloc(buf, cap);
-            if (!tmp) {
-                free(buf);
-                return NULL;
+
+        int pr = poll(pfds, n, -1);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break; /* unexpected poll failure: stop draining */
+        }
+
+        for (nfds_t j = 0; j < n; j++) {
+            if (!(pfds[j].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+            struct fd_state *s = &st[map[j]];
+            ssize_t rd = read(s->fd, s->buf + s->len, s->cap - s->len);
+            if (rd < 0) {
+                if (errno == EINTR || errno == EAGAIN) continue;
+                s->done = true;
+            } else if (rd == 0) {
+                s->done = true; /* EOF */
+            } else {
+                s->len += (size_t)rd;
+                if (s->len == s->cap) {
+                    size_t ncap = s->cap * 2;
+                    char *tmp = realloc(s->buf, ncap);
+                    if (!tmp) {
+                        free(s->buf);
+                        s->buf = NULL;
+                        s->done = true;
+                    } else {
+                        s->buf = tmp;
+                        s->cap = ncap;
+                    }
+                }
             }
-            buf = tmp;
         }
     }
-    buf[len] = '\0';
-    return buf;
+
+    for (int i = 0; i < 2; i++) {
+        if (st[i].buf) st[i].buf[st[i].len] = '\0';
+    }
+    *out_a = st[0].buf;
+    *out_b = st[1].buf;
 }
 #endif
 
@@ -242,8 +296,11 @@ LatValue process_shell(const char *cmd, char **err) {
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
-    char *stdout_buf = read_all_fd(stdout_pipe[0]);
-    char *stderr_buf = read_all_fd(stderr_pipe[0]);
+    /* Drain stdout and stderr concurrently to avoid a pipe-buffer deadlock when
+     * the child fills one pipe while we are blocked reading the other. */
+    char *stdout_buf = NULL;
+    char *stderr_buf = NULL;
+    drain_two_fds(stdout_pipe[0], stderr_pipe[0], &stdout_buf, &stderr_buf);
     close(stdout_pipe[0]);
     close(stderr_pipe[0]);
 

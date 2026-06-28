@@ -3,6 +3,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef __EMSCRIPTEN__
+/* Per-channel waiter node.
+ *
+ * A single `select` over several channels registers ONE caller-owned
+ * LatSelectWaiter on every channel at once. The public LatSelectWaiter has a
+ * single `next` pointer, so threading that one node through multiple channels'
+ * waiter lists makes the lists share/overwrite each other's links — corrupting
+ * them (lost wakeups / select hangs). To avoid that, each channel keeps its own
+ * internally-allocated node: it records the owning waiter (for removal identity)
+ * plus a copy of that waiter's wakeup mutex/cond, and owns a `next` that belongs
+ * solely to this channel's list. These nodes live behind ch->waiters (declared
+ * LatSelectWaiter* in the header) and are only ever touched here in channel.c. */
+typedef struct ChWaiterNode {
+    LatSelectWaiter *owner;
+    pthread_mutex_t *mutex;
+    pthread_cond_t *cond;
+    struct ChWaiterNode *next;
+} ChWaiterNode;
+#endif
+
 LatChannel *channel_new(void) {
     LatChannel *ch = calloc(1, sizeof(LatChannel));
     if (!ch) return NULL;
@@ -56,7 +76,7 @@ bool channel_send(LatChannel *ch, LatValue val) {
 #ifndef __EMSCRIPTEN__
     pthread_cond_signal(&ch->cond_notempty);
     /* Wake any select waiters */
-    for (LatSelectWaiter *w = ch->waiters; w; w = w->next) {
+    for (ChWaiterNode *w = (ChWaiterNode *)ch->waiters; w; w = w->next) {
         pthread_mutex_lock(w->mutex);
         pthread_cond_signal(w->cond);
         pthread_mutex_unlock(w->mutex);
@@ -103,7 +123,7 @@ void channel_close(LatChannel *ch) {
 #ifndef __EMSCRIPTEN__
     pthread_cond_broadcast(&ch->cond_notempty);
     /* Wake any select waiters */
-    for (LatSelectWaiter *w = ch->waiters; w; w = w->next) {
+    for (ChWaiterNode *w = (ChWaiterNode *)ch->waiters; w; w = w->next) {
         pthread_mutex_lock(w->mutex);
         pthread_cond_signal(w->cond);
         pthread_mutex_unlock(w->mutex);
@@ -138,9 +158,16 @@ bool channel_try_recv(LatChannel *ch, LatValue *out, bool *closed_out) {
 
 void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w) {
 #ifndef __EMSCRIPTEN__
+    /* Allocate a node private to THIS channel so the owner's single `next`
+     * pointer is never shared between channel lists (see ChWaiterNode above). */
+    ChWaiterNode *node = malloc(sizeof(ChWaiterNode));
+    if (!node) return; /* OOM: skip registration; the select still re-polls */
+    node->owner = w;
+    node->mutex = w->mutex;
+    node->cond = w->cond;
     pthread_mutex_lock(&ch->mutex);
-    w->next = ch->waiters;
-    ch->waiters = w;
+    node->next = (ChWaiterNode *)ch->waiters;
+    ch->waiters = (LatSelectWaiter *)node;
     pthread_mutex_unlock(&ch->mutex);
 #else
     (void)ch;
@@ -151,14 +178,23 @@ void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w) {
 void channel_remove_waiter(LatChannel *ch, LatSelectWaiter *w) {
 #ifndef __EMSCRIPTEN__
     pthread_mutex_lock(&ch->mutex);
-    LatSelectWaiter **pp = &ch->waiters;
-    while (*pp) {
-        if (*pp == w) {
-            *pp = w->next;
-            break;
+    /* Drop every node this channel holds for the owning waiter (a select may
+     * register the same owner more than once, e.g. two arms on one channel). */
+    ChWaiterNode *head = (ChWaiterNode *)ch->waiters;
+    ChWaiterNode *prev = NULL;
+    ChWaiterNode *cur = head;
+    while (cur) {
+        ChWaiterNode *next = cur->next;
+        if (cur->owner == w) {
+            if (prev) prev->next = next;
+            else head = next;
+            free(cur);
+        } else {
+            prev = cur;
         }
-        pp = &(*pp)->next;
+        cur = next;
     }
+    ch->waiters = (LatSelectWaiter *)head;
     pthread_mutex_unlock(&ch->mutex);
 #else
     (void)ch;

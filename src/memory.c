@@ -237,6 +237,7 @@ void *bump_alloc(BumpArena *ba, size_t size) {
     /* Allocate a new page */
     size_t page_cap = aligned > ARENA_PAGE_SIZE ? aligned : ARENA_PAGE_SIZE;
     ArenaPage *np = arena_page_new(page_cap);
+    if (!np) return NULL; /* OOM: propagate like the other allocators here */
     if (cur) {
         np->next = cur->next;
         cur->next = np;
@@ -531,6 +532,7 @@ void *arena_alloc(CrystalRegion *r, size_t size) {
     /* Need a new page — oversized allocs get a dedicated page */
     size_t page_cap = aligned > ARENA_PAGE_SIZE ? aligned : ARENA_PAGE_SIZE;
     ArenaPage *np = r->page_aligned ? arena_page_new_aligned(page_cap) : arena_page_new(page_cap);
+    if (!np) return NULL; /* OOM: propagate (arena_calloc already guards its result) */
     np->next = r->pages;
     r->pages = np;
 
@@ -544,6 +546,7 @@ void *arena_calloc(CrystalRegion *r, size_t count, size_t size) {
     if (count > 0 && size > SIZE_MAX / count) return NULL;
     size_t total = count * size;
     void *ptr = arena_alloc(r, total);
+    if (!ptr) return NULL; /* OOM propagated from arena_alloc */
     memset(ptr, 0, total);
     return ptr;
 }
