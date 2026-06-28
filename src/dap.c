@@ -20,23 +20,32 @@
 
 typedef struct {
     int ref_id;
-    LatValue value; /* shallow copy — do NOT free */
+    LatValue value; /* owned deep clone — freed in varrefs_clear() */
 } DapVarRef;
 
 static DapVarRef *s_varrefs = NULL;
 static size_t s_varref_count = 0;
 static size_t s_varref_cap = 0;
 
-static void varrefs_clear(void) { s_varref_count = 0; }
+static void varrefs_clear(void) {
+    /* Each entry owns a deep clone of the value it references; release them so a
+     * fresh stop does not leak the previous stop's snapshots. */
+    for (size_t i = 0; i < s_varref_count; i++) { value_free(&s_varrefs[i].value); }
+    s_varref_count = 0;
+}
 
-static int varrefs_add(LatValue val) {
+static int varrefs_add(const LatValue *val) {
     if (s_varref_count >= s_varref_cap) {
         s_varref_cap = s_varref_cap ? s_varref_cap * 2 : 32;
         s_varrefs = realloc(s_varrefs, s_varref_cap * sizeof(DapVarRef));
     }
     int id = DAP_VARREF_BASE + (int)s_varref_count;
     s_varrefs[s_varref_count].ref_id = id;
-    s_varrefs[s_varref_count].value = val;
+    /* Store an owned deep clone: the live VM value (a local, global, or array
+     * element) may be freed or mutated by a later `evaluate` before the deferred
+     * `variables` expansion reads this entry. Owning the data decouples our
+     * lifetime from the VM's. Released in varrefs_clear(). */
+    s_varrefs[s_varref_count].value = value_deep_clone(val);
     s_varref_count++;
     return id;
 }
@@ -135,7 +144,7 @@ static void dap_print_callback(const char *text, void *userdata) {
 
 static int get_varref_for_value(LatValue *val) {
     if (val->type == VAL_ARRAY || val->type == VAL_STRUCT || val->type == VAL_MAP || val->type == VAL_TUPLE) {
-        return varrefs_add(*val);
+        return varrefs_add(val);
     }
     return 0;
 }
@@ -360,10 +369,17 @@ static void handle_variables(Debugger *dbg, StackVM *vm, StackCallFrame *frame, 
     } else if (var_ref == DAP_VARREF_GLOBALS) {
         variables = build_globals_variables(vm);
     } else {
-        /* Compound variable expansion */
+        /* Compound variable expansion. Snapshot the stored value onto the stack
+         * before expanding: build_compound_variables() registers child refs via
+         * varrefs_add(), which can realloc s_varrefs and invalidate `ref` (and
+         * therefore &ref->value) mid-iteration. The snapshot is a stable handle
+         * whose internal heap pointers alias the owned clone's buffers (which
+         * realloc does not move), so it stays valid for the whole expansion.
+         * Do NOT free it — it aliases the entry owned by s_varrefs. */
         DapVarRef *ref = varrefs_find(var_ref);
         if (ref) {
-            variables = build_compound_variables(&ref->value);
+            LatValue snapshot = ref->value;
+            variables = build_compound_variables(&snapshot);
         } else {
             variables = cJSON_CreateArray();
         }
@@ -484,7 +500,14 @@ bool dap_handshake(Debugger *dbg, const char *source_path) {
         cJSON *cmd = cJSON_GetObjectItem(msg, "command");
         cJSON *seq = cJSON_GetObjectItem(msg, "seq");
         int req_seq = seq ? seq->valueint : 0;
-        const char *command = cmd ? cmd->valuestring : "";
+        /* `command` must be a JSON string; a present-but-non-string value leaves
+         * valuestring NULL and would crash the strcmp() dispatch below. */
+        const char *command = cJSON_IsString(cmd) ? cmd->valuestring : NULL;
+        if (!command) {
+            dap_send_error(dbg, req_seq, "", "malformed request: command must be a string");
+            cJSON_Delete(msg);
+            continue;
+        }
         cJSON *args = cJSON_GetObjectItem(msg, "arguments");
 
         if (strcmp(command, "initialize") == 0) {
@@ -584,7 +607,14 @@ bool dap_debugger_check(Debugger *dbg, void *vm_ptr, void *frame_ptr, size_t fra
         cJSON *cmd = cJSON_GetObjectItem(msg, "command");
         cJSON *seq = cJSON_GetObjectItem(msg, "seq");
         int req_seq = seq ? seq->valueint : 0;
-        const char *command = cmd ? cmd->valuestring : "";
+        /* `command` must be a JSON string; a present-but-non-string value leaves
+         * valuestring NULL and would crash the strcmp() dispatch below. */
+        const char *command = cJSON_IsString(cmd) ? cmd->valuestring : NULL;
+        if (!command) {
+            dap_send_error(dbg, req_seq, "", "malformed request: command must be a string");
+            cJSON_Delete(msg);
+            continue;
+        }
         cJSON *args = cJSON_GetObjectItem(msg, "arguments");
 
         if (strcmp(command, "continue") == 0) {
