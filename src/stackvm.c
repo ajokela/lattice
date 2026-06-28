@@ -264,7 +264,21 @@ static ObjUpvalue *capture_upvalue(StackVM *vm, LatValue *local) {
 
 /* Fast-path clone: flat copy for primitives, strdup for strings,
  * full deep clone only for compound types. */
+static LatValue value_clone_fast_inner(const LatValue *src);
+
+/* Depth-guarded wrapper (LAT-486): deeply nested data built at runtime would
+ * otherwise recurse here until the C stack overflows. Shares value_clone_impl's
+ * counter; beyond the limit the clone truncates (returns nil) instead of
+ * crashing. The recursive calls below go through this wrapper, so each level
+ * is counted. */
 static inline LatValue value_clone_fast(const LatValue *src) {
+    if (!value_recursion_enter()) return value_nil();
+    LatValue r = value_clone_fast_inner(src);
+    value_recursion_leave();
+    return r;
+}
+
+static LatValue value_clone_fast_inner(const LatValue *src) {
     /* CbR Stage 3 (S3-R1): borrow fast path — aliasing a shared crystal is
      * retain + O(1) bitwise handle copy. MUST come before the per-arm
      * region_id = REGION_NONE resets below, which would orphan the retain.

@@ -28,6 +28,52 @@ DualHeap *value_get_heap(void) { return g_heap; }
 void value_set_arena(CrystalRegion *region) { g_arena = region; }
 CrystalRegion *value_get_arena(void) { return g_arena; }
 
+/* ── Recursion-depth guard (LAT-486) ──
+ *
+ * value_clone_impl / value_free recurse once per level of nesting.  Runtime-
+ * built data can nest arbitrarily deep (e.g.
+ *   flux a = []; for i in 0..1000000 { a = [a] }
+ * ) which would otherwise blow the C stack -> SIGSEGV.  VALUE_RECURSION_LIMIT
+ * is far above any legitimate nesting depth (real data is rarely more than a
+ * few hundred deep) yet well below the depth at which an 8 MiB C stack — the
+ * size every Lattice fiber/thread is created with — overflows (each frame is
+ * a few hundred bytes, so the wall is ~20k+ frames).
+ *
+ * Beyond the limit:
+ *   - value_clone_impl truncates the clone (returns nil) instead of recursing.
+ *     The original is untouched, so there is no double-free; only pathological
+ *     depth loses data.  Because construction of deep data itself funnels
+ *     through value_clone_impl (assignment clones), this also caps how deep a
+ *     structure can grow, which in turn keeps value_free within the limit.
+ *   - value_free stops descending (it still frees everything down to the
+ *     limit).  TRADEOFF: a structure that somehow nests deeper than the limit
+ *     leaks the tail below it — a bounded leak accepted only at a depth no
+ *     real program reaches, in exchange for never crashing.  A full
+ *     explicit-stack iterative free was judged too invasive to retrofit
+ *     safely into this hot, central destructor.
+ *
+ * Thread-local so concurrent fibers each track their own depth. */
+#define VALUE_RECURSION_LIMIT 10000
+#ifdef __EMSCRIPTEN__
+static int value_recursion_depth = 0;
+#else
+static _Thread_local int value_recursion_depth = 0;
+#endif
+
+/* Shared accessors for the recursion-depth guard so the VM clone paths
+ * (value_clone_fast in stackvm.c, rvm_clone in regvm.c) use the SAME counter as
+ * value_clone_impl/value_free here — a single deep structure cannot overflow
+ * the C stack via any backend (LAT-486). value_recursion_enter() returns 0 when
+ * the limit is reached (the caller must not recurse) and 1 otherwise. */
+int value_recursion_enter(void) {
+    if (value_recursion_depth >= VALUE_RECURSION_LIMIT) return 0;
+    value_recursion_depth++;
+    return 1;
+}
+void value_recursion_leave(void) {
+    if (value_recursion_depth > 0) value_recursion_depth--;
+}
+
 /* Deep-clone a value into thread-independent (malloc-backed) storage by
  * cloning with the thread-local heap/arena temporarily detached. Force-copied
  * nodes come back with region_id REGION_NONE; a shared crystal handle (CbR
@@ -449,6 +495,13 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
         return *v; /* bitwise handle copy */
     }
 
+    /* LAT-486: cap recursion depth so pathologically deep data truncates
+     * rather than overflowing the C stack.  The check precedes the depth
+     * bump, and the borrow fast path above returns without bumping, so every
+     * increment is balanced by the decrement before the single return. */
+    if (value_recursion_depth >= VALUE_RECURSION_LIMIT) return value_nil();
+    value_recursion_depth++;
+
     LatValue out = {.type = v->type, .phase = v->phase, .region_id = (size_t)-1};
 
     switch (v->type) {
@@ -666,6 +719,7 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
             if (out.as.iterator.refcount) (*out.as.iterator.refcount)++;
             break;
     }
+    value_recursion_depth--;
     return out;
 }
 
@@ -1510,6 +1564,17 @@ void value_free(LatValue *v) {
         memset(v, 0, sizeof(*v)); /* arena owns everything */
         return;
     }
+    /* LAT-486: bounded recursion. Beyond the limit, stop descending into
+     * children rather than overflowing the C stack. TRADEOFF: the subtree
+     * below this node leaks — a bounded leak accepted only at a depth no real
+     * program reaches (value_clone_impl caps construction at the same limit,
+     * so normally-built data never gets here). The shared-region branch above
+     * does not recurse, so guarding here keeps every increment balanced. */
+    if (value_recursion_depth >= VALUE_RECURSION_LIMIT) {
+        memset(v, 0, sizeof(*v));
+        return;
+    }
+    value_recursion_depth++;
     switch (v->type) {
         case VAL_STR: val_dealloc(v, v->as.str_val); break;
         case VAL_ARRAY:
@@ -1595,6 +1660,7 @@ void value_free(LatValue *v) {
             break;
         default: break;
     }
+    value_recursion_depth--;
     memset(v, 0, sizeof(*v));
 }
 

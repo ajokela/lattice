@@ -3,6 +3,7 @@
 #include "memory.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h> /* LAT-482: atomic Env refcount (shared across threads) */
 
 #define INITIAL_SCOPE_CAP 8
 
@@ -37,12 +38,20 @@ Env *env_new(void) {
 }
 
 void env_retain(Env *env) {
-    if (env) env->refcount++;
+    /* Relaxed: a retain only happens while holding a live handle, so its
+     * visibility piggybacks on whatever published the handle (pthread_create,
+     * channel/mutex). Mirrors ref_retain / crystal_region_retain. */
+    if (env) atomic_fetch_add_explicit(&env->refcount, 1, memory_order_relaxed);
 }
 
 void env_release(Env *env) {
     if (!env) return;
-    if (--env->refcount == 0) env_free(env);
+    /* acq_rel so every prior write through this env happens-before the free,
+     * plus an acquire fence on the final release before tearing it down. */
+    if (atomic_fetch_sub_explicit(&env->refcount, 1, memory_order_acq_rel) == 1) {
+        atomic_thread_fence(memory_order_acquire);
+        env_free(env);
+    }
 }
 
 void env_free(Env *env) {

@@ -12,7 +12,13 @@ struct Env {
     Scope *scopes;
     size_t count;
     size_t cap;
-    size_t refcount;
+    /* LAT-482: closures captured into spawned fibers/threads share their
+     * captured_env, so retain/release can race across threads. The count is
+     * atomic with the same memory-ordering contract as the LatRef cell
+     * (relaxed retain, acq_rel release + acquire fence before free).
+     * `_Atomic size_t` keeps the field size/alignment unchanged; plain
+     * initializing stores (env_new/env_clone) remain valid. */
+    _Atomic size_t refcount;
     bool arena_backed;
 };
 

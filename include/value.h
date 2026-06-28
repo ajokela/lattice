@@ -228,6 +228,13 @@ LatValue value_deep_clone(const LatValue *v);
  * through the recursion as a parameter (never TLS) so reentrant evaluation
  * cannot observe or corrupt it. */
 LatValue value_clone_impl(const LatValue *v, bool allow_share);
+/* Shared recursion-depth guard (LAT-486). The VM clone paths
+ * (value_clone_fast, rvm_clone) call value_recursion_enter() before recursing
+ * and value_recursion_leave() after, sharing value_clone_impl's counter so deep
+ * data cannot overflow the C stack on any backend. enter() returns 0 at the
+ * limit (do not recurse), 1 otherwise. */
+int value_recursion_enter(void);
+void value_recursion_leave(void);
 /* True when the LATTICE_FORCE_COPY=1 differential oracle is active (borrow
  * fast paths disabled — every clone is a physical deep copy). Exposed so VM
  * clone funnels outside value.c share the SAME gate as value_clone_impl. */
