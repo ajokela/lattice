@@ -8,6 +8,11 @@
 #include "win32_compat.h"
 #endif
 
+/* Upper bound on string-builder allocations (pad_left/pad_right). Keeps
+ * (size_t)n + 1 from wrapping on a 32-bit size_t (wasm32) and rejects absurd
+ * target lengths so the malloc size and the fill length always agree. */
+#define LAT_STR_PAD_MAX ((size_t)1 << 28)
+
 /* ========================================================================
  * Array methods (no closures)
  * ======================================================================== */
@@ -905,13 +910,17 @@ LatValue builtin_string_pad_left(LatValue *obj, LatValue *args, int arg_count, c
     int64_t n = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
     char pad = (arg_count >= 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
     size_t slen = strlen(obj->as.str_val);
-    if ((int64_t)slen >= n) return value_deep_clone(obj);
-    size_t plen = (size_t)n - slen;
-    char *buf = malloc((size_t)n + 1);
+    /* Reject targets <= current length or absurdly large ones so the malloc
+     * size and the memset fill length are computed identically in size_t and
+     * (size_t)n + 1 cannot wrap on a 32-bit size_t (wasm32). */
+    if (n <= (int64_t)slen || (uint64_t)n > LAT_STR_PAD_MAX) return value_deep_clone(obj);
+    size_t total = (size_t)n;
+    size_t plen = total - slen;
+    char *buf = malloc(total + 1);
     if (!buf) return value_deep_clone(obj);
     memset(buf, pad, plen);
     memcpy(buf + plen, obj->as.str_val, slen);
-    buf[(size_t)n] = '\0';
+    buf[total] = '\0';
     return value_string_owned(buf);
 }
 
@@ -920,12 +929,15 @@ LatValue builtin_string_pad_right(LatValue *obj, LatValue *args, int arg_count, 
     int64_t n = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
     char pad = (arg_count >= 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
     size_t slen = strlen(obj->as.str_val);
-    if ((int64_t)slen >= n) return value_deep_clone(obj);
-    char *buf = malloc((size_t)n + 1);
+    /* See pad_left: keep the malloc size and the memset fill length identical
+     * and prevent (size_t)n + 1 from wrapping on a 32-bit size_t (wasm32). */
+    if (n <= (int64_t)slen || (uint64_t)n > LAT_STR_PAD_MAX) return value_deep_clone(obj);
+    size_t total = (size_t)n;
+    char *buf = malloc(total + 1);
     if (!buf) return value_deep_clone(obj);
     memcpy(buf, obj->as.str_val, slen);
-    memset(buf + slen, pad, (size_t)n - slen);
-    buf[(size_t)n] = '\0';
+    memset(buf + slen, pad, total - slen);
+    buf[total] = '\0';
     return value_string_owned(buf);
 }
 
@@ -1200,7 +1212,8 @@ LatValue builtin_buffer_write_u8(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_read_u16(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 2 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 2) {
         *error = strdup("Buffer.read_u16: index out of bounds");
         return value_int(0);
     }
@@ -1211,7 +1224,8 @@ LatValue builtin_buffer_read_u16(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_write_u16(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 2 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 2) {
         *error = strdup("Buffer.write_u16: index out of bounds");
         return value_unit();
     }
@@ -1228,7 +1242,8 @@ LatValue builtin_buffer_write_u16(LatValue *obj, LatValue *args, int arg_count, 
 
 LatValue builtin_buffer_read_u32(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 4 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 4) {
         *error = strdup("Buffer.read_u32: index out of bounds");
         return value_int(0);
     }
@@ -1240,7 +1255,8 @@ LatValue builtin_buffer_read_u32(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_write_u32(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 4 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 4) {
         *error = strdup("Buffer.write_u32: index out of bounds");
         return value_unit();
     }
@@ -1268,7 +1284,8 @@ LatValue builtin_buffer_read_i8(LatValue *obj, LatValue *args, int arg_count, ch
 
 LatValue builtin_buffer_read_i16(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 2 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 2) {
         *error = strdup("Buffer.read_i16: index out of bounds");
         return value_int(0);
     }
@@ -1280,7 +1297,8 @@ LatValue builtin_buffer_read_i16(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_read_i32(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 4 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 4) {
         *error = strdup("Buffer.read_i32: index out of bounds");
         return value_int(0);
     }
@@ -1292,7 +1310,8 @@ LatValue builtin_buffer_read_i32(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_read_f32(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 4 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 4) {
         *error = strdup("Buffer.read_f32: index out of bounds");
         return value_float(0.0);
     }
@@ -1304,7 +1323,8 @@ LatValue builtin_buffer_read_f32(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_read_f64(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 8) {
         *error = strdup("Buffer.read_f64: index out of bounds");
         return value_float(0.0);
     }
@@ -1316,7 +1336,8 @@ LatValue builtin_buffer_read_f64(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_read_u64(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 8) {
         *error = strdup("Buffer.read_u64: index out of bounds");
         return value_int(0);
     }
@@ -1330,7 +1351,8 @@ LatValue builtin_buffer_read_u64(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_write_u64(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 8) {
         *error = strdup("Buffer.write_u64: index out of bounds");
         return value_unit();
     }
@@ -1353,7 +1375,8 @@ LatValue builtin_buffer_write_u64(LatValue *obj, LatValue *args, int arg_count, 
 
 LatValue builtin_buffer_read_i64(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 8) {
         *error = strdup("Buffer.read_i64: index out of bounds");
         return value_int(0);
     }
@@ -1365,7 +1388,8 @@ LatValue builtin_buffer_read_i64(LatValue *obj, LatValue *args, int arg_count, c
 
 LatValue builtin_buffer_write_i64(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
-    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (size_t)args[0].as.int_val + 8 > obj->as.buffer.len) {
+    if (args[0].type != VAL_INT || args[0].as.int_val < 0 || (uint64_t)args[0].as.int_val > obj->as.buffer.len ||
+        obj->as.buffer.len - (size_t)args[0].as.int_val < 8) {
         *error = strdup("Buffer.write_i64: index out of bounds");
         return value_unit();
     }

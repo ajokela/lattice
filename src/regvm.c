@@ -30,6 +30,11 @@
 #include <pthread.h>
 #endif
 
+/* Upper bound on string-builder allocations (pad_left/pad_right). Keeps
+ * (size_t)n + 1 from wrapping on a 32-bit size_t (wasm32) and rejects absurd
+ * target lengths so the malloc size and the fill length always agree. */
+#define LAT_STR_PAD_MAX ((size_t)1 << 28)
+
 /* Native function marker — same sentinel as stack VM (defined in vm.c) */
 #define VM_NATIVE_MARKER ((struct Expr **)(uintptr_t)0x1)
 /* Extension function marker — same sentinel as stack VM */
@@ -1885,16 +1890,20 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             char pad =
                 (arg_count == 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
             size_t slen = strlen(obj->as.str_val);
-            if ((int64_t)slen >= n) {
+            /* Reject targets <= current length or absurdly large ones so the
+             * malloc size and the memset fill length are computed identically
+             * in size_t and (size_t)n + 1 cannot wrap on a 32-bit size_t. */
+            if (n <= (int64_t)slen || (uint64_t)n > LAT_STR_PAD_MAX) {
                 *result = rvm_clone(obj);
                 return true;
             }
-            size_t plen = (size_t)n - slen;
-            char *buf = malloc((size_t)n + 1);
+            size_t total = (size_t)n;
+            size_t plen = total - slen;
+            char *buf = malloc(total + 1);
             if (!buf) return 0;
             memset(buf, pad, plen);
             memcpy(buf + plen, obj->as.str_val, slen);
-            buf[(size_t)n] = '\0';
+            buf[total] = '\0';
             *result = value_string_owned(buf);
             return true;
         }
@@ -1903,15 +1912,19 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             char pad =
                 (arg_count == 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
             size_t slen = strlen(obj->as.str_val);
-            if ((int64_t)slen >= n) {
+            /* See pad_left: keep the malloc size and the memset fill length
+             * identical and prevent (size_t)n + 1 from wrapping on a 32-bit
+             * size_t (wasm32). */
+            if (n <= (int64_t)slen || (uint64_t)n > LAT_STR_PAD_MAX) {
                 *result = rvm_clone(obj);
                 return true;
             }
-            char *buf = malloc((size_t)n + 1);
+            size_t total = (size_t)n;
+            char *buf = malloc(total + 1);
             if (!buf) return 0;
             memcpy(buf, obj->as.str_val, slen);
-            memset(buf + slen, pad, (size_t)n - slen);
-            buf[(size_t)n] = '\0';
+            memset(buf + slen, pad, total - slen);
+            buf[total] = '\0';
             *result = value_string_owned(buf);
             return true;
         }
@@ -2284,7 +2297,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (mhash == MHASH_read_u16 && strcmp(method, "read_u16") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
-                if (idx < 0 || (size_t)idx + 2 > obj->as.buffer.len) {
+                if (idx < 0 || (uint64_t)idx > obj->as.buffer.len || obj->as.buffer.len - (size_t)idx < 2) {
                     *result = value_nil();
                 } else {
                     uint16_t v = (uint16_t)(obj->as.buffer.data[idx]) | ((uint16_t)(obj->as.buffer.data[idx + 1]) << 8);
@@ -2299,7 +2312,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 uint16_t v = (uint16_t)args[1].as.int_val;
-                if (idx >= 0 && (size_t)idx + 1 < obj->as.buffer.len) {
+                if (idx >= 0 && (uint64_t)idx <= obj->as.buffer.len && obj->as.buffer.len - (size_t)idx >= 2) {
                     obj->as.buffer.data[idx] = (uint8_t)(v & 0xFF);
                     obj->as.buffer.data[idx + 1] = (uint8_t)(v >> 8);
                 }
@@ -2310,7 +2323,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (mhash == MHASH_read_u32 && strcmp(method, "read_u32") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
-                if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) {
+                if (idx < 0 || (uint64_t)idx > obj->as.buffer.len || obj->as.buffer.len - (size_t)idx < 4) {
                     *result = value_nil();
                 } else {
                     uint32_t v = (uint32_t)(obj->as.buffer.data[idx]) |
@@ -2328,7 +2341,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             if (args[0].type == VAL_INT && args[1].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
                 uint32_t v = (uint32_t)args[1].as.int_val;
-                if (idx >= 0 && (size_t)idx + 3 < obj->as.buffer.len) {
+                if (idx >= 0 && (uint64_t)idx <= obj->as.buffer.len && obj->as.buffer.len - (size_t)idx >= 4) {
                     obj->as.buffer.data[idx] = (uint8_t)(v & 0xFF);
                     obj->as.buffer.data[idx + 1] = (uint8_t)((v >> 8) & 0xFF);
                     obj->as.buffer.data[idx + 2] = (uint8_t)((v >> 16) & 0xFF);
@@ -2354,7 +2367,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (mhash == MHASH_read_i16 && strcmp(method, "read_i16") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
-                if (idx < 0 || (size_t)idx + 2 > obj->as.buffer.len) {
+                if (idx < 0 || (uint64_t)idx > obj->as.buffer.len || obj->as.buffer.len - (size_t)idx < 2) {
                     *result = value_nil();
                 } else {
                     int16_t v;
@@ -2369,7 +2382,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (mhash == MHASH_read_i32 && strcmp(method, "read_i32") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
-                if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) {
+                if (idx < 0 || (uint64_t)idx > obj->as.buffer.len || obj->as.buffer.len - (size_t)idx < 4) {
                     *result = value_nil();
                 } else {
                     int32_t v;
@@ -2384,7 +2397,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (mhash == MHASH_read_f32 && strcmp(method, "read_f32") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
-                if (idx < 0 || (size_t)idx + 4 > obj->as.buffer.len) {
+                if (idx < 0 || (uint64_t)idx > obj->as.buffer.len || obj->as.buffer.len - (size_t)idx < 4) {
                     *result = value_nil();
                 } else {
                     float v;
@@ -2399,7 +2412,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (mhash == MHASH_read_f64 && strcmp(method, "read_f64") == 0 && arg_count == 1) {
             if (args[0].type == VAL_INT) {
                 int64_t idx = args[0].as.int_val;
-                if (idx < 0 || (size_t)idx + 8 > obj->as.buffer.len) {
+                if (idx < 0 || (uint64_t)idx > obj->as.buffer.len || obj->as.buffer.len - (size_t)idx < 8) {
                     *result = value_nil();
                 } else {
                     double v;
