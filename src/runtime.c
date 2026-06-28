@@ -285,20 +285,26 @@ static LatValue native_abs(LatValue *args, int arg_count) {
 
 static LatValue native_floor(LatValue *args, int arg_count) {
     if (arg_count != 1) return value_int(0);
-    if (args[0].type == VAL_FLOAT) return value_int((int64_t)args[0].as.float_val);
-    if (args[0].type == VAL_INT) return args[0];
-    return value_int(0);
+    /* Delegate to math_floor so the NaN/inf/out-of-range float->int guard
+     * (LAT-505) applies on the VM backends too, instead of an unguarded cast. */
+    char *err = NULL;
+    LatValue r = math_floor(&args[0], &err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
+    return r;
 }
 
 static LatValue native_ceil(LatValue *args, int arg_count) {
     if (arg_count != 1) return value_int(0);
-    if (args[0].type == VAL_FLOAT) {
-        double v = args[0].as.float_val;
-        int64_t i = (int64_t)v;
-        return value_int(v > (double)i ? i + 1 : i);
+    char *err = NULL;
+    LatValue r = math_ceil(&args[0], &err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
     }
-    if (args[0].type == VAL_INT) return args[0];
-    return value_int(0);
+    return r;
 }
 
 static LatValue native_exit(LatValue *args, int arg_count) {
@@ -3518,6 +3524,14 @@ static LatValue native_breakpoint(LatValue *args, int arg_count) {
     LatRuntime *rt = lat_runtime_current();
     if (!rt || !rt->active_vm) return value_unit();
 
+    /* breakpoint() introspects StackVM call frames; under the register VM
+     * backend active_vm is a RegVM*, so the cast below would be type confusion
+     * (crash / memory unsafety). Skip the interactive breakpoint gracefully. */
+    if (rt->backend == RT_BACKEND_REG_VM) {
+        fprintf(stderr, "breakpoint(): not supported under the register VM backend\n");
+        return value_unit();
+    }
+
     StackVM *vm = (StackVM *)rt->active_vm;
 
     /* Determine current line from the caller's frame */
@@ -3775,7 +3789,15 @@ static LatValue native_load_bytecode(LatValue *args, int ac) {
         return value_nil();
     }
 
-    /* Stack-VM bytecode (.latc) can only run on the stack VM */
+    /* Stack-VM bytecode (.latc) can only run on the stack VM. Under the register
+     * VM backend active_vm is a RegVM*, so casting it to StackVM* and running it
+     * would be type confusion (crash / memory unsafety). Fail gracefully. */
+    if (current_rt->backend == RT_BACKEND_REG_VM) {
+        current_rt->error = strdup("load_bytecode: .latc bytecode requires the stack VM backend");
+        chunk_free(chunk);
+        return value_nil();
+    }
+
     StackVM *vm = (StackVM *)current_rt->active_vm;
     LatValue result;
     StackVMResult res = stackvm_run(vm, chunk, &result);

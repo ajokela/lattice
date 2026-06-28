@@ -1,6 +1,11 @@
 #include "tls.h"
 #include "net.h"
 
+/* Upper bound on a single tls_read_bytes() request. The count originates from a
+ * Lattice Int (int64); a negative value casts to an enormous size_t, so cap to a
+ * sane maximum (256 MiB) to reject negatives and oversized allocations alike. */
+#define TLS_READ_BYTES_MAX ((size_t)256 * 1024 * 1024)
+
 /* Schannel takes priority: Windows builds define both LATTICE_HAS_TLS and
  * LATTICE_TLS_SCHANNEL but have no OpenSSL */
 #if defined(LATTICE_HAS_TLS) && !defined(LATTICE_TLS_SCHANNEL)
@@ -127,6 +132,14 @@ char *net_tls_read(int fd, char **err) {
 char *net_tls_read_bytes(int fd, size_t count, char **err) {
     if (fd < 0 || fd >= FD_SETSIZE || !tls_sessions[fd]) {
         *err = strdup("tls_read_bytes: not a TLS socket");
+        return NULL;
+    }
+
+    /* Reject negative (which casts to a huge size_t such as SIZE_MAX) or
+     * oversized counts before malloc(count + 1). Otherwise a count of -1 makes
+     * malloc(0) succeed and the SSL_read loop writes peer plaintext OOB. */
+    if (count > TLS_READ_BYTES_MAX) {
+        *err = strdup("tls_read_bytes: count out of range");
         return NULL;
     }
 
@@ -535,6 +548,14 @@ char *net_tls_read(int fd, char **err) {
 /* ── tls_read_bytes ── */
 
 char *net_tls_read_bytes(int fd, size_t count, char **err) {
+    /* Reject negative (which casts to a huge size_t such as SIZE_MAX) or
+     * oversized counts before malloc(count + 1). Otherwise a count of -1 makes
+     * malloc(0) succeed and the per-chunk memcpy below overflows the buffer with
+     * up to 64 KB of server-controlled TLS plaintext. */
+    if (count > TLS_READ_BYTES_MAX) {
+        *err = strdup("tls_read_bytes: count out of range");
+        return NULL;
+    }
     char *result = malloc(count + 1);
     if (!result) {
         *err = strdup("tls_read_bytes: out of memory");

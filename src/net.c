@@ -187,6 +187,11 @@ int net_tcp_connect(const char *host, int port, char **err) {
 
 #define TCP_READ_BUF 8192
 
+/* Upper bound on a single tcp_read_bytes() request. The count originates from a
+ * Lattice Int (int64); a negative value casts to an enormous size_t, so cap to a
+ * sane maximum (256 MiB) to reject negatives and oversized allocations alike. */
+#define NET_READ_BYTES_MAX ((size_t)256 * 1024 * 1024)
+
 char *net_tcp_read(int fd, char **err) {
     if (!is_tracked(fd)) {
         *err = strdup("tcp_read: not a tracked socket");
@@ -215,6 +220,15 @@ char *net_tcp_read(int fd, char **err) {
 char *net_tcp_read_bytes(int fd, size_t count, char **err) {
     if (!is_tracked(fd)) {
         *err = strdup("tcp_read_bytes: not a tracked socket");
+        return NULL;
+    }
+
+    /* Reject negative (which casts to a huge size_t such as SIZE_MAX) or
+     * oversized counts before malloc(count + 1) below. Without this a count of
+     * -1 makes malloc(0) succeed and the recv loop would write peer-controlled
+     * bytes far past the allocation. */
+    if (count > NET_READ_BYTES_MAX) {
+        *err = strdup("tcp_read_bytes: count out of range");
         return NULL;
     }
 

@@ -135,6 +135,14 @@ static char *format_request(const HttpRequest *req, const HttpUrl *url) {
 /* ── Response parsing ── */
 
 static HttpResponse *parse_response(const char *raw, size_t raw_len, char **err) {
+    /* An empty/zero-length response (server closed with no data) leaves the read
+     * buffer uninitialized and unterminated; the strstr() scans below would read
+     * past the allocation. Reject it cleanly before touching the buffer. */
+    if (!raw || raw_len == 0) {
+        *err = strdup("invalid HTTP response: empty response");
+        return NULL;
+    }
+
     /* Find end of headers */
     const char *hdr_end = strstr(raw, "\r\n\r\n");
     if (!hdr_end) {
