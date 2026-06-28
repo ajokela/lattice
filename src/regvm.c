@@ -431,7 +431,20 @@ static inline LatValue rvm_clone_or_borrow(const LatValue *src) {
     return rvm_clone(src);
 }
 
+static LatValue rvm_clone_inner(const LatValue *src);
+
+/* Depth-guarded wrapper (LAT-486): shares value_clone_impl's recursion counter
+ * so deeply nested data truncates (returns nil) instead of overflowing the C
+ * stack on the register backend too. The recursive clones below go through this
+ * wrapper, so each level is counted. */
 static inline LatValue rvm_clone(const LatValue *src) {
+    if (!value_recursion_enter()) return value_nil();
+    LatValue r = rvm_clone_inner(src);
+    value_recursion_leave();
+    return r;
+}
+
+static LatValue rvm_clone_inner(const LatValue *src) {
     /* CbR Stage 4 (LAT-456, mirrors stackvm.c value_clone_fast): borrow fast
      * path — aliasing a shared crystal is retain + O(1) bitwise handle copy.
      * MUST come before the per-arm region_id = REGION_NONE resets below,
@@ -3052,6 +3065,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_SETSLICE_LOCAL] = &&L_SETSLICE_LOCAL,
         /* Misc */
         [ROP_HALT] = &&L_HALT,
+        /* Wide-constant variants */
+        [ROP_GETFIELD_16] = &&L_GETFIELD_16,
+        [ROP_SETFIELD_16] = &&L_SETFIELD_16,
     };
 
 #define DISPATCH()                            \
@@ -3602,6 +3618,56 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         DISPATCH();
     }
 
+    CASE(GETFIELD_16) {
+        /* Wide variant of GETFIELD: the field-name constant index is a full
+         * 16-bit value carried in a follow-up data word (LAT-463). */
+        uint8_t a = REG_GET_A(instr);
+        uint8_t b = REG_GET_B(instr);
+        RegInstr field_data = READ_INSTR();
+        const char *field_name = frame->chunk->constants[REG_GET_Bx(field_data)].as.str_val;
+
+        if (R[b].type == VAL_STRUCT) {
+            bool found = false;
+            for (size_t i = 0; i < R[b].as.strct.field_count; i++) {
+                if (strcmp(R[b].as.strct.field_names[i], field_name) == 0) {
+                    reg_set(&R[a], rvm_clone_or_borrow(&R[b].as.strct.field_values[i]));
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) RVM_ERROR("struct '%s' has no field '%s'", R[b].as.strct.name, field_name);
+        } else if (R[b].type == VAL_MAP) {
+            LatValue *val = lat_map_get(R[b].as.map.map, field_name);
+            if (val) reg_set(&R[a], rvm_clone_or_borrow(val));
+            else reg_set(&R[a], value_nil());
+        } else if (R[b].type == VAL_TUPLE) {
+            char *endp;
+            long idx = strtol(field_name, &endp, 10);
+            if (*endp == '\0' && idx >= 0 && (size_t)idx < R[b].as.tuple.len)
+                reg_set(&R[a], rvm_clone_or_borrow(&R[b].as.tuple.elems[idx]));
+            else RVM_ERROR("tuple has no field '%s'", field_name);
+        } else if (R[b].type == VAL_ENUM) {
+            if (strcmp(field_name, "tag") == 0 || strcmp(field_name, "variant_name") == 0)
+                reg_set(&R[a], value_string(R[b].as.enm.variant_name));
+            else if (strcmp(field_name, "enum_name") == 0) reg_set(&R[a], value_string(R[b].as.enm.enum_name));
+            else if (strcmp(field_name, "payload") == 0) {
+                if (R[b].as.enm.payload_count > 0) {
+                    LatValue *elems = malloc(R[b].as.enm.payload_count * sizeof(LatValue));
+                    if (!elems) return REGVM_RUNTIME_ERROR;
+                    for (size_t pi = 0; pi < R[b].as.enm.payload_count; pi++)
+                        elems[pi] = rvm_clone(&R[b].as.enm.payload[pi]);
+                    reg_set(&R[a], value_array(elems, R[b].as.enm.payload_count));
+                    free(elems);
+                } else {
+                    reg_set(&R[a], value_array(NULL, 0));
+                }
+            } else RVM_ERROR("enum has no field '%s'", field_name);
+        } else {
+            RVM_ERROR("cannot access field '%s' on %s", field_name, value_type_name(&R[b]));
+        }
+        DISPATCH();
+    }
+
     CASE(GETFIELD) {
         uint8_t a = REG_GET_A(instr);
         uint8_t b = REG_GET_B(instr);
@@ -3675,6 +3741,55 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
         /* Also check per-field phases (alloy types) even on non-frozen structs */
+        if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases && R[a].phase != VTAG_CRYSTAL) {
+            for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
+                if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
+                    if (R[a].as.strct.field_phases[i] == VTAG_CRYSTAL)
+                        RVM_ERROR("cannot assign to frozen field '%s'", field_name);
+                    break;
+                }
+            }
+        }
+
+        if (R[a].type == VAL_STRUCT) {
+            for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
+                if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
+                    value_free(&R[a].as.strct.field_values[i]);
+                    R[a].as.strct.field_values[i] = rvm_clone(&R[c]);
+                    break;
+                }
+            }
+        } else if (R[a].type == VAL_MAP) {
+            LatValue cloned = rvm_clone(&R[c]);
+            lat_map_set(R[a].as.map.map, field_name, &cloned);
+        }
+        DISPATCH();
+    }
+
+    CASE(SETFIELD_16) {
+        /* Wide variant of SETFIELD: the field-name constant index is a full
+         * 16-bit value carried in a follow-up data word (LAT-463). */
+        uint8_t a = REG_GET_A(instr); /* object reg */
+        uint8_t c = REG_GET_C(instr); /* value reg */
+        RegInstr field_data = READ_INSTR();
+        const char *field_name = frame->chunk->constants[REG_GET_Bx(field_data)].as.str_val;
+
+        /* Phase checks */
+        if (R[a].phase == VTAG_CRYSTAL || R[a].phase == VTAG_SUBLIMATED) {
+            bool blocked = true;
+            if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases && R[a].phase == VTAG_CRYSTAL) {
+                for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
+                    if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
+                        if (R[a].as.strct.field_phases[i] != VTAG_CRYSTAL) blocked = false;
+                        break;
+                    }
+                }
+            }
+            if (blocked) {
+                const char *phase_name = R[a].phase == VTAG_CRYSTAL ? "frozen" : "sublimated";
+                RVM_ERROR("cannot set field '%s' on a %s value", field_name, phase_name);
+            }
+        }
         if (R[a].type == VAL_STRUCT && R[a].as.strct.field_phases && R[a].phase != VTAG_CRYSTAL) {
             for (size_t i = 0; i < R[a].as.strct.field_count; i++) {
                 if (strcmp(R[a].as.strct.field_names[i], field_name) == 0) {
@@ -3782,8 +3897,14 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     RVM_ERROR("map key must be a string");
                 }
                 LatValue *val = lat_map_get(ref->value.as.map.map, R[c].as.str_val);
-                reg_set(&R[a], val ? rvm_clone(val) : value_nil());
+                /* LAT-472: clone while locked, then unlock BEFORE reg_set. When
+                 * dst==obj (r = r["k"]) reg_set frees R[a] — the sole Ref handle
+                 * — which destroys this very mutex; unlocking afterwards is a
+                 * use-after-free. The clone is independent of ref, so freeing
+                 * the Ref after unlock is safe. */
+                LatValue out = val ? rvm_clone(val) : value_nil();
                 ref_unlock(ref);
+                reg_set(&R[a], out);
             } else if (ref->value.type == VAL_ARRAY) {
                 if (R[c].type != VAL_INT) {
                     ref_unlock(ref);
@@ -3795,8 +3916,13 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     ref_unlock(ref);
                     RVM_ERROR("array index out of bounds");
                 }
-                reg_set(&R[a], rvm_clone(&ref->value.as.array.elems[idx]));
+                /* LAT-472: clone while locked, then unlock BEFORE reg_set. When
+                 * dst==obj (r = r[0]) reg_set frees R[a] — the sole Ref handle —
+                 * which destroys this very mutex; unlocking afterwards is a
+                 * use-after-free. The clone is independent of ref. */
+                LatValue out = rvm_clone(&ref->value.as.array.elems[idx]);
                 ref_unlock(ref);
+                reg_set(&R[a], out);
             } else {
                 const char *tn = value_type_name(&ref->value);
                 ref_unlock(ref);
@@ -4399,18 +4525,19 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
     CASE(INVOKE) {
         /* Two-instruction sequence:
-         *   INVOKE A=dst, B=method_ki, C=argc
-         *   data:  A=obj_reg, B=args_base, C=0
+         *   INVOKE A=dst, B=method_ki_lo, C=argc
+         *   data:  A=obj_reg, B=args_base, C=method_ki_hi
          * Object is mutated in-place at R[obj_reg] (for push/pop).
          * Return value goes into R[dst]. */
         uint8_t dst = REG_GET_A(instr);
-        uint8_t method_ki = REG_GET_B(instr);
         uint8_t argc = REG_GET_C(instr);
 
         /* Read data word */
         RegInstr data = *frame->ip++;
         uint8_t obj_reg = REG_GET_A(data);
         uint8_t args_base = REG_GET_B(data);
+        /* LAT-463: 16-bit method key (lo in word1 B, hi in data word C). */
+        uint16_t method_ki = (uint16_t)REG_GET_B(instr) | ((uint16_t)REG_GET_C(data) << 8);
 
         const char *method_name = frame->chunk->constants[method_ki].as.str_val;
 
@@ -6409,8 +6536,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t argc = REG_GET_C(instr);
 
         RegInstr data = *frame->ip++;
-        uint8_t method_ki = REG_GET_A(data);
         uint8_t args_base = REG_GET_B(data);
+        /* LAT-463: 16-bit method key (lo in data A, hi in data C). */
+        uint16_t method_ki = (uint16_t)REG_GET_A(data) | ((uint16_t)REG_GET_C(data) << 8);
 
         const char *global_name = frame->chunk->constants[name_ki].as.str_val;
         const char *method_name = frame->chunk->constants[method_ki].as.str_val;
@@ -6604,8 +6732,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t argc = REG_GET_C(instr);
 
         RegInstr data = *frame->ip++;
-        uint8_t method_ki = REG_GET_A(data);
         uint8_t args_base = REG_GET_B(data);
+        /* LAT-463: 16-bit method key (lo in data A, hi in data C). */
+        uint16_t method_ki = (uint16_t)REG_GET_A(data) | ((uint16_t)REG_GET_C(data) << 8);
 
         const char *method_name = frame->chunk->constants[method_ki].as.str_val;
 
@@ -7289,6 +7418,8 @@ static size_t reg_instr_words(const RegChunk *c, size_t i, char **err) {
         case ROP_INVOKE_LOCAL:
         case ROP_CHECK_TYPE:
         case ROP_FREEZE_EXCEPT:
+        case ROP_GETFIELD_16:
+        case ROP_SETFIELD_16:
             if (avail < 2) {
                 *err = reg_verify_failf("truncated two-word opcode %u at word %zu", op, i);
                 return 0;
@@ -7381,6 +7512,8 @@ static char *reg_verify_operands(const RegChunk *c, size_t i, const uint8_t *is_
         case ROP_REQUIRE: RCK_STR(Bx); break;
         case ROP_GETFIELD: RCK_STR(C); break;
         case ROP_SETFIELD: RCK_STR(B); break;
+        case ROP_GETFIELD_16:
+        case ROP_SETFIELD_16: RCK_STR(REG_GET_Bx(c->code[i + 1])); break; /* field name in data word */
         case ROP_FREEZE_VAR:
         case ROP_THAW_VAR:
         case ROP_SUBLIMATE_VAR: RCK_STR(A); break;
@@ -7389,15 +7522,28 @@ static char *reg_verify_operands(const RegChunk *c, size_t i, const uint8_t *is_
         case ROP_CLOSURE: RCK_SUBFN(Bx); break;
         case ROP_NEWARRAY:
         case ROP_NEWTUPLE: RCK_WINDOW(B, C); break;
+        case ROP_PRINT: RCK_WINDOW(A, B); break; /* H-12: print reads R[A..A+B-1] */
+        case ROP_CALL:
+            /* H-12: CALL reads R[A] (callee) + R[A+1..A+B] (args); also writes
+             * the result back into R[A]. The widest access is A + (B+1). */
+            RCK_WINDOW(A, (size_t)B + 1);
+            break;
         case ROP_JMP: RCK_JUMP(REG_GET_sBx24(instr)); break;
         case ROP_JMPFALSE:
         case ROP_JMPTRUE:
         case ROP_JMPNOTNIL:
         case ROP_PUSH_HANDLER:
         case ROP_DEFER_PUSH: RCK_JUMP(REG_GET_sBx(instr)); break;
-        case ROP_INVOKE:
-            RCK_STR(B); /* method name (word 1, field B) */
+        case ROP_INVOKE: {
+            /* method key: lo in word1 B, hi in data word C (LAT-463). */
+            RegInstr w2 = c->code[i + 1];
+            uint16_t method_ki = (uint16_t)(B | (REG_GET_C(w2) << 8));
+            RCK_STR(method_ki);
+            RCK_WINDOW(REG_GET_A(w2), 1); /* H-12: obj_reg */
+            RCK_WINDOW(REG_GET_B(w2), C); /* H-12: args_base + argc */
+            RCK_WINDOW(A, 1);             /* dst */
             break;
+        }
         case ROP_NEWSTRUCT: {
             RegInstr w2 = c->code[i + 1];
             RCK_STR(REG_GET_Bx(w2));      /* struct name */
@@ -7414,13 +7560,20 @@ static char *reg_verify_operands(const RegChunk *c, size_t i, const uint8_t *is_
         }
         case ROP_INVOKE_GLOBAL: {
             RegInstr w2 = c->code[i + 1];
-            RCK_STR(B);             /* global name */
-            RCK_STR(REG_GET_A(w2)); /* method name */
+            uint16_t method_ki = (uint16_t)(REG_GET_A(w2) | (REG_GET_C(w2) << 8));
+            RCK_STR(B);                   /* global name (8-bit) */
+            RCK_STR(method_ki);           /* method name (16-bit, LAT-463) */
+            RCK_WINDOW(REG_GET_B(w2), C); /* H-12: args_base + argc */
+            RCK_WINDOW(A, 1);             /* dst */
             break;
         }
         case ROP_INVOKE_LOCAL: {
             RegInstr w2 = c->code[i + 1];
-            RCK_STR(REG_GET_A(w2)); /* method name */
+            uint16_t method_ki = (uint16_t)(REG_GET_A(w2) | (REG_GET_C(w2) << 8));
+            RCK_STR(method_ki);           /* method name (16-bit, LAT-463) */
+            RCK_WINDOW(REG_GET_B(w2), C); /* H-12: args_base + argc */
+            RCK_WINDOW(A, 1);             /* dst */
+            RCK_WINDOW(B, 1);             /* loc_reg */
             break;
         }
         case ROP_CHECK_TYPE: {

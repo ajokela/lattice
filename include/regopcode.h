@@ -202,6 +202,14 @@ typedef enum {
     /* Misc */
     ROP_HALT, /* stop execution                                */
 
+    /* Wide-constant variants (16-bit name/field constant index, two-word).
+     * Emitted only when the constant index exceeds 255 so existing bytecode
+     * (and small programs) keep using the compact single-word forms.
+     * Appended at the end of the opcode list to preserve every existing
+     * opcode number for already-serialized .rlatc files. */
+    ROP_GETFIELD_16, /* A=dst, B=obj; data word: Bx=field_ki (16-bit)   */
+    ROP_SETFIELD_16, /* A=obj, C=val; data word: Bx=field_ki (16-bit)   */
+
     ROP_COUNT /* number of opcodes                             */
 } RegOpcode;
 

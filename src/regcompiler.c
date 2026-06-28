@@ -184,34 +184,74 @@ static size_t emit_AsBx(uint8_t op, uint8_t a, int16_t sbx, int line) {
     return emit(REG_ENCODE_AsBx(op, a, sbx), line);
 }
 
+/* Emit a GETFIELD whose field-name key is `field_ki`. Uses the compact
+ * single-word form when the constant index fits in 8 bits, otherwise the
+ * two-word ROP_GETFIELD_16 form (LAT-463: never truncate the index). */
+static void emit_getfield(uint8_t dst, uint8_t obj, uint16_t field_ki, int line) {
+    if (field_ki <= 0xFF) {
+        emit(REG_ENCODE_ABC(ROP_GETFIELD, dst, obj, (uint8_t)field_ki), line);
+    } else {
+        emit(REG_ENCODE_ABC(ROP_GETFIELD_16, dst, obj, 0), line);
+        emit(REG_ENCODE_ABx(0, 0, field_ki), line); /* data word: Bx = field_ki */
+    }
+}
+
+/* Emit a SETFIELD whose field-name key is `field_ki`. Wide form when needed. */
+static void emit_setfield(uint8_t obj, uint16_t field_ki, uint8_t val, int line) {
+    if (field_ki <= 0xFF) {
+        emit(REG_ENCODE_ABC(ROP_SETFIELD, obj, (uint8_t)field_ki, val), line);
+    } else {
+        emit(REG_ENCODE_ABC(ROP_SETFIELD_16, obj, 0, val), line);
+        emit(REG_ENCODE_ABx(0, 0, field_ki), line); /* data word: Bx = field_ki */
+    }
+}
+
 /* Emit jump placeholder, return instruction index for patching */
 static size_t emit_jump_placeholder(uint8_t op, uint8_t a, int line) { return emit_AsBx(op, a, 0, line); }
 
 static size_t emit_jmp_placeholder(int line) { return emit(REG_ENCODE_sBx(ROP_JMP, 0), line); }
 
-/* Patch a conditional jump (AsBx format) */
+/* Patch a conditional jump (AsBx format, 16-bit signed offset) */
 static void patch_jump(size_t instr_idx) {
     if (rc_error) return;
-    int16_t offset = (int16_t)(current_chunk()->code_len - instr_idx - 1);
+    long off = (long)current_chunk()->code_len - (long)instr_idx - 1;
+    /* LAT-485: refuse to truncate an offset that does not fit in int16_t —
+     * a silently wrapped offset jumps to an arbitrary instruction. */
+    if (off < -32768 || off > 32767) {
+        rc_error = strdup("jump offset out of range (function body exceeds 32767 instructions)");
+        return;
+    }
+    int16_t offset = (int16_t)off;
     RegInstr old = current_chunk()->code[instr_idx];
     uint8_t op = REG_GET_OP(old);
     uint8_t a = REG_GET_A(old);
     current_chunk()->code[instr_idx] = REG_ENCODE_AsBx(op, a, offset);
 }
 
-/* Patch an unconditional jump (sBx24 format) */
+/* Patch an unconditional jump (sBx24 format, 24-bit signed offset) */
 static void patch_jmp(size_t instr_idx) {
     if (rc_error) return;
-    int32_t offset = (int32_t)(current_chunk()->code_len - instr_idx - 1);
+    long off = (long)current_chunk()->code_len - (long)instr_idx - 1;
+    /* LAT-485: 24-bit signed range; refuse rather than wrap. */
+    if (off < -0x7FFFFF || off > 0x7FFFFF) {
+        rc_error = strdup("jump offset out of range (24-bit limit exceeded)");
+        return;
+    }
     /* Preserve original opcode (may be ROP_JMP, ROP_DEFER_PUSH, etc.) */
     uint8_t op = REG_GET_OP(current_chunk()->code[instr_idx]);
-    current_chunk()->code[instr_idx] = REG_ENCODE_sBx(op, offset);
+    current_chunk()->code[instr_idx] = REG_ENCODE_sBx(op, (int32_t)off);
 }
 
 /* Emit backward jump to loop_start */
 static void emit_loop_back(size_t loop_start, int line) {
-    int32_t offset = (int32_t)(loop_start) - (int32_t)(current_chunk()->code_len) - 1;
-    emit(REG_ENCODE_sBx(ROP_JMP, offset), line);
+    if (rc_error) return;
+    long off = (long)loop_start - (long)current_chunk()->code_len - 1;
+    /* LAT-485: 24-bit signed range; refuse rather than wrap. */
+    if (off < -0x7FFFFF || off > 0x7FFFFF) {
+        rc_error = strdup("loop jump offset out of range (24-bit limit exceeded)");
+        return;
+    }
+    emit(REG_ENCODE_sBx(ROP_JMP, (int32_t)off), line);
 }
 
 /* Emit DEFER_RUN + RETURN (use for all returns except inside defer bodies) */
@@ -233,6 +273,34 @@ static uint16_t add_constant(LatValue val) {
         return 0;
     }
     return (uint16_t)idx;
+}
+
+/* Pack a name/string constant index into an 8-bit instruction operand.
+ * Several opcodes (FREEZE_VAR/THAW_VAR/SUBLIMATE_VAR, FREEZE_EXCEPT,
+ * FREEZE_FIELD, the INVOKE_GLOBAL global name, the NEWENUM variant name) have
+ * no spare bits for a wide index, so rather than silently truncating a >255
+ * index — which would make the VM dereference an unrelated constant as a
+ * char* (LAT-463) — we refuse to emit and surface a compile error. */
+static uint8_t name_ki8(uint16_t ki) {
+    if (rc_error) return 0;
+    if (ki > 0xFF) {
+        rc_error = strdup("too many constants in one chunk for an 8-bit name "
+                          "operand (split the function or reduce literals)");
+        return 0;
+    }
+    return (uint8_t)ki;
+}
+
+/* Like name_ki8 but reserves 0xFF as a sentinel (scope/select sub-chunk and
+ * binding indices use 0xFF to mean "none"), so the safe range is 0..254. */
+static uint8_t sub_idx8(uint16_t ki) {
+    if (rc_error) return 0;
+    if (ki >= 0xFF) {
+        rc_error = strdup("too many constants in one chunk for a scope/select "
+                          "sub-chunk index (>254)");
+        return 0;
+    }
+    return (uint8_t)ki;
 }
 
 /* ── Scope and local management ── */
@@ -831,13 +899,13 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     uint16_t name_ki = add_constant(value_string(var_name));
                     int slot = resolve_local(rc, var_name);
                     if (slot >= 0) {
-                        emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 0 | 0x80, local_reg(slot), line);
+                        emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 0 | 0x80, local_reg(slot), line);
                     } else {
                         int uv = resolve_upvalue(rc, var_name);
                         if (uv >= 0) {
-                            emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 1 | 0x80, (uint8_t)uv, line);
+                            emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 1 | 0x80, (uint8_t)uv, line);
                         } else {
-                            emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 2 | 0x80, 0, line);
+                            emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 2 | 0x80, 0, line);
                         }
                     }
                     /* Result: load frozen value into dst */
@@ -1017,12 +1085,12 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 emit_ABC(ROP_LOADNIL, dst, 0, 0, line);
                 size_t skip = emit_jump_placeholder(ROP_JMPFALSE, obj_reg, line);
                 uint16_t field_ki = add_constant(value_string(e->as.field_access.field));
-                emit_ABC(ROP_GETFIELD, dst, obj_reg, (uint8_t)field_ki, line);
+                emit_getfield(dst, obj_reg, field_ki, line);
                 patch_jump(skip);
                 if (obj_reg_temp) free_reg(obj_reg);
             } else {
                 uint16_t field_ki = add_constant(value_string(e->as.field_access.field));
-                emit_ABC(ROP_GETFIELD, dst, obj_reg, (uint8_t)field_ki, line);
+                emit_getfield(dst, obj_reg, field_ki, line);
             }
             break;
         }
@@ -1153,8 +1221,8 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                         if (uv >= 0) emit_ABC(ROP_GETUPVALUE, var_reg, (uint8_t)uv, 0, line);
                         else emit_ABx(ROP_GETGLOBAL, var_reg, pki, line);
                     }
-                    uint8_t fk = (uint8_t)add_constant(value_string(field));
-                    emit_ABC(ROP_FREEZE_FIELD, var_reg, fk, 0, line);
+                    uint16_t fk = add_constant(value_string(field));
+                    emit_ABC(ROP_FREEZE_FIELD, var_reg, name_ki8(fk), 0, line);
                     /* Write back */
                     if (slot >= 0) {
                         emit_ABC(ROP_MOVE, local_reg(slot), var_reg, 0, line);
@@ -1165,7 +1233,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                         else emit_ABx(ROP_SETGLOBAL, var_reg, pki2, line);
                     }
                     /* Return the frozen field value */
-                    emit_ABC(ROP_GETFIELD, dst, var_reg, fk, line);
+                    emit_getfield(dst, var_reg, fk, line);
                     free_reg(var_reg);
                     break;
                 }
@@ -1192,8 +1260,8 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                      * Since m["key"] has a string literal key, extract it. */
                     Expr *idx_expr = e->as.freeze.expr->as.index.index;
                     if (idx_expr->tag == EXPR_STRING_LIT) {
-                        uint8_t fk = (uint8_t)add_constant(value_string(idx_expr->as.str_val));
-                        emit_ABC(ROP_FREEZE_FIELD, var_reg, fk, 0, line);
+                        uint16_t fk = add_constant(value_string(idx_expr->as.str_val));
+                        emit_ABC(ROP_FREEZE_FIELD, var_reg, name_ki8(fk), 0, line);
                     }
                     /* Write back */
                     if (slot >= 0) {
@@ -1242,7 +1310,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                         slot_val = 0;
                     }
                 }
-                emit_ABC(ROP_FREEZE_EXCEPT, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+                emit_ABC(ROP_FREEZE_EXCEPT, name_ki8(name_ki), loc_type, slot_val, line);
                 emit_ABC(ROP_MOVE, except_base, (uint8_t)e->as.freeze.except_count, 0, line);
                 /* Free except field registers */
                 if (e->as.freeze.except_count == 0) free_reg(except_base);
@@ -1298,13 +1366,13 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 uint16_t name_ki = add_constant(value_string(name));
                 int slot = resolve_local(rc, name);
                 if (slot >= 0) {
-                    emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 0, local_reg(slot), line);
+                    emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 0, local_reg(slot), line);
                 } else {
                     int uv = resolve_upvalue(rc, name);
                     if (uv >= 0) {
-                        emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 1, (uint8_t)uv, line);
+                        emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 1, (uint8_t)uv, line);
                     } else {
-                        emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 2, 0, line);
+                        emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 2, 0, line);
                     }
                 }
                 /* FREEZE_VAR writes back to the variable but dst still holds the
@@ -1341,7 +1409,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     if (loc_type == 0) emit_ABC(ROP_MOVE, parent_reg, slot_val, 0, line);
                     else if (loc_type == 1) emit_ABC(ROP_GETUPVALUE, parent_reg, slot_val, 0, line);
                     else emit_ABx(ROP_GETGLOBAL, parent_reg, pname_ki, line);
-                    emit_ABC(ROP_SETFIELD, parent_reg, (uint8_t)(field_ki & 0xFF), dst, line);
+                    emit_setfield(parent_reg, field_ki, dst, line);
                     /* Write back the modified parent */
                     if (loc_type == 0) emit_ABC(ROP_MOVE, slot_val, parent_reg, 0, line);
                     else if (loc_type == 1) emit_ABC(ROP_SETUPVALUE, parent_reg, slot_val, 0, line);
@@ -1402,13 +1470,13 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 uint16_t name_ki = add_constant(value_string(name));
                 int slot = resolve_local(rc, name);
                 if (slot >= 0) {
-                    emit_ABC(ROP_THAW_VAR, (uint8_t)(name_ki & 0xFF), 0, local_reg(slot), line);
+                    emit_ABC(ROP_THAW_VAR, name_ki8(name_ki), 0, local_reg(slot), line);
                 } else {
                     int uv = resolve_upvalue(rc, name);
                     if (uv >= 0) {
-                        emit_ABC(ROP_THAW_VAR, (uint8_t)(name_ki & 0xFF), 1, (uint8_t)uv, line);
+                        emit_ABC(ROP_THAW_VAR, name_ki8(name_ki), 1, (uint8_t)uv, line);
                     } else {
-                        emit_ABC(ROP_THAW_VAR, (uint8_t)(name_ki & 0xFF), 2, 0, line);
+                        emit_ABC(ROP_THAW_VAR, name_ki8(name_ki), 2, 0, line);
                     }
                 }
                 /* THAW_VAR writes back to the variable but dst still holds the
@@ -1471,8 +1539,11 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 uint16_t name_ki = add_constant(value_string(global_name));
                 uint16_t method_ki = add_constant(value_string(e->as.method_call.method));
 
-                emit_ABC(ROP_INVOKE_GLOBAL, dst, (uint8_t)(name_ki & 0xFF), (uint8_t)e->as.method_call.arg_count, line);
-                emit_ABC(ROP_MOVE, (uint8_t)(method_ki & 0xFF), args_base, 0, line);
+                /* LAT-463: the global name has no spare bits (8-bit operand) so
+                 * refuse if it overflows; the method key carries a hi byte in
+                 * the data word's C field, giving it a full 16-bit index. */
+                emit_ABC(ROP_INVOKE_GLOBAL, dst, name_ki8(name_ki), (uint8_t)e->as.method_call.arg_count, line);
+                emit_ABC(ROP_MOVE, (uint8_t)(method_ki & 0xFF), args_base, (uint8_t)(method_ki >> 8), line);
 
                 if (e->as.method_call.arg_count == 0) free_reg(args_base);
                 else free_regs_to(args_base);
@@ -1497,8 +1568,10 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
                     uint16_t method_ki = add_constant(value_string(e->as.method_call.method));
 
+                    /* LAT-463: method key is 16-bit — lo in data-word A, hi in
+                     * data-word C (previously an unused/zero field). */
                     emit_ABC(ROP_INVOKE_LOCAL, dst, local_reg(local), (uint8_t)e->as.method_call.arg_count, line);
-                    emit_ABC(ROP_MOVE, (uint8_t)(method_ki & 0xFF), args_base, 0, line);
+                    emit_ABC(ROP_MOVE, (uint8_t)(method_ki & 0xFF), args_base, (uint8_t)(method_ki >> 8), line);
 
                     if (e->as.method_call.arg_count == 0) free_reg(args_base);
                     else free_regs_to(args_base);
@@ -1534,8 +1607,11 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
             uint16_t method_ki = add_constant(value_string(e->as.method_call.method));
 
+            /* LAT-463: method key is 16-bit — lo in word1 B, hi in the data
+             * word's C field (previously an unused/zero field). */
             emit_ABC(ROP_INVOKE, dst, (uint8_t)(method_ki & 0xFF), (uint8_t)e->as.method_call.arg_count, line);
-            emit_ABC(ROP_MOVE, obj_reg, args_base, 0, line); /* data word (not executed as MOVE) */
+            emit_ABC(ROP_MOVE, obj_reg, args_base, (uint8_t)(method_ki >> 8),
+                     line); /* data word (not executed as MOVE) */
 
             /* Free temp registers */
             if (e->as.method_call.arg_count == 0) free_reg(args_base);
@@ -1927,18 +2003,18 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                         if (spfields[k].value_pat == NULL) {
                             /* Shorthand: {x} => bind x to field value */
                             uint8_t bind_r = add_local(fname);
-                            emit_ABC(ROP_GETFIELD, bind_r, scrutinee, (uint8_t)field_ki, line);
+                            emit_getfield(bind_r, scrutinee, field_ki, line);
                         } else {
                             Pattern *vpat = spfields[k].value_pat;
                             if (vpat->tag == PAT_BINDING) {
                                 uint8_t bind_r = add_local(vpat->as.binding_name);
-                                emit_ABC(ROP_GETFIELD, bind_r, scrutinee, (uint8_t)field_ki, line);
+                                emit_getfield(bind_r, scrutinee, field_ki, line);
                             } else if (vpat->tag == PAT_WILDCARD) {
                                 uint8_t tmp_r = add_local("");
-                                emit_ABC(ROP_GETFIELD, tmp_r, scrutinee, (uint8_t)field_ki, line);
+                                emit_getfield(tmp_r, scrutinee, field_ki, line);
                             } else if (vpat->tag == PAT_LITERAL) {
                                 uint8_t fval_r = alloc_reg();
-                                emit_ABC(ROP_GETFIELD, fval_r, scrutinee, (uint8_t)field_ki, line);
+                                emit_getfield(fval_r, scrutinee, field_ki, line);
                                 uint8_t pat_r = alloc_reg();
                                 compile_expr(vpat->as.literal, pat_r, line);
                                 uint8_t eq_r = alloc_reg();
@@ -1953,7 +2029,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                                 free_reg(fval_r);
                             } else {
                                 uint8_t tmp_r = add_local("");
-                                emit_ABC(ROP_GETFIELD, tmp_r, scrutinee, (uint8_t)field_ki, line);
+                                emit_getfield(tmp_r, scrutinee, field_ki, line);
                             }
                         }
                     }
@@ -2017,7 +2093,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                         uint8_t args_base = alloc_reg();
                         uint16_t name_ki = add_constant(value_string("enum_name"));
                         emit_ABC(ROP_INVOKE, name_reg, (uint8_t)(name_ki & 0xFF), 0, line);
-                        emit_ABC(ROP_MOVE, scrutinee, args_base, 0, line); /* data word */
+                        emit_ABC(ROP_MOVE, scrutinee, args_base, (uint8_t)(name_ki >> 8), line); /* data word */
                         free_reg(args_base);
                         uint8_t expected = alloc_reg();
                         emit_ABx(ROP_LOADK, expected,
@@ -2036,7 +2112,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                         uint8_t args_base = alloc_reg();
                         uint16_t vname_ki = add_constant(value_string("variant_name"));
                         emit_ABC(ROP_INVOKE, vname_reg, (uint8_t)(vname_ki & 0xFF), 0, line);
-                        emit_ABC(ROP_MOVE, scrutinee, args_base, 0, line); /* data word */
+                        emit_ABC(ROP_MOVE, scrutinee, args_base, (uint8_t)(vname_ki >> 8), line); /* data word */
                         free_reg(args_base);
                         uint8_t expected = alloc_reg();
                         emit_ABx(ROP_LOADK, expected,
@@ -2058,7 +2134,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                         uint8_t args_base = alloc_reg();
                         uint16_t payload_ki = add_constant(value_string("payload"));
                         emit_ABC(ROP_INVOKE, payload_reg, (uint8_t)(payload_ki & 0xFF), 0, line);
-                        emit_ABC(ROP_MOVE, scrutinee, args_base, 0, line); /* data word */
+                        emit_ABC(ROP_MOVE, scrutinee, args_base, (uint8_t)(payload_ki >> 8), line); /* data word */
                         free_reg(args_base);
                     }
 
@@ -2191,8 +2267,11 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                  * Follow-up data word: A=base, B=variant_ki */
                 uint16_t name_ki = add_constant(value_string(e->as.enum_variant.enum_name));
                 uint16_t var_ki = add_constant(value_string(e->as.enum_variant.variant_name));
+                /* enum name is full 16-bit (lo in B, hi in the data word's C);
+                 * the variant key occupies the data word's B with no spare bits
+                 * (LAT-463: refuse rather than truncate). */
                 emit_ABC(ROP_NEWENUM, dst, (uint8_t)(name_ki & 0xFF), (uint8_t)e->as.enum_variant.arg_count, line);
-                emit_ABC(ROP_MOVE, base, (uint8_t)(var_ki & 0xFF), (uint8_t)((name_ki >> 8) & 0xFF), line);
+                emit_ABC(ROP_MOVE, base, name_ki8(var_ki), (uint8_t)((name_ki >> 8) & 0xFF), line);
                 free_regs_to(base);
             }
             break;
@@ -2205,13 +2284,13 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 uint16_t name_ki = add_constant(value_string(name));
                 int slot = resolve_local(rc, name);
                 if (slot >= 0) {
-                    emit_ABC(ROP_SUBLIMATE_VAR, (uint8_t)(name_ki & 0xFF), 0, local_reg(slot), line);
+                    emit_ABC(ROP_SUBLIMATE_VAR, name_ki8(name_ki), 0, local_reg(slot), line);
                 } else {
                     int uv = resolve_upvalue(rc, name);
                     if (uv >= 0) {
-                        emit_ABC(ROP_SUBLIMATE_VAR, (uint8_t)(name_ki & 0xFF), 1, (uint8_t)uv, line);
+                        emit_ABC(ROP_SUBLIMATE_VAR, name_ki8(name_ki), 1, (uint8_t)uv, line);
                     } else {
-                        emit_ABC(ROP_SUBLIMATE_VAR, (uint8_t)(name_ki & 0xFF), 2, 0, line);
+                        emit_ABC(ROP_SUBLIMATE_VAR, name_ki8(name_ki), 2, 0, line);
                     }
                 }
             }
@@ -2363,13 +2442,13 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 if (slot >= 0) {
                     /* Write closure result back to the variable's register */
                     emit_ABC(ROP_MOVE, local_reg(slot), dst, 0, line);
-                    emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 0, local_reg(slot), line);
+                    emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 0, local_reg(slot), line);
                 } else {
                     int uv = resolve_upvalue(rc, name);
                     if (uv >= 0) {
-                        emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 1, (uint8_t)uv, line);
+                        emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 1, (uint8_t)uv, line);
                     } else {
-                        emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), 2, 0, line);
+                        emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), 2, 0, line);
                     }
                 }
             } else {
@@ -2421,7 +2500,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 emit_ABC(ROP_IS_CRYSTAL, was_crystal, dst, 0, line);
                 /* Freeze the variable */
                 compile_expr(e->as.crystallize.expr, dst, line);
-                emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+                emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), loc_type, slot_val, line);
                 /* Execute body */
                 begin_scope();
                 for (size_t i = 0; i < e->as.crystallize.body_count; i++) compile_stmt(e->as.crystallize.body[i]);
@@ -2430,7 +2509,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 size_t skip_thaw = emit_jump_placeholder(ROP_JMPTRUE, was_crystal, line);
                 /* was not crystal → thaw back */
                 compile_expr(e->as.crystallize.expr, dst, line);
-                emit_ABC(ROP_THAW_VAR, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+                emit_ABC(ROP_THAW_VAR, name_ki8(name_ki), loc_type, slot_val, line);
                 patch_jump(skip_thaw);
                 free_reg(was_crystal);
             } else {
@@ -2470,7 +2549,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 emit_ABC(ROP_IS_FLUID, was_fluid, dst, 0, line);
                 /* Thaw the variable */
                 compile_expr(e->as.borrow.expr, dst, line);
-                emit_ABC(ROP_THAW_VAR, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+                emit_ABC(ROP_THAW_VAR, name_ki8(name_ki), loc_type, slot_val, line);
                 /* Execute body */
                 begin_scope();
                 for (size_t i = 0; i < e->as.borrow.body_count; i++) compile_stmt(e->as.borrow.body[i]);
@@ -2479,7 +2558,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 size_t skip_freeze = emit_jump_placeholder(ROP_JMPTRUE, was_fluid, line);
                 /* was not fluid → freeze back */
                 compile_expr(e->as.borrow.expr, dst, line);
-                emit_ABC(ROP_FREEZE_VAR, (uint8_t)(name_ki & 0xFF), loc_type, slot_val, line);
+                emit_ABC(ROP_FREEZE_VAR, name_ki8(name_ki), loc_type, slot_val, line);
                 patch_jump(skip_freeze);
                 free_reg(was_fluid);
             } else {
@@ -2496,7 +2575,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         case EXPR_SPAWN: {
             /* Spawn outside scope — compile as ROP_SCOPE with 0 spawns (sub-chunk so return works) */
             RegChunk *spawn_ch = compile_reg_sub_body(e->as.block.stmts, e->as.block.count, line);
-            uint8_t body_idx = (uint8_t)add_regchunk_constant(spawn_ch);
+            uint8_t body_idx = sub_idx8(add_regchunk_constant(spawn_ch));
 
             /* Emit: ROP_SCOPE dst, then data word with spawn_count=0, sync_idx=body_idx */
             emit_ABC(ROP_SCOPE, dst, 0, 0, line);
@@ -2531,7 +2610,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     if (!(s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)) sync_stmts[si++] = s;
                 }
                 RegChunk *sync_ch = compile_reg_sub_body(sync_stmts, sync_count, line);
-                sync_idx = (uint8_t)add_regchunk_constant(sync_ch);
+                sync_idx = sub_idx8(add_regchunk_constant(sync_ch));
                 free(sync_stmts);
             }
 
@@ -2548,7 +2627,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     Expr *spawn_expr = s->as.expr;
                     RegChunk *spawn_ch =
                         compile_reg_sub_body(spawn_expr->as.block.stmts, spawn_expr->as.block.count, line);
-                    spawn_indices[spi++] = (uint8_t)add_regchunk_constant(spawn_ch);
+                    spawn_indices[spi++] = sub_idx8(add_regchunk_constant(spawn_ch));
                 }
             }
 
@@ -2592,19 +2671,19 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     chan_idx = 0xFF;
                 } else if (arms[i].is_timeout) {
                     RegChunk *to_ch = compile_reg_sub_expr(arms[i].timeout_expr, line);
-                    chan_idx = (uint8_t)add_regchunk_constant(to_ch);
+                    chan_idx = sub_idx8(add_regchunk_constant(to_ch));
                 } else {
                     RegChunk *ch_ch = compile_reg_sub_expr(arms[i].channel_expr, line);
-                    chan_idx = (uint8_t)add_regchunk_constant(ch_ch);
+                    chan_idx = sub_idx8(add_regchunk_constant(ch_ch));
                 }
 
                 /* Body chunk */
                 RegChunk *body_ch = compile_reg_sub_body(arms[i].body, arms[i].body_count, line);
-                uint8_t body_idx = (uint8_t)add_regchunk_constant(body_ch);
+                uint8_t body_idx = sub_idx8(add_regchunk_constant(body_ch));
 
                 /* Binding name constant index */
                 uint8_t binding_idx = 0xFF;
-                if (arms[i].binding_name) binding_idx = (uint8_t)add_constant(value_string(arms[i].binding_name));
+                if (arms[i].binding_name) binding_idx = sub_idx8(add_constant(value_string(arms[i].binding_name)));
 
                 /* Emit arm data: flags, chan_idx, body_idx, binding_idx */
                 emit_ABC(0, flags, chan_idx, body_idx, line);
@@ -2752,7 +2831,7 @@ static void compile_stmt(const Stmt *s) {
                 }
 
                 uint16_t field_ki = add_constant(value_string(target->as.field_access.field));
-                emit_ABC(ROP_SETFIELD, obj_reg, (uint8_t)(field_ki & 0xFF), val_reg, line);
+                emit_setfield(obj_reg, field_ki, val_reg, line);
 
                 /* Write back if it's a global/upvalue */
                 if (!obj_is_local && target->as.field_access.object->tag == EXPR_IDENT) {
@@ -3111,10 +3190,10 @@ static void compile_stmt(const Stmt *s) {
                     uint16_t field_ki = add_constant(value_string(s->as.destructure.names[i]));
                     if (rc->scope_depth > 0) {
                         uint8_t var_reg = add_local(s->as.destructure.names[i]);
-                        emit_ABC(ROP_GETFIELD, var_reg, src_reg, (uint8_t)field_ki, line);
+                        emit_getfield(var_reg, src_reg, field_ki, line);
                     } else {
                         uint8_t val_reg = alloc_reg();
-                        emit_ABC(ROP_GETFIELD, val_reg, src_reg, (uint8_t)field_ki, line);
+                        emit_getfield(val_reg, src_reg, field_ki, line);
                         uint16_t nki = add_constant(value_string(s->as.destructure.names[i]));
                         emit_ABx(ROP_DEFINEGLOBAL, val_reg, nki, line);
                         free_reg(val_reg);
@@ -3156,7 +3235,7 @@ static void compile_stmt(const Stmt *s) {
                 for (size_t i = 0; i < s->as.import.selective_count; i++) {
                     uint16_t field_ki = add_constant(value_string(s->as.import.selective_names[i]));
                     uint8_t val_reg = alloc_reg();
-                    emit_ABC(ROP_GETFIELD, val_reg, tmp, (uint8_t)field_ki, line);
+                    emit_getfield(val_reg, tmp, field_ki, line);
                     /* Check that the export exists (not nil) */
                     size_t ok = emit_jump_placeholder(ROP_JMPNOTNIL, val_reg, line);
                     {
