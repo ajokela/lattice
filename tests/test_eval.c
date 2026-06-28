@@ -6775,3 +6775,129 @@ TEST(cbr_s3_catch_does_not_pin_regions) {
                 "    assert(phase_of(shared) == \"crystal\", \"shared phase changed\")\n"
                 "}\n");
 }
+
+/* ── LAT-458 / LAT-460 / LAT-537: Ref copy-on-write + concurrency safety ── */
+TEST(ref_lat458_cow_push_preserves_frozen_alias) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let orig = freeze([1, 2, 3])\n"
+                "  let r = Ref::new(orig)\n"
+                "  r.push(99)\n"
+                "  assert(r.get().len() == 4, \"ref should have 4 elements after push\")\n"
+                "  assert(orig.len() == 3, \"frozen original must stay length 3\")\n"
+                "}\n");
+}
+
+TEST(ref_lat458_cow_index_assign_preserves_frozen_alias) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let orig = freeze([1, 2, 3])\n"
+                "  let r = Ref::new(orig)\n"
+                "  r[0] = 88\n"
+                "  assert(r.get()[0] == 88, \"ref element should update\")\n"
+                "  assert(orig[0] == 1, \"frozen original element must be unchanged\")\n"
+                "}\n");
+}
+
+TEST(ref_lat458_direct_frozen_mutation_still_errors) {
+    ASSERT_FAILS("fn main() {\n"
+                 "  let a = freeze([1, 2, 3])\n"
+                 "  a.push(9)\n"
+                 "}\n");
+}
+
+TEST(ref_lat537_index_assign_evaluates_index_once) {
+    ASSERT_RUNS("fn bump(c: any) { c.set(c.get() + 1); return 0 }\n"
+                "fn main() {\n"
+                "  let counter = Ref::new(0)\n"
+                "  let r = Ref::new([10, 20, 30])\n"
+                "  r[bump(counter)] = 88\n"
+                "  assert(counter.get() == 1, \"index sub-expression must be evaluated exactly once\")\n"
+                "  assert(r.get()[0] == 88, \"index write must land\")\n"
+                "}\n");
+}
+
+TEST(ref_lat537_concurrent_mutation_no_crash) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([0])\n"
+                "  for round in 0..80 {\n"
+                "    scope {\n"
+                "      spawn { r.push(round) }\n"
+                "      spawn { r.set([round]) }\n"
+                "      spawn { r[0] = round }\n"
+                "      spawn { let x = r.get() }\n"
+                "    }\n"
+                "  }\n"
+                "  assert(true, \"concurrent ref mutation completed\")\n"
+                "}\n");
+}
+
+TEST(ref_lat537_concurrent_read_write_no_crash) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new(freeze([1, 2, 3]))\n"
+                "  for round in 0..80 {\n"
+                "    scope {\n"
+                "      spawn { let a = r[0] }\n"
+                "      spawn { let b = r[1] }\n"
+                "      spawn { r[2] = round }\n"
+                "    }\n"
+                "  }\n"
+                "  assert(true, \"concurrent ref read/write completed\")\n"
+                "}\n");
+}
+
+TEST(ref_lat460_cross_thread_heap_inner_no_double_free) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([0])\n"
+                "  for round in 0..80 {\n"
+                "    scope {\n"
+                "      spawn { r.set([round, round + 1]) }\n"
+                "      spawn { let x = r.get() }\n"
+                "    }\n"
+                "  }\n"
+                "  assert(true, \"cross-thread ref heap-inner churn completed\")\n"
+                "}\n");
+}
+
+TEST(ref_lat537_slice_assign_toctou_type_confusion_errors_safely) {
+    ASSERT_FAILS("struct Pt { x: int, y: int }\n"
+                 "fn evil() { r.set(Pt { x: 1, y: 2 }); return 0 }\n"
+                 "flux r = Ref::new([10, 20, 30])\n"
+                 "fn main() {\n"
+                 "  r[evil()..2] = [99]\n"
+                 "}\n");
+}
+
+TEST(ref_lat537_slice_assign_refreeze_during_bounds_errors_safely) {
+    ASSERT_FAILS("flux r = Ref::new([1, 2, 3, 4])\n"
+                 "fn evil() { r.set(freeze([9, 9, 9])); return 2 }\n"
+                 "fn main() {\n"
+                 "  r[0..evil()] = [7]\n"
+                 "}\n");
+}
+
+TEST(ref_lat537_concurrent_len_read_no_uaf) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([1, 2, 3])\n"
+                "  for round in 0..80 {\n"
+                "    scope {\n"
+                "      spawn { let n = r.len() }\n"
+                "      spawn { let m = r.length() }\n"
+                "      spawn { r.set([round, round]) }\n"
+                "    }\n"
+                "  }\n"
+                "  assert(true, \"concurrent ref len/set completed\")\n"
+                "}\n");
+}
+
+TEST(ref_lat537_transient_ref_index_oob_errors_safely) {
+    ASSERT_FAILS("fn main() {\n"
+                 "  let x = Ref::new([1, 2, 3])[99]\n"
+                 "}\n");
+}
+
+TEST(ref_lat537_ref_len_returns_inner_length) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([10, 20, 30, 40])\n"
+                "  assert(r.len() == 4, \"ref len must be 4\")\n"
+                "  assert(r.length() == 4, \"ref length must be 4\")\n"
+                "}\n");
+}

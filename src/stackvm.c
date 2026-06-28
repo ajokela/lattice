@@ -4695,29 +4695,40 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             LatValue obj = pop(vm);
             /* Ref proxy: delegate indexing to inner value */
             if (obj.type == VAL_REF) {
-                LatValue *inner = &obj.as.ref.ref->value;
+                /* LAT-537: hold the cell lock across the READ (clone under the
+                 * lock) so a concurrent locked writer cannot free the inner
+                 * mid-clone. obj is a retained ref value, so the cell outlives
+                 * the unlock until value_free(&obj) releases it. */
+                LatRef *rcell = obj.as.ref.ref;
+                ref_lock(rcell);
+                LatValue *inner = &rcell->value;
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        size_t alen = inner->as.array.len; /* capture before value_free frees the cell */
+                        ref_unlock(rcell);
                         value_free(&obj);
-                        VM_ERROR("array index out of bounds: %lld (len %zu)", (long long)i, inner->as.array.len);
+                        VM_ERROR("array index out of bounds: %lld (len %zu)", (long long)i, alen);
                         break;
                     }
                     LatValue elem = value_deep_clone(&inner->as.array.elems[i]);
+                    ref_unlock(rcell);
                     value_free(&obj);
                     push(vm, elem);
                     break;
                 }
                 if (inner->type == VAL_MAP && idx.type == VAL_STR) {
                     LatValue *found = lat_map_get(inner->as.map.map, idx.as.str_val);
-                    if (found) push(vm, value_deep_clone(found));
-                    else push(vm, value_nil());
+                    LatValue out = found ? value_deep_clone(found) : value_nil();
+                    ref_unlock(rcell);
+                    push(vm, out);
                     value_free(&obj);
                     value_free(&idx);
                     break;
                 }
                 const char *it = value_type_name(&idx);
                 const char *innert = value_type_name(inner);
+                ref_unlock(rcell);
                 value_free(&obj);
                 value_free(&idx);
                 VM_ERROR("invalid index operation: Ref<%s>[%s]", innert, it);
@@ -4839,7 +4850,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     VM_ERROR("cannot assign index on a frozen Ref");
                     break;
                 }
-                LatValue *inner = &obj.as.ref.ref->value;
+                /* LAT-537: hold the per-cell lock across the unshare + write so
+                 * concurrent mutation through a shared Ref cannot race. Mirrors
+                 * regvm SETINDEX — every error exit unlocks first. */
+                LatRef *ref = obj.as.ref.ref;
+                ref_lock(ref);
+                LatValue *inner = &ref->value;
                 /* LAT-458: privatize a borrowed shared/crystal inner before the
                  * in-place index write — value_free/lat_map_set on sealed region
                  * memory corrupts it. Mirrors regvm (cf77625). */
@@ -4847,24 +4863,34 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        ref_unlock(ref);
                         value_free(&obj);
                         value_free(&val);
                         VM_ERROR("array index out of bounds in assignment");
                         break;
                     }
                     value_free(&inner->as.array.elems[i]);
-                    inner->as.array.elems[i] = val;
+                    /* STORE direction (LAT-450): the cell outlives a spawned
+                     * writer, so the stored copy must be detached (malloc-backed)
+                     * — mirrors regvm SETINDEX. */
+                    inner->as.array.elems[i] = value_detach(&val);
+                    value_free(&val);
+                    ref_unlock(ref);
                     push(vm, obj);
                     break;
                 }
                 if (inner->type == VAL_MAP && idx.type == VAL_STR) {
                     LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, idx.as.str_val);
                     if (old) value_free(old);
-                    lat_map_set(inner->as.map.map, idx.as.str_val, &val);
+                    LatValue stored = value_detach(&val);
+                    lat_map_set(inner->as.map.map, idx.as.str_val, &stored);
+                    value_free(&val);
+                    ref_unlock(ref);
                     value_free(&idx);
                     push(vm, obj);
                     break;
                 }
+                ref_unlock(ref);
                 value_free(&obj);
                 value_free(&idx);
                 value_free(&val);
@@ -6313,7 +6339,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     VM_ERROR("cannot assign index on a frozen Ref");
                     break;
                 }
-                LatValue *inner = &obj->as.ref.ref->value;
+                /* LAT-537: hold the per-cell lock across the unshare + write so
+                 * concurrent mutation through a shared Ref cannot race. Mirrors
+                 * regvm SETINDEX — every error exit unlocks first. */
+                LatRef *ref = obj->as.ref.ref;
+                ref_lock(ref);
+                LatValue *inner = &ref->value;
                 /* LAT-458: privatize a borrowed shared/crystal inner before the
                  * in-place index write — value_free/lat_map_set on sealed region
                  * memory corrupts it. Mirrors regvm (cf77625). */
@@ -6321,21 +6352,29 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        ref_unlock(ref);
                         value_free(&val);
                         VM_ERROR("array index out of bounds: %lld (len %zu)", (long long)i, inner->as.array.len);
                         break;
                     }
                     value_free(&inner->as.array.elems[i]);
-                    inner->as.array.elems[i] = val;
+                    /* STORE direction (LAT-450): detach — see regvm SETINDEX. */
+                    inner->as.array.elems[i] = value_detach(&val);
+                    value_free(&val);
+                    ref_unlock(ref);
                     break;
                 }
                 if (inner->type == VAL_MAP && idx.type == VAL_STR) {
                     LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, idx.as.str_val);
                     if (old) value_free(old);
-                    lat_map_set(inner->as.map.map, idx.as.str_val, &val);
+                    LatValue stored = value_detach(&val);
+                    lat_map_set(inner->as.map.map, idx.as.str_val, &stored);
+                    value_free(&val);
+                    ref_unlock(ref);
                     value_free(&idx);
                     break;
                 }
+                ref_unlock(ref);
                 value_free(&val);
                 value_free(&idx);
                 VM_ERROR("invalid index assignment on Ref");
@@ -6465,26 +6504,32 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 }
                 push(vm, value_int(obj->as.buffer.data[i]));
             } else if (obj->type == VAL_REF) {
-                LatValue *inner = &obj->as.ref.ref->value;
-                /* LAT-458: privatize a borrowed shared/crystal inner before the
-                 * in-place index write — value_free/lat_map_set on sealed region
-                 * memory corrupts it. Mirrors regvm (cf77625). */
-                value_unshare_detached(inner);
+                /* LAT-537: hold the cell lock across the READ so a concurrent
+                 * locked writer cannot free/replace the inner mid-clone. Clone
+                 * under the lock, unlock, then push. Reads do NOT unshare. */
+                LatRef *rcell = obj->as.ref.ref;
+                ref_lock(rcell);
+                LatValue *inner = &rcell->value;
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        ref_unlock(rcell);
                         VM_ERROR("array index out of bounds: %lld (len %zu)", (long long)i, inner->as.array.len);
                         break;
                     }
-                    push(vm, value_deep_clone(&inner->as.array.elems[i]));
+                    LatValue out = value_deep_clone(&inner->as.array.elems[i]);
+                    ref_unlock(rcell);
+                    push(vm, out);
                 } else if (inner->type == VAL_MAP && idx.type == VAL_STR) {
                     LatValue *found = lat_map_get(inner->as.map.map, idx.as.str_val);
-                    if (found) push(vm, value_deep_clone(found));
-                    else push(vm, value_nil());
+                    LatValue out = found ? value_deep_clone(found) : value_nil();
+                    ref_unlock(rcell);
+                    push(vm, out);
                     value_free(&idx);
                 } else {
                     const char *it = value_type_name(&idx);
                     const char *innert = value_type_name(inner);
+                    ref_unlock(rcell);
                     value_free(&idx);
                     VM_ERROR("invalid index operation: Ref<%s>[%s]", innert, it);
                 }
@@ -6593,26 +6638,32 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 }
                 push(vm, value_int(obj->as.buffer.data[i]));
             } else if (obj->type == VAL_REF) {
-                LatValue *inner = &obj->as.ref.ref->value;
-                /* LAT-458: privatize a borrowed shared/crystal inner before the
-                 * in-place index write — value_free/lat_map_set on sealed region
-                 * memory corrupts it. Mirrors regvm (cf77625). */
-                value_unshare_detached(inner);
+                /* LAT-537: hold the cell lock across the READ so a concurrent
+                 * locked writer cannot free/replace the inner mid-clone. Clone
+                 * under the lock, unlock, then push. Reads do NOT unshare. */
+                LatRef *rcell = obj->as.ref.ref;
+                ref_lock(rcell);
+                LatValue *inner = &rcell->value;
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        ref_unlock(rcell);
                         VM_ERROR("array index out of bounds: %lld (len %zu)", (long long)i, inner->as.array.len);
                         break;
                     }
-                    push(vm, value_deep_clone(&inner->as.array.elems[i]));
+                    LatValue out = value_deep_clone(&inner->as.array.elems[i]);
+                    ref_unlock(rcell);
+                    push(vm, out);
                 } else if (inner->type == VAL_MAP && idx.type == VAL_STR) {
                     LatValue *found = lat_map_get(inner->as.map.map, idx.as.str_val);
-                    if (found) push(vm, value_deep_clone(found));
-                    else push(vm, value_nil());
+                    LatValue out = found ? value_deep_clone(found) : value_nil();
+                    ref_unlock(rcell);
+                    push(vm, out);
                     value_free(&idx);
                 } else {
                     const char *it = value_type_name(&idx);
                     const char *innert = value_type_name(inner);
+                    ref_unlock(rcell);
                     value_free(&idx);
                     VM_ERROR("invalid index operation: Ref<%s>[%s]", innert, it);
                 }
@@ -6659,7 +6710,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     VM_ERROR("cannot assign index on a frozen Ref");
                     break;
                 }
-                LatValue *inner = &obj->as.ref.ref->value;
+                /* LAT-537: hold the per-cell lock across the unshare + write so
+                 * concurrent mutation through a shared Ref cannot race. Mirrors
+                 * regvm SETINDEX — every error exit unlocks first. */
+                LatRef *ref = obj->as.ref.ref;
+                ref_lock(ref);
+                LatValue *inner = &ref->value;
                 /* LAT-458: privatize a borrowed shared/crystal inner before the
                  * in-place index write — value_free/lat_map_set on sealed region
                  * memory corrupts it. Mirrors regvm (cf77625). */
@@ -6667,21 +6723,29 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
+                        ref_unlock(ref);
                         value_free(&val);
                         VM_ERROR("array index out of bounds in assignment");
                         break;
                     }
                     value_free(&inner->as.array.elems[i]);
-                    inner->as.array.elems[i] = val;
+                    /* STORE direction (LAT-450): detach — see regvm SETINDEX. */
+                    inner->as.array.elems[i] = value_detach(&val);
+                    value_free(&val);
+                    ref_unlock(ref);
                     break;
                 }
                 if (inner->type == VAL_MAP && idx.type == VAL_STR) {
                     LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, idx.as.str_val);
                     if (old) value_free(old);
-                    lat_map_set(inner->as.map.map, idx.as.str_val, &val);
+                    LatValue stored = value_detach(&val);
+                    lat_map_set(inner->as.map.map, idx.as.str_val, &stored);
+                    value_free(&val);
+                    ref_unlock(ref);
                     value_free(&idx);
                     break;
                 }
+                ref_unlock(ref);
                 value_free(&val);
                 value_free(&idx);
                 VM_ERROR("invalid index assignment on Ref");
@@ -6886,8 +6950,14 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             stackvm_promote_value(&val);
             LatValue *obj = &frame->slots[slot];
 
-            /* Ref unwrap */
-            if (obj->type == VAL_REF) obj = &obj->as.ref.ref->value;
+            /* Ref unwrap (LAT-537: capture the cell to lock + privatize the
+             * splice — the in-place realloc/memmove/free on a shared inner
+             * would otherwise race concurrent mutators). */
+            LatRef *slice_cell = NULL;
+            if (obj->type == VAL_REF) {
+                slice_cell = obj->as.ref.ref;
+                obj = &obj->as.ref.ref->value;
+            }
 
             if (obj->type != VAL_ARRAY) {
                 value_free(&val);
@@ -6908,6 +6978,30 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 value_free(&val);
                 VM_ERROR("slice bounds must be integers");
                 break;
+            }
+
+            /* LAT-537: lock + privatize before the in-place splice. The only
+             * error exit below the lock is the TOCTOU re-check (which unlocks);
+             * the success break also unlocks, keeping the lock balanced. */
+            if (slice_cell) {
+                ref_lock(slice_cell);
+                value_unshare_detached(&slice_cell->value);
+                obj = &slice_cell->value;
+                /* Re-validate UNDER the lock: a concurrent r.set may have
+                 * replaced the inner with a non-array or re-frozen it since the
+                 * pre-lock check (TOCTOU type confusion / immutability bypass). */
+                if (obj->type != VAL_ARRAY) {
+                    ref_unlock(slice_cell);
+                    value_free(&val);
+                    VM_ERROR("slice assignment target must be an array");
+                    break;
+                }
+                if (obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) {
+                    ref_unlock(slice_cell);
+                    value_free(&val);
+                    VM_ERROR("cannot modify a %s value", obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                    break;
+                }
             }
 
             int64_t start = start_v.as.int_val;
@@ -6954,6 +7048,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             }
 
             value_free(&val);
+            if (slice_cell) {
+                /* LAT-537: the splice cloned elements / realloc'd the buffer on
+                 * THIS thread's fluid heap; detach the spliced inner so the
+                 * shared cell holds malloc-backed storage that outlives a
+                 * spawned worker's heap teardown (free-direction double-free
+                 * class). Mirrors the tree-walker slice store in eval.c. */
+                LatValue detached = value_detach(obj);
+                value_free(obj);
+                *obj = detached;
+                ref_unlock(slice_cell);
+            }
             break;
         }
 

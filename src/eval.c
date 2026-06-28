@@ -637,6 +637,29 @@ static LatValue *ref_unwrap_for_write(LatValue *lv, bool *was_ref) {
     return lv;
 }
 
+/* LAT-537: acquire the per-cell lock for an in-place Ref mutation and
+ * privatize the inner (copy-on-write) UNDER the lock. Returns the LOCKED
+ * cell and sets *inner to the now-private inner ptr; returns NULL (nothing
+ * locked) for a non-Ref lvalue, leaving *inner = lv. A non-NULL return MUST
+ * be paired with ref_write_unlock(cell) on EVERY exit. Moving
+ * value_unshare_detached under the lock closes the privatization race that
+ * bare ref_unwrap_for_write leaves open. */
+static LatRef *ref_write_lock(LatValue *lv, LatValue **inner) {
+    if (lv && lv->type == VAL_REF) {
+        LatRef *cell = lv->as.ref.ref;
+        ref_lock(cell);
+        LatValue *in = &cell->value;
+        value_unshare_detached(in); /* privatization now happens under the lock */
+        *inner = in;
+        return cell;
+    }
+    *inner = lv;
+    return NULL;
+}
+static inline void ref_write_unlock(LatRef *cell) {
+    if (cell) ref_unlock(cell);
+}
+
 /*
  * Resolve a mutable pointer to a LatValue from an lvalue expression.
  * Walks chains of field_access and index expressions to find the
@@ -7784,11 +7807,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "set") == 0 && expr->as.method_call.arg_count == 2) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                bool map_from_ref = false;
-                map_lv = ref_unwrap_for_write(map_lv, &map_from_ref);
+                /* LAT-537: a VAL_REF lvalue falls through to the locked dispatch
+                 * (eval_ref_method_locked) instead of mutating the inner here
+                 * without the per-cell lock. */
                 if (map_lv && map_lv->type == VAL_MAP) {
-                    if (!map_from_ref && map_lv->phase == VTAG_SUBLIMATED)
-                        return eval_err(strdup("cannot set on a sublimated map"));
+                    if (map_lv->phase == VTAG_SUBLIMATED) return eval_err(strdup("cannot set on a sublimated map"));
                     EvalResult kr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(kr)) return kr;
                     if (kr.value.type != VAL_STR) {
@@ -7815,13 +7838,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "pop") == 0 && expr->as.method_call.arg_count == 0) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                bool arr_from_ref = false;
-                arr_lv = ref_unwrap_for_write(arr_lv, &arr_from_ref);
+                /* LAT-537: a VAL_REF lvalue falls through to the locked dispatch. */
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
-                    if (!arr_from_ref && value_is_crystal(arr_lv))
-                        return eval_err(strdup("cannot pop from a crystal array"));
-                    if (!arr_from_ref && arr_lv->phase == VTAG_SUBLIMATED)
-                        return eval_err(strdup("cannot pop from a sublimated array"));
+                    if (value_is_crystal(arr_lv)) return eval_err(strdup("cannot pop from a crystal array"));
+                    if (arr_lv->phase == VTAG_SUBLIMATED) return eval_err(strdup("cannot pop from a sublimated array"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
                         if (vn) {
@@ -7843,12 +7863,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "insert") == 0 && expr->as.method_call.arg_count == 2) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                bool arr_from_ref = false;
-                arr_lv = ref_unwrap_for_write(arr_lv, &arr_from_ref);
+                /* LAT-537: a VAL_REF lvalue falls through to the locked dispatch. */
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
-                    if (!arr_from_ref && value_is_crystal(arr_lv))
-                        return eval_err(strdup("cannot insert into a crystal array"));
-                    if (!arr_from_ref && arr_lv->phase == VTAG_SUBLIMATED)
+                    if (value_is_crystal(arr_lv)) return eval_err(strdup("cannot insert into a crystal array"));
+                    if (arr_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot insert into a sublimated array"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
@@ -7895,12 +7913,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "remove_at") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                bool arr_from_ref = false;
-                arr_lv = ref_unwrap_for_write(arr_lv, &arr_from_ref);
+                /* LAT-537: a VAL_REF lvalue falls through to the locked dispatch. */
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
-                    if (!arr_from_ref && value_is_crystal(arr_lv))
-                        return eval_err(strdup("cannot remove from a crystal array"));
-                    if (!arr_from_ref && arr_lv->phase == VTAG_SUBLIMATED)
+                    if (value_is_crystal(arr_lv)) return eval_err(strdup("cannot remove from a crystal array"));
+                    if (arr_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot remove from a sublimated array"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
@@ -7936,11 +7952,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "merge") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                bool map_from_ref = false;
-                map_lv = ref_unwrap_for_write(map_lv, &map_from_ref);
+                /* LAT-537: a VAL_REF lvalue falls through to the locked dispatch. */
                 if (map_lv && map_lv->type == VAL_MAP) {
-                    if (!map_from_ref && map_lv->phase == VTAG_SUBLIMATED)
-                        return eval_err(strdup("cannot merge into a sublimated map"));
+                    if (map_lv->phase == VTAG_SUBLIMATED) return eval_err(strdup("cannot merge into a sublimated map"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
                         if (vn) {
@@ -7980,10 +7994,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "remove") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                bool map_from_ref = false;
-                map_lv = ref_unwrap_for_write(map_lv, &map_from_ref);
+                /* LAT-537: a VAL_REF lvalue falls through to the locked dispatch. */
                 if (map_lv && map_lv->type == VAL_MAP) {
-                    if (!map_from_ref && map_lv->phase == VTAG_SUBLIMATED)
+                    if (map_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot remove from a sublimated map"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
@@ -8070,12 +8083,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "push") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                bool buf_from_ref = false;
-                buf_lv = ref_unwrap_for_write(buf_lv, &buf_from_ref);
+                /* LAT-537: a VAL_REF lvalue falls through to the locked dispatch. */
                 if (buf_lv && buf_lv->type == VAL_ARRAY) {
-                    /* Ref-wrapped array push via resolve_lvalue */
-                    if (!buf_from_ref && value_is_crystal(buf_lv))
-                        return eval_err(strdup("cannot push to a crystal array"));
+                    if (value_is_crystal(buf_lv)) return eval_err(strdup("cannot push to a crystal array"));
                     EvalResult ar = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(ar)) return ar;
                     if (buf_lv->as.array.len >= buf_lv->as.array.cap) {
@@ -8496,10 +8506,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             }
             /* Ref proxy: delegate indexing to inner value */
             if (objr.value.type == VAL_REF) {
-                LatValue *inner = &objr.value.as.ref.ref->value;
+                /* LAT-537: hold the cell lock across the READ so a concurrent
+                 * locked writer cannot free/replace the inner mid-clone. Clone
+                 * under the lock, unlock before returning. */
+                LatRef *rcell = objr.value.as.ref.ref;
+                ref_lock(rcell);
+                LatValue *inner = &rcell->value;
                 if (inner->type == VAL_MAP && idxr.value.type == VAL_STR) {
                     LatValue *found = (LatValue *)lat_map_get(inner->as.map.map, idxr.value.as.str_val);
                     LatValue result = found ? value_deep_clone(found) : value_unit();
+                    ref_unlock(rcell);
                     value_free(&objr.value);
                     value_free(&idxr.value);
                     return eval_ok(result);
@@ -8510,13 +8526,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (idx >= inner->as.array.len) {
                         char *berr = NULL;
                         lat_asprintf(&berr, "index %zu out of bounds (length %zu)", idx, inner->as.array.len);
+                        ref_unlock(rcell);
                         value_free(&objr.value);
                         return eval_err(berr);
                     }
                     LatValue result = value_deep_clone(&inner->as.array.elems[idx]);
+                    ref_unlock(rcell);
                     value_free(&objr.value);
                     return eval_ok(result);
                 }
+                ref_unlock(rcell);
             }
             char *err = NULL;
             lat_asprintf(&err, "cannot index %s with %s", value_type_name(&objr.value), value_type_name(&idxr.value));
@@ -10838,79 +10857,222 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     value_free(&valr.value);
                     return eval_err(arr_err);
                 }
-                arr = arr_lv;
-                if (arr->type == VAL_REF) arr = &arr->as.ref.ref->value;
-
-                /* Clamp bounds */
-                int64_t arr_len = (int64_t)arr->as.array.len;
-                if (start < 0) start = 0;
-                if (start > arr_len) start = arr_len;
-                if (end < 0) end = 0;
-                if (end > arr_len) end = arr_len;
-                if (end < start) end = start;
-
-                /* RHS must be an array */
-                if (valr.value.type != VAL_ARRAY) {
+                /* LAT-537: take the per-cell lock for the splice. The range
+                 * bounds were evaluated above (pre-lock), so nothing under the
+                 * lock calls eval_expr; ref_write_lock privatizes a borrowed
+                 * shared/crystal inner under the lock. Every exit from here to
+                 * the write is funnelled through `goto slice_unlock` so the
+                 * lock is released exactly once. */
+                LatValue *slice_inner;
+                LatRef *slice_cell = ref_write_lock(arr_lv, &slice_inner);
+                arr = slice_inner;
+                EvalResult slice_res = eval_ok(value_unit());
+                /* LAT-537: re-validate UNDER the lock, UNCONDITIONALLY. Between
+                 * the pre-lock checks and here, eval_expr on the range bounds
+                 * (or a concurrent r.set on a Ref) can re-resolve/replace the
+                 * target with a non-array OR re-freeze it. Reading as.array.len
+                 * /elems off the wrong union member would drive a wild
+                 * allocation / OOB / invalid free (type confusion), and
+                 * splicing a re-frozen array would break immutability. This
+                 * also covers a non-Ref target whose own bound expression
+                 * reassigned the variable (slice_cell is NULL there). */
+                if (arr->type != VAL_ARRAY) {
                     value_free(&valr.value);
-                    return eval_err(strdup("slice assignment value must be an array"));
+                    slice_res = eval_err(strdup("slice assignment target must be an array"));
+                    goto slice_unlock;
                 }
-
-                size_t slice_start = (size_t)start;
-                size_t slice_end = (size_t)end;
-                size_t old_slice_len = slice_end - slice_start;
-                size_t new_slice_len = valr.value.as.array.len;
-                size_t old_len = arr->as.array.len;
-                size_t new_len = old_len - old_slice_len + new_slice_len;
-
-                /* Build a new array value with the splice applied, then
-                 * swap it into the variable.  This avoids realloc on
-                 * memory potentially owned by the fluid heap. */
-                size_t tmp_cap = new_len < 4 ? 4 : new_len;
-                LatValue *tmp = malloc(tmp_cap * sizeof(LatValue));
-                if (!tmp) {
+                if (arr->phase == VTAG_CRYSTAL) {
                     value_free(&valr.value);
-                    return eval_err(strdup("out of memory"));
+                    slice_res = eval_err(strdup("cannot assign to slice of frozen array"));
+                    goto slice_unlock;
                 }
-
-                /* Deep-clone prefix (before slice). The clones below allocate and
-                 * can trigger a GC; keep the RHS array rooted until it has been
-                 * consumed into the new array (LAT-466). */
-                GC_PUSH(ev, &valr.value);
-                for (size_t i = 0; i < slice_start; i++) { tmp[i] = value_deep_clone(&arr->as.array.elems[i]); }
-                /* Deep-clone new elements from RHS */
-                for (size_t i = 0; i < new_slice_len; i++) {
-                    tmp[slice_start + i] = value_deep_clone(&valr.value.as.array.elems[i]);
+                if (arr->phase == VTAG_SUBLIMATED) {
+                    value_free(&valr.value);
+                    slice_res = eval_err(strdup("cannot assign to slice of sublimated array"));
+                    goto slice_unlock;
                 }
-                /* Deep-clone suffix (after slice) */
-                size_t tail_count = old_len - slice_end;
-                for (size_t i = 0; i < tail_count; i++) {
-                    tmp[slice_start + new_slice_len + i] = value_deep_clone(&arr->as.array.elems[slice_end + i]);
+                {
+                    /* Clamp bounds */
+                    int64_t arr_len = (int64_t)arr->as.array.len;
+                    if (start < 0) start = 0;
+                    if (start > arr_len) start = arr_len;
+                    if (end < 0) end = 0;
+                    if (end > arr_len) end = arr_len;
+                    if (end < start) end = start;
+
+                    /* RHS must be an array */
+                    if (valr.value.type != VAL_ARRAY) {
+                        value_free(&valr.value);
+                        slice_res = eval_err(strdup("slice assignment value must be an array"));
+                        goto slice_unlock;
+                    }
+
+                    size_t slice_start = (size_t)start;
+                    size_t slice_end = (size_t)end;
+                    size_t old_slice_len = slice_end - slice_start;
+                    size_t new_slice_len = valr.value.as.array.len;
+                    size_t old_len = arr->as.array.len;
+                    size_t new_len = old_len - old_slice_len + new_slice_len;
+
+                    /* Build a new array value with the splice applied, then
+                     * swap it into the variable.  This avoids realloc on
+                     * memory potentially owned by the fluid heap. */
+                    size_t tmp_cap = new_len < 4 ? 4 : new_len;
+                    LatValue *tmp = malloc(tmp_cap * sizeof(LatValue));
+                    if (!tmp) {
+                        value_free(&valr.value);
+                        slice_res = eval_err(strdup("out of memory"));
+                        goto slice_unlock;
+                    }
+
+                    /* Deep-clone prefix (before slice). The clones below allocate and
+                     * can trigger a GC; keep the RHS array rooted until it has been
+                     * consumed into the new array (LAT-466). */
+                    GC_PUSH(ev, &valr.value);
+                    for (size_t i = 0; i < slice_start; i++) { tmp[i] = value_deep_clone(&arr->as.array.elems[i]); }
+                    /* Deep-clone new elements from RHS */
+                    for (size_t i = 0; i < new_slice_len; i++) {
+                        tmp[slice_start + i] = value_deep_clone(&valr.value.as.array.elems[i]);
+                    }
+                    /* Deep-clone suffix (after slice) */
+                    size_t tail_count = old_len - slice_end;
+                    for (size_t i = 0; i < tail_count; i++) {
+                        tmp[slice_start + new_slice_len + i] = value_deep_clone(&arr->as.array.elems[slice_end + i]);
+                    }
+
+                    /* Construct a proper new array value via value_array
+                     * (which allocates via lat_alloc, tracked by the heap). */
+                    PhaseTag saved_phase = arr->phase;
+                    LatValue new_arr = value_array(tmp, new_len);
+                    new_arr.phase = saved_phase;
+
+                    /* value_array copied the LatValues via memcpy (shallow),
+                     * so just free the temporary buffer, not the elements. */
+                    free(tmp);
+
+                    /* Free old array and replace in-place */
+                    value_free(arr);
+                    /* LAT-537: when storing into a shared Ref cell, the new
+                     * array must be detached (malloc-backed) — a fluid-heap
+                     * array built on a spawned writer's TLS heap dangles inside
+                     * the cell after the thread joins (the free-direction
+                     * double-free class). Non-Ref targets keep the fluid array. */
+                    if (slice_cell) {
+                        *arr = value_detach(&new_arr);
+                        value_free(&new_arr);
+                    } else {
+                        *arr = new_arr;
+                    }
+
+                    GC_POP(ev);
+                    value_free(&valr.value);
+
+                    /* Record history for root variable */
+                    if (ev->tracked_count > 0) {
+                        const Expr *root = stmt->as.assign.target->as.index.object;
+                        while (root->tag == EXPR_INDEX) root = root->as.index.object;
+                        if (root->tag == EXPR_IDENT) record_history(ev, root->as.str_val);
+                    }
                 }
+            slice_unlock:
+                ref_write_unlock(slice_cell);
+                return slice_res;
+            }
 
-                /* Construct a proper new array value via value_array
-                 * (which allocates via lat_alloc, tracked by the heap). */
-                PhaseTag saved_phase = arr->phase;
-                LatValue new_arr = value_array(tmp, new_len);
-                new_arr.phase = saved_phase;
-
-                /* value_array copied the LatValues via memcpy (shallow),
-                 * so just free the temporary buffer, not the elements. */
-                free(tmp);
-
-                /* Free old array and replace in-place */
-                value_free(arr);
-                *arr = new_arr;
-
-                GC_POP(ev);
-                value_free(&valr.value);
-
-                /* Record history for root variable */
-                if (ev->tracked_count > 0) {
-                    const Expr *root = stmt->as.assign.target->as.index.object;
-                    while (root->tag == EXPR_INDEX) root = root->as.index.object;
-                    if (root->tag == EXPR_IDENT) record_history(ev, root->as.str_val);
+            /* LAT-537: dedicated locked path for a top-level Ref index-assign
+             * (r[i]=v / r[k]=v) where the container is a simple variable.
+             * Resolve the variable FIRST (a side-effect-free IDENT lookup);
+             * only if it is a Ref do we evaluate the index and take the
+             * per-cell lock — so the index sub-expr is evaluated exactly once
+             * and never under the lock, and the frozen-Ref handle is rejected
+             * before locking (one cell lock held at a time). A single unlock
+             * exit (goto idx_unlock) guarantees lock balance. Non-Ref (or
+             * non-IDENT-container) targets fall through to the generic path
+             * unchanged — no double evaluation of the index. */
+            if (stmt->as.assign.target->tag == EXPR_INDEX &&
+                stmt->as.assign.target->as.index.object->tag == EXPR_IDENT) {
+                const Expr *t = stmt->as.assign.target;
+                char *idx_lv_err = NULL;
+                LatValue *parent = resolve_lvalue(ev, t->as.index.object, &idx_lv_err);
+                if (parent && parent->type == VAL_REF) {
+                    /* Capture the STABLE cell + handle phase BEFORE evaluating
+                     * the index: eval_expr can rehash the scope map (which
+                     * invalidates the raw `parent` slot pointer) or even
+                     * reassign the variable, so `parent` must not be touched
+                     * afterward. ref_retain keeps the cell alive across the
+                     * eval; the LatRef* itself is heap-stable. */
+                    LatRef *cell = parent->as.ref.ref;
+                    PhaseTag handle_phase = parent->phase;
+                    ref_retain(cell);
+                    GC_PUSH(ev, &valr.value);
+                    EvalResult idxr = eval_expr(ev, t->as.index.index); /* pre-lock, once */
+                    GC_POP(ev);
+                    if (!IS_OK(idxr)) {
+                        ref_release(cell);
+                        value_free(&valr.value);
+                        return idxr;
+                    }
+                    if (handle_phase == VTAG_CRYSTAL) { /* guard BEFORE the lock */
+                        ref_release(cell);
+                        value_free(&idxr.value);
+                        value_free(&valr.value);
+                        return eval_err(strdup("cannot assign index on a frozen Ref"));
+                    }
+                    ref_lock(cell);
+                    value_unshare_detached(&cell->value); /* privatize under the lock */
+                    LatValue *inner = &cell->value;
+                    EvalResult res;
+                    if (inner->type == VAL_MAP) {
+                        if (idxr.value.type != VAL_STR) {
+                            res = eval_err(strdup("map key must be a string"));
+                            goto idx_unlock;
+                        }
+                        const char *key = idxr.value.as.str_val;
+                        LatValue *slot = (LatValue *)lat_map_get(inner->as.map.map, key);
+                        if (!slot) { /* auto-vivify under the lock */
+                            LatValue u = value_unit();
+                            lat_map_set(inner->as.map.map, key, &u);
+                            slot = (LatValue *)lat_map_get(inner->as.map.map, key);
+                        }
+                        value_free(slot);
+                        *slot = value_detach(&valr.value);
+                        res = eval_ok(value_unit());
+                    } else if (inner->type == VAL_ARRAY) {
+                        if (idxr.value.type != VAL_INT) {
+                            res = eval_err(strdup("array index must be an integer"));
+                            goto idx_unlock;
+                        }
+                        size_t i = (size_t)idxr.value.as.int_val;
+                        if (i >= inner->as.array.len) {
+                            char *oob = NULL;
+                            lat_asprintf(&oob, "index %zu out of bounds (length %zu)", i, inner->as.array.len);
+                            res = eval_err(oob);
+                            goto idx_unlock;
+                        }
+                        value_free(&inner->as.array.elems[i]);
+                        inner->as.array.elems[i] = value_detach(&valr.value);
+                        res = eval_ok(value_unit());
+                    } else {
+                        char *cie = NULL;
+                        lat_asprintf(&cie, "cannot index into %s", value_type_name(inner));
+                        res = eval_err(cie);
+                    }
+                idx_unlock:
+                    ref_unlock(cell); /* SINGLE exit — every branch reaches here */
+                    ref_release(cell);
+                    value_free(&idxr.value);
+                    value_free(&valr.value);
+                    if (IS_OK(res) && ev->tracked_count > 0) {
+                        const Expr *root = t;
+                        while (root->tag == EXPR_FIELD_ACCESS) root = root->as.field_access.object;
+                        while (root->tag == EXPR_INDEX) root = root->as.index.object;
+                        if (root->tag == EXPR_IDENT) record_history(ev, root->as.str_val);
+                    }
+                    return res;
                 }
-                return eval_ok(value_unit());
+                /* not a Ref parent: fall through to the generic path, which
+                 * resolves the lvalue and evaluates the index itself (once). */
+                if (idx_lv_err) free(idx_lv_err);
             }
 
             /* For field access, index, and nested chains: use resolve_lvalue.
@@ -11504,6 +11666,16 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
     /// Return the type name of the wrapped value.
     /// @example r.inner_type()
     if (strcmp(method, "inner_type") == 0 && arg_count == 0) { return eval_ok(value_string(value_type_name(inner))); }
+    /* LAT-537: len/length under the per-cell lock for ANY inner type (array/
+     * string/map/buffer). Ref receivers route here from eval_method_call, so
+     * this must match the old inline handler's coverage to avoid a regression. */
+    if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
+        if (inner->type == VAL_ARRAY) return eval_ok(value_int((int64_t)inner->as.array.len));
+        if (inner->type == VAL_STR) return eval_ok(value_int((int64_t)strlen(inner->as.str_val)));
+        if (inner->type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(inner->as.map.map)));
+        if (inner->type == VAL_BUFFER) return eval_ok(value_int((int64_t)inner->as.buffer.len));
+        return eval_err(strdup(".len()/.length() is not defined on this Ref inner type"));
+    }
 
     /* Map proxy (when inner is VAL_MAP) */
     if (inner->type == VAL_MAP) {
@@ -11523,6 +11695,33 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
             /* STORE direction (Stage 5 review): detach — see Ref.set above. */
             LatValue cloned = value_detach(&args[1]);
             lat_map_set(inner->as.map.map, args[0].as.str_val, &cloned);
+            return eval_ok(value_unit());
+        }
+        /* LAT-537: absorbed map mutators (formerly inline, now under the
+         * per-cell lock). args are pre-evaluated by the caller and owned by
+         * it, so every store detaches a private copy. */
+        if (strcmp(method, "merge") == 0 && arg_count == 1) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (args[0].type != VAL_MAP) return eval_err(strdup(".merge() argument must be a Map"));
+            value_unshare_detached(inner);
+            LatMap *other = args[0].as.map.map;
+            for (size_t i = 0; i < other->cap; i++) {
+                if (other->entries[i].state == MAP_OCCUPIED) {
+                    LatValue cloned = value_detach((LatValue *)other->entries[i].value);
+                    LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, other->entries[i].key);
+                    if (old) value_free(old);
+                    lat_map_set(inner->as.map.map, other->entries[i].key, &cloned);
+                }
+            }
+            return eval_ok(value_unit());
+        }
+        if (strcmp(method, "remove") == 0 && arg_count == 1) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (args[0].type != VAL_STR) return eval_err(strdup(".remove() key must be a string"));
+            value_unshare_detached(inner);
+            LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, args[0].as.str_val);
+            if (old) value_free(old);
+            lat_map_remove(inner->as.map.map, args[0].as.str_val);
             return eval_ok(value_unit());
         }
         if (strcmp(method, "has") == 0 && arg_count == 1) {
@@ -11598,6 +11797,72 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
                 if (value_eq(&inner->as.array.elems[i], &args[0])) return eval_ok(value_bool(true));
             }
             return eval_ok(value_bool(false));
+        }
+        /* LAT-537: absorbed array mutators (formerly inline, now under the
+         * per-cell lock). The inner is privatized (malloc-backed) by
+         * value_unshare_detached, so grow via realloc and detach every store. */
+        if (strcmp(method, "push") == 0 && arg_count == 1) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            value_unshare_detached(inner);
+            if (inner->as.array.len >= inner->as.array.cap) {
+                size_t old_cap = inner->as.array.cap;
+                inner->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
+                inner->as.array.elems = realloc(inner->as.array.elems, inner->as.array.cap * sizeof(LatValue));
+            }
+            inner->as.array.elems[inner->as.array.len++] = value_detach(&args[0]);
+            return eval_ok(value_unit());
+        }
+        if (strcmp(method, "pop") == 0 && arg_count == 0) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            value_unshare_detached(inner);
+            if (inner->as.array.len == 0) return eval_err(strdup("pop on empty array"));
+            LatValue popped = inner->as.array.elems[--inner->as.array.len];
+            return eval_ok(popped);
+        }
+        if (strcmp(method, "insert") == 0 && arg_count == 2) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (args[0].type != VAL_INT) return eval_err(strdup(".insert() index must be an integer"));
+            value_unshare_detached(inner);
+            int64_t idx = args[0].as.int_val;
+            if (idx < 0 || (size_t)idx > inner->as.array.len) return eval_err(strdup(".insert() index out of bounds"));
+            if (inner->as.array.len >= inner->as.array.cap) {
+                size_t old_cap = inner->as.array.cap;
+                inner->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
+                inner->as.array.elems = realloc(inner->as.array.elems, inner->as.array.cap * sizeof(LatValue));
+            }
+            memmove(&inner->as.array.elems[(size_t)idx + 1], &inner->as.array.elems[(size_t)idx],
+                    (inner->as.array.len - (size_t)idx) * sizeof(LatValue));
+            inner->as.array.elems[(size_t)idx] = value_detach(&args[1]);
+            inner->as.array.len++;
+            return eval_ok(value_unit());
+        }
+        if (strcmp(method, "remove_at") == 0 && arg_count == 1) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (args[0].type != VAL_INT) return eval_err(strdup(".remove_at() index must be an integer"));
+            value_unshare_detached(inner);
+            int64_t idx = args[0].as.int_val;
+            if (idx < 0 || (size_t)idx >= inner->as.array.len)
+                return eval_err(strdup(".remove_at() index out of bounds"));
+            LatValue removed = inner->as.array.elems[(size_t)idx];
+            memmove(&inner->as.array.elems[(size_t)idx], &inner->as.array.elems[(size_t)idx + 1],
+                    (inner->as.array.len - (size_t)idx - 1) * sizeof(LatValue));
+            inner->as.array.len--;
+            return eval_ok(removed);
+        }
+    }
+
+    /* Buffer proxy (LAT-537: absorbed .push, now under the per-cell lock) */
+    if (inner->type == VAL_BUFFER) {
+        if (strcmp(method, "push") == 0 && arg_count == 1) {
+            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            value_unshare_detached(inner);
+            uint8_t byte = (args[0].type == VAL_INT) ? (uint8_t)(args[0].as.int_val & 0xFF) : 0;
+            if (inner->as.buffer.len >= inner->as.buffer.cap) {
+                inner->as.buffer.cap = inner->as.buffer.cap ? inner->as.buffer.cap * 2 : 8;
+                inner->as.buffer.data = realloc(inner->as.buffer.data, inner->as.buffer.cap);
+            }
+            inner->as.buffer.data[inner->as.buffer.len++] = byte;
+            return eval_ok(value_unit());
         }
     }
 
@@ -12266,7 +12531,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     /// @category Array Methods
     /// Append a value to the end of the array (mutates in place).
     /// @example arr.push(42)
-    if (strcmp(method, "push") == 0) {
+    /* LAT-537: let a Ref receiver fall through to the locked Ref dispatch
+     * (mirrors the `get` guard above) — formerly handled by the inline
+     * eval_expr push fast-path. */
+    if (strcmp(method, "push") == 0 && obj.type != VAL_REF) {
         if (obj.type != VAL_ARRAY) return eval_err(strdup(".push() is not defined on non-array"));
         if (value_is_crystal(&obj)) return eval_err(strdup("cannot push to a crystal array"));
         if (arg_count != 1) return eval_err(strdup(".push() expects exactly 1 argument"));
@@ -12284,7 +12552,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     /// Return the number of elements or characters. Also available as .length().
     /// @example [1, 2, 3].len()  // 3
     /// @example "hello".length()  // 5
-    if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) {
+    /* LAT-537: a Ref receiver falls through to the locked Ref dispatch
+     * (eval_ref_method_locked implements len/length under the per-cell lock);
+     * reading the inner here would race a concurrent r.set (UAF). */
+    if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && obj.type != VAL_REF) {
         if (obj.type == VAL_ARRAY) return eval_ok(value_int((int64_t)obj.as.array.len));
         if (obj.type == VAL_STR) return eval_ok(value_int((int64_t)strlen(obj.as.str_val)));
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
