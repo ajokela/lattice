@@ -89,7 +89,36 @@ void http_url_free(HttpUrl *url) {
 
 /* ── Request formatting ── */
 
-static char *format_request(const HttpRequest *req, const HttpUrl *url) {
+/* Reject values that get interpolated into the request line or a header but
+ * contain CR, LF, or other control characters. Without this an attacker-
+ * supplied URL or header value containing "\r\n" could inject extra headers or
+ * split the request entirely (HTTP request splitting / smuggling). These are
+ * NUL-terminated C strings, so an embedded NUL already truncates the string;
+ * the remaining danger is CR/LF and other control bytes, all of which are
+ * below 0x20 (plus DEL, 0x7f). */
+static bool http_field_is_safe(const char *s) {
+    if (!s) return true;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f) return false;
+    }
+    return true;
+}
+
+static char *format_request(const HttpRequest *req, const HttpUrl *url, char **err) {
+    /* Reject control characters (CR/LF/NUL/...) in anything interpolated into
+     * the request line or headers — otherwise the request can be split or
+     * extra headers injected (HTTP request splitting / smuggling). */
+    if (!http_field_is_safe(req->method) || !http_field_is_safe(url->host) || !http_field_is_safe(url->path)) {
+        *err = strdup("invalid request: control characters in method, host, or path");
+        return NULL;
+    }
+    for (size_t i = 0; i < req->header_count; i++) {
+        if (!http_field_is_safe(req->header_keys[i]) || !http_field_is_safe(req->header_values[i])) {
+            *err = strdup("invalid header: control characters not allowed");
+            return NULL;
+        }
+    }
+
     /* Calculate buffer size */
     size_t cap = 256;
     cap += strlen(req->method) + strlen(url->path) + strlen(url->host);
@@ -98,7 +127,10 @@ static char *format_request(const HttpRequest *req, const HttpUrl *url) {
     if (req->body) cap += 64 + req->body_len; /* Content-Length header + body */
 
     char *buf = malloc(cap);
-    if (!buf) return NULL;
+    if (!buf) {
+        *err = strdup("out of memory formatting request");
+        return NULL;
+    }
     size_t pos = 0;
 
     /* Request line */
@@ -305,6 +337,16 @@ void http_response_free(HttpResponse *resp) {
 
 /* ── Execute request ── */
 
+/* Defined in net.c. Like net_tcp_read() but reports the exact number of bytes
+ * read via *out_len, so a binary body containing embedded NUL bytes is not
+ * truncated (strlen would stop at the first NUL). */
+char *net_tcp_read_buf(int fd, size_t *out_len, char **err);
+
+/* Upper bound on the total accumulated HTTP response. A malicious or runaway
+ * server could otherwise stream an unbounded body straight into memory
+ * (DoS / OOM). 256 MiB. */
+#define HTTP_MAX_RESPONSE_SIZE ((size_t)256 * 1024 * 1024)
+
 HttpResponse *http_execute(const HttpRequest *req, char **err) {
     HttpUrl url;
     if (!http_parse_url(req->url, &url, err)) return NULL;
@@ -329,7 +371,13 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
     net_tcp_set_timeout(fd, timeout_s, err);
 
     /* Format and send request */
-    char *raw_req = format_request(req, &url);
+    char *raw_req = format_request(req, &url, err);
+    if (!raw_req) {
+        if (use_tls) net_tls_close(fd);
+        else net_tcp_close(fd);
+        http_url_free(&url);
+        return NULL;
+    }
     bool ok;
     if (use_tls) {
         ok = net_tls_write(fd, raw_req, strlen(raw_req), err);
@@ -349,14 +397,25 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
     size_t resp_cap = 8192;
     size_t resp_len = 0;
     char *resp_buf = malloc(resp_cap);
-    if (!resp_buf) return NULL;
+    if (!resp_buf) {
+        if (use_tls) net_tls_close(fd);
+        else net_tcp_close(fd);
+        http_url_free(&url);
+        *err = strdup("out of memory reading response");
+        return NULL;
+    }
 
     for (;;) {
         char *chunk;
+        size_t clen;
         if (use_tls) {
             chunk = net_tls_read(fd, err);
+            /* net_tls_read has no length out-param, so a binary HTTPS body is
+             * still bounded by its first NUL; the plain-HTTP path below keeps
+             * the exact byte count. */
+            clen = chunk ? strlen(chunk) : 0;
         } else {
-            chunk = net_tcp_read(fd, err);
+            chunk = net_tcp_read_buf(fd, &clen, err);
         }
         if (!chunk) {
             /* Read error — but if we already have data, try to parse it */
@@ -371,11 +430,23 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
             http_url_free(&url);
             return NULL;
         }
-        size_t clen = strlen(chunk);
         if (clen == 0) {
             free(chunk);
             break;
         } /* EOF */
+
+        /* Bound total response size to avoid unbounded memory growth (DoS).
+         * Written as a subtraction to avoid overflow; resp_len never exceeds
+         * the cap, so HTTP_MAX_RESPONSE_SIZE - resp_len never underflows. */
+        if (clen > HTTP_MAX_RESPONSE_SIZE - resp_len) {
+            free(chunk);
+            free(resp_buf);
+            if (use_tls) net_tls_close(fd);
+            else net_tcp_close(fd);
+            http_url_free(&url);
+            *err = strdup("HTTP response exceeds maximum allowed size");
+            return NULL;
+        }
 
         while (resp_len + clen + 1 > resp_cap) {
             size_t newcap = resp_cap * 2;

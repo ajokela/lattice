@@ -192,7 +192,13 @@ int net_tcp_connect(const char *host, int port, char **err) {
  * sane maximum (256 MiB) to reject negatives and oversized allocations alike. */
 #define NET_READ_BYTES_MAX ((size_t)256 * 1024 * 1024)
 
-char *net_tcp_read(int fd, char **err) {
+/* Like net_tcp_read but reports the exact byte count read via *out_len, so a
+ * caller can preserve binary data containing embedded NUL bytes instead of
+ * truncating at the first NUL via strlen. The returned buffer is still
+ * NUL-terminated for convenience. *out_len is 0 on EOF. Returns NULL on error. */
+char *net_tcp_read_buf(int fd, size_t *out_len, char **err) {
+    if (out_len) *out_len = 0;
+
     if (!is_tracked(fd)) {
         *err = strdup("tcp_read: not a tracked socket");
         return NULL;
@@ -212,7 +218,13 @@ char *net_tcp_read(int fd, char **err) {
     }
 
     buf[n] = '\0';
+    if (out_len) *out_len = (size_t)n;
     return buf;
+}
+
+char *net_tcp_read(int fd, char **err) {
+    size_t len;
+    return net_tcp_read_buf(fd, &len, err);
 }
 
 /* ── tcp_read_bytes ── */
