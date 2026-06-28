@@ -124,6 +124,10 @@ static bool br_read_bytes(ByteReader *br, void *dst, size_t n) {
     return true;
 }
 
+/* Bytes still available in the reader. Used to bound attacker-controlled
+ * lengths/counts before they drive an allocation or a loop. */
+static size_t br_remaining(const ByteReader *br) { return br->len - br->pos; }
+
 /* ── Serialize a single chunk (recursive) ── */
 
 static void serialize_chunk(ByteBuf *bb, const Chunk *c) {
@@ -256,12 +260,29 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
     }
 
     Chunk *c = chunk_new();
+    if (!c) {
+        *err = strdup("out of memory: chunk");
+        return NULL;
+    }
 
-    /* Bytecode */
+    /* Bytecode. The code blob is code_len raw bytes; reject a length that
+     * exceeds the input before allocating so a bogus length can't trigger a
+     * giant allocation, and check the realloc result. */
     if (code_len > 0) {
+        if ((size_t)code_len > br_remaining(br)) {
+            *err = strdup("truncated: incomplete bytecode");
+            chunk_free(c);
+            return NULL;
+        }
         if (c->code_cap < code_len) {
+            uint8_t *nc = realloc(c->code, code_len);
+            if (!nc) {
+                *err = strdup("out of memory: bytecode");
+                chunk_free(c);
+                return NULL;
+            }
+            c->code = nc;
             c->code_cap = code_len;
-            c->code = realloc(c->code, c->code_cap);
         }
         if (!br_read_bytes(br, c->code, code_len)) {
             *err = strdup("truncated: incomplete bytecode");
@@ -278,9 +299,22 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
         chunk_free(c);
         return NULL;
     }
+    /* Each line entry is a u32 (4 bytes); a count larger than the remaining
+     * input is impossible and would otherwise drive a huge allocation. */
+    if ((size_t)line_count > br_remaining(br) / 4) {
+        *err = strdup("truncated: incomplete line data");
+        chunk_free(c);
+        return NULL;
+    }
     if (c->lines_cap < line_count) {
+        int *nl = realloc(c->lines, (size_t)line_count * sizeof(int));
+        if (!nl) {
+            *err = strdup("out of memory: line table");
+            chunk_free(c);
+            return NULL;
+        }
+        c->lines = nl;
         c->lines_cap = line_count;
-        c->lines = realloc(c->lines, c->lines_cap * sizeof(int));
     }
     for (uint32_t i = 0; i < line_count; i++) {
         uint32_t line_val;
@@ -297,6 +331,13 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
     uint32_t const_count;
     if (!br_read_u32_le(br, &const_count)) {
         *err = strdup("truncated: missing const_count");
+        chunk_free(c);
+        return NULL;
+    }
+    /* Every constant consumes at least its 1-byte tag, so the count cannot
+     * exceed the bytes remaining. Bounds it before the loop allocates. */
+    if ((size_t)const_count > br_remaining(br)) {
+        *err = strdup("truncated: incomplete constant pool");
         chunk_free(c);
         return NULL;
     }
@@ -345,8 +386,17 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
                     chunk_free(c);
                     return NULL;
                 }
-                char *s = malloc(slen + 1);
-                if (!s) return NULL;
+                if ((size_t)slen > br_remaining(br)) {
+                    *err = strdup("truncated: incomplete string data");
+                    chunk_free(c);
+                    return NULL;
+                }
+                char *s = malloc((size_t)slen + 1);
+                if (!s) {
+                    *err = strdup("out of memory: string constant");
+                    chunk_free(c);
+                    return NULL;
+                }
                 if (!br_read_bytes(br, s, slen)) {
                     free(s);
                     *err = strdup("truncated: incomplete string data");
@@ -409,6 +459,13 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
         chunk_free(c);
         return NULL;
     }
+    /* Each entry consumes at least its 1-byte present flag, so the count
+     * cannot exceed the bytes remaining. */
+    if ((size_t)local_name_count > br_remaining(br)) {
+        *err = strdup("truncated: incomplete local name table");
+        chunk_free(c);
+        return NULL;
+    }
     for (uint32_t i = 0; i < local_name_count; i++) {
         uint8_t present;
         if (!br_read_u8(br, &present)) {
@@ -423,8 +480,17 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
                 chunk_free(c);
                 return NULL;
             }
-            char *name = malloc(nlen + 1);
-            if (!name) return NULL;
+            if ((size_t)nlen > br_remaining(br)) {
+                *err = strdup("truncated: incomplete local name data");
+                chunk_free(c);
+                return NULL;
+            }
+            char *name = malloc((size_t)nlen + 1);
+            if (!name) {
+                *err = strdup("out of memory: local name");
+                chunk_free(c);
+                return NULL;
+            }
             if (!br_read_bytes(br, name, nlen)) {
                 free(name);
                 *err = strdup("truncated: incomplete local name data");
@@ -447,8 +513,14 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
                 chunk_free(c);
                 return NULL;
             }
-            char *cname = malloc(nlen + 1);
+            if ((size_t)nlen > br_remaining(br)) {
+                *err = strdup("truncated: incomplete chunk name data");
+                chunk_free(c);
+                return NULL;
+            }
+            char *cname = malloc((size_t)nlen + 1);
             if (!cname) {
+                *err = strdup("out of memory: chunk name");
                 chunk_free(c);
                 return NULL;
             }
@@ -482,6 +554,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
         if (default_count > 0) {
             c->default_values = malloc(default_count * sizeof(LatValue));
             if (!c->default_values) {
+                *err = strdup("out of memory: default values");
                 chunk_free(c);
                 return NULL;
             }
@@ -516,6 +589,7 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
                     case TAG_STR: {
                         uint32_t slen;
                         ok = br_read_u32_le(br, &slen);
+                        if (ok && (size_t)slen > br_remaining(br)) ok = false;
                         if (ok) {
                             char *s = malloc((size_t)slen + 1);
                             if (!s || !br_read_bytes(br, s, slen)) {
@@ -760,8 +834,18 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
     }
 
     RegChunk *c = regchunk_new();
+    if (!c) {
+        *err = strdup("out of memory: chunk");
+        return NULL;
+    }
 
-    /* Instructions */
+    /* Instructions. Each instruction is a u32 (4 bytes); reject a count that
+     * exceeds the input so a bogus length can't drive an unbounded loop. */
+    if ((size_t)code_len > br_remaining(br) / 4) {
+        *err = strdup("truncated: incomplete instructions");
+        regchunk_free(c);
+        return NULL;
+    }
     for (uint32_t i = 0; i < code_len; i++) {
         uint32_t instr;
         if (!br_read_u32_le(br, &instr)) {
@@ -781,10 +865,22 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
     }
     /* Ensure lines array is large enough, then read all line entries.
      * We must always consume the serialized bytes to keep the reader
-     * position correct for subsequent fields (constants, local names). */
+     * position correct for subsequent fields (constants, local names).
+     * Each entry is a u32, so the count cannot exceed remaining/4. */
+    if ((size_t)line_count > br_remaining(br) / 4) {
+        *err = strdup("truncated: incomplete line data");
+        regchunk_free(c);
+        return NULL;
+    }
     if (line_count > c->lines_cap) {
+        int *nl = realloc(c->lines, (size_t)line_count * sizeof(int));
+        if (!nl) {
+            *err = strdup("out of memory: line table");
+            regchunk_free(c);
+            return NULL;
+        }
+        c->lines = nl;
         c->lines_cap = line_count;
-        c->lines = realloc(c->lines, c->lines_cap * sizeof(int));
     }
     for (uint32_t i = 0; i < line_count; i++) {
         uint32_t line_val;
@@ -801,6 +897,12 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
     uint32_t const_count;
     if (!br_read_u32_le(br, &const_count)) {
         *err = strdup("truncated: missing const_count");
+        regchunk_free(c);
+        return NULL;
+    }
+    /* Every constant consumes at least its 1-byte tag. */
+    if ((size_t)const_count > br_remaining(br)) {
+        *err = strdup("truncated: incomplete constant pool");
         regchunk_free(c);
         return NULL;
     }
@@ -849,7 +951,17 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
                     regchunk_free(c);
                     return NULL;
                 }
-                char *s = malloc(slen + 1);
+                if ((size_t)slen > br_remaining(br)) {
+                    *err = strdup("truncated string data");
+                    regchunk_free(c);
+                    return NULL;
+                }
+                char *s = malloc((size_t)slen + 1);
+                if (!s) {
+                    *err = strdup("out of memory: string constant");
+                    regchunk_free(c);
+                    return NULL;
+                }
                 if (!br_read_bytes(br, s, slen)) {
                     free(s);
                     *err = strdup("truncated string data");
@@ -921,6 +1033,12 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
         regchunk_free(c);
         return NULL;
     }
+    /* Each entry consumes at least its 1-byte present flag. */
+    if ((size_t)local_name_count > br_remaining(br)) {
+        *err = strdup("truncated local name");
+        regchunk_free(c);
+        return NULL;
+    }
     for (uint32_t i = 0; i < local_name_count; i++) {
         uint8_t present;
         if (!br_read_u8(br, &present)) {
@@ -935,7 +1053,17 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
                 regchunk_free(c);
                 return NULL;
             }
-            char *name = malloc(nlen + 1);
+            if ((size_t)nlen > br_remaining(br)) {
+                *err = strdup("truncated local name data");
+                regchunk_free(c);
+                return NULL;
+            }
+            char *name = malloc((size_t)nlen + 1);
+            if (!name) {
+                *err = strdup("out of memory: local name");
+                regchunk_free(c);
+                return NULL;
+            }
             if (!br_read_bytes(br, name, nlen)) {
                 free(name);
                 *err = strdup("truncated local name data");
