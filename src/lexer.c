@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <errno.h>
 
 Lexer lexer_new(const char *source) {
     Lexer lex;
@@ -205,7 +206,14 @@ static bool next_token(Lexer *lex, Token *out, char **err) {
             free(num_str);
             *out = token_float(val, line, col);
         } else {
+            errno = 0;
             int64_t val = strtoll(num_str, NULL, is_hex ? 16 : 10);
+            if (errno == ERANGE) {
+                *err = NULL;
+                lat_asprintf(err, "%zu:%zu: integer literal out of range", line, col);
+                free(num_str);
+                return false;
+            }
             free(num_str);
             *out = token_int(val, line, col);
         }

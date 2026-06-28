@@ -183,7 +183,23 @@ static Stmt **parse_block_stmts(Parser *p, size_t *count, char **err) {
 
 /* ── Types ── */
 
+static TypeExpr *parse_type_expr_inner(Parser *p, char **err);
+
+/* Depth-guarded wrapper: deeply nested type syntax (e.g. [[[...]]]) must not
+ * be able to overflow the C stack. Shares the recursion facility used by
+ * parse_expr. */
 static TypeExpr *parse_type_expr(Parser *p, char **err) {
+    if (++p->depth > PARSER_MAX_DEPTH) {
+        if (!*err) *err = strdup("type nesting too deep");
+        p->depth--;
+        return NULL;
+    }
+    TypeExpr *te = parse_type_expr_inner(p, err);
+    p->depth--;
+    return te;
+}
+
+static TypeExpr *parse_type_expr_inner(Parser *p, char **err) {
     TypeExpr *te = calloc(1, sizeof(TypeExpr));
     if (!te) return NULL;
 
@@ -995,7 +1011,23 @@ static Expr *parse_postfix(Parser *p, char **err) {
 
 /* ── Pattern parsing (recursive, for match expressions) ── */
 
+static Pattern *parse_pattern_inner(Parser *p, char **err);
+
+/* Depth-guarded wrapper: deeply nested patterns (e.g. [[[...]]]) must not be
+ * able to overflow the C stack. Shares the recursion facility used by
+ * parse_expr. */
 static Pattern *parse_pattern(Parser *p, char **err) {
+    if (++p->depth > PARSER_MAX_DEPTH) {
+        if (!*err) *err = strdup("pattern nesting too deep");
+        p->depth--;
+        return NULL;
+    }
+    Pattern *pat = parse_pattern_inner(p, err);
+    p->depth--;
+    return pat;
+}
+
+static Pattern *parse_pattern_inner(Parser *p, char **err) {
     TokenType pt = peek_type(p);
     if (pt == TOK_INT_LIT) {
         Token *t = advance(p);
@@ -1247,6 +1279,10 @@ static Expr *parse_primary(Parser *p, char **err) {
             }
             exprs[count] = e;
             count++;
+            /* Reserve the next literal slot so the interp_fail cleanup loop
+             * (which frees parts[0..count]) never frees an uninitialized
+             * pointer when we bail before the MID/END branch writes it. */
+            parts[count] = NULL;
 
             if (peek_type(p) == TOK_INTERP_MID) {
                 Token *mid = advance(p);
