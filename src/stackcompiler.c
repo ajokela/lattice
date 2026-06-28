@@ -113,6 +113,31 @@ static void emit_constant_idx(uint8_t op, uint8_t op16, size_t idx, int line) {
     }
 }
 
+/* Emit an opcode whose only/first operand is an 8-bit constant index for which
+ * there is no 16-bit form (OP_GET_FIELD/SET_FIELD/INVOKE/BUILD_STRUCT/BUILD_ENUM/
+ * IMPORT/GET_FIELD_LOCAL). Refuse to compile rather than silently truncating an
+ * index >255, which made the VM reinterpret an unrelated constant's union as a
+ * char or Chunk pointer (LAT-462/LAT-474). */
+static void emit_op_const8(uint8_t op, size_t idx, int line) {
+    if (idx > 255) {
+        if (!compile_error)
+            compile_error = strdup("too many constants in one chunk for a field/method/name operand (>255)");
+        return;
+    }
+    emit_bytes(op, (uint8_t)idx, line);
+}
+
+/* Emit a bare 8-bit constant-index operand (the opcode/other operands are
+ * emitted separately by the caller). Same >255 guard as emit_op_const8. */
+static void emit_const8(size_t idx, int line) {
+    if (idx > 255) {
+        if (!compile_error)
+            compile_error = strdup("too many constants in one chunk for a field/method/name operand (>255)");
+        return;
+    }
+    emit_byte((uint8_t)idx, line);
+}
+
 static size_t emit_constant(LatValue val, int line) {
     size_t idx = chunk_add_constant(current_chunk(), val);
     emit_constant_idx(OP_CONSTANT, OP_CONSTANT_16, idx, line);
@@ -192,6 +217,13 @@ static void end_scope_preserve_tos(int line) {
 }
 
 static void add_local(const char *name) {
+    /* Local slots are addressed by 1-byte operands in OP_*_LOCAL; a function
+     * with more than 256 locals would silently truncate slot indices and alias
+     * unrelated slots (LAT-499). Refuse to compile instead. */
+    if (current->local_count >= 256) {
+        if (!compile_error) compile_error = strdup("too many local variables in function (max 256)");
+        return;
+    }
     if (current->local_count >= current->local_cap) {
         current->local_cap *= 2;
         current->locals = realloc(current->locals, current->local_cap * sizeof(Local));
@@ -319,6 +351,20 @@ static size_t add_chunk_constant(Chunk *ch) {
     fn_val.as.closure.body = NULL;
     fn_val.as.closure.native_fn = ch;
     return chunk_add_constant(current_chunk(), fn_val);
+}
+
+/* Add a pre-compiled scope/spawn/select sub-chunk to the constant pool and
+ * return its index as a byte. OP_SCOPE/OP_SELECT operands are 8-bit with no
+ * 16-bit form; refuse to compile rather than truncate an index >255, which made
+ * the VM execute an unrelated constant's union bits as a Chunk* (LAT-462). */
+static uint8_t add_subchunk_const8(Chunk *ch) {
+    size_t idx = add_chunk_constant(ch);
+    if (idx > 255) {
+        if (!compile_error)
+            compile_error = strdup("too many constants in one chunk before a scope/spawn/select body (>255)");
+        return 0;
+    }
+    return (uint8_t)idx;
 }
 
 /* ── Recursive constant folding ──
@@ -828,7 +874,7 @@ static void compile_expr(const Expr *e, int line) {
                     size_t idx = chunk_add_constant(current_chunk(), value_string(e->as.field_access.field));
                     emit_byte(OP_GET_FIELD_LOCAL, line);
                     emit_byte((uint8_t)slot, line);
-                    emit_byte((uint8_t)idx, line);
+                    emit_const8(idx, line);
                     break;
                 }
             }
@@ -840,7 +886,7 @@ static void compile_expr(const Expr *e, int line) {
                 patch_jump(skip);
             }
             size_t idx = chunk_add_constant(current_chunk(), value_string(e->as.field_access.field));
-            emit_bytes(OP_GET_FIELD, (uint8_t)idx, line);
+            emit_op_const8(OP_GET_FIELD, idx, line);
             if (e->as.field_access.optional) patch_jump(end_jump);
             break;
         }
@@ -911,7 +957,7 @@ static void compile_expr(const Expr *e, int line) {
                         emit_byte((uint8_t)e->as.method_call.arg_count, line);
                     } else {
                         emit_byte(OP_INVOKE_GLOBAL, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte((uint8_t)method_idx, line);
                         emit_byte((uint8_t)e->as.method_call.arg_count, line);
                     }
@@ -929,7 +975,7 @@ static void compile_expr(const Expr *e, int line) {
             for (size_t i = 0; i < e->as.method_call.arg_count; i++) compile_expr(e->as.method_call.args[i], line);
             size_t idx = chunk_add_constant(current_chunk(), value_string(e->as.method_call.method));
             emit_byte(OP_INVOKE, line);
-            emit_byte((uint8_t)idx, line);
+            emit_const8(idx, line);
             emit_byte((uint8_t)e->as.method_call.arg_count, line);
             if (opt) patch_jump(end_jump);
             break;
@@ -942,7 +988,7 @@ static void compile_expr(const Expr *e, int line) {
             /* Struct name + field names must be consecutive in the constant pool */
             size_t name_idx = chunk_add_constant_nodupe(current_chunk(), value_string(e->as.struct_lit.name));
             emit_byte(OP_BUILD_STRUCT, line);
-            emit_byte((uint8_t)name_idx, line);
+            emit_const8(name_idx, line);
             emit_byte((uint8_t)e->as.struct_lit.field_count, line);
             /* Also store field names in constants for the VM to use (consecutive) */
             for (size_t i = 0; i < e->as.struct_lit.field_count; i++)
@@ -1145,7 +1191,7 @@ static void compile_expr(const Expr *e, int line) {
                         emit_byte(OP_DUP, line);
                         {
                             size_t nci = chunk_add_constant(current_chunk(), value_string("enum_name"));
-                            emit_bytes(OP_INVOKE, (uint8_t)nci, line);
+                            emit_op_const8(OP_INVOKE, nci, line);
                             emit_byte(0, line);
                         }
                         emit_constant(value_string(arm->pattern->as.enum_variant.enum_name), line);
@@ -1160,7 +1206,7 @@ static void compile_expr(const Expr *e, int line) {
                         emit_byte(OP_DUP, line);
                         {
                             size_t vci = chunk_add_constant(current_chunk(), value_string("variant_name"));
-                            emit_bytes(OP_INVOKE, (uint8_t)vci, line);
+                            emit_op_const8(OP_INVOKE, vci, line);
                             emit_byte(0, line);
                         }
                         emit_constant(value_string(arm->pattern->as.enum_variant.variant_name), line);
@@ -1179,7 +1225,7 @@ static void compile_expr(const Expr *e, int line) {
                             emit_byte(OP_DUP, line);
                             {
                                 size_t pci = chunk_add_constant(current_chunk(), value_string("payload"));
-                                emit_bytes(OP_INVOKE, (uint8_t)pci, line);
+                                emit_op_const8(OP_INVOKE, pci, line);
                                 emit_byte(0, line);
                             }
                             emit_constant(value_int((int64_t)k), line);
@@ -1217,7 +1263,7 @@ static void compile_expr(const Expr *e, int line) {
                         emit_byte(OP_DUP, line); /* [S, S', S''] */
                         {
                             size_t len_ci = chunk_add_constant(current_chunk(), value_string("len"));
-                            emit_bytes(OP_INVOKE, (uint8_t)len_ci, line);
+                            emit_op_const8(OP_INVOKE, len_ci, line);
                             emit_byte(0, line); /* [S, S', arr_len] */
                         }
                         if (rest_idx >= 0) {
@@ -1271,7 +1317,7 @@ static void compile_expr(const Expr *e, int line) {
                             emit_byte(OP_POP, line);
                             emit_byte(OP_DUP, line); /* [S, S', S''] */
                             size_t fci = chunk_add_constant(current_chunk(), value_string(spfields[k].name));
-                            emit_bytes(OP_GET_FIELD, (uint8_t)fci, line);
+                            emit_op_const8(OP_GET_FIELD, fci, line);
                             compile_expr(spfields[k].value_pat->as.literal, line);
                             emit_byte(OP_EQ, line);
                             size_t fld_done = emit_jump(OP_JUMP, line);
@@ -1310,7 +1356,7 @@ static void compile_expr(const Expr *e, int line) {
                             emit_byte((uint8_t)s_slot, line);
                             {
                                 size_t pci = chunk_add_constant(current_chunk(), value_string("payload"));
-                                emit_bytes(OP_INVOKE, (uint8_t)pci, line);
+                                emit_op_const8(OP_INVOKE, pci, line);
                                 emit_byte(0, line);
                             }
                             emit_constant(value_int((int64_t)k), line);
@@ -1341,7 +1387,7 @@ static void compile_expr(const Expr *e, int line) {
                                 emit_byte((uint8_t)s_slot, line);
                                 {
                                     size_t lci = chunk_add_constant(current_chunk(), value_string("len"));
-                                    emit_bytes(OP_INVOKE, (uint8_t)lci, line);
+                                    emit_op_const8(OP_INVOKE, lci, line);
                                     emit_byte(0, line);
                                 }
                                 size_t after = pat_count - 1 - (size_t)rest_idx;
@@ -1351,7 +1397,7 @@ static void compile_expr(const Expr *e, int line) {
                                 }
                                 {
                                     size_t sci = chunk_add_constant(current_chunk(), value_string("slice"));
-                                    emit_bytes(OP_INVOKE, (uint8_t)sci, line);
+                                    emit_op_const8(OP_INVOKE, sci, line);
                                     emit_byte(2, line);
                                 }
                                 if (sub->tag == PAT_BINDING) add_local(sub->as.binding_name);
@@ -1363,7 +1409,7 @@ static void compile_expr(const Expr *e, int line) {
                                 emit_byte((uint8_t)s_slot, line);
                                 {
                                     size_t lci = chunk_add_constant(current_chunk(), value_string("len"));
-                                    emit_bytes(OP_INVOKE, (uint8_t)lci, line);
+                                    emit_op_const8(OP_INVOKE, lci, line);
                                     emit_byte(0, line);
                                 }
                                 emit_constant(value_int((int64_t)(pat_count - 1 - k)), line);
@@ -1391,7 +1437,7 @@ static void compile_expr(const Expr *e, int line) {
                             emit_byte(OP_GET_LOCAL, line);
                             emit_byte((uint8_t)s_slot, line);
                             size_t fci = chunk_add_constant(current_chunk(), value_string(spfields[k].name));
-                            emit_bytes(OP_GET_FIELD, (uint8_t)fci, line);
+                            emit_op_const8(OP_GET_FIELD, fci, line);
 
                             if (spfields[k].value_pat == NULL) add_local(spfields[k].name);
                             else if (spfields[k].value_pat->tag == PAT_BINDING)
@@ -1653,8 +1699,8 @@ static void compile_expr(const Expr *e, int line) {
             size_t enum_idx = chunk_add_constant(current_chunk(), value_string(e->as.enum_variant.enum_name));
             size_t var_idx = chunk_add_constant(current_chunk(), value_string(e->as.enum_variant.variant_name));
             emit_byte(OP_BUILD_ENUM, line);
-            emit_byte((uint8_t)enum_idx, line);
-            emit_byte((uint8_t)var_idx, line);
+            emit_const8(enum_idx, line);
+            emit_const8(var_idx, line);
             emit_byte((uint8_t)e->as.enum_variant.arg_count, line);
             break;
         }
@@ -1670,7 +1716,7 @@ static void compile_expr(const Expr *e, int line) {
                     size_t pname_idx = chunk_add_constant(current_chunk(), value_string(pname));
                     int slot = resolve_local(current, pname);
                     emit_byte(OP_FREEZE_FIELD, line);
-                    emit_byte((uint8_t)pname_idx, line);
+                    emit_const8(pname_idx, line);
                     if (slot >= 0) {
                         emit_byte(0, line);
                         emit_byte((uint8_t)slot, line);
@@ -1701,7 +1747,7 @@ static void compile_expr(const Expr *e, int line) {
                     size_t pname_idx = chunk_add_constant(current_chunk(), value_string(pname));
                     int slot = resolve_local(current, pname);
                     emit_byte(OP_FREEZE_FIELD, line);
-                    emit_byte((uint8_t)pname_idx, line);
+                    emit_const8(pname_idx, line);
                     if (slot >= 0) {
                         emit_byte(0, line);
                         emit_byte((uint8_t)slot, line);
@@ -1729,7 +1775,7 @@ static void compile_expr(const Expr *e, int line) {
                 for (size_t i = 0; i < e->as.freeze.except_count; i++)
                     compile_expr(e->as.freeze.except_fields[i], line);
                 emit_byte(OP_FREEZE_EXCEPT, line);
-                emit_byte((uint8_t)name_idx, line);
+                emit_const8(name_idx, line);
                 int slot = resolve_local(current, name);
                 if (slot >= 0) {
                     emit_byte(0, line);
@@ -1786,19 +1832,19 @@ static void compile_expr(const Expr *e, int line) {
                 int slot = resolve_local(current, name);
                 if (slot >= 0) {
                     emit_byte(OP_FREEZE_VAR, line);
-                    emit_byte((uint8_t)name_idx, line);
+                    emit_const8(name_idx, line);
                     emit_byte(0, line);
                     emit_byte((uint8_t)slot, line);
                 } else {
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
                         emit_byte(OP_FREEZE_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(1, line);
                         emit_byte((uint8_t)upvalue, line);
                     } else {
                         emit_byte(OP_FREEZE_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(2, line);
                         emit_byte(0, line);
                     }
@@ -1817,19 +1863,19 @@ static void compile_expr(const Expr *e, int line) {
                 int slot = resolve_local(current, name);
                 if (slot >= 0) {
                     emit_byte(OP_THAW_VAR, line);
-                    emit_byte((uint8_t)name_idx, line);
+                    emit_const8(name_idx, line);
                     emit_byte(0, line); /* loc_type = local */
                     emit_byte((uint8_t)slot, line);
                 } else {
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
                         emit_byte(OP_THAW_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(1, line); /* loc_type = upvalue */
                         emit_byte((uint8_t)upvalue, line);
                     } else {
                         emit_byte(OP_THAW_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(2, line); /* loc_type = global */
                         emit_byte(0, line);
                     }
@@ -1897,19 +1943,19 @@ static void compile_expr(const Expr *e, int line) {
                 int slot = resolve_local(current, name);
                 if (slot >= 0) {
                     emit_byte(OP_FREEZE_VAR, line);
-                    emit_byte((uint8_t)name_idx, line);
+                    emit_const8(name_idx, line);
                     emit_byte(0, line);
                     emit_byte((uint8_t)slot, line);
                 } else {
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
                         emit_byte(OP_FREEZE_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(1, line);
                         emit_byte((uint8_t)upvalue, line);
                     } else {
                         emit_byte(OP_FREEZE_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(2, line);
                         emit_byte(0, line);
                     }
@@ -1966,7 +2012,7 @@ static void compile_expr(const Expr *e, int line) {
                 /* Freeze the variable */
                 compile_expr(e->as.crystallize.expr, line);
                 emit_byte(OP_FREEZE_VAR, line);
-                emit_byte((uint8_t)name_idx, line);
+                emit_const8(name_idx, line);
                 emit_byte((uint8_t)loc_type, line);
                 emit_byte(slot, line);
                 emit_byte(OP_POP, line); /* discard freeze result */
@@ -1983,7 +2029,7 @@ static void compile_expr(const Expr *e, int line) {
                 emit_byte(OP_POP, line); /* pop false */
                 compile_expr(e->as.crystallize.expr, line);
                 emit_byte(OP_THAW_VAR, line);
-                emit_byte((uint8_t)name_idx, line);
+                emit_const8(name_idx, line);
                 emit_byte((uint8_t)loc_type, line);
                 emit_byte(slot, line);
                 emit_byte(OP_POP, line); /* discard thaw result */
@@ -2026,7 +2072,7 @@ static void compile_expr(const Expr *e, int line) {
                 /* Thaw the variable */
                 compile_expr(e->as.borrow.expr, line);
                 emit_byte(OP_THAW_VAR, line);
-                emit_byte((uint8_t)name_idx, line);
+                emit_const8(name_idx, line);
                 emit_byte((uint8_t)loc_type, line);
                 emit_byte(slot, line);
                 emit_byte(OP_POP, line); /* discard thaw result */
@@ -2043,7 +2089,7 @@ static void compile_expr(const Expr *e, int line) {
                 emit_byte(OP_POP, line); /* pop false */
                 compile_expr(e->as.borrow.expr, line);
                 emit_byte(OP_FREEZE_VAR, line);
-                emit_byte((uint8_t)name_idx, line);
+                emit_const8(name_idx, line);
                 emit_byte((uint8_t)loc_type, line);
                 emit_byte(slot, line);
                 emit_byte(OP_POP, line); /* discard freeze result */
@@ -2066,19 +2112,19 @@ static void compile_expr(const Expr *e, int line) {
                 int slot = resolve_local(current, name);
                 if (slot >= 0) {
                     emit_byte(OP_SUBLIMATE_VAR, line);
-                    emit_byte((uint8_t)name_idx, line);
+                    emit_const8(name_idx, line);
                     emit_byte(0, line); /* loc_type = local */
                     emit_byte((uint8_t)slot, line);
                 } else {
                     int upvalue = resolve_upvalue(current, name);
                     if (upvalue >= 0) {
                         emit_byte(OP_SUBLIMATE_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(1, line); /* loc_type = upvalue */
                         emit_byte((uint8_t)upvalue, line);
                     } else {
                         emit_byte(OP_SUBLIMATE_VAR, line);
-                        emit_byte((uint8_t)name_idx, line);
+                        emit_const8(name_idx, line);
                         emit_byte(2, line); /* loc_type = global */
                         emit_byte(0, line);
                     }
@@ -2097,7 +2143,7 @@ static void compile_expr(const Expr *e, int line) {
         case EXPR_SPAWN: {
             /* Compile as OP_SCOPE with 0 spawns (sub-chunk so return works) */
             Chunk *spawn_ch = compile_sub_body(e->as.block.stmts, e->as.block.count, line);
-            uint8_t body_idx = (uint8_t)add_chunk_constant(spawn_ch);
+            uint8_t body_idx = add_subchunk_const8(spawn_ch);
             emit_byte(OP_SCOPE, line);
             emit_byte(0, line);        /* spawn_count = 0 */
             emit_byte(body_idx, line); /* sync_idx */
@@ -2131,7 +2177,7 @@ static void compile_expr(const Expr *e, int line) {
                     if (!(s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)) sync_stmts[si++] = s;
                 }
                 Chunk *sync_chunk = compile_sub_body(sync_stmts, sync_count, line);
-                sync_idx = (uint8_t)add_chunk_constant(sync_chunk);
+                sync_idx = add_subchunk_const8(sync_chunk);
                 free(sync_stmts);
             }
 
@@ -2147,7 +2193,7 @@ static void compile_expr(const Expr *e, int line) {
                 if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN) {
                     Expr *spawn_expr = s->as.expr;
                     Chunk *spawn_ch = compile_sub_body(spawn_expr->as.block.stmts, spawn_expr->as.block.count, line);
-                    spawn_indices[spi++] = (uint8_t)add_chunk_constant(spawn_ch);
+                    spawn_indices[spi++] = add_subchunk_const8(spawn_ch);
                 }
             }
 
@@ -2183,19 +2229,20 @@ static void compile_expr(const Expr *e, int line) {
                     emit_byte(0xFF, line);
                 } else if (arms[i].is_timeout) {
                     Chunk *to_ch = compile_sub_expr(arms[i].timeout_expr, line);
-                    emit_byte((uint8_t)add_chunk_constant(to_ch), line);
+                    emit_byte(add_subchunk_const8(to_ch), line);
                 } else {
                     Chunk *ch_ch = compile_sub_expr(arms[i].channel_expr, line);
-                    emit_byte((uint8_t)add_chunk_constant(ch_ch), line);
+                    emit_byte(add_subchunk_const8(ch_ch), line);
                 }
 
                 /* Body chunk */
                 Chunk *body_ch = compile_sub_body(arms[i].body, arms[i].body_count, line);
-                emit_byte((uint8_t)add_chunk_constant(body_ch), line);
+                emit_byte(add_subchunk_const8(body_ch), line);
 
                 /* Binding name (string constant or 0xFF) */
                 if (arms[i].binding_name) {
-                    emit_byte((uint8_t)chunk_add_constant(current_chunk(), value_string(arms[i].binding_name)), line);
+                    size_t bind_idx = chunk_add_constant(current_chunk(), value_string(arms[i].binding_name));
+                    emit_const8(bind_idx, line);
                 } else {
                     emit_byte(0xFF, line);
                 }
@@ -2379,7 +2426,7 @@ static void compile_stmt(const Stmt *s) {
                 compile_expr(s->as.assign.target->as.field_access.object, line);
                 size_t idx =
                     chunk_add_constant(current_chunk(), value_string(s->as.assign.target->as.field_access.field));
-                emit_bytes(OP_SET_FIELD, (uint8_t)idx, line);
+                emit_op_const8(OP_SET_FIELD, idx, line);
                 /* Write back the modified object to the variable */
                 Expr *obj_expr = s->as.assign.target->as.field_access.object;
                 if (obj_expr->tag == EXPR_IDENT) {
@@ -2678,7 +2725,7 @@ static void compile_stmt(const Stmt *s) {
                         /* Use native "len" to get end index */
                         emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
                         size_t len_idx = chunk_add_constant(current_chunk(), value_string("len"));
-                        emit_bytes(OP_INVOKE, (uint8_t)len_idx, line);
+                        emit_op_const8(OP_INVOKE, len_idx, line);
                         emit_byte(0, line); /* 0 args to .len() */
                         emit_byte(OP_BUILD_RANGE, line);
                         emit_byte(OP_INDEX, line);
@@ -2688,7 +2735,7 @@ static void compile_stmt(const Stmt *s) {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
                         emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
                         size_t fidx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
-                        emit_bytes(OP_GET_FIELD, (uint8_t)fidx, line);
+                        emit_op_const8(OP_GET_FIELD, fidx, line);
                         add_local(s->as.destructure.names[i]);
                     }
                 }
@@ -2710,7 +2757,7 @@ static void compile_stmt(const Stmt *s) {
                         emit_byte(OP_DUP, line); /* [source, source] */
                         emit_byte(OP_DUP, line); /* [source, source, source] */
                         size_t len_idx2 = chunk_add_constant(current_chunk(), value_string("len"));
-                        emit_bytes(OP_INVOKE, (uint8_t)len_idx2, line);
+                        emit_op_const8(OP_INVOKE, len_idx2, line);
                         emit_byte(0, line); /* [source, source, len] — invoke consumes TOS source, pushes len */
                         emit_constant(value_int(start), line); /* [source, source, len, start] */
                         emit_byte(OP_SWAP, line);              /* [source, source, start, len] */
@@ -2724,7 +2771,7 @@ static void compile_stmt(const Stmt *s) {
                     for (size_t i = 0; i < s->as.destructure.name_count; i++) {
                         emit_byte(OP_DUP, line);
                         size_t fidx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
-                        emit_bytes(OP_GET_FIELD, (uint8_t)fidx, line);
+                        emit_op_const8(OP_GET_FIELD, fidx, line);
                         size_t nidx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, nidx, line);
                     }
@@ -2754,7 +2801,7 @@ static void compile_stmt(const Stmt *s) {
 
         case STMT_IMPORT: {
             size_t path_idx = chunk_add_constant(current_chunk(), value_string(s->as.import.module_path));
-            emit_bytes(OP_IMPORT, (uint8_t)path_idx, line);
+            emit_op_const8(OP_IMPORT, path_idx, line);
             if (s->as.import.alias) {
                 if (current->scope_depth > 0) {
                     add_local(s->as.import.alias);
@@ -2768,7 +2815,7 @@ static void compile_stmt(const Stmt *s) {
                     emit_byte(OP_DUP, line); /* duplicate module map */
                     size_t field_idx =
                         chunk_add_constant(current_chunk(), value_string(s->as.import.selective_names[i]));
-                    emit_bytes(OP_GET_FIELD, (uint8_t)field_idx, line);
+                    emit_op_const8(OP_GET_FIELD, field_idx, line);
                     /* Check that the export exists (not nil) */
                     emit_byte(OP_DUP, line);
                     size_t import_ok = emit_jump(OP_JUMP_IF_NOT_NIL, line);

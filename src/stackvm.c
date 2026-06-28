@@ -4554,6 +4554,9 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 for (int i = 0; i < count; i++) stackvm_promote_value(&elems[i]);
             }
             LatValue tup = value_tuple(elems, count);
+            /* value_tuple deep-clones each element, so the popped originals are
+             * owned by us and must be freed or they leak (LAT-483). */
+            for (int i = 0; i < count; i++) value_free(&elems[i]);
             if (count > 16) free(elems);
             push(vm, tup);
             break;
@@ -4643,6 +4646,9 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 for (int i = payload_count - 1; i >= 0; i--) payload[i] = pop(vm);
             }
             LatValue e = value_enum(enum_name, variant_name, payload, payload_count);
+            /* value_enum deep-clones the payload, so the popped originals are
+             * owned by us and must be freed or they leak (LAT-484). */
+            for (int i = 0; i < payload_count; i++) value_free(&payload[i]);
             free(payload);
             push(vm, e);
             break;

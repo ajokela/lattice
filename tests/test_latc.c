@@ -732,19 +732,18 @@ TEST(latc_stack_mem_strings_and_arrays) {
 /* ── Stack VM: many constants (exercises wide constant opcodes) ── */
 
 TEST(latc_stack_many_constants) {
-    /* Build source with many distinct string constants to test constant pool
-     * handling. If the compiler emits > 256 constants, this exercises
-     * OP_CONSTANT_16 and wide global opcodes. */
+    /* Build source with >256 distinct string constants to exercise the wide
+     * constant opcodes (OP_CONSTANT_16). Uses distinct print literals rather
+     * than 300 locals so this stays under the 256-local-slot cap (LAT-499) and
+     * genuinely tests the constant pool. */
     char source[16384];
     int off = 0;
     off += snprintf(source + off, sizeof(source) - (size_t)off, "fn main() {\n");
-    for (int i = 0; i < 300; i++) {
-        off += snprintf(source + off, sizeof(source) - (size_t)off, "    let v%d = \"str_%d\"\n", i, i);
+    off += snprintf(source + off, sizeof(source) - (size_t)off, "    let first = \"str_0\"\n");
+    for (int i = 1; i < 300; i++) {
+        off += snprintf(source + off, sizeof(source) - (size_t)off, "    print(\"str_%d\")\n", i);
     }
-    off += snprintf(source + off, sizeof(source) - (size_t)off,
-                    "    print(v0)\n"
-                    "    print(v299)\n"
-                    "}\n");
+    off += snprintf(source + off, sizeof(source) - (size_t)off, "    print(first)\n}\n");
     ASSERT_STACK_ROUNDTRIP(source);
 }
 
