@@ -1173,6 +1173,10 @@ void doc_file_free(DocFile *df) {
 
 /* ── Rendering helpers ──────────────────────────────────────────────────── */
 
+/* Defined below; forward-declared so JSON renderers above the definition can
+ * route source-derived strings through the escaper. */
+static void sb_append_json_str(StrBuf *sb, const char *s);
+
 static void render_params_md(StrBuf *sb, const DocParam *params, size_t count) {
     sb_append(sb, "(");
     for (size_t i = 0; i < count; i++) {
@@ -1193,8 +1197,12 @@ static void render_params_json(StrBuf *sb, const DocParam *params, size_t count)
     for (size_t i = 0; i < count; i++) {
         if (i > 0) sb_append(sb, ", ");
         sb_append(sb, "{");
-        sb_printf(sb, "\"name\": \"%s\"", params[i].name);
-        if (params[i].type_name) sb_printf(sb, ", \"type\": \"%s\"", params[i].type_name);
+        sb_append(sb, "\"name\": ");
+        sb_append_json_str(sb, params[i].name);
+        if (params[i].type_name) {
+            sb_append(sb, ", \"type\": ");
+            sb_append_json_str(sb, params[i].type_name);
+        }
         if (params[i].is_variadic) sb_append(sb, ", \"variadic\": true");
         if (params[i].has_default) sb_append(sb, ", \"has_default\": true");
         sb_append(sb, "}");
@@ -1202,17 +1210,31 @@ static void render_params_json(StrBuf *sb, const DocParam *params, size_t count)
     sb_append(sb, "]");
 }
 
-/* Escape a string for JSON output */
+/* Escape a string for JSON output. Routes all source-derived strings through
+ * here so a tricky identifier (quote, backslash, or control char) can neither
+ * break out of the JSON string nor produce malformed/invalid JSON. */
 static void sb_append_json_str(StrBuf *sb, const char *s) {
     sb_append(sb, "\"");
-    for (const char *p = s; *p; p++) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
         switch (*p) {
             case '"': sb_append(sb, "\\\""); break;
             case '\\': sb_append(sb, "\\\\"); break;
+            case '\b': sb_append(sb, "\\b"); break;
+            case '\f': sb_append(sb, "\\f"); break;
             case '\n': sb_append(sb, "\\n"); break;
             case '\r': sb_append(sb, "\\r"); break;
             case '\t': sb_append(sb, "\\t"); break;
-            default: sb_append_char(sb, *p); break;
+            default:
+                if (*p < 0x20) {
+                    /* Other control characters: emit a \u00XX escape so the
+                     * output is always well-formed JSON. */
+                    char esc[8];
+                    snprintf(esc, sizeof(esc), "\\u%04x", *p);
+                    sb_append(sb, esc);
+                } else {
+                    sb_append_char(sb, (char)*p);
+                }
+                break;
         }
     }
     sb_append(sb, "\"");
@@ -1648,8 +1670,12 @@ static void render_json(StrBuf *sb, const DocFile *files, size_t file_count) {
                         if (j > 0) sb_append(sb, ", ");
                         const DocField *f = &it->as.strct.fields[j];
                         sb_append(sb, "{");
-                        sb_printf(sb, "\"name\": \"%s\"", f->name);
-                        if (f->type_name) sb_printf(sb, ", \"type\": \"%s\"", f->type_name);
+                        sb_append(sb, "\"name\": ");
+                        sb_append_json_str(sb, f->name);
+                        if (f->type_name) {
+                            sb_append(sb, ", \"type\": ");
+                            sb_append_json_str(sb, f->type_name);
+                        }
                         if (f->doc) {
                             sb_append(sb, ", \"doc\": ");
                             sb_append_json_str(sb, f->doc);
@@ -1665,8 +1691,12 @@ static void render_json(StrBuf *sb, const DocFile *files, size_t file_count) {
                         if (j > 0) sb_append(sb, ", ");
                         const DocVariant *v = &it->as.enm.variants[j];
                         sb_append(sb, "{");
-                        sb_printf(sb, "\"name\": \"%s\"", v->name);
-                        if (v->params) sb_printf(sb, ", \"params\": \"%s\"", v->params);
+                        sb_append(sb, "\"name\": ");
+                        sb_append_json_str(sb, v->name);
+                        if (v->params) {
+                            sb_append(sb, ", \"params\": ");
+                            sb_append_json_str(sb, v->params);
+                        }
                         if (v->doc) {
                             sb_append(sb, ", \"doc\": ");
                             sb_append_json_str(sb, v->doc);
@@ -1682,10 +1712,14 @@ static void render_json(StrBuf *sb, const DocFile *files, size_t file_count) {
                         if (j > 0) sb_append(sb, ", ");
                         const DocTraitMethod *m = &it->as.trait.methods[j];
                         sb_append(sb, "{");
-                        sb_printf(sb, "\"name\": \"%s\"", m->name);
+                        sb_append(sb, "\"name\": ");
+                        sb_append_json_str(sb, m->name);
                         sb_append(sb, ", \"params\": ");
                         render_params_json(sb, m->params, m->param_count);
-                        if (m->return_type) sb_printf(sb, ", \"return_type\": \"%s\"", m->return_type);
+                        if (m->return_type) {
+                            sb_append(sb, ", \"return_type\": ");
+                            sb_append_json_str(sb, m->return_type);
+                        }
                         if (m->doc) {
                             sb_append(sb, ", \"doc\": ");
                             sb_append_json_str(sb, m->doc);
@@ -1696,17 +1730,23 @@ static void render_json(StrBuf *sb, const DocFile *files, size_t file_count) {
                     break;
 
                 case DOC_IMPL:
-                    sb_printf(sb, ",\n        \"trait_name\": \"%s\"", it->as.impl.trait_name);
-                    sb_printf(sb, ",\n        \"type_name\": \"%s\"", it->as.impl.type_name);
+                    sb_append(sb, ",\n        \"trait_name\": ");
+                    sb_append_json_str(sb, it->as.impl.trait_name);
+                    sb_append(sb, ",\n        \"type_name\": ");
+                    sb_append_json_str(sb, it->as.impl.type_name);
                     sb_append(sb, ",\n        \"methods\": [");
                     for (size_t j = 0; j < it->as.impl.method_count; j++) {
                         if (j > 0) sb_append(sb, ", ");
                         const DocTraitMethod *m = &it->as.impl.methods[j];
                         sb_append(sb, "{");
-                        sb_printf(sb, "\"name\": \"%s\"", m->name);
+                        sb_append(sb, "\"name\": ");
+                        sb_append_json_str(sb, m->name);
                         sb_append(sb, ", \"params\": ");
                         render_params_json(sb, m->params, m->param_count);
-                        if (m->return_type) sb_printf(sb, ", \"return_type\": \"%s\"", m->return_type);
+                        if (m->return_type) {
+                            sb_append(sb, ", \"return_type\": ");
+                            sb_append_json_str(sb, m->return_type);
+                        }
                         if (m->doc) {
                             sb_append(sb, ", \"doc\": ");
                             sb_append_json_str(sb, m->doc);
@@ -1717,8 +1757,12 @@ static void render_json(StrBuf *sb, const DocFile *files, size_t file_count) {
                     break;
 
                 case DOC_VARIABLE:
-                    sb_printf(sb, ",\n        \"phase\": \"%s\"", it->as.var.phase);
-                    if (it->as.var.type_name) sb_printf(sb, ",\n        \"type\": \"%s\"", it->as.var.type_name);
+                    sb_append(sb, ",\n        \"phase\": ");
+                    sb_append_json_str(sb, it->as.var.phase);
+                    if (it->as.var.type_name) {
+                        sb_append(sb, ",\n        \"type\": ");
+                        sb_append_json_str(sb, it->as.var.type_name);
+                    }
                     break;
 
                 case DOC_MODULE: break;

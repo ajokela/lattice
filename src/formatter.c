@@ -19,6 +19,11 @@
 
 #define INDENT_WIDTH       4
 #define DEFAULT_LINE_WIDTH 100
+/* Upper bound on emitted indentation depth. Pathologically nested braces would
+ * otherwise make each line re-emit unbounded leading spaces, growing the output
+ * buffer quadratically in nesting depth (a DoS on a tiny malicious input).
+ * Clamping the emitted width keeps total output linear in the input size. */
+#define MAX_INDENT_DEPTH 64
 
 /* ── Scanner state ── */
 typedef struct {
@@ -114,7 +119,11 @@ static void emit_char(Fmt *f, char c) {
 }
 
 static void emit_indent(Fmt *f) {
-    for (int i = 0; i < f->indent * INDENT_WIDTH; i++) emit_char(f, ' ');
+    /* f->indent still tracks the true brace depth (for matching); only the
+     * emitted indentation width is bounded so output growth stays linear. */
+    int depth = f->indent;
+    if (depth > MAX_INDENT_DEPTH) depth = MAX_INDENT_DEPTH;
+    for (int i = 0; i < depth * INDENT_WIDTH; i++) emit_char(f, ' ');
 }
 
 static void emit_newline(Fmt *f) {
@@ -168,13 +177,25 @@ static bool is_flow_keyword(const char *word) {
            strcmp(word, "match") == 0 || strcmp(word, "select") == 0 || strcmp(word, "catch") == 0;
 }
 
-/* Read an identifier or keyword from source (does not advance f->pos) */
-static size_t read_word(const Fmt *f, char *buf, size_t buf_size) {
-    size_t i = 0;
-    size_t p = f->pos;
-    while (p < f->len && is_ident_char(f->src[p]) && i < buf_size - 1) { buf[i++] = f->src[p++]; }
-    buf[i] = '\0';
-    return i;
+/* Read an identifier or keyword from source (does not advance f->pos).
+ * Returns a newly-allocated, NUL-terminated copy of the *entire* identifier,
+ * however long, so the formatter never splits a long identifier (which would
+ * silently corrupt the source by injecting a space inside it). The caller owns
+ * and must free the returned buffer; returns NULL on allocation failure. */
+static char *read_word(const Fmt *f, size_t *out_len) {
+    size_t start = f->pos;
+    size_t p = start;
+    while (p < f->len && is_ident_char(f->src[p])) p++;
+    size_t n = p - start;
+    char *buf = malloc(n + 1);
+    if (!buf) {
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
+    memcpy(buf, f->src + start, n);
+    buf[n] = '\0';
+    if (out_len) *out_len = n;
+    return buf;
 }
 
 /* ── Comment handling ── */
@@ -465,9 +486,9 @@ char *lat_format(const char *source, int max_width, char **err) {
 
         /* ── Identifiers and keywords ── */
         if (isalpha((unsigned char)c) || c == '_') {
-            char word[128];
-            size_t wlen = read_word(&f, word, sizeof(word));
-            (void)wlen;
+            size_t wlen = 0;
+            char *word = read_word(&f, &wlen);
+            if (!word) break; /* allocation failure: stop formatting */
 
             bool kw = is_keyword(word);
 
@@ -488,13 +509,14 @@ char *lat_format(const char *source, int max_width, char **err) {
                 if (needs_space && f.out.len > 0 && f.out.data[f.out.len - 1] != ' ') emit_char(&f, ' ');
             }
 
-            /* Advance past the word */
-            for (size_t i = 0; i < strlen(word); i++) emit_char(&f, fmt_advance(&f));
+            /* Advance past the word (the full identifier, any length) */
+            for (size_t i = 0; i < wlen; i++) emit_char(&f, fmt_advance(&f));
 
             strncpy(f.last_word, word, sizeof(f.last_word) - 1);
             f.last_word[sizeof(f.last_word) - 1] = '\0';
             f.last = kw ? LAST_KEYWORD : LAST_IDENT;
             f.need_space = true;
+            free(word);
             continue;
         }
 
