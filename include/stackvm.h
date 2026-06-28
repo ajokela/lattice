@@ -15,6 +15,14 @@ struct Debugger;  /* forward declaration */
 #define STACKVM_FRAMES_MAX  512
 #define STACKVM_HANDLER_MAX 64
 #define STACKVM_DEFER_MAX   256
+/* OP_*_LOCAL slot operands are a single byte (0..255). push() bounds stack_top
+ * to STACKVM_STACK_MAX, so a frame base is always <= stack + STACKVM_STACK_MAX;
+ * a 256-slot redzone after the value stack therefore makes frame->slots[slot]
+ * land in allocated, zero-initialized memory for ANY slot a crafted .latc can
+ * encode, so a bogus slot can no longer read/write past the stack into adjacent
+ * VM state (LAT-471). The redzone is zeroed by stackvm_init's memset, so the
+ * value_free in OP_SET_LOCAL on an untouched redzone cell is a safe no-op. */
+#define STACKVM_SLOT_REDZONE 256
 
 /* Upvalue representation for closed-over variables */
 typedef struct ObjUpvalue {
@@ -57,7 +65,7 @@ typedef enum {
 typedef struct {
     StackCallFrame frames[STACKVM_FRAMES_MAX];
     size_t frame_count;
-    LatValue stack[STACKVM_STACK_MAX];
+    LatValue stack[STACKVM_STACK_MAX + STACKVM_SLOT_REDZONE]; /* +redzone: see STACKVM_SLOT_REDZONE */
     LatValue *stack_top;
     Env *env;                  /* For global variable access */
     char *error;               /* Runtime error message (heap-allocated) */

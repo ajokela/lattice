@@ -78,6 +78,10 @@ static void push(StackVM *vm, LatValue val) {
 }
 
 static LatValue pop(StackVM *vm) {
+    /* Underflow guard for crafted .latc: never decrement below the stack base,
+     * which would read/free out of bounds (LAT-470). Valid compiled code is
+     * stack-balanced and never triggers this. */
+    if (vm->stack_top <= vm->stack) return value_nil();
     vm->stack_top--;
     return *vm->stack_top;
 }
@@ -3416,6 +3420,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         lbl_OP_POP:
 #endif
         case OP_POP: {
+            if (vm->stack_top <= vm->stack) break; /* underflow guard (LAT-470) */
             vm->stack_top--;
             value_free(vm->stack_top);
             break;
