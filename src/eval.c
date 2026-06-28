@@ -2272,7 +2272,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /// @builtin phase_of(val: Any) -> String
                 /// @category Core
-                /// Returns the phase of a value ("flux", "fix", or "crystal").
+                /// Returns the phase of a value ("fluid", "crystal", "sublimated", or "unphased").
                 /// @example phase_of(freeze([1, 2]))  // "crystal"
                 if (strcmp(fn_name, "phase_of") == 0) {
                     if (argc != 1) {
@@ -13487,8 +13487,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         LatChannel *ch = obj.as.channel.ch;
         /// @method Channel.send(val: Any) -> Unit
         /// @category Channel Methods
-        /// Send a crystal (frozen) value on the channel.
-        /// @example ch.send(freeze(42))
+        /// Send a value on the channel. Crystal, unphased, and scalar values are accepted; fluid containers are
+        /// rejected. Values containing Refs, closures, or iterators are rejected. Sending on a closed channel is an
+        /// error.
+        /// @example ch.send(freeze([1, 2, 3]))
         if (strcmp(method, "send") == 0) {
             if (arg_count != 1) return eval_err(strdup(".send() expects exactly 1 argument"));
             const char *send_err = value_send_ineligible(&args[0]);
@@ -13516,7 +13518,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         }
         /// @method Channel.close() -> Unit
         /// @category Channel Methods
-        /// Close the channel, preventing further sends.
+        /// Close the channel. Further sends raise an error; recv() returns Unit once the channel is empty.
         /// @example ch.close()
         if (strcmp(method, "close") == 0) {
             if (arg_count != 0) return eval_err(strdup(".close() takes no arguments"));
