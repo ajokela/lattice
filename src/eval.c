@@ -191,6 +191,19 @@ static EvalResult eval_signal(ControlFlowTag tag, LatValue v) {
         for (size_t _i = 0; _i < (n); _i++) GC_POP(ev); \
     } while (0)
 
+/* Re-root all evaluated call arguments for the duration of a higher-order
+ * builtin that invokes user closures. After the call dispatch pops the
+ * per-arg roots, the only reference to a sibling argument's fluid-allocated
+ * metadata (closure param_names, etc.) is the C `args` array, so a GC
+ * triggered inside one closure body can sweep another argument out from under
+ * us (LAT-467). Must be balanced with HOF_UNROOT_ARGS before any path that
+ * frees `args`. */
+#define HOF_ROOT_ARGS(ev, args, argc)                                          \
+    do {                                                                       \
+        for (size_t _ha = 0; _ha < (argc); _ha++) GC_PUSH((ev), &(args)[_ha]); \
+    } while (0)
+#define HOF_UNROOT_ARGS(ev, argc) GC_POP_N((ev), (argc))
+
 /* Forward declarations */
 static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr);
 static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt);
@@ -2502,6 +2515,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         free(args);
                         return eval_err(err);
                     }
+                    HOF_ROOT_ARGS(ev, args, argc);
+                    GC_PUSH(ev, &val);
                     /* Check and validate all seeds for this variable */
                     for (size_t si = 0; si < ev->seed_count; si++) {
                         if (strcmp(ev->seeds[si].var_name, vname) != 0) continue;
@@ -2514,6 +2529,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             char *msg = NULL;
                             lat_asprintf(&msg, "grow() seed contract failed: %s", vr.error);
                             free(vr.error);
+                            GC_POP(ev);
+                            HOF_UNROOT_ARGS(ev, argc);
                             value_free(&val);
                             for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                             free(args);
@@ -2521,6 +2538,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         }
                         if (!value_is_truthy(&vr.value)) {
                             value_free(&vr.value);
+                            GC_POP(ev);
+                            HOF_UNROOT_ARGS(ev, argc);
                             value_free(&val);
                             for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                             free(args);
@@ -2533,6 +2552,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         ev->seeds[si] = ev->seeds[--ev->seed_count];
                         si--; /* re-check this index */
                     }
+                    GC_POP(ev);
+                    HOF_UNROOT_ARGS(ev, argc);
                     /* Freeze the variable */
                     val = value_freeze(val);
                     freeze_to_region(ev, &val);
@@ -5060,7 +5081,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     LatValue inner = args[0];
                     args[0].type = VAL_NIL; /* prevent double-free; ownership moves */
+                    HOF_ROOT_ARGS(ev, args, argc);
+                    GC_PUSH(ev, &inner);
                     LatValue result = iter_map_transform(inner, args[1], ev, eval_dispatch_call_closure);
+                    GC_POP(ev);
+                    HOF_UNROOT_ARGS(ev, argc);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(result);
@@ -5078,7 +5103,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     LatValue inner = args[0];
                     args[0].type = VAL_NIL;
+                    HOF_ROOT_ARGS(ev, args, argc);
+                    GC_PUSH(ev, &inner);
                     LatValue result = iter_filter(inner, args[1], ev, eval_dispatch_call_closure);
+                    GC_POP(ev);
+                    HOF_UNROOT_ARGS(ev, argc);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(result);
@@ -7145,6 +7174,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("assert_throws() expects a closure argument"));
                     }
                     /* Call the closure — pass nil if it expects a parameter (convention from lib/test.lat) */
+                    HOF_ROOT_ARGS(ev, args, argc);
                     LatValue nil_arg = value_nil();
                     size_t call_argc = args[0].as.closure.param_count > 0 ? 1 : 0;
                     LatValue *call_args = call_argc > 0 ? &nil_arg : NULL;
@@ -7156,6 +7186,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         /* Success — it threw via eval_err (assert failures, etc.) */
                         LatValue ret = value_string(r.error);
                         free(r.error);
+                        HOF_UNROOT_ARGS(ev, argc);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
                         return eval_ok(ret);
@@ -7164,11 +7195,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (IS_OK(r) && r.value.type == VAL_STR && strncmp(r.value.as.str_val, "EVAL_ERROR:", 11) == 0) {
                         LatValue ret = value_string(r.value.as.str_val + 11);
                         value_free(&r.value);
+                        HOF_UNROOT_ARGS(ev, argc);
                         for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                         free(args);
                         return eval_ok(ret);
                     }
                     value_free(&r.value);
+                    HOF_UNROOT_ARGS(ev, argc);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_err(strdup("assert_throws: expected an error but none was thrown"));
@@ -7281,6 +7314,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         }
                     }
                     LatValue current = value_deep_clone(&args[0]);
+                    HOF_ROOT_ARGS(ev, args, argc);
+                    GC_PUSH(ev, &current);
                     for (size_t i = 1; i < argc; i++) {
                         LatValue call_arg = current;
                         EvalResult r =
@@ -7288,12 +7323,16 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                                          args[i].as.closure.body, args[i].as.closure.captured_env, &call_arg, 1,
                                          args[i].as.closure.default_values, args[i].as.closure.has_variadic);
                         if (!IS_OK(r)) {
+                            GC_POP(ev);
+                            HOF_UNROOT_ARGS(ev, argc);
                             for (size_t j = 0; j < argc; j++) value_free(&args[j]);
                             free(args);
                             return r;
                         }
                         current = r.value;
                     }
+                    GC_POP(ev);
+                    HOF_UNROOT_ARGS(ev, argc);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(current);
@@ -8666,6 +8705,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (expr->as.freeze.contract) {
                     EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
                     if (!IS_OK(cr)) return cr;
+                    if (cr.value.type != VAL_CLOSURE) {
+                        value_free(&cr.value);
+                        return eval_err(strdup("freeze contract must be a function"));
+                    }
                     LatValue check_val = value_deep_clone(&parent->as.strct.field_values[fi]);
                     EvalResult vr =
                         call_closure(ev, cr.value.as.closure.param_names, cr.value.as.closure.param_count,
@@ -8730,6 +8773,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         free(key);
                         return cr;
                     }
+                    if (cr.value.type != VAL_CLOSURE) {
+                        value_free(&cr.value);
+                        free(key);
+                        return eval_err(strdup("freeze contract must be a function"));
+                    }
                     LatValue check_val = value_deep_clone(val_ptr);
                     EvalResult vr =
                         call_closure(ev, cr.value.as.closure.param_names, cr.value.as.closure.param_count,
@@ -8780,6 +8828,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         if (!IS_OK(cr)) {
                             value_free(&val);
                             return cr;
+                        }
+                        if (cr.value.type != VAL_CLOSURE) {
+                            value_free(&cr.value);
+                            value_free(&val);
+                            return eval_err(strdup("freeze contract must be a function"));
                         }
                         LatValue check_val = value_deep_clone(&val);
                         EvalResult vr =
@@ -8965,6 +9018,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         value_free(&val);
                         return cr;
                     }
+                    if (cr.value.type != VAL_CLOSURE) {
+                        value_free(&cr.value);
+                        value_free(&val);
+                        return eval_err(strdup("freeze contract must be a function"));
+                    }
                     LatValue check_val = value_deep_clone(&val);
                     EvalResult vr =
                         call_closure(ev, cr.value.as.closure.param_names, cr.value.as.closure.param_count,
@@ -9013,6 +9071,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (!IS_OK(cr)) {
                     value_free(&er.value);
                     return cr;
+                }
+                if (cr.value.type != VAL_CLOSURE) {
+                    value_free(&cr.value);
+                    value_free(&er.value);
+                    return eval_err(strdup("freeze contract must be a function"));
                 }
                 LatValue check_val = value_deep_clone(&er.value);
                 EvalResult vr = call_closure(ev, cr.value.as.closure.param_names, cr.value.as.closure.param_count,
@@ -9737,7 +9800,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                             }
                             /* Map pattern index to array index, accounting for rest */
                             size_t arr_idx;
-                            if (rest_idx >= 0 && (int)k > rest_idx) arr_idx = arr_len - (pat_count - 1 - k);
+                            if (rest_idx >= 0 && (int)k > rest_idx) arr_idx = arr_len - (pat_count - k);
                             else arr_idx = k;
                             LatValue *elem = &scr.value.as.array.elems[arr_idx];
                             if (sub->tag == PAT_WILDCARD) {
@@ -10632,7 +10695,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
              * since buffers store raw bytes, not LatValues) */
             if (stmt->as.assign.target->tag == EXPR_INDEX) {
                 char *buf_chk_err = NULL;
+                GC_PUSH(ev, &valr.value);
                 LatValue *buf_chk = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &buf_chk_err);
+                GC_POP(ev);
                 if (buf_chk_err) free(buf_chk_err);
                 if (buf_chk && buf_chk->type == VAL_BUFFER) {
                     /* LAT-441: phase guard — frozen/sublimated buffers are immutable */
@@ -10643,7 +10708,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                                      buf_chk->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
                         return eval_err(berr);
                     }
+                    GC_PUSH(ev, &valr.value);
                     EvalResult buf_idxr = eval_expr(ev, stmt->as.assign.target->as.index.index);
+                    GC_POP(ev);
                     if (!IS_OK(buf_idxr)) {
                         value_free(&valr.value);
                         return buf_idxr;
@@ -10676,7 +10743,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             if (stmt->as.assign.target->tag == EXPR_INDEX &&
                 stmt->as.assign.target->as.index.index->tag == EXPR_RANGE) {
                 char *arr_err = NULL;
+                GC_PUSH(ev, &valr.value);
                 LatValue *arr_lv = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &arr_err);
+                GC_POP(ev);
                 if (!arr_lv) {
                     value_free(&valr.value);
                     return eval_err(arr_err);
@@ -10699,12 +10768,16 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     return eval_err(strdup("cannot assign to slice of sublimated array"));
                 }
                 /* Evaluate range bounds */
+                GC_PUSH(ev, &valr.value);
                 EvalResult sr = eval_expr(ev, stmt->as.assign.target->as.index.index->as.range.start);
+                GC_POP(ev);
                 if (!IS_OK(sr)) {
                     value_free(&valr.value);
                     return sr;
                 }
+                GC_PUSH(ev, &valr.value);
                 EvalResult er = eval_expr(ev, stmt->as.assign.target->as.index.index->as.range.end);
+                GC_POP(ev);
                 if (!IS_OK(er)) {
                     value_free(&valr.value);
                     value_free(&sr.value);
@@ -10723,7 +10796,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
 
                 /* Re-resolve arr_lv since eval_expr may have invalidated pointers */
                 arr_err = NULL;
+                GC_PUSH(ev, &valr.value);
                 arr_lv = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &arr_err);
+                GC_POP(ev);
                 if (!arr_lv) {
                     value_free(&valr.value);
                     return eval_err(arr_err);
@@ -10762,7 +10837,10 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     return eval_err(strdup("out of memory"));
                 }
 
-                /* Deep-clone prefix (before slice) */
+                /* Deep-clone prefix (before slice). The clones below allocate and
+                 * can trigger a GC; keep the RHS array rooted until it has been
+                 * consumed into the new array (LAT-466). */
+                GC_PUSH(ev, &valr.value);
                 for (size_t i = 0; i < slice_start; i++) { tmp[i] = value_deep_clone(&arr->as.array.elems[i]); }
                 /* Deep-clone new elements from RHS */
                 for (size_t i = 0; i < new_slice_len; i++) {
@@ -10788,6 +10866,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 value_free(arr);
                 *arr = new_arr;
 
+                GC_POP(ev);
                 value_free(&valr.value);
 
                 /* Record history for root variable */
@@ -10799,9 +10878,15 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 return eval_ok(value_unit());
             }
 
-            /* For field access, index, and nested chains: use resolve_lvalue */
+            /* For field access, index, and nested chains: use resolve_lvalue.
+             * The RHS (valr.value) must stay GC-rooted across every sub-eval
+             * below — resolve_lvalue and the phase-check re-resolves evaluate
+             * index/object expressions that can run user code and trigger a GC
+             * that would otherwise sweep the un-rooted RHS (LAT-466). */
             char *lv_err = NULL;
+            GC_PUSH(ev, &valr.value);
             LatValue *target = resolve_lvalue(ev, stmt->as.assign.target, &lv_err);
+            GC_POP(ev);
             if (!target) {
                 value_free(&valr.value);
                 return eval_err(lv_err);
@@ -10812,7 +10897,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             }
             /* Check sublimated phase for direct parent */
             if (stmt->as.assign.target->tag == EXPR_FIELD_ACCESS) {
+                GC_PUSH(ev, &valr.value);
                 LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.field_access.object, &lv_err);
+                GC_POP(ev);
                 if (parent && parent->phase == VTAG_SUBLIMATED) {
                     const char *fname = stmt->as.assign.target->as.field_access.field;
                     char *err = NULL;
@@ -10822,7 +10909,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 }
             }
             if (stmt->as.assign.target->tag == EXPR_INDEX) {
+                GC_PUSH(ev, &valr.value);
                 LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &lv_err);
+                GC_POP(ev);
                 if (parent && parent->phase == VTAG_SUBLIMATED) {
                     value_free(&valr.value);
                     return eval_err(strdup("cannot assign to index of sublimated value"));
@@ -10830,7 +10919,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             }
             /* Check per-field phase for struct field assignments */
             if (stmt->as.assign.target->tag == EXPR_FIELD_ACCESS) {
+                GC_PUSH(ev, &valr.value);
                 LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.field_access.object, &lv_err);
+                GC_POP(ev);
                 if (parent && parent->type == VAL_STRUCT && parent->phase == VTAG_CRYSTAL) {
                     const char *fname = stmt->as.assign.target->as.field_access.field;
                     char *err = NULL;
@@ -10855,7 +10946,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             }
             /* Check per-key phase for map key assignments */
             if (stmt->as.assign.target->tag == EXPR_INDEX) {
+                GC_PUSH(ev, &valr.value);
                 LatValue *parent = resolve_lvalue(ev, stmt->as.assign.target->as.index.object, &lv_err);
+                GC_POP(ev);
                 if (parent && parent->type == VAL_REF && parent->phase == VTAG_CRYSTAL) {
                     value_free(&valr.value);
                     return eval_err(strdup("cannot assign index on a frozen Ref"));
@@ -10870,7 +10963,9 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         value_free(&valr.value);
                         return eval_err(strdup("cannot assign to key of frozen map"));
                     }
+                    GC_PUSH(ev, &valr.value);
                     EvalResult kidxr = eval_expr(ev, stmt->as.assign.target->as.index.index);
+                    GC_POP(ev);
                     if (IS_OK(kidxr) && kidxr.value.type == VAL_STR) {
                         PhaseTag *kp = (PhaseTag *)lat_map_get(kphases, kidxr.value.as.str_val);
                         if (parent_crystal) {
