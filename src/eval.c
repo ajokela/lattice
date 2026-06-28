@@ -619,6 +619,24 @@ static char *freeze_cascade(Evaluator *ev, const char *target_name) {
     return NULL;
 }
 
+/* LAT-458: unwrap a Ref lvalue to its inner for an in-place mutation, copying a
+ * borrowed shared/crystal inner out to private storage first (copy-on-write
+ * through the fluid Ref handle — matches regvm/stackvm, which gate only on the
+ * handle's phase). On a Ref, *was_ref is set so the caller skips the inner's
+ * own crystal/sublimated guard (the mutation lands on the now-private copy; the
+ * original frozen alias is untouched). A direct (non-Ref) lvalue is returned
+ * unchanged with *was_ref=false, so a direct frozen mutation still errors. */
+static LatValue *ref_unwrap_for_write(LatValue *lv, bool *was_ref) {
+    if (lv && lv->type == VAL_REF) {
+        *was_ref = true;
+        LatValue *inner = &lv->as.ref.ref->value;
+        value_unshare_detached(inner);
+        return inner;
+    }
+    *was_ref = false;
+    return lv;
+}
+
 /*
  * Resolve a mutable pointer to a LatValue from an lvalue expression.
  * Walks chains of field_access and index expressions to find the
@@ -667,15 +685,18 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
             return NULL;
         }
 
-        /* Ref unwrap: delegate indexing to the inner value */
-        if (parent->type == VAL_REF) parent = &parent->as.ref.ref->value;
+        /* Ref unwrap: delegate indexing to the inner value (LAT-458:
+         * copy-on-write a borrowed shared/crystal inner; the Ref handle is the
+         * mutable holder, so its inner skips the phase guard below). */
+        bool parent_from_ref = false;
+        parent = ref_unwrap_for_write(parent, &parent_from_ref);
 
         /* LAT-441: phase guard — resolve_lvalue is only used for writes
          * (index assignment and in-place mutating methods), so reject
          * resolution through a crystal/sublimated container.  Map keys with
          * an explicit non-crystal key_phases entry (freeze-except) stay
          * writable. */
-        if (parent->phase == VTAG_CRYSTAL || parent->phase == VTAG_SUBLIMATED) {
+        if (!parent_from_ref && (parent->phase == VTAG_CRYSTAL || parent->phase == VTAG_SUBLIMATED)) {
             bool exempt = false;
             if (parent->type == VAL_MAP && idxr.value.type == VAL_STR && parent->as.map.key_phases) {
                 PhaseTag *kp = lat_map_get(parent->as.map.key_phases, idxr.value.as.str_val);
@@ -7763,9 +7784,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "set") == 0 && expr->as.method_call.arg_count == 2) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                if (map_lv && map_lv->type == VAL_REF) map_lv = &map_lv->as.ref.ref->value;
+                bool map_from_ref = false;
+                map_lv = ref_unwrap_for_write(map_lv, &map_from_ref);
                 if (map_lv && map_lv->type == VAL_MAP) {
-                    if (map_lv->phase == VTAG_SUBLIMATED) return eval_err(strdup("cannot set on a sublimated map"));
+                    if (!map_from_ref && map_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot set on a sublimated map"));
                     EvalResult kr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(kr)) return kr;
                     if (kr.value.type != VAL_STR) {
@@ -7792,10 +7815,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "pop") == 0 && expr->as.method_call.arg_count == 0) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                if (arr_lv && arr_lv->type == VAL_REF) arr_lv = &arr_lv->as.ref.ref->value;
+                bool arr_from_ref = false;
+                arr_lv = ref_unwrap_for_write(arr_lv, &arr_from_ref);
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
-                    if (value_is_crystal(arr_lv)) return eval_err(strdup("cannot pop from a crystal array"));
-                    if (arr_lv->phase == VTAG_SUBLIMATED) return eval_err(strdup("cannot pop from a sublimated array"));
+                    if (!arr_from_ref && value_is_crystal(arr_lv))
+                        return eval_err(strdup("cannot pop from a crystal array"));
+                    if (!arr_from_ref && arr_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot pop from a sublimated array"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
                         if (vn) {
@@ -7817,10 +7843,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "insert") == 0 && expr->as.method_call.arg_count == 2) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                if (arr_lv && arr_lv->type == VAL_REF) arr_lv = &arr_lv->as.ref.ref->value;
+                bool arr_from_ref = false;
+                arr_lv = ref_unwrap_for_write(arr_lv, &arr_from_ref);
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
-                    if (value_is_crystal(arr_lv)) return eval_err(strdup("cannot insert into a crystal array"));
-                    if (arr_lv->phase == VTAG_SUBLIMATED)
+                    if (!arr_from_ref && value_is_crystal(arr_lv))
+                        return eval_err(strdup("cannot insert into a crystal array"));
+                    if (!arr_from_ref && arr_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot insert into a sublimated array"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
@@ -7867,10 +7895,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "remove_at") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *arr_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                if (arr_lv && arr_lv->type == VAL_REF) arr_lv = &arr_lv->as.ref.ref->value;
+                bool arr_from_ref = false;
+                arr_lv = ref_unwrap_for_write(arr_lv, &arr_from_ref);
                 if (arr_lv && arr_lv->type == VAL_ARRAY) {
-                    if (value_is_crystal(arr_lv)) return eval_err(strdup("cannot remove from a crystal array"));
-                    if (arr_lv->phase == VTAG_SUBLIMATED)
+                    if (!arr_from_ref && value_is_crystal(arr_lv))
+                        return eval_err(strdup("cannot remove from a crystal array"));
+                    if (!arr_from_ref && arr_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot remove from a sublimated array"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
@@ -7906,9 +7936,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "merge") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                if (map_lv && map_lv->type == VAL_REF) map_lv = &map_lv->as.ref.ref->value;
+                bool map_from_ref = false;
+                map_lv = ref_unwrap_for_write(map_lv, &map_from_ref);
                 if (map_lv && map_lv->type == VAL_MAP) {
-                    if (map_lv->phase == VTAG_SUBLIMATED) return eval_err(strdup("cannot merge into a sublimated map"));
+                    if (!map_from_ref && map_lv->phase == VTAG_SUBLIMATED)
+                        return eval_err(strdup("cannot merge into a sublimated map"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
                         if (vn) {
@@ -7948,9 +7980,10 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "remove") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *map_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                if (map_lv && map_lv->type == VAL_REF) map_lv = &map_lv->as.ref.ref->value;
+                bool map_from_ref = false;
+                map_lv = ref_unwrap_for_write(map_lv, &map_from_ref);
                 if (map_lv && map_lv->type == VAL_MAP) {
-                    if (map_lv->phase == VTAG_SUBLIMATED)
+                    if (!map_from_ref && map_lv->phase == VTAG_SUBLIMATED)
                         return eval_err(strdup("cannot remove from a sublimated map"));
                     {
                         const char *vn = get_method_obj_varname(expr->as.method_call.object);
@@ -8037,10 +8070,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (strcmp(expr->as.method_call.method, "push") == 0 && expr->as.method_call.arg_count == 1) {
                 char *lv_err = NULL;
                 LatValue *buf_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
-                if (buf_lv && buf_lv->type == VAL_REF) buf_lv = &buf_lv->as.ref.ref->value;
+                bool buf_from_ref = false;
+                buf_lv = ref_unwrap_for_write(buf_lv, &buf_from_ref);
                 if (buf_lv && buf_lv->type == VAL_ARRAY) {
                     /* Ref-wrapped array push via resolve_lvalue */
-                    if (value_is_crystal(buf_lv)) return eval_err(strdup("cannot push to a crystal array"));
+                    if (!buf_from_ref && value_is_crystal(buf_lv))
+                        return eval_err(strdup("cannot push to a crystal array"));
                     EvalResult ar = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(ar)) return ar;
                     if (buf_lv->as.array.len >= buf_lv->as.array.cap) {
@@ -11480,6 +11515,9 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
         if (strcmp(method, "set") == 0 && arg_count == 2) {
             if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             if (args[0].type != VAL_STR) return eval_err(strdup(".set() key must be a string"));
+            /* LAT-458: privatize a borrowed shared/crystal inner before the
+             * in-place map write (copy-on-write through the fluid Ref handle). */
+            value_unshare_detached(inner);
             LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, args[0].as.str_val);
             if (old) value_free(old);
             /* STORE direction (Stage 5 review): detach — see Ref.set above. */
