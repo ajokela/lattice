@@ -351,6 +351,7 @@ static LspDocument *add_document(LspServer *srv, const char *uri, const char *te
 }
 
 static void remove_document(LspServer *srv, const char *uri) {
+    if (!uri) return;
     for (size_t i = 0; i < srv->doc_count; i++) {
         if (strcmp(srv->documents[i]->uri, uri) == 0) {
             lsp_document_free(srv->documents[i]);
@@ -533,6 +534,7 @@ static void handle_did_change(LspServer *srv, cJSON *params) {
     if (!td) return;
 
     const char *uri = lsp_json_str(td, "uri");
+    if (!uri) return; /* missing/non-string uri would NULL-deref downstream */
     cJSON *ver = cJSON_GetObjectItem(td, "version");
     int version = ver ? ver->valueint : 0;
 

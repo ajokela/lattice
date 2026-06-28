@@ -9,6 +9,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+
+/* Append a formatted fragment to a fixed buffer without ever advancing the
+ * write cursor past `end`. snprintf returns the would-be length, which can
+ * exceed the remaining space if the buffer was under-sized; advancing p by that
+ * value would make a later `(size_t)(end - p)` underflow and overflow the heap.
+ * Clamping the advance keeps every subsequent write strictly in bounds. */
+static __attribute__((format(printf, 3, 4))) char *sig_appendf(char *p, char *end, const char *fmt, ...) {
+    if (p >= end) return p;
+    size_t rem = (size_t)(end - p);
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(p, rem, fmt, ap);
+    va_end(ap);
+    if (n < 0) return p;
+    return p + ((size_t)n < rem ? (size_t)n : rem - 1);
+}
 
 /* Parse "line:col: message" format from lexer/parser errors.
  * line/col are 1-based in Lattice; convert to 0-based for LSP. */
@@ -110,18 +127,22 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                 sym.kind = LSP_SYM_FUNCTION;
                 /* Build signature */
                 size_t siglen = strlen(fn->name) + 32;
-                for (size_t j = 0; j < fn->param_count; j++) siglen += strlen(fn->params[j].name) + 16;
+                for (size_t j = 0; j < fn->param_count; j++) {
+                    siglen += strlen(fn->params[j].name) + 16;
+                    /* Type annotation is attacker-controlled and uncapped — must be counted. */
+                    if (fn->params[j].ty.name) siglen += strlen(fn->params[j].ty.name) + 2;
+                }
                 sym.signature = malloc(siglen);
                 if (!sym.signature) return;
                 char *p = sym.signature;
                 char *end = sym.signature + siglen;
-                p += snprintf(p, (size_t)(end - p), "fn %s(", fn->name);
+                p = sig_appendf(p, end, "fn %s(", fn->name);
                 for (size_t j = 0; j < fn->param_count; j++) {
-                    if (j > 0) p += snprintf(p, (size_t)(end - p), ", ");
-                    p += snprintf(p, (size_t)(end - p), "%s", fn->params[j].name);
-                    if (fn->params[j].ty.name) p += snprintf(p, (size_t)(end - p), ": %s", fn->params[j].ty.name);
+                    if (j > 0) p = sig_appendf(p, end, ", ");
+                    p = sig_appendf(p, end, "%s", fn->params[j].name);
+                    if (fn->params[j].ty.name) p = sig_appendf(p, end, ": %s", fn->params[j].ty.name);
                 }
-                snprintf(p, (size_t)(end - p), ")");
+                sig_appendf(p, end, ")");
                 find_decl_position(doc->text, "fn", fn->name, last_line, &sym.line, &sym.col);
                 found = true;
                 break;
@@ -149,9 +170,19 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                         sdef.fields[j].type_name = sd->fields[j].ty.name ? strdup(sd->fields[j].ty.name) : NULL;
                     }
                 }
-                doc->struct_def_count++;
-                doc->struct_defs = realloc(doc->struct_defs, doc->struct_def_count * sizeof(LspStructDef));
-                doc->struct_defs[doc->struct_def_count - 1] = sdef;
+                LspStructDef *sd_tmp = realloc(doc->struct_defs, (doc->struct_def_count + 1) * sizeof(LspStructDef));
+                if (!sd_tmp) {
+                    /* Keep the old buffer; free the just-built record to avoid a leak. */
+                    free(sdef.name);
+                    for (size_t j = 0; j < sdef.field_count; j++) {
+                        free(sdef.fields[j].name);
+                        free(sdef.fields[j].type_name);
+                    }
+                    free(sdef.fields);
+                    return;
+                }
+                doc->struct_defs = sd_tmp;
+                doc->struct_defs[doc->struct_def_count++] = sdef;
 
                 found = true;
                 break;
@@ -207,9 +238,19 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
                         }
                     }
                 }
-                doc->enum_def_count++;
-                doc->enum_defs = realloc(doc->enum_defs, doc->enum_def_count * sizeof(LspEnumDef));
-                doc->enum_defs[doc->enum_def_count - 1] = edef;
+                LspEnumDef *ed_tmp = realloc(doc->enum_defs, (doc->enum_def_count + 1) * sizeof(LspEnumDef));
+                if (!ed_tmp) {
+                    /* Keep the old buffer; free the just-built record to avoid a leak. */
+                    free(edef.name);
+                    for (size_t j = 0; j < edef.variant_count; j++) {
+                        free(edef.variants[j].name);
+                        free(edef.variants[j].params);
+                    }
+                    free(edef.variants);
+                    return;
+                }
+                doc->enum_defs = ed_tmp;
+                doc->enum_defs[doc->enum_def_count++] = edef;
 
                 found = true;
                 break;
@@ -293,27 +334,38 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
 
                         /* Build signature like "fn distance(self: Point, other: Point)" */
                         size_t msiglen = strlen(fn->name) + 32;
-                        for (size_t k = 0; k < fn->param_count; k++) msiglen += strlen(fn->params[k].name) + 16;
+                        for (size_t k = 0; k < fn->param_count; k++) {
+                            msiglen += strlen(fn->params[k].name) + 16;
+                            /* Type annotation is attacker-controlled and uncapped — must be counted. */
+                            if (fn->params[k].ty.name) msiglen += strlen(fn->params[k].ty.name) + 2;
+                        }
                         im.signature = malloc(msiglen);
                         if (im.signature) {
                             char *p = im.signature;
                             char *end = im.signature + msiglen;
-                            p += snprintf(p, (size_t)(end - p), "fn %s(", fn->name);
+                            p = sig_appendf(p, end, "fn %s(", fn->name);
                             for (size_t k = 0; k < fn->param_count; k++) {
-                                if (k > 0) p += snprintf(p, (size_t)(end - p), ", ");
-                                p += snprintf(p, (size_t)(end - p), "%s", fn->params[k].name);
-                                if (fn->params[k].ty.name)
-                                    p += snprintf(p, (size_t)(end - p), ": %s", fn->params[k].ty.name);
+                                if (k > 0) p = sig_appendf(p, end, ", ");
+                                p = sig_appendf(p, end, "%s", fn->params[k].name);
+                                if (fn->params[k].ty.name) p = sig_appendf(p, end, ": %s", fn->params[k].ty.name);
                             }
-                            snprintf(p, (size_t)(end - p), ")");
+                            sig_appendf(p, end, ")");
                         }
 
                         /* Find method position in text */
                         find_decl_position(doc->text, "fn", fn->name, sym.line, &im.line, &(int){0});
 
-                        doc->impl_method_count++;
-                        doc->impl_methods = realloc(doc->impl_methods, doc->impl_method_count * sizeof(LspImplMethod));
-                        doc->impl_methods[doc->impl_method_count - 1] = im;
+                        LspImplMethod *im_tmp =
+                            realloc(doc->impl_methods, (doc->impl_method_count + 1) * sizeof(LspImplMethod));
+                        if (!im_tmp) {
+                            /* Keep the old buffer; free the just-built record to avoid a leak. */
+                            free(im.type_name);
+                            free(im.method_name);
+                            free(im.signature);
+                            return;
+                        }
+                        doc->impl_methods = im_tmp;
+                        doc->impl_methods[doc->impl_method_count++] = im;
                     }
                 }
 
@@ -326,9 +378,17 @@ static void extract_symbols(LspDocument *doc, const Program *prog) {
         if (found) {
             last_line = sym.line;
             sym.owner_type = NULL;
-            doc->symbol_count++;
-            doc->symbols = realloc(doc->symbols, doc->symbol_count * sizeof(LspSymbol));
-            doc->symbols[doc->symbol_count - 1] = sym;
+            LspSymbol *sym_tmp = realloc(doc->symbols, (doc->symbol_count + 1) * sizeof(LspSymbol));
+            if (!sym_tmp) {
+                /* Keep the old buffer; free the just-built symbol to avoid a leak. */
+                free(sym.name);
+                free(sym.signature);
+                free(sym.doc);
+                free(sym.owner_type);
+                continue;
+            }
+            doc->symbols = sym_tmp;
+            doc->symbols[doc->symbol_count++] = sym;
         }
     }
 }
@@ -453,12 +513,15 @@ static void extract_folding_ranges(LspDocument *doc) {
             }
             /* Emit folding range if multi-line */
             if (line > start_line) {
-                doc->folding_range_count++;
-                doc->folding_ranges = realloc(doc->folding_ranges, doc->folding_range_count * sizeof(LspFoldingRange));
-                LspFoldingRange *fr = &doc->folding_ranges[doc->folding_range_count - 1];
-                fr->start_line = start_line;
-                fr->end_line = line;
-                fr->kind = "comment";
+                LspFoldingRange *fr_tmp =
+                    realloc(doc->folding_ranges, (doc->folding_range_count + 1) * sizeof(LspFoldingRange));
+                if (fr_tmp) {
+                    doc->folding_ranges = fr_tmp;
+                    LspFoldingRange *fr = &doc->folding_ranges[doc->folding_range_count++];
+                    fr->start_line = start_line;
+                    fr->end_line = line;
+                    fr->kind = "comment";
+                }
             }
             continue;
         }
@@ -473,13 +536,15 @@ static void extract_folding_ranges(LspDocument *doc) {
                 brace_depth--;
                 int start_line = brace_stack[brace_depth];
                 if (line > start_line) {
-                    doc->folding_range_count++;
-                    doc->folding_ranges =
-                        realloc(doc->folding_ranges, doc->folding_range_count * sizeof(LspFoldingRange));
-                    LspFoldingRange *fr = &doc->folding_ranges[doc->folding_range_count - 1];
-                    fr->start_line = start_line;
-                    fr->end_line = line;
-                    fr->kind = "region";
+                    LspFoldingRange *fr_tmp =
+                        realloc(doc->folding_ranges, (doc->folding_range_count + 1) * sizeof(LspFoldingRange));
+                    if (fr_tmp) {
+                        doc->folding_ranges = fr_tmp;
+                        LspFoldingRange *fr = &doc->folding_ranges[doc->folding_range_count++];
+                        fr->start_line = start_line;
+                        fr->end_line = line;
+                        fr->kind = "region";
+                    }
                 }
             }
         }
@@ -686,6 +751,17 @@ static int semtok_cmp(const void *a, const void *b) {
     return sa->col - sb->col;
 }
 
+/* Double the entries buffer. Returns false (leaving the old buffer intact) on a
+ * failed realloc so the caller can drop the entry instead of dereferencing NULL. */
+static bool semtok_grow(SemTokEntry **entries, size_t *cap) {
+    size_t ncap = *cap * 2;
+    SemTokEntry *tmp = realloc(*entries, ncap * sizeof(SemTokEntry));
+    if (!tmp) return false;
+    *entries = tmp;
+    *cap = ncap;
+    return true;
+}
+
 /* Extract semantic tokens by re-lexing and classifying tokens, plus scanning for comments. */
 static void extract_semantic_tokens(LspDocument *doc) {
     if (!doc->text || !*doc->text) return;
@@ -768,11 +844,8 @@ static void extract_semantic_tokens(LspDocument *doc) {
                 col++;
                 len++;
             }
-            if (entry_count >= entry_cap) {
-                entry_cap *= 2;
-                entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
-            }
-            entries[entry_count++] = (SemTokEntry){line, start_col, len, LSP_SEMTOK_COMMENT};
+            if (entry_count < entry_cap || semtok_grow(&entries, &entry_cap))
+                entries[entry_count++] = (SemTokEntry){line, start_col, len, LSP_SEMTOK_COMMENT};
             continue;
         }
 
@@ -809,11 +882,8 @@ static void extract_semantic_tokens(LspDocument *doc) {
                 }
                 first_len -= start_col;
                 if (first_len > 0) {
-                    if (entry_count >= entry_cap) {
-                        entry_cap *= 2;
-                        entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
-                    }
-                    entries[entry_count++] = (SemTokEntry){start_line, start_col, first_len, LSP_SEMTOK_COMMENT};
+                    if (entry_count < entry_cap || semtok_grow(&entries, &entry_cap))
+                        entries[entry_count++] = (SemTokEntry){start_line, start_col, first_len, LSP_SEMTOK_COMMENT};
                 }
                 /* Middle + last lines */
                 for (int cl = start_line + 1; cl <= line; cl++) {
@@ -825,11 +895,8 @@ static void extract_semantic_tokens(LspDocument *doc) {
                         ll++;
                     }
                     if (ll > 0) {
-                        if (entry_count >= entry_cap) {
-                            entry_cap *= 2;
-                            entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
-                        }
-                        entries[entry_count++] = (SemTokEntry){cl, 0, ll, LSP_SEMTOK_COMMENT};
+                        if (entry_count < entry_cap || semtok_grow(&entries, &entry_cap))
+                            entries[entry_count++] = (SemTokEntry){cl, 0, ll, LSP_SEMTOK_COMMENT};
                     }
                     scan = le;
                 }
@@ -837,11 +904,8 @@ static void extract_semantic_tokens(LspDocument *doc) {
                 /* Single-line block comment */
                 int len = col - start_col;
                 if (len > 0) {
-                    if (entry_count >= entry_cap) {
-                        entry_cap *= 2;
-                        entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
-                    }
-                    entries[entry_count++] = (SemTokEntry){start_line, start_col, len, LSP_SEMTOK_COMMENT};
+                    if (entry_count < entry_cap || semtok_grow(&entries, &entry_cap))
+                        entries[entry_count++] = (SemTokEntry){start_line, start_col, len, LSP_SEMTOK_COMMENT};
                 }
             }
             continue;
@@ -956,11 +1020,8 @@ static void extract_semantic_tokens(LspDocument *doc) {
         }
 
         if (tok_type >= 0 && tok_len > 0 && tok_line >= 0 && tok_col >= 0) {
-            if (entry_count >= entry_cap) {
-                entry_cap *= 2;
-                entries = realloc(entries, entry_cap * sizeof(SemTokEntry));
-            }
-            entries[entry_count++] = (SemTokEntry){tok_line, tok_col, tok_len, tok_type};
+            if (entry_count < entry_cap || semtok_grow(&entries, &entry_cap))
+                entries[entry_count++] = (SemTokEntry){tok_line, tok_col, tok_len, tok_type};
         }
     }
 
