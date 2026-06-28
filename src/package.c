@@ -1964,15 +1964,28 @@ char *pkg_resolve_module(const char *name, const char *project_dir) {
             char *err = NULL;
             if (pkg_manifest_parse(toml_src, &dep_m, &err)) {
                 if (dep_m.meta.entry) {
+                    char pkgdir[PATH_MAX], pkgdir_real[PATH_MAX];
                     if (project_dir) {
                         snprintf(candidate, sizeof(candidate), "%s/lat_modules/%s/%s", project_dir, name,
                                  dep_m.meta.entry);
+                        snprintf(pkgdir, sizeof(pkgdir), "%s/lat_modules/%s", project_dir, name);
                     } else {
                         snprintf(candidate, sizeof(candidate), "lat_modules/%s/%s", name, dep_m.meta.entry);
+                        snprintf(pkgdir, sizeof(pkgdir), "lat_modules/%s", name);
                     }
                     pkg_manifest_free(&dep_m);
                     free(toml_src);
-                    if (realpath(candidate, resolved)) return strdup(resolved);
+                    /* LAT-529: confine the entry-resolved path to the package directory so a
+                     * malicious lattice.toml `entry` (e.g. "../../../evil.lat") cannot escape
+                     * lat_modules/<name>/ and make `import` load an arbitrary file. A legitimate
+                     * sub-path like "src/main.lat" still resolves inside the package dir. */
+                    if (realpath(candidate, resolved) && realpath(pkgdir, pkgdir_real)) {
+                        size_t plen = strlen(pkgdir_real);
+                        if (strncmp(resolved, pkgdir_real, plen) == 0 &&
+                            (resolved[plen] == '/' || resolved[plen] == '\0')) {
+                            return strdup(resolved);
+                        }
+                    }
                     return NULL;
                 }
                 pkg_manifest_free(&dep_m);

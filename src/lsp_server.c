@@ -2999,8 +2999,10 @@ static void handle_code_action(LspServer *srv, cJSON *params, int id) {
             memcpy(original, indent_end, line_len - indent_len);
             original[line_len - indent_len] = '\0';
 
-            /* Build try/catch wrapper */
-            size_t new_len = indent_len * 3 + strlen(original) + 64;
+            /* Build try/catch wrapper. The indent string is interpolated 5 times
+             * in the snprintf below, so the buffer must budget for 5x (not 3x)
+             * or the edit is truncated for deeply-indented lines (LAT-531). */
+            size_t new_len = indent_len * 5 + strlen(original) + 64;
             char *new_text = malloc(new_len);
             if (new_text) {
                 snprintf(new_text, new_len, "%stry {\n%s  %s\n%s} catch (e) {\n%s  // handle error\n%s}", indent,

@@ -1253,6 +1253,26 @@ static void sb_append_html_esc(StrBuf *sb, const char *s) {
     }
 }
 
+/* Escape a source-derived string for safe inclusion in generated Markdown
+ * (LAT-536): neutralizes table-cell separators and newlines (which would
+ * corrupt tables / split headings) and HTML-significant characters (which would
+ * inject markup / script when the Markdown is later rendered to HTML). */
+static void sb_append_md(StrBuf *sb, const char *s) {
+    if (!s) return;
+    for (const char *p = s; *p; p++) {
+        switch (*p) {
+            case '&': sb_append(sb, "&amp;"); break;
+            case '<': sb_append(sb, "&lt;"); break;
+            case '>': sb_append(sb, "&gt;"); break;
+            case '|': sb_append(sb, "\\|"); break;
+            case '`': sb_append(sb, "\\`"); break;
+            case '\r': break;
+            case '\n': sb_append_char(sb, ' '); break;
+            default: sb_append_char(sb, *p); break;
+        }
+    }
+}
+
 /* ── Plain text renderer ─────────────────────────────────────────────────── */
 
 static void render_text_params(StrBuf *sb, const DocParam *params, size_t count) {
@@ -1489,8 +1509,13 @@ static void render_markdown(StrBuf *sb, const DocFile *files, size_t file_count)
                     sb_append(sb, "|-------|------|-------------|\n");
                     for (size_t j = 0; j < it->as.strct.field_count; j++) {
                         const DocField *f = &it->as.strct.fields[j];
-                        sb_printf(sb, "| `%s` | `%s` | %s |\n", f->name, f->type_name ? f->type_name : "",
-                                  f->doc ? f->doc : "");
+                        sb_append(sb, "| `");
+                        sb_append_md(sb, f->name);
+                        sb_append(sb, "` | `");
+                        sb_append_md(sb, f->type_name ? f->type_name : "");
+                        sb_append(sb, "` | ");
+                        sb_append_md(sb, f->doc ? f->doc : "");
+                        sb_append(sb, " |\n");
                     }
                     sb_append(sb, "\n");
                 }
@@ -1517,7 +1542,10 @@ static void render_markdown(StrBuf *sb, const DocFile *files, size_t file_count)
                         sb_printf(sb, "- `%s", v->name);
                         if (v->params) sb_printf(sb, "(%s)", v->params);
                         sb_append(sb, "`");
-                        if (v->doc) sb_printf(sb, " — %s", v->doc);
+                        if (v->doc) {
+                            sb_append(sb, " — ");
+                            sb_append_md(sb, v->doc);
+                        }
                         sb_append(sb, "\n");
                     }
                     sb_append(sb, "\n");
@@ -1546,7 +1574,10 @@ static void render_markdown(StrBuf *sb, const DocFile *files, size_t file_count)
                         render_params_md(sb, m->params, m->param_count);
                         if (m->return_type) sb_printf(sb, " -> %s", m->return_type);
                         sb_append(sb, "`");
-                        if (m->doc) sb_printf(sb, " — %s", m->doc);
+                        if (m->doc) {
+                            sb_append(sb, " — ");
+                            sb_append_md(sb, m->doc);
+                        }
                         sb_append(sb, "\n");
                     }
                     sb_append(sb, "\n");
@@ -1575,7 +1606,10 @@ static void render_markdown(StrBuf *sb, const DocFile *files, size_t file_count)
                         render_params_md(sb, m->params, m->param_count);
                         if (m->return_type) sb_printf(sb, " -> %s", m->return_type);
                         sb_append(sb, "`");
-                        if (m->doc) sb_printf(sb, " — %s", m->doc);
+                        if (m->doc) {
+                            sb_append(sb, " — ");
+                            sb_append_md(sb, m->doc);
+                        }
                         sb_append(sb, "\n");
                     }
                     sb_append(sb, "\n");
