@@ -2683,6 +2683,10 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                         ref_unlock(ref);
                         return true;
                     }
+                    /* LAT-458: privatize a borrowed shared/crystal inner before
+                     * the in-place write — value_free/lat_map_set on sealed
+                     * region memory corrupts it. Mirrors regvm (cf77625). */
+                    value_unshare_detached(inner);
                     LatValue val2 = stackvm_peek(vm, 0)[0];
                     vm->stack_top--;
                     LatValue key = stackvm_peek(vm, 0)[0];
@@ -2798,6 +2802,9 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                         ref_unlock(ref);
                         return true;
                     }
+                    /* LAT-458: privatize a borrowed shared/crystal inner before
+                     * merging in place (mirrors regvm cf77625). */
+                    value_unshare_detached(inner);
                     LatValue other = stackvm_peek(vm, 0)[0];
                     vm->stack_top--;
                     if (other.type == VAL_MAP) {
@@ -2827,6 +2834,10 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                         ref_unlock(ref);
                         return true;
                     }
+                    /* LAT-458: privatize a borrowed shared/crystal inner before
+                     * the in-place realloc/append — realloc of region-interior
+                     * elems corrupts the sealed region. Mirrors regvm (cf77625). */
+                    value_unshare_detached(inner);
                     LatValue val2 = stackvm_peek(vm, 0)[0];
                     vm->stack_top--;
                     /* STORE direction (Stage 5 review): detach — see Ref.set
@@ -2850,6 +2861,9 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                         ref_unlock(ref);
                         return true;
                     }
+                    /* LAT-458: pop moves a region-interior element out of a
+                     * shared inner; privatize first (mirrors regvm cf77625). */
+                    value_unshare_detached(inner);
                     if (inner->as.array.len == 0) {
                         runtime_error(vm, "pop on empty array");
                         ref_unlock(ref);
@@ -4826,6 +4840,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
                 LatValue *inner = &obj.as.ref.ref->value;
+                /* LAT-458: privatize a borrowed shared/crystal inner before the
+                 * in-place index write — value_free/lat_map_set on sealed region
+                 * memory corrupts it. Mirrors regvm (cf77625). */
+                value_unshare_detached(inner);
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
@@ -6296,6 +6314,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
                 LatValue *inner = &obj->as.ref.ref->value;
+                /* LAT-458: privatize a borrowed shared/crystal inner before the
+                 * in-place index write — value_free/lat_map_set on sealed region
+                 * memory corrupts it. Mirrors regvm (cf77625). */
+                value_unshare_detached(inner);
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
@@ -6444,6 +6466,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 push(vm, value_int(obj->as.buffer.data[i]));
             } else if (obj->type == VAL_REF) {
                 LatValue *inner = &obj->as.ref.ref->value;
+                /* LAT-458: privatize a borrowed shared/crystal inner before the
+                 * in-place index write — value_free/lat_map_set on sealed region
+                 * memory corrupts it. Mirrors regvm (cf77625). */
+                value_unshare_detached(inner);
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
@@ -6568,6 +6594,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 push(vm, value_int(obj->as.buffer.data[i]));
             } else if (obj->type == VAL_REF) {
                 LatValue *inner = &obj->as.ref.ref->value;
+                /* LAT-458: privatize a borrowed shared/crystal inner before the
+                 * in-place index write — value_free/lat_map_set on sealed region
+                 * memory corrupts it. Mirrors regvm (cf77625). */
+                value_unshare_detached(inner);
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
@@ -6630,6 +6660,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     break;
                 }
                 LatValue *inner = &obj->as.ref.ref->value;
+                /* LAT-458: privatize a borrowed shared/crystal inner before the
+                 * in-place index write — value_free/lat_map_set on sealed region
+                 * memory corrupts it. Mirrors regvm (cf77625). */
+                value_unshare_detached(inner);
                 if (inner->type == VAL_ARRAY && idx.type == VAL_INT) {
                     int64_t i = idx.as.int_val;
                     if (i < 0 || (size_t)i >= inner->as.array.len) {
