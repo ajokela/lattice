@@ -389,7 +389,13 @@ LatValue value_ref(LatValue inner) {
     LatValue val = {.type = VAL_REF, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     LatRef *r = malloc(sizeof(LatRef));
     if (!r) return value_nil();
-    r->value = value_deep_clone(&inner);
+    /* LAT-460: the cell is shared bitwise across spawned evaluators and outlives
+     * any one thread, so its inner must be detached (malloc-backed, untracked by
+     * any thread's DualHeap) — exactly as Ref.set / map-set already store
+     * (Stage 5). A heap-tracked clone here is the residual free-direction
+     * double-free: a spawned writer frees this original inner, but the creator's
+     * DualHeap still tracks the pointer and re-frees it at teardown. */
+    r->value = value_detach(&inner);
     atomic_init(&r->refcount, 1);
 #ifndef __EMSCRIPTEN__
     /* LAT-450: recursive — set_phase_recursive can re-enter the same cell
