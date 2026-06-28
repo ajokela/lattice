@@ -5604,6 +5604,191 @@ TEST(channel_send_survives_spawn_exit) {
                 "}\n");
 }
 
+/* ── LAT-442: channel send must reject refs/closures/iterators on all backends ──
+ * value_detach deep-clones most values, but VAL_REF / VAL_CLOSURE / VAL_ITERATOR
+ * are SHARED by value_deep_clone (ref_retain on the same cell with a non-atomic
+ * refcount, shared captured_env, shared iterator state). Sending such a graph
+ * puts non-atomically-refcounted shared mutable state on two threads. */
+
+TEST(channel_send_rejects_closure) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    let f = |a| { a }\n"
+                 "    ch.send(f)\n"
+                 "}\n");
+}
+
+TEST(channel_send_rejects_closure_in_container) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    let f = |a| { a }\n"
+                 "    let arr = [1, f, 3]\n"
+                 "    ch.send(arr)\n"
+                 "}\n");
+}
+
+TEST(channel_send_rejects_ref) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    let r = Ref::new([1, 2, 3])\n"
+                 "    ch.send(r)\n"
+                 "}\n");
+}
+
+TEST(channel_send_rejects_frozen_ref) {
+    /* Even a crystal ref shares its cell across the clone — phase does not
+     * make the shared refcount atomic. Must be rejected. */
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    let r = freeze(Ref::new([1, 2, 3]))\n"
+                 "    ch.send(r)\n"
+                 "}\n");
+}
+
+TEST(channel_send_rejects_ref_in_container) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    let arr = [Ref::new(1)]\n"
+                 "    ch.send(arr)\n"
+                 "}\n");
+}
+
+TEST(channel_send_rejects_iterator) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    let it = iter([1, 2, 3])\n"
+                 "    ch.send(it)\n"
+                 "}\n");
+}
+
+/* ── LAT-442: harmonized phase rule pins ── */
+
+TEST(channel_send_rejects_fluid_aggregate) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    flux arr = [1, 2, 3]\n"
+                 "    ch.send(arr)\n"
+                 "}\n");
+}
+
+TEST(channel_send_rejects_sublimated_aggregate) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    flux arr = [1, 2, 3]\n"
+                 "    sublimate(arr)\n"
+                 "    ch.send(arr)\n"
+                 "}\n");
+}
+
+TEST(channel_send_allows_crystal_aggregate) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    ch.send(freeze([1, 2, 3]))\n"
+                "    let v = ch.recv()\n"
+                "    assert(v[2] == 3, \"crystal send round-trip\")\n"
+                "}\n");
+}
+
+TEST(channel_send_allows_scalars_any_phase) {
+    /* Scalars carry no aliasable state; detach copies them by value. They are
+     * sendable regardless of phase on every backend. */
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    flux x = 5\n"
+                "    ch.send(x)\n"
+                "    ch.send(2.5)\n"
+                "    ch.send(true)\n"
+                "    ch.send(nil)\n"
+                "    ch.send(0..4)\n"
+                "    assert(ch.recv() == 5, \"fluid int send\")\n"
+                "    assert(ch.recv() == 2.5, \"float send\")\n"
+                "    assert(ch.recv() == true, \"bool send\")\n"
+                "    assert(typeof(ch.recv()) == \"Nil\", \"nil send\")\n"
+                "    assert(typeof(ch.recv()) == \"Range\", \"range send\")\n"
+                "}\n");
+}
+
+TEST(channel_send_allows_unphased_container) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    let arr = [1, 2, 3]\n"
+                "    ch.send(arr)\n"
+                "    let v = ch.recv()\n"
+                "    assert(v[0] == 1, \"unphased container send\")\n"
+                "}\n");
+}
+
+TEST(channel_send_allows_unphased_string) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    let s = \"hello\"\n"
+                "    ch.send(s)\n"
+                "    assert(ch.recv() == \"hello\", \"unphased string send\")\n"
+                "}\n");
+}
+
+TEST(channel_send_buffered_fifo_pin) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    ch.send(freeze(1))\n"
+                "    ch.send(2)\n"
+                "    ch.send(freeze([3]))\n"
+                "    assert(ch.recv() == 1, \"fifo 1\")\n"
+                "    assert(ch.recv() == 2, \"fifo 2\")\n"
+                "    let a = ch.recv()\n"
+                "    assert(a[0] == 3, \"fifo 3\")\n"
+                "}\n");
+}
+
+TEST(channel_send_select_arm_pin) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    ch.send(42)\n"
+                "    select {\n"
+                "        v from ch => { assert(v == 42, \"select recv after scalar send\") }\n"
+                "    }\n"
+                "}\n");
+}
+
+TEST(channel_send_spawn_crystal_pin) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    scope {\n"
+                "        spawn { ch.send(freeze(\"worker done\")) }\n"
+                "    }\n"
+                "    assert(ch.recv() == \"worker done\", \"spawned crystal send\")\n"
+                "}\n");
+}
+
+/* ── LAT-443: sending on a closed channel must error on all backends ── */
+
+TEST(channel_send_closed_errors) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    ch.close()\n"
+                 "    ch.send(freeze(1))\n"
+                 "}\n");
+}
+
+TEST(channel_send_closed_errors_scalar) {
+    ASSERT_FAILS("fn main() {\n"
+                 "    let ch = Channel::new()\n"
+                 "    ch.send(1)\n"
+                 "    ch.close()\n"
+                 "    ch.send(2)\n"
+                 "}\n");
+}
+
+TEST(channel_recv_after_close_drains_then_unit_pin) {
+    ASSERT_RUNS("fn main() {\n"
+                "    let ch = Channel::new()\n"
+                "    ch.send(freeze(7))\n"
+                "    ch.close()\n"
+                "    assert(ch.recv() == 7, \"drain buffered value after close\")\n"
+                "    assert(typeof(ch.recv()) == \"Unit\", \"closed+empty recv yields unit\")\n"
+                "}\n");
+}
+
 /* ── Intern table thread-safety (LAT-412) ── */
 #include "intern.h"
 #include <pthread.h>
