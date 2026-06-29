@@ -394,9 +394,38 @@ static LatValue value_clone_fast_inner(const LatValue *src) {
             return v;
         }
         case VAL_MAP: {
+            LatMap *sm = src->as.map.map;
+            if (sm->cmi && !src->as.map.key_phases) {
+                /* Crystallized map: block-copy clone (one memcpy + rebase +
+                 * per-entry value clone) so the optimized layout survives
+                 * routine VM copies (locals, globals, call arguments). */
+                LatMapEntry *dense = NULL;
+                CrystalMapHeader *blk = lat_map_cmi_clone_block(sm, &dense);
+                if (blk) {
+                    LatMap *dst = malloc(sizeof(LatMap));
+                    if (!dst) {
+                        free(blk);
+                    } else {
+                        *dst = *sm;
+                        dst->cmi = blk;
+                        dst->entries = dense;
+                        for (uint64_t i = 0; i < blk->n; i++) {
+                            LatValue tmp = *(LatValue *)dense[i].value;
+                            *(LatValue *)dense[i].value = value_clone_fast(&tmp);
+                        }
+                        LatValue v;
+                        v.type = VAL_MAP;
+                        v.phase = src->phase;
+                        v.region_id = REGION_NONE;
+                        v.as.map.map = dst;
+                        v.as.map.key_phases = NULL;
+                        return v;
+                    }
+                }
+                /* alloc failure: fall through to the rebuild path below */
+            }
             LatValue v = value_map_new();
             v.phase = src->phase; /* Preserve phase tag */
-            LatMap *sm = src->as.map.map;
             for (size_t i = 0; i < sm->cap; i++) {
                 if (sm->entries[i].state == MAP_OCCUPIED) {
                     LatValue cloned = value_clone_fast((LatValue *)sm->entries[i].value);
@@ -7336,6 +7365,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             /* CbR Stage 3 (S3-R2): materialize into a shared region (legacy
              * tag-flip fallback for unshareable/small values inside). */
             stackvm_freeze_value(vm, &val);
+            value_crystallize(&val); /* rebuild eligible non-region maps into the read-optimized layout */
             push(vm, val);
             break;
         }
@@ -7638,6 +7668,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
              * rc=2 for two live handles. */
             stackvm_freeze_value(vm, &val);
             LatValue frozen = val;
+            value_crystallize(&frozen); /* the deep clones below block-copy the optimized layout */
             LatValue ret = value_deep_clone(&frozen);
             stackvm_write_back(vm, frame, loc_type, loc_slot, var_name, frozen);
             value_free(&frozen);
@@ -7808,6 +7839,9 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     }
                 }
             } else if (val.type == VAL_MAP) {
+                /* Partial freeze: incompatible with the crystallized layout —
+                 * exempted keys stay mutable. Degrade to the sparse layout. */
+                if (val.as.map.map->cmi) lat_map_decrystallize(val.as.map.map);
                 /* LAT-441: freeze-except on an already fully-crystal map must not
                  * punch new mutability holes — exempted keys keep their current
                  * effective phase (explicit entry, else the parent's phase). */
@@ -7916,6 +7950,10 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 value_free(&field_name);
                 push(vm, ret);
             } else if (parent.type == VAL_MAP && field_name.type == VAL_STR) {
+                /* Per-key freeze attaches key_phases: incompatible with the
+                 * crystallized layout (freeze(m) then freeze_field(m, k) is
+                 * reachable). Degrade to the sparse layout first. */
+                if (parent.as.map.map->cmi) lat_map_decrystallize(parent.as.map.map);
                 const char *key = field_name.as.str_val;
                 LatValue *val_ptr = (LatValue *)lat_map_get(parent.as.map.map, key);
                 if (!val_ptr) {
