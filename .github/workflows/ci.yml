@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# CI builds extensions into ./extensions/ and then runs the suite / ext tests.
+# The hardened default extension search path excludes the CWD (loadable only via
+# this opt-in), so set it workflow-wide for every job that builds and loads one.
+env:
+  LATTICE_EXT_ALLOW_CWD: "1"
+
 jobs:
   build-and-test:
     name: Build & Test (${{ matrix.os }})

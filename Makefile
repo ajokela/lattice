@@ -406,9 +406,9 @@ test-all-backends: $(TEST_TARGET) $(LSP_TARGET)
 # MECHANISM itself (handle identity, retain counts) self-skip under the
 # oracle — see cbr_force_copy_active().
 test-force-copy: $(TEST_TARGET) $(LSP_TARGET)
-	@echo "=== FORCE_COPY oracle: stack-vm ===" && LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend stack-vm
-	@echo "=== FORCE_COPY oracle: tree-walk ===" && LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend tree-walk
-	@echo "=== FORCE_COPY oracle: regvm ===" && LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend regvm
+	@echo "=== FORCE_COPY oracle: stack-vm ===" && LATTICE_EXT_ALLOW_CWD=1 LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend stack-vm
+	@echo "=== FORCE_COPY oracle: tree-walk ===" && LATTICE_EXT_ALLOW_CWD=1 LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend tree-walk
+	@echo "=== FORCE_COPY oracle: regvm ===" && LATTICE_EXT_ALLOW_CWD=1 LATTICE_FORCE_COPY=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
 LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_traits latc_traits_codegen \
              latc_expressions latc_variables latc_control_flow latc_functions \
@@ -556,9 +556,9 @@ asan: clean $(TEST_TARGET) $(LSP_TARGET)
 asan-all: CFLAGS += -fsanitize=address,undefined -g -O1
 asan-all: LDFLAGS += -fsanitize=address,undefined
 asan-all: clean $(TEST_TARGET) $(LSP_TARGET)
-	@echo "=== asan: stack-vm ===" && ./$(BUILD_DIR)/test_runner --backend stack-vm
-	@echo "=== asan: tree-walk ===" && ./$(BUILD_DIR)/test_runner --backend tree-walk
-	@echo "=== asan: regvm ===" ; ./$(BUILD_DIR)/test_runner --backend regvm; \
+	@echo "=== asan: stack-vm ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend stack-vm
+	@echo "=== asan: tree-walk ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend tree-walk
+	@echo "=== asan: regvm ===" ; LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm; \
 	 rc=$$?; if [ $$rc -gt 128 ]; then exit $$rc; fi
 
 # Stage 5 (LAT-457): the TSan gate runs the full suite on all three
