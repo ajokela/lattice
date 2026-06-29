@@ -26,6 +26,7 @@
 #include "string_ops.h"
 #include "array_ops.h"
 #include "channel.h"
+#include "env.h" /* For env_detach_values (async_iter producer teardown, LAT-541) */
 #include "iterator.h"
 #include "progress.h"
 #include "ext.h"
@@ -2486,6 +2487,20 @@ static void *async_iter_thread_fn(void *arg) {
         /* Close the channel to signal done */
         channel_close(task->ch);
 
+        /* LAT-541 (same class as LAT-538): the producer closure can leave
+         * heap-backed temporaries behind — on an uncaught error stackvm_run
+         * returns without unwinding (e.g. an out-of-bounds index), and even a
+         * normal HALT can leave values on the stack or in the worker env. Those
+         * slots are freed later by stackvm_free_child, which would run AFTER
+         * dual_heap_free has already released the worker heap -> UAF/double-free.
+         * Detach env values and free the live stack on THIS thread, while the
+         * worker heap is still active, so stackvm_free_child becomes a no-op for
+         * them. value_detach re-homes env values onto malloc (heap-independent);
+         * env_detach_entry frees VAL_ITERATOR in place (its state can only be
+         * shallow-shared). */
+        if (child->rt) env_detach_values(child->rt->env);
+        stackvm_free_child_stack(child);
+
         dual_heap_free(heap);
         stackvm_free_child(child);
     } else {
@@ -2518,6 +2533,14 @@ static void *async_iter_thread_fn(void *arg) {
         value_free(&ch_val);
 
         channel_close(task->ch);
+
+        /* LAT-541 (same class as LAT-538): free worker-side register/env
+         * temporaries left by the producer closure (uncaught error or normal
+         * HALT) on THIS thread, before dual_heap_free releases the worker heap —
+         * otherwise regvm_free_child frees them against an already-freed heap
+         * (UAF/double-free). See the stack-VM branch above for the full rationale. */
+        if (child->rt) env_detach_values(child->rt->env);
+        regvm_free_child_registers(child);
 
         dual_heap_free(heap);
         regvm_free_child(child);

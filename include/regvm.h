@@ -129,6 +129,10 @@ RegVM *regvm_clone_for_thread(RegVM *parent);
 /* Free a child RegVM created by regvm_clone_for_thread. */
 void regvm_free_child(RegVM *child);
 
+/* Free the child's live register stack (and nil the slots) on the worker thread,
+ * before its heap is torn down — avoids the spawn-teardown UAF (LAT-538/541). */
+void regvm_free_child_registers(RegVM *child);
+
 /* ── Register compiler ── */
 
 /* Compile a program to register-based bytecode. */

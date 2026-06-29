@@ -6965,3 +6965,61 @@ TEST(ref_lat539_freeze_except_index_assign_through_ref) {
                 "  assert(r.get()[0][\"score\"] == 2, \"freeze-except write through a Ref must succeed\")\n"
                 "}\n");
 }
+
+/* ── LAT-541/542: async_iter teardown + nested-Ref interior locking ── */
+TEST(ref_lat542_nested_index_assign_nonroot_and_multiref) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let box = [Ref::new([1, 2, 3])]\n"
+                "  box[0][0] = 9\n"
+                "  assert(box[0].get()[0] == 9, \"non-root ref nested index-assign\")\n"
+                "  let inner = Ref::new([1, 2, 3])\n"
+                "  let outer = Ref::new([inner])\n"
+                "  outer[0][0] = 7\n"
+                "  assert(inner.get()[0] == 7, \"multi-ref chain index-assign mutates the inner cell\")\n"
+                "}\n");
+}
+TEST(ref_lat542_nonroot_ref_concurrent_no_uaf) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let box = [Ref::new([1, 2, 3])]\n"
+                "  for round in 0..80 { scope { spawn { box[0][0] = round } spawn { box[0].set([9, 9, 9]) } spawn { "
+                "let x = box[0].get() } } }\n"
+                "  assert(true, \"concurrent non-root ref mutation completed\")\n"
+                "}\n");
+}
+TEST(ref_lat542_multiref_chain_concurrent_no_uaf) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let inner = Ref::new([1, 2, 3])\n"
+                "  let outer = Ref::new([inner])\n"
+                "  for round in 0..80 { scope { spawn { outer[0][0] = round } spawn { inner.set([9, 9, 9]) } spawn { "
+                "let x = outer.get() } } }\n"
+                "  assert(true, \"concurrent multi-ref chain mutation completed\")\n"
+                "}\n");
+}
+TEST(ref_lat542_abba_two_cell_no_deadlock) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let a = Ref::new([0, 0])\n"
+                "  let b = Ref::new([0, 0])\n"
+                "  a.set([b, 0])\n"
+                "  b.set([a, 0])\n"
+                "  for round in 0..120 { scope { spawn { a[0][1] = round } spawn { b[0][1] = round } } }\n"
+                "  assert(true, \"ordered two-cell locking: no AB-BA deadlock\")\n"
+                "}\n");
+}
+TEST(ref_lat541_async_iter_teardown_no_uaf) {
+    if (test_backend != BACKEND_STACK_VM) return;
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "  let it = async_iter(|ch| { for i in 0..4 { let big = [[1, 2, 3], [4, 5, 6]]; ch.send(big[100]) } })\n"
+        "  for v in it { }\n"
+        "}\n");
+}
+
+TEST(ref_lat542_set_method_through_ref_falls_back_not_errors) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let s = Set::new()\n"
+                "  s.add(1); s.add(2); s.add(3)\n"
+                "  let r = Ref::new([s])\n"
+                "  r[0].remove(2)\n"
+                "  assert(true, \"Set method through a Ref falls back to generic dispatch (not a hard error)\")\n"
+                "}\n");
+}

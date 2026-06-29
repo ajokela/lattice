@@ -358,8 +358,10 @@ static void regvm_export_locals_to_env(RegVM *parent, RegVM *child) {
  * active and nil the slots so regvm_free_child is a no-op. Unlike value_detach,
  * value_free correctly releases EVERY value kind via its own free path —
  * including VAL_ITERATOR, whose state value_clone_impl only shallow-shares
- * (refcount bump), so a detached copy would still alias freed worker-heap state. */
-static void regvm_free_child_registers(RegVM *vm) {
+ * (refcount bump), so a detached copy would still alias freed worker-heap state.
+ * Exposed (LAT-541) so the async_iter producer teardown in runtime.c can reuse
+ * the same worker-side register cleanup before it frees the worker heap. */
+void regvm_free_child_registers(RegVM *vm) {
     for (size_t i = 0; i < vm->reg_stack_top; i++) {
         value_free(&vm->reg_stack[i]);
         vm->reg_stack[i] = value_nil();

@@ -783,25 +783,65 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
  * path): a Ref reached via a field/non-root step, a second Ref deeper in the
  * chain, and Set / multibyte-Buffer interior slots. */
 
-/* If every step of `e` from the outside in is EXPR_INDEX bottoming out in an
- * EXPR_IDENT, return that root IDENT Expr and set *depth to the number of
- * index steps; otherwise NULL. Pure AST walk — no evaluation. */
-static const Expr *chain_index_root_ident(const Expr *e, size_t *depth) {
+/* ── LAT-542: generalized locked navigation through nested Refs ──────────────
+ *
+ * LAT-539 closed the case where the chain ROOT is a simple IDENT resolving to a
+ * VAL_REF. The residual it left — and the source of the constructible
+ * use-after-free — was a Ref reached at a NON-root position: a struct/array
+ * field holding a Ref (s.field[k]=v, box[0][k].push(x)), and a second Ref met
+ * deeper in the chain (a multi-Ref chain r1[i][j] where r1[i] is itself a Ref).
+ * resolve_lvalue hands out a BARE interior pointer for those with no cell lock,
+ * so a sibling thread's r.set()/r.push() can free that interior mid-write.
+ *
+ * The helpers below extend the lock-after-eval discipline to those shapes:
+ *   - the chain root may be any side-effect-free lvalue prefix (an IDENT or a
+ *     chain of FIELD_ACCESS bottoming at an IDENT) that resolves to a Ref, OR a
+ *     container whose PURE (literal/identifier) index steps reach a Ref;
+ *   - EVERY Ref crossed along the chain is locked and its inner privatized
+ *     UNDER that lock, so the interior write serializes against every other
+ *     holder of that cell;
+ *   - when the walk crosses any Ref it first takes ONE process-wide recursive
+ *     mutex (g_refchain_lock) BEFORE any per-cell lock. That single global order
+ *     for chain ops makes the classic AB-BA inversion (thread A locks cellA then
+ *     cellB through one interior chain, thread B the reverse) impossible without
+ *     needing to know the cell addresses up front;
+ *   - all indices AND method args are evaluated EXACTLY ONCE, before any lock,
+ *     so a side-effecting arg in a former fallback case no longer double-runs;
+ *   - every exit releases all locks via a single goto-cleanup.
+ *
+ * Residual (still the bare-pointer class, handed to the generic path BEFORE any
+ * evaluation so without new double-eval): a non-root Ref reached through an
+ * IMPURE index (box[f()][k]=v), and multibyte-Buffer interior method writers
+ * (write_u16 &c., which never reach method_is_inplace_mutator). */
+
+/* Strip the trailing EXPR_INDEX steps of `e` and return the bottom lvalue
+ * prefix — an EXPR_IDENT or a chain of EXPR_FIELD_ACCESS bottoming at an
+ * EXPR_IDENT, both side-effect-free for resolve_lvalue to resolve. *depth = the
+ * number of index steps. Returns NULL when the bottom is anything else (a call,
+ * a literal, …) so the chain cannot be re-resolved without side effects. */
+static const Expr *chain_index_root(const Expr *e, size_t *depth) {
     size_t n = 0;
     while (e->tag == EXPR_INDEX) {
         n++;
         e = e->as.index.object;
     }
-    if (e->tag != EXPR_IDENT) return NULL;
+    const Expr *b = e;
+    while (b->tag == EXPR_FIELD_ACCESS) b = b->as.field_access.object;
+    if (b->tag != EXPR_IDENT) return NULL;
     *depth = n;
     return e;
 }
 
+/* The IDENT at the bottom of a (possibly field-access) root prefix — the
+ * variable whose history a write through the chain records. */
+static const char *chain_root_ident_name(const Expr *root) {
+    while (root->tag == EXPR_FIELD_ACCESS) root = root->as.field_access.object;
+    return root->tag == EXPR_IDENT ? root->as.str_val : NULL;
+}
+
 /* (method, arg_count) pairs that mutate_inner_locked mutates IN PLACE on a
  * map/array/buffer interior slot. 1-arg "set" is EXCLUDED — that is the
- * whole-inner Ref.set, not an interior write. Set and multibyte-buffer
- * mutators are intentionally absent: those interior slots are handed back to
- * the generic (residual) path rather than silently mis-dispatched. */
+ * whole-inner Ref.set, not an interior write. */
 static bool method_is_inplace_mutator(const char *m, size_t argc) {
     switch (argc) {
         case 0: return strcmp(m, "pop") == 0;
@@ -813,27 +853,146 @@ static bool method_is_inplace_mutator(const char *m, size_t argc) {
     }
 }
 
-/* Navigate a privatized Ref inner along pre-evaluated index values (root-most
- * first), mirroring resolve_lvalue's per-step semantics. The cell lock MUST be
- * held; performs NO eval_expr and takes NO second lock.
- *   - map step:   key must be a string; a missing key auto-vivifies to unit.
- *   - array step: index must be an int; bounds-checked.
- *   - the FIRST step (k==0, the Ref inner itself) skips the crystal guard
- *     (parent_from_ref==true in resolve_lvalue); deeper containers (k>=1)
- *     reject crystal/sublimated, exactly as resolve_lvalue does.
- *   - a VAL_REF / VAL_BUFFER container at any step would need a second cell
- *     unwrapped or the buffer-byte path: signal *fellback so the caller hands
- *     off to the generic path instead of touching it here.
- * Returns the final slot, or NULL with either *fellback set or *err set. */
-static LatValue *nav_ref_interior(LatValue *inner, LatValue *idx_vals, size_t n, bool *fellback, char **err) {
-    *fellback = false;
-    LatValue *cur = inner;
-    for (size_t k = 0; k < n; k++) {
-        if (k >= 1 && (cur->phase == VTAG_CRYSTAL || cur->phase == VTAG_SUBLIMATED)) {
-            /* LAT-539: mirror resolve_lvalue's freeze-except exemption — a crystal
-             * MAP stays writable at a key whose key_phases entry is non-crystal
-             * (freeze m except [key]). Without this, r[i][exemptKey]=v through a
-             * Ref wrongly errored while the non-Ref path allowed it. */
+/* An index expression whose evaluation is observably side-effect-free, so it may
+ * be evaluated speculatively (to look for a Ref) and then re-evaluated by the
+ * generic path with no visible difference. Conservative: literals and a bare
+ * identifier (a scope read + scalar/handle clone — never user code). */
+static bool expr_index_is_pure(const Expr *e) {
+    switch (e->tag) {
+        case EXPR_INT_LIT:
+        case EXPR_FLOAT_LIT:
+        case EXPR_STRING_LIT:
+        case EXPR_BOOL_LIT:
+        case EXPR_NIL_LIT:
+        case EXPR_IDENT: return true;
+        default: return false;
+    }
+}
+
+static bool chain_indices_all_pure(const Expr *target, size_t depth) {
+    const Expr *e = target;
+    for (size_t k = 0; k < depth; k++) {
+        if (!expr_index_is_pure(e->as.index.index)) return false;
+        e = e->as.index.object;
+    }
+    return true;
+}
+
+/* ── lock-set held across one chain walk ── */
+#define REFCHAIN_MAX_CELLS 64
+typedef struct {
+    LatRef *cells[REFCHAIN_MAX_CELLS];
+    size_t count;
+    bool global_held;
+} RefChainLocks;
+
+#ifndef __EMSCRIPTEN__
+static pthread_mutex_t g_refchain_lock;
+static pthread_once_t g_refchain_once = PTHREAD_ONCE_INIT;
+static void g_refchain_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE); /* same thread may re-enter via a ref cycle */
+    pthread_mutex_init(&g_refchain_lock, &a);
+    pthread_mutexattr_destroy(&a);
+}
+#endif
+
+static void refchain_global_lock(RefChainLocks *L) {
+    if (L->global_held) return;
+#ifndef __EMSCRIPTEN__
+    pthread_once(&g_refchain_once, g_refchain_init);
+    pthread_mutex_lock(&g_refchain_lock);
+#endif
+    L->global_held = true;
+}
+
+/* Cross a Ref: take the global order lock (once), then lock+pin this cell and
+ * privatize its inner UNDER that lock. Returns the now-private inner, or NULL
+ * with *err set when the chain is deeper than we track. */
+static LatValue *refchain_cross(RefChainLocks *L, LatRef *cell, char **err) {
+    refchain_global_lock(L);
+    if (L->count >= REFCHAIN_MAX_CELLS) {
+        *err = strdup("Ref chain too deep to lock safely");
+        return NULL;
+    }
+    ref_lock(cell);
+    ref_retain(cell);
+    L->cells[L->count++] = cell;
+    value_unshare_detached(&cell->value); /* privatize under the lock */
+    return &cell->value;
+}
+
+/* Unlock + release every cell in reverse acquisition order, then drop the
+ * global order lock. Idempotent; called on EVERY exit. */
+static void refchain_release_all(RefChainLocks *L) {
+    for (size_t i = L->count; i > 0; i--) {
+        ref_unlock(L->cells[i - 1]);
+        ref_release(L->cells[i - 1]);
+    }
+    L->count = 0;
+    if (L->global_held) {
+#ifndef __EMSCRIPTEN__
+        pthread_mutex_unlock(&g_refchain_lock);
+#endif
+        L->global_held = false;
+    }
+}
+
+/* Read-only: walk thread-local containers along pre-evaluated indices looking
+ * for a Ref crossed at a NON-leaf step (one with interior indices still to
+ * apply). Returns true iff the locked path must engage. Mutates nothing (no
+ * auto-vivify) and bails (false) on any irregular step, leaving the generic
+ * path fully authoritative for the no-Ref case (whose pure indices it re-reads
+ * harmlessly). */
+static bool refchain_find_ref(LatValue *root, LatValue *idx_vals, size_t depth) {
+    LatValue *cur = root;
+    for (size_t k = 0; k < depth; k++) {
+        if (cur->type == VAL_REF) return true; /* an interior Ref crossing */
+        if (cur->type == VAL_ARRAY) {
+            if (idx_vals[k].type != VAL_INT) return false;
+            size_t i = (size_t)idx_vals[k].as.int_val;
+            if (i >= cur->as.array.len) return false;
+            cur = &cur->as.array.elems[i];
+        } else if (cur->type == VAL_MAP) {
+            if (idx_vals[k].type != VAL_STR) return false;
+            LatValue *slot = (LatValue *)lat_map_get(cur->as.map.map, idx_vals[k].as.str_val);
+            if (!slot) return false;
+            cur = slot;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
+/* Apply `depth` pre-evaluated indices to `cur`, crossing (locking) every Ref met
+ * along the way, mirroring resolve_lvalue's per-step semantics. NO eval_expr is
+ * ever called here — every index/arg was evaluated by the caller before the
+ * first lock. `behind_ref` is true when `cur` is the direct inner of an
+ * already-crossed Ref (its first index step skips the crystal guard, exactly as
+ * a fluid Ref handle's write does). When `cross_trailing` (method receivers) the
+ * leaf is unwrapped through any trailing Ref(s) so the receiver is the inner
+ * container. Returns the leaf slot (locks recorded in L), or NULL with *err set
+ * (hard error) or *fell_container set (a buffer/scalar mid-chain the caller must
+ * resolve). */
+static LatValue *refchain_navigate(LatValue *cur, bool behind_ref, LatValue *idx_vals, size_t depth,
+                                   bool cross_trailing, RefChainLocks *L, LatValue **fell_container, size_t *fell_k,
+                                   char **err) {
+    *fell_container = NULL;
+    for (size_t k = 0; k < depth; k++) {
+        while (cur->type == VAL_REF) {
+            if (cur->phase == VTAG_CRYSTAL) {
+                *err = strdup("cannot modify through a frozen Ref");
+                return NULL;
+            }
+            cur = refchain_cross(L, cur->as.ref.ref, err);
+            if (!cur) return NULL;
+            behind_ref = true;
+        }
+        if (!behind_ref && (cur->phase == VTAG_CRYSTAL || cur->phase == VTAG_SUBLIMATED)) {
+            /* mirror resolve_lvalue's freeze-except carve-out — a crystal MAP
+             * stays writable at a key whose key_phases entry is non-crystal. */
             bool exempt = false;
             if (cur->type == VAL_MAP && idx_vals[k].type == VAL_STR && cur->as.map.key_phases) {
                 PhaseTag *kp = lat_map_get(cur->as.map.key_phases, idx_vals[k].as.str_val);
@@ -844,6 +1003,7 @@ static LatValue *nav_ref_interior(LatValue *inner, LatValue *idx_vals, size_t n,
                 return NULL;
             }
         }
+        behind_ref = false;
         LatValue *idx = &idx_vals[k];
         if (cur->type == VAL_MAP) {
             if (idx->type != VAL_STR) {
@@ -868,19 +1028,32 @@ static LatValue *nav_ref_interior(LatValue *inner, LatValue *idx_vals, size_t n,
             }
             cur = &cur->as.array.elems[i];
         } else {
-            /* VAL_REF (a second cell), VAL_BUFFER (byte path), or anything else
-             * resolve_lvalue would handle differently — hand off. */
-            *fellback = true;
+            /* A buffer (byte path) or scalar as a non-final container: hand the
+             * locked container + step back to the caller, which either does the
+             * buffer-byte write under the lock or errors. */
+            *fell_container = cur;
+            *fell_k = k;
             return NULL;
+        }
+    }
+    if (cross_trailing) {
+        while (cur->type == VAL_REF) {
+            if (cur->phase == VTAG_CRYSTAL) {
+                *err = strdup("cannot modify through a frozen Ref");
+                return NULL;
+            }
+            cur = refchain_cross(L, cur->as.ref.ref, err);
+            if (!cur) return NULL;
         }
     }
     return cur;
 }
 
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method, LatValue *args, size_t arg_count);
-/* LAT-539: defined just after eval_ref_method_locked. Each returns true and
+/* LAT-539/542: defined just after eval_ref_method_locked. Each returns true and
  * writes *out when it handled (and serialized) the operation, or false to hand
- * off to the generic path (non-Ref root / residual interior). */
+ * off to the generic path BEFORE any evaluation (non-Ref / impure-index
+ * residual). */
 static bool eval_nested_ref_method(Evaluator *ev, const Expr *expr, EvalResult *out);
 static bool eval_nested_ref_index_assign(Evaluator *ev, const Stmt *stmt, LatValue *valr_value, EvalResult *out);
 
@@ -7826,13 +7999,15 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         }
 
         case EXPR_METHOD_CALL: {
-            /* LAT-539: serialize an in-place mutator on a root-Ref interior
-             * index chain (r[i]...[k].push/set/...) under the per-cell lock.
-             * Placed BEFORE the crystal pre-filter so the index sub-exprs are
-             * evaluated exactly once — the pre-filter would resolve_lvalue the
-             * whole r[i] chain and re-evaluate them. eval_nested_ref_method
-             * bails (returns false) for a non-Ref root or a residual interior,
-             * leaving every other receiver to the handlers below unchanged. */
+            /* LAT-539/542: serialize an in-place mutator on a Ref interior index
+             * chain (r[i]...[k].push/set/..., box[0][k].push, s.field[k].push)
+             * under per-cell locks. Placed BEFORE the crystal pre-filter so the
+             * index sub-exprs and method args are evaluated exactly once — the
+             * pre-filter would resolve_lvalue the whole chain and re-evaluate
+             * them. eval_nested_ref_method bails (returns false), having
+             * evaluated nothing, for a chain reaching no Ref or hiding it behind
+             * an impure index, leaving every other receiver to the handlers
+             * below unchanged. */
             if (expr->as.method_call.object->tag == EXPR_INDEX &&
                 method_is_inplace_mutator(expr->as.method_call.method, expr->as.method_call.arg_count)) {
                 EvalResult nr;
@@ -10870,17 +11045,20 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 return eval_ok(value_unit());
             }
 
-            /* LAT-539: nested (2+ level) index-assign whose root IDENT is a
-             * Ref — serialize the interior write under the per-cell lock. This
-             * MUST run before the buffer/slice/single-level checks below: each
-             * of those resolve_lvalue's the immediate container (r[i]) and
-             * dereferences the BARE interior pointer it gets back, which a
-             * sibling r.set() can free out from under it (the LAT-539 UAF).
-             * Slice targets (outermost RANGE index) are excluded — the slice
-             * path handles them. Non-Ref roots / buffer / deeper-Ref interiors
-             * fall through (returns false) to the checks below unchanged. */
+            /* LAT-539/542: index-assign through a Ref interior — serialize the
+             * write under per-cell locks. MUST run before the buffer/slice/
+             * single-level checks below: each of those resolve_lvalue's the
+             * immediate container and dereferences the BARE interior pointer it
+             * gets back, which a sibling r.set() can free out from under it (the
+             * UAF). Fires for a nested index chain (box[0][k]=v) or a struct-
+             * field-Ref chain (s.field[k]=v); the single-level IDENT root case
+             * (r[i]=v) is left to the lean fast path below. Slice targets
+             * (outermost RANGE index) are excluded. Returns false — having
+             * evaluated nothing — for chains that reach no Ref or hide it behind
+             * an impure index, so the checks below run unchanged. */
             if (stmt->as.assign.target->tag == EXPR_INDEX &&
-                stmt->as.assign.target->as.index.object->tag == EXPR_INDEX &&
+                (stmt->as.assign.target->as.index.object->tag == EXPR_INDEX ||
+                 stmt->as.assign.target->as.index.object->tag == EXPR_FIELD_ACCESS) &&
                 stmt->as.assign.target->as.index.index->tag != EXPR_RANGE) {
                 EvalResult nr;
                 if (eval_nested_ref_index_assign(ev, stmt, &valr.value, &nr)) return nr;
@@ -12025,50 +12203,54 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
     return mutate_inner_locked(&obj.as.ref.ref->value, obj.phase, method, args, arg_count);
 }
 
-/* LAT-539: serialize an in-place mutator on a root-Ref interior index chain
- * (root[i]...[k].<mutator>(args), root an IDENT resolving to a VAL_REF) under
- * the per-cell lock. EVERY index sub-expr AND method arg is evaluated BEFORE
- * the lock is taken — so nothing under the lock calls eval_expr or takes a
- * second cell lock (the stated deadlock rule). ref_retain pins the captured
- * cell across the pre-lock evals (eval_expr may rehash the scope map or even
- * reassign the variable, exactly like the single-level LAT-537 path).
+/* LAT-542: serialize an in-place mutator called through a Ref interior index
+ * chain (object[i]...[k].<mutator>(args)) under per-cell locks. The object's
+ * bottom prefix is a side-effect-free lvalue (an IDENT or FIELD_ACCESS chain).
+ * EVERY index AND method arg is evaluated EXACTLY ONCE, before any lock; nothing
+ * under the locks evaluates or takes a lock out of the global order (refchain_*).
+ * The walk crosses (locks) the root Ref and every deeper Ref met, so a multi-Ref
+ * chain is fully serialized and AB-BA is excluded by the global order lock.
  *
- * Returns true with *out set when it handled the call; false (nothing locked,
- * nothing consumed beyond its own scratch) to fall through to the generic
- * path: a non-Ref root, or an interior slot that is a deeper Ref / Set /
- * buffer / scalar (the residual LAT-458 class). */
+ * Returns true with *out set when it handled the call; false — having evaluated
+ * and consumed NOTHING — to fall through to the generic path: a chain that
+ * reaches no Ref, or whose Ref sits behind an impure index (the residual). */
 static bool eval_nested_ref_method(Evaluator *ev, const Expr *expr, EvalResult *out) {
     const Expr *mc_obj = expr->as.method_call.object;
     size_t depth = 0;
-    const Expr *root = chain_index_root_ident(mc_obj, &depth);
+    const Expr *root = chain_index_root(mc_obj, &depth);
     if (!root || depth == 0) return false;
 
-    /* Side-effect-free IDENT lookup: bail out for a non-Ref root BEFORE
-     * evaluating any index/arg, so plain arrays keep the generic path. */
+    /* Resolve the side-effect-free root prefix WITHOUT evaluating any index/arg.
+     * A non-Ref root only engages if its indices are all pure, so a no-Ref bail
+     * later re-reads them harmlessly rather than double-running side effects. */
     char *r_err = NULL;
     LatValue *rlv = resolve_lvalue(ev, root, &r_err);
     if (r_err) free(r_err);
-    if (!rlv || rlv->type != VAL_REF) return false;
+    if (!rlv) return false;
+    bool root_is_ref = (rlv->type == VAL_REF);
+    if (!root_is_ref && !chain_indices_all_pure(mc_obj, depth)) return false;
 
-    LatRef *cell = rlv->as.ref.ref;
-    PhaseTag hp = rlv->phase;
-    ref_retain(cell);
+    /* Capture the stable root cell + handle phase BEFORE evaluating indices: an
+     * impure index can rehash the scope map (invalidating rlv) or reassign the
+     * variable, so for a Ref root we navigate from the captured cell, not rlv. */
+    LatRef *root_cell = root_is_ref ? rlv->as.ref.ref : NULL;
+    PhaseTag root_hp = root_is_ref ? rlv->phase : VTAG_FLUID;
+    if (root_cell) ref_retain(root_cell);
 
     size_t argc = expr->as.method_call.arg_count;
     const char *method = expr->as.method_call.method;
     LatValue *idx_vals = malloc((depth ? depth : 1) * sizeof(LatValue));
     LatValue *margs = malloc((argc ? argc : 1) * sizeof(LatValue));
     size_t nidx = 0, nargs = 0;
-    bool handled = true, locked = false;
+    bool handled = true;
+    RefChainLocks L = {0};
     EvalResult res = eval_ok(value_unit());
     if (!idx_vals || !margs) {
         res = eval_err(strdup("out of memory"));
         goto cleanup;
     }
 
-    /* Evaluate indices leaf-first (matching resolve_lvalue's order) but store
-     * them root-most-first into idx_vals[] for nav. Each evaluated value is
-     * GC-rooted so a later eval_expr's GC cannot sweep it. */
+    /* Evaluate indices leaf-first, store root-most-first, GC-rooted. */
     {
         const Expr *e = mc_obj;
         for (size_t k = depth; k > 0; k--) {
@@ -12084,7 +12266,20 @@ static bool eval_nested_ref_method(Evaluator *ev, const Expr *expr, EvalResult *
         }
     }
 
-    /* Evaluate method args PRE-LOCK, GC-rooted. */
+    /* Non-Ref root: decide whether a Ref is reachable via the (pure) indices. If
+     * not, bail with NO method args evaluated — a side-effecting arg never runs
+     * in the fallback. The generic path re-reads the pure indices. */
+    if (!root_is_ref) {
+        char *rr2 = NULL;
+        LatValue *rlv2 = resolve_lvalue(ev, root, &rr2);
+        if (rr2) free(rr2);
+        if (!rlv2 || !refchain_find_ref(rlv2, idx_vals, depth)) {
+            handled = false;
+            goto cleanup;
+        }
+    }
+
+    /* Engaged: evaluate method args PRE-LOCK, GC-rooted (exactly once). */
     for (; nargs < argc; nargs++) {
         EvalResult ar = eval_expr(ev, expr->as.method_call.args[nargs]);
         if (!IS_OK(ar)) {
@@ -12095,81 +12290,103 @@ static bool eval_nested_ref_method(Evaluator *ev, const Expr *expr, EvalResult *
         GC_PUSH(ev, &margs[nargs]);
     }
 
-    /* Frozen Ref handle: reject BEFORE the lock. */
-    if (hp == VTAG_CRYSTAL) {
+    /* Frozen root Ref handle: reject before locking. */
+    if (root_is_ref && root_hp == VTAG_CRYSTAL) {
         char *e = NULL;
         lat_asprintf(&e, "cannot call mutating method '%s' on a frozen Ref", method);
         res = eval_err(e);
         goto cleanup;
     }
 
-    /* ── Under the cell lock: navigate the privatized inner + mutate. No
-     * eval_expr and no second ref_lock run from here to the unlock. ── */
-    ref_lock(cell);
-    locked = true;
-    value_unshare_detached(&cell->value);
+    /* ── Locked navigation + mutation. No eval, no out-of-order lock. ── */
     {
-        bool fellback = false;
+        LatValue *start;
+        bool behind;
+        if (root_is_ref) {
+            char *cerr = NULL;
+            start = refchain_cross(&L, root_cell, &cerr); /* global order lock + root cell */
+            if (!start) {
+                res = eval_err(cerr);
+                goto cleanup;
+            }
+            behind = true;
+        } else {
+            char *rr3 = NULL;
+            start = resolve_lvalue(ev, root, &rr3); /* fresh, side-effect-free */
+            if (rr3) free(rr3);
+            if (!start) {
+                res = eval_err(strdup("undefined variable"));
+                goto cleanup;
+            }
+            behind = false;
+        }
+        LatValue *fell = NULL;
+        size_t fk = 0;
         char *nav_err = NULL;
-        LatValue *slot = nav_ref_interior(&cell->value, idx_vals, depth, &fellback, &nav_err);
-        if (fellback) {
-            handled = false; /* deeper Ref / buffer container — generic path */
-        } else if (!slot) {
+        LatValue *recv =
+            refchain_navigate(start, behind, idx_vals, depth, /*cross_trailing=*/true, &L, &fell, &fk, &nav_err);
+        if (nav_err) {
             res = eval_err(nav_err);
-        } else if (slot->type != VAL_MAP && slot->type != VAL_ARRAY && slot->type != VAL_BUFFER) {
-            handled = false; /* Set / scalar / second-Ref receiver — residual */
-        } else if (slot->phase == VTAG_CRYSTAL || slot->phase == VTAG_SUBLIMATED) {
-            res = eval_err(strdup(slot->phase == VTAG_CRYSTAL ? "cannot modify a frozen value"
+        } else if (fell || (recv->type != VAL_MAP && recv->type != VAL_ARRAY && recv->type != VAL_BUFFER)) {
+            /* LAT-542: a non-navigable interior (second Ref / buffer mid-chain)
+             * or a receiver that isn't an in-place map/array/buffer mutator
+             * target (Set, struct/enum/tuple/scalar) is the documented residual:
+             * fall back to the generic dispatcher (which still handles e.g.
+             * Set.remove / user methods) rather than hard-erroring a previously
+             * working operation. handled=false unlocks via cleanup and returns
+             * false so the caller takes the generic path. */
+            handled = false;
+        } else if (recv->phase == VTAG_CRYSTAL || recv->phase == VTAG_SUBLIMATED) {
+            res = eval_err(strdup(recv->phase == VTAG_CRYSTAL ? "cannot modify a frozen value"
                                                               : "cannot modify a sublimated value"));
         } else {
-            res = mutate_inner_locked(slot, VTAG_FLUID, method, margs, argc);
+            res = mutate_inner_locked(recv, VTAG_FLUID, method, margs, argc);
         }
     }
 
 cleanup:
-    if (locked) ref_unlock(cell);
+    refchain_release_all(&L);
     if (nargs) GC_POP_N(ev, nargs);
     if (nidx) GC_POP_N(ev, nidx);
     for (size_t j = 0; j < nargs; j++) value_free(&margs[j]);
     free(margs);
-    /* LAT-539: the index loop fills idx_vals high-slot-first (idx_vals[k-1] for
-     * k=depth..1), so after nidx successes the live slots are [depth-nidx,depth),
-     * NOT [0,nidx). On a partial-eval failure those ranges diverge; freeing
-     * [0,nidx) would free uninitialized slots (wild pointer) and leak the
-     * evaluated ones. Free exactly the slots that were stored. */
+    /* The index loop fills idx_vals high-slot-first, so after nidx successes the
+     * live slots are [depth-nidx,depth). Free exactly those (a partial-eval
+     * failure leaves the low slots uninitialized). */
     for (size_t j = depth - nidx; j < depth; j++) value_free(&idx_vals[j]);
     free(idx_vals);
-    ref_release(cell);
-    if (!handled) return false; /* res is still the initial unit — no leak */
+    if (root_cell) ref_release(root_cell);
+    if (!handled) return false; /* nothing locked/consumed — generic path */
     *out = res;
     return true;
 }
 
-/* LAT-539: nested (2+ level) index-assign whose root IDENT is a Ref —
- * root[i]...[k] = v. Same lock-after-eval discipline as eval_nested_ref_method
- * and as the single-level LAT-537 path. `valr_value` is the caller-owned RHS:
- * CONSUMED (detached into the slot, then freed) when this returns true;
- * left UNTOUCHED when it returns false so the caller's generic path can use
- * it. */
+/* LAT-542: nested index-assign through a Ref interior (target[i]...[k] = v).
+ * Same generalized lock-after-eval discipline as eval_nested_ref_method. The RHS
+ * `valr_value` is caller-owned: CONSUMED (detached into the slot, then freed)
+ * when this returns true; left UNTOUCHED when it returns false. */
 static bool eval_nested_ref_index_assign(Evaluator *ev, const Stmt *stmt, LatValue *valr_value, EvalResult *out) {
     const Expr *target = stmt->as.assign.target;
     size_t depth = 0;
-    const Expr *root = chain_index_root_ident(target, &depth);
-    if (!root || depth < 2) return false; /* single-level handled upstream */
+    const Expr *root = chain_index_root(target, &depth);
+    if (!root || depth == 0) return false;
 
     char *r_err = NULL;
     LatValue *rlv = resolve_lvalue(ev, root, &r_err);
     if (r_err) free(r_err);
-    if (!rlv || rlv->type != VAL_REF) return false;
+    if (!rlv) return false;
+    bool root_is_ref = (rlv->type == VAL_REF);
+    if (!root_is_ref && !chain_indices_all_pure(target, depth)) return false;
 
-    LatRef *cell = rlv->as.ref.ref;
-    PhaseTag hp = rlv->phase;
-    ref_retain(cell);
+    LatRef *root_cell = root_is_ref ? rlv->as.ref.ref : NULL;
+    PhaseTag root_hp = root_is_ref ? rlv->phase : VTAG_FLUID;
+    if (root_cell) ref_retain(root_cell);
     GC_PUSH(ev, valr_value); /* keep the RHS rooted across pre-lock index evals */
 
     LatValue *idx_vals = malloc(depth * sizeof(LatValue));
     size_t nidx = 0;
-    bool handled = true, locked = false;
+    bool handled = true;
+    RefChainLocks L = {0};
     EvalResult res = eval_ok(value_unit());
     if (!idx_vals) {
         res = eval_err(strdup("out of memory"));
@@ -12191,44 +12408,93 @@ static bool eval_nested_ref_index_assign(Evaluator *ev, const Stmt *stmt, LatVal
         }
     }
 
-    if (hp == VTAG_CRYSTAL) {
+    if (!root_is_ref) {
+        char *rr2 = NULL;
+        LatValue *rlv2 = resolve_lvalue(ev, root, &rr2);
+        if (rr2) free(rr2);
+        if (!rlv2 || !refchain_find_ref(rlv2, idx_vals, depth)) {
+            handled = false; /* no Ref in chain — RHS untouched, generic path */
+            goto cleanup;
+        }
+    }
+
+    if (root_is_ref && root_hp == VTAG_CRYSTAL) {
         res = eval_err(strdup("cannot assign index on a frozen Ref"));
         goto cleanup;
     }
 
-    ref_lock(cell);
-    locked = true;
-    value_unshare_detached(&cell->value);
     {
-        bool fellback = false;
+        LatValue *start;
+        bool behind;
+        if (root_is_ref) {
+            char *cerr = NULL;
+            start = refchain_cross(&L, root_cell, &cerr);
+            if (!start) {
+                res = eval_err(cerr);
+                goto cleanup;
+            }
+            behind = true;
+        } else {
+            char *rr3 = NULL;
+            start = resolve_lvalue(ev, root, &rr3);
+            if (rr3) free(rr3);
+            if (!start) {
+                res = eval_err(strdup("undefined variable"));
+                goto cleanup;
+            }
+            behind = false;
+        }
+        LatValue *fell = NULL;
+        size_t fk = 0;
         char *nav_err = NULL;
-        LatValue *slot = nav_ref_interior(&cell->value, idx_vals, depth, &fellback, &nav_err);
-        if (fellback) {
-            handled = false; /* deeper Ref / buffer container — generic path */
-        } else if (!slot) {
+        LatValue *slot =
+            refchain_navigate(start, behind, idx_vals, depth, /*cross_trailing=*/false, &L, &fell, &fk, &nav_err);
+        if (nav_err) {
             res = eval_err(nav_err);
+        } else if (fell) {
+            /* The one valid non-array/map leaf: a buffer byte write, done under
+             * the cell lock (so this also closes the buffer-interior UAF). */
+            if (fell->type == VAL_BUFFER && fk == depth - 1) {
+                if (idx_vals[fk].type != VAL_INT) {
+                    res = eval_err(strdup("buffer index must be an integer"));
+                } else if (valr_value->type != VAL_INT) {
+                    res = eval_err(strdup("buffer element must be an integer"));
+                } else {
+                    size_t bi = (size_t)idx_vals[fk].as.int_val;
+                    if (bi >= fell->as.buffer.len) {
+                        char *e = NULL;
+                        lat_asprintf(&e, "buffer index %zu out of bounds (length %zu)", bi, fell->as.buffer.len);
+                        res = eval_err(e);
+                    } else {
+                        fell->as.buffer.data[bi] = (uint8_t)(valr_value->as.int_val & 0xFF);
+                        res = eval_ok(value_unit());
+                    }
+                }
+            } else {
+                char *e = NULL;
+                lat_asprintf(&e, "cannot index into %s", value_type_name(fell));
+                res = eval_err(e);
+            }
         } else {
             value_free(slot);
-            *slot = value_detach(valr_value); /* private, cell outlives writers */
+            *slot = value_detach(valr_value); /* private; cell outlives writers */
             res = eval_ok(value_unit());
         }
     }
 
 cleanup:
-    if (locked) ref_unlock(cell);
+    refchain_release_all(&L);
     if (nidx) GC_POP_N(ev, nidx);
     GC_POP(ev); /* valr_value */
-    /* LAT-539: the index loop fills idx_vals high-slot-first (idx_vals[k-1] for
-     * k=depth..1), so after nidx successes the live slots are [depth-nidx,depth),
-     * NOT [0,nidx). On a partial-eval failure those ranges diverge; freeing
-     * [0,nidx) would free uninitialized slots (wild pointer) and leak the
-     * evaluated ones. Free exactly the slots that were stored. */
     for (size_t j = depth - nidx; j < depth; j++) value_free(&idx_vals[j]);
     free(idx_vals);
-    ref_release(cell);
+    if (root_cell) ref_release(root_cell);
     if (!handled) return false; /* RHS untouched — caller still owns it */
-    value_free(valr_value);     /* detached into the slot on success; freed here */
-    if (IS_OK(res) && ev->tracked_count > 0) record_history(ev, root->as.str_val);
+    value_free(valr_value);     /* consumed (detached into the slot, or read) — free original */
+    if (IS_OK(res) && ev->tracked_count > 0) {
+        const char *rn = chain_root_ident_name(root);
+        if (rn) record_history(ev, rn);
+    }
     *out = res;
     return true;
 }

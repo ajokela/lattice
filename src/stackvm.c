@@ -986,8 +986,10 @@ void stackvm_export_locals_to_env(StackVM *parent, StackVM *child) {
  * worker heap is still active and nil the slots so stackvm_free_child is a no-op.
  * Unlike value_detach, value_free correctly releases EVERY value kind via its own
  * free path — including VAL_ITERATOR, whose state value_clone_impl only
- * shallow-shares, so a detached copy would still alias freed worker-heap state. */
-static void stackvm_free_child_stack(StackVM *vm) {
+ * shallow-shares, so a detached copy would still alias freed worker-heap state.
+ * Exposed (LAT-541) so the async_iter producer teardown in runtime.c can reuse
+ * the same worker-side stack cleanup before it frees the worker heap. */
+void stackvm_free_child_stack(StackVM *vm) {
     for (LatValue *p = vm->stack; p < vm->stack_top; p++) {
         value_free(p);
         *p = value_nil();

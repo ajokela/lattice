@@ -121,6 +121,10 @@ StackVM *stackvm_clone_for_thread(StackVM *parent);
 /* Free a child StackVM created by stackvm_clone_for_thread. Does NOT free fn_chunks or struct_meta. */
 void stackvm_free_child(StackVM *child);
 
+/* Free the child's live value stack (and nil the slots) on the worker thread,
+ * before its heap is torn down — avoids the spawn-teardown UAF (LAT-538/541). */
+void stackvm_free_child_stack(StackVM *child);
+
 /* Track a dynamically compiled chunk in the StackVM's fn_chunks array for cleanup. */
 void stackvm_track_chunk(StackVM *vm, Chunk *ch);
 
