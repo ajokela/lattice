@@ -395,6 +395,20 @@ static void push_continue_patch(size_t instr_idx) {
 
 static void compile_expr(const Expr *e, uint8_t dst, int line);
 static void compile_stmt(const Stmt *s);
+static void emit_index_writeback(Expr *node, uint8_t modified_reg, int line);
+
+/* True when an EXPR_INDEX chain bottoms out at a named variable — the only base
+ * emit_index_writeback can actually store back to. For a non-writable base (a
+ * call result, a field access, ...) the write-back chain emits nothing at its
+ * terminal and would only re-evaluate the base expression, so the LAT-544
+ * nested-element mutation must fall back to the plain INVOKE path (a correct
+ * no-op) instead. Mirrors stackcompiler's gate so regvm and stackvm agree. */
+static bool index_chain_writable(const Expr *node) {
+    const Expr *o = node->as.index.object;
+    if (o->tag == EXPR_IDENT) return true;
+    if (o->tag == EXPR_INDEX) return index_chain_writable(o);
+    return false;
+}
 
 /* Compile statements into a standalone RegChunk (sub-body for scope/spawn/select).
  * The last expression statement becomes the return value; otherwise returns unit. */
@@ -1607,16 +1621,48 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
             uint16_t method_ki = add_constant(value_string(e->as.method_call.method));
 
-            /* LAT-463: method key is 16-bit — lo in word1 B, hi in the data
-             * word's C field (previously an unused/zero field). */
-            emit_ABC(ROP_INVOKE, dst, (uint8_t)(method_ki & 0xFF), (uint8_t)e->as.method_call.arg_count, line);
-            emit_ABC(ROP_MOVE, obj_reg, args_base, (uint8_t)(method_ki >> 8),
-                     line); /* data word (not executed as MOVE) */
+            if (e->as.method_call.object->tag == EXPR_INDEX && index_chain_writable(e->as.method_call.object)) {
+                /* LAT-544: nested-element mutating method call. The general
+                 * INVOKE path clones obj[i] into obj_reg via GETINDEX, mutates
+                 * the clone, and discards it — so obj[i].push(x) silently
+                 * no-ops. Emit a 3-word ROP_INVOKE_MUT followed immediately by
+                 * the index write-back chain; word2 (`skip`) records the chain's
+                 * word count. At runtime the chain runs only when the call was a
+                 * real in-place builtin mutation (push/pop/...); otherwise the VM
+                 * advances past it (impl Type::method, struct/map closure field,
+                 * non-mutating builtin, missing method — including frozen
+                 * receivers, which must NOT trigger a write-back). */
+                emit_ABC(ROP_INVOKE_MUT, dst, (uint8_t)(method_ki & 0xFF), (uint8_t)e->as.method_call.arg_count, line);
+                emit_ABC(ROP_MOVE, obj_reg, args_base, (uint8_t)(method_ki >> 8),
+                         line);                                /* data word (not executed as MOVE) */
+                size_t skip_word = emit_ABC(0, 0, 0, 0, line); /* word2: skip placeholder (raw u32) */
+                size_t wb_anchor = current_chunk()->code_len;
 
-            /* Free temp registers */
-            if (e->as.method_call.arg_count == 0) free_reg(args_base);
-            else free_regs_to(args_base);
-            if (obj_allocated) free_reg(obj_reg);
+                /* Free the args first so the write-back's temporaries reuse the
+                 * arg slots, never obj_reg; obj_reg must survive the write-back. */
+                if (e->as.method_call.arg_count == 0) free_reg(args_base);
+                else free_regs_to(args_base);
+
+                emit_index_writeback(e->as.method_call.object, obj_reg, line);
+
+                /* Patch the raw forward skip = words emitted for the chain. */
+                if (!rc_error) {
+                    size_t skip = current_chunk()->code_len - wb_anchor;
+                    current_chunk()->code[skip_word] = (RegInstr)skip;
+                }
+                if (obj_allocated) free_reg(obj_reg); /* free obj_reg LAST */
+            } else {
+                /* LAT-463: method key is 16-bit — lo in word1 B, hi in the data
+                 * word's C field (previously an unused/zero field). */
+                emit_ABC(ROP_INVOKE, dst, (uint8_t)(method_ki & 0xFF), (uint8_t)e->as.method_call.arg_count, line);
+                emit_ABC(ROP_MOVE, obj_reg, args_base, (uint8_t)(method_ki >> 8),
+                         line); /* data word (not executed as MOVE) */
+
+                /* Free temp registers */
+                if (e->as.method_call.arg_count == 0) free_reg(args_base);
+                else free_regs_to(args_base);
+                if (obj_allocated) free_reg(obj_reg);
+            }
             if (opt_skip) patch_jmp(opt_skip);
             break;
         }
@@ -2843,6 +2889,15 @@ static void compile_stmt(const Stmt *s) {
                         uint16_t nki = add_constant(value_string(name));
                         emit_ABx(ROP_SETGLOBAL, obj_reg, nki, line);
                     }
+                    free_reg(obj_reg);
+                } else if (!obj_is_local && target->as.field_access.object->tag == EXPR_INDEX &&
+                           index_chain_writable(target->as.field_access.object)) {
+                    /* LAT-544: obj[i].x = v. SETFIELD mutated the GETINDEX clone
+                     * in obj_reg; propagate it back into obj[i]. A field-assign is
+                     * unconditionally a real mutation, so the write-back is
+                     * emitted directly (no skip mechanism). A frozen parent/clone
+                     * errors in SETFIELD's own phase guard before this runs. */
+                    emit_index_writeback(target->as.field_access.object, obj_reg, line);
                     free_reg(obj_reg);
                 }
                 free_reg(val_reg);

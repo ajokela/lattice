@@ -225,6 +225,20 @@ static size_t invoke_instruction(const Chunk *c, size_t offset) {
     return offset + 3;
 }
 
+static size_t invoke_mut_instruction(const Chunk *c, size_t offset) {
+    uint8_t method_idx = c->code[offset + 1];
+    uint8_t arg_count = c->code[offset + 2];
+    uint16_t skip_len = (uint16_t)((c->code[offset + 3] << 8) | c->code[offset + 4]);
+    fprintf(stderr, "%-20s %4d '", "OP_INVOKE_MUT", method_idx);
+    if (method_idx < c->const_len) {
+        char *repr = value_repr(&c->constants[method_idx]);
+        fprintf(stderr, "%s", repr);
+        free(repr);
+    }
+    fprintf(stderr, "' (%d args, skip %d)\n", arg_count, skip_len);
+    return offset + 5;
+}
+
 static size_t build_struct_instruction(const Chunk *c, size_t offset) {
     uint8_t name_idx = c->code[offset + 1];
     uint8_t field_count = c->code[offset + 2];
@@ -448,6 +462,7 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
         case OP_HALT: return simple_instruction("OP_HALT", offset);
         case OP_INDEX_GLOBAL: return constant_instruction_16("OP_INDEX_GLOBAL", c, offset);
         case OP_SET_INDEX_GLOBAL: return constant_instruction_16("OP_SET_INDEX_GLOBAL", c, offset);
+        case OP_INVOKE_MUT: return invoke_mut_instruction(c, offset);
         default: fprintf(stderr, "Unknown opcode %d\n", op); return offset + 1;
     }
 }
@@ -609,6 +624,7 @@ static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
         case OP_DEFER_PUSH: NEED(4); return 4;
         /* 5-byte */
         case OP_INVOKE_LOCAL_16:
+        case OP_INVOKE_MUT:
         case OP_FREEZE_EXCEPT: NEED(5); return 5;
         /* 6-byte */
         case OP_INVOKE_GLOBAL_16: NEED(6); return 6;
@@ -687,6 +703,15 @@ static char *verify_instr_operands(const Chunk *c, size_t off, const uint8_t *is
         case OP_INDEX_GLOBAL:
         case OP_SET_INDEX_GLOBAL: CK_STR(U16(off + 1)); break;
         case OP_INVOKE: CK_STR(c->code[off + 1]); break;
+        case OP_INVOKE_MUT: {
+            CK_STR(c->code[off + 1]);
+            /* The everything-else path does frame->ip += skip_len, landing at the
+             * instruction right after the write-back chain. Validate that target. */
+            size_t target = off + 5 + U16(off + 3);
+            if (target >= c->code_len || !is_start[target])
+                return verify_failf("OP_INVOKE_MUT skip target %zu invalid at offset %zu", target, off);
+            break;
+        }
         case OP_INVOKE_LOCAL: CK_STR(c->code[off + 2]); break;
         case OP_INVOKE_GLOBAL:
             CK_STR(c->code[off + 1]);

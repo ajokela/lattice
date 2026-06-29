@@ -210,6 +210,22 @@ typedef enum {
     ROP_GETFIELD_16, /* A=dst, B=obj; data word: Bx=field_ki (16-bit)   */
     ROP_SETFIELD_16, /* A=obj, C=val; data word: Bx=field_ki (16-bit)   */
 
+    /* Nested-element mutating method call (LAT-544). Emitted only for
+     * obj[i].method() where the receiver is an EXPR_INDEX, so an in-place
+     * container mutation (push/pop/...) propagates back into obj[i] instead of
+     * being discarded with the GETINDEX clone. Three-word, opcode-agnostic
+     * .rlatc layout:
+     *   word0: A=dst, B=method_ki_lo, C=argc
+     *   word1: A=obj_reg, B=args_base, C=method_ki_hi   (op byte is filler)
+     *   word2: skip — forward RegInstr-word count past the write-back chain
+     * The write-back chain (a SETINDEX/SETINDEX_LOCAL sequence) is emitted by
+     * the compiler immediately after word2. At runtime, when the call is a real
+     * in-place builtin mutation, control falls through and runs the chain; for
+     * every other resolution (non-mutating builtin, struct/map closure field,
+     * impl Type::method, missing method) the VM advances ip by `skip` once,
+     * skipping the now-dead chain. */
+    ROP_INVOKE_MUT,
+
     ROP_COUNT /* number of opcodes                             */
 } RegOpcode;
 

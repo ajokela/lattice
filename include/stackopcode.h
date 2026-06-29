@@ -176,6 +176,19 @@ typedef enum {
      * self-hosted compiler, which hardcodes opcode numbers. */
     OP_INDEX_GLOBAL,     /* operand = BE16 name constant. Pop index. Push global[index] element. */
     OP_SET_INDEX_GLOBAL, /* operand = BE16 name constant. Pop index, value. Mutate global[index] = value in place. */
+
+    /* Nested-element mutation (LAT-544). Emitted only for `obj[i].mutator()` where
+     * the object is an EXPR_INDEX and the method name passes the mutator pre-filter.
+     * Layout: [method_idx:u8][arg_count:u8][skip_len:u16 BE]. The index write-back
+     * chain (skip_len bytes) is emitted immediately after this instruction. At
+     * runtime, builtin_method_mutates() decides: if true, run the in-place builtin
+     * on the cloned receiver, leave [result, mutated_clone], and fall through into
+     * the write-back chain (which stores the clone back, error-checking the parent
+     * phase). If false, advance past the chain (frame->ip += skip_len) and resolve
+     * exactly like OP_INVOKE (struct/enum/map closure field, impl Type::method,
+     * non-mutating builtin, or missing-method error). Appended last so existing
+     * opcode numbers stay stable for the self-hosted compiler. */
+    OP_INVOKE_MUT,
 } Opcode;
 
 const char *opcode_name(Opcode op);

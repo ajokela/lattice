@@ -3254,6 +3254,189 @@ static LatValue stackvm_dispatch_call_closure(void *vm_ptr, LatValue *closure, L
     return result;
 }
 
+/* Shared method-call resolution for OP_INVOKE and the "everything-else" path of
+ * OP_INVOKE_MUT (LAT-544). Resolution order mirrors OP_INVOKE exactly so the
+ * impl-method (Type::method) lookup can never be dropped by one of the two paths
+ * — the root cause of the reverted name-only attempt's regression #3.
+ *
+ * Entry stack (bottom->top): [obj, arg1..argN], with obj == stackvm_peek(vm,
+ * arg_count). Returns STACKVM_OK when the caller should `break` (a synchronous
+ * result was pushed, a new deferred frame was installed via *frame_ref, or an
+ * error was caught and the frame repointed to its catch handler). Returns a
+ * non-OK StackVMResult that the caller must propagate (uncaught error). */
+static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame_ref, LatValue *obj,
+                                             const char *method_name, int arg_count) {
+    if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL)) {
+        if (vm->error) { return stackvm_handle_native_error(vm, frame_ref); }
+        /* Builtin handled it. Pop the object and replace with result. */
+        LatValue result_val = pop(vm);
+        LatValue obj_val = pop(vm);
+        value_free(&obj_val);
+        push(vm, result_val);
+        return STACKVM_OK;
+    }
+
+    /* Check if map has a callable closure field */
+    if (obj->type == VAL_MAP) {
+        LatValue *field = lat_map_get(obj->as.map.map, method_name);
+        if (field && field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+            field->as.closure.default_values != VM_NATIVE_MARKER) {
+            /* Bytecode closure stored in map - call it */
+            Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+            int arity = (int)field->as.closure.param_count;
+            int adjusted = stackvm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
+            if (adjusted < 0) {
+                char *err = vm->error;
+                vm->error = NULL;
+                StackVMResult r = stackvm_handle_error(vm, frame_ref, "%s", err);
+                free(err);
+                return r;
+            }
+            (void)adjusted;
+            ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+            size_t uv_count = field->as.closure.upvalue_count;
+            if (vm->frame_count >= STACKVM_FRAMES_MAX)
+                return stackvm_handle_error(vm, frame_ref, "stack overflow (too many nested calls)");
+            stackvm_promote_frame_ephemerals(vm, *frame_ref);
+            /* CbR Stage 3 (S3-R4): unreachable for shared containers BY
+             * CONSTRUCTION — a closure field makes the container unshareable. */
+            assert(!REGION_IS_SHARED_ID(obj->region_id));
+            LatValue closure_copy = value_deep_clone(field);
+            value_free(obj);
+            *obj = closure_copy;
+            StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+            new_frame->chunk = fn_chunk;
+            new_frame->ip = fn_chunk->code;
+            new_frame->slots = obj;
+            new_frame->upvalues = upvals;
+            new_frame->upvalue_count = uv_count;
+            *frame_ref = new_frame;
+            return STACKVM_OK;
+        }
+        if (field && field->type == VAL_CLOSURE && field->as.closure.default_values == VM_NATIVE_MARKER) {
+            /* StackVM native function stored in map */
+            VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+            LatValue *args = (arg_count <= 16) ? vm->fast_args : malloc(arg_count * sizeof(LatValue));
+            for (int i = arg_count - 1; i >= 0; i--) args[i] = pop(vm);
+            LatValue obj_val = pop(vm);
+            LatValue ret = native(args, arg_count);
+            /* Bridge: native errors from runtime to StackVM */
+            if (vm->rt->error) {
+                vm->error = vm->rt->error;
+                vm->rt->error = NULL;
+            }
+            for (int i = 0; i < arg_count; i++) value_free(&args[i]);
+            if (arg_count > 16) free(args);
+            value_free(&obj_val);
+            push(vm, ret);
+            return STACKVM_OK;
+        }
+    }
+
+    /* Check if struct has a callable closure field */
+    if (obj->type == VAL_STRUCT) {
+        const char *imethod = intern(method_name);
+        for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
+            if (obj->as.strct.field_names[fi] != imethod) continue;
+            LatValue *field = &obj->as.strct.field_values[fi];
+            if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
+                field->as.closure.default_values != VM_NATIVE_MARKER) {
+                /* Bytecode closure in struct field — inject self */
+                Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                size_t uv_count = field->as.closure.upvalue_count;
+                if (vm->frame_count >= STACKVM_FRAMES_MAX)
+                    return stackvm_handle_error(vm, frame_ref, "stack overflow (too many nested calls)");
+                stackvm_promote_frame_ephemerals(vm, *frame_ref);
+                /* CbR Stage 3 (S3-R4): see map prong above. */
+                assert(!REGION_IS_SHARED_ID(obj->region_id));
+                LatValue self_copy = value_deep_clone(obj);
+                LatValue closure_copy = value_deep_clone(field);
+                /* Shift args up by 1 to make room for self */
+                push(vm, value_nil());
+                for (int si = arg_count; si >= 1; si--) obj[si + 1] = obj[si];
+                obj[1] = self_copy;
+                value_free(obj);
+                *obj = closure_copy;
+                StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                new_frame->chunk = fn_chunk;
+                new_frame->ip = fn_chunk->code;
+                new_frame->slots = obj;
+                new_frame->upvalues = upvals;
+                new_frame->upvalue_count = uv_count;
+                *frame_ref = new_frame;
+                return STACKVM_OK;
+            }
+            if (field->type == VAL_CLOSURE && field->as.closure.default_values == VM_NATIVE_MARKER) {
+                /* StackVM native in struct field — inject self */
+                VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                LatValue self_copy = value_deep_clone(obj);
+                int total_args = arg_count + 1;
+                LatValue *args = malloc(total_args * sizeof(LatValue));
+                if (!args) return STACKVM_RUNTIME_ERROR;
+                args[0] = self_copy;
+                for (int ai = arg_count - 1; ai >= 0; ai--) args[ai + 1] = pop(vm);
+                LatValue obj_val = pop(vm);
+                LatValue ret = native(args, total_args);
+                for (int ai = 0; ai < total_args; ai++) value_free(&args[ai]);
+                free(args);
+                value_free(&obj_val);
+                push(vm, ret);
+                return STACKVM_OK;
+            }
+            break; /* found field but not callable */
+        }
+    }
+
+    /* Try to find it as a compiled method via "TypeName::method" global */
+    const char *type_name = (obj->type == VAL_STRUCT) ? obj->as.strct.name
+                            : (obj->type == VAL_ENUM) ? obj->as.enm.enum_name
+                                                      : value_type_name(obj);
+    char key[256];
+    snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
+    LatValue *method_ref = env_get_ref(vm->env, key);
+    if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
+        /* Found a compiled method - call it with self + args */
+        Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
+        int m_arity = stackvm_method_arity(method_ref, fn_chunk);
+        int m_argc = stackvm_adjust_call_args(vm, fn_chunk, m_arity, (int)arg_count);
+        if (m_argc < 0) {
+            char *err = vm->error;
+            vm->error = NULL;
+            StackVMResult r = stackvm_handle_error(vm, frame_ref, "%s", err);
+            free(err);
+            return r;
+        }
+        (void)m_argc;
+        if (vm->frame_count >= STACKVM_FRAMES_MAX)
+            return stackvm_handle_error(vm, frame_ref, "stack overflow (too many nested calls)");
+        stackvm_promote_frame_ephemerals(vm, *frame_ref);
+        StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
+        new_frame->chunk = fn_chunk;
+        new_frame->ip = fn_chunk->code;
+        new_frame->slots = obj; /* self is in slot 0 */
+        new_frame->upvalues = (ObjUpvalue **)method_ref->as.closure.captured_env;
+        new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
+        *frame_ref = new_frame;
+        return STACKVM_OK;
+    }
+
+    /* Method not found - error with suggestion */
+    const char *tname = value_type_name(obj);
+    int otype = obj->type;
+    for (int i = 0; i < arg_count; i++) {
+        LatValue v = pop(vm);
+        value_free(&v);
+    }
+    LatValue obj_val = pop(vm);
+    value_free(&obj_val);
+    const char *msug = builtin_find_similar_method(otype, method_name);
+    if (msug)
+        return stackvm_handle_error(vm, frame_ref, "type '%s' has no method '%s' (did you mean '%s'?)", tname,
+                                    method_name, msug);
+    return stackvm_handle_error(vm, frame_ref, "type '%s' has no method '%s'", tname, method_name);
+}
+
 StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
     /* Always initialize *result: error paths return without writing it, and
      * several callers value_free it unconditionally. An uninitialized
@@ -3410,6 +3593,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_HALT] = &&lbl_OP_HALT,
         [OP_INDEX_GLOBAL] = &&lbl_OP_INDEX_GLOBAL,
         [OP_SET_INDEX_GLOBAL] = &&lbl_OP_SET_INDEX_GLOBAL,
+        [OP_INVOKE_MUT] = &&lbl_OP_INVOKE_MUT,
     };
 #endif
 
@@ -5198,198 +5382,64 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             /* Object is below args on the stack */
             LatValue *obj = stackvm_peek(vm, arg_count);
 
-            if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL)) {
-                if (vm->error) {
-                    StackVMResult r = stackvm_handle_native_error(vm, &frame);
-                    if (r != STACKVM_OK) return r;
+            /* Shared resolution (see stackvm_dispatch_invoke). STACKVM_OK ⇒ break
+             * (sync result pushed / deferred frame installed / error caught and
+             * frame repointed); non-OK ⇒ propagate (uncaught error). */
+            StackVMResult r = stackvm_dispatch_invoke(vm, &frame, obj, method_name, arg_count);
+            if (r != STACKVM_OK) return r;
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_INVOKE_MUT:
+#endif
+        case OP_INVOKE_MUT: {
+            /* Nested-element mutation: `obj[i].mutator()` (LAT-544). The index
+             * write-back chain of byte length skip_len immediately follows this
+             * instruction. */
+            uint8_t method_idx = READ_BYTE();
+            uint8_t arg_count = READ_BYTE();
+            uint16_t skip_len = READ_U16();
+            const char *method_name = frame->chunk->constants[method_idx].as.str_val;
+
+            /* Object (a clone of obj[i] produced by OP_INDEX*) is below the args. */
+            LatValue *obj = stackvm_peek(vm, arg_count);
+
+            if (builtin_method_mutates(obj->type, method_name)) {
+                /* CONTAINER path: run the in-place builtin on the cloned receiver. */
+                if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL)) {
+                    if (vm->error) {
+                        /* On a caught error the unwinder repoints frame->ip to the
+                         * catch handler, so the trailing write-back is not run; on a
+                         * frozen receiver this surfaces the same error as the
+                         * tree-walker. */
+                        StackVMResult r = stackvm_handle_native_error(vm, &frame);
+                        if (r != STACKVM_OK) return r;
+                        break;
+                    }
+                    /* Success: stack is [mutated_clone, result]. Swap to
+                     * [result, mutated_clone] and fall through (frame->ip unchanged)
+                     * into the write-back chain, which stores the mutated clone back
+                     * into obj[i] — a frozen parent then errors in the locked
+                     * SET_INDEX*, matching the tree-walker. */
+                    LatValue t = vm->stack_top[-1];
+                    vm->stack_top[-1] = vm->stack_top[-2];
+                    vm->stack_top[-2] = t;
                     break;
                 }
-                /* Builtin handled it. Pop the object and replace with result. */
-                LatValue result_val = pop(vm); /* pop result pushed by builtin */
-                /* Pop the object */
-                /* The object is at stack_top[-1] now (or at the right place). Actually...
-                 * We need to be careful here. The args were popped by builtin if needed.
-                 * The object is still on the stack. Let's clean up. */
-                LatValue obj_val = pop(vm);
-                value_free(&obj_val);
-                push(vm, result_val);
-            } else {
-                /* Check if map/struct has a callable closure field */
-                if (obj->type == VAL_MAP) {
-                    LatValue *field = lat_map_get(obj->as.map.map, method_name);
-                    if (field && field->type == VAL_CLOSURE && field->as.closure.native_fn &&
-                        field->as.closure.default_values != VM_NATIVE_MARKER) {
-                        /* Bytecode closure stored in map - call it */
-                        Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
-                        int arity = (int)field->as.closure.param_count;
-                        int adjusted = stackvm_adjust_call_args(vm, fn_chunk, arity, (int)arg_count);
-                        if (adjusted < 0) {
-                            char *err = vm->error;
-                            vm->error = NULL;
-                            VM_ERROR("%s", err);
-                            free(err);
-                            break;
-                        }
-                        (void)adjusted;
-                        ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                        size_t uv_count = field->as.closure.upvalue_count;
-                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
-                            VM_ERROR("stack overflow (too many nested calls)");
-                            break;
-                        }
-                        stackvm_promote_frame_ephemerals(vm, frame);
-                        /* Replace the map on the stack with a closure placeholder
-                         * so OP_RETURN can clean up properly.
-                         * CbR Stage 3 (S3-R4): unreachable for shared
-                         * containers BY CONSTRUCTION — a closure field makes
-                         * the container unshareable (value_is_shareable), so
-                         * this in-place overwrite never touches a region. */
-                        assert(!REGION_IS_SHARED_ID(obj->region_id));
-                        LatValue closure_copy = value_deep_clone(field);
-                        value_free(obj);
-                        *obj = closure_copy;
-                        StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                        new_frame->chunk = fn_chunk;
-                        new_frame->ip = fn_chunk->code;
-                        new_frame->slots = obj;
-                        new_frame->upvalues = upvals;
-                        new_frame->upvalue_count = uv_count;
-                        frame = new_frame;
-                        break;
-                    }
-                    if (field && field->type == VAL_CLOSURE && field->as.closure.default_values == VM_NATIVE_MARKER) {
-                        /* StackVM native function stored in map */
-                        VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
-                        LatValue *args = (arg_count <= 16) ? vm->fast_args : malloc(arg_count * sizeof(LatValue));
-                        for (int i = arg_count - 1; i >= 0; i--) args[i] = pop(vm);
-                        LatValue obj_val = pop(vm);
-                        LatValue ret = native(args, arg_count);
-                        /* Bridge: native errors from runtime to StackVM */
-                        if (vm->rt->error) {
-                            vm->error = vm->rt->error;
-                            vm->rt->error = NULL;
-                        }
-                        for (int i = 0; i < arg_count; i++) value_free(&args[i]);
-                        if (arg_count > 16) free(args);
-                        value_free(&obj_val);
-                        push(vm, ret);
-                        break;
-                    }
-                }
-
-                /* Check if struct has a callable closure field */
-                if (obj->type == VAL_STRUCT) {
-                    const char *imethod = intern(method_name);
-                    bool handled = false;
-                    for (size_t fi = 0; fi < obj->as.strct.field_count; fi++) {
-                        if (obj->as.strct.field_names[fi] != imethod) continue;
-                        LatValue *field = &obj->as.strct.field_values[fi];
-                        if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
-                            field->as.closure.default_values != VM_NATIVE_MARKER) {
-                            /* Bytecode closure in struct field — inject self */
-                            Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
-                            ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
-                            size_t uv_count = field->as.closure.upvalue_count;
-                            if (vm->frame_count >= STACKVM_FRAMES_MAX) {
-                                VM_ERROR("stack overflow (too many nested calls)");
-                                break;
-                            }
-                            stackvm_promote_frame_ephemerals(vm, frame);
-                            /* CbR Stage 3 (S3-R4): see map prong above. */
-                            assert(!REGION_IS_SHARED_ID(obj->region_id));
-                            LatValue self_copy = value_deep_clone(obj);
-                            LatValue closure_copy = value_deep_clone(field);
-                            /* Shift args up by 1 to make room for self */
-                            push(vm, value_nil());
-                            for (int si = arg_count; si >= 1; si--) obj[si + 1] = obj[si];
-                            obj[1] = self_copy;
-                            value_free(obj);
-                            *obj = closure_copy;
-                            StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                            new_frame->chunk = fn_chunk;
-                            new_frame->ip = fn_chunk->code;
-                            new_frame->slots = obj;
-                            new_frame->upvalues = upvals;
-                            new_frame->upvalue_count = uv_count;
-                            frame = new_frame;
-                            handled = true;
-                            break;
-                        }
-                        if (field->type == VAL_CLOSURE && field->as.closure.default_values == VM_NATIVE_MARKER) {
-                            /* StackVM native in struct field — inject self */
-                            VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
-                            LatValue self_copy = value_deep_clone(obj);
-                            int total_args = arg_count + 1;
-                            LatValue *args = malloc(total_args * sizeof(LatValue));
-                            if (!args) return STACKVM_RUNTIME_ERROR;
-                            args[0] = self_copy;
-                            for (int ai = arg_count - 1; ai >= 0; ai--) args[ai + 1] = pop(vm);
-                            LatValue obj_val = pop(vm);
-                            LatValue ret = native(args, total_args);
-                            for (int ai = 0; ai < total_args; ai++) value_free(&args[ai]);
-                            free(args);
-                            value_free(&obj_val);
-                            push(vm, ret);
-                            handled = true;
-                            break;
-                        }
-                        break; /* found field but not callable */
-                    }
-                    if (handled) break;
-                }
-
-                /* Try to find it as a compiled method via "TypeName::method" global */
-                const char *type_name = (obj->type == VAL_STRUCT) ? obj->as.strct.name
-                                        : (obj->type == VAL_ENUM) ? obj->as.enm.enum_name
-                                                                  : value_type_name(obj);
-                char key[256];
-                snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                LatValue *method_ref = env_get_ref(vm->env, key);
-                if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
-                    /* Found a compiled method - call it with self + args */
-                    Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
-                    int m_arity = stackvm_method_arity(method_ref, fn_chunk);
-                    int m_argc = stackvm_adjust_call_args(vm, fn_chunk, m_arity, (int)arg_count);
-                    if (m_argc < 0) {
-                        char *err = vm->error;
-                        vm->error = NULL;
-                        VM_ERROR("%s", err);
-                        free(err);
-                        break;
-                    }
-                    (void)m_argc;
-                    /* Rearrange stack: obj is already below args, use as slot 0 */
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
-                        VM_ERROR("stack overflow (too many nested calls)");
-                        break;
-                    }
-                    stackvm_promote_frame_ephemerals(vm, frame);
-                    StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                    new_frame->chunk = fn_chunk;
-                    new_frame->ip = fn_chunk->code;
-                    new_frame->slots = obj; /* self is in slot 0 */
-                    new_frame->upvalues = (ObjUpvalue **)method_ref->as.closure.captured_env;
-                    new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
-                    frame = new_frame;
-                } else {
-                    /* Method not found - error with suggestion */
-                    const char *tname = value_type_name(obj);
-                    int otype = obj->type;
-                    for (int i = 0; i < arg_count; i++) {
-                        LatValue v = pop(vm);
-                        value_free(&v);
-                    }
-                    LatValue obj_val = pop(vm);
-                    value_free(&obj_val);
-                    const char *msug = builtin_find_similar_method(otype, method_name);
-                    if (msug) {
-                        VM_ERROR("type '%s' has no method '%s' (did you mean '%s'?)", tname, method_name, msug);
-                    } else {
-                        VM_ERROR("type '%s' has no method '%s'", tname, method_name);
-                    }
-                    break;
-                }
+                /* Defensive: the classifier said "mutate" but no stackvm builtin
+                 * exists (e.g. the map "delete" alias). Fall into the everything-else
+                 * path below so we never strand a [clone, args] frame. */
             }
+
+            /* EVERYTHING-ELSE path: skip the write-back chain, then resolve exactly
+             * like OP_INVOKE (struct/enum/map closure field, impl Type::method,
+             * non-mutating builtin, or missing-method error). Because the VM reads
+             * straight from frame->ip, both synchronous and deferred sub-paths
+             * resume past the write-back for free. */
+            frame->ip += skip_len;
+            StackVMResult r = stackvm_dispatch_invoke(vm, &frame, obj, method_name, arg_count);
+            if (r != STACKVM_OK) return r;
             break;
         }
 

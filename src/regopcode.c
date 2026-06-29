@@ -120,6 +120,11 @@ static const char *names[] = {
     [ROP_SETSLICE_LOCAL] = "SETSLICE_LOCAL",
     /* Misc */
     [ROP_HALT] = "HALT",
+    /* Wide-constant variants */
+    [ROP_GETFIELD_16] = "GETFIELD_16",
+    [ROP_SETFIELD_16] = "SETFIELD_16",
+    /* Nested-element mutating method call (LAT-544) */
+    [ROP_INVOKE_MUT] = "INVOKE_MUT",
 };
 
 const char *reg_opcode_name(RegOpcode op) {

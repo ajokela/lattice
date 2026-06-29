@@ -118,6 +118,7 @@ static const char *names[] = {
     [OP_HALT] = "OP_HALT",
     [OP_INDEX_GLOBAL] = "OP_INDEX_GLOBAL",
     [OP_SET_INDEX_GLOBAL] = "OP_SET_INDEX_GLOBAL",
+    [OP_INVOKE_MUT] = "OP_INVOKE_MUT",
 };
 
 const char *opcode_name(Opcode op) {

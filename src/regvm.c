@@ -3125,6 +3125,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Wide-constant variants */
         [ROP_GETFIELD_16] = &&L_GETFIELD_16,
         [ROP_SETFIELD_16] = &&L_SETFIELD_16,
+        /* Nested-element mutating method call (LAT-544) */
+        [ROP_INVOKE_MUT] = &&L_INVOKE_MUT,
     };
 
 #define DISPATCH()                            \
@@ -4756,6 +4758,211 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         }
 
     invoke_fail: {
+        const char *msug = builtin_find_similar_method(R[obj_reg].type, method_name);
+        if (msug)
+            RVM_ERROR("no method '%s' on %s (did you mean '%s'?)", method_name, value_type_name(&R[obj_reg]), msug);
+        else RVM_ERROR("no method '%s' on %s", method_name, value_type_name(&R[obj_reg]));
+    }
+    }
+
+    CASE(INVOKE_MUT) {
+        /* Three-instruction sequence (LAT-544 nested-element mutation):
+         *   INVOKE_MUT A=dst, B=method_ki_lo, C=argc
+         *   data:      A=obj_reg, B=args_base, C=method_ki_hi
+         *   skip:      forward RegInstr-word count of the write-back chain
+         * Emitted only for obj[i].method() (the receiver is an EXPR_INDEX). The
+         * write-back chain that follows propagates the in-place-mutated
+         * R[obj_reg] back into obj[i]; it runs only when the call was a real
+         * in-place builtin mutation, otherwise we advance ip past it exactly
+         * once (see the two choke points below). */
+        uint8_t dst = REG_GET_A(instr);
+        uint8_t argc = REG_GET_C(instr);
+
+        RegInstr data = *frame->ip++;
+        uint8_t obj_reg = REG_GET_A(data);
+        uint8_t args_base = REG_GET_B(data);
+        /* LAT-463: 16-bit method key (lo in word1 B, hi in data word C). */
+        uint16_t method_ki = (uint16_t)REG_GET_B(instr) | ((uint16_t)REG_GET_C(data) << 8);
+        uint32_t mut_skip = *frame->ip++; /* frame->ip now → first write-back instr */
+
+        const char *method_name = frame->chunk->constants[method_ki].as.str_val;
+
+        /* Classify BEFORE invoking, from the freshly GETINDEX-cloned receiver.
+         * builtin_method_mutates is the authoritative classifier (true only for
+         * in-place container mutators: array push/pop/insert/remove_at; map
+         * set/remove/merge/delete; set add/remove/clear; buffer push, write_NN,
+         * clear/fill/resize). */
+        bool want_wb = builtin_method_mutates(R[obj_reg].type, method_name);
+
+        /* Try builtin */
+        LatValue invoke_result;
+        LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
+        if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL)) {
+            if (vm->error) return REGVM_RUNTIME_ERROR; /* frozen/sublimated/arity guard fired */
+            reg_set(&R[dst], invoke_result);
+            /* CHOKE POINT (a): a real in-place mutation falls through to run the
+             * write-back chain; a non-mutating builtin (sort/reverse copies, a
+             * Ref proxy that already aliases the live cell) skips it. */
+            if (!want_wb) frame->ip += mut_skip;
+            DISPATCH();
+        }
+
+        /* CHOKE POINT (b): not a builtin — every remaining resolution discards
+         * the GETINDEX clone, so the write-back is dead. Advance ONCE here, at
+         * the single label opening the not-builtin region, so all closure/impl/
+         * native/fail subpaths (synchronous AND deferred) inherit it. For a
+         * deferred RegChunk call the caller ip is advanced BEFORE the callee
+         * frame is pushed, so RETURN resumes the caller past the chain. */
+        frame->ip += mut_skip;
+
+        /* Check for callable closure field in map */
+        if (R[obj_reg].type == VAL_MAP) {
+            LatValue *field = lat_map_get(R[obj_reg].as.map.map, method_name);
+            if (field && field->type == VAL_CLOSURE) {
+                /* Native C function in map */
+                if (field->as.closure.default_values == VM_NATIVE_MARKER) {
+                    VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = native(call_args, argc);
+                    if (vm->rt->error) {
+                        vm->error = vm->rt->error;
+                        vm->rt->error = NULL;
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                /* Extension native function in map */
+                if (field->as.closure.default_values == VM_EXT_MARKER) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = ext_call_native(field->as.closure.native_fn, call_args, (size_t)argc);
+                    if (ret.type == VAL_STR && ret.as.str_val && strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                        vm->error = strdup(ret.as.str_val + 11);
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                /* RegChunk closure in map */
+                RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                if (fn_chunk && fn_chunk->magic == REGCHUNK_MAGIC) {
+                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+
+                    size_t new_base = vm->reg_stack_top;
+                    LatValue *new_regs = &vm->reg_stack[new_base];
+                    vm->reg_stack_top += REGVM_REG_MAX;
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+
+                    /* Slot 0 = reserved, slots 1+ = args (no self for map closures) */
+                    new_regs[0] = value_unit();
+                    for (int i = 0; i < argc; i++) { new_regs[1 + i] = rvm_clone(&R[args_base + i]); }
+
+                    ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                    size_t uv_count = field->as.closure.upvalue_count;
+
+                    RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->chunk = fn_chunk;
+                    new_frame->ip = fn_chunk->code;
+                    new_frame->regs = new_regs;
+                    new_frame->reg_count = mr;
+                    new_frame->upvalues = upvals;
+                    new_frame->upvalue_count = uv_count;
+                    new_frame->caller_result_reg = dst;
+                    frame = new_frame;
+                    R = new_regs;
+                    DISPATCH();
+                }
+                /* Stack-VM closure in map — use regvm bridge */
+                if (field->as.closure.native_fn) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = regvm_call_closure(vm, field, call_args, argc);
+                    if (vm->error) return REGVM_RUNTIME_ERROR;
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+            }
+        }
+
+        /* Check for callable closure field in struct */
+        if (R[obj_reg].type == VAL_STRUCT) {
+            for (size_t fi = 0; fi < R[obj_reg].as.strct.field_count; fi++) {
+                if (strcmp(R[obj_reg].as.strct.field_names[fi], method_name) != 0) continue;
+                LatValue *field = &R[obj_reg].as.strct.field_values[fi];
+                if (field->type == VAL_CLOSURE && field->as.closure.native_fn) {
+                    RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+
+                    size_t new_base = vm->reg_stack_top;
+                    LatValue *new_regs = &vm->reg_stack[new_base];
+                    vm->reg_stack_top += REGVM_REG_MAX;
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+
+                    /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
+                    new_regs[0] = value_unit();
+                    new_regs[1] = rvm_clone(&R[obj_reg]); /* self = first param */
+                    for (int i = 0; i < argc; i++) { new_regs[2 + i] = rvm_clone(&R[args_base + i]); }
+
+                    ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                    size_t uv_count = field->as.closure.upvalue_count;
+
+                    RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->chunk = fn_chunk;
+                    new_frame->ip = fn_chunk->code;
+                    new_frame->regs = new_regs;
+                    new_frame->reg_count = mr;
+                    new_frame->upvalues = upvals;
+                    new_frame->upvalue_count = uv_count;
+                    new_frame->caller_result_reg = dst;
+                    frame = new_frame;
+                    R = new_regs;
+                    DISPATCH();
+                }
+            }
+        }
+
+        /* Check for impl method (TypeName::method) */
+        if (R[obj_reg].type == VAL_STRUCT) {
+            char key[256];
+            snprintf(key, sizeof(key), "%s::%s", R[obj_reg].as.strct.name, method_name);
+            LatValue impl_fn;
+            if (env_get(vm->env, key, &impl_fn) && impl_fn.type == VAL_CLOSURE) {
+                RegChunk *fn_chunk = (RegChunk *)impl_fn.as.closure.native_fn;
+                if (!fn_chunk) goto invoke_mut_fail;
+
+                if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+
+                size_t new_base = vm->reg_stack_top;
+                LatValue *new_regs = &vm->reg_stack[new_base];
+                vm->reg_stack_top += REGVM_REG_MAX;
+                int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+
+                /* ITEM_IMPL compiles self at slot 0, other params at slot 1+ */
+                new_regs[0] = rvm_clone(&R[obj_reg]); /* self */
+                for (int i = 0; i < argc; i++) { new_regs[1 + i] = rvm_clone(&R[args_base + i]); }
+
+                ObjUpvalue **upvals = (ObjUpvalue **)impl_fn.as.closure.captured_env;
+                size_t uv_count = impl_fn.as.closure.upvalue_count;
+
+                RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                new_frame->chunk = fn_chunk;
+                new_frame->ip = fn_chunk->code;
+                new_frame->regs = new_regs;
+                new_frame->reg_count = mr;
+                new_frame->upvalues = upvals;
+                new_frame->upvalue_count = uv_count;
+                new_frame->caller_result_reg = dst;
+                frame = new_frame;
+                R = new_regs;
+                DISPATCH();
+            }
+        }
+
+    invoke_mut_fail: {
         const char *msug = builtin_find_similar_method(R[obj_reg].type, method_name);
         if (msug)
             RVM_ERROR("no method '%s' on %s (did you mean '%s'?)", method_name, value_type_name(&R[obj_reg]), msug);
@@ -7482,6 +7689,12 @@ static size_t reg_instr_words(const RegChunk *c, size_t i, char **err) {
                 return 0;
             }
             return 2;
+        case ROP_INVOKE_MUT: /* word0 + data word + skip word (LAT-544) */
+            if (avail < 3) {
+                *err = reg_verify_failf("truncated three-word opcode %u at word %zu", op, i);
+                return 0;
+            }
+            return 3;
         case ROP_CLOSURE: {
             uint16_t bx = REG_GET_Bx(instr);
             if (bx >= c->const_len || c->constants[bx].type != VAL_CLOSURE) {
@@ -7599,6 +7812,24 @@ static char *reg_verify_operands(const RegChunk *c, size_t i, const uint8_t *is_
             RCK_WINDOW(REG_GET_A(w2), 1); /* H-12: obj_reg */
             RCK_WINDOW(REG_GET_B(w2), C); /* H-12: args_base + argc */
             RCK_WINDOW(A, 1);             /* dst */
+            break;
+        }
+        case ROP_INVOKE_MUT: {
+            /* word0=A:dst,B:method_ki_lo,C:argc; word1=A:obj_reg,B:args_base,
+             * C:method_ki_hi; word2=raw forward skip (LAT-544). */
+            RegInstr w2 = c->code[i + 1];
+            uint16_t method_ki = (uint16_t)(B | (REG_GET_C(w2) << 8));
+            RCK_STR(method_ki);
+            RCK_WINDOW(REG_GET_A(w2), 1); /* obj_reg */
+            RCK_WINDOW(REG_GET_B(w2), C); /* args_base + argc */
+            RCK_WINDOW(A, 1);             /* dst */
+            /* The skip word must land on a real instruction start strictly
+             * within the code (valid compiler output always has a terminator
+             * after the write-back chain). i+3 is the first write-back word. */
+            uint32_t skip = c->code[i + 2];
+            long long t = (long long)i + 3 + (long long)skip;
+            if (t < 0 || (size_t)t >= c->code_len || !is_start[(size_t)t])
+                return reg_verify_failf("INVOKE_MUT skip target %lld invalid at word %zu", t, i);
             break;
         }
         case ROP_NEWSTRUCT: {

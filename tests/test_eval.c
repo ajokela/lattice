@@ -7076,3 +7076,62 @@ TEST(ref_lat543_freeze_except_via_impure_index_still_guarded_treewalk) {
                  "  box[0][key()] = 2\n"
                  "}\n");
 }
+
+/* ── LAT-544: VM nested-element method + field-assign mutation parity ── */
+TEST(ref_lat544_nested_method_mutation_parity) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let m = [[1, 2, 3]]; m[0].push(9)\n"
+                "  assert(m[0].len() == 4 && m[0][3] == 9, \"nested array element .push mutates on all backends\")\n"
+                "  let r = Ref::new([[1, 2, 3]]); r[0].push(8)\n"
+                "  assert(r.get()[0].len() == 4, \"Ref-interior element .push mutates on all backends\")\n"
+                "  let mm = Map::new(); mm[\"a\"] = [1]; mm[\"a\"].push(7)\n"
+                "  assert(mm[\"a\"].len() == 2, \"map-of-arrays element .push mutates on all backends\")\n"
+                "}\n");
+}
+TEST(ref_lat544_nested_field_assign_parity) {
+    ASSERT_RUNS("struct P { x: int }\n"
+                "fn main() {\n"
+                "  let ps = [P{x: 1}]; ps[0].x = 42\n"
+                "  assert(ps[0].x == 42, \"field-assign on a nested struct element mutates on all backends\")\n"
+                "}\n");
+}
+TEST(ref_lat544_impl_method_named_like_mutator_through_index) {
+    ASSERT_RUNS(
+        "struct Box { v: any }\n"
+        "trait T { fn add(self: any) }\n"
+        "impl T for Box { fn add(self: any) { return self.v + 100 } }\n"
+        "fn main() {\n"
+        "  let boxes = [Box{v: 7}]\n"
+        "  assert(boxes[0].add() == 107, \"impl method named like a mutator resolves through an indexed receiver\")\n"
+        "}\n");
+}
+TEST(ref_lat544_frozen_closure_field_method_through_index) {
+    ASSERT_RUNS("struct Box { act: Fn, v: int }\n"
+                "fn main() {\n"
+                "  let boxes = [Box{act: |self| { return 42 }, v: 1}]\n"
+                "  let fb = freeze(boxes)\n"
+                "  assert(fb[0].act() == 42, \"non-mutating closure-field method on a frozen indexed element does not "
+                "spuriously error\")\n"
+                "}\n");
+}
+TEST(ref_lat544_frozen_container_element_mutation_errors) {
+    ASSERT_FAILS("fn main() {\n"
+                 "  let fb = freeze([[1, 2, 3]])\n"
+                 "  fb[0].push(9)\n"
+                 "}\n");
+}
+TEST(ref_lat544_nonwritable_base_evaluated_once) {
+    ASSERT_RUNS("flux calls = 0\n"
+                "fn gen() { calls = calls + 1; return [[[1], [2]]] }\n"
+                "fn main() {\n"
+                "  gen()[0][1].push(99)\n"
+                "  assert(calls == 1, \"non-writable base of a nested mutating call is evaluated exactly once\")\n"
+                "}\n");
+}
+TEST(ref_lat544_concurrent_nested_push_no_uaf) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([[1, 2, 3]])\n"
+                "  for i in 0..80 { scope { spawn { r[0].push(i) } spawn { r.set([[9, 9]]) } } }\n"
+                "  assert(true, \"concurrent nested-element push through a shared Ref completes without UAF\")\n"
+                "}\n");
+}

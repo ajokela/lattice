@@ -290,6 +290,34 @@ static void push_break_jump(size_t offset) {
 
 static void compile_expr(const Expr *e, int line);
 static void compile_stmt(const Stmt *s);
+static void emit_index_write_back(Expr *node, int line);
+
+/* Mutator pre-filter (LAT-544): the union of every method name for which
+ * builtin_method_mutates() can return true across all container types. A name
+ * passing this filter MIGHT be a real in-place mutation at runtime, so
+ * `obj[i].name()` is compiled as OP_INVOKE_MUT (carrying a write-back chain).
+ * Names outside this set are never mutators, so plain OP_INVOKE suffices. The
+ * authoritative per-type decision is still made at runtime by
+ * builtin_method_mutates(); this is only a conservative compile-time gate. */
+static bool method_name_may_mutate(const char *m) {
+    return strcmp(m, "push") == 0 || strcmp(m, "pop") == 0 || strcmp(m, "insert") == 0 || strcmp(m, "remove_at") == 0 ||
+           strcmp(m, "set") == 0 || strcmp(m, "remove") == 0 || strcmp(m, "merge") == 0 || strcmp(m, "delete") == 0 ||
+           strcmp(m, "add") == 0 || strcmp(m, "clear") == 0 || strcmp(m, "push_u16") == 0 ||
+           strcmp(m, "push_u32") == 0 || strcmp(m, "fill") == 0 || strcmp(m, "resize") == 0 ||
+           strncmp(m, "write_", 6) == 0;
+}
+
+/* True when an EXPR_INDEX chain bottoms out at a named variable (the only base
+ * emit_index_write_back can store back to). For temporaries (call results, field
+ * accesses, ...) there is nothing to write back to — mutating the indexed clone
+ * is a correct no-op — so those fall back to the generic OP_INVOKE path, which
+ * keeps the stack balanced without a write-back chain. */
+static bool index_chain_writable(const Expr *node) {
+    const Expr *o = node->as.index.object;
+    if (o->tag == EXPR_IDENT) return true;
+    if (o->tag == EXPR_INDEX) return index_chain_writable(o);
+    return false;
+}
 
 /* Compile a statement and emit OP_RESET_EPHEMERAL to reclaim temporaries. */
 static void compile_stmt_reset(const Stmt *s) {
@@ -964,6 +992,43 @@ static void compile_expr(const Expr *e, int line) {
                     if (opt) patch_jump(end_jump);
                     break;
                 }
+            }
+            /* Nested-element mutation (LAT-544): `obj[i].mutator()`. Emit the
+             * receiver clone, args, OP_INVOKE_MUT, then the index write-back chain;
+             * back-patch skip_len = byte length of that chain. At runtime, if the
+             * receiver really is a mutated container the clone is stored back into
+             * obj[i]; otherwise frame->ip skips the chain and resolution proceeds
+             * exactly like OP_INVOKE. Restricted to writable index chains; a
+             * method-name constant overflowing the 8-bit operand falls back to the
+             * generic OP_INVOKE path below. */
+            if (e->as.method_call.object->tag == EXPR_INDEX && index_chain_writable(e->as.method_call.object) &&
+                method_name_may_mutate(e->as.method_call.method)) {
+                size_t midx = chunk_add_constant(current_chunk(), value_string(e->as.method_call.method));
+                if (midx <= 255) {
+                    Expr *obj_expr = e->as.method_call.object;
+                    compile_expr(obj_expr, line);
+                    size_t mut_end_jump = 0;
+                    if (opt) {
+                        size_t skip = emit_jump(OP_JUMP_IF_NOT_NIL, line);
+                        mut_end_jump = emit_jump(OP_JUMP, line);
+                        patch_jump(skip);
+                    }
+                    for (size_t i = 0; i < e->as.method_call.arg_count; i++)
+                        compile_expr(e->as.method_call.args[i], line);
+                    emit_byte(OP_INVOKE_MUT, line);
+                    emit_byte((uint8_t)midx, line);
+                    emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    emit_byte(0xff, line); /* skip_len placeholder (BE16) */
+                    emit_byte(0xff, line);
+                    size_t skip_patch = current_chunk()->code_len - 2;
+                    emit_index_write_back(obj_expr, line);
+                    /* patch_jump writes a BE16 measured from the byte after the
+                     * 2-byte operand — exactly the value frame->ip += skip_len needs. */
+                    patch_jump(skip_patch);
+                    if (opt) patch_jump(mut_end_jump);
+                    break;
+                }
+                /* else: method-name constant > 255 — fall through to generic OP_INVOKE. */
             }
             compile_expr(e->as.method_call.object, line);
             size_t end_jump = 0;
@@ -2330,6 +2395,13 @@ static void emit_index_write_back(Expr *node, int line) {
                 size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
                 emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
             }
+            /* OP_SET_UPVALUE/OP_SET_GLOBAL leave the modified parent on the stack
+             * (they peek, not pop). Drop it so this helper is uniformly net -1
+             * (consumes the value being written back, leaves nothing) for every
+             * base kind — matching the OP_SET_INDEX_LOCAL/_GLOBAL fast paths above.
+             * Callers (nested index assignment and OP_INVOKE_MUT write-back) rely
+             * on this; previously an upvalue base leaked one residual per write. */
+            emit_byte(OP_POP, line);
         }
     } else if (node->as.index.object->tag == EXPR_INDEX) {
         /* Intermediate level: compile parent, set index, recurse up */
@@ -2443,6 +2515,15 @@ static void compile_stmt(const Stmt *s) {
                             emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
                         }
                     }
+                } else if (obj_expr->tag == EXPR_INDEX && index_chain_writable(obj_expr)) {
+                    /* Nested element field-assign (LAT-544): `obj[i].x = v`. A
+                     * field-assign is always a genuine in-place element mutation
+                     * (no runtime classifier needed). After OP_SET_FIELD the stack
+                     * is [modified_struct]; emit_index_write_back stores it back
+                     * through the full local/global/upvalue/nesting chain and is
+                     * net -1, so skip the trailing OP_POP. */
+                    emit_index_write_back(obj_expr, line);
+                    skip_pop = true;
                 }
             } else if (s->as.assign.target->tag == EXPR_INDEX &&
                        s->as.assign.target->as.index.index->tag == EXPR_RANGE) {
