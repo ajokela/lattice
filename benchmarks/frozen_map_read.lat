@@ -1,136 +1,132 @@
-// Frozen-vs-fluid map READ benchmark (crystallized-layout design baseline).
+// Benchmark: Frozen vs Fluid Map Reads (baseline for crystallized-layout design)
 //
-// Builds string-keyed maps at sizes 8 / 64 / 1000 / 65536, then measures on
-// the SAME map first while fluid, then after freeze():
-//   lookup_hit  — m[k] for keys present
-//   lookup_miss — m[k] for keys absent (-> nil)
-//   has_hit     — m.has(k), key present   (maps spell "contains" as .has;
-//                 .contains is the array/set method)
-//   has_miss    — m.has(k), key absent
-//   iter        — full `for k in m` iteration
+// Establishes the read-performance BASELINE that the freeze-time
+// data-structure optimization must beat. For each map size we measure,
+// on the SAME logical map first while fluid and then after freeze():
+//   - lookup_hit  : m[k] for keys present in the map
+//   - lookup_miss : m[k] for keys absent from the map (returns nil)
+//   - has_hit     : m.has(k) for present keys   (map's "contains")
+//   - has_miss    : m.has(k) for absent keys
+//   - iter        : for k in m (full iteration)
 //
-// Lookups cycle a pre-built probe-key array (sampled at a stride for the 64k
-// map) enough times for ~3M lookups / ~2M iteration visits per segment.
-// Timing is wall-clock ms via time(). Each RESULT line carries ops, ms and a
-// semantic checksum so the harness can verify frozen == fluid behavior.
+// Notes:
+//   - Map keys must be strings in Lattice (integer-keyed maps are a parse
+//     error / "invalid index assignment"), so there is no int-key scenario.
+//   - Maps have .has(); .contains() is the array/string/set spelling.
+//   - Today freeze() does NOT change map layout, so frozen and fluid
+//     numbers should match within noise. The optimized prototype should
+//     re-run this exact file and beat the frozen rows.
 //
-// NOTE: integer-keyed maps are not supported in Lattice (m[1] = 10 fails with
-// "invalid index assignment"; only VAL_STR indexes a VAL_MAP), so there is no
-// int-key scenario.
-
-fn bench_size(size: Int, target_ops: Int, iter_target: Int) {
-  // ── build map ──
-  flux m = Map::new()
-  flux i = 0
-  while i < size {
-    m["key_${i}"] = i * 3 + 1
-    i = i + 1
-  }
-
-  // ── probe keys: hits (sampled at stride to cover the table) ──
-  flux nprobe = size
-  if nprobe > 1024 { nprobe = 1024 }
-  let stride = size / nprobe
-  flux hit_keys = []
-  flux miss_keys = []
-  i = 0
-  while i < nprobe {
-    hit_keys.push("key_${i * stride}")
-    miss_keys.push("nokey_${i * stride}")
-    i = i + 1
-  }
-  let rounds = target_ops / nprobe
-  let iter_rounds = iter_target / size + 1
-
-  flux phase_names = ["fluid", "frozen"]
-  flux p = 0
-  while p < 2 {
-    let phase = phase_names[p]
-    if p == 1 {
-      freeze(m)
-    }
-
-    // lookup_hit
-    flux checksum = 0
-    flux r = 0
-    flux t0 = time()
-    while r < rounds {
-      i = 0
-      while i < nprobe {
-        checksum = checksum + m[hit_keys[i]]
-        i = i + 1
-      }
-      r = r + 1
-    }
-    flux t1 = time()
-    print("RESULT lookup_hit ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
-
-    // lookup_miss
-    checksum = 0
-    r = 0
-    t0 = time()
-    while r < rounds {
-      i = 0
-      while i < nprobe {
-        let v = m[miss_keys[i]]
-        if v == nil { checksum = checksum + 1 }
-        i = i + 1
-      }
-      r = r + 1
-    }
-    t1 = time()
-    print("RESULT lookup_miss ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
-
-    // has_hit
-    checksum = 0
-    r = 0
-    t0 = time()
-    while r < rounds {
-      i = 0
-      while i < nprobe {
-        if m.has(hit_keys[i]) { checksum = checksum + 1 }
-        i = i + 1
-      }
-      r = r + 1
-    }
-    t1 = time()
-    print("RESULT has_hit ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
-
-    // has_miss
-    checksum = 0
-    r = 0
-    t0 = time()
-    while r < rounds {
-      i = 0
-      while i < nprobe {
-        if m.has(miss_keys[i]) { checksum = checksum + 1 }
-        i = i + 1
-      }
-      r = r + 1
-    }
-    t1 = time()
-    print("RESULT has_miss ${size} ${phase} ops=${rounds * nprobe} ms=${t1 - t0} checksum=${checksum}")
-
-    // iter
-    checksum = 0
-    r = 0
-    t0 = time()
-    while r < iter_rounds {
-      for k in m {
-        checksum = checksum + 1
-      }
-      r = r + 1
-    }
-    t1 = time()
-    print("RESULT iter ${size} ${phase} ops=${iter_rounds * size} ms=${t1 - t0} checksum=${checksum}")
-
-    p = p + 1
-  }
-}
+// Output: one machine-readable line per measurement:
+//   RESULT scenario=<name> phase=<fluid|frozen> size=<n> ops=<n> ms=<n> check=<n>
+// 'check' is a semantic checksum; it must be identical between the fluid
+// and frozen rows of the same scenario/size (confirms identical semantics).
 
 fn main() {
-  bench_size(8, 3000000, 2000000)
-  bench_size(64, 3000000, 2000000)
-  bench_size(1000, 3000000, 2000000)
-  bench_size(65536, 3000000, 2000000)
+    let sizes = [8, 64, 1000, 65536]
+    let lookup_target = 3000000   // target ops per lookup/has scenario
+    let iter_target = 2000000     // target element-visits per iter scenario
+
+    for n in sizes {
+        // ---- build the map and probe-key arrays (sampled for big maps) ----
+        flux probe_len = n
+        if probe_len > 4096 { probe_len = 4096 }
+        let stride = n / probe_len
+
+        flux m = Map::new()
+        flux hit_keys = []
+        flux miss_keys = []
+        flux i = 0
+        while i < n {
+            m["k_${i}"] = i
+            i = i + 1
+        }
+        flux j = 0
+        while j < probe_len {
+            hit_keys.push("k_${j * stride}")
+            miss_keys.push("x_${j * stride}")
+            j = j + 1
+        }
+
+        flux lookup_reps = lookup_target / probe_len
+        if lookup_reps < 1 { lookup_reps = 1 }
+        let lookup_ops = lookup_reps * probe_len
+        flux iter_reps = iter_target / n
+        if iter_reps < 1 { iter_reps = 1 }
+        let iter_ops = iter_reps * n
+
+        // ---- two passes over the same map: phase 0 = fluid, phase 1 = frozen ----
+        flux phase = 0
+        while phase < 2 {
+            flux phase_name = "fluid"
+            if phase == 1 {
+                freeze(m)
+                phase_name = "frozen"
+            }
+
+            // lookup_hit
+            flux sum = 0
+            flux r = 0
+            let t0 = time()
+            while r < lookup_reps {
+                for k in hit_keys { sum = sum + m[k] }
+                r = r + 1
+            }
+            let t1 = time()
+            print("RESULT scenario=lookup_hit phase=${phase_name} size=${n} ops=${lookup_ops} ms=${t1 - t0} check=${sum}")
+
+            // lookup_miss
+            flux misses = 0
+            flux r2 = 0
+            let t2 = time()
+            while r2 < lookup_reps {
+                for k in miss_keys {
+                    if m[k] == nil { misses = misses + 1 }
+                }
+                r2 = r2 + 1
+            }
+            let t3 = time()
+            print("RESULT scenario=lookup_miss phase=${phase_name} size=${n} ops=${lookup_ops} ms=${t3 - t2} check=${misses}")
+
+            // has_hit
+            flux hits = 0
+            flux r3 = 0
+            let t4 = time()
+            while r3 < lookup_reps {
+                for k in hit_keys {
+                    if m.has(k) { hits = hits + 1 }
+                }
+                r3 = r3 + 1
+            }
+            let t5 = time()
+            print("RESULT scenario=has_hit phase=${phase_name} size=${n} ops=${lookup_ops} ms=${t5 - t4} check=${hits}")
+
+            // has_miss
+            flux absent = 0
+            flux r4 = 0
+            let t6 = time()
+            while r4 < lookup_reps {
+                for k in miss_keys {
+                    if m.has(k) { absent = absent + 1 }
+                }
+                r4 = r4 + 1
+            }
+            let t7 = time()
+            print("RESULT scenario=has_miss phase=${phase_name} size=${n} ops=${lookup_ops} ms=${t7 - t6} check=${absent}")
+
+            // iter (full map iteration)
+            flux count = 0
+            flux r5 = 0
+            let t8 = time()
+            while r5 < iter_reps {
+                for k in m { count = count + 1 }
+                r5 = r5 + 1
+            }
+            let t9 = time()
+            print("RESULT scenario=iter phase=${phase_name} size=${n} ops=${iter_ops} ms=${t9 - t8} check=${count}")
+
+            phase = phase + 1
+        }
+    }
+    print("DONE")
 }

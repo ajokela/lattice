@@ -1,84 +1,69 @@
 #!/usr/bin/env bash
-# Frozen-vs-fluid map read benchmark harness.
+# Driver for benchmarks/frozen_map_read.lat — the frozen-map read baseline.
 #
-# Runs benchmarks/frozen_map_read.lat RUNS times (default 3) with the given
-# binary/flags, takes the per-scenario MEDIAN ms, derives ns/op, prints a
-# frozen/fluid ratio column, and verifies that every frozen checksum equals
-# its fluid counterpart across all runs.
+# Runs the benchmark RUNS times (default 3) with the given clat binary
+# (default ./clat, i.e. the stack VM), parses the RESULT lines, and reports
+# the per-scenario MEDIAN wall time and derived ns/op, with a frozen-vs-fluid
+# ratio column. Also verifies that the semantic checksum of every frozen row
+# matches its fluid counterpart.
 #
 # Usage:
-#   scripts/bench_frozen_map_read.sh [binary] [extra-flags...]
-#   RUNS=5 scripts/bench_frozen_map_read.sh ./clat --regvm
+#   scripts/bench_frozen_map_read.sh [path-to-clat] [extra clat flags...]
+# Examples:
+#   scripts/bench_frozen_map_read.sh                # stack VM (default)
+#   scripts/bench_frozen_map_read.sh ./clat --regvm # register VM
 set -euo pipefail
 
-BIN="${1:-./clat}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CLAT="${1:-$ROOT/clat}"
 shift || true
 RUNS="${RUNS:-3}"
-BENCH="benchmarks/frozen_map_read.lat"
+BENCH="$ROOT/benchmarks/frozen_map_read.lat"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-for r in $(seq 1 "$RUNS"); do
-    echo "run $r/$RUNS..." >&2
-    "$BIN" "$@" "$BENCH" | grep '^RESULT' > "$TMP/run$r.txt"
+for run in $(seq 1 "$RUNS"); do
+    echo "run $run/$RUNS ..." >&2
+    "$CLAT" "$@" "$BENCH" | grep '^RESULT' > "$TMP/run$run.txt"
 done
 
-awk -v runs="$RUNS" -v dir="$TMP" '
-function median(arr, n,   i, j, t) {
-    for (i = 1; i < n; i++)
-        for (j = i + 1; j <= n; j++)
-            if (arr[j] < arr[i]) { t = arr[i]; arr[i] = arr[j]; arr[j] = t }
-    if (n % 2) return arr[(n + 1) / 2]
-    return (arr[n / 2] + arr[n / 2 + 1]) / 2
-}
-BEGIN {
-    nscen = 0
-    for (r = 1; r <= runs; r++) {
-        file = dir "/run" r ".txt"
-        while ((getline line < file) > 0) {
-            split(line, f, " ")
-            scen = f[2]; size = f[3]; phase = f[4]
-            split(f[5], a, "="); ops = a[2]
-            split(f[6], b, "="); ms = b[2]
-            split(f[7], c, "="); cs = c[2]
-            key = scen "|" size "|" phase
-            if (!(key in seen)) { seen[key] = 1; order[++nscen] = key }
-            msv[key "|" r] = ms
-            opsv[key] = ops
-            if (key in csv && csv[key] != cs) {
-                print "CHECKSUM UNSTABLE across runs: " key > "/dev/stderr"; bad = 1
-            }
-            csv[key] = cs
-        }
-        close(file)
-    }
-    # checksum: frozen must equal fluid
-    for (i = 1; i <= nscen; i++) {
-        key = order[i]
-        if (key ~ /\|frozen$/) {
-            fk = key; sub(/\|frozen$/, "|fluid", fk)
-            if (csv[key] != csv[fk]) {
-                print "CHECKSUM MISMATCH frozen vs fluid: " key " (" csv[key] " vs " csv[fk] ")" > "/dev/stderr"
-                bad = 1
-            }
-        }
-    }
-    printf "%-12s %7s  %12s %13s  %12s\n", "scenario", "size", "fluid ns/op", "frozen ns/op", "frozen/fluid"
-    for (i = 1; i <= nscen; i++) {
-        key = order[i]
-        if (key !~ /\|fluid$/) continue
-        split(key, kf, "|")
-        for (r = 1; r <= runs; r++) tmp[r] = msv[key "|" r] + 0
-        fl_ms = median(tmp, runs)
-        fk = kf[1] "|" kf[2] "|frozen"
-        for (r = 1; r <= runs; r++) tmp[r] = msv[fk "|" r] + 0
-        fz_ms = median(tmp, runs)
-        fl_ns = fl_ms * 1e6 / opsv[key]
-        fz_ns = fz_ms * 1e6 / opsv[fk]
-        ratio = (fl_ns > 0) ? fz_ns / fl_ns : 0
-        printf "%-12s %7s  %12.1f %13.1f  %12.3f\n", kf[1], kf[2], fl_ns, fz_ns, ratio
-    }
-    if (bad) { print "CHECKSUM VERIFICATION FAILED" > "/dev/stderr"; exit 1 }
-    print "checksums: all frozen == fluid, stable across runs" > "/dev/stderr"
-}'
+python3 - "$TMP" "$RUNS" <<'EOF'
+import sys, os, statistics
+
+tmp, runs = sys.argv[1], int(sys.argv[2])
+data = {}   # (scenario, size, phase) -> {"ops": int, "ms": [..], "check": set}
+order = []
+for r in range(1, runs + 1):
+    for line in open(os.path.join(tmp, f"run{r}.txt")):
+        kv = dict(tok.split("=", 1) for tok in line.split()[1:])
+        key = (kv["scenario"], int(kv["size"]), kv["phase"])
+        if key not in data:
+            data[key] = {"ops": int(kv["ops"]), "ms": [], "check": set()}
+            order.append(key)
+        data[key]["ms"].append(int(kv["ms"]))
+        data[key]["check"].add(kv["check"])
+
+bad = False
+for (scen, size, phase), d in data.items():
+    if len(d["check"]) != 1:
+        print(f"CHECK UNSTABLE: {scen}/{size}/{phase}: {d['check']}"); bad = True
+for (scen, size, phase) in order:
+    if phase != "fluid":
+        continue
+    fl, fr = data[(scen, size, "fluid")], data.get((scen, size, "frozen"))
+    if fr and fl["check"] != fr["check"]:
+        print(f"SEMANTIC MISMATCH {scen}/{size}: fluid={fl['check']} frozen={fr['check']}")
+        bad = True
+print("checksums: " + ("MISMATCH" if bad else f"all frozen==fluid, stable across {runs} runs"))
+print()
+hdr = f"{'scenario':<12} {'size':>6} {'ops':>9} | {'fluid med ms':>12} {'ns/op':>8} | {'frozen med ms':>13} {'ns/op':>8} | {'frozen/fluid':>12}"
+print(hdr); print("-" * len(hdr))
+for (scen, size, phase) in order:
+    if phase != "fluid":
+        continue
+    fl, fr = data[(scen, size, "fluid")], data[(scen, size, "frozen")]
+    fm, zm = statistics.median(fl["ms"]), statistics.median(fr["ms"])
+    fn_, zn = fm * 1e6 / fl["ops"], zm * 1e6 / fr["ops"]
+    print(f"{scen:<12} {size:>6} {fl['ops']:>9} | {fm:>12.0f} {fn_:>8.1f} | {zm:>13.0f} {zn:>8.1f} | {zm/fm if fm else float('nan'):>12.3f}")
+EOF
