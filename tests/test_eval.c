@@ -7023,3 +7023,56 @@ TEST(ref_lat542_set_method_through_ref_falls_back_not_errors) {
                 "  assert(true, \"Set method through a Ref falls back to generic dispatch (not a hard error)\")\n"
                 "}\n");
 }
+
+/* ── LAT-543: lock Set/Buffer/field-assign interiors + impure-index-hiding-a-Ref (tree-walker) ── */
+TEST(ref_lat543_set_through_ref_concurrent_no_uaf) {
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "  let r = Ref::new([Set::new()])\n"
+        "  for i in 0..80 { scope { spawn { r[0].add(i) } spawn { r[0].remove(i) } spawn { r.set([Set::new()]) } } }\n"
+        "  assert(true, \"Set interior mutation through a Ref is serialized (no UAF)\")\n"
+        "}\n");
+}
+TEST(ref_lat543_field_assign_through_ref_concurrent_no_uaf) {
+    ASSERT_RUNS(
+        "struct P { x: int, y: int }\n"
+        "fn main() {\n"
+        "  let r = Ref::new([P{x: 1, y: 2}])\n"
+        "  for i in 0..80 { scope { spawn { r[0].x = i } spawn { r[0].y = i } spawn { r.set([P{x: 9, y: 9}]) } } }\n"
+        "  assert(true, \"field-assign through a Ref interior is serialized (no UAF)\")\n"
+        "}\n");
+}
+TEST(ref_lat543_impure_index_hiding_ref_concurrent_no_uaf) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let box = [Ref::new([1, 2, 3])]\n"
+                "  for i in 0..80 { scope { spawn { box[0][0] = i } spawn { box[0].set([7, 8, 9]) } } }\n"
+                "  assert(true, \"impure-index-hiding-a-Ref index-assign is serialized (no UAF)\")\n"
+                "}\n");
+}
+TEST(ref_lat543_set_mutate_through_ref_correct_treewalk) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([Set::new()])\n"
+                "  r[0].add(5); r[0].add(7); r[0].remove(5)\n"
+                "  assert(r.get()[0].has(7) && !r.get()[0].has(5), \"Set add/remove through a Ref mutate the inner\")\n"
+                "}\n");
+}
+TEST(ref_lat543_field_assign_through_ref_correct_treewalk) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("struct P { x: int }\n"
+                "fn main() {\n"
+                "  let r = Ref::new([P{x: 1}])\n"
+                "  r[0].x = 99\n"
+                "  assert(r.get()[0].x == 99, \"field-assign through a Ref mutates the inner struct field\")\n"
+                "}\n");
+}
+TEST(ref_lat543_freeze_except_via_impure_index_still_guarded_treewalk) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+    ASSERT_FAILS("fn key() -> String { return \"k\" }\n"
+                 "fn main() {\n"
+                 "  flux box = [ Map::new() ]\n"
+                 "  box[0][\"k\"] = 1\n"
+                 "  freeze(box[0][\"k\"])\n"
+                 "  box[0][key()] = 2\n"
+                 "}\n");
+}
