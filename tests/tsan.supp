@@ -4,7 +4,18 @@
 # crystal-by-reference concurrency story; everything CbR-related must be
 # fixed, not suppressed. Keep each entry annotated with a ticket reference.
 #
-# (Currently empty: the PIC data races flagged by the Stage 5 inventory were
-# fixed by making PIC entries relaxed-atomic packed words — see
-# include/inline_cache.h — and the LatRef cell races by LAT-450's per-cell
-# lock + atomic refcount.)
+# (The PIC data races flagged by the Stage 5 inventory were fixed by making PIC
+# entries relaxed-atomic packed words — see include/inline_cache.h — and the
+# LatRef cell races by LAT-450's per-cell lock + atomic refcount.)
+#
+# LAT-542 lock-order-inversion (NOT a data race — a documented-safe false
+# positive). The nested-Ref two-cell mutation path (refchain_cross -> ref_lock)
+# locks per-cell mutexes in chain order, which differs between threads
+# (`a[0][1]=` locks A then B; `b[0][1]=` locks B then A — see the
+# ref_lat542_abba_two_cell_no_deadlock probe). TSan reports a potential
+# deadlock, but it cannot occur: refchain_cross takes the process-wide
+# g_refchain_lock BEFORE any cell lock, serializing every multi-cell ref
+# navigation, so the per-cell acquisition order can never interleave across
+# threads. Single-cell ref_lock callers cannot invert (one lock). Suppressing
+# the lock-order heuristic here is sound; the gate lock is the real invariant.
+deadlock:ref_lock

@@ -39,6 +39,9 @@
 #define LAT_TSAN_BUILD 1
 #endif
 #endif
+#if defined(__SANITIZE_THREAD__) && !defined(LAT_TSAN_BUILD) /* GCC: __has_feature is clang-only */
+#define LAT_TSAN_BUILD 1
+#endif
 
 /* Import test harness from test_main.c */
 extern void register_test(const char *name, void (*fn)(void));
