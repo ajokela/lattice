@@ -71,6 +71,19 @@ static void env_detach_entry(const char *key, void *value, void *ctx) {
     (void)key;
     (void)ctx;
     LatValue *v = (LatValue *)value;
+    /* LAT-538: a VAL_ITERATOR cannot be made thread-independent by value_detach —
+     * value_clone_impl only bumps the iterator refcount (shallow share), so a
+     * "detached" copy still aliases this thread's heap-backed iterator state,
+     * which dual_heap_free then frees -> UAF when the parent later frees this
+     * env. The env being detached belongs to a dying thread (discarded at
+     * teardown), so free the value HERE (refcount-aware: a handle inherited from
+     * the parent merely decrements; a child-created iterator's state is released
+     * while this heap is still active) and nil the slot so env_free is a no-op. */
+    if (v->type == VAL_ITERATOR) {
+        value_free(v);
+        *v = value_nil();
+        return;
+    }
     LatValue detached = value_detach(v);
     value_free(v);
     *v = detached;

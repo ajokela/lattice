@@ -6901,3 +6901,67 @@ TEST(ref_lat537_ref_len_returns_inner_length) {
                 "  assert(r.length() == 4, \"ref length must be 4\")\n"
                 "}\n");
 }
+
+/* ── LAT-538/539/540: spawn-teardown, nested Ref interior, Ref-scalar len ── */
+TEST(ref_lat538_spawn_teardown_heap_temp_no_uaf) {
+    ASSERT_FAILS("fn h() { flux x = [[1, 2, 3], [4, 5, 6]]; x[99] }\n"
+                 "fn m() { scope { spawn { h() } } }\n"
+                 "fn main() { m() }\n");
+}
+TEST(ref_lat540_ref_scalar_len_on_all_backends) {
+    ASSERT_RUNS("fn main() {\n"
+                "  assert(Ref::new(\"hello\").len() == 5, \"Ref<String> len should be 5\")\n"
+                "  let b = Buffer::new(7)\n"
+                "  assert(Ref::new(b).len() == 7, \"Ref<Buffer> len should be 7\")\n"
+                "}\n");
+}
+TEST(ref_lat539_nested_index_assign_through_ref) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([[1, 2], [3, 4]])\n"
+                "  r[0][1] = 99\n"
+                "  assert(r.get()[0][1] == 99, \"nested index-assign through ref must land\")\n"
+                "}\n");
+}
+TEST(ref_lat539_concurrent_nested_mutation_no_uaf) {
+    ASSERT_RUNS("fn main() {\n"
+                "  let r = Ref::new([[1, 2], [3, 4]])\n"
+                "  for round in 0..60 {\n"
+                "    scope {\n"
+                "      spawn { r[0][1] = round }\n"
+                "      spawn { r.set([[9, 9]]) }\n"
+                "      spawn { let x = r.get() }\n"
+                "    }\n"
+                "  }\n"
+                "  assert(true, \"concurrent nested ref mutation completed\")\n"
+                "}\n");
+}
+
+TEST(ref_lat538_iterator_temp_in_spawn_no_uaf) {
+    ASSERT_RUNS("fn main() {\n"
+                "  for round in 0..40 {\n"
+                "    scope {\n"
+                "      spawn { let it = iter([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) }\n"
+                "      spawn { flux g = iter([[1, 2]]); for v in g { } }\n"
+                "    }\n"
+                "  }\n"
+                "  assert(true, \"iterator temporaries in spawn bodies torn down without UAF\")\n"
+                "}\n");
+}
+
+TEST(ref_lat539_partial_index_eval_no_wild_free) {
+    ASSERT_FAILS("fn main() {\n"
+                 "  let r = Ref::new([[1, 2]])\n"
+                 "  r[oops][0].push(3)\n"
+                 "}\n");
+}
+
+TEST(ref_lat539_freeze_except_index_assign_through_ref) {
+    ASSERT_RUNS("fn main() {\n"
+                "  flux m = Map::new()\n"
+                "  m[\"score\"] = 1\n"
+                "  freeze(m) except [\"score\"]\n"
+                "  let r = Ref::new([m])\n"
+                "  r[0][\"score\"] = 2\n"
+                "  assert(r.get()[0][\"score\"] == 2, \"freeze-except write through a Ref must succeed\")\n"
+                "}\n");
+}

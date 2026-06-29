@@ -769,7 +769,120 @@ static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
     *err = strdup("invalid lvalue expression");
     return NULL;
 }
+
+/* ── LAT-539: locked interior mutation through a root-Ref index chain ──
+ *
+ * resolve_lvalue's Ref unwraps hand out a BARE interior pointer (no lock held),
+ * so a sibling thread's r.set()/r.push() can free that interior under the
+ * cell lock while another thread is mid-write through r[i]/r[i][j]. LAT-537
+ * closed the single-level case (r[i]=v, r.push(...)); the helpers below extend
+ * the same lock-after-eval discipline to a NESTED index chain whose ROOT is a
+ * simple IDENT resolving to a VAL_REF (r[i][j]=v, r[k].set(...), r[i].push()).
+ *
+ * Residual (still the LAT-458 bare-pointer class, handed back to the generic
+ * path): a Ref reached via a field/non-root step, a second Ref deeper in the
+ * chain, and Set / multibyte-Buffer interior slots. */
+
+/* If every step of `e` from the outside in is EXPR_INDEX bottoming out in an
+ * EXPR_IDENT, return that root IDENT Expr and set *depth to the number of
+ * index steps; otherwise NULL. Pure AST walk — no evaluation. */
+static const Expr *chain_index_root_ident(const Expr *e, size_t *depth) {
+    size_t n = 0;
+    while (e->tag == EXPR_INDEX) {
+        n++;
+        e = e->as.index.object;
+    }
+    if (e->tag != EXPR_IDENT) return NULL;
+    *depth = n;
+    return e;
+}
+
+/* (method, arg_count) pairs that mutate_inner_locked mutates IN PLACE on a
+ * map/array/buffer interior slot. 1-arg "set" is EXCLUDED — that is the
+ * whole-inner Ref.set, not an interior write. Set and multibyte-buffer
+ * mutators are intentionally absent: those interior slots are handed back to
+ * the generic (residual) path rather than silently mis-dispatched. */
+static bool method_is_inplace_mutator(const char *m, size_t argc) {
+    switch (argc) {
+        case 0: return strcmp(m, "pop") == 0;
+        case 1:
+            return strcmp(m, "push") == 0 || strcmp(m, "remove") == 0 || strcmp(m, "merge") == 0 ||
+                   strcmp(m, "remove_at") == 0;
+        case 2: return strcmp(m, "set") == 0 || strcmp(m, "insert") == 0;
+        default: return false;
+    }
+}
+
+/* Navigate a privatized Ref inner along pre-evaluated index values (root-most
+ * first), mirroring resolve_lvalue's per-step semantics. The cell lock MUST be
+ * held; performs NO eval_expr and takes NO second lock.
+ *   - map step:   key must be a string; a missing key auto-vivifies to unit.
+ *   - array step: index must be an int; bounds-checked.
+ *   - the FIRST step (k==0, the Ref inner itself) skips the crystal guard
+ *     (parent_from_ref==true in resolve_lvalue); deeper containers (k>=1)
+ *     reject crystal/sublimated, exactly as resolve_lvalue does.
+ *   - a VAL_REF / VAL_BUFFER container at any step would need a second cell
+ *     unwrapped or the buffer-byte path: signal *fellback so the caller hands
+ *     off to the generic path instead of touching it here.
+ * Returns the final slot, or NULL with either *fellback set or *err set. */
+static LatValue *nav_ref_interior(LatValue *inner, LatValue *idx_vals, size_t n, bool *fellback, char **err) {
+    *fellback = false;
+    LatValue *cur = inner;
+    for (size_t k = 0; k < n; k++) {
+        if (k >= 1 && (cur->phase == VTAG_CRYSTAL || cur->phase == VTAG_SUBLIMATED)) {
+            /* LAT-539: mirror resolve_lvalue's freeze-except exemption — a crystal
+             * MAP stays writable at a key whose key_phases entry is non-crystal
+             * (freeze m except [key]). Without this, r[i][exemptKey]=v through a
+             * Ref wrongly errored while the non-Ref path allowed it. */
+            bool exempt = false;
+            if (cur->type == VAL_MAP && idx_vals[k].type == VAL_STR && cur->as.map.key_phases) {
+                PhaseTag *kp = lat_map_get(cur->as.map.key_phases, idx_vals[k].as.str_val);
+                if (kp && *kp != VTAG_CRYSTAL) exempt = true;
+            }
+            if (!exempt) {
+                lat_asprintf(err, "cannot modify a %s value", cur->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                return NULL;
+            }
+        }
+        LatValue *idx = &idx_vals[k];
+        if (cur->type == VAL_MAP) {
+            if (idx->type != VAL_STR) {
+                *err = strdup("map key must be a string");
+                return NULL;
+            }
+            const char *key = idx->as.str_val;
+            if (!lat_map_contains(cur->as.map.map, key)) {
+                LatValue u = value_unit();
+                lat_map_set(cur->as.map.map, key, &u);
+            }
+            cur = (LatValue *)lat_map_get(cur->as.map.map, key);
+        } else if (cur->type == VAL_ARRAY) {
+            if (idx->type != VAL_INT) {
+                *err = strdup("array index must be an integer");
+                return NULL;
+            }
+            size_t i = (size_t)idx->as.int_val;
+            if (i >= cur->as.array.len) {
+                lat_asprintf(err, "index %zu out of bounds (length %zu)", i, cur->as.array.len);
+                return NULL;
+            }
+            cur = &cur->as.array.elems[i];
+        } else {
+            /* VAL_REF (a second cell), VAL_BUFFER (byte path), or anything else
+             * resolve_lvalue would handle differently — hand off. */
+            *fellback = true;
+            return NULL;
+        }
+    }
+    return cur;
+}
+
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method, LatValue *args, size_t arg_count);
+/* LAT-539: defined just after eval_ref_method_locked. Each returns true and
+ * writes *out when it handled (and serialized) the operation, or false to hand
+ * off to the generic path (non-Ref root / residual interior). */
+static bool eval_nested_ref_method(Evaluator *ev, const Expr *expr, EvalResult *out);
+static bool eval_nested_ref_index_assign(Evaluator *ev, const Stmt *stmt, LatValue *valr_value, EvalResult *out);
 
 /* ── FnDecl lookup helpers ── */
 /* We store FnDecl* pointers in the map */
@@ -7713,6 +7826,18 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         }
 
         case EXPR_METHOD_CALL: {
+            /* LAT-539: serialize an in-place mutator on a root-Ref interior
+             * index chain (r[i]...[k].push/set/...) under the per-cell lock.
+             * Placed BEFORE the crystal pre-filter so the index sub-exprs are
+             * evaluated exactly once — the pre-filter would resolve_lvalue the
+             * whole r[i] chain and re-evaluate them. eval_nested_ref_method
+             * bails (returns false) for a non-Ref root or a residual interior,
+             * leaving every other receiver to the handlers below unchanged. */
+            if (expr->as.method_call.object->tag == EXPR_INDEX &&
+                method_is_inplace_mutator(expr->as.method_call.method, expr->as.method_call.arg_count)) {
+                EvalResult nr;
+                if (eval_nested_ref_method(ev, expr, &nr)) return nr;
+            }
             /* LAT-441: reject mutating builtin methods on crystal/sublimated
              * receivers BEFORE any inline mutation handler below runs (this
              * also keeps lat_map_remove from freeing arena-region memory of a
@@ -10745,6 +10870,22 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 return eval_ok(value_unit());
             }
 
+            /* LAT-539: nested (2+ level) index-assign whose root IDENT is a
+             * Ref — serialize the interior write under the per-cell lock. This
+             * MUST run before the buffer/slice/single-level checks below: each
+             * of those resolve_lvalue's the immediate container (r[i]) and
+             * dereferences the BARE interior pointer it gets back, which a
+             * sibling r.set() can free out from under it (the LAT-539 UAF).
+             * Slice targets (outermost RANGE index) are excluded — the slice
+             * path handles them. Non-Ref roots / buffer / deeper-Ref interiors
+             * fall through (returns false) to the checks below unchanged. */
+            if (stmt->as.assign.target->tag == EXPR_INDEX &&
+                stmt->as.assign.target->as.index.object->tag == EXPR_INDEX &&
+                stmt->as.assign.target->as.index.index->tag != EXPR_RANGE) {
+                EvalResult nr;
+                if (eval_nested_ref_index_assign(ev, stmt, &valr.value, &nr)) return nr;
+            }
+
             /* Buffer index assignment: buf[i] = byte (must be handled before resolve_lvalue
              * since buffers store raw bytes, not LatValues) */
             if (stmt->as.assign.target->tag == EXPR_INDEX) {
@@ -11631,11 +11772,16 @@ static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
  * be serialized against sibling-thread thaw/unshare windows (see
  * include/value.h). The caller takes the lock; enter ONLY with it held.
  * Bare interior pointers from resolve_lvalue's Ref unwraps are NOT
- * covered — that pre-existing aliasing class is LAT-458. */
-static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatValue *args, size_t arg_count) {
-    LatRef *ref = obj.as.ref.ref;
-    LatValue *inner = &ref->value;
-
+ * covered at the TOP level — that pre-existing aliasing class is LAT-458,
+ * partially closed for root-Ref index chains by LAT-539 (eval_nested_ref_*).
+ *
+ * LAT-539: this body is parameterized over the inner pointer + handle phase so
+ * the SAME (already-audited) detach-on-store / privatize-before-mutate logic
+ * also serves an interior slot reached by nav_ref_interior. The interior
+ * caller passes handle_phase==VTAG_FLUID (it rejects a frozen handle and a
+ * frozen interior slot itself, before the lock / before this call). */
+static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, const char *method, LatValue *args,
+                                      size_t arg_count) {
     /* Ref-specific methods */
     /// @method Ref.get() -> Any
     /// @category Ref Methods
@@ -11652,7 +11798,7 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
     /// Replace the inner value (all holders see the change).
     /// @example r.set(42)
     if (strcmp(method, "set") == 0 && arg_count == 1) {
-        if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+        if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
         value_free(inner);
         /* STORE direction (Stage 5 review): the cell outlives a spawned
          * writer, so the stored copy must be detached (malloc-backed) — a
@@ -11685,7 +11831,7 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
             return eval_ok(found ? value_deep_clone(found) : value_nil());
         }
         if (strcmp(method, "set") == 0 && arg_count == 2) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             if (args[0].type != VAL_STR) return eval_err(strdup(".set() key must be a string"));
             /* LAT-458: privatize a borrowed shared/crystal inner before the
              * in-place map write (copy-on-write through the fluid Ref handle). */
@@ -11701,7 +11847,7 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
          * per-cell lock). args are pre-evaluated by the caller and owned by
          * it, so every store detaches a private copy. */
         if (strcmp(method, "merge") == 0 && arg_count == 1) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             if (args[0].type != VAL_MAP) return eval_err(strdup(".merge() argument must be a Map"));
             value_unshare_detached(inner);
             LatMap *other = args[0].as.map.map;
@@ -11716,7 +11862,7 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
             return eval_ok(value_unit());
         }
         if (strcmp(method, "remove") == 0 && arg_count == 1) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             if (args[0].type != VAL_STR) return eval_err(strdup(".remove() key must be a string"));
             value_unshare_detached(inner);
             LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, args[0].as.str_val);
@@ -11802,7 +11948,7 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
          * per-cell lock). The inner is privatized (malloc-backed) by
          * value_unshare_detached, so grow via realloc and detach every store. */
         if (strcmp(method, "push") == 0 && arg_count == 1) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             value_unshare_detached(inner);
             if (inner->as.array.len >= inner->as.array.cap) {
                 size_t old_cap = inner->as.array.cap;
@@ -11813,14 +11959,14 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
             return eval_ok(value_unit());
         }
         if (strcmp(method, "pop") == 0 && arg_count == 0) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             value_unshare_detached(inner);
             if (inner->as.array.len == 0) return eval_err(strdup("pop on empty array"));
             LatValue popped = inner->as.array.elems[--inner->as.array.len];
             return eval_ok(popped);
         }
         if (strcmp(method, "insert") == 0 && arg_count == 2) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             if (args[0].type != VAL_INT) return eval_err(strdup(".insert() index must be an integer"));
             value_unshare_detached(inner);
             int64_t idx = args[0].as.int_val;
@@ -11837,7 +11983,7 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
             return eval_ok(value_unit());
         }
         if (strcmp(method, "remove_at") == 0 && arg_count == 1) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             if (args[0].type != VAL_INT) return eval_err(strdup(".remove_at() index must be an integer"));
             value_unshare_detached(inner);
             int64_t idx = args[0].as.int_val;
@@ -11854,7 +12000,7 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
     /* Buffer proxy (LAT-537: absorbed .push, now under the per-cell lock) */
     if (inner->type == VAL_BUFFER) {
         if (strcmp(method, "push") == 0 && arg_count == 1) {
-            if (obj.phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
+            if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             value_unshare_detached(inner);
             uint8_t byte = (args[0].type == VAL_INT) ? (uint8_t)(args[0].as.int_val & 0xFF) : 0;
             if (inner->as.buffer.len >= inner->as.buffer.cap) {
@@ -11871,6 +12017,220 @@ static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatVa
     if (rsug) lat_asprintf(&rerr, "Ref has no method '%s' (did you mean '%s'?)", method, rsug);
     else lat_asprintf(&rerr, "Ref has no method '%s'", method);
     return eval_err(rerr);
+}
+
+/* Top-level Ref method dispatch: byte-identical to the pre-LAT-539 inline body
+ * (the inner is the cell's direct value, the handle phase is the Ref's). */
+static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatValue *args, size_t arg_count) {
+    return mutate_inner_locked(&obj.as.ref.ref->value, obj.phase, method, args, arg_count);
+}
+
+/* LAT-539: serialize an in-place mutator on a root-Ref interior index chain
+ * (root[i]...[k].<mutator>(args), root an IDENT resolving to a VAL_REF) under
+ * the per-cell lock. EVERY index sub-expr AND method arg is evaluated BEFORE
+ * the lock is taken — so nothing under the lock calls eval_expr or takes a
+ * second cell lock (the stated deadlock rule). ref_retain pins the captured
+ * cell across the pre-lock evals (eval_expr may rehash the scope map or even
+ * reassign the variable, exactly like the single-level LAT-537 path).
+ *
+ * Returns true with *out set when it handled the call; false (nothing locked,
+ * nothing consumed beyond its own scratch) to fall through to the generic
+ * path: a non-Ref root, or an interior slot that is a deeper Ref / Set /
+ * buffer / scalar (the residual LAT-458 class). */
+static bool eval_nested_ref_method(Evaluator *ev, const Expr *expr, EvalResult *out) {
+    const Expr *mc_obj = expr->as.method_call.object;
+    size_t depth = 0;
+    const Expr *root = chain_index_root_ident(mc_obj, &depth);
+    if (!root || depth == 0) return false;
+
+    /* Side-effect-free IDENT lookup: bail out for a non-Ref root BEFORE
+     * evaluating any index/arg, so plain arrays keep the generic path. */
+    char *r_err = NULL;
+    LatValue *rlv = resolve_lvalue(ev, root, &r_err);
+    if (r_err) free(r_err);
+    if (!rlv || rlv->type != VAL_REF) return false;
+
+    LatRef *cell = rlv->as.ref.ref;
+    PhaseTag hp = rlv->phase;
+    ref_retain(cell);
+
+    size_t argc = expr->as.method_call.arg_count;
+    const char *method = expr->as.method_call.method;
+    LatValue *idx_vals = malloc((depth ? depth : 1) * sizeof(LatValue));
+    LatValue *margs = malloc((argc ? argc : 1) * sizeof(LatValue));
+    size_t nidx = 0, nargs = 0;
+    bool handled = true, locked = false;
+    EvalResult res = eval_ok(value_unit());
+    if (!idx_vals || !margs) {
+        res = eval_err(strdup("out of memory"));
+        goto cleanup;
+    }
+
+    /* Evaluate indices leaf-first (matching resolve_lvalue's order) but store
+     * them root-most-first into idx_vals[] for nav. Each evaluated value is
+     * GC-rooted so a later eval_expr's GC cannot sweep it. */
+    {
+        const Expr *e = mc_obj;
+        for (size_t k = depth; k > 0; k--) {
+            EvalResult ir = eval_expr(ev, e->as.index.index);
+            if (!IS_OK(ir)) {
+                res = ir;
+                goto cleanup;
+            }
+            idx_vals[k - 1] = ir.value;
+            GC_PUSH(ev, &idx_vals[k - 1]);
+            nidx++;
+            e = e->as.index.object;
+        }
+    }
+
+    /* Evaluate method args PRE-LOCK, GC-rooted. */
+    for (; nargs < argc; nargs++) {
+        EvalResult ar = eval_expr(ev, expr->as.method_call.args[nargs]);
+        if (!IS_OK(ar)) {
+            res = ar;
+            goto cleanup;
+        }
+        margs[nargs] = ar.value;
+        GC_PUSH(ev, &margs[nargs]);
+    }
+
+    /* Frozen Ref handle: reject BEFORE the lock. */
+    if (hp == VTAG_CRYSTAL) {
+        char *e = NULL;
+        lat_asprintf(&e, "cannot call mutating method '%s' on a frozen Ref", method);
+        res = eval_err(e);
+        goto cleanup;
+    }
+
+    /* ── Under the cell lock: navigate the privatized inner + mutate. No
+     * eval_expr and no second ref_lock run from here to the unlock. ── */
+    ref_lock(cell);
+    locked = true;
+    value_unshare_detached(&cell->value);
+    {
+        bool fellback = false;
+        char *nav_err = NULL;
+        LatValue *slot = nav_ref_interior(&cell->value, idx_vals, depth, &fellback, &nav_err);
+        if (fellback) {
+            handled = false; /* deeper Ref / buffer container — generic path */
+        } else if (!slot) {
+            res = eval_err(nav_err);
+        } else if (slot->type != VAL_MAP && slot->type != VAL_ARRAY && slot->type != VAL_BUFFER) {
+            handled = false; /* Set / scalar / second-Ref receiver — residual */
+        } else if (slot->phase == VTAG_CRYSTAL || slot->phase == VTAG_SUBLIMATED) {
+            res = eval_err(strdup(slot->phase == VTAG_CRYSTAL ? "cannot modify a frozen value"
+                                                              : "cannot modify a sublimated value"));
+        } else {
+            res = mutate_inner_locked(slot, VTAG_FLUID, method, margs, argc);
+        }
+    }
+
+cleanup:
+    if (locked) ref_unlock(cell);
+    if (nargs) GC_POP_N(ev, nargs);
+    if (nidx) GC_POP_N(ev, nidx);
+    for (size_t j = 0; j < nargs; j++) value_free(&margs[j]);
+    free(margs);
+    /* LAT-539: the index loop fills idx_vals high-slot-first (idx_vals[k-1] for
+     * k=depth..1), so after nidx successes the live slots are [depth-nidx,depth),
+     * NOT [0,nidx). On a partial-eval failure those ranges diverge; freeing
+     * [0,nidx) would free uninitialized slots (wild pointer) and leak the
+     * evaluated ones. Free exactly the slots that were stored. */
+    for (size_t j = depth - nidx; j < depth; j++) value_free(&idx_vals[j]);
+    free(idx_vals);
+    ref_release(cell);
+    if (!handled) return false; /* res is still the initial unit — no leak */
+    *out = res;
+    return true;
+}
+
+/* LAT-539: nested (2+ level) index-assign whose root IDENT is a Ref —
+ * root[i]...[k] = v. Same lock-after-eval discipline as eval_nested_ref_method
+ * and as the single-level LAT-537 path. `valr_value` is the caller-owned RHS:
+ * CONSUMED (detached into the slot, then freed) when this returns true;
+ * left UNTOUCHED when it returns false so the caller's generic path can use
+ * it. */
+static bool eval_nested_ref_index_assign(Evaluator *ev, const Stmt *stmt, LatValue *valr_value, EvalResult *out) {
+    const Expr *target = stmt->as.assign.target;
+    size_t depth = 0;
+    const Expr *root = chain_index_root_ident(target, &depth);
+    if (!root || depth < 2) return false; /* single-level handled upstream */
+
+    char *r_err = NULL;
+    LatValue *rlv = resolve_lvalue(ev, root, &r_err);
+    if (r_err) free(r_err);
+    if (!rlv || rlv->type != VAL_REF) return false;
+
+    LatRef *cell = rlv->as.ref.ref;
+    PhaseTag hp = rlv->phase;
+    ref_retain(cell);
+    GC_PUSH(ev, valr_value); /* keep the RHS rooted across pre-lock index evals */
+
+    LatValue *idx_vals = malloc(depth * sizeof(LatValue));
+    size_t nidx = 0;
+    bool handled = true, locked = false;
+    EvalResult res = eval_ok(value_unit());
+    if (!idx_vals) {
+        res = eval_err(strdup("out of memory"));
+        goto cleanup;
+    }
+
+    {
+        const Expr *e = target;
+        for (size_t k = depth; k > 0; k--) {
+            EvalResult ir = eval_expr(ev, e->as.index.index);
+            if (!IS_OK(ir)) {
+                res = ir;
+                goto cleanup;
+            }
+            idx_vals[k - 1] = ir.value;
+            GC_PUSH(ev, &idx_vals[k - 1]);
+            nidx++;
+            e = e->as.index.object;
+        }
+    }
+
+    if (hp == VTAG_CRYSTAL) {
+        res = eval_err(strdup("cannot assign index on a frozen Ref"));
+        goto cleanup;
+    }
+
+    ref_lock(cell);
+    locked = true;
+    value_unshare_detached(&cell->value);
+    {
+        bool fellback = false;
+        char *nav_err = NULL;
+        LatValue *slot = nav_ref_interior(&cell->value, idx_vals, depth, &fellback, &nav_err);
+        if (fellback) {
+            handled = false; /* deeper Ref / buffer container — generic path */
+        } else if (!slot) {
+            res = eval_err(nav_err);
+        } else {
+            value_free(slot);
+            *slot = value_detach(valr_value); /* private, cell outlives writers */
+            res = eval_ok(value_unit());
+        }
+    }
+
+cleanup:
+    if (locked) ref_unlock(cell);
+    if (nidx) GC_POP_N(ev, nidx);
+    GC_POP(ev); /* valr_value */
+    /* LAT-539: the index loop fills idx_vals high-slot-first (idx_vals[k-1] for
+     * k=depth..1), so after nidx successes the live slots are [depth-nidx,depth),
+     * NOT [0,nidx). On a partial-eval failure those ranges diverge; freeing
+     * [0,nidx) would free uninitialized slots (wild pointer) and leak the
+     * evaluated ones. Free exactly the slots that were stored. */
+    for (size_t j = depth - nidx; j < depth; j++) value_free(&idx_vals[j]);
+    free(idx_vals);
+    ref_release(cell);
+    if (!handled) return false; /* RHS untouched — caller still owns it */
+    value_free(valr_value);     /* detached into the slot on success; freed here */
+    if (IS_OK(res) && ev->tracked_count > 0) record_history(ev, root->as.str_val);
+    *out = res;
+    return true;
 }
 
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method, LatValue *args, size_t arg_count) {

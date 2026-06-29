@@ -348,6 +348,24 @@ static void regvm_export_locals_to_env(RegVM *parent, RegVM *child) {
     }
 }
 
+/* Free the child's live register stack on THIS thread before the heap is freed.
+ * On an uncaught error rvm_handle_error returns without unwinding frames, and a
+ * normal HALT leaves the top frame's registers live, so heap-backed temporaries
+ * can sit in reg_stack[0..reg_stack_top); the parent's regvm_free_child would
+ * otherwise free them after dual_heap_free already released the worker heap ->
+ * UAF/double-free (LAT-538). These registers are transient (a spawn returns no
+ * value through a register), so we free them HERE while the worker heap is still
+ * active and nil the slots so regvm_free_child is a no-op. Unlike value_detach,
+ * value_free correctly releases EVERY value kind via its own free path —
+ * including VAL_ITERATOR, whose state value_clone_impl only shallow-shares
+ * (refcount bump), so a detached copy would still alias freed worker-heap state. */
+static void regvm_free_child_registers(RegVM *vm) {
+    for (size_t i = 0; i < vm->reg_stack_top; i++) {
+        value_free(&vm->reg_stack[i]);
+        vm->reg_stack[i] = value_nil();
+    }
+}
+
 /* Thread function: runs a RegVM sub-chunk in its own thread. */
 static void *regvm_spawn_thread_fn(void *arg) {
     RegVMSpawnTask *task = arg;
@@ -371,6 +389,9 @@ static void *regvm_spawn_thread_fn(void *arg) {
     /* Detach env values out of this thread's heap before freeing it — the parent
      * frees the child env after join (see env_detach_values / LAT-420). */
     if (task->child_vm->rt) env_detach_values(task->child_vm->rt->env);
+    /* Likewise detach live register temporaries left by an uncaught error or a
+     * normal HALT before the worker heap is torn down (LAT-538). */
+    regvm_free_child_registers(task->child_vm);
 
     dual_heap_free(heap);
     return NULL;
@@ -2707,6 +2728,27 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                     }
                 }
                 *result = value_bool(found);
+                ref_unlock(ref);
+                return true;
+            }
+        }
+        /* String proxy (LAT-540): len/length under the per-cell lock.
+         * Mirrors eval_ref_method_locked — strlen, matches tree-walker. */
+        if (ref->value.type == VAL_STR) {
+            if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
+                 (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
+                arg_count == 0) {
+                *result = value_int((int64_t)strlen(ref->value.as.str_val));
+                ref_unlock(ref);
+                return true;
+            }
+        }
+        /* Buffer proxy (LAT-540): len/length under the per-cell lock. */
+        if (ref->value.type == VAL_BUFFER) {
+            if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
+                 (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
+                arg_count == 0) {
+                *result = value_int((int64_t)ref->value.as.buffer.len);
                 ref_unlock(ref);
                 return true;
             }

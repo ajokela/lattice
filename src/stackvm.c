@@ -977,6 +977,23 @@ void stackvm_export_locals_to_env(StackVM *parent, StackVM *child) {
     }
 }
 
+/* Free the child's live value stack on THIS thread before the heap is freed. On
+ * an uncaught error stackvm_run returns without unwinding, and a normal HALT can
+ * leave temporaries on the stack, so heap-backed values can sit in
+ * [stack, stack_top); the parent's stackvm_free_child would otherwise free them
+ * after dual_heap_free already released the worker heap -> UAF/double-free
+ * (LAT-538). These stack slots are transient, so we free them HERE while the
+ * worker heap is still active and nil the slots so stackvm_free_child is a no-op.
+ * Unlike value_detach, value_free correctly releases EVERY value kind via its own
+ * free path — including VAL_ITERATOR, whose state value_clone_impl only
+ * shallow-shares, so a detached copy would still alias freed worker-heap state. */
+static void stackvm_free_child_stack(StackVM *vm) {
+    for (LatValue *p = vm->stack; p < vm->stack_top; p++) {
+        value_free(p);
+        *p = value_nil();
+    }
+}
+
 static void *stackvm_spawn_thread_fn(void *arg) {
     VMSpawnTask *task = arg;
     lat_runtime_set_current(task->child_vm->rt);
@@ -1000,6 +1017,9 @@ static void *stackvm_spawn_thread_fn(void *arg) {
      * before the heap is freed — the parent frees the child env after join, so
      * env values backed by this heap would otherwise be a use-after-free. */
     if (task->child_vm->rt) env_detach_values(task->child_vm->rt->env);
+    /* Likewise detach live stack temporaries left by an uncaught error or a
+     * normal HALT before the worker heap is torn down (LAT-538). */
+    stackvm_free_child_stack(task->child_vm);
 
     dual_heap_free(heap);
     return NULL;
@@ -2893,6 +2913,29 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                     }
                     value_free(&needle);
                     push(vm, value_bool(found));
+                    ref_unlock(ref);
+                    return true;
+                }
+            }
+
+            /* String proxy (LAT-540): len/length under the per-cell lock.
+             * Mirrors eval_ref_method_locked — strlen, matches tree-walker. */
+            if (inner->type == VAL_STR) {
+                if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
+                     (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
+                    arg_count == 0) {
+                    push(vm, value_int((int64_t)strlen(inner->as.str_val)));
+                    ref_unlock(ref);
+                    return true;
+                }
+            }
+
+            /* Buffer proxy (LAT-540): len/length under the per-cell lock. */
+            if (inner->type == VAL_BUFFER) {
+                if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
+                     (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
+                    arg_count == 0) {
+                    push(vm, value_int((int64_t)inner->as.buffer.len));
                     ref_unlock(ref);
                     return true;
                 }
