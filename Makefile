@@ -340,7 +340,12 @@ FUZZ_FORMATTER_SRC    = $(FUZZ_DIR)/fuzz_formatter.c
 FUZZ_FORMATTER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_formatter.o
 FUZZ_FORMATTER_TARGET = $(BUILD_DIR)/fuzz_formatter
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+# Parser fuzz harness
+FUZZ_PARSER_SRC    = $(FUZZ_DIR)/fuzz_parser.c
+FUZZ_PARSER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_parser.o
+FUZZ_PARSER_TARGET = $(BUILD_DIR)/fuzz_parser
+
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -741,6 +746,15 @@ fuzz-formatter: clean $(LIB_OBJS) $(FUZZ_FORMATTER_OBJ)
 	@echo "\n==> Formatter fuzzer built: $(FUZZ_FORMATTER_TARGET)"
 	@echo "    Run:  $(FUZZ_FORMATTER_TARGET) fuzz/corpus/ -max_len=4096"
 	@echo "    Seed: make fuzz-seed"
+
+fuzz-parser: CC = $(FUZZ_CC)
+fuzz-parser: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
+fuzz-parser: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,undefined
+fuzz-parser: clean $(LIB_OBJS) $(FUZZ_PARSER_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_PARSER_TARGET) $(LIB_OBJS) $(FUZZ_PARSER_OBJ) $(LDFLAGS)
+	@mkdir -p fuzz/corpus_parser
+	@echo "\n==> Parser fuzzer built: $(FUZZ_PARSER_TARGET)"
+	@echo "    Run:  $(FUZZ_PARSER_TARGET) fuzz/corpus_parser/ -max_len=4096"
 
 fuzz-all: CC = $(FUZZ_CC)
 fuzz-all: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
