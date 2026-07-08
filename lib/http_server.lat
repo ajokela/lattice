@@ -192,20 +192,68 @@ fn parse_cookies(cookie_header: String) -> Map {
     return cookies
 }
 
+fn _has_header_ctl(value: String) -> Bool {
+    return value.contains("\r") || value.contains("\n")
+}
+
+fn _safe_header_name(name: String) -> Bool {
+    if len(name) == 0 || _has_header_ctl(name) {
+        return false
+    }
+    let separators = "()<>@,;:\\\"/[]?={} \t"
+    flux i = 0
+    while i < len(name) {
+        let ch = name.substring(i, i + 1)
+        if separators.contains(ch) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn _safe_header_value(value: Any) -> Bool {
+    return !_has_header_ctl(_header_string(value))
+}
+
+fn _header_string(value: Any) -> String {
+    if typeof(value) == "String" {
+        return value
+    }
+    return to_string(value)
+}
+
+fn _safe_cookie_token(name: String) -> Bool {
+    return _safe_header_name(name)
+}
+
+fn _safe_cookie_value(value: String) -> Bool {
+    return !_has_header_ctl(value) && !value.contains(";")
+}
+
 // Format a Set-Cookie header value from name, value, and options.
 fn _format_set_cookie(name: String, value: String, opts: Map) -> String {
+    if !_safe_cookie_token(name) || !_safe_cookie_value(value) {
+        return ""
+    }
     flux cookie = name + "=" + value
     if opts.has("path") {
-        cookie = cookie + "; Path=" + opts.get("path")
+        let path = _header_string(opts.get("path"))
+        if !_safe_cookie_value(path) { return "" }
+        cookie = cookie + "; Path=" + path
     }
     if opts.has("domain") {
-        cookie = cookie + "; Domain=" + opts.get("domain")
+        let domain = _header_string(opts.get("domain"))
+        if !_safe_cookie_value(domain) { return "" }
+        cookie = cookie + "; Domain=" + domain
     }
     if opts.has("max_age") {
         cookie = cookie + "; Max-Age=" + to_string(opts.get("max_age"))
     }
     if opts.has("expires") {
-        cookie = cookie + "; Expires=" + opts.get("expires")
+        let expires = _header_string(opts.get("expires"))
+        if !_safe_cookie_value(expires) { return "" }
+        cookie = cookie + "; Expires=" + expires
     }
     if opts.has("http_only") {
         if opts.get("http_only") == true {
@@ -218,7 +266,9 @@ fn _format_set_cookie(name: String, value: String, opts: Map) -> String {
         }
     }
     if opts.has("same_site") {
-        cookie = cookie + "; SameSite=" + opts.get("same_site")
+        let same_site = _header_string(opts.get("same_site"))
+        if !_safe_cookie_token(same_site) { return "" }
+        cookie = cookie + "; SameSite=" + same_site
     }
     return cookie
 }
@@ -227,6 +277,9 @@ fn _format_set_cookie(name: String, value: String, opts: Map) -> String {
 // Because Maps are pass-by-value, the caller must use the return value.
 fn set_cookie(res: Map, name: String, value: String, opts: Map) -> Map {
     let cookie_str = _format_set_cookie(name, value, opts)
+    if len(cookie_str) == 0 {
+        return res
+    }
     flux cookies = res.get("_cookies")
     cookies.push(cookie_str)
     res.set("_cookies", cookies)
@@ -617,14 +670,19 @@ fn _format_response(res: Map) -> String {
     let cookies = res.get("_cookies")
     if cookies != nil {
         for cookie_str in cookies {
-            result = result + "Set-Cookie: " + cookie_str + "\r\n"
+            if _safe_header_value(cookie_str) {
+                result = result + "Set-Cookie: " + cookie_str + "\r\n"
+            }
         }
     }
 
     // Append user-specified headers
     let header_keys = headers.keys()
     for key in header_keys {
-        result = result + key + ": " + headers.get(key) + "\r\n"
+        let value = headers.get(key)
+        if _safe_header_name(key) && _safe_header_value(value) {
+            result = result + key + ": " + _header_string(value) + "\r\n"
+        }
     }
 
     // End of headers

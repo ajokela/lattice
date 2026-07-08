@@ -104,7 +104,8 @@ int net_tls_connect(const char *host, int port, char **err) {
 
 #define TLS_READ_BUF 8192
 
-char *net_tls_read(int fd, char **err) {
+char *net_tls_read_buf(int fd, size_t *out_len, char **err) {
+    if (out_len) *out_len = 0;
     if (fd < 0 || fd >= FD_SETSIZE || !tls_sessions[fd]) {
         *err = strdup("tls_read: not a TLS socket");
         return NULL;
@@ -124,7 +125,14 @@ char *net_tls_read(int fd, char **err) {
     }
 
     buf[n] = '\0';
+    if (out_len) *out_len = (size_t)n;
     return buf;
+}
+
+char *net_tls_read(int fd, char **err) {
+    size_t len = 0;
+    (void)len;
+    return net_tls_read_buf(fd, &len, err);
 }
 
 /* ── tls_read_bytes ── */
@@ -435,7 +443,8 @@ int net_tls_connect(const char *host, int port, char **err) {
 
 #define SCHAN_READ_BUF 65536
 
-char *net_tls_read(int fd, char **err) {
+char *net_tls_read_buf(int fd, size_t *out_len, char **err) {
+    if (out_len) *out_len = 0;
     if (fd < 0 || fd >= SCHAN_MAX_FDS || !schan_sessions[fd].active) {
         *err = strdup("tls_read: not a TLS socket");
         return NULL;
@@ -448,8 +457,13 @@ char *net_tls_read(int fd, char **err) {
      * directly — it must not be fed back through DecryptMessage */
     if (sess->dec_buf && sess->dec_len > 0) {
         char *result = malloc(sess->dec_len + 1);
+        if (!result) {
+            *err = strdup("tls_read: out of memory");
+            return NULL;
+        }
         memcpy(result, sess->dec_buf, sess->dec_len);
         result[sess->dec_len] = '\0';
+        if (out_len) *out_len = sess->dec_len;
         free(sess->dec_buf);
         sess->dec_buf = NULL;
         sess->dec_len = 0;
@@ -457,6 +471,10 @@ char *net_tls_read(int fd, char **err) {
     }
 
     char *iobuf = malloc(SCHAN_READ_BUF);
+    if (!iobuf) {
+        *err = strdup("tls_read: out of memory");
+        return NULL;
+    }
     int iolen = 0;
 
     /* Copy any extra (undecrypted) data */
@@ -477,6 +495,10 @@ char *net_tls_read(int fd, char **err) {
                     /* EOF */
                     free(iobuf);
                     char *empty = malloc(1);
+                    if (!empty) {
+                        *err = strdup("tls_read: out of memory");
+                        return NULL;
+                    }
                     empty[0] = '\0';
                     return empty;
                 }
@@ -516,8 +538,14 @@ char *net_tls_read(int fd, char **err) {
                 }
             }
             char *result = malloc((size_t)data_len + 1);
+            if (!result) {
+                free(iobuf);
+                *err = strdup("tls_read: out of memory");
+                return NULL;
+            }
             if (data && data_len > 0) memcpy(result, data, (size_t)data_len);
             result[data_len] = '\0';
+            if (out_len) *out_len = (size_t)data_len;
             free(iobuf);
             return result;
         } else if (ss == SEC_E_INCOMPLETE_MESSAGE) {
@@ -526,6 +554,10 @@ char *net_tls_read(int fd, char **err) {
             if (n <= 0) {
                 free(iobuf);
                 char *empty = malloc(1);
+                if (!empty) {
+                    *err = strdup("tls_read: out of memory");
+                    return NULL;
+                }
                 empty[0] = '\0';
                 return empty;
             }
@@ -535,6 +567,10 @@ char *net_tls_read(int fd, char **err) {
             /* Server closed TLS */
             free(iobuf);
             char *empty = malloc(1);
+            if (!empty) {
+                *err = strdup("tls_read: out of memory");
+                return NULL;
+            }
             empty[0] = '\0';
             return empty;
         } else {
@@ -543,6 +579,11 @@ char *net_tls_read(int fd, char **err) {
             return NULL;
         }
     }
+}
+
+char *net_tls_read(int fd, char **err) {
+    size_t len = 0;
+    return net_tls_read_buf(fd, &len, err);
 }
 
 /* ── tls_read_bytes ── */
@@ -563,12 +604,12 @@ char *net_tls_read_bytes(int fd, size_t count, char **err) {
     }
     size_t total = 0;
     while (total < count) {
-        char *chunk = net_tls_read(fd, err);
+        size_t clen = 0;
+        char *chunk = net_tls_read_buf(fd, &clen, err);
         if (!chunk) {
             free(result);
             return NULL;
         }
-        size_t clen = strlen(chunk);
         if (clen == 0) {
             free(chunk);
             break; /* EOF */
@@ -724,6 +765,13 @@ int net_tls_connect(const char *host, int port, char **err) {
 
 char *net_tls_read(int fd, char **err) {
     (void)fd;
+    *err = no_tls_err();
+    return NULL;
+}
+
+char *net_tls_read_buf(int fd, size_t *out_len, char **err) {
+    (void)fd;
+    if (out_len) *out_len = 0;
     *err = no_tls_err();
     return NULL;
 }

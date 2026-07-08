@@ -837,13 +837,15 @@ static void compile_expr(const Expr *e, int line) {
                     const char *var_name = e->as.call.args[0]->as.str_val;
                     compile_expr(e->as.call.args[1], line);
                     size_t idx = chunk_add_constant(current_chunk(), value_string(var_name));
-                    emit_bytes(OP_REACT, (uint8_t)idx, line);
+                    emit_byte(OP_REACT, line);
+                    emit_const8(idx, line);
                     break;
                 }
                 if (strcmp(fn, "unreact") == 0 && e->as.call.arg_count == 1 && e->as.call.args[0]->tag == EXPR_IDENT) {
                     const char *var_name = e->as.call.args[0]->as.str_val;
                     size_t idx = chunk_add_constant(current_chunk(), value_string(var_name));
-                    emit_bytes(OP_UNREACT, (uint8_t)idx, line);
+                    emit_byte(OP_UNREACT, line);
+                    emit_const8(idx, line);
                     break;
                 }
                 if (strcmp(fn, "bond") == 0 && e->as.call.arg_count >= 2 && e->as.call.args[0]->tag == EXPR_IDENT) {
@@ -860,11 +862,10 @@ static void compile_expr(const Expr *e, int line) {
                     for (size_t i = 1; i < dep_end; i++) {
                         const char *dep_name =
                             (e->as.call.args[i]->tag == EXPR_IDENT) ? e->as.call.args[i]->as.str_val : "";
-                        size_t dep_idx = chunk_add_constant(current_chunk(), value_string(dep_name));
-                        emit_bytes(OP_CONSTANT, (uint8_t)dep_idx, line);
-                        size_t strat_idx = chunk_add_constant(current_chunk(), value_string(strategy));
-                        emit_bytes(OP_CONSTANT, (uint8_t)strat_idx, line);
-                        emit_bytes(OP_BOND, (uint8_t)target_idx, line);
+                        emit_constant(value_string(dep_name), line);
+                        emit_constant(value_string(strategy), line);
+                        emit_byte(OP_BOND, line);
+                        emit_const8(target_idx, line);
                         if (i + 1 < dep_end) emit_byte(OP_POP, line);
                     }
                     break;
@@ -875,9 +876,9 @@ static void compile_expr(const Expr *e, int line) {
                     for (size_t i = 1; i < e->as.call.arg_count; i++) {
                         const char *dep_name =
                             (e->as.call.args[i]->tag == EXPR_IDENT) ? e->as.call.args[i]->as.str_val : "";
-                        size_t dep_idx = chunk_add_constant(current_chunk(), value_string(dep_name));
-                        emit_bytes(OP_CONSTANT, (uint8_t)dep_idx, line);
-                        emit_bytes(OP_UNBOND, (uint8_t)target_idx, line);
+                        emit_constant(value_string(dep_name), line);
+                        emit_byte(OP_UNBOND, line);
+                        emit_const8(target_idx, line);
                         if (i + 1 < e->as.call.arg_count) emit_byte(OP_POP, line);
                     }
                     break;
@@ -886,13 +887,15 @@ static void compile_expr(const Expr *e, int line) {
                     const char *var_name = e->as.call.args[0]->as.str_val;
                     compile_expr(e->as.call.args[1], line);
                     size_t idx = chunk_add_constant(current_chunk(), value_string(var_name));
-                    emit_bytes(OP_SEED, (uint8_t)idx, line);
+                    emit_byte(OP_SEED, line);
+                    emit_const8(idx, line);
                     break;
                 }
                 if (strcmp(fn, "unseed") == 0 && e->as.call.arg_count == 1 && e->as.call.args[0]->tag == EXPR_IDENT) {
                     const char *var_name = e->as.call.args[0]->as.str_val;
                     size_t idx = chunk_add_constant(current_chunk(), value_string(var_name));
-                    emit_bytes(OP_UNSEED, (uint8_t)idx, line);
+                    emit_byte(OP_UNSEED, line);
+                    emit_const8(idx, line);
                     break;
                 }
                 /* track(var) / history(var) / phases(var): pass var name as string */
@@ -1996,11 +1999,7 @@ static void compile_expr(const Expr *e, int line) {
                 size_t past_catch = emit_jump(OP_JUMP, line);
                 /* Catch: stack restored to [value], then error pushed → [value, error] */
                 patch_jump(handler_jump);
-                {
-                    size_t prefix_idx = chunk_add_constant(current_chunk(), value_string("freeze contract failed: "));
-                    emit_byte(OP_CONSTANT, line);
-                    emit_byte((uint8_t)prefix_idx, line);
-                }
+                { emit_constant(value_string("freeze contract failed: "), line); }
                 emit_byte(OP_SWAP, line);
                 emit_byte(OP_CONCAT, line);
                 /* [value, "freeze contract failed: <msg>"] → throw */
@@ -2107,8 +2106,7 @@ static void compile_expr(const Expr *e, int line) {
             patch_jump(anneal_ok);
             emit_byte(OP_POP, line); /* pop false */
             {
-                size_t err_idx = chunk_add_constant(current_chunk(), value_string("anneal requires a crystal value"));
-                emit_bytes(OP_CONSTANT, (uint8_t)err_idx, line);
+                emit_constant(value_string("anneal requires a crystal value"), line);
                 emit_byte(OP_THROW, line);
             }
             patch_jump(anneal_past_check);
@@ -2159,8 +2157,7 @@ static void compile_expr(const Expr *e, int line) {
             current->scope_depth = saved_sd;
             /* Error string is on TOS. Concatenate with prefix. */
             {
-                size_t prefix_idx = chunk_add_constant(current_chunk(), value_string("anneal failed: "));
-                emit_bytes(OP_CONSTANT, (uint8_t)prefix_idx, line);
+                emit_constant(value_string("anneal failed: "), line);
                 emit_byte(OP_SWAP, line);
                 emit_byte(OP_CONCAT, line);
                 emit_byte(OP_THROW, line);
@@ -2478,8 +2475,8 @@ static void emit_return_type_check(int line) {
     size_t type_idx = chunk_add_constant(current_chunk(), value_string(current->return_type_name));
     size_t err_idx = chunk_add_constant(current_chunk(), value_string(err_msg));
     emit_byte(OP_CHECK_RETURN_TYPE, line);
-    emit_byte((uint8_t)type_idx, line);
-    emit_byte((uint8_t)err_idx, line);
+    emit_const8(type_idx, line);
+    emit_const8(err_idx, line);
 }
 
 /* Emit write-back chain for nested index assignment.
@@ -3089,8 +3086,7 @@ static void compile_stmt(const Stmt *s) {
                         char err_msg[512];
                         snprintf(err_msg, sizeof(err_msg), "module '%s' does not export '%s'", s->as.import.module_path,
                                  s->as.import.selective_names[i]);
-                        size_t err_idx = chunk_add_constant(current_chunk(), value_string(err_msg));
-                        emit_bytes(OP_CONSTANT, (uint8_t)err_idx, line);
+                        emit_constant(value_string(err_msg), line);
                         emit_byte(OP_THROW, line);
                     }
                     patch_jump(import_ok);
@@ -3167,8 +3163,8 @@ static void compile_function_body(FunctionType type, const char *name, Param *pa
         size_t err_idx = chunk_add_constant(current_chunk(), value_string(err_msg));
         emit_byte(OP_CHECK_TYPE, line);
         emit_byte((uint8_t)slot, line);
-        emit_byte((uint8_t)type_idx, line);
-        emit_byte((uint8_t)err_idx, line);
+        emit_const8(type_idx, line);
+        emit_const8(err_idx, line);
     }
 
     /* Compile require contracts (preconditions) */
@@ -3336,8 +3332,7 @@ Chunk *stack_compile(const Program *prog, char **error) {
                 /* Store as global "__struct_<name>" */
                 char meta_name[256];
                 snprintf(meta_name, sizeof(meta_name), "__struct_%s", sd->name);
-                size_t arr_idx = chunk_add_constant(current_chunk(), arr);
-                emit_bytes(OP_CONSTANT, (uint8_t)arr_idx, 0);
+                emit_constant(arr, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
                 emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 /* Alloy: emit per-field phase metadata if any field has a phase annotation */
@@ -3358,8 +3353,7 @@ Chunk *stack_compile(const Program *prog, char **error) {
                         free(phases);
                         char phase_meta[256];
                         snprintf(phase_meta, sizeof(phase_meta), "__struct_phases_%s", sd->name);
-                        size_t pi = chunk_add_constant(current_chunk(), phase_arr);
-                        emit_bytes(OP_CONSTANT, (uint8_t)pi, 0);
+                        emit_constant(phase_arr, 0);
                         size_t pn = chunk_add_constant(current_chunk(), value_string(phase_meta));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, pn, 0);
                     }
@@ -3466,8 +3460,7 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
                 free(field_names);
                 char meta_name[256];
                 snprintf(meta_name, sizeof(meta_name), "__struct_%s", sd->name);
-                size_t arr_idx = chunk_add_constant(current_chunk(), arr);
-                emit_bytes(OP_CONSTANT, (uint8_t)arr_idx, 0);
+                emit_constant(arr, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
                 emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 /* Alloy: emit per-field phase metadata if any field has a phase annotation */
@@ -3488,8 +3481,7 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
                         free(phases);
                         char phase_meta[256];
                         snprintf(phase_meta, sizeof(phase_meta), "__struct_phases_%s", sd->name);
-                        size_t pi = chunk_add_constant(current_chunk(), phase_arr);
-                        emit_bytes(OP_CONSTANT, (uint8_t)pi, 0);
+                        emit_constant(phase_arr, 0);
                         size_t pn = chunk_add_constant(current_chunk(), value_string(phase_meta));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, pn, 0);
                     }
@@ -3597,8 +3589,7 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
                 free(field_names);
                 char meta_name[256];
                 snprintf(meta_name, sizeof(meta_name), "__struct_%s", sd->name);
-                size_t arr_idx = chunk_add_constant(current_chunk(), arr);
-                emit_bytes(OP_CONSTANT, (uint8_t)arr_idx, 0);
+                emit_constant(arr, 0);
                 size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
                 emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
                 {
@@ -3618,8 +3609,7 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
                         free(phases);
                         char phase_meta[256];
                         snprintf(phase_meta, sizeof(phase_meta), "__struct_phases_%s", sd->name);
-                        size_t pi = chunk_add_constant(current_chunk(), phase_arr);
-                        emit_bytes(OP_CONSTANT, (uint8_t)pi, 0);
+                        emit_constant(phase_arr, 0);
                         size_t pn = chunk_add_constant(current_chunk(), value_string(phase_meta));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, pn, 0);
                     }

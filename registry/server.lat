@@ -18,6 +18,7 @@
 //
 // Client usage:
 //   LATTICE_REGISTRY=http://localhost:8080/v1 clat install
+//   LATTICE_REGISTRY_TOKEN=<secret> clat registry/publish.lat <package-dir>
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -29,6 +30,81 @@ fn get_packages_dir() -> String {
     return "registry/packages"
 }
 
+fn env_str(key: String) -> String {
+    let val = env(key)
+    if typeof(val) == "String" && len(val) > 0 {
+        return val
+    }
+    return ""
+}
+
+fn has_header_ctl(value: String) -> Bool {
+    return value.contains("\r") || value.contains("\n")
+}
+
+fn safe_cors_origin() -> String {
+    let origin = env_str("LATTICE_REGISTRY_CORS_ORIGIN")
+    if len(origin) == 0 || has_header_ctl(origin) {
+        return ""
+    }
+    return origin
+}
+
+fn is_safe_component(value: String) -> Bool {
+    if len(value) == 0 { return false }
+    if value == "." || value == ".." { return false }
+    if value.contains("..") { return false }
+    if value.contains("/") || value.contains("\\") { return false }
+    if value.contains("\r") || value.contains("\n") { return false }
+
+    let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+"
+    flux i = 0
+    while i < len(value) {
+        let ch = value.substring(i, i + 1)
+        if !allowed.contains(ch) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn header_value(headers: Map, name: String) -> String {
+    let wanted = name.to_lower()
+    let keys = headers.keys()
+    for key in keys {
+        if key.to_lower() == wanted {
+            let val = headers.get(key)
+            if typeof(val) == "String" {
+                return val
+            }
+        }
+    }
+    return ""
+}
+
+fn publish_auth_ok(headers: Map) -> Bool {
+    let token = env_str("LATTICE_REGISTRY_TOKEN")
+    if len(token) == 0 {
+        return false
+    }
+    if has_header_ctl(token) {
+        return false
+    }
+
+    let auth = header_value(headers, "Authorization")
+    if auth == "Bearer " + token {
+        return true
+    }
+
+    let direct = header_value(headers, "X-Registry-Token")
+    if direct == token {
+        return true
+    }
+
+    return false
+}
+
 // ---------------------------------------------------------------------------
 // HTTP Response Helpers
 // ---------------------------------------------------------------------------
@@ -38,6 +114,8 @@ fn status_text(code: Int) -> String {
     if code == 201 { return "Created" }
     if code == 204 { return "No Content" }
     if code == 400 { return "Bad Request" }
+    if code == 401 { return "Unauthorized" }
+    if code == 403 { return "Forbidden" }
     if code == 404 { return "Not Found" }
     if code == 405 { return "Method Not Allowed" }
     if code == 409 { return "Conflict" }
@@ -51,7 +129,10 @@ fn build_response(status: Int, content_type: String, body: String) -> String {
     resp = resp + "Content-Type: " + content_type + "\r\n"
     resp = resp + "Content-Length: " + to_string(len(body)) + "\r\n"
     resp = resp + "Connection: close\r\n"
-    resp = resp + "Access-Control-Allow-Origin: *\r\n"
+    let cors_origin = safe_cors_origin()
+    if len(cors_origin) > 0 {
+        resp = resp + "Access-Control-Allow-Origin: " + cors_origin + "\r\n"
+    }
     resp = resp + "\r\n"
     resp = resp + body
     return resp
@@ -419,6 +500,9 @@ fn dispatch(req: Map) -> String {
     }
 
     let pkg_name = segments[2]
+    if !is_safe_component(pkg_name) {
+        return error_response(400, "invalid package name")
+    }
 
     // GET /v1/packages/<name>/versions
     if method == "GET" && seg_count == 4 && segments[3] == "versions" {
@@ -428,12 +512,25 @@ fn dispatch(req: Map) -> String {
     // GET /v1/packages/<name>/<version>
     if method == "GET" && seg_count == 4 {
         let version = segments[3]
+        if !is_safe_component(version) {
+            return error_response(400, "invalid package version")
+        }
         return handle_download(pkg_name, version)
     }
 
     // POST /v1/packages/<name>/<version>
     if method == "POST" && seg_count == 4 {
         let version = segments[3]
+        if !is_safe_component(version) {
+            return error_response(400, "invalid package version")
+        }
+        let headers = req.get("headers")
+        if !publish_auth_ok(headers) {
+            if len(env_str("LATTICE_REGISTRY_TOKEN")) == 0 {
+                return error_response(403, "publishing is disabled until LATTICE_REGISTRY_TOKEN is set")
+            }
+            return error_response(401, "invalid registry publish token")
+        }
         return handle_publish(pkg_name, version, body)
     }
 
@@ -468,13 +565,20 @@ fn main() {
     let pkg_dir = get_packages_dir()
     ensure_dir(pkg_dir)
 
+    flux host = "127.0.0.1"
+    let env_host = env_str("LATTICE_REGISTRY_HOST")
+    if len(env_host) > 0 {
+        host = env_host
+    }
+
     print("Lattice Package Registry Server")
     print("  Packages dir: " + pkg_dir)
-    print("  Listening on: http://localhost:" + to_string(port))
-    print("  Client usage: LATTICE_REGISTRY=http://localhost:" + to_string(port) + "/v1 clat install")
+    print("  Listening on: http://" + host + ":" + to_string(port))
+    print("  Client usage: LATTICE_REGISTRY=http://" + host + ":" + to_string(port) + "/v1 clat install")
+    print("  Publish auth: set LATTICE_REGISTRY_TOKEN on server and publisher")
     print("")
 
-    let server_fd = tcp_listen("0.0.0.0", port)
+    let server_fd = tcp_listen(host, port)
 
     loop {
         let client_fd = tcp_accept(server_fd)

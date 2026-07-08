@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#define DAP_MAX_CONTENT_LENGTH (8 * 1024 * 1024)
+
 /* ── Variable reference management ── */
 
 /* Variable references for structured data (arrays, structs, maps).
@@ -61,11 +63,15 @@ static DapVarRef *varrefs_find(int ref_id) {
 
 cJSON *dap_read_message(FILE *in) {
     char header[256];
-    int content_length = -1;
+    long content_length = -1;
 
     while (fgets(header, sizeof(header), in)) {
         if (header[0] == '\r' || header[0] == '\n') break;
-        if (strncmp(header, "Content-Length:", 15) == 0) { content_length = atoi(header + 15); }
+        if (strncmp(header, "Content-Length:", 15) == 0) {
+            char *endp = NULL;
+            long v = strtol(header + 15, &endp, 10);
+            content_length = (v > 0 && v <= DAP_MAX_CONTENT_LENGTH) ? v : -1;
+        }
     }
 
     if (content_length <= 0) return NULL;
@@ -74,7 +80,7 @@ cJSON *dap_read_message(FILE *in) {
     if (!body) return NULL;
 
     size_t nread = fread(body, 1, (size_t)content_length, in);
-    if ((int)nread != content_length) {
+    if (nread != (size_t)content_length) {
         free(body);
         return NULL;
     }

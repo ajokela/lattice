@@ -5922,10 +5922,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(value_string_owned(dir));
                 }
 
-                /// @builtin exec(cmd: String) -> Map
+                /// @builtin exec(cmd: String) -> String
                 /// @category Process
-                /// Execute a command directly (no shell), returning {stdout, stderr, status}.
-                /// @example exec("ls -la")  // {stdout: "...", stderr: "", status: 0}
+                /// Execute a command through the platform shell and return stdout.
+                /// Do not pass untrusted input without shell-escaping it first.
+                /// @example exec("ls -la")  // "..."
                 if (strcmp(fn_name, "exec") == 0) {
                     if (argc != 1) {
                         for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }

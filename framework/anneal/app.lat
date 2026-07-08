@@ -239,7 +239,13 @@ fn _safe_static(file_path: String, abs_root: String) -> Bool {
     if resolved == nil {
         return false
     }
-    return resolved.starts_with(abs_root)
+    if resolved == abs_root {
+        return true
+    }
+    if abs_root == "/" {
+        return resolved.starts_with("/")
+    }
+    return resolved.starts_with(abs_root + "/")
 }
 
 // Pre-allocate an array of nil slots.

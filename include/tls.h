@@ -19,6 +19,11 @@ int net_tls_connect(const char *host, int port, char **err);
  * Returns heap-allocated string, empty on EOF, NULL on error. */
 char *net_tls_read(int fd, char **err);
 
+/* Read available data via TLS and return the exact byte count.
+ * The returned buffer is NUL-terminated for convenience but may contain
+ * embedded NUL bytes before out_len. */
+char *net_tls_read_buf(int fd, size_t *out_len, char **err);
+
 /* Read exactly n bytes via SSL_read.
  * Returns heap-allocated string, NULL on error. */
 char *net_tls_read_bytes(int fd, size_t n, char **err);

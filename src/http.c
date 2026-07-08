@@ -409,11 +409,7 @@ HttpResponse *http_execute(const HttpRequest *req, char **err) {
         char *chunk;
         size_t clen;
         if (use_tls) {
-            chunk = net_tls_read(fd, err);
-            /* net_tls_read has no length out-param, so a binary HTTPS body is
-             * still bounded by its first NUL; the plain-HTTP path below keeps
-             * the exact byte count. */
-            clen = chunk ? strlen(chunk) : 0;
+            chunk = net_tls_read_buf(fd, &clen, err);
         } else {
             chunk = net_tcp_read_buf(fd, &clen, err);
         }

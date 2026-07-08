@@ -6,6 +6,7 @@
 #include "match_check.h"
 #include "stackcompiler.h"
 #include "stackvm.h"
+#include "chunk.h"
 #include "latc.h"
 #include "regvm.h"
 #include "runtime.h"
@@ -369,6 +370,17 @@ static int run_source(const char *source, bool show_stats, const char *script_di
     if (!chunk) {
         fprintf(stderr, "compile error: %s\n", comp_err);
         free(comp_err);
+        evaluator_free(ev);
+        program_free(&prog);
+        for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+        lat_vec_free(&tokens);
+        return 1;
+    }
+    char *verr = chunk_verify(chunk);
+    if (verr) {
+        fprintf(stderr, "bytecode verification error: %s\n", verr);
+        free(verr);
+        chunk_free(chunk);
         evaluator_free(ev);
         program_free(&prog);
         for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
@@ -1294,6 +1306,18 @@ int main(int argc, char **argv) {
             if (!chunk) {
                 fprintf(stderr, "compile error: %s\n", comp_err);
                 free(comp_err);
+                program_free(&prog);
+                for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
+                lat_vec_free(&tokens);
+                free(source);
+                free(default_output);
+                return 1;
+            }
+            char *verr = chunk_verify(chunk);
+            if (verr) {
+                fprintf(stderr, "bytecode verification error: %s\n", verr);
+                free(verr);
+                chunk_free(chunk);
                 program_free(&prog);
                 for (size_t i = 0; i < tokens.len; i++) token_free(lat_vec_get(&tokens, i));
                 lat_vec_free(&tokens);

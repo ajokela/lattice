@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <limits.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -262,17 +263,180 @@ static const char *get_registry_url(void) {
     return PKG_DEFAULT_REGISTRY;
 }
 
-/* Compute the SHA-256 (hex) of an installed package's primary source file, for
+typedef struct {
+    unsigned char *data;
+    size_t len;
+    size_t cap;
+} PkgHashBuf;
+
+static bool pkg_hash_append(PkgHashBuf *buf, const void *data, size_t len) {
+    if (len == 0) return true;
+    if (len > ((size_t)-1) - buf->len) return false;
+    size_t need = buf->len + len;
+    if (need > buf->cap) {
+        size_t new_cap = buf->cap ? buf->cap : 4096;
+        while (new_cap < need) {
+            if (new_cap > ((size_t)-1) / 2) {
+                new_cap = need;
+                break;
+            }
+            new_cap *= 2;
+        }
+        unsigned char *tmp = realloc(buf->data, new_cap);
+        if (!tmp) return false;
+        buf->data = tmp;
+        buf->cap = new_cap;
+    }
+    memcpy(buf->data + buf->len, data, len);
+    buf->len = need;
+    return true;
+}
+
+static bool pkg_hash_append_str(PkgHashBuf *buf, const char *s) { return pkg_hash_append(buf, s, strlen(s)); }
+
+static int pkg_strptr_cmp(const void *a, const void *b) {
+    const char *const *sa = (const char *const *)a;
+    const char *const *sb = (const char *const *)b;
+    return strcmp(*sa, *sb);
+}
+
+static char *pkg_join_path(const char *base, const char *name) {
+    size_t blen = strlen(base);
+    size_t nlen = strlen(name);
+    size_t need = blen + nlen + 2;
+    char *out = malloc(need);
+    if (!out) return NULL;
+    snprintf(out, need, "%s/%s", base, name);
+    return out;
+}
+
+static char *pkg_join_rel(const char *rel, const char *name) {
+    if (!rel || rel[0] == '\0') return strdup(name);
+    return pkg_join_path(rel, name);
+}
+
+static bool pkg_hash_record(PkgHashBuf *buf, const char *type, const char *rel) {
+    return pkg_hash_append_str(buf, type) && pkg_hash_append_str(buf, "\n") && pkg_hash_append_str(buf, rel) &&
+           pkg_hash_append_str(buf, "\n");
+}
+
+static bool pkg_hash_file(PkgHashBuf *buf, const char *full, const char *rel, int64_t size_hint) {
+    if (!pkg_hash_record(buf, "F", rel)) return false;
+    char size_buf[64];
+    snprintf(size_buf, sizeof(size_buf), "%lld\n", (long long)size_hint);
+    if (!pkg_hash_append_str(buf, size_buf)) return false;
+
+    FILE *f = fopen(full, "rb");
+    if (!f) return false;
+    unsigned char chunk[8192];
+    bool ok = true;
+    while (ok) {
+        size_t n = fread(chunk, 1, sizeof(chunk), f);
+        if (n > 0) ok = pkg_hash_append(buf, chunk, n);
+        if (n < sizeof(chunk)) {
+            if (ferror(f)) ok = false;
+            break;
+        }
+    }
+    fclose(f);
+    return ok && pkg_hash_append_str(buf, "\n");
+}
+
+#ifndef _WIN32
+static bool pkg_hash_symlink(PkgHashBuf *buf, const char *full, const char *rel) {
+    char target[PATH_MAX];
+    ssize_t n = readlink(full, target, sizeof(target) - 1);
+    if (n < 0) return false;
+    target[n] = '\0';
+    return pkg_hash_record(buf, "L", rel) && pkg_hash_append_str(buf, target) && pkg_hash_append_str(buf, "\n");
+}
+#endif
+
+static bool pkg_hash_path(PkgHashBuf *buf, const char *full, const char *rel) {
+    struct stat st;
+#ifdef _WIN32
+    if (stat(full, &st) != 0) return false;
+#else
+    if (lstat(full, &st) != 0) return false;
+#endif
+
+    if (S_ISREG(st.st_mode)) return pkg_hash_file(buf, full, rel, (int64_t)st.st_size);
+
+#ifndef _WIN32
+    if (S_ISLNK(st.st_mode)) return pkg_hash_symlink(buf, full, rel);
+#endif
+
+    if (S_ISDIR(st.st_mode)) {
+        if (rel && rel[0] != '\0' && !pkg_hash_record(buf, "D", rel)) return false;
+
+        size_t count = 0;
+        char *err = NULL;
+        char **entries = fs_list_dir(full, &count, &err);
+        if (!entries) {
+            free(err);
+            return false;
+        }
+        qsort(entries, count, sizeof(char *), pkg_strptr_cmp);
+
+        bool ok = true;
+        for (size_t i = 0; i < count; i++) {
+            if (strcmp(entries[i], ".git") == 0) {
+                free(entries[i]);
+                continue;
+            }
+
+            char *child_full = pkg_join_path(full, entries[i]);
+            char *child_rel = pkg_join_rel(rel, entries[i]);
+            if (!child_full || !child_rel || !pkg_hash_path(buf, child_full, child_rel)) ok = false;
+            free(child_full);
+            free(child_rel);
+            free(entries[i]);
+            if (!ok) {
+                for (size_t j = i + 1; j < count; j++) free(entries[j]);
+                break;
+            }
+        }
+        free(entries);
+        return ok;
+    }
+
+    return pkg_hash_record(buf, "O", rel);
+}
+
+/* Compute the SHA-256 (hex) of the complete installed package tree for
  * recording in / verifying against lattice.lock. Returns "" if unavailable. */
 static char *pkg_compute_checksum(const char *name) {
-    char path[PATH_MAX];
-    snprintf(path, sizeof(path), "lat_modules/%s/main.lat", name);
-    if (!fs_file_exists(path)) snprintf(path, sizeof(path), "lat_modules/%s/lattice.toml", name);
-    char *content = builtin_read_file(path);
-    if (!content) return strdup("");
+    char root[PATH_MAX];
+    int n = snprintf(root, sizeof(root), "lat_modules/%s", name);
+    if (n < 0 || (size_t)n >= sizeof(root)) return strdup("");
+
+    PkgHashBuf buf = {0};
+    bool ok = pkg_hash_append_str(&buf, "lattice-package-tree-v1\n");
+    if (ok && fs_is_dir(root)) {
+        ok = pkg_hash_path(&buf, root, "");
+    } else if (ok) {
+        char single[PATH_MAX];
+        n = snprintf(single, sizeof(single), "lat_modules/%s.lat", name);
+        if (n < 0 || (size_t)n >= sizeof(single) || !fs_file_exists(single)) ok = false;
+        else {
+            char *rel = malloc(strlen(name) + 5);
+            if (!rel) ok = false;
+            else {
+                sprintf(rel, "%s.lat", name);
+                ok = pkg_hash_path(&buf, single, rel);
+                free(rel);
+            }
+        }
+    }
+
+    if (!ok) {
+        free(buf.data);
+        return strdup("");
+    }
+
     char *cerr = NULL;
-    char *sum = crypto_sha256(content, strlen(content), &cerr);
-    free(content);
+    char *sum = crypto_sha256((const char *)buf.data, buf.len, &cerr);
+    free(buf.data);
     free(cerr);
     return sum ? sum : strdup("");
 }
@@ -1558,8 +1722,6 @@ int pkg_cmd_install(void) {
         }
 
         if (fetch_ok) {
-            printf(" ok\n");
-
             /* Determine resolved version */
             char toml_path[PATH_MAX];
             snprintf(toml_path, sizeof(toml_path), "lat_modules/%s/lattice.toml", dep_name);
@@ -1587,6 +1749,8 @@ int pkg_cmd_install(void) {
             char *new_sum = pkg_compute_checksum(dep_name);
             const char *old_sum = have_lock ? lock_find_checksum(&existing_lock, dep_name) : NULL;
             if (old_sum && *old_sum && strcmp(old_sum, new_sum) != 0) {
+                printf(" FAILED\n");
+                fflush(stdout);
                 fprintf(stderr,
                         "  error: integrity check failed for '%s' — content does not match lattice.lock checksum\n",
                         dep_name);
@@ -1595,6 +1759,7 @@ int pkg_cmd_install(void) {
                 pkg_remove_tree(rmpath);
                 free(new_sum);
                 free(resolved_ver);
+                failures++;
             } else {
                 /* Add to lock */
                 if (lock.entry_count >= lock.entry_cap) {
@@ -1606,6 +1771,7 @@ int pkg_cmd_install(void) {
                 le->version = resolved_ver;
                 le->source = strdup(pkg_source);
                 le->checksum = new_sum;
+                printf(" ok\n");
             }
         } else {
             printf(" FAILED\n");

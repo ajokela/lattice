@@ -33,6 +33,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "stackcompiler.h"
+#include "chunk.h"
 #include "latc.h"
 #include <stdlib.h>
 #include <limits.h>
@@ -3784,6 +3785,12 @@ static LatValue native_compile_file(LatValue *args, int ac) {
 
     if (!chunk) {
         free(comp_err);
+        return value_nil();
+    }
+    char *verr = chunk_verify(chunk);
+    if (verr) {
+        free(verr);
+        chunk_free(chunk);
         return value_nil();
     }
 

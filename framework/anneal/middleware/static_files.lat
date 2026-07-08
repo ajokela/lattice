@@ -57,14 +57,17 @@ fn _safe_path(file_path: String, abs_root: String) -> Bool {
     if file_path.contains("..") {
         return false
     }
-    if file_path.contains("\0") {
-        return false
-    }
     // Resolve the file path
     let resolved = realpath(file_path)
     if resolved == nil {
         return false
     }
-    // Ensure the resolved path starts with the root
-    return resolved.starts_with(abs_root)
+    // Ensure the resolved path is the root itself or a child path with a boundary.
+    if resolved == abs_root {
+        return true
+    }
+    if abs_root == "/" {
+        return resolved.starts_with("/")
+    }
+    return resolved.starts_with(abs_root + "/")
 }

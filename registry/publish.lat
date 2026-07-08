@@ -11,6 +11,7 @@
 //
 // Environment:
 //   LATTICE_REGISTRY - registry URL (default: http://localhost:8080/v1)
+//   LATTICE_REGISTRY_TOKEN - bearer token required by the registry for publish
 //
 // Example:
 //   clat registry/publish.lat registry/packages/hello/1.0.0
@@ -61,12 +62,18 @@ fn parse_url(url: String) -> Map {
 }
 
 // Send an HTTP POST request and return the raw response.
-fn http_post(host: String, port: Int, path: String, body: String, content_type: String) -> String {
+fn http_post(host: String, port: Int, path: String, body: String, content_type: String, token: String) -> String {
     let conn = tcp_connect(host, port)
+
+    flux auth_header = ""
+    if len(token) > 0 {
+        auth_header = "Authorization: Bearer " + token + "\r\n"
+    }
 
     let request = "POST " + path + " HTTP/1.1\r\n"
         + "Host: " + host + "\r\n"
         + "Content-Type: " + content_type + "\r\n"
+        + auth_header
         + "Content-Length: " + to_string(len(body)) + "\r\n"
         + "Connection: close\r\n"
         + "\r\n"
@@ -109,6 +116,37 @@ fn parse_body(raw: String) -> String {
         return raw.substring(idx + 4, len(raw))
     }
     return ""
+}
+
+fn env_str(key: String) -> String {
+    let val = env(key)
+    if typeof(val) == "String" && len(val) > 0 {
+        return val
+    }
+    return ""
+}
+
+fn has_header_ctl(value: String) -> Bool {
+    return value.contains("\r") || value.contains("\n")
+}
+
+fn is_safe_component(value: String) -> Bool {
+    if len(value) == 0 { return false }
+    if value == "." || value == ".." { return false }
+    if value.contains("..") { return false }
+    if value.contains("/") || value.contains("\\") { return false }
+    if value.contains("\r") || value.contains("\n") { return false }
+
+    let allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+"
+    flux i = 0
+    while i < len(value) {
+        let ch = value.substring(i, i + 1)
+        if !allowed.contains(ch) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
 }
 
 // ---------------------------------------------------------------------------
@@ -164,8 +202,8 @@ fn main() {
     if len(argv) > 2 {
         registry_url = argv[2]
     } else {
-        let env_reg = env("LATTICE_REGISTRY")
-        if typeof(env_reg) == "String" && len(env_reg) > 0 {
+        let env_reg = env_str("LATTICE_REGISTRY")
+        if len(env_reg) > 0 {
             registry_url = env_reg
         }
     }
@@ -189,6 +227,20 @@ fn main() {
     }
     if len(pkg_version) == 0 {
         eprint("Error: lattice.toml is missing 'version' in [package]\n")
+        exit(1)
+    }
+    if !is_safe_component(pkg_name) {
+        eprint("Error: package name is not a safe registry path component: " + pkg_name + "\n")
+        exit(1)
+    }
+    if !is_safe_component(pkg_version) {
+        eprint("Error: package version is not a safe registry path component: " + pkg_version + "\n")
+        exit(1)
+    }
+
+    let publish_token = env_str("LATTICE_REGISTRY_TOKEN")
+    if has_header_ctl(publish_token) {
+        eprint("Error: LATTICE_REGISTRY_TOKEN contains invalid header characters\n")
         exit(1)
     }
 
@@ -220,7 +272,7 @@ fn main() {
     print("  POST " + host + ":" + to_string(port) + publish_path)
 
     let raw_response = try {
-        http_post(host, port, publish_path, body, "application/json")
+        http_post(host, port, publish_path, body, "application/json", publish_token)
     } catch e {
         eprint("Error: failed to connect to registry at " + registry_url + "\n")
         eprint("  " + to_string(e) + "\n")

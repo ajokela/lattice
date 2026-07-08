@@ -45,6 +45,9 @@ fn new(secret: String) -> Fn {
 
         // Create new session if needed
         if session_idx < 0 {
+            if sess_count >= MAX_SESSIONS {
+                return http.response(503, "session store full")
+            }
             let new_id = uuid()
             session_idx = sess_count
             sess_ids[session_idx] = new_id

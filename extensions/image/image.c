@@ -16,6 +16,12 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include <strings.h> /* strcasecmp */
+#ifdef __APPLE__
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* Forward declare the init function (exported symbol) */
 void lat_ext_init(LatExtContext *ctx);
@@ -73,6 +79,31 @@ static uint16_t read_le16(const unsigned char *p) { return (uint16_t)((uint16_t)
 static uint32_t read_le32(const unsigned char *p) {
     return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[0];
 }
+
+#ifdef __APPLE__
+static int run_sips(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execvp("sips", argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        return -1;
+    }
+    if (!WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+#endif
 
 /* ── Dimension parsing per format ── */
 
@@ -423,7 +454,8 @@ static LatExtValue *image_resize(LatExtValue **args, size_t argc) {
 #else
     const char *src, *dst;
     int64_t w, h;
-    char cmd[2048];
+    char width_buf[32];
+    char height_buf[32];
     int rc;
 
     if (argc < 4 || lat_ext_type(args[0]) != LAT_EXT_STRING || lat_ext_type(args[1]) != LAT_EXT_STRING ||
@@ -438,10 +470,11 @@ static LatExtValue *image_resize(LatExtValue **args, size_t argc) {
 
     if (w <= 0 || h <= 0) { return lat_ext_error("image.resize: width and height must be positive"); }
 
-    snprintf(cmd, sizeof(cmd), "sips -z %lld %lld '%s' --out '%s' > /dev/null 2>&1", (long long)h, (long long)w, src,
-             dst);
+    snprintf(width_buf, sizeof(width_buf), "%lld", (long long)w);
+    snprintf(height_buf, sizeof(height_buf), "%lld", (long long)h);
 
-    rc = system(cmd);
+    char *const argv[] = {"sips", "-z", height_buf, width_buf, (char *)src, "--out", (char *)dst, NULL};
+    rc = run_sips(argv);
     if (rc != 0) { return lat_ext_error("image.resize: sips command failed"); }
     return lat_ext_bool(true);
 #endif
@@ -455,7 +488,6 @@ static LatExtValue *image_convert(LatExtValue **args, size_t argc) {
     return lat_ext_error("image.convert: not supported on this platform (requires macOS sips)");
 #else
     const char *src, *dst, *fmt;
-    char cmd[2048];
     int rc;
 
     if (argc < 2 || lat_ext_type(args[0]) != LAT_EXT_STRING || lat_ext_type(args[1]) != LAT_EXT_STRING) {
@@ -468,9 +500,8 @@ static LatExtValue *image_convert(LatExtValue **args, size_t argc) {
     fmt = extension_to_sips_format(dst);
     if (!fmt) { return lat_ext_error("image.convert: cannot infer output format from destination file extension"); }
 
-    snprintf(cmd, sizeof(cmd), "sips -s format %s '%s' --out '%s' > /dev/null 2>&1", fmt, src, dst);
-
-    rc = system(cmd);
+    char *const argv[] = {"sips", "-s", "format", (char *)fmt, (char *)src, "--out", (char *)dst, NULL};
+    rc = run_sips(argv);
     if (rc != 0) { return lat_ext_error("image.convert: sips command failed"); }
     return lat_ext_bool(true);
 #endif
@@ -491,7 +522,8 @@ static LatExtValue *image_thumbnail(LatExtValue **args, size_t argc) {
     ImageFormat fmt;
     Dimensions dim;
     uint32_t new_w, new_h;
-    char cmd[2048];
+    char width_buf[32];
+    char height_buf[32];
     int rc;
 
     if (argc < 3 || lat_ext_type(args[0]) != LAT_EXT_STRING || lat_ext_type(args[1]) != LAT_EXT_STRING ||
@@ -543,9 +575,11 @@ static LatExtValue *image_thumbnail(LatExtValue **args, size_t argc) {
         if (new_w == 0) new_w = 1;
     }
 
-    snprintf(cmd, sizeof(cmd), "sips -z %u %u '%s' --out '%s' > /dev/null 2>&1", new_h, new_w, src, dst);
+    snprintf(width_buf, sizeof(width_buf), "%u", new_w);
+    snprintf(height_buf, sizeof(height_buf), "%u", new_h);
 
-    rc = system(cmd);
+    char *const argv[] = {"sips", "-z", height_buf, width_buf, (char *)src, "--out", (char *)dst, NULL};
+    rc = run_sips(argv);
     if (rc != 0) { return lat_ext_error("image.thumbnail: sips command failed"); }
     return lat_ext_bool(true);
 #endif
