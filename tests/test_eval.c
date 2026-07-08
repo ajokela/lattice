@@ -7265,3 +7265,157 @@ TEST(ref_lat544_concurrent_nested_push_no_uaf) {
                 "  assert(true, \"concurrent nested-element push through a shared Ref completes without UAF\")\n"
                 "}\n");
 }
+
+/* ── LAT-545: a non-idempotent index in a nested write-back is evaluated once ──
+ *
+ * A nested mutation reads the receiver/parent (evaluating each index level) and
+ * writes it back through the same chain. The two bytecode backends used to
+ * RE-evaluate the index in the write-back, so a side-effecting index fired
+ * twice and the read/write targeted different slots (silent data corruption).
+ * The fix evaluates each index level once and reuses it in the write-back.
+ *
+ * The tree-walker has a SEPARATE, pre-existing multi-evaluation of
+ * non-idempotent nested indices (it re-resolves the lvalue in per-shape phase
+ * checks) that is out of scope for LAT-545 — for index-/field-assign it even
+ * runs the index enough times to go out of bounds. So the strict evaluate-once
+ * assertions below are scoped to the two VM backends; the corruption-free and
+ * idempotent checks that follow run on all three. */
+TEST(lat545_nested_method_index_single_eval_vm) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("flux w = 0\n"
+                "fn pick() { w = w + 1; return w - 1 }\n"
+                "fn main() {\n"
+                "  flux outer = [[1], [2]]\n"
+                "  outer[pick()].push(99)\n"
+                "  assert(w == 1, \"method: index evaluated exactly once\")\n"
+                "  assert(outer[0].len() == 2 && outer[0][1] == 99, \"method: pushed into the read slot\")\n"
+                "  assert(outer[1].len() == 1 && outer[1][0] == 2, \"method: sibling slot untouched\")\n"
+                "}\n");
+}
+TEST(lat545_nested_index_assign_single_eval_vm) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("flux w = 0\n"
+                "fn pick() { w = w + 1; return w - 1 }\n"
+                "fn main() {\n"
+                "  flux ia = [[1], [2]]\n"
+                "  ia[pick()][0] = 99\n"
+                "  assert(w == 1, \"index-assign: index evaluated exactly once\")\n"
+                "  assert(ia[0][0] == 99, \"index-assign: wrote the read slot\")\n"
+                "  assert(ia[1][0] == 2, \"index-assign: sibling slot untouched\")\n"
+                "}\n");
+}
+TEST(lat545_nested_field_assign_single_eval_vm) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("struct Box { x: int }\n"
+                "flux w = 0\n"
+                "fn pick() { w = w + 1; return w - 1 }\n"
+                "fn main() {\n"
+                "  flux fa = [Box{x: 1}, Box{x: 2}]\n"
+                "  fa[pick()].x = 99\n"
+                "  assert(w == 1, \"field-assign: index evaluated exactly once\")\n"
+                "  assert(fa[0].x == 99, \"field-assign: wrote the read slot\")\n"
+                "  assert(fa[1].x == 2, \"field-assign: sibling slot untouched\")\n"
+                "}\n");
+}
+TEST(lat545_nested_multilevel_single_eval_vm) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("flux ca = 0\n"
+                "flux cb = 0\n"
+                "fn fa2() { ca = ca + 1; return ca - 1 }\n"
+                "fn fb2() { cb = cb + 1; return cb - 1 }\n"
+                "fn main() {\n"
+                "  flux g = [[[1], [2]], [[3], [4]]]\n"
+                "  g[fa2()][fb2()].push(99)\n"
+                "  assert(ca == 1 && cb == 1, \"multi-level: each index level evaluated once\")\n"
+                "  assert(g[0][0].len() == 2 && g[0][0][1] == 99, \"multi-level: pushed into read slot\")\n"
+                "  assert(g[0][1][0] == 2 && g[1][0][0] == 3, \"multi-level: siblings untouched\")\n"
+                "}\n");
+}
+TEST(lat545_nested_index_assign_via_binding_single_eval_vm) {
+    /* Same fix reached through a binding value (`let r = ...`) — still a
+     * statement-top expression, so the temp-local optimization applies. */
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("flux w = 0\n"
+                "fn pick() { w = w + 1; return w - 1 }\n"
+                "fn main() {\n"
+                "  flux outer = [[1], [2]]\n"
+                "  let _r = outer[pick()].push(99)\n"
+                "  assert(w == 1, \"binding-value method: index evaluated exactly once\")\n"
+                "  assert(outer[0][1] == 99 && outer[1][0] == 2, \"binding-value method: correct slot\")\n"
+                "}\n");
+}
+TEST(lat545_nested_optional_method_single_eval_vm) {
+    /* Optional-chaining receiver: the index must be evaluated once even though the
+     * optional nil-check reads the receiver too. Both VMs agree (w == 1). */
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_RUNS("flux w = 0\n"
+                "fn pick() { w = w + 1; return w - 1 }\n"
+                "fn main() {\n"
+                "  flux a = [[1], [2]]\n"
+                "  a[pick()]?.push(9)\n"
+                "  assert(w == 1, \"optional method: index evaluated exactly once\")\n"
+                "  assert(a[0].len() == 2 && a[0][1] == 9 && a[1][0] == 2, \"optional method: correct slot\")\n"
+                "}\n");
+}
+/* Corruption-free property that holds on ALL THREE backends: the fixed VMs and
+ * the tree-walker all read and write the SAME slot for a nested method mutation,
+ * so no element is copied across slots. This fails on the pre-fix VMs. */
+TEST(lat545_nested_method_no_cross_slot_corruption_all_backends) {
+    ASSERT_RUNS("flux w = 0\n"
+                "fn pick() { w = w + 1; return w - 1 }\n"
+                "fn main() {\n"
+                "  flux m = [[1], [2]]\n"
+                "  m[pick()].push(99)\n"
+                "  assert(m[0][0] == 1, \"m[0] head preserved\")\n"
+                "  assert(m[1][0] == 2, \"m[1] head preserved (no cross-slot copy)\")\n"
+                "  assert(m[0].len() + m[1].len() == 3, \"exactly one element pushed, nothing lost\")\n"
+                "}\n");
+}
+/* ── LAT-444: slice assignment through a nested index chain is rejected ──
+ *
+ * `g[0][1..2] = v` had no write-back for the intermediate clone: the C bytecode
+ * compilers silently no-op'd it and the self-hosted compiler faulted at runtime
+ * ("invalid index assignment"). Both bytecode compilers now reject it at compile
+ * time with an identical message. The tree-walker natively supports it
+ * (reference semantics) and is intentionally unchanged, so the compile-error
+ * assertion is scoped to the two VM backends. */
+TEST(lat444_nested_slice_assignment_rejected_vm) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_FAILS("fn main() {\n"
+                 "  flux g = [[1, 2, 3, 4], [5, 6, 7, 8]]\n"
+                 "  g[0][1..3] = [90, 91]\n"
+                 "}\n");
+}
+TEST(lat444_single_level_slice_assignment_still_works) {
+    ASSERT_RUNS("fn main() {\n"
+                "  flux g = [1, 2, 3, 4]\n"
+                "  g[1..3] = [90, 91]\n"
+                "  assert(g[0] == 1 && g[1] == 90 && g[2] == 91 && g[3] == 4, \"single-level slice assignment "
+                "mutates in place\")\n"
+                "  flux h = [1, 2, 3, 4]\n"
+                "  h[0..2] = [7]\n"
+                "  assert(h.len() == 3 && h[0] == 7 && h[1] == 3, \"single-level slice can change length\")\n"
+                "}\n");
+}
+
+/* Idempotent (variable/literal) indices are left untouched by the fix — the
+ * common nested write-back path must still be correct on every backend. */
+TEST(lat545_idempotent_index_nested_writeback_all_backends) {
+    ASSERT_RUNS("struct Box { x: int }\n"
+                "fn main() {\n"
+                "  flux k = 1\n"
+                "  flux mm = [[1], [2]]\n"
+                "  mm[k].push(9)\n"
+                "  assert(mm[1].len() == 2 && mm[1][1] == 9, \"idempotent index: method write-back\")\n"
+                "  flux ia = [[1], [2]]\n"
+                "  ia[k][0] = 7\n"
+                "  assert(ia[1][0] == 7 && ia[0][0] == 1, \"idempotent index: index-assign write-back\")\n"
+                "  flux fa = [Box{x: 1}, Box{x: 2}]\n"
+                "  fa[k].x = 5\n"
+                "  assert(fa[1].x == 5 && fa[0].x == 1, \"idempotent index: field-assign write-back\")\n"
+                "  flux g = [[[1], [2]], [[3], [4]]]\n"
+                "  g[1][0].push(8)\n"
+                "  assert(g[1][0].len() == 2 && g[1][0][1] == 8, \"idempotent: multi-level method write-back\")\n"
+                "  assert(g[0][0][0] == 1 && g[1][1][0] == 4, \"idempotent: siblings untouched\")\n"
+                "}\n");
+}

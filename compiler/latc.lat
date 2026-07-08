@@ -4188,8 +4188,26 @@ fn parse_nested_index_assignment(name: any, depth: any, line: any) {
     flux i = pos
     flux k = 0
     while k < depth {
+        // LAT-444: reject a slice within a nested index chain (g[0][1..2] = v).
+        // The chain's per-level OP_SET_INDEX cannot express a range write, so it
+        // would emit bytecode that faults at runtime ("invalid index assignment").
+        // Single-level slice (g[1..2] = v) never reaches here (depth < 2).
+        let close = find_matching_bracket(i)
+        flux j = i + 1
+        flux d = 0
+        while j < close {
+            let tt = tokens[j].type
+            if tt == "[" || tt == "(" {
+                d = d + 1
+            } else { if tt == "]" || tt == ")" {
+                d = d - 1
+            } else { if tt == ".." && d == 0 {
+                compiler_error("slice assignment through a nested index chain is not supported", line)
+            } } }
+            j = j + 1
+        }
         spans.push(i + 1)
-        i = find_matching_bracket(i) + 1
+        i = close + 1
         k = k + 1
     }
     pos = i

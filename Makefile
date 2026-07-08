@@ -424,7 +424,7 @@ LATC_TESTS = latc_roundtrip latc_structs latc_match latc_new_features latc_trait
              latc_match_enum latc_match_test latc_try_test \
              latc_from_import_test latc_scope_test \
              latc_defer_test latc_select_test latc_type_check latc_variadic_defaults latc_optimized_ops \
-             latc_test_blocks latc_nested_index
+             latc_test_blocks latc_nested_index latc_slice
 
 test-latc: $(TARGET)
 	@PASS=0; FAIL=0; \
@@ -481,6 +481,19 @@ test-latc: $(TARGET)
 	done; \
 	PASS=$$((PASS + DPASS)); \
 	FAIL=$$((FAIL + DFAIL)); \
+	echo ""; \
+	echo "--- Compile-error rejection (LAT-444) ---"; \
+	printf "%-30s" "reject:nested_slice..."; \
+	printf 'flux g = [[1,2,3,4],[5,6,7,8]]\ng[0][1..3] = [90, 91]\n' > /tmp/latc_nested_slice.lat; \
+	CE_OUT=$$(./$(TARGET) compiler/latc.lat /tmp/latc_nested_slice.lat /tmp/latc_nested_slice.latc 2>&1); \
+	if [ $$? -ne 0 ] && echo "$$CE_OUT" | grep -q "slice assignment through a nested index chain is not supported"; then \
+		echo "PASS"; \
+		PASS=$$((PASS + 1)); \
+	else \
+		echo "FAIL (expected compile error, got: $$CE_OUT)"; \
+		FAIL=$$((FAIL + 1)); \
+	fi; \
+	rm -f /tmp/latc_nested_slice.lat /tmp/latc_nested_slice.latc; \
 	echo ""; \
 	echo "Results: $$PASS passed, $$FAIL failed"; \
 	if [ $$FAIL -gt 0 ]; then exit 1; fi

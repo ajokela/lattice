@@ -58,6 +58,13 @@ typedef struct RegCompiler {
 static RegCompiler *rc = NULL; /* Current compiler */
 static char *rc_error = NULL;
 
+/* LAT-545: true only while compiling the top-level expression of a statement.
+ * Captured/cleared at the top of compile_expr so only the outermost expression
+ * observes it. Gates the nested-method-call write-back single-eval optimization
+ * to the same statement-top contexts as the stack VM, keeping the two backends
+ * consistent for the (rare) embedded-mutating-call case. */
+static bool g_reg_stmt_tos = false;
+
 /* Track known enums (same as stack compiler) */
 static char **rc_known_enums = NULL;
 static size_t rc_known_enum_count = 0;
@@ -397,6 +404,84 @@ static void compile_expr(const Expr *e, uint8_t dst, int line);
 static void compile_stmt(const Stmt *s);
 static void emit_index_writeback(Expr *node, uint8_t modified_reg, int line);
 
+/* ── LAT-545: single-evaluation of non-idempotent indices in write-backs ──
+ * See the matching comment in src/stackcompiler.c. A nested mutation reads the
+ * receiver/parent (evaluating each index level) and writes it back through the
+ * same chain (re-evaluating them); for a side-effecting index the read and
+ * write-back target different slots and the effect fires twice. Fix: evaluate
+ * each non-idempotent index level once into a register, bind it to a synthetic
+ * identifier, and rewrite the AST index child so read + write-back reuse it. */
+
+static bool index_expr_idempotent(const Expr *ix) {
+    switch (ix->tag) {
+        case EXPR_INT_LIT:
+        case EXPR_FLOAT_LIT:
+        case EXPR_BOOL_LIT:
+        case EXPR_STRING_LIT:
+        case EXPR_NIL_LIT:
+        case EXPR_IDENT: return true;
+        default: return false;
+    }
+}
+
+/* True if any index level of chain `chain` is non-idempotent. */
+static bool chain_has_impure_index(const Expr *chain) {
+    for (const Expr *n = chain; n && n->tag == EXPR_INDEX; n = n->as.index.object) {
+        if (!index_expr_idempotent(n->as.index.index)) return true;
+    }
+    return false;
+}
+
+#define IDX_HOIST_MAX 16
+static unsigned g_reg_idx_hoist_counter = 0;
+
+typedef struct {
+    Expr *nodes[IDX_HOIST_MAX]; /* EXPR_INDEX node whose index child was rewritten */
+    Expr *orig[IDX_HOIST_MAX];  /* saved original index child */
+    Expr idents[IDX_HOIST_MAX]; /* synthetic replacement EXPR_IDENT nodes */
+    char names[IDX_HOIST_MAX][32];
+    int count;
+    size_t saved_local_count;
+    uint8_t saved_next_reg;
+} RegIdxHoist;
+
+/* Evaluate each non-idempotent index level of `chain` once into a fresh register
+ * (bound to a unique synthetic-name local) and rewrite the AST index child to a
+ * synthetic EXPR_IDENT referencing it. reg_idx_hoist_end restores the AST, pops
+ * the synthetic locals, and reclaims the registers. */
+static void reg_idx_hoist_begin(RegIdxHoist *h, Expr *chain, int line) {
+    h->count = 0;
+    h->saved_local_count = rc->local_count;
+    h->saved_next_reg = rc->next_reg;
+    unsigned tag = g_reg_idx_hoist_counter++;
+    Expr *chstack[IDX_HOIST_MAX];
+    int n = 0;
+    for (Expr *nd = chain; nd && nd->tag == EXPR_INDEX && n < IDX_HOIST_MAX; nd = nd->as.index.object)
+        chstack[n++] = nd;
+    for (int i = n - 1; i >= 0; i--) {
+        Expr *nd = chstack[i];
+        if (index_expr_idempotent(nd->as.index.index)) continue;
+        if (h->count >= IDX_HOIST_MAX) break;
+        int k = h->count;
+        snprintf(h->names[k], sizeof(h->names[k]), "$idxh%u_%d", tag, k);
+        uint8_t reg = add_local(h->names[k]);        /* dedicated register, held until end */
+        compile_expr(nd->as.index.index, reg, line); /* evaluate ONCE */
+        h->idents[k].tag = EXPR_IDENT;
+        h->idents[k].line = line;
+        h->idents[k].as.str_val = h->names[k];
+        h->nodes[k] = nd;
+        h->orig[k] = nd->as.index.index;
+        nd->as.index.index = &h->idents[k];
+        h->count++;
+    }
+}
+
+static void reg_idx_hoist_end(RegIdxHoist *h) {
+    for (int k = 0; k < h->count; k++) h->nodes[k]->as.index.index = h->orig[k];
+    while (rc->local_count > h->saved_local_count) free(rc->locals[--rc->local_count].name);
+    free_regs_to(h->saved_next_reg);
+}
+
 /* True when an EXPR_INDEX chain bottoms out at a named variable — the only base
  * emit_index_writeback can actually store back to. For a non-writable base (a
  * call result, a field access, ...) the write-back chain emits nothing at its
@@ -631,6 +716,11 @@ static void emit_folded_constant(LatValue folded, uint8_t dst, int line) {
 static void compile_expr(const Expr *e, uint8_t dst, int line) {
     if (rc_error) return;
     if (e->line > 0) line = e->line;
+
+    /* LAT-545: capture-and-clear so only the outermost expression of a statement
+     * observes the clean-context flag; every nested compile_expr sees false. */
+    bool at_tos = g_reg_stmt_tos;
+    g_reg_stmt_tos = false;
 
     switch (e->tag) {
         case EXPR_INT_LIT: {
@@ -1509,6 +1599,21 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         }
 
         case EXPR_METHOD_CALL: {
+            /* LAT-545: for a nested-element mutating call through a chain with a
+             * side-effecting index, evaluate each impure index level once (into a
+             * held register) so the optional nil-check, the receiver read, and the
+             * write-back all reuse it. Hoisted at the top (before the optional
+             * nil-check) so the nil-check does not re-evaluate the index. Gated on
+             * at_tos to mirror the stack VM (which needs a clean stack). When
+             * hoisting, the object is an EXPR_INDEX, so the IDENT global/local fast
+             * paths below are never taken and control always reaches the matching
+             * reg_idx_hoist_end in the expression-object path. */
+            Expr *mc_obj = e->as.method_call.object;
+            bool mc_hoist =
+                at_tos && mc_obj->tag == EXPR_INDEX && index_chain_writable(mc_obj) && chain_has_impure_index(mc_obj);
+            RegIdxHoist mc_h;
+            if (mc_hoist) reg_idx_hoist_begin(&mc_h, mc_obj, line);
+
             /* Optional chaining: obj?.method() — if obj is nil, return nil */
             size_t opt_skip = 0;
             if (e->as.method_call.optional) {
@@ -1663,6 +1768,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 else free_regs_to(args_base);
                 if (obj_allocated) free_reg(obj_reg);
             }
+            if (mc_hoist) reg_idx_hoist_end(&mc_h);
             if (opt_skip) patch_jmp(opt_skip);
             break;
         }
@@ -2808,6 +2914,7 @@ static void compile_stmt(const Stmt *s) {
         case STMT_EXPR: {
             /* Compile expression, result goes into a temporary that we free */
             uint8_t tmp = alloc_reg();
+            g_reg_stmt_tos = true; /* LAT-545: statement-top expression */
             compile_expr(s->as.expr, tmp, line);
             free_reg(tmp);
             break;
@@ -2817,16 +2924,20 @@ static void compile_stmt(const Stmt *s) {
             if (rc->scope_depth > 0) {
                 /* Local variable: allocate a register */
                 uint8_t reg = add_local(s->as.binding.name);
-                if (s->as.binding.value) compile_expr(s->as.binding.value, reg, line);
-                else emit_ABC(ROP_LOADNIL, reg, 0, 0, line);
+                if (s->as.binding.value) {
+                    g_reg_stmt_tos = true; /* LAT-545 */
+                    compile_expr(s->as.binding.value, reg, line);
+                } else emit_ABC(ROP_LOADNIL, reg, 0, 0, line);
 
                 if (s->as.binding.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, reg, 0, 0, line);
                 else if (s->as.binding.phase == PHASE_CRYSTAL) emit_ABC(ROP_FREEZE, reg, reg, 0, line);
             } else {
                 /* Global variable */
                 uint8_t tmp = alloc_reg();
-                if (s->as.binding.value) compile_expr(s->as.binding.value, tmp, line);
-                else emit_ABC(ROP_LOADNIL, tmp, 0, 0, line);
+                if (s->as.binding.value) {
+                    g_reg_stmt_tos = true; /* LAT-545 */
+                    compile_expr(s->as.binding.value, tmp, line);
+                } else emit_ABC(ROP_LOADNIL, tmp, 0, 0, line);
 
                 if (s->as.binding.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, tmp, 0, 0, line);
                 else if (s->as.binding.phase == PHASE_CRYSTAL) emit_ABC(ROP_FREEZE, tmp, tmp, 0, line);
@@ -2839,6 +2950,7 @@ static void compile_stmt(const Stmt *s) {
         }
 
         case STMT_ASSIGN: {
+            g_reg_stmt_tos = true; /* LAT-545: the assigned value is a statement-top expr */
             if (s->as.assign.target->tag == EXPR_IDENT) {
                 const char *name = s->as.assign.target->as.str_val;
                 int local = resolve_local(rc, name);
@@ -2879,6 +2991,15 @@ static void compile_stmt(const Stmt *s) {
                 Expr *target = s->as.assign.target;
                 uint8_t val_reg = alloc_reg();
                 compile_expr(s->as.assign.value, val_reg, line);
+
+                /* LAT-545: `arr[f()].x = v` — the object chain's impure indices are
+                 * evaluated by both the read (into obj_reg) and the write-back;
+                 * hoist them so each fires once and read/write-back agree. */
+                bool fa_hoist = target->as.field_access.object->tag == EXPR_INDEX &&
+                                index_chain_writable(target->as.field_access.object) &&
+                                chain_has_impure_index(target->as.field_access.object);
+                RegIdxHoist fa_h;
+                if (fa_hoist) reg_idx_hoist_begin(&fa_h, target->as.field_access.object, line);
 
                 /* Get the object register */
                 uint8_t obj_reg;
@@ -2922,12 +3043,22 @@ static void compile_stmt(const Stmt *s) {
                     emit_index_writeback(target->as.field_access.object, obj_reg, line);
                     free_reg(obj_reg);
                 }
+                if (fa_hoist) reg_idx_hoist_end(&fa_h); /* reclaim cached-index regs */
                 free_reg(val_reg);
             } else if (s->as.assign.target->tag == EXPR_INDEX &&
                        s->as.assign.target->as.index.index->tag == EXPR_RANGE) {
                 /* Slice assignment: arr[start..end] = rhs_array */
                 Expr *target = s->as.assign.target;
                 Expr *range_expr = target->as.index.index;
+
+                /* LAT-444: reject a slice assignment through a nested index chain
+                 * (g[0][1..2] = v) — the intermediate clone has no write-back, so
+                 * it would silently no-op. Single-level slice (g[1..2]) is fine. */
+                if (target->as.index.object->tag == EXPR_INDEX) {
+                    if (!rc_error) rc_error = strdup("slice assignment through a nested index chain is not supported");
+                    break;
+                }
+
                 uint8_t val_reg = alloc_reg();
                 compile_expr(s->as.assign.value, val_reg, line);
 
@@ -2974,6 +3105,14 @@ static void compile_stmt(const Stmt *s) {
                 uint8_t val_reg = alloc_reg();
                 compile_expr(s->as.assign.value, val_reg, line);
 
+                /* LAT-545: `m[f()][j] = v` — the parent chain's impure indices are
+                 * evaluated by both the read (into obj_reg) and the write-back;
+                 * hoist them so each fires once and read/write-back agree. */
+                bool ia_hoist =
+                    target->as.index.object->tag == EXPR_INDEX && chain_has_impure_index(target->as.index.object);
+                RegIdxHoist ia_h;
+                if (ia_hoist) reg_idx_hoist_begin(&ia_h, target->as.index.object, line);
+
                 uint8_t obj_reg;
                 bool obj_is_local = false;
                 if (target->as.index.object->tag == EXPR_IDENT) {
@@ -3010,6 +3149,7 @@ static void compile_stmt(const Stmt *s) {
                     free_reg(obj_reg);
                 }
                 free_reg(idx_reg);
+                if (ia_hoist) reg_idx_hoist_end(&ia_h); /* reclaim cached-index regs */
                 free_reg(val_reg);
             }
             break;
@@ -3017,8 +3157,10 @@ static void compile_stmt(const Stmt *s) {
 
         case STMT_RETURN: {
             uint8_t ret_reg = alloc_reg();
-            if (s->as.return_expr) compile_expr(s->as.return_expr, ret_reg, line);
-            else emit_ABC(ROP_LOADUNIT, ret_reg, 0, 0, line);
+            if (s->as.return_expr) {
+                g_reg_stmt_tos = true; /* LAT-545 */
+                compile_expr(s->as.return_expr, ret_reg, line);
+            } else emit_ABC(ROP_LOADUNIT, ret_reg, 0, 0, line);
             emit_postconditions(ret_reg, line);
             emit_return(ret_reg, line);
             free_reg(ret_reg);

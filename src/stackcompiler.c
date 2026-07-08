@@ -9,6 +9,14 @@
 static Compiler *current = NULL;
 static char *compile_error = NULL;
 
+/* LAT-545: true only while compiling the top-level expression of a statement,
+ * where the value stack is clean-adjacent (top == local_count). Captured and
+ * cleared at the very top of compile_expr, so only the outermost expression
+ * observes it; every nested compile_expr sees false. The nested-method-call
+ * write-back optimization uses temp locals, which are safe to claim only at a
+ * clean-adjacent stack point — so it consults this flag. */
+static bool g_stmt_tos_expr = false;
+
 /* Set a compile error with line info in "line:1: message" format.
  * The line parameter is 1-based (from AST s->line). */
 static void set_compile_error(int line, const char *msg) {
@@ -292,6 +300,94 @@ static void compile_expr(const Expr *e, int line);
 static void compile_stmt(const Stmt *s);
 static void emit_index_write_back(Expr *node, int line);
 
+/* ── LAT-545: single-evaluation of non-idempotent indices in write-backs ──
+ *
+ * A nested mutation (arr[f()][j]=v, arr[f()].push(x), arr[f()].x=v) reads the
+ * receiver/parent — evaluating each index level — and then writes it back
+ * through the SAME chain, which RE-evaluates every index level. For a
+ * side-effecting index f() the read and the write-back would target different
+ * slots and fire the side effect twice, diverging from evaluate-once semantics
+ * (silently corrupting data: the element read is not the element written).
+ *
+ * Fix: before the read, evaluate each non-idempotent index level exactly once
+ * into a temp local and rewrite the AST index child to a synthetic identifier
+ * bound to that temp. The read and the write-back then both compile the
+ * synthetic identifier (a plain local load), so each index is evaluated once
+ * and read/write-back agree. The rewrite is reverted afterward. Idempotent
+ * indices (literals, identifiers) are left untouched — zero codegen change for
+ * the common case. */
+
+static bool index_expr_idempotent(const Expr *ix) {
+    switch (ix->tag) {
+        case EXPR_INT_LIT:
+        case EXPR_FLOAT_LIT:
+        case EXPR_BOOL_LIT:
+        case EXPR_STRING_LIT:
+        case EXPR_NIL_LIT:
+        case EXPR_IDENT: return true;
+        default: return false;
+    }
+}
+
+/* True if any index level of the read/write-back chain `chain` (an EXPR_INDEX)
+ * is non-idempotent, so that read + write-back would double-evaluate it. */
+static bool chain_has_impure_index(const Expr *chain) {
+    for (const Expr *n = chain; n && n->tag == EXPR_INDEX; n = n->as.index.object) {
+        if (!index_expr_idempotent(n->as.index.index)) return true;
+    }
+    return false;
+}
+
+#define IDX_HOIST_MAX 16
+static unsigned g_idx_hoist_counter = 0;
+
+typedef struct {
+    Expr *nodes[IDX_HOIST_MAX]; /* EXPR_INDEX node whose index child was rewritten */
+    Expr *orig[IDX_HOIST_MAX];  /* saved original index child */
+    Expr idents[IDX_HOIST_MAX]; /* synthetic replacement EXPR_IDENT nodes */
+    char names[IDX_HOIST_MAX][32];
+    int count;
+} IdxHoist;
+
+/* Evaluate each non-idempotent index level of `chain` once into a fresh temp
+ * local (bound to a unique synthetic name) and rewrite the AST index child to a
+ * synthetic EXPR_IDENT referencing it. Precondition: the value stack is
+ * clean-adjacent (top == local_count) so each add_local claims exactly the value
+ * just pushed. The caller must have opened a scope that end_scope[_preserve_tos]
+ * will later close (popping the temps), and must call idx_hoist_restore after
+ * emitting the read + write-back. */
+static void idx_hoist_apply(IdxHoist *h, Expr *chain, int line) {
+    h->count = 0;
+    unsigned tag = g_idx_hoist_counter++;
+    /* Collect index nodes outer→base, then evaluate base-adjacent first so the
+     * indices fire in source order (a[f()][g()]: f() before g()). */
+    Expr *chstack[IDX_HOIST_MAX];
+    int n = 0;
+    for (Expr *nd = chain; nd && nd->tag == EXPR_INDEX && n < IDX_HOIST_MAX; nd = nd->as.index.object)
+        chstack[n++] = nd;
+    for (int i = n - 1; i >= 0; i--) {
+        Expr *nd = chstack[i];
+        if (index_expr_idempotent(nd->as.index.index)) continue;
+        if (h->count >= IDX_HOIST_MAX) break;
+        int k = h->count;
+        snprintf(h->names[k], sizeof(h->names[k]), "$idxh%u_%d", tag, k);
+        compile_expr(nd->as.index.index, line); /* evaluate ONCE */
+        add_local(h->names[k]);                 /* claim the pushed value as a temp local */
+        h->idents[k].tag = EXPR_IDENT;
+        h->idents[k].line = line;
+        h->idents[k].as.str_val = h->names[k];
+        h->nodes[k] = nd;
+        h->orig[k] = nd->as.index.index;
+        nd->as.index.index = &h->idents[k];
+        h->count++;
+    }
+}
+
+/* Revert the AST index-child rewrites made by idx_hoist_apply. */
+static void idx_hoist_restore(IdxHoist *h) {
+    for (int k = 0; k < h->count; k++) h->nodes[k]->as.index.index = h->orig[k];
+}
+
 /* Mutator pre-filter (LAT-544): the union of every method name for which
  * builtin_method_mutates() can return true across all container types. A name
  * passing this filter MIGHT be a real in-place mutation at runtime, so
@@ -533,6 +629,12 @@ static bool try_const_fold(const Expr *e, LatValue *out) {
 static void compile_expr(const Expr *e, int line) {
     if (compile_error) return;
     if (e->line > 0) line = e->line;
+
+    /* LAT-545: capture-and-clear the statement-top flag so only THIS (outermost)
+     * expression sees a clean-adjacent stack; every nested compile_expr sees
+     * false. Used by the nested-method-call write-back optimization below. */
+    bool at_tos = g_stmt_tos_expr;
+    g_stmt_tos_expr = false;
 
     switch (e->tag) {
         case EXPR_INT_LIT:
@@ -1006,6 +1108,20 @@ static void compile_expr(const Expr *e, int line) {
                 size_t midx = chunk_add_constant(current_chunk(), value_string(e->as.method_call.method));
                 if (midx <= 255) {
                     Expr *obj_expr = e->as.method_call.object;
+                    /* LAT-545: evaluate non-idempotent index levels once (into temp
+                     * locals) so the receiver read and the write-back below use the
+                     * same slot. Only when this method call is a statement-top
+                     * expression (at_tos ⇒ clean-adjacent stack) is claiming temp
+                     * locals safe; otherwise fall back to the plain path (which
+                     * re-evaluates, matching pre-existing behavior for the rare
+                     * embedded case). */
+                    IdxHoist mh;
+                    mh.count = 0;
+                    bool mhoist = at_tos && chain_has_impure_index(obj_expr);
+                    if (mhoist) {
+                        begin_scope();
+                        idx_hoist_apply(&mh, obj_expr, line);
+                    }
                     compile_expr(obj_expr, line);
                     size_t mut_end_jump = 0;
                     if (opt) {
@@ -1026,6 +1142,10 @@ static void compile_expr(const Expr *e, int line) {
                      * 2-byte operand — exactly the value frame->ip += skip_len needs. */
                     patch_jump(skip_patch);
                     if (opt) patch_jump(mut_end_jump);
+                    if (mhoist) {
+                        idx_hoist_restore(&mh);
+                        end_scope_preserve_tos(line); /* keep the method result, drop temps */
+                    }
                     break;
                 }
                 /* else: method-name constant > 255 — fall through to generic OP_INVOKE. */
@@ -2420,13 +2540,16 @@ static void compile_stmt(const Stmt *s) {
     int line = s->line;
     switch (s->tag) {
         case STMT_EXPR:
+            g_stmt_tos_expr = true; /* LAT-545: clean-adjacent stack at statement top */
             compile_expr(s->as.expr, line);
             emit_byte(OP_POP, line);
             break;
 
         case STMT_BINDING: {
-            if (s->as.binding.value) compile_expr(s->as.binding.value, line);
-            else emit_byte(OP_NIL, line);
+            if (s->as.binding.value) {
+                g_stmt_tos_expr = true; /* LAT-545 */
+                compile_expr(s->as.binding.value, line);
+            } else emit_byte(OP_NIL, line);
 
             /* Apply phase tag for flux/fix declarations */
             if (s->as.binding.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
@@ -2478,6 +2601,7 @@ static void compile_stmt(const Stmt *s) {
             }
 
             bool skip_pop = false;
+            g_stmt_tos_expr = true; /* LAT-545: clean-adjacent stack at statement top */
             compile_expr(s->as.assign.value, line);
             if (s->as.assign.target->tag == EXPR_IDENT) {
                 const char *name = s->as.assign.target->as.str_val;
@@ -2495,35 +2619,57 @@ static void compile_stmt(const Stmt *s) {
                     }
                 }
             } else if (s->as.assign.target->tag == EXPR_FIELD_ACCESS) {
-                compile_expr(s->as.assign.target->as.field_access.object, line);
+                Expr *obj_expr = s->as.assign.target->as.field_access.object;
                 size_t idx =
                     chunk_add_constant(current_chunk(), value_string(s->as.assign.target->as.field_access.field));
-                emit_op_const8(OP_SET_FIELD, idx, line);
-                /* Write back the modified object to the variable */
-                Expr *obj_expr = s->as.assign.target->as.field_access.object;
-                if (obj_expr->tag == EXPR_IDENT) {
-                    const char *name = obj_expr->as.str_val;
-                    int slot = resolve_local(current, name);
-                    if (slot >= 0) {
-                        emit_bytes(OP_SET_LOCAL, (uint8_t)slot, line);
-                    } else {
-                        int upvalue = resolve_upvalue(current, name);
-                        if (upvalue >= 0) {
-                            emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
-                        } else {
-                            size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
-                            emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
-                        }
-                    }
-                } else if (obj_expr->tag == EXPR_INDEX && index_chain_writable(obj_expr)) {
-                    /* Nested element field-assign (LAT-544): `obj[i].x = v`. A
-                     * field-assign is always a genuine in-place element mutation
-                     * (no runtime classifier needed). After OP_SET_FIELD the stack
-                     * is [modified_struct]; emit_index_write_back stores it back
-                     * through the full local/global/upvalue/nesting chain and is
-                     * net -1, so skip the trailing OP_POP. */
+                if (obj_expr->tag == EXPR_INDEX && index_chain_writable(obj_expr) && chain_has_impure_index(obj_expr)) {
+                    /* LAT-545: `arr[f()].x = v` through a nested index chain. The
+                     * value is already on the stack; claim it as a temp local so
+                     * the stack is clean, evaluate the impure index levels once
+                     * into temps, then re-push the value and run the read +
+                     * SET_FIELD + write-back with cached indices (single eval). */
+                    begin_scope();
+                    char vn[32];
+                    snprintf(vn, sizeof(vn), "$idxv%u", g_idx_hoist_counter);
+                    add_local(vn); /* claim value (stack top→local) */
+                    int vslot = (int)current->local_count - 1;
+                    IdxHoist h;
+                    idx_hoist_apply(&h, obj_expr, line);
+                    emit_bytes(OP_GET_LOCAL, (uint8_t)vslot, line); /* re-push value */
+                    compile_expr(obj_expr, line);
+                    emit_op_const8(OP_SET_FIELD, idx, line);
                     emit_index_write_back(obj_expr, line);
+                    idx_hoist_restore(&h);
+                    end_scope(line);
                     skip_pop = true;
+                } else {
+                    compile_expr(obj_expr, line);
+                    emit_op_const8(OP_SET_FIELD, idx, line);
+                    /* Write back the modified object to the variable */
+                    if (obj_expr->tag == EXPR_IDENT) {
+                        const char *name = obj_expr->as.str_val;
+                        int slot = resolve_local(current, name);
+                        if (slot >= 0) {
+                            emit_bytes(OP_SET_LOCAL, (uint8_t)slot, line);
+                        } else {
+                            int upvalue = resolve_upvalue(current, name);
+                            if (upvalue >= 0) {
+                                emit_bytes(OP_SET_UPVALUE, (uint8_t)upvalue, line);
+                            } else {
+                                size_t gidx = chunk_add_constant(current_chunk(), value_string(name));
+                                emit_constant_idx(OP_SET_GLOBAL, OP_SET_GLOBAL_16, gidx, line);
+                            }
+                        }
+                    } else if (obj_expr->tag == EXPR_INDEX && index_chain_writable(obj_expr)) {
+                        /* Nested element field-assign (LAT-544): `obj[i].x = v`. A
+                         * field-assign is always a genuine in-place element mutation
+                         * (no runtime classifier needed). After OP_SET_FIELD the stack
+                         * is [modified_struct]; emit_index_write_back stores it back
+                         * through the full local/global/upvalue/nesting chain and is
+                         * net -1, so skip the trailing OP_POP. */
+                        emit_index_write_back(obj_expr, line);
+                        skip_pop = true;
+                    }
                 }
             } else if (s->as.assign.target->tag == EXPR_INDEX &&
                        s->as.assign.target->as.index.index->tag == EXPR_RANGE) {
@@ -2531,6 +2677,16 @@ static void compile_stmt(const Stmt *s) {
                 Expr *target = s->as.assign.target;
                 Expr *range_expr = target->as.index.index;
                 /* Stack has: [val] from compile_expr(value) above */
+
+                /* LAT-444: a slice assignment through a nested index chain
+                 * (g[0][1..2] = v) has no write-back for the intermediate clone,
+                 * so it silently no-ops. Reject it at compile time with the same
+                 * message the self-hosted compiler emits, rather than compiling a
+                 * silently-wrong mutation. Single-level slice (g[1..2]) is fine. */
+                if (target->as.index.object->tag == EXPR_INDEX) {
+                    set_compile_error(line, "slice assignment through a nested index chain is not supported");
+                    break;
+                }
 
                 /* Check if object is a local variable (fast path) */
                 if (target->as.index.object->tag == EXPR_IDENT) {
@@ -2587,10 +2743,33 @@ static void compile_stmt(const Stmt *s) {
                 /* Nested index (e.g. m[i][j] = val): compile intermediate,
                  * SET_INDEX, then write-back chain to root variable */
                 if (target->as.index.object->tag == EXPR_INDEX) {
-                    compile_expr(target->as.index.object, line);
+                    Expr *obj_chain = target->as.index.object;
+                    if (chain_has_impure_index(obj_chain)) {
+                        /* LAT-545: the parent chain's impure indices are evaluated
+                         * by both the read (compile_expr) and the write-back; hoist
+                         * them so each fires once and read/write-back agree. Value
+                         * is on the stack — claim it, hoist, re-push, then run the
+                         * unchanged read + SET_INDEX + write-back. */
+                        begin_scope();
+                        char vn[32];
+                        snprintf(vn, sizeof(vn), "$idxv%u", g_idx_hoist_counter);
+                        add_local(vn); /* claim value (stack top→local) */
+                        int vslot = (int)current->local_count - 1;
+                        IdxHoist h;
+                        idx_hoist_apply(&h, obj_chain, line);
+                        emit_bytes(OP_GET_LOCAL, (uint8_t)vslot, line); /* re-push value */
+                        compile_expr(obj_chain, line);
+                        compile_expr(target->as.index.index, line);
+                        emit_byte(OP_SET_INDEX, line);
+                        emit_index_write_back(obj_chain, line);
+                        idx_hoist_restore(&h);
+                        end_scope(line);
+                        break;
+                    }
+                    compile_expr(obj_chain, line);
                     compile_expr(target->as.index.index, line);
                     emit_byte(OP_SET_INDEX, line);
-                    emit_index_write_back(target->as.index.object, line);
+                    emit_index_write_back(obj_chain, line);
                     break; /* write-back handles everything, skip OP_POP */
                 }
                 /* Fallback: non-local single-level index (global/upvalue) */
@@ -2614,8 +2793,10 @@ static void compile_stmt(const Stmt *s) {
         }
 
         case STMT_RETURN:
-            if (s->as.return_expr) compile_expr(s->as.return_expr, line);
-            else emit_byte(OP_UNIT, line);
+            if (s->as.return_expr) {
+                g_stmt_tos_expr = true; /* LAT-545 */
+                compile_expr(s->as.return_expr, line);
+            } else emit_byte(OP_UNIT, line);
             emit_return_type_check(line);
             emit_ensure_checks(line);
             emit_byte(OP_DEFER_RUN, line);
