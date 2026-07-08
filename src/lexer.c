@@ -806,7 +806,9 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
             }
 
             if (depth != 0) {
-                free(buf);
+                /* buf is already owned by the segment token pushed above;
+                 * lexer_tokenize's error cleanup frees it via token_free.
+                 * Freeing it here would double-free it. */
                 free(dedented);
                 *err = NULL;
                 lat_asprintf(err, "%zu:%zu: unterminated interpolation in triple-quoted string", line, col);
@@ -825,8 +827,9 @@ static bool lex_triple_quote_string(Lexer *lex, LatVec *tokens, char **err) {
                 skip_whitespace_and_comments(&expr_lex);
                 if (expr_lex.pos >= expr_lex.len) break;
                 if (!lex_one(&expr_lex, tokens, err)) {
+                    /* buf is owned by the segment token pushed above; do not
+                     * free it here or lexer_tokenize's cleanup double-frees it. */
                     free(expr_src);
-                    free(buf);
                     free(dedented);
                     return false;
                 }
