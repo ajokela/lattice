@@ -3295,6 +3295,24 @@ static bool stackvm_struct_field_arity_ok(StackVM *vm, const Chunk *fn_chunk, in
     return true;
 }
 
+/* LAT-566: the struct-field invoke fast paths inject self and set up the callee
+ * frame directly, bypassing stackvm_adjust_call_args — so they never fill the
+ * slots of omitted default parameters, leaving them as uninitialized stack data
+ * (observed as 0). Push the declared default values for the missing trailing
+ * params onto the stack (on top of the contiguous user args) and return the
+ * updated non-self arg count so the prong's self-shift lays them out correctly.
+ * Call AFTER the arity check and BEFORE the self-injection shift. */
+static int stackvm_pad_struct_field_defaults(StackVM *vm, const Chunk *fn_chunk, const LatValue *field, int arg_count) {
+    int pc = (int)field->as.closure.param_count;
+    int dc = fn_chunk->default_count;
+    if (fn_chunk->fn_has_variadic || dc <= 0 || !fn_chunk->default_values) return arg_count;
+    int required = pc - dc;       /* params before the first defaulted one (incl. self) */
+    int provided = arg_count + 1; /* user args + injected self */
+    if (provided >= pc) return arg_count;
+    for (int pi = provided; pi < pc; pi++) push(vm, value_clone_fast(&fn_chunk->default_values[pi - required]));
+    return pc - 1; /* all non-self params now present */
+}
+
 /* Dispatch pointer adapters for LatRuntime */
 static LatValue stackvm_dispatch_call_closure(void *vm_ptr, LatValue *closure, LatValue *args, int argc) {
     StackVM *vm = (StackVM *)vm_ptr;
@@ -3412,6 +3430,7 @@ static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame
                 assert(!REGION_IS_SHARED_ID(obj->region_id));
                 LatValue self_copy = value_deep_clone(obj);
                 LatValue closure_copy = value_deep_clone(field);
+                arg_count = stackvm_pad_struct_field_defaults(vm, fn_chunk, field, arg_count); /* LAT-566 */
                 /* Shift args up by 1 to make room for self */
                 push(vm, value_nil());
                 for (int si = arg_count; si >= 1; si--) obj[si + 1] = obj[si];
@@ -5646,6 +5665,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         LatValue self_copy = value_deep_clone(obj);
                         LatValue closure_copy = value_deep_clone(field);
                         LatValue *arg_base = vm->stack_top - arg_count;
+                        arg_count = stackvm_pad_struct_field_defaults(vm, fn_chunk, field, arg_count); /* LAT-566 */
                         push(vm, value_nil());
                         push(vm, value_nil());
                         for (int si = arg_count - 1; si >= 0; si--) arg_base[si + 2] = arg_base[si];
@@ -5937,6 +5957,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         stackvm_promote_frame_ephemerals(vm, frame);
                         LatValue self_copy = value_deep_clone(obj);
                         LatValue closure_copy = value_deep_clone(field);
+                        arg_count = stackvm_pad_struct_field_defaults(vm, fn_chunk, field, arg_count); /* LAT-566 */
                         push(vm, value_nil());
                         for (int si = arg_count; si >= 1; si--) obj[si + 1] = obj[si];
                         obj[1] = self_copy;
@@ -6157,6 +6178,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         LatValue self_copy = value_deep_clone(obj);
                         LatValue closure_copy = value_deep_clone(field);
                         LatValue *arg_base = vm->stack_top - arg_count;
+                        arg_count = stackvm_pad_struct_field_defaults(vm, fn_chunk, field, arg_count); /* LAT-566 */
                         push(vm, value_nil());
                         push(vm, value_nil());
                         for (int si = arg_count - 1; si >= 0; si--) arg_base[si + 2] = arg_base[si];
@@ -6428,6 +6450,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         stackvm_promote_frame_ephemerals(vm, frame);
                         LatValue self_copy = value_deep_clone(obj);
                         LatValue closure_copy = value_deep_clone(field);
+                        arg_count = stackvm_pad_struct_field_defaults(vm, fn_chunk, field, arg_count); /* LAT-566 */
                         push(vm, value_nil());
                         for (int si = arg_count; si >= 1; si--) obj[si + 1] = obj[si];
                         obj[1] = self_copy;

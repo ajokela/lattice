@@ -6541,6 +6541,22 @@ TEST(phase_contract_default_param_struct_field_arity_ok) {
                 "print(h.f())\n");
 }
 
+/* LAT-566: a callable struct field whose closure has a default parameter,
+ * invoked with fewer positional args, must observe the DECLARED default value
+ * (not an uninitialized slot). The stack-VM struct-field invoke path bypassed
+ * stackvm_adjust_call_args and left the defaulted slot unfilled, yielding 0
+ * instead of the default. In-language assert() makes this backend-independent:
+ * a wrong value aborts the program and fails ASSERT_RUNS. */
+TEST(lat566_struct_field_default_value_used) {
+    ASSERT_RUNS("struct H { f: Fn }\n"
+                "let h = H { f: |self, a=5| { a } }\n"
+                "assert(h.f() == 5)\n");
+    /* mixed: one positional supplied, one defaulted */
+    ASSERT_RUNS("struct H { g: Fn }\n"
+                "let h = H { g: |self, a, b=7| { a + b } }\n"
+                "assert(h.g(3) == 10)\n");
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * LAT-452 / Stage 3: stack-VM-shaped Crystal-by-Reference semantics pins
  *
