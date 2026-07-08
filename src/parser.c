@@ -168,6 +168,7 @@ static Stmt **parse_block_stmts(Parser *p, size_t *count, char **err) {
     while (peek_type(p) != TOK_RBRACE && !at_eof(p)) {
         Stmt *s = parse_stmt(p, err);
         if (!s) {
+            for (size_t i = 0; i < n; i++) stmt_free(stmts[i]);
             free(stmts);
             return NULL;
         }
