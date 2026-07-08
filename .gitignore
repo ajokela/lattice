@@ -6,6 +6,7 @@ lattice-lang.org
 tinycomputers.io
 crash-*
 fuzz/corpus/
+fuzz/corpus_parser/
 scripts/jira_*.py
 .env
 extensions/**/*.dylib
