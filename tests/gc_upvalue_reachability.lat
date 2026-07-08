@@ -1,0 +1,48 @@
+// LAT-447: closed-over heap values of GLOBAL closures must survive GC.
+//
+// After make_holder() returns, its frame is gone and the closure's upvalue is
+// closed — the captured array lives ONLY inside that upvalue's `closed` slot,
+// reachable solely through the global closure `f`. The mark phase must walk a
+// compiled closure's ObjUpvalue** captured_env -> each upvalue -> uv.closed
+// (bytecode collector, src/gc.c) and a tree-walk closure's captured env
+// (src/eval.c), guarded against self-capture cycles. Previously the bytecode
+// arm skipped the upvalue walk entirely, so a churn-triggered collection could
+// free the closed-over value out from under a live global closure.
+//
+// Self-asserting: identical result under every backend and GC mode, e.g.
+//   ./clat tests/gc_upvalue_reachability.lat
+//   ./clat --tree-walk --gc-stress tests/gc_upvalue_reachability.lat
+//   ./clat --regvm tests/gc_upvalue_reachability.lat
+
+fn make_holder() {
+    let secret = [11, 22, 33, 44]
+    return | | { secret }
+}
+
+fn main() {
+    let f = make_holder()
+
+    // A second live global closure keeps its own captured heap array; both
+    // must stay marked across the churn below.
+    let g = make_holder()
+
+    // Churn the heap so a collection runs while f and g are live globals with
+    // no frame referencing their closed-over arrays.
+    flux total = 0
+    for i in 0..50 {
+        let scratch = [i, i + 1, "scratch padding string 0123456789"]
+        total = total + scratch[0]
+    }
+
+    let r = f()
+    assert(r[0] == 11, "closed-over elem 0 freed")
+    assert(r[1] == 22, "closed-over elem 1 freed")
+    assert(r[2] == 33, "closed-over elem 2 freed")
+    assert(r[3] == 44, "closed-over elem 3 freed")
+
+    let r2 = g()
+    assert(r2[3] == 44, "second closure closed-over value freed")
+    assert(total == 1225, "churn total wrong: ${total}")
+
+    print("gc_upvalue_reachability: OK")
+}

@@ -230,6 +230,36 @@ static void gc_mark_env_value(LatValue *v, void *ctx) {
     gc_mark_value(mc->fh, v, mc->reachable_regions);
 }
 
+/* ── Closure captured-env cycle guard (LAT-447) ──
+ *
+ * A VAL_CLOSURE is marked by recursing into its captured_env's values. Tree-walk
+ * closures normally snapshot their defining scope, so no cycle forms — but a
+ * mutable binding rebound to a closure that captures the same env, or two
+ * closures that mutually capture each other's scope, would make gc_mark_value
+ * recurse until the C stack overflows (the identical self-capture hazard the
+ * bytecode collector guards in gc.c). We record each captured_env Env* visited
+ * this cycle and traverse it at most once: distinct closures that share one env
+ * hold the same value set, so marking it once loses nothing while breaking the
+ * cycle. Thread-local because spawn runs child evaluators on their own threads,
+ * each with an independent fluid heap and GC cycle. */
+static _Thread_local void **g_mark_visited_envs = NULL;
+static _Thread_local size_t g_mark_visited_env_count = 0;
+static _Thread_local size_t g_mark_visited_env_cap = 0;
+
+static void gc_mark_visited_reset(void) { g_mark_visited_env_count = 0; }
+
+/* Returns true if 'env' was already traversed this cycle (skip re-descent). */
+static bool gc_mark_env_seen(void *env) {
+    for (size_t i = 0; i < g_mark_visited_env_count; i++)
+        if (g_mark_visited_envs[i] == env) return true;
+    if (g_mark_visited_env_count >= g_mark_visited_env_cap) {
+        g_mark_visited_env_cap = g_mark_visited_env_cap ? g_mark_visited_env_cap * 2 : 16;
+        g_mark_visited_envs = realloc(g_mark_visited_envs, g_mark_visited_env_cap * sizeof(void *));
+    }
+    g_mark_visited_envs[g_mark_visited_env_count++] = env;
+    return false;
+}
+
 /*
  * Mark a single LatValue as reachable, recursively marking contained
  * heap pointers in the fluid heap.  Collects reachable crystal region
@@ -279,8 +309,9 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
                     if (v->as.closure.param_names[i]) fluid_mark(fh, v->as.closure.param_names[i]);
                 }
             }
-            /* Mark captured env's values recursively */
-            if (v->as.closure.captured_env) {
+            /* Mark captured env's values recursively (guarded against
+             * self-capture cycles — see gc_mark_env_seen, LAT-447). */
+            if (v->as.closure.captured_env && !gc_mark_env_seen(v->as.closure.captured_env)) {
                 Env *cenv = v->as.closure.captured_env;
                 GcMarkCtx cctx = {fh, reachable_regions};
                 env_iter_values(cenv, gc_mark_env_value, &cctx);
@@ -295,6 +326,12 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
                     }
                 }
             }
+            /* A partially-frozen map (freeze()...except / per-key phases) carries
+             * a second fluid-allocated LatMap for key phases. It is live for as
+             * long as the map value is, but was never marked here — under
+             * gc-stress it was swept, then value_free ran lat_map_free on the
+             * dangling pointer (LAT-453 pattern a: freeze-except exempt-key). */
+            if (v->as.map.key_phases) fluid_mark(fh, v->as.map.key_phases);
             break;
         case VAL_ENUM:
             if (v->as.enm.enum_name) fluid_mark(fh, v->as.enm.enum_name);
@@ -398,6 +435,7 @@ static void gc_cycle(Evaluator *ev) {
 
     /* 1. Clear all marks */
     fluid_unmark_all(fh);
+    gc_mark_visited_reset(); /* fresh closure-env cycle guard for this cycle */
 
     /* 2. Mark roots from environment */
     GcMarkCtx ctx = {fh, &reachable_regions};
@@ -413,6 +451,32 @@ static void gc_cycle(Evaluator *ev) {
     for (size_t i = 0; i < ev->saved_envs.len; i++) {
         Env **ep = lat_vec_get(&ev->saved_envs, i);
         env_iter_values(*ep, gc_mark_env_value, &ctx);
+    }
+
+    /* 4b. Mark Evaluator-owned value stashes. These hold live LatValues whose
+     * backing lives in the fluid heap but that are reachable through neither the
+     * environment nor the shadow stack, so under gc-stress they were swept and
+     * later use/free hit freed memory (LAT-453 pattern c: seed contracts). The
+     * same hazard applies to phase reactions, tracked-variable history, and the
+     * module/extension caches; mark them all. fluid_mark on a non-fluid (e.g.
+     * region-backed or malloc'd) member is a harmless no-op, so over-marking is
+     * always safe. */
+    for (size_t i = 0; i < ev->seed_count; i++) gc_mark_value(fh, &ev->seeds[i].contract, &reachable_regions);
+    for (size_t i = 0; i < ev->reaction_count; i++) {
+        for (size_t j = 0; j < ev->reactions[i].cb_count; j++)
+            gc_mark_value(fh, &ev->reactions[i].callbacks[j], &reachable_regions);
+    }
+    for (size_t i = 0; i < ev->tracked_count; i++) {
+        VariableHistory *vh = &ev->tracked_vars[i].history;
+        for (size_t j = 0; j < vh->count; j++) gc_mark_value(fh, &vh->snapshots[j].value, &reachable_regions);
+    }
+    for (size_t i = 0; i < ev->module_cache.cap; i++) {
+        if (ev->module_cache.entries[i].state == MAP_OCCUPIED)
+            gc_mark_value(fh, (LatValue *)ev->module_cache.entries[i].value, &reachable_regions);
+    }
+    for (size_t i = 0; i < ev->loaded_extensions.cap; i++) {
+        if (ev->loaded_extensions.entries[i].state == MAP_OCCUPIED)
+            gc_mark_value(fh, (LatValue *)ev->loaded_extensions.entries[i].value, &reachable_regions);
     }
 
     /* 5. Sweep unmarked fluid allocations */
@@ -9783,12 +9847,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             /* Evaluate the closure expression */
             EvalResult clr = eval_expr(ev, expr->as.anneal.closure);
             if (!IS_OK(clr)) return clr;
+            /* The transform closure lives only in this local, yet call_closure
+             * below (and the target-expr eval on the general path) run user code
+             * that can trigger GC. Root it so its fluid-allocated param_names /
+             * captured env are not swept mid-call, then value_free + GC_POP on
+             * every exit (LAT-453 pattern b: anneal rebinding). */
+            GC_PUSH(ev, &clr.value);
 
             /* Special handling for identifier targets (in-place update) */
             if (expr->as.anneal.expr->tag == EXPR_IDENT) {
                 const char *name = expr->as.anneal.expr->as.str_val;
                 LatValue val;
                 if (!env_get(ev->env, name, &val)) {
+                    GC_POP(ev);
                     value_free(&clr.value);
                     char *err = NULL;
                     lat_asprintf(&err, "undefined variable '%s'", name);
@@ -9796,6 +9867,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
                 if (val.phase != VTAG_CRYSTAL) {
                     value_free(&val);
+                    GC_POP(ev);
                     value_free(&clr.value);
                     return eval_err(strdup("anneal requires a crystal value"));
                 }
@@ -9809,6 +9881,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 EvalResult tr = call_closure(ev, clr.value.as.closure.param_names, clr.value.as.closure.param_count,
                                              clr.value.as.closure.body, clr.value.as.closure.captured_env, &thawed, 1,
                                              clr.value.as.closure.default_values, clr.value.as.closure.has_variadic);
+                GC_POP(ev);
                 value_free(&clr.value);
 
                 if (!IS_OK(tr)) {
@@ -9846,12 +9919,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             /* General expression path */
             EvalResult er = eval_expr(ev, expr->as.anneal.expr);
             if (!IS_OK(er)) {
+                GC_POP(ev);
                 value_free(&clr.value);
                 return er;
             }
 
             if (er.value.phase != VTAG_CRYSTAL) {
                 value_free(&er.value);
+                GC_POP(ev);
                 value_free(&clr.value);
                 return eval_err(strdup("anneal requires a crystal value"));
             }
@@ -9866,6 +9941,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             EvalResult tr = call_closure(ev, clr.value.as.closure.param_names, clr.value.as.closure.param_count,
                                          clr.value.as.closure.body, clr.value.as.closure.captured_env, &thawed, 1,
                                          clr.value.as.closure.default_values, clr.value.as.closure.has_variadic);
+            GC_POP(ev);
             value_free(&clr.value);
 
             if (!IS_OK(tr)) {

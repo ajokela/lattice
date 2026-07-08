@@ -833,6 +833,77 @@ TEST(eval_gc_stress_game_loop) {
     gc_stress = false;
 }
 
+/* ── GC-stress regression tests (LAT-447 / LAT-453) ──
+ *
+ * Each of these crashed the tree-walker under --gc-stress before the fix
+ * (heap corruption / use-after-free in lat_map_free or on a closure's swept
+ * param_names). They exercise fluid-heap roots/edges that the mark phase
+ * previously missed; assertions also pin the aliasing semantics. */
+
+/* LAT-453 (a): a partially-frozen map (freeze()...except) carries a second
+ * fluid-allocated LatMap for per-key phases that gc_mark_value never marked —
+ * it was swept mid-life, then value_free ran lat_map_free on freed memory. */
+TEST(eval_gc_stress_freeze_except_key) {
+    gc_stress = true;
+    ASSERT_RUNS(
+        "fn main() {\n"
+        "    flux m = Map::new()\n"
+        "    m[\"host\"] = \"localhost padded out to a long string 0123456789\"\n"
+        "    m[\"score\"] = 1\n"
+        "    freeze(m) except [\"score\"]\n"
+        "    m[\"score\"] = 2\n"
+        "    assert(m[\"score\"] == 2, \"exempt key write lost\")\n"
+        "    assert(m[\"host\"] == \"localhost padded out to a long string 0123456789\", \"frozen key changed\")\n"
+        "}\n");
+    gc_stress = false;
+}
+
+/* LAT-453 (b): the anneal transform closure lives only in a C local and was
+ * not GC-rooted across call_closure, so a collection inside the closure body
+ * swept its fluid param_names; value_free then read the freed array. */
+TEST(eval_gc_stress_anneal_rebinding) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    flux tmp = Map::new()\n"
+                "    tmp[\"k\"] = [1, 2, 3]\n"
+                "    tmp[\"j\"] = \"anneal long padding string 01234567890123456789\"\n"
+                "    fix m = tmp\n"
+                "    let alias = m\n"
+                "    anneal(m) |x| {\n"
+                "        x[\"k\"] = [9, 9]\n"
+                "        x\n"
+                "    }\n"
+                "    assert(m[\"k\"][0] == 9, \"anneal did not apply\")\n"
+                "    assert(alias[\"k\"][0] == 1, \"alias saw anneal mutation\")\n"
+                "    assert(phase_of(m) == \"crystal\", \"m not refrozen\")\n"
+                "}\n");
+    gc_stress = false;
+}
+
+/* LAT-453 (c): a seed contract closure is stashed in ev->seeds, reachable
+ * through neither the environment nor the shadow stack — it was swept between
+ * seed() and grow(), and grow() then called a closure with freed param_names. */
+TEST(eval_gc_stress_seed_grow) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    flux cfg = [8080, \"grow seed long padding string 0123456789\"]\n"
+                "    seed(cfg, |v| { v[0] > 0 })\n"
+                "    grow(\"cfg\")\n"
+                "    assert(phase_of(cfg) == \"crystal\", \"grow did not freeze\")\n"
+                "    let galias = cfg\n"
+                "    assert(galias[0] == 8080, \"alias content wrong after grow\")\n"
+                "}\n");
+    gc_stress = false;
+}
+
+/* LAT-447 (global closure closed-over value survives GC) is exercised by the
+ * standalone self-asserting harness tests/gc_upvalue_reachability.lat, run in
+ * CI under --tree-walk --gc-stress and every other backend. It is deliberately
+ * NOT a C-harness TEST here: on the stack-vm backend the bytecode collector is
+ * dormant (gc_alloc has no live call site) so it cannot demonstrate the bug,
+ * and a closure-heavy program run before the LSP fork-based integration test
+ * trips a macOS ASan fork()+exec-of-instrumented-child artifact. */
+
 /* ── Dual-Heap Invariant Tests ── */
 
 /*

@@ -182,11 +182,24 @@ void gc_mark_value(GC *gc, LatValue *val) {
                 for (size_t i = 0; i < val->as.closure.param_count; i++)
                     gc_mark_ptr(gc, val->as.closure.param_names[i]);
             }
-            /* For tree-walk closures with captured_env, mark env values */
-            if (val->as.closure.captured_env && !(val->as.closure.body == NULL && val->as.closure.native_fn != NULL)) {
-                /* Tree-walk closure: captured_env is an Env* */
-                /* We don't traverse Env here for the bytecode VM path;
-                 * bytecode closures store ObjUpvalue** in captured_env. */
+            /* Compiled bytecode closures pack ObjUpvalue** into captured_env
+             * (body == NULL, upvalue_count > 0; natives/extensions and closures
+             * without captures leave captured_env NULL with upvalue_count 0).
+             * A closed upvalue's `closed` value can own heap objects reachable
+             * ONLY through this closure once its defining frame has returned
+             * (LAT-447) — the open_upvalues list + live frame arrays no longer
+             * cover it, so without walking here it would be swept while live.
+             * Guard each upvalue with the per-cycle visited set so a
+             * self-capturing closure (uv->closed transitively holds the same
+             * upvalue) cannot recurse until the C stack overflows. */
+            if (val->as.closure.body == NULL && val->as.closure.upvalue_count > 0 && val->as.closure.captured_env) {
+                ObjUpvalue **upvals = (ObjUpvalue **)val->as.closure.captured_env;
+                for (uint32_t i = 0; i < val->as.closure.upvalue_count; i++) {
+                    ObjUpvalue *uv = upvals[i];
+                    if (!uv || !gc_visit_ref(gc, uv)) continue;
+                    gc_mark_value(gc, &uv->closed);
+                    if (uv->location && uv->location != &uv->closed) gc_mark_value(gc, uv->location);
+                }
             }
             break;
 
@@ -439,6 +452,19 @@ static void gc_trace_one(GC *gc) {
                 gc_mark_ptr(gc, val->as.closure.param_names);
                 for (size_t i = 0; i < val->as.closure.param_count; i++)
                     gc_mark_ptr(gc, val->as.closure.param_names[i]);
+            }
+            /* Compiled-closure upvalues — see gc_mark_value's VAL_CLOSURE arm
+             * (LAT-447). Same visited-set guard against self-capture cycles;
+             * children are pushed to the gray worklist for the incremental
+             * tracer rather than marked recursively. */
+            if (val->as.closure.body == NULL && val->as.closure.upvalue_count > 0 && val->as.closure.captured_env) {
+                ObjUpvalue **upvals = (ObjUpvalue **)val->as.closure.captured_env;
+                for (uint32_t i = 0; i < val->as.closure.upvalue_count; i++) {
+                    ObjUpvalue *uv = upvals[i];
+                    if (!uv || !gc_visit_ref(gc, uv)) continue;
+                    gc_gray_push_value(gc, &uv->closed);
+                    if (uv->location && uv->location != &uv->closed) gc_gray_push_value(gc, uv->location);
+                }
             }
             break;
 
