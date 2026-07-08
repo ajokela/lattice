@@ -292,6 +292,11 @@ static LatValue tp_parse_inline_table(TomlParser *p) {
             return value_unit();
         }
 
+        /* Duplicate key inside an inline table: free the previous value before
+         * overwriting — lat_map_set memcpys over the inline slot and does not
+         * free the old owned value. */
+        LatValue *old = (LatValue *)lat_map_get(map.as.map.map, key);
+        if (old) value_free(old);
         lat_map_set(map.as.map.map, key, &val);
         free(key);
 
@@ -357,6 +362,9 @@ static LatMap *tp_ensure_table(LatValue *root, char **parts, size_t count) {
         if (existing && existing->type == VAL_MAP) {
             cur = existing->as.map.map;
         } else {
+            /* Key exists as a non-table (scalar/array): it is being replaced by
+             * a table. Free the old owned value first to avoid orphaning it. */
+            if (existing) value_free(existing);
             LatValue sub = value_map_new();
             lat_map_set(cur, parts[i], &sub);
             LatValue *inserted = (LatValue *)lat_map_get(cur, parts[i]);
@@ -437,6 +445,8 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
                     if (existing && existing->type == VAL_MAP) {
                         parent = existing->as.map.map;
                     } else {
+                        /* Replacing a non-table value with a table: free it. */
+                        if (existing) value_free(existing);
                         LatValue sub = value_map_new();
                         lat_map_set(parent, parts[i], &sub);
                         LatValue *ins = (LatValue *)lat_map_get(parent, parts[i]);
@@ -446,6 +456,9 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
                 char *arr_key = parts[count - 1];
                 LatValue *arr_val = (LatValue *)lat_map_get(parent, arr_key);
                 if (!arr_val || arr_val->type != VAL_ARRAY) {
+                    /* Key exists but is not an array-of-tables: replace it and
+                     * free the previous owned value. */
+                    if (arr_val) value_free(arr_val);
                     LatValue empty_arr = value_array(NULL, 0);
                     lat_map_set(parent, arr_key, &empty_arr);
                     arr_val = (LatValue *)lat_map_get(parent, arr_key);
@@ -516,12 +529,17 @@ LatValue toml_ops_parse(const char *toml_str, char **err) {
                 if (existing && existing->type == VAL_MAP) {
                     target = existing->as.map.map;
                 } else {
+                    /* Replacing a non-table value with a table: free it. */
+                    if (existing) value_free(existing);
                     LatValue sub = value_map_new();
                     lat_map_set(target, parts[i], &sub);
                     LatValue *ins = (LatValue *)lat_map_get(target, parts[i]);
                     target = ins->as.map.map;
                 }
             }
+            /* Redefined key: free the prior value before overwriting. */
+            LatValue *prev = (LatValue *)lat_map_get(target, parts[count - 1]);
+            if (prev) value_free(prev);
             lat_map_set(target, parts[count - 1], &val);
 
             for (size_t i = 0; i < count; i++) free(parts[i]);

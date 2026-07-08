@@ -115,6 +115,17 @@ static void yaml_skip_blanks(YamlParser *p) {
 static LatValue yaml_parse_node(YamlParser *p, int min_indent);
 static LatValue yaml_parse_flow_value(YamlParser *p);
 
+/* ── Insert into a result map, freeing any prior value for the same key ──
+ * lat_map_set overwrites an occupied slot with a shallow memcpy and does NOT
+ * free the displaced LatValue. Malformed input with duplicate keys would
+ * otherwise leak the previous value's heap allocations (string/array/map).
+ * Mirrors the free-old-then-set idiom used by the VM's index write. */
+static void yaml_map_put(LatMap *m, const char *key, LatValue *val) {
+    LatValue *old = (LatValue *)lat_map_get(m, key);
+    if (old) value_free(old);
+    lat_map_set(m, key, val);
+}
+
 /* ── Parse flow sequence [a, b, c] ── */
 static LatValue yaml_parse_flow_seq(YamlParser *p) {
     p->pos++; /* skip [ */
@@ -176,7 +187,7 @@ static LatValue yaml_parse_flow_map(YamlParser *p) {
             value_free(&map);
             return value_unit();
         }
-        lat_map_set(map.as.map.map, stripped_key, &val);
+        yaml_map_put(map.as.map.map, stripped_key, &val);
         free(stripped_key);
 
         while (p->src[p->pos] == ' ') p->pos++;
@@ -319,14 +330,14 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
                             val = yaml_parse_node(p, cur_indent + 2);
                             p->depth--;
                         }
-                        lat_map_set(map_elem.as.map.map, stripped_key, &val);
+                        yaml_map_put(map_elem.as.map.map, stripped_key, &val);
                     } else {
                         char *raw = yaml_read_line_value(p);
                         char *stripped = yaml_strip_quotes(raw);
                         LatValue val = yaml_detect_scalar(stripped);
                         free(stripped);
                         free(raw);
-                        lat_map_set(map_elem.as.map.map, stripped_key, &val);
+                        yaml_map_put(map_elem.as.map.map, stripped_key, &val);
                     }
                     free(stripped_key);
 
@@ -360,14 +371,14 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
                                 val = yaml_parse_node(p, next_indent + 1);
                                 p->depth--;
                             }
-                            lat_map_set(map_elem.as.map.map, stripped_key2, &val);
+                            yaml_map_put(map_elem.as.map.map, stripped_key2, &val);
                         } else {
                             char *raw2 = yaml_read_line_value(p);
                             char *stripped2 = yaml_strip_quotes(raw2);
                             LatValue val = yaml_detect_scalar(stripped2);
                             free(stripped2);
                             free(raw2);
-                            lat_map_set(map_elem.as.map.map, stripped_key2, &val);
+                            yaml_map_put(map_elem.as.map.map, stripped_key2, &val);
                         }
                         free(stripped_key2);
                         yaml_skip_blanks(p);
@@ -445,10 +456,10 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
                             val = yaml_parse_node(p, cur_indent + 1);
                             p->depth--;
                         }
-                        lat_map_set(map.as.map.map, stripped_key, &val);
+                        yaml_map_put(map.as.map.map, stripped_key, &val);
                     } else if (p->src[p->pos] == '[' || p->src[p->pos] == '{') {
                         LatValue val = yaml_parse_flow_value(p);
-                        lat_map_set(map.as.map.map, stripped_key, &val);
+                        yaml_map_put(map.as.map.map, stripped_key, &val);
                         while (p->src[p->pos] && p->src[p->pos] != '\n') p->pos++;
                         if (p->src[p->pos] == '\n') p->pos++;
                     } else {
@@ -457,7 +468,7 @@ static LatValue yaml_parse_node(YamlParser *p, int min_indent) {
                         LatValue val = yaml_detect_scalar(stripped);
                         free(stripped);
                         free(raw);
-                        lat_map_set(map.as.map.map, stripped_key, &val);
+                        yaml_map_put(map.as.map.map, stripped_key, &val);
                     }
                     free(stripped_key);
                 }

@@ -409,6 +409,11 @@ static LatValue jp_parse_object(JsonParser *p) {
             return value_unit();
         }
 
+        /* Duplicate keys: lat_map_set overwrites the inline LatValue in place
+         * without freeing the previous one, so free any existing value first to
+         * avoid leaking its heap data. */
+        LatValue *old = (LatValue *)lat_map_get(map.as.map.map, key);
+        if (old) value_free(old);
         lat_map_set(map.as.map.map, key, &val);
         free(key);
 
