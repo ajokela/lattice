@@ -24,6 +24,9 @@
 #endif
 #include <dirent.h>
 #include <sys/stat.h>
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+#include <sys/resource.h> /* getrusage for --stats RSS peak (VM backends) */
+#endif
 #ifndef __EMSCRIPTEN__
 #if defined(LATTICE_HAS_EDITLINE)
 #include <editline/readline.h>
@@ -181,6 +184,46 @@ static void print_package_help(void) {
     printf("  -h, --help                  Show this help\n");
 }
 
+/* --stats report for the bytecode (stack) and register VM backends.
+ *
+ * The tree-walker threads fine-grained counters (freezes, thaws, per-type
+ * allocations, scope depth, bindings, ...) through the Evaluator and prints
+ * them via memory_stats_print(). The VM backends don't carry those per-op
+ * counters, so we report what they *can* measure: the process-global
+ * shared-crystal-region registry counters, the process RSS peak, and — when
+ * the opt-in mark/sweep GC is active — its cycle counters. The layout mirrors
+ * the tree-walk report's section headings so `--stats` reads consistently
+ * across all three backends.
+ *
+ * `gc` may be NULL (the register VM has no GC), in which case the garbage
+ * collection section is omitted. */
+static void vm_stats_print(const GC *gc, FILE *out) {
+    fprintf(out, "=== Memory Statistics ===\n\n");
+    fprintf(out, "Memory footprint:\n");
+    fprintf(out, "  region peak:  %zu\n", crystal_region_peak_count());
+    fprintf(out, "  region live:  %zu (%zu bytes data)\n", crystal_region_live_count(),
+            crystal_region_live_data_bytes());
+    fprintf(out, "  region total: %zu created\n", crystal_region_created_total());
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+#ifdef __linux__
+        size_t rss_kb = (size_t)ru.ru_maxrss;
+#else
+        size_t rss_kb = (size_t)ru.ru_maxrss / 1024;
+#endif
+        if (rss_kb > 0) fprintf(out, "  RSS peak:     %zu KB\n", rss_kb);
+    }
+#endif
+    if (gc) {
+        fprintf(out, "\nGarbage collection:\n");
+        fprintf(out, "  gc cycles:    %zu\n", gc->total_cycles);
+        fprintf(out, "  swept total:  %zu objects\n", gc->total_collected);
+        fprintf(out, "  live objects: %zu\n", gc->object_count);
+        fprintf(out, "  bytes alloc:  %zu\n", gc->bytes_allocated);
+    }
+}
+
 static int run_source(const char *source, bool show_stats, const char *script_dir, const char *source_path) {
     /* Lex */
     Lexer lex = lexer_new(source);
@@ -300,6 +343,10 @@ static int run_source(const char *source, bool show_stats, const char *script_di
             return 1;
         }
         value_free(&rresult);
+        if (show_stats) {
+            fprintf(stderr, "\n");
+            vm_stats_print(NULL, stderr); /* register VM has no GC */
+        }
         regvm_free(&rvm);
         lat_runtime_free(&rrt);
         regchunk_free(rchunk);
@@ -406,6 +453,10 @@ static int run_source(const char *source, bool show_stats, const char *script_di
         return 1;
     }
     value_free(&result);
+    if (show_stats) {
+        fprintf(stderr, "\n");
+        vm_stats_print(&vm.gc, stderr);
+    }
     /* Send DAP terminated event and wait for disconnect */
     if (dbg && dbg->mode == DBG_MODE_DAP) {
         extern void dap_send_terminated(Debugger * dbg);

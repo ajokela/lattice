@@ -253,6 +253,27 @@ static int run_source_ok(const char *source, char **err_out) {
         }                                                                                                  \
     } while (0)
 
+/* Convenience: assert source fails AND the error message contains `needle` */
+#define ASSERT_FAILS_MSG(src, needle)                                                                               \
+    do {                                                                                                            \
+        char *_err = NULL;                                                                                          \
+        int _rc = run_source_ok(src, &_err);                                                                        \
+        if (_rc == 0) {                                                                                             \
+            fprintf(stderr, "  FAIL: %s:%d: expected failure but source succeeded\n", __FILE__, __LINE__);          \
+            free(_err);                                                                                             \
+            test_current_failed = 1;                                                                                \
+            return;                                                                                                 \
+        }                                                                                                           \
+        if (!_err || !strstr(_err, needle)) {                                                                       \
+            fprintf(stderr, "  FAIL: %s:%d: error '%s' missing '%s'\n", __FILE__, __LINE__, _err ? _err : "(null)", \
+                    needle);                                                                                        \
+            free(_err);                                                                                             \
+            test_current_failed = 1;                                                                                \
+            return;                                                                                                 \
+        }                                                                                                           \
+        free(_err);                                                                                                 \
+    } while (0)
+
 /* ── Test: Hello World ── */
 
 TEST(eval_hello_world) {
@@ -2172,6 +2193,85 @@ TEST(phase_crystal_allows_read) {
                 "    fix data = freeze([10, 20, 30])\n"
                 "    assert(data[0] == 10)\n"
                 "    assert(data.len() == 3)\n"
+                "}\n");
+}
+
+/* ── LAT-454: in-place fast compound-assign opcodes must honor crystal phase ──
+ * The stack VM's OP_APPEND_STR_LOCAL / OP_INC_LOCAL / OP_DEC_LOCAL fast paths
+ * mutated a crystal (or sublimated) local IN PLACE with no phase guard; the
+ * register VM planted no mutability check before its in-place compound-assign
+ * into a local. Both VMs now reject with the standard phase-violation error.
+ * The tree-walker treats `x OP= y` as a fresh-value rebind (the crystal is
+ * never mutated in place) and is intentionally more permissive here — it is
+ * gated out exactly like phase_crystal_array_rejects_index_assign above. */
+
+TEST(phase_crystal_string_local_rejects_plus_eq) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_FAILS_MSG("fn main() {\n"
+                     "    flux s = \"hello\"\n"
+                     "    fix f = freeze(s)\n"
+                     "    f += \" world\"\n"
+                     "}\n",
+                     "frozen");
+}
+
+TEST(phase_crystal_int_local_rejects_inc) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_FAILS_MSG("fn main() {\n"
+                     "    flux a = 10\n"
+                     "    fix f = freeze(a)\n"
+                     "    f += 1\n"
+                     "}\n",
+                     "frozen");
+}
+
+TEST(phase_crystal_int_local_rejects_dec) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_FAILS_MSG("fn main() {\n"
+                     "    flux a = 10\n"
+                     "    fix f = freeze(a)\n"
+                     "    f -= 1\n"
+                     "}\n",
+                     "frozen");
+}
+
+TEST(phase_crystal_int_local_rejects_plus_eq_n) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_FAILS_MSG("fn main() {\n"
+                     "    flux a = 10\n"
+                     "    fix f = freeze(a)\n"
+                     "    f += 5\n"
+                     "}\n",
+                     "frozen");
+}
+
+TEST(phase_sublimated_string_local_rejects_plus_eq) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+    ASSERT_FAILS_MSG("fn main() {\n"
+                     "    flux s = \"hi\"\n"
+                     "    sublimate(s)\n"
+                     "    s += \"x\"\n"
+                     "}\n",
+                     "sublimated");
+}
+
+/* Boundary: a thawed accumulator, and reads of a crystal in arithmetic that
+ * rebind a fresh (non-crystal) local, must all still succeed on every backend
+ * — the guard fires only on genuine in-place compound-assign into a crystal. */
+TEST(phase_crystal_compound_assign_boundaries_ok) {
+    ASSERT_RUNS("fn main() {\n"
+                "    flux total = 0\n"
+                "    for i in 0..5 { total += i }\n"
+                "    assert(total == 10)\n"
+                "    flux acc = \"\"\n"
+                "    for i in 0..3 { acc += \"x\" }\n"
+                "    assert(acc == \"xxx\")\n"
+                "    fix x = freeze(7)\n"
+                "    let y = x + 1\n" /* read crystal, bind fresh value */
+                "    assert(y == 8)\n"
+                "    flux g = thaw(x)\n"
+                "    g += 2\n" /* thawed → mutable again */
+                "    assert(g == 9)\n"
                 "}\n");
 }
 
@@ -6415,9 +6515,10 @@ TEST(cbr_iter_closure_over_fluid_strings) {
  * paths such as arity mismatch — callers are forbidden from freeing them, so
  * a leaked shared-crystal handle would pin its region forever. Pin the path
  * via a callable struct field invoked with the wrong arity.
- * Tree-walk only: the VMs do not enforce arity on callable struct fields. */
+ * LAT-451: invoking a callable struct field with the wrong number of arguments
+ * must ERROR on ALL backends (tree-walk, stack VM, regvm) — the VMs used to
+ * silently accept it. Runs cross-backend now. */
 TEST(phase_contract_wrong_arity_no_leak) {
-    if (test_backend != BACKEND_TREE_WALK) return;
     ASSERT_FAILS("struct Holder { f: Fn }\n"
                  "fn main() {\n"
                  "    fix data = [\"cccccccccccccccccccccccccccccccccccccccc\", "
@@ -6425,6 +6526,19 @@ TEST(phase_contract_wrong_arity_no_leak) {
                  "    let h = Holder { f: |self, a| { a } }\n"
                  "    h.f(data, data, data)\n"
                  "}\n");
+}
+
+/* LAT-451 regression: a callable struct field with a DEFAULT parameter,
+ * invoked with fewer positional args than params, must be ACCEPTED (the
+ * missing arg is defaulted) on all three backends — the arity check must
+ * count defaults as optional, not required. The body returns a constant so
+ * this asserts arity acceptance without depending on default-value evaluation
+ * (a separate stack-VM default-eval concern). Guards the regvm regression
+ * where the struct-field arity check ignored default_count. */
+TEST(phase_contract_default_param_struct_field_arity_ok) {
+    ASSERT_RUNS("struct Holder { f: Fn }\n"
+                "let h = Holder { f: |self, a=5| { 99 } }\n"
+                "print(h.f())\n");
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

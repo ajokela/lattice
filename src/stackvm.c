@@ -3271,6 +3271,30 @@ static int stackvm_method_arity(const LatValue *method_ref, const Chunk *fn_chun
     return arity;
 }
 
+/* Arity check for a self-injecting callable struct field (LAT-451). The
+ * tree-walker's call_closure prepends `self` and validates the resulting
+ * argument count against the closure's declared parameters; the VM struct-field
+ * invoke prongs used to skip this and silently accept any arity. Mirror the
+ * check here — `total` counts the injected self (so it lines up with the
+ * closure's param_count, which includes the `self` parameter). Sets vm->error
+ * (heap) and returns false on mismatch, reusing stackvm_adjust_call_args' message
+ * shape so the struct-field path is consistent with the map-field/method paths. */
+static bool stackvm_struct_field_arity_ok(StackVM *vm, const Chunk *fn_chunk, int param_count, int arg_count) {
+    int total = arg_count + 1; /* self is prepended as the first argument */
+    int dc = fn_chunk->default_count;
+    bool vd = fn_chunk->fn_has_variadic;
+    int required = param_count - dc - (vd ? 1 : 0);
+    int max_positional = vd ? param_count - 1 : param_count;
+    if (total < required || (!vd && total > max_positional)) {
+        if (vd) lat_asprintf(&vm->error, "expected at least %d arguments but got %d", required, total);
+        else if (dc > 0)
+            lat_asprintf(&vm->error, "expected %d to %d arguments but got %d", required, param_count, total);
+        else lat_asprintf(&vm->error, "expected %d arguments but got %d", param_count, total);
+        return false;
+    }
+    return true;
+}
+
 /* Dispatch pointer adapters for LatRuntime */
 static LatValue stackvm_dispatch_call_closure(void *vm_ptr, LatValue *closure, LatValue *args, int argc) {
     StackVM *vm = (StackVM *)vm_ptr;
@@ -3372,6 +3396,13 @@ static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame
                 field->as.closure.default_values != VM_NATIVE_MARKER) {
                 /* Bytecode closure in struct field — inject self */
                 Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                if (!stackvm_struct_field_arity_ok(vm, fn_chunk, (int)field->as.closure.param_count, (int)arg_count)) {
+                    char *err = vm->error;
+                    vm->error = NULL;
+                    StackVMResult r = stackvm_handle_error(vm, frame_ref, "%s", err);
+                    free(err);
+                    return r;
+                }
                 ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                 size_t uv_count = field->as.closure.upvalue_count;
                 if (vm->frame_count >= STACKVM_FRAMES_MAX)
@@ -5596,6 +5627,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         /* Bytecode closure — inject [closure, self] below args */
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        if (!stackvm_struct_field_arity_ok(vm, fn_chunk, (int)field->as.closure.param_count,
+                                                           (int)arg_count)) {
+                            char *err = vm->error;
+                            vm->error = NULL;
+                            handled = true;
+                            VM_ERROR("%s", err);
+                            free(err);
+                            break;
+                        }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
@@ -5879,6 +5919,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        if (!stackvm_struct_field_arity_ok(vm, fn_chunk, (int)field->as.closure.param_count,
+                                                           (int)arg_count)) {
+                            char *err = vm->error;
+                            vm->error = NULL;
+                            handled = true;
+                            VM_ERROR("%s", err);
+                            free(err);
+                            break;
+                        }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
@@ -6089,6 +6138,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        if (!stackvm_struct_field_arity_ok(vm, fn_chunk, (int)field->as.closure.param_count,
+                                                           (int)arg_count)) {
+                            char *err = vm->error;
+                            vm->error = NULL;
+                            handled = true;
+                            VM_ERROR("%s", err);
+                            free(err);
+                            break;
+                        }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
@@ -6352,6 +6410,15 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     if (field->type == VAL_CLOSURE && field->as.closure.native_fn &&
                         field->as.closure.default_values != VM_NATIVE_MARKER) {
                         Chunk *fn_chunk = (Chunk *)field->as.closure.native_fn;
+                        if (!stackvm_struct_field_arity_ok(vm, fn_chunk, (int)field->as.closure.param_count,
+                                                           (int)arg_count)) {
+                            char *err = vm->error;
+                            vm->error = NULL;
+                            handled = true;
+                            VM_ERROR("%s", err);
+                            free(err);
+                            break;
+                        }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
                         if (vm->frame_count >= STACKVM_FRAMES_MAX) {
@@ -8606,6 +8673,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         case OP_INC_LOCAL: {
             uint8_t slot = READ_BYTE();
             LatValue *lv = &frame->slots[slot];
+            /* LAT-454: '++'/'+= 1' mutates the local in place — reject a
+             * crystal/sublimated local before touching it. */
+            if (lv->phase == VTAG_CRYSTAL || lv->phase == VTAG_SUBLIMATED) {
+                VM_ERROR("cannot modify a %s value", lv->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                break;
+            }
             if (lv->type == VAL_INT) {
                 lv->as.int_val++;
             } else {
@@ -8620,6 +8693,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         case OP_DEC_LOCAL: {
             uint8_t slot = READ_BYTE();
             LatValue *lv = &frame->slots[slot];
+            /* LAT-454: '--'/'-= 1' mutates the local in place — reject a
+             * crystal/sublimated local before touching it. */
+            if (lv->phase == VTAG_CRYSTAL || lv->phase == VTAG_SUBLIMATED) {
+                VM_ERROR("cannot modify a %s value", lv->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                break;
+            }
             if (lv->type == VAL_INT) {
                 lv->as.int_val--;
             } else {
@@ -8761,6 +8840,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             uint8_t slot = READ_BYTE();
             LatValue rhs = pop(vm);
             LatValue *local = &frame->slots[slot];
+            /* LAT-454: this fast path mutates the local in place (realloc for
+             * strings, or store-back for the numeric fallback). A crystal or
+             * sublimated local is immutable — reject before mutating, emitting
+             * the same phase-violation error the slow OP_ADD/index paths use. */
+            if (local->phase == VTAG_CRYSTAL || local->phase == VTAG_SUBLIMATED) {
+                const char *pn = local->phase == VTAG_CRYSTAL ? "frozen" : "sublimated";
+                value_free(&rhs);
+                VM_ERROR("cannot modify a %s value", pn);
+                break;
+            }
             if (local->type == VAL_STR && rhs.type == VAL_STR) {
                 const char *rp = rhs.as.str_val;
                 size_t rl = rhs.as.str_len ? rhs.as.str_len : strlen(rp);

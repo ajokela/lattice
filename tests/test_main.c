@@ -24,7 +24,7 @@ typedef struct {
     TestFn fn;
 } TestEntry;
 
-#define MAX_TESTS 2048
+#define MAX_TESTS 4096
 static TestEntry all_tests[MAX_TESTS];
 static int test_count = 0;
 
@@ -36,6 +36,12 @@ void register_test(const char *name, TestFn fn) {
         all_tests[test_count].name = name;
         all_tests[test_count].fn = fn;
         test_count++;
+    } else {
+        /* Never silently drop a test — a full registry means the suite would
+         * under-report and hide real failures. Fail loudly so MAX_TESTS gets
+         * bumped instead. */
+        fprintf(stderr, "FATAL: test registry full (MAX_TESTS=%d); cannot register '%s'\n", MAX_TESTS, name);
+        abort();
     }
 }
 

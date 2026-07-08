@@ -40,6 +40,7 @@ typedef struct RegChunk {
     char *name;            /* Debug: function name */
     uint8_t *param_phases; /* Phase constraints per parameter (AstPhase enum) */
     int param_phase_count;
+    int default_count;   /* LAT-451: # params with defaults, for cross-backend arity check */
     char **export_names; /* Module export list (NULL = export-all) */
     size_t export_count;
     bool has_exports; /* true if module uses explicit exports */

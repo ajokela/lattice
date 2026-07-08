@@ -226,6 +226,12 @@ typedef enum {
      * skipping the now-dead chain. */
     ROP_INVOKE_MUT,
 
+    /* LAT-454: guard emitted before an in-place compound assignment into a
+     * local (x = x OP rhs). Throws "cannot modify a frozen/sublimated value"
+     * if R[A] is crystal/sublimated, else no-op. Appended at the end to
+     * preserve every existing opcode number for already-serialized .rlatc. */
+    ROP_CHECK_MUTABLE, /* A : throw if R[A].phase is CRYSTAL/SUBLIMATED */
+
     ROP_COUNT /* number of opcodes                             */
 } RegOpcode;
 

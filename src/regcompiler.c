@@ -1679,9 +1679,11 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             for (size_t i = 0; i < e->as.closure.param_count; i++) add_local(e->as.closure.params[i]);
 
             /* Emit default parameter initialization */
+            int rc_default_count = 0;
             if (e->as.closure.default_values) {
                 for (size_t i = 0; i < e->as.closure.param_count; i++) {
                     if (e->as.closure.default_values[i]) {
+                        rc_default_count++;
                         uint8_t preg = local_reg((int)(i + 1));
                         size_t skip = emit_jump_placeholder(ROP_JMPNOTNIL, preg, line);
                         compile_expr(e->as.closure.default_values[i], preg, line);
@@ -1689,6 +1691,9 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     }
                 }
             }
+            /* LAT-451: record default count on the chunk so callable-struct-field
+             * arity checks can distinguish required from optional params. */
+            func_comp.chunk->default_count = rc_default_count;
 
             /* Emit variadic collection if needed */
             if (e->as.closure.has_variadic) {
@@ -1740,6 +1745,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             fn_val.as.closure.body = NULL;
             fn_val.as.closure.native_fn = fn_chunk;
             fn_val.as.closure.param_count = e->as.closure.param_count;
+            fn_val.as.closure.has_variadic = e->as.closure.has_variadic;
             if (e->as.closure.param_count > 0) {
                 fn_val.as.closure.param_names = malloc(e->as.closure.param_count * sizeof(char *));
                 if (!fn_val.as.closure.param_names) return;
@@ -2837,6 +2843,22 @@ static void compile_stmt(const Stmt *s) {
                 const char *name = s->as.assign.target->as.str_val;
                 int local = resolve_local(rc, name);
                 if (local >= 0) {
+                    /* LAT-454: an in-place compound assignment into a local
+                     * (x = x OP rhs) mutates a crystal/sublimated value in
+                     * place. The stack VM rejects these via its
+                     * OP_INC_LOCAL/OP_DEC_LOCAL/OP_APPEND_STR_LOCAL fast
+                     * opcodes; guard the identical set here so both VMs agree.
+                     * Set: `x = x + <any>` (covers += and ++), and `x = x - 1`
+                     * (covers --). Other rewrites (x = x - 2, x = x * y) stay
+                     * fresh-value rebinds on both backends. */
+                    Expr *v = s->as.assign.value;
+                    if (v->tag == EXPR_BINOP && v->as.binop.left->tag == EXPR_IDENT &&
+                        strcmp(v->as.binop.left->as.str_val, name) == 0 &&
+                        (v->as.binop.op == BINOP_ADD ||
+                         (v->as.binop.op == BINOP_SUB && v->as.binop.right->tag == EXPR_INT_LIT &&
+                          v->as.binop.right->as.int_val == 1))) {
+                        emit_ABC(ROP_CHECK_MUTABLE, local_reg(local), 0, 0, line);
+                    }
                     compile_expr(s->as.assign.value, local_reg(local), line);
                 } else {
                     int upvalue = resolve_upvalue(rc, name);

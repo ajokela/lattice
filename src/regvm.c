@@ -3127,6 +3127,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_SETFIELD_16] = &&L_SETFIELD_16,
         /* Nested-element mutating method call (LAT-544) */
         [ROP_INVOKE_MUT] = &&L_INVOKE_MUT,
+        /* Compound-assign mutability guard (LAT-454) */
+        [ROP_CHECK_MUTABLE] = &&L_CHECK_MUTABLE,
     };
 
 #define DISPATCH()                            \
@@ -4688,6 +4690,25 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 LatValue *field = &R[obj_reg].as.strct.field_values[fi];
                 if (field->type == VAL_CLOSURE && field->as.closure.native_fn) {
                     RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                    /* LAT-451: mirror the tree-walker's call_closure arity check.
+                     * self is prepended (slot 1), so `total` counts it — line it up
+                     * against the closure's declared param_count (which includes the
+                     * `self` parameter). Wrong arity must ERROR, not be silently
+                     * accepted. */
+                    {
+                        int total = argc + 1;
+                        int param_count = (int)field->as.closure.param_count;
+                        int dc = fn_chunk->default_count;
+                        bool vd = field->as.closure.has_variadic;
+                        int required = param_count - dc - (vd ? 1 : 0);
+                        int max_positional = vd ? param_count - 1 : param_count;
+                        if (total < required || (!vd && total > max_positional)) {
+                            if (vd) RVM_ERROR("expected at least %d arguments but got %d", required, total);
+                            else if (dc > 0)
+                                RVM_ERROR("expected %d to %d arguments but got %d", required, param_count, total);
+                            else RVM_ERROR("expected %d arguments but got %d", param_count, total);
+                        }
+                    }
                     if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base = vm->reg_stack_top;
@@ -4893,6 +4914,25 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 LatValue *field = &R[obj_reg].as.strct.field_values[fi];
                 if (field->type == VAL_CLOSURE && field->as.closure.native_fn) {
                     RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                    /* LAT-451: mirror the tree-walker's call_closure arity check.
+                     * self is prepended (slot 1), so `total` counts it — line it up
+                     * against the closure's declared param_count (which includes the
+                     * `self` parameter). Wrong arity must ERROR, not be silently
+                     * accepted. */
+                    {
+                        int total = argc + 1;
+                        int param_count = (int)field->as.closure.param_count;
+                        int dc = fn_chunk->default_count;
+                        bool vd = field->as.closure.has_variadic;
+                        int required = param_count - dc - (vd ? 1 : 0);
+                        int max_positional = vd ? param_count - 1 : param_count;
+                        if (total < required || (!vd && total > max_positional)) {
+                            if (vd) RVM_ERROR("expected at least %d arguments but got %d", required, total);
+                            else if (dc > 0)
+                                RVM_ERROR("expected %d to %d arguments but got %d", required, param_count, total);
+                            else RVM_ERROR("expected %d arguments but got %d", param_count, total);
+                        }
+                    }
                     if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base = vm->reg_stack_top;
@@ -6616,6 +6656,20 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         DISPATCH();
     }
 
+    CASE(CHECK_MUTABLE) {
+        /* LAT-454: emitted before an in-place compound assignment into a local
+         * (x = x OP rhs). The stack VM's OP_INC_LOCAL/OP_DEC_LOCAL/
+         * OP_APPEND_STR_LOCAL reject a crystal/sublimated local in place; the
+         * register VM computes the compound value into the local's own
+         * register, so the compiler plants this guard on that register to emit
+         * the identical phase-violation error. */
+        uint8_t a = REG_GET_A(instr);
+        if (R[a].phase == VTAG_CRYSTAL || R[a].phase == VTAG_SUBLIMATED) {
+            RVM_ERROR("cannot modify a %s value", R[a].phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+        }
+        DISPATCH();
+    }
+
     CASE(SETINDEX_LOCAL) {
         /* R[A][R[B]] = R[C] — in-place array/map mutation */
         uint8_t a = REG_GET_A(instr), b = REG_GET_B(instr), c = REG_GET_C(instr);
@@ -6866,6 +6920,24 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         closure.as.closure.default_values != VM_EXT_MARKER) {
                         /* Compiled closure */
                         RegChunk *fn_chunk = (RegChunk *)closure.as.closure.native_fn;
+                        /* LAT-451: mirror the tree-walker's call_closure arity check.
+                         * self is prepended (slot 1), so `total` counts it — line it
+                         * up against the closure's declared param_count. */
+                        {
+                            int total = argc + 1;
+                            int param_count = (int)closure.as.closure.param_count;
+                            int dc = fn_chunk->default_count;
+                            bool vd = closure.as.closure.has_variadic;
+                            int required = param_count - dc - (vd ? 1 : 0);
+                            int max_positional = vd ? param_count - 1 : param_count;
+                            if (total < required || (!vd && total > max_positional)) {
+                                value_free(&closure);
+                                if (vd) RVM_ERROR("expected at least %d arguments but got %d", required, total);
+                                else if (dc > 0)
+                                    RVM_ERROR("expected %d to %d arguments but got %d", required, param_count, total);
+                                else RVM_ERROR("expected %d arguments but got %d", param_count, total);
+                            }
+                        }
                         if (vm->frame_count >= REGVM_FRAMES_MAX) {
                             value_free(&closure);
                             RVM_ERROR("stack overflow");
@@ -7117,6 +7189,23 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 LatValue *field = &R[loc_reg].as.strct.field_values[fi];
                 if (field->type == VAL_CLOSURE && field->as.closure.native_fn) {
                     RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                    /* LAT-451: mirror the tree-walker's call_closure arity check.
+                     * self is prepended (slot 1), so `total` counts it — line it up
+                     * against the closure's declared param_count. */
+                    {
+                        int total = argc + 1;
+                        int param_count = (int)field->as.closure.param_count;
+                        int dc = fn_chunk->default_count;
+                        bool vd = field->as.closure.has_variadic;
+                        int required = param_count - dc - (vd ? 1 : 0);
+                        int max_positional = vd ? param_count - 1 : param_count;
+                        if (total < required || (!vd && total > max_positional)) {
+                            if (vd) RVM_ERROR("expected at least %d arguments but got %d", required, total);
+                            else if (dc > 0)
+                                RVM_ERROR("expected %d to %d arguments but got %d", required, param_count, total);
+                            else RVM_ERROR("expected %d arguments but got %d", param_count, total);
+                        }
+                    }
                     if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base_s = vm->reg_stack_top;
