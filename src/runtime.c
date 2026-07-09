@@ -4533,8 +4533,6 @@ void lat_runtime_init(LatRuntime *rt) {
     rt_register_native(rt, "compose", native_compose, 2);
 
     intern_init();
-
-    intern_init();
 }
 
 void lat_runtime_free(LatRuntime *rt) {

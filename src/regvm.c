@@ -4480,14 +4480,22 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (!env_get(vm->env, meta_name, &meta)) { RVM_ERROR("unknown struct '%s'", struct_name); }
 
         if (meta.type != VAL_ARRAY || (int)meta.as.array.len != c) {
+            value_free(&meta); /* env_get returned an owned deep clone */
             RVM_ERROR("struct '%s' field count mismatch", struct_name);
         }
 
         /* Build field names array */
         char **field_names = malloc(c * sizeof(char *));
-        if (!field_names) return REGVM_RUNTIME_ERROR;
+        if (!field_names) {
+            value_free(&meta);
+            return REGVM_RUNTIME_ERROR;
+        }
         LatValue *field_values = malloc(c * sizeof(LatValue));
-        if (!field_values) return REGVM_RUNTIME_ERROR;
+        if (!field_values) {
+            free(field_names);
+            value_free(&meta);
+            return REGVM_RUNTIME_ERROR;
+        }
         for (int i = 0; i < c; i++) {
             field_names[i] = strdup(meta.as.array.elems[i].as.str_val);
             /* Field values are in registers a+1..a+c */
@@ -4506,6 +4514,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* Wait, looking at the compiler: base = alloc_reg(), fields compiled into base..base+c-1.
              * Then NEWSTRUCT A=dst, then LOADK A=base. So base is in REG_GET_A(name_instr). */
         }
+        value_free(&meta); /* field names strdup'd out of the struct-meta clone; release it */
         uint8_t field_base = REG_GET_A(name_instr);
         for (int i = 0; i < c; i++) { field_values[i] = rvm_clone(&R[field_base + i]); }
 
