@@ -346,12 +346,20 @@ FUZZ_FS_SRC    = $(FUZZ_DIR)/fuzz_fs.c
 FUZZ_FS_OBJ    = $(BUILD_DIR)/fuzz/fuzz_fs.o
 FUZZ_FS_TARGET = $(BUILD_DIR)/fuzz_fs
 
+# Cross-compiled Windows FS fuzzer: MinGW + ASan + SanitizerCoverage + minifuzz.
+# libFuzzer is unsupported for the mingw target, so fuzz/minifuzz.c supplies a
+# coverage-guided driver. Build from Linux with llvm-mingw's clang:
+#   make fuzz-fs-win WINFUZZ_CC=/opt/llvm-mingw/bin/x86_64-w64-mingw32-clang
+FUZZ_MINIFUZZ_OBJ  = $(BUILD_DIR)/fuzz/minifuzz.o
+FUZZ_FS_WIN_TARGET = $(BUILD_DIR)/fuzz_fs.exe
+WINFUZZ_CC ?= clang
+
 # Parser fuzz harness
 FUZZ_PARSER_SRC    = $(FUZZ_DIR)/fuzz_parser.c
 FUZZ_PARSER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_parser.o
 FUZZ_PARSER_TARGET = $(BUILD_DIR)/fuzz_parser
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -725,6 +733,13 @@ fuzz-fs: LDFLAGS = $(EDIT_LDFLAGS) $(TLS_LDFLAGS) -fsanitize=fuzzer,address,unde
 fuzz-fs: clean $(LIB_OBJS) $(FUZZ_FS_OBJ)
 	$(CC) $(CFLAGS) -o $(FUZZ_FS_TARGET) $(LIB_OBJS) $(FUZZ_FS_OBJ) $(LDFLAGS)
 	@echo "\n==> FS fuzzer built: $(FUZZ_FS_TARGET)"
+
+fuzz-fs-win: CC = $(WINFUZZ_CC)
+fuzz-fs-win: CFLAGS = -std=c11 -Iinclude -D_WIN32_WINNT=0x0600 --target=x86_64-w64-windows-gnu -fsanitize=address -fsanitize-coverage=trace-pc-guard -g -O1
+fuzz-fs-win: LDFLAGS = -fsanitize=address -lpthread -lws2_32 -lbcrypt -lcrypt32
+fuzz-fs-win: clean $(LIB_OBJS) $(FUZZ_FS_OBJ) $(FUZZ_MINIFUZZ_OBJ)
+	$(CC) $(CFLAGS) -o $(FUZZ_FS_WIN_TARGET) $(LIB_OBJS) $(FUZZ_FS_OBJ) $(FUZZ_MINIFUZZ_OBJ) $(LDFLAGS)
+	@echo "\n==> Windows FS fuzzer built: $(FUZZ_FS_WIN_TARGET)"
 
 fuzz-json: CC = $(FUZZ_CC)
 fuzz-json: CFLAGS = -std=c11 -D_GNU_SOURCE -Iinclude $(EDIT_CFLAGS) $(TLS_CFLAGS) -fsanitize=fuzzer,address,undefined -g -O1
