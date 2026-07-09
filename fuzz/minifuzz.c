@@ -19,6 +19,7 @@
 #include <string.h>
 #include <time.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -146,6 +147,30 @@ int main(int argc, char **argv) {
     if (g_max_len > sizeof(mut_buf)) g_max_len = sizeof(mut_buf);
     srand(seed);
     __asan_set_death_callback(on_death);
+
+    /* libFuzzer-compatible repro mode: if the positional arg is a regular file
+     * (not a directory), run it once through the harness and exit. crash-report.py
+     * reproduces a finding by invoking `exe <crashfile>`; a real crash aborts via
+     * ASan here, a benign input exits 0. Only a directory is fuzzed as a corpus. */
+    if (corpus_dir) {
+        struct stat st;
+        if (stat(corpus_dir, &st) == 0 && !(st.st_mode & S_IFDIR)) {
+            FILE *f = fopen(corpus_dir, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long n = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                uint8_t *buf = malloc((size_t)(n > 0 ? n : 1));
+                size_t got = fread(buf, 1, (size_t)(n > 0 ? n : 0), f);
+                fclose(f);
+                g_cur = buf;
+                g_cur_len = got;
+                LLVMFuzzerTestOneInput(buf, got);
+                free(buf);
+            }
+            return 0;
+        }
+    }
 
     /* Seed the corpus from files in corpus_dir (MinGW provides dirent). */
     if (corpus_dir) load_dir(corpus_dir);
