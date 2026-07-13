@@ -216,16 +216,19 @@ LatValue builtin_array_min(LatValue *obj, LatValue *args, int arg_count, char **
         return value_unit();
     }
     LatValue best = obj->as.array.elems[0];
+    if (best.type != VAL_INT && best.type != VAL_FLOAT) {
+        *error = strdup("min() requires numeric elements");
+        return value_unit();
+    }
     for (size_t i = 1; i < obj->as.array.len; i++) {
         LatValue *el = &obj->as.array.elems[i];
-        bool less = false;
-        if (el->type == VAL_INT && best.type == VAL_INT) less = el->as.int_val < best.as.int_val;
-        else if (el->type == VAL_FLOAT || best.type == VAL_FLOAT) {
-            double a = el->type == VAL_FLOAT ? el->as.float_val : (double)el->as.int_val;
-            double b = best.type == VAL_FLOAT ? best.as.float_val : (double)best.as.int_val;
-            less = a < b;
+        ValueNumericCmp cmp = value_numeric_compare(el, &best);
+        if (cmp == VALUE_CMP_NOT_NUMERIC || cmp == VALUE_CMP_UNORDERED) {
+            *error =
+                strdup(cmp == VALUE_CMP_UNORDERED ? "min() cannot compare NaN" : "min() requires numeric elements");
+            return value_unit();
         }
-        if (less) best = *el;
+        if (cmp == VALUE_CMP_LESS) best = *el;
     }
     return value_deep_clone(&best);
 }
@@ -242,16 +245,19 @@ LatValue builtin_array_max(LatValue *obj, LatValue *args, int arg_count, char **
         return value_unit();
     }
     LatValue best = obj->as.array.elems[0];
+    if (best.type != VAL_INT && best.type != VAL_FLOAT) {
+        *error = strdup("max() requires numeric elements");
+        return value_unit();
+    }
     for (size_t i = 1; i < obj->as.array.len; i++) {
         LatValue *el = &obj->as.array.elems[i];
-        bool greater = false;
-        if (el->type == VAL_INT && best.type == VAL_INT) greater = el->as.int_val > best.as.int_val;
-        else if (el->type == VAL_FLOAT || best.type == VAL_FLOAT) {
-            double a = el->type == VAL_FLOAT ? el->as.float_val : (double)el->as.int_val;
-            double b = best.type == VAL_FLOAT ? best.as.float_val : (double)best.as.int_val;
-            greater = a > b;
+        ValueNumericCmp cmp = value_numeric_compare(el, &best);
+        if (cmp == VALUE_CMP_NOT_NUMERIC || cmp == VALUE_CMP_UNORDERED) {
+            *error =
+                strdup(cmp == VALUE_CMP_UNORDERED ? "max() cannot compare NaN" : "max() requires numeric elements");
+            return value_unit();
         }
-        if (greater) best = *el;
+        if (cmp == VALUE_CMP_GREATER) best = *el;
     }
     return value_deep_clone(&best);
 }
@@ -1486,32 +1492,20 @@ LatValue builtin_buffer_to_hex(LatValue *obj, LatValue *args, int arg_count, cha
 LatValue builtin_set_has(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    char *key = value_hash_key(&args[0]);
-    bool found = lat_map_contains(obj->as.set.map, key);
-    free(key);
-    return value_bool(found);
+    return value_bool(value_set_contains(obj, &args[0]));
 }
 
 LatValue builtin_set_add(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    char *key = value_hash_key(&args[0]);
-    LatValue clone = value_deep_clone(&args[0]);
-    lat_map_set(obj->as.set.map, key, &clone);
-    free(key);
+    value_set_insert(obj, &args[0]);
     return value_unit();
 }
 
 LatValue builtin_set_remove(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    char *key = value_hash_key(&args[0]);
-    /* Free the stored element value before removing: lat_map_remove only frees
-     * the key, not the inline LatValue payload. */
-    LatValue *old = (LatValue *)lat_map_get(obj->as.set.map, key);
-    if (old) value_free(old);
-    lat_map_remove(obj->as.set.map, key);
-    free(key);
+    value_set_remove(obj, &args[0]);
     return value_unit();
 }
 
@@ -1537,124 +1531,44 @@ LatValue builtin_set_to_array(LatValue *obj, LatValue *args, int arg_count, char
 LatValue builtin_set_union(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    LatValue result = value_set_new();
-    for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-        if (obj->as.set.map->entries[i].state == MAP_OCCUPIED) {
-            LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-            LatValue c = value_deep_clone(v);
-            lat_map_set(result.as.set.map, obj->as.set.map->entries[i].key, &c);
-        }
-    }
-    if (args[0].type == VAL_SET) {
-        for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
-            if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED) {
-                LatValue *v = (LatValue *)args[0].as.set.map->entries[i].value;
-                LatValue c = value_deep_clone(v);
-                lat_map_set(result.as.set.map, args[0].as.set.map->entries[i].key, &c);
-            }
-        }
-    }
-    return result;
+    return value_set_union(obj, args[0].type == VAL_SET ? &args[0] : NULL);
 }
 
 LatValue builtin_set_intersection(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    LatValue result = value_set_new();
-    if (args[0].type == VAL_SET) {
-        for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-            if (obj->as.set.map->entries[i].state == MAP_OCCUPIED &&
-                lat_map_contains(args[0].as.set.map, obj->as.set.map->entries[i].key)) {
-                LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-                LatValue c = value_deep_clone(v);
-                lat_map_set(result.as.set.map, obj->as.set.map->entries[i].key, &c);
-            }
-        }
-    }
-    return result;
+    return value_set_intersection(obj, args[0].type == VAL_SET ? &args[0] : NULL);
 }
 
 LatValue builtin_set_difference(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    LatValue result = value_set_new();
-    if (args[0].type == VAL_SET) {
-        for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-            if (obj->as.set.map->entries[i].state == MAP_OCCUPIED &&
-                !lat_map_contains(args[0].as.set.map, obj->as.set.map->entries[i].key)) {
-                LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-                LatValue c = value_deep_clone(v);
-                lat_map_set(result.as.set.map, obj->as.set.map->entries[i].key, &c);
-            }
-        }
-    }
-    return result;
+    return value_set_difference(obj, args[0].type == VAL_SET ? &args[0] : NULL);
 }
 
 LatValue builtin_set_symmetric_difference(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    LatValue result = value_set_new();
-    if (args[0].type == VAL_SET) {
-        /* Add elements in self but not in other */
-        for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-            if (obj->as.set.map->entries[i].state == MAP_OCCUPIED &&
-                !lat_map_contains(args[0].as.set.map, obj->as.set.map->entries[i].key)) {
-                LatValue *v = (LatValue *)obj->as.set.map->entries[i].value;
-                LatValue c = value_deep_clone(v);
-                lat_map_set(result.as.set.map, obj->as.set.map->entries[i].key, &c);
-            }
-        }
-        /* Add elements in other but not in self */
-        for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
-            if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED &&
-                !lat_map_contains(obj->as.set.map, args[0].as.set.map->entries[i].key)) {
-                LatValue *v = (LatValue *)args[0].as.set.map->entries[i].value;
-                LatValue c = value_deep_clone(v);
-                lat_map_set(result.as.set.map, args[0].as.set.map->entries[i].key, &c);
-            }
-        }
-    }
-    return result;
+    return value_set_symmetric_difference(obj, args[0].type == VAL_SET ? &args[0] : NULL);
 }
 
 LatValue builtin_set_is_subset(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    if (args[0].type != VAL_SET) return value_bool(false);
-    for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-        if (obj->as.set.map->entries[i].state == MAP_OCCUPIED &&
-            !lat_map_contains(args[0].as.set.map, obj->as.set.map->entries[i].key))
-            return value_bool(false);
-    }
-    return value_bool(true);
+    return value_bool(args[0].type == VAL_SET && value_set_is_subset(obj, &args[0]));
 }
 
 LatValue builtin_set_is_superset(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    if (args[0].type != VAL_SET) return value_bool(false);
-    for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
-        if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED &&
-            !lat_map_contains(obj->as.set.map, args[0].as.set.map->entries[i].key))
-            return value_bool(false);
-    }
-    return value_bool(true);
+    return value_bool(args[0].type == VAL_SET && value_set_is_subset(&args[0], obj));
 }
 
 LatValue builtin_set_clear(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args;
     (void)arg_count;
     (void)error;
-    /* lat_map_free only frees keys, not the inline LatValue payloads (which hold
-     * value_deep_clone copies). Free each stored element first to avoid leaking
-     * every element — mirrors how value_free handles VAL_SET. */
-    for (size_t i = 0; i < obj->as.set.map->cap; i++) {
-        if (obj->as.set.map->entries[i].state == MAP_OCCUPIED)
-            value_free((LatValue *)obj->as.set.map->entries[i].value);
-    }
-    lat_map_free(obj->as.set.map);
-    *obj->as.set.map = lat_map_new(sizeof(LatValue));
+    value_set_clear(obj);
     return value_unit();
 }
 

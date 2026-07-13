@@ -119,6 +119,12 @@ static const char *names[] = {
     [OP_INDEX_GLOBAL] = "OP_INDEX_GLOBAL",
     [OP_SET_INDEX_GLOBAL] = "OP_SET_INDEX_GLOBAL",
     [OP_INVOKE_MUT] = "OP_INVOKE_MUT",
+    [OP_SELECT_CHOOSE] = "OP_SELECT_CHOOSE",
+    [OP_HAS_FIELD] = "OP_HAS_FIELD",
+    [OP_MATCH_RANGE] = "OP_MATCH_RANGE",
+    [OP_MATCH_FLUID] = "OP_MATCH_FLUID",
+    [OP_CLOSE_UPVALUE_PRESERVE] = "OP_CLOSE_UPVALUE_PRESERVE",
+    [OP_MATCH_TYPE] = "OP_MATCH_TYPE",
 };
 
 const char *opcode_name(Opcode op) {

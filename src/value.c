@@ -8,10 +8,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <math.h>
 #include <stdatomic.h> /* LAT-450: atomic LatRef refcount */
 
 _Static_assert(sizeof(LatValue) <= LAT_MAP_INLINE_MAX,
                "LatValue must fit in LAT_MAP_INLINE_MAX bytes for inline hashmap storage");
+
+/* Internal tree-walk recursion alias. Stored aliases borrow captured_env;
+ * cloning one materializes a normal owning closure. */
+#define WEAK_CLOSURE_PHASE ((PhaseTag)0x7e)
 
 /* ── Heap-tracked allocation wrappers ── */
 
@@ -552,6 +557,7 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
             break;
         }
         case VAL_CLOSURE: {
+            bool weak_alias = v->phase == WEAK_CLOSURE_PHASE;
             size_t pc = v->as.closure.param_count;
             if (v->as.closure.param_names) {
                 out.as.closure.param_names = lat_alloc(pc * sizeof(char *));
@@ -573,7 +579,10 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
                  * Exception: when an arena is active (during freeze), we must
                  * clone the env into the arena so GC can safely skip crystal
                  * values without traversing their fluid-heap env pointers. */
-                if (value_get_arena()) {
+                if (weak_alias) {
+                    out.as.closure.captured_env = v->as.closure.captured_env;
+                    env_retain(v->as.closure.captured_env);
+                } else if (value_get_arena()) {
                     out.as.closure.captured_env = env_clone(v->as.closure.captured_env);
                 } else {
                     out.as.closure.captured_env = v->as.closure.captured_env;
@@ -584,6 +593,10 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
             out.as.closure.has_variadic = v->as.closure.has_variadic;
             out.as.closure.upvalue_count = v->as.closure.upvalue_count;
             out.as.closure.native_fn = v->as.closure.native_fn; /* shared, not owned */
+            if (weak_alias) {
+                out.phase = (PhaseTag)v->as.closure.upvalue_count;
+                out.as.closure.upvalue_count = 0;
+            }
             break;
         }
         case VAL_UNIT: break;
@@ -1528,7 +1541,49 @@ const char *value_type_name(const LatValue *v) {
 
 /* ── Equality ── */
 
+static ValueNumericCmp compare_int_float(int64_t integer, double floating) {
+    if (isnan(floating)) return VALUE_CMP_UNORDERED;
+    if (floating >= 0x1p63) return VALUE_CMP_LESS;
+    if (floating < -0x1p63) return VALUE_CMP_GREATER;
+
+    double whole = 0.0;
+    double fraction = modf(floating, &whole);
+    int64_t float_integer = (int64_t)whole;
+    if (integer < float_integer) return VALUE_CMP_LESS;
+    if (integer > float_integer) return VALUE_CMP_GREATER;
+    if (fraction > 0.0) return VALUE_CMP_LESS;
+    if (fraction < 0.0) return VALUE_CMP_GREATER;
+    return VALUE_CMP_EQUAL;
+}
+
+ValueNumericCmp value_numeric_compare(const LatValue *a, const LatValue *b) {
+    bool a_numeric = a->type == VAL_INT || a->type == VAL_FLOAT;
+    bool b_numeric = b->type == VAL_INT || b->type == VAL_FLOAT;
+    if (!a_numeric || !b_numeric) return VALUE_CMP_NOT_NUMERIC;
+
+    if (a->type == VAL_INT && b->type == VAL_INT) {
+        if (a->as.int_val < b->as.int_val) return VALUE_CMP_LESS;
+        if (a->as.int_val > b->as.int_val) return VALUE_CMP_GREATER;
+        return VALUE_CMP_EQUAL;
+    }
+    if (a->type == VAL_FLOAT && b->type == VAL_FLOAT) {
+        if (isnan(a->as.float_val) || isnan(b->as.float_val)) return VALUE_CMP_UNORDERED;
+        if (a->as.float_val < b->as.float_val) return VALUE_CMP_LESS;
+        if (a->as.float_val > b->as.float_val) return VALUE_CMP_GREATER;
+        return VALUE_CMP_EQUAL;
+    }
+    if (a->type == VAL_INT) return compare_int_float(a->as.int_val, b->as.float_val);
+
+    ValueNumericCmp reversed = compare_int_float(b->as.int_val, a->as.float_val);
+    if (reversed == VALUE_CMP_LESS) return VALUE_CMP_GREATER;
+    if (reversed == VALUE_CMP_GREATER) return VALUE_CMP_LESS;
+    return reversed;
+}
+
 bool value_eq(const LatValue *a, const LatValue *b) {
+    if ((a->type == VAL_INT || a->type == VAL_FLOAT) && (b->type == VAL_INT || b->type == VAL_FLOAT)) {
+        return value_numeric_compare(a, b) == VALUE_CMP_EQUAL;
+    }
     if (a->type != b->type) return false;
     switch (a->type) {
         case VAL_INT: return a->as.int_val == b->as.int_val;
@@ -1576,13 +1631,7 @@ bool value_eq(const LatValue *a, const LatValue *b) {
             return true;
         }
         case VAL_SET: {
-            if (lat_map_len(a->as.set.map) != lat_map_len(b->as.set.map)) return false;
-            for (size_t i = 0; i < a->as.set.map->cap; i++) {
-                if (a->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
-                const char *key = a->as.set.map->entries[i].key;
-                if (!lat_map_contains(b->as.set.map, key)) return false;
-            }
-            return true;
+            return value_set_equal(a, b);
         }
         case VAL_TUPLE:
             if (a->as.tuple.len != b->as.tuple.len) return false;
@@ -1601,50 +1650,512 @@ bool value_eq(const LatValue *a, const LatValue *b) {
 
 /* ── Hash key ── */
 
-char *value_hash_key(const LatValue *v) {
-    /* For structs: produce a deterministic hash key from the struct name
-     * and data fields only (skip closure/method fields), so two struct
-     * instances with the same data hash identically regardless of methods. */
-    if (v->type == VAL_STRUCT) {
-        size_t cap = 128;
-        char *buf = malloc(cap);
-        if (!buf) return strdup("<Struct>");
-        size_t pos = 0;
-        size_t nlen = strlen(v->as.strct.name);
-        while (pos + nlen + 8 > cap) {
-            cap *= 2;
-            buf = realloc(buf, cap);
-        }
-        memcpy(buf + pos, v->as.strct.name, nlen);
-        pos += nlen;
-        buf[pos++] = '{';
-        bool first = true;
-        for (size_t i = 0; i < v->as.strct.field_count; i++) {
-            /* Skip closure fields (methods) for hashing */
-            if (v->as.strct.field_values[i].type == VAL_CLOSURE) continue;
-            if (!first) { buf[pos++] = ','; }
-            first = false;
-            const char *fname = v->as.strct.field_names[i];
-            size_t flen = strlen(fname);
-            char *fval = value_hash_key(&v->as.strct.field_values[i]);
-            size_t vlen = strlen(fval);
-            while (pos + flen + vlen + 8 > cap) {
-                cap *= 2;
-                buf = realloc(buf, cap);
-            }
-            memcpy(buf + pos, fname, flen);
-            pos += flen;
-            buf[pos++] = ':';
-            memcpy(buf + pos, fval, vlen);
-            pos += vlen;
-            free(fval);
-        }
-        buf[pos++] = '}';
-        buf[pos] = '\0';
-        return buf;
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+    bool ok;
+} HashKeyBuilder;
+
+static bool hash_key_reserve(HashKeyBuilder *b, size_t extra) {
+    if (!b->ok) return false;
+    if (extra > SIZE_MAX - b->len - 1) {
+        b->ok = false;
+        return false;
     }
-    /* For all other types, fall back to value_display */
-    return value_display(v);
+    size_t need = b->len + extra + 1;
+    if (need <= b->cap) return true;
+    size_t cap = b->cap ? b->cap : 64;
+    while (cap < need) {
+        if (cap > SIZE_MAX / 2) {
+            cap = need;
+            break;
+        }
+        cap *= 2;
+    }
+    char *grown = realloc(b->data, cap);
+    if (!grown) {
+        b->ok = false;
+        return false;
+    }
+    b->data = grown;
+    b->cap = cap;
+    return true;
+}
+
+static bool hash_key_append(HashKeyBuilder *b, const char *data, size_t len) {
+    if (!hash_key_reserve(b, len)) return false;
+    memcpy(b->data + b->len, data, len);
+    b->len += len;
+    b->data[b->len] = '\0';
+    return true;
+}
+
+static bool hash_key_append_cstr(HashKeyBuilder *b, const char *text) { return hash_key_append(b, text, strlen(text)); }
+
+static bool hash_key_append_size(HashKeyBuilder *b, size_t value) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%zu", value);
+    return n >= 0 && hash_key_append(b, tmp, (size_t)n);
+}
+
+/* Map keys are NUL-terminated strings, so arbitrary string/buffer bytes are
+ * encoded as hex rather than copied into the key. */
+static bool hash_key_append_bytes(HashKeyBuilder *b, const unsigned char *bytes, size_t len) {
+    static const char hex[] = "0123456789abcdef";
+    if (len > SIZE_MAX / 2 || !hash_key_reserve(b, len * 2)) return false;
+    for (size_t i = 0; i < len; i++) {
+        b->data[b->len++] = hex[bytes[i] >> 4];
+        b->data[b->len++] = hex[bytes[i] & 0x0f];
+    }
+    b->data[b->len] = '\0';
+    return true;
+}
+
+static bool hash_key_append_blob(HashKeyBuilder *b, const char *tag, const void *data, size_t len) {
+    return hash_key_append_cstr(b, tag) && hash_key_append_size(b, len) && hash_key_append_cstr(b, ":") &&
+           hash_key_append_bytes(b, data, len) && hash_key_append_cstr(b, ";");
+}
+
+static int hash_key_cstr_cmp(const void *a, const void *b) {
+    const char *const *sa = a;
+    const char *const *sb = b;
+    return strcmp(*sa, *sb);
+}
+
+static int hash_key_entry_cmp(const void *a, const void *b) {
+    const LatMapEntry *const *ea = a;
+    const LatMapEntry *const *eb = b;
+    return strcmp((*ea)->key, (*eb)->key);
+}
+
+static bool hash_key_append_value(HashKeyBuilder *b, const LatValue *v, size_t depth);
+
+static char *hash_key_make(const LatValue *v, size_t depth) {
+    HashKeyBuilder b = {0};
+    b.ok = true;
+    if (!hash_key_append_value(&b, v, depth) || !b.ok) {
+        free(b.data);
+        return NULL;
+    }
+    if (!b.data) return strdup("");
+    return b.data;
+}
+
+static bool hash_key_append_pointer(HashKeyBuilder *b, const char *tag, const void *ptr) {
+    char tmp[2 * sizeof(uintptr_t) + 8];
+    int n = snprintf(tmp, sizeof(tmp), "%s%p;", tag, ptr);
+    return n >= 0 && hash_key_append(b, tmp, (size_t)n);
+}
+
+static bool hash_key_append_value(HashKeyBuilder *b, const LatValue *v, size_t depth) {
+    if (depth >= VALUE_RECURSION_LIMIT) return hash_key_append_cstr(b, "depth;");
+
+    char tmp[96];
+    int n;
+    switch (v->type) {
+        case VAL_INT:
+            n = snprintf(tmp, sizeof(tmp), "n%lld;", (long long)v->as.int_val);
+            return n >= 0 && hash_key_append(b, tmp, (size_t)n);
+        case VAL_FLOAT: {
+            double whole = 0.0;
+            if (isfinite(v->as.float_val) && modf(v->as.float_val, &whole) == 0.0 && whole >= -0x1p63 &&
+                whole < 0x1p63) {
+                n = snprintf(tmp, sizeof(tmp), "n%lld;", (long long)(int64_t)whole);
+                return n >= 0 && hash_key_append(b, tmp, (size_t)n);
+            }
+            uint64_t bits = 0;
+            if (v->as.float_val != 0.0) memcpy(&bits, &v->as.float_val, sizeof(bits));
+            n = snprintf(tmp, sizeof(tmp), "f%016llx;", (unsigned long long)bits);
+            return n >= 0 && hash_key_append(b, tmp, (size_t)n);
+        }
+        case VAL_BOOL: return hash_key_append_cstr(b, v->as.bool_val ? "b1;" : "b0;");
+        case VAL_STR: {
+            size_t len = v->as.str_len ? v->as.str_len : strlen(v->as.str_val);
+            return hash_key_append_blob(b, "s", v->as.str_val, len);
+        }
+        case VAL_ARRAY:
+            if (!hash_key_append_cstr(b, "a") || !hash_key_append_size(b, v->as.array.len) ||
+                !hash_key_append_cstr(b, "["))
+                return false;
+            for (size_t i = 0; i < v->as.array.len; i++)
+                if (!hash_key_append_value(b, &v->as.array.elems[i], depth + 1)) return false;
+            return hash_key_append_cstr(b, "]");
+        case VAL_STRUCT: {
+            size_t data_fields = 0;
+            for (size_t i = 0; i < v->as.strct.field_count; i++)
+                if (v->as.strct.field_values[i].type != VAL_CLOSURE) data_fields++;
+            if (!hash_key_append_blob(b, "r", v->as.strct.name, strlen(v->as.strct.name)) ||
+                !hash_key_append_size(b, data_fields) || !hash_key_append_cstr(b, "{"))
+                return false;
+            for (size_t i = 0; i < v->as.strct.field_count; i++) {
+                if (v->as.strct.field_values[i].type == VAL_CLOSURE) continue;
+                const char *name = v->as.strct.field_names[i];
+                if (!hash_key_append_blob(b, "n", name, strlen(name)) ||
+                    !hash_key_append_value(b, &v->as.strct.field_values[i], depth + 1))
+                    return false;
+            }
+            return hash_key_append_cstr(b, "}");
+        }
+        case VAL_CLOSURE:
+            if (!hash_key_append_pointer(b, "cbody", v->as.closure.body) ||
+                !hash_key_append_pointer(b, "cenv", v->as.closure.captured_env))
+                return false;
+            return hash_key_append_pointer(b, "cnative", v->as.closure.native_fn);
+        case VAL_UNIT: return hash_key_append_cstr(b, "u;");
+        case VAL_NIL: return hash_key_append_cstr(b, "n;");
+        case VAL_RANGE:
+            n = snprintf(tmp, sizeof(tmp), "g%lld:%lld;", (long long)v->as.range.start, (long long)v->as.range.end);
+            return n >= 0 && hash_key_append(b, tmp, (size_t)n);
+        case VAL_MAP: {
+            size_t len = lat_map_len(v->as.map.map);
+            LatMapEntry **entries = len ? malloc(len * sizeof(*entries)) : NULL;
+            if (len && !entries) return false;
+            size_t count = 0;
+            for (size_t i = 0; i < v->as.map.map->cap; i++)
+                if (v->as.map.map->entries[i].state == MAP_OCCUPIED) entries[count++] = &v->as.map.map->entries[i];
+            if (count > 1) qsort(entries, count, sizeof(*entries), hash_key_entry_cmp);
+            bool ok = hash_key_append_cstr(b, "m") && hash_key_append_size(b, count) && hash_key_append_cstr(b, "{");
+            for (size_t i = 0; ok && i < count; i++) {
+                ok = hash_key_append_blob(b, "k", entries[i]->key, strlen(entries[i]->key)) &&
+                     hash_key_append_value(b, entries[i]->value, depth + 1);
+            }
+            free(entries);
+            return ok && hash_key_append_cstr(b, "}");
+        }
+        case VAL_CHANNEL: return hash_key_append_pointer(b, "h", v->as.channel.ch);
+        case VAL_ENUM:
+            if (!hash_key_append_blob(b, "e", v->as.enm.enum_name, strlen(v->as.enm.enum_name)) ||
+                !hash_key_append_blob(b, "v", v->as.enm.variant_name, strlen(v->as.enm.variant_name)) ||
+                !hash_key_append_size(b, v->as.enm.payload_count) || !hash_key_append_cstr(b, "("))
+                return false;
+            for (size_t i = 0; i < v->as.enm.payload_count; i++)
+                if (!hash_key_append_value(b, &v->as.enm.payload[i], depth + 1)) return false;
+            return hash_key_append_cstr(b, ")");
+        case VAL_SET: {
+            size_t len = lat_map_len(v->as.set.map);
+            char **keys = len ? malloc(len * sizeof(*keys)) : NULL;
+            if (len && !keys) return false;
+            size_t count = 0;
+            bool ok = true;
+            for (size_t i = 0; i < v->as.set.map->cap; i++) {
+                if (v->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+                keys[count] = hash_key_make(v->as.set.map->entries[i].value, depth + 1);
+                if (!keys[count]) {
+                    ok = false;
+                    break;
+                }
+                count++;
+            }
+            if (count > 1) qsort(keys, count, sizeof(*keys), hash_key_cstr_cmp);
+            if (ok) ok = hash_key_append_cstr(b, "t") && hash_key_append_size(b, count) && hash_key_append_cstr(b, "{");
+            for (size_t i = 0; ok && i < count; i++)
+                ok = hash_key_append_size(b, strlen(keys[i])) && hash_key_append_cstr(b, ":") &&
+                     hash_key_append_cstr(b, keys[i]) && hash_key_append_cstr(b, ";");
+            for (size_t i = 0; i < count; i++) free(keys[i]);
+            free(keys);
+            return ok && hash_key_append_cstr(b, "}");
+        }
+        case VAL_TUPLE:
+            if (!hash_key_append_cstr(b, "q") || !hash_key_append_size(b, v->as.tuple.len) ||
+                !hash_key_append_cstr(b, "("))
+                return false;
+            for (size_t i = 0; i < v->as.tuple.len; i++)
+                if (!hash_key_append_value(b, &v->as.tuple.elems[i], depth + 1)) return false;
+            return hash_key_append_cstr(b, ")");
+        case VAL_BUFFER: return hash_key_append_blob(b, "x", v->as.buffer.data, v->as.buffer.len);
+        case VAL_REF: return hash_key_append_pointer(b, "p", v->as.ref.ref);
+        case VAL_ITERATOR:
+            if (!hash_key_append_pointer(b, "istate", v->as.iterator.state)) return false;
+            return hash_key_append_pointer(b, "iref", v->as.iterator.refcount);
+    }
+    return false;
+}
+
+char *value_hash_key(const LatValue *v) {
+    char *key = hash_key_make(v, 0);
+    if (key) return key;
+    /* The Set API cannot surface allocation failure. Keep the fallback typed
+     * so even a degraded key cannot recreate the original display collision. */
+    char *fallback = NULL;
+    lat_asprintf(&fallback, "oom:%d:%p", (int)v->type, (const void *)v);
+    return fallback ? fallback : strdup("oom");
+}
+
+/* Set map keys are canonical structural hashes. Unequal values with the same
+ * hash occupy compact numbered slots (`hash`, `hash#1`, ...); equality, never
+ * the slot name, decides membership. Keeping each element as an ordinary
+ * LatValue map entry preserves the existing clone/GC/iteration representation. */
+static char *value_set_storage_key(const char *hash, size_t slot) {
+    if (slot == 0) return strdup(hash);
+    char *key = NULL;
+    lat_asprintf(&key, "%s#%zu", hash, slot);
+    return key;
+}
+
+static bool value_set_item_equal(const LatValue *left, const LatValue *right) {
+    if (left == right) return true;
+    if (!left || !right) return false;
+    if ((left->type == VAL_INT || left->type == VAL_FLOAT) && (right->type == VAL_INT || right->type == VAL_FLOAT))
+        return value_numeric_compare(left, right) == VALUE_CMP_EQUAL;
+    if (left->type != right->type) return false;
+
+    switch (left->type) {
+        case VAL_CLOSURE:
+            return left->as.closure.body == right->as.closure.body &&
+                   left->as.closure.native_fn == right->as.closure.native_fn &&
+                   left->as.closure.captured_env == right->as.closure.captured_env &&
+                   left->as.closure.upvalue_count == right->as.closure.upvalue_count;
+        case VAL_ITERATOR:
+            return left->as.iterator.next_fn == right->as.iterator.next_fn &&
+                   left->as.iterator.state == right->as.iterator.state &&
+                   left->as.iterator.refcount == right->as.iterator.refcount;
+        case VAL_ARRAY:
+            if (left->as.array.len != right->as.array.len) return false;
+            for (size_t i = 0; i < left->as.array.len; i++)
+                if (!value_set_item_equal(&left->as.array.elems[i], &right->as.array.elems[i])) return false;
+            return true;
+        case VAL_STRUCT:
+            if (strcmp(left->as.strct.name, right->as.strct.name) != 0 ||
+                left->as.strct.field_count != right->as.strct.field_count)
+                return false;
+            for (size_t i = 0; i < left->as.strct.field_count; i++) {
+                if (strcmp(left->as.strct.field_names[i], right->as.strct.field_names[i]) != 0) return false;
+                /* `eq` is the struct's equality method, not data identity. */
+                if (strcmp(left->as.strct.field_names[i], "eq") == 0 &&
+                    left->as.strct.field_values[i].type == VAL_CLOSURE &&
+                    right->as.strct.field_values[i].type == VAL_CLOSURE)
+                    continue;
+                if (!value_set_item_equal(&left->as.strct.field_values[i], &right->as.strct.field_values[i]))
+                    return false;
+            }
+            return true;
+        case VAL_MAP:
+            if (lat_map_len(left->as.map.map) != lat_map_len(right->as.map.map)) return false;
+            for (size_t i = 0; i < left->as.map.map->cap; i++) {
+                if (left->as.map.map->entries[i].state != MAP_OCCUPIED) continue;
+                LatValue *right_value = lat_map_get(right->as.map.map, left->as.map.map->entries[i].key);
+                if (!right_value || !value_set_item_equal((LatValue *)left->as.map.map->entries[i].value, right_value))
+                    return false;
+            }
+            return true;
+        case VAL_ENUM:
+            if (strcmp(left->as.enm.enum_name, right->as.enm.enum_name) != 0 ||
+                strcmp(left->as.enm.variant_name, right->as.enm.variant_name) != 0 ||
+                left->as.enm.payload_count != right->as.enm.payload_count)
+                return false;
+            for (size_t i = 0; i < left->as.enm.payload_count; i++)
+                if (!value_set_item_equal(&left->as.enm.payload[i], &right->as.enm.payload[i])) return false;
+            return true;
+        case VAL_SET: return value_set_equal(left, right);
+        case VAL_TUPLE:
+            if (left->as.tuple.len != right->as.tuple.len) return false;
+            for (size_t i = 0; i < left->as.tuple.len; i++)
+                if (!value_set_item_equal(&left->as.tuple.elems[i], &right->as.tuple.elems[i])) return false;
+            return true;
+        default: return value_eq(left, right);
+    }
+}
+
+static bool value_set_find(const LatValue *set, const LatValue *value, const char *hash, char **matched_key,
+                           size_t *matched_slot, size_t *next_slot) {
+    if (matched_key) *matched_key = NULL;
+    if (matched_slot) *matched_slot = 0;
+    if (next_slot) *next_slot = SIZE_MAX;
+    if (!set || set->type != VAL_SET || !set->as.set.map) return false;
+
+    LatValue *stored = lat_map_get(set->as.set.map, hash);
+    if (!stored) {
+        if (next_slot) *next_slot = 0;
+        return false;
+    }
+    if (value_set_item_equal(stored, value)) {
+        if (matched_key) *matched_key = strdup(hash);
+        return !matched_key || *matched_key != NULL;
+    }
+
+    for (size_t slot = 1; slot != SIZE_MAX; slot++) {
+        char *key = value_set_storage_key(hash, slot);
+        if (!key) return false;
+        stored = lat_map_get(set->as.set.map, key);
+        if (!stored) {
+            if (next_slot) *next_slot = slot;
+            free(key);
+            return false;
+        }
+        if (value_set_item_equal(stored, value)) {
+            if (matched_key) *matched_key = key;
+            else free(key);
+            if (matched_slot) *matched_slot = slot;
+            return true;
+        }
+        free(key);
+    }
+    return false;
+}
+
+size_t value_set_length(const LatValue *set) {
+    return set && set->type == VAL_SET && set->as.set.map ? lat_map_len(set->as.set.map) : 0;
+}
+
+bool value_set_contains(const LatValue *set, const LatValue *value) {
+    if (!set || set->type != VAL_SET || !value) return false;
+    char *hash = value_hash_key(value);
+    if (!hash) return false;
+    bool found = value_set_find(set, value, hash, NULL, NULL, NULL);
+    free(hash);
+    return found;
+}
+
+bool value_set_insert(LatValue *set, const LatValue *value) {
+    if (!set || set->type != VAL_SET || !set->as.set.map || !value) return false;
+    char *hash = value_hash_key(value);
+    if (!hash) return false;
+    size_t next_slot = 0;
+    if (value_set_find(set, value, hash, NULL, NULL, &next_slot)) {
+        free(hash);
+        return false;
+    }
+
+    char *storage_key = next_slot == SIZE_MAX ? NULL : value_set_storage_key(hash, next_slot);
+    if (!storage_key) {
+        free(hash);
+        return false;
+    }
+
+    LatValue stored = value_deep_clone(value);
+    lat_map_set(set->as.set.map, storage_key, &stored);
+    free(storage_key);
+    free(hash);
+    return true;
+}
+
+bool value_set_remove(LatValue *set, const LatValue *value) {
+    if (!set || set->type != VAL_SET || !set->as.set.map || !value) return false;
+    char *hash = value_hash_key(value);
+    if (!hash) return false;
+    char *storage_key = NULL;
+    size_t slot = 0;
+    if (!value_set_find(set, value, hash, &storage_key, &slot, NULL) || !storage_key) {
+        free(hash);
+        return false;
+    }
+
+    size_t last_slot = slot;
+    while (last_slot != SIZE_MAX - 1) {
+        char *next_key = value_set_storage_key(hash, last_slot + 1);
+        if (!next_key) {
+            free(storage_key);
+            free(hash);
+            return false;
+        }
+        bool present = lat_map_contains(set->as.set.map, next_key);
+        free(next_key);
+        if (!present) break;
+        last_slot++;
+    }
+
+    char *last_key = NULL;
+    LatValue *last = NULL;
+    if (last_slot != slot) {
+        last_key = value_set_storage_key(hash, last_slot);
+        last = last_key ? lat_map_get(set->as.set.map, last_key) : NULL;
+    }
+    LatValue *removed = lat_map_get(set->as.set.map, storage_key);
+    if (!removed || (last_slot != slot && !last)) {
+        free(last_key);
+        free(storage_key);
+        free(hash);
+        return false;
+    }
+    value_free(removed);
+
+    if (last_slot == slot) {
+        lat_map_remove(set->as.set.map, storage_key);
+    } else {
+        LatValue moved = *last;
+        *last = value_nil();
+        lat_map_remove(set->as.set.map, storage_key);
+        lat_map_remove(set->as.set.map, last_key);
+        lat_map_set(set->as.set.map, storage_key, &moved);
+    }
+    free(last_key);
+    free(storage_key);
+    free(hash);
+    return true;
+}
+
+void value_set_clear(LatValue *set) {
+    if (!set || set->type != VAL_SET || !set->as.set.map) return;
+    for (size_t i = 0; i < set->as.set.map->cap; i++) {
+        if (set->as.set.map->entries[i].state == MAP_OCCUPIED)
+            value_free((LatValue *)set->as.set.map->entries[i].value);
+    }
+    lat_map_free(set->as.set.map);
+    *set->as.set.map = lat_map_new(sizeof(LatValue));
+}
+
+static void value_set_insert_all(LatValue *result, const LatValue *source) {
+    if (!source || source->type != VAL_SET || !source->as.set.map) return;
+    for (size_t i = 0; i < source->as.set.map->cap; i++) {
+        if (source->as.set.map->entries[i].state == MAP_OCCUPIED)
+            value_set_insert(result, (LatValue *)source->as.set.map->entries[i].value);
+    }
+}
+
+LatValue value_set_union(const LatValue *left, const LatValue *right) {
+    LatValue result = value_set_new();
+    value_set_insert_all(&result, left);
+    value_set_insert_all(&result, right);
+    return result;
+}
+
+LatValue value_set_intersection(const LatValue *left, const LatValue *right) {
+    LatValue result = value_set_new();
+    if (!left || left->type != VAL_SET || !right || right->type != VAL_SET) return result;
+    for (size_t i = 0; i < left->as.set.map->cap; i++) {
+        if (left->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+        LatValue *value = (LatValue *)left->as.set.map->entries[i].value;
+        if (value_set_contains(right, value)) value_set_insert(&result, value);
+    }
+    return result;
+}
+
+LatValue value_set_difference(const LatValue *left, const LatValue *right) {
+    LatValue result = value_set_new();
+    if (!left || left->type != VAL_SET || !right || right->type != VAL_SET) return result;
+    for (size_t i = 0; i < left->as.set.map->cap; i++) {
+        if (left->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+        LatValue *value = (LatValue *)left->as.set.map->entries[i].value;
+        if (!value_set_contains(right, value)) value_set_insert(&result, value);
+    }
+    return result;
+}
+
+LatValue value_set_symmetric_difference(const LatValue *left, const LatValue *right) {
+    LatValue result = value_set_difference(left, right);
+    if (!left || left->type != VAL_SET || !right || right->type != VAL_SET) return result;
+    for (size_t i = 0; i < right->as.set.map->cap; i++) {
+        if (right->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+        LatValue *value = (LatValue *)right->as.set.map->entries[i].value;
+        if (!value_set_contains(left, value)) value_set_insert(&result, value);
+    }
+    return result;
+}
+
+bool value_set_is_subset(const LatValue *subset, const LatValue *superset) {
+    if (!subset || subset->type != VAL_SET || !superset || superset->type != VAL_SET) return false;
+    if (value_set_length(subset) > value_set_length(superset)) return false;
+    for (size_t i = 0; i < subset->as.set.map->cap; i++) {
+        if (subset->as.set.map->entries[i].state != MAP_OCCUPIED) continue;
+        if (!value_set_contains(superset, (LatValue *)subset->as.set.map->entries[i].value)) return false;
+    }
+    return true;
+}
+
+bool value_set_equal(const LatValue *left, const LatValue *right) {
+    if (!left || left->type != VAL_SET || !right || right->type != VAL_SET) return false;
+    return value_set_length(left) == value_set_length(right) && value_set_is_subset(left, right);
 }
 
 /* ── Free ── */
@@ -1707,7 +2218,8 @@ void value_free(LatValue *v) {
             }
             /* Don't free compiled bytecode closures' env — they store ObjUpvalue**,
              * not Env*. The VM manages upvalue lifetime. */
-            if (v->as.closure.captured_env && !(v->as.closure.body == NULL && v->as.closure.native_fn != NULL))
+            if (v->phase != WEAK_CLOSURE_PHASE && v->as.closure.captured_env &&
+                !(v->as.closure.body == NULL && v->as.closure.native_fn != NULL))
                 env_release(v->as.closure.captured_env);
             break;
         case VAL_MAP:

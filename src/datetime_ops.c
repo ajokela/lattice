@@ -25,8 +25,19 @@ static time_t portable_timegm(struct tm *tm) {
     return local_epoch + (local_epoch - utc_epoch);
 }
 
+static int64_t epoch_ms_floor_seconds(int64_t epoch_ms, int *millis) {
+    int64_t seconds = epoch_ms / 1000;
+    int64_t remainder = epoch_ms % 1000;
+    if (remainder < 0) {
+        remainder += 1000;
+        seconds--;
+    }
+    if (millis) *millis = (int)remainder;
+    return seconds;
+}
+
 char *datetime_format(int64_t epoch_ms, const char *fmt, char **err) {
-    time_t secs = (time_t)(epoch_ms / 1000);
+    time_t secs = (time_t)epoch_ms_floor_seconds(epoch_ms, NULL);
     struct tm tm;
     if (localtime_r(&secs, &tm) == NULL) {
         *err = strdup("time_format: failed to convert timestamp");
@@ -68,7 +79,7 @@ int64_t datetime_parse(const char *str, const char *fmt, char **err) {
 /* ── Component extraction ── */
 
 static struct tm epoch_to_tm(int64_t epoch_ms) {
-    time_t secs = (time_t)(epoch_ms / 1000);
+    time_t secs = (time_t)epoch_ms_floor_seconds(epoch_ms, NULL);
     struct tm tm;
     localtime_r(&secs, &tm);
     return tm;
@@ -98,6 +109,7 @@ int datetime_days_in_month(int year, int month) {
 int datetime_day_of_year(int year, int month, int day) {
     static const int cum[] = {0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
     if (month < 1 || month > 12) return -1;
+    if (day < 1 || day > datetime_days_in_month(year, month)) return -1;
     int doy = cum[month] + day;
     if (month > 2 && datetime_is_leap_year(year)) doy++;
     return doy;
@@ -106,9 +118,11 @@ int datetime_day_of_year(int year, int month, int day) {
 int datetime_day_of_week(int year, int month, int day) {
     /* Tomohiko Sakamoto's algorithm: returns 0=Sunday..6=Saturday */
     static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-    int y = year;
+    if (month < 1 || month > 12 || day < 1 || day > datetime_days_in_month(year, month)) return -1;
+    int64_t y = year;
     if (month < 3) y--;
-    return (y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7;
+    int result = (int)((y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7);
+    return result < 0 ? result + 7 : result;
 }
 
 /* ── Timezone ── */
@@ -145,21 +159,31 @@ int64_t datetime_parse_iso(const char *str, char **err) {
     bool is_utc = false;
 
     /* Try full ISO 8601: YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM] */
-    int n = sscanf(str, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second);
+    char suffix[16] = {0};
+    int n = sscanf(str, "%d-%d-%dT%d:%d:%d%15s", &year, &month, &day, &hour, &minute, &second, suffix);
     if (n >= 3) {
-        if (n >= 4) has_time = true;
-
-        /* Look for timezone suffix */
-        const char *p = str;
-        while (*p && *p != 'Z' && *p != '+') {
-            if (*p == '-' && p > str + 10) break; /* timezone minus (not date minus) */
-            p++;
+        if (n == 4 || n == 5) {
+            *err = strdup("datetime_from_iso: malformed time component");
+            return 0;
         }
-        if (*p == 'Z') {
+        if (n == 3 && strlen(str) != 10) {
+            *err = strdup("datetime_from_iso: malformed date");
+            return 0;
+        }
+        if (n >= 4) has_time = true;
+        if (n == 7 && strcmp(suffix, "Z") == 0) {
             is_utc = true;
-        } else if (*p == '+' || (*p == '-' && p > str + 10)) {
-            tz_sign = *p;
-            sscanf(p + 1, "%d:%d", &tz_hour, &tz_min);
+        } else if (n == 7 && (suffix[0] == '+' || suffix[0] == '-')) {
+            char extra[2] = {0};
+            int tz_n = sscanf(suffix + 1, "%d:%d%1s", &tz_hour, &tz_min, extra);
+            if (tz_n != 2) {
+                *err = strdup("datetime_from_iso: malformed timezone suffix");
+                return 0;
+            }
+            tz_sign = suffix[0];
+        } else if (n == 7) {
+            *err = strdup("datetime_from_iso: malformed timezone suffix");
+            return 0;
         }
     } else {
         char msg[256];
@@ -169,8 +193,9 @@ int64_t datetime_parse_iso(const char *str, char **err) {
     }
 
     /* Validate ranges */
-    if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
-        second < 0 || second > 59) {
+    if (month < 1 || month > 12 || day < 1 || day > datetime_days_in_month(year, month) || hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 || second < 0 || second > 59 || tz_hour < 0 || tz_hour > 23 || tz_min < 0 ||
+        tz_min > 59) {
         *err = strdup("datetime_from_iso: date/time components out of range");
         return 0;
     }

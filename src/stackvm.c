@@ -88,6 +88,57 @@ static LatValue pop(StackVM *vm) {
 
 static LatValue *stackvm_peek(StackVM *vm, int distance) { return &vm->stack_top[-1 - distance]; }
 
+static char *stackvm_module_global_name(const Chunk *chunk, const char *name) {
+    if (!chunk || !chunk->module_prefix) return NULL;
+    char *qualified = NULL;
+    lat_asprintf(&qualified, "%s::%s", chunk->module_prefix, name);
+    return qualified;
+}
+
+/* Module chunks resolve their own bindings first, then fall back to the base
+ * runtime namespace for builtins. Definitions always stay in the module
+ * namespace, so an exported closure can retain its globals without leaking
+ * source-visible names into the importer. */
+static LatValue *stackvm_global_ref(StackVM *vm, const Chunk *chunk, const char *name, size_t raw_hash) {
+    char *qualified = stackvm_module_global_name(chunk, name);
+    if (qualified) {
+        LatValue *ref = env_get_ref(vm->env, qualified);
+        free(qualified);
+        if (ref) return ref;
+    }
+    return raw_hash ? env_get_ref_prehashed(vm->env, name, raw_hash) : env_get_ref(vm->env, name);
+}
+
+static bool stackvm_global_get(StackVM *vm, const Chunk *chunk, const char *name, LatValue *out) {
+    char *qualified = stackvm_module_global_name(chunk, name);
+    if (qualified) {
+        bool found = env_get(vm->env, qualified, out);
+        free(qualified);
+        if (found) return true;
+    }
+    return env_get(vm->env, name, out);
+}
+
+static bool stackvm_global_set(StackVM *vm, const Chunk *chunk, const char *name, LatValue value) {
+    char *qualified = stackvm_module_global_name(chunk, name);
+    if (qualified) {
+        bool found = env_set(vm->env, qualified, value);
+        free(qualified);
+        if (found) return true;
+    }
+    return env_set(vm->env, name, value);
+}
+
+static void stackvm_global_define(StackVM *vm, const Chunk *chunk, const char *name, LatValue value) {
+    char *qualified = stackvm_module_global_name(chunk, name);
+    if (qualified) {
+        env_define(vm->env, qualified, value);
+        free(qualified);
+    } else {
+        env_define(vm->env, name, value);
+    }
+}
+
 /* Get the source line for the current instruction in the topmost frame. */
 static int stackvm_current_line(StackVM *vm) {
     if (vm->frame_count == 0) return 0;
@@ -153,6 +204,9 @@ static StackVMResult runtime_error(StackVM *vm, const char *fmt, ...) {
 }
 
 static void close_upvalues(StackVM *vm, LatValue *last); /* defined below */
+static char *stackvm_unwind_defers_to(StackVM *vm, size_t target_count);
+static StackVMResult stackvm_transfer_to_handler(StackVM *vm, StackCallFrame **frame_ptr, StackExceptionHandler handler,
+                                                 LatValue err_map, const char *original_error);
 
 /* CbR Stage 3 (LAT-452): release every live stack slot in [new_top,
  * vm->stack_top) before resetting the stack pointer during exception
@@ -177,6 +231,13 @@ static void stackvm_unwind_release(StackVM *vm, LatValue *new_top) {
     vm->stack_top = new_top;
 }
 
+/* Exception handlers are owned by the call frame that installed them. A
+ * nonlocal return can bypass the compiler-emitted POP_HANDLER instructions,
+ * so discard every handler belonging to the frame before removing it. */
+static void stackvm_discard_handlers_from_frame(StackVM *vm, size_t frame_index) {
+    while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame_index >= frame_index) vm->handler_count--;
+}
+
 /* Try to route a runtime error through exception handlers.
  * If a handler exists, unwinds to it, pushes the error string, and returns STACKVM_OK
  * (caller should `break` to continue the StackVM loop).
@@ -191,18 +252,25 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
     if (vm->handler_count > 0) {
         /* Caught by try/catch — build structured error Map before unwinding */
         LatValue err_map = stackvm_build_error_map(vm, inner);
-        free(inner);
         StackExceptionHandler h = vm->handlers[--vm->handler_count];
-        while (vm->frame_count - 1 > h.frame_index) vm->frame_count--;
-        *frame_ptr = &vm->frames[vm->frame_count - 1];
-        /* Release abandoned slots BEFORE the err_map push below (LAT-452). */
-        stackvm_unwind_release(vm, h.stack_top);
-        (*frame_ptr)->ip = h.ip;
-        push(vm, err_map);
-        return STACKVM_OK;
+        StackVMResult result = stackvm_transfer_to_handler(vm, frame_ptr, h, err_map, inner);
+        free(inner);
+        return result;
     }
 
-    /* Uncaught — store raw error (stack trace provides line info) */
+    /* Uncaught — all active frames are leaving, so run every remaining defer
+     * before exposing the error to the host. A cleanup error takes precedence
+     * but retains the triggering error as context. */
+    if (!vm->unwinding_defers && vm->defer_count > 0) {
+        char *cleanup_error = stackvm_unwind_defers_to(vm, 0);
+        if (cleanup_error) {
+            char *combined = NULL;
+            lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error, inner);
+            free(cleanup_error);
+            free(inner);
+            inner = combined;
+        }
+    }
     vm->error = inner;
     return STACKVM_RUNTIME_ERROR;
 }
@@ -213,25 +281,34 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
 static StackVMResult stackvm_handle_native_error(StackVM *vm, StackCallFrame **frame_ptr) {
     if (vm->handler_count > 0) {
         /* Build structured error Map before unwinding */
-        LatValue err_map = stackvm_build_error_map(vm, vm->error);
-        free(vm->error);
+        char *original = vm->error;
+        LatValue err_map = stackvm_build_error_map(vm, original);
         vm->error = NULL;
         StackExceptionHandler h = vm->handlers[--vm->handler_count];
-        while (vm->frame_count - 1 > h.frame_index) vm->frame_count--;
-        *frame_ptr = &vm->frames[vm->frame_count - 1];
-        /* Release abandoned slots BEFORE the err_map push below (LAT-452). */
-        stackvm_unwind_release(vm, h.stack_top);
-        (*frame_ptr)->ip = h.ip;
-        push(vm, err_map);
-        return STACKVM_OK;
+        StackVMResult result = stackvm_transfer_to_handler(vm, frame_ptr, h, err_map, original);
+        free(original);
+        return result;
     }
-    /* Uncaught — vm->error already set by native function, no line prefix */
+    /* Uncaught native error: clear it while cleanup executes so a successful
+     * defer is not mistaken for the original failure. */
+    if (!vm->unwinding_defers && vm->defer_count > 0) {
+        char *original = vm->error;
+        vm->error = NULL;
+        char *cleanup_error = stackvm_unwind_defers_to(vm, 0);
+        if (cleanup_error) {
+            lat_asprintf(&vm->error, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
+                         original ? original : "runtime error");
+            free(cleanup_error);
+            free(original);
+        } else {
+            vm->error = original;
+        }
+    }
+    /* vm->error already set by native function, no line prefix */
     return STACKVM_RUNTIME_ERROR;
 }
 
-static bool is_falsy(LatValue *v) {
-    return v->type == VAL_NIL || (v->type == VAL_BOOL && !v->as.bool_val) || v->type == VAL_UNIT;
-}
+static bool is_falsy(LatValue *v) { return !value_is_truthy(v); }
 
 /* ── Upvalue management ── */
 
@@ -309,7 +386,8 @@ static LatValue value_clone_fast_inner(const LatValue *src) {
         case VAL_NIL:
         case VAL_RANGE: {
             LatValue v = *src;
-            v.region_id = REGION_NONE;
+            v.region_id =
+                (src->type == VAL_NIL && src->region_id == REGION_MISSING_ARG) ? REGION_MISSING_ARG : REGION_NONE;
             return v;
         }
         case VAL_STR: {
@@ -623,6 +701,86 @@ static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *a
     return result;
 }
 
+/* Execute and remove every defer registered after target_count. Handler state
+ * is hidden while each cleanup runs: a cleanup may catch its own errors, but
+ * an escaping cleanup error must not enter the catch whose try block is still
+ * being unwound. Saved outer handlers are restored before propagation. */
+static char *stackvm_unwind_defers_to(StackVM *vm, size_t target_count) {
+    char *cleanup_error = NULL;
+    bool was_unwinding = vm->unwinding_defers;
+    vm->unwinding_defers = true;
+    while (vm->defer_count > target_count) {
+        StackDeferEntry d = vm->defers[--vm->defer_count];
+        StackExceptionHandler saved_handlers[STACKVM_HANDLER_MAX];
+        size_t saved_handler_count = vm->handler_count;
+        if (saved_handler_count > 0)
+            memcpy(saved_handlers, vm->handlers, saved_handler_count * sizeof(StackExceptionHandler));
+        vm->handler_count = 0;
+
+        size_t saved_frame_count = vm->frame_count;
+        LatValue defer_result = stackvm_call_closure(vm, &d.closure, NULL, 0);
+        value_free(&defer_result);
+        value_free(&d.closure);
+
+        char *current_error = NULL;
+        if (vm->error) {
+            current_error = vm->error;
+            vm->error = NULL;
+        } else if (vm->rt && vm->rt->error) {
+            current_error = vm->rt->error;
+            vm->rt->error = NULL;
+        }
+
+        /* A failed nested stackvm_run releases its stack window but leaves
+         * frame metadata for its caller to unwind. The cleanup is already
+         * removed from the defer stack, so dropping those frames is exact. */
+        if (vm->frame_count > saved_frame_count) vm->frame_count = saved_frame_count;
+
+        vm->handler_count = saved_handler_count;
+        if (saved_handler_count > 0)
+            memcpy(vm->handlers, saved_handlers, saved_handler_count * sizeof(StackExceptionHandler));
+
+        if (current_error) {
+            if (cleanup_error) {
+                char *combined = NULL;
+                lat_asprintf(&combined, "%s (while unwinding after: %s)", current_error, cleanup_error);
+                free(current_error);
+                free(cleanup_error);
+                cleanup_error = combined;
+            } else {
+                cleanup_error = current_error;
+            }
+        }
+    }
+    vm->unwinding_defers = was_unwinding;
+    return cleanup_error;
+}
+
+/* Run pending cleanup while the throwing frames and their captured locals are
+ * still live, then perform the ordinary frame/stack transfer into catch. */
+static StackVMResult stackvm_transfer_to_handler(StackVM *vm, StackCallFrame **frame_ptr, StackExceptionHandler handler,
+                                                 LatValue err_map, const char *original_error) {
+    char *cleanup_error = stackvm_unwind_defers_to(vm, handler.defer_count);
+    if (cleanup_error) {
+        value_free(&err_map);
+        char *propagated = NULL;
+        lat_asprintf(&propagated, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
+                     original_error ? original_error : "runtime error");
+        free(cleanup_error);
+        StackVMResult result = stackvm_handle_error(vm, frame_ptr, "%s", propagated);
+        free(propagated);
+        return result;
+    }
+
+    while (vm->frame_count - 1 > handler.frame_index) vm->frame_count--;
+    *frame_ptr = &vm->frames[vm->frame_count - 1];
+    /* Release abandoned slots only after defers have read their captures. */
+    stackvm_unwind_release(vm, handler.stack_top);
+    (*frame_ptr)->ip = handler.ip;
+    push(vm, err_map);
+    return STACKVM_OK;
+}
+
 /* BuiltinCallback adapter for stackvm: closure is a LatValue*, ctx is a StackVM* */
 static LatValue stackvm_builtin_callback(void *closure, LatValue *args, int arg_count, void *ctx) {
     return stackvm_call_closure((StackVM *)ctx, (LatValue *)closure, args, arg_count);
@@ -794,6 +952,9 @@ void stackvm_free(StackVM *vm) {
         uv = next;
     }
 
+    for (size_t i = 0; i < vm->defer_count; i++) value_free(&vm->defers[i].closure);
+    vm->defer_count = 0;
+
     /* LAT-448 (Stage 5): frames never OWN their upvalue pointers — OP_CALL
      * and every method-dispatch site alias the callee closure's
      * captured_env directly, value_clone shallow-shares that array, and
@@ -958,6 +1119,9 @@ void stackvm_free_child(StackVM *child) {
         free(uv);
         uv = next;
     }
+
+    for (size_t i = 0; i < child->defer_count; i++) value_free(&child->defers[i].closure);
+    child->defer_count = 0;
 
     /* LAT-448 (Stage 5): no per-frame upvalue frees — frames only alias
      * closure-owned upvalue storage. See the matching comment in
@@ -1546,16 +1710,17 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
                             value_free(&cmp);
                         } else {
                             /* Default: ascending for ints, floats, strings */
-                            if (elems[j - 1].type == VAL_INT && key.type == VAL_INT) {
-                                should_swap = elems[j - 1].as.int_val > key.as.int_val;
-                            } else if (elems[j - 1].type == VAL_FLOAT && key.type == VAL_FLOAT) {
-                                should_swap = elems[j - 1].as.float_val > key.as.float_val;
-                            } else if ((elems[j - 1].type == VAL_INT || elems[j - 1].type == VAL_FLOAT) &&
-                                       (key.type == VAL_INT || key.type == VAL_FLOAT)) {
-                                double a_d = elems[j - 1].type == VAL_INT ? (double)elems[j - 1].as.int_val
-                                                                          : elems[j - 1].as.float_val;
-                                double b_d = key.type == VAL_INT ? (double)key.as.int_val : key.as.float_val;
-                                should_swap = a_d > b_d;
+                            if ((elems[j - 1].type == VAL_INT || elems[j - 1].type == VAL_FLOAT) &&
+                                (key.type == VAL_INT || key.type == VAL_FLOAT)) {
+                                ValueNumericCmp cmp = value_numeric_compare(&elems[j - 1], &key);
+                                if (cmp == VALUE_CMP_UNORDERED) {
+                                    for (size_t fi = 0; fi < len; fi++) value_free(&elems[fi]);
+                                    free(elems);
+                                    vm->error = strdup("sort: cannot compare NaN");
+                                    push(vm, value_unit());
+                                    return true;
+                                }
+                                should_swap = cmp == VALUE_CMP_GREATER;
                             } else if (elems[j - 1].type == VAL_STR && key.type == VAL_STR) {
                                 should_swap = strcmp(elems[j - 1].as.str_val, key.as.str_val) > 0;
                             } else {
@@ -3212,7 +3377,23 @@ static void stackvm_iter_convert_to_array(LatValue *iter) {
     *iter = arr;
 }
 
+static bool stackvm_call_phases_ok(StackVM *vm, const Chunk *fn_chunk, int arg_count) {
+    if (!fn_chunk->param_phases) return true;
+    for (int i = 0; i < fn_chunk->param_phase_count && i < arg_count; i++) {
+        uint8_t pp = fn_chunk->param_phases[i];
+        if (pp == PHASE_UNSPECIFIED) continue;
+        LatValue *arg = stackvm_peek(vm, arg_count - 1 - i);
+        if ((pp == PHASE_FLUID && arg->phase == VTAG_CRYSTAL) || (pp == PHASE_CRYSTAL && arg->phase == VTAG_FLUID)) {
+            lat_asprintf(&vm->error, "phase constraint violation in function '%s'",
+                         fn_chunk->name ? fn_chunk->name : "<anonymous>");
+            return false;
+        }
+    }
+    return true;
+}
+
 static int stackvm_adjust_call_args(StackVM *vm, Chunk *fn_chunk, int arity, int arg_count) {
+    if (!stackvm_call_phases_ok(vm, fn_chunk, arg_count)) return -1;
     int dc = fn_chunk->default_count;
     bool vd = fn_chunk->fn_has_variadic;
     if (dc == 0 && !vd) {
@@ -3233,10 +3414,12 @@ static int stackvm_adjust_call_args(StackVM *vm, Chunk *fn_chunk, int arity, int
     }
 
     /* Push defaults for missing non-variadic params */
-    if (arg_count < non_variadic && fn_chunk->default_values) {
+    if (arg_count < non_variadic) {
         for (int i = arg_count; i < non_variadic; i++) {
-            int def_idx = i - required;
-            push(vm, value_clone_fast(&fn_chunk->default_values[def_idx]));
+            (void)i;
+            LatValue missing = value_nil();
+            missing.region_id = REGION_MISSING_ARG;
+            push(vm, missing);
         }
         arg_count = non_variadic;
     }
@@ -3305,11 +3488,15 @@ static bool stackvm_struct_field_arity_ok(StackVM *vm, const Chunk *fn_chunk, in
 static int stackvm_pad_struct_field_defaults(StackVM *vm, const Chunk *fn_chunk, const LatValue *field, int arg_count) {
     int pc = (int)field->as.closure.param_count;
     int dc = fn_chunk->default_count;
-    if (fn_chunk->fn_has_variadic || dc <= 0 || !fn_chunk->default_values) return arg_count;
-    int required = pc - dc;       /* params before the first defaulted one (incl. self) */
+    if (fn_chunk->fn_has_variadic || dc <= 0) return arg_count;
     int provided = arg_count + 1; /* user args + injected self */
     if (provided >= pc) return arg_count;
-    for (int pi = provided; pi < pc; pi++) push(vm, value_clone_fast(&fn_chunk->default_values[pi - required]));
+    for (int pi = provided; pi < pc; pi++) {
+        (void)pi;
+        LatValue missing = value_nil();
+        missing.region_id = REGION_MISSING_ARG;
+        push(vm, missing);
+    }
     return pc - 1; /* all non-self params now present */
 }
 
@@ -3473,7 +3660,7 @@ static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame
                                                       : value_type_name(obj);
     char key[256];
     snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-    LatValue *method_ref = env_get_ref(vm->env, key);
+    LatValue *method_ref = stackvm_global_ref(vm, (*frame_ref)->chunk, key, 0);
     if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
         /* Found a compiled method - call it with self + args */
         Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
@@ -3673,6 +3860,12 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_INDEX_GLOBAL] = &&lbl_OP_INDEX_GLOBAL,
         [OP_SET_INDEX_GLOBAL] = &&lbl_OP_SET_INDEX_GLOBAL,
         [OP_INVOKE_MUT] = &&lbl_OP_INVOKE_MUT,
+        [OP_SELECT_CHOOSE] = &&lbl_OP_SELECT_CHOOSE,
+        [OP_HAS_FIELD] = &&lbl_OP_HAS_FIELD,
+        [OP_MATCH_RANGE] = &&lbl_OP_MATCH_RANGE,
+        [OP_MATCH_FLUID] = &&lbl_OP_MATCH_FLUID,
+        [OP_CLOSE_UPVALUE_PRESERVE] = &&lbl_OP_CLOSE_UPVALUE_PRESERVE,
+        [OP_MATCH_TYPE] = &&lbl_OP_MATCH_TYPE,
     };
 #endif
 
@@ -3772,7 +3965,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         case OP_ADD: {
             LatValue b = pop(vm), a = pop(vm);
             if (a.type == VAL_INT && b.type == VAL_INT) {
-                push(vm, value_int(a.as.int_val + b.as.int_val));
+                push(vm, value_int((int64_t)((uint64_t)a.as.int_val + (uint64_t)b.as.int_val)));
             } else if (a.type == VAL_FLOAT && b.type == VAL_FLOAT) {
                 push(vm, value_float(a.as.float_val + b.as.float_val));
             } else if (a.type == VAL_INT && b.type == VAL_FLOAT) {
@@ -3830,7 +4023,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_SUB: {
             LatValue b = pop(vm), a = pop(vm);
-            if (a.type == VAL_INT && b.type == VAL_INT) push(vm, value_int(a.as.int_val - b.as.int_val));
+            if (a.type == VAL_INT && b.type == VAL_INT)
+                push(vm, value_int((int64_t)((uint64_t)a.as.int_val - (uint64_t)b.as.int_val)));
             else if (a.type == VAL_FLOAT && b.type == VAL_FLOAT) push(vm, value_float(a.as.float_val - b.as.float_val));
             else if (a.type == VAL_INT && b.type == VAL_FLOAT)
                 push(vm, value_float((double)a.as.int_val - b.as.float_val));
@@ -3850,7 +4044,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_MUL: {
             LatValue b = pop(vm), a = pop(vm);
-            if (a.type == VAL_INT && b.type == VAL_INT) push(vm, value_int(a.as.int_val * b.as.int_val));
+            if (a.type == VAL_INT && b.type == VAL_INT)
+                push(vm, value_int((int64_t)((uint64_t)a.as.int_val * (uint64_t)b.as.int_val)));
             else if (a.type == VAL_FLOAT && b.type == VAL_FLOAT) push(vm, value_float(a.as.float_val * b.as.float_val));
             else if (a.type == VAL_INT && b.type == VAL_FLOAT)
                 push(vm, value_float((double)a.as.int_val * b.as.float_val));
@@ -3875,7 +4070,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     VM_ERROR("division by zero");
                     break;
                 }
-                push(vm, value_int(a.as.int_val / b.as.int_val));
+                push(vm, value_int(a.as.int_val == INT64_MIN && b.as.int_val == -1 ? INT64_MIN
+                                                                                   : a.as.int_val / b.as.int_val));
             } else if (a.type == VAL_FLOAT || b.type == VAL_FLOAT) {
                 double fa = a.type == VAL_INT ? (double)a.as.int_val : a.as.float_val;
                 double fb = b.type == VAL_INT ? (double)b.as.int_val : b.as.float_val;
@@ -3900,7 +4096,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     VM_ERROR("modulo by zero");
                     break;
                 }
-                push(vm, value_int(a.as.int_val % b.as.int_val));
+                push(vm, value_int(a.as.int_val == INT64_MIN && b.as.int_val == -1 ? 0 : a.as.int_val % b.as.int_val));
             } else {
                 value_free(&a);
                 value_free(&b);
@@ -4002,17 +4198,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_LT: {
             LatValue b = pop(vm), a = pop(vm);
-            if (a.type == VAL_INT && b.type == VAL_INT) push(vm, value_bool(a.as.int_val < b.as.int_val));
-            else if (a.type == VAL_FLOAT || b.type == VAL_FLOAT) {
-                double fa = a.type == VAL_INT ? (double)a.as.int_val : a.as.float_val;
-                double fb = b.type == VAL_INT ? (double)b.as.int_val : b.as.float_val;
-                push(vm, value_bool(fa < fb));
-            } else {
+            ValueNumericCmp cmp = value_numeric_compare(&a, &b);
+            if (cmp == VALUE_CMP_NOT_NUMERIC) {
                 value_free(&a);
                 value_free(&b);
                 VM_ERROR("operands must be numbers for '<'");
                 break;
             }
+            value_free(&a);
+            value_free(&b);
+            push(vm, value_bool(cmp == VALUE_CMP_LESS));
             break;
         }
 #ifdef VM_USE_COMPUTED_GOTO
@@ -4020,17 +4215,16 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_GT: {
             LatValue b = pop(vm), a = pop(vm);
-            if (a.type == VAL_INT && b.type == VAL_INT) push(vm, value_bool(a.as.int_val > b.as.int_val));
-            else if (a.type == VAL_FLOAT || b.type == VAL_FLOAT) {
-                double fa = a.type == VAL_INT ? (double)a.as.int_val : a.as.float_val;
-                double fb = b.type == VAL_INT ? (double)b.as.int_val : b.as.float_val;
-                push(vm, value_bool(fa > fb));
-            } else {
+            ValueNumericCmp cmp = value_numeric_compare(&a, &b);
+            if (cmp == VALUE_CMP_NOT_NUMERIC) {
                 value_free(&a);
                 value_free(&b);
                 VM_ERROR("operands must be numbers for '>'");
                 break;
             }
+            value_free(&a);
+            value_free(&b);
+            push(vm, value_bool(cmp == VALUE_CMP_GREATER));
             break;
         }
 #ifdef VM_USE_COMPUTED_GOTO
@@ -4038,17 +4232,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_LTEQ: {
             LatValue b = pop(vm), a = pop(vm);
-            if (a.type == VAL_INT && b.type == VAL_INT) push(vm, value_bool(a.as.int_val <= b.as.int_val));
-            else if (a.type == VAL_FLOAT || b.type == VAL_FLOAT) {
-                double fa = a.type == VAL_INT ? (double)a.as.int_val : a.as.float_val;
-                double fb = b.type == VAL_INT ? (double)b.as.int_val : b.as.float_val;
-                push(vm, value_bool(fa <= fb));
-            } else {
+            ValueNumericCmp cmp = value_numeric_compare(&a, &b);
+            if (cmp == VALUE_CMP_NOT_NUMERIC) {
                 value_free(&a);
                 value_free(&b);
                 VM_ERROR("operands must be numbers for '<='");
                 break;
             }
+            bool result = cmp == VALUE_CMP_LESS || cmp == VALUE_CMP_EQUAL;
+            value_free(&a);
+            value_free(&b);
+            push(vm, value_bool(result));
             break;
         }
 #ifdef VM_USE_COMPUTED_GOTO
@@ -4056,17 +4250,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_GTEQ: {
             LatValue b = pop(vm), a = pop(vm);
-            if (a.type == VAL_INT && b.type == VAL_INT) push(vm, value_bool(a.as.int_val >= b.as.int_val));
-            else if (a.type == VAL_FLOAT || b.type == VAL_FLOAT) {
-                double fa = a.type == VAL_INT ? (double)a.as.int_val : a.as.float_val;
-                double fb = b.type == VAL_INT ? (double)b.as.int_val : b.as.float_val;
-                push(vm, value_bool(fa >= fb));
-            } else {
+            ValueNumericCmp cmp = value_numeric_compare(&a, &b);
+            if (cmp == VALUE_CMP_NOT_NUMERIC) {
                 value_free(&a);
                 value_free(&b);
                 VM_ERROR("operands must be numbers for '>='");
                 break;
             }
+            bool result = cmp == VALUE_CMP_GREATER || cmp == VALUE_CMP_EQUAL;
+            value_free(&a);
+            value_free(&b);
+            push(vm, value_bool(result));
             break;
         }
 
@@ -4140,7 +4334,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     VM_ERROR("shift amount out of range (0..63)");
                     break;
                 }
-                push(vm, value_int(a.as.int_val << b.as.int_val));
+                push(vm, value_int((int64_t)((uint64_t)a.as.int_val << (unsigned)b.as.int_val)));
             } else {
                 value_free(&a);
                 value_free(&b);
@@ -4240,7 +4434,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             uint8_t idx = READ_BYTE();
             const char *name = frame->chunk->constants[idx].as.str_val;
             size_t hash = frame->chunk->const_hashes[idx];
-            LatValue *ref = env_get_ref_prehashed(vm->env, name, hash);
+            LatValue *ref = stackvm_global_ref(vm, frame->chunk, name, hash);
             if (!ref) {
                 const char *sug = env_find_similar_name(vm->env, name);
                 if (sug) {
@@ -4267,7 +4461,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             uint16_t idx = READ_U16();
             const char *name = frame->chunk->constants[idx].as.str_val;
             size_t hash = frame->chunk->const_hashes[idx];
-            LatValue *ref = env_get_ref_prehashed(vm->env, name, hash);
+            LatValue *ref = stackvm_global_ref(vm, frame->chunk, name, hash);
             if (!ref) {
                 const char *sug = env_find_similar_name(vm->env, name);
                 if (sug) {
@@ -4294,7 +4488,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             uint8_t idx = READ_BYTE();
             const char *name = frame->chunk->constants[idx].as.str_val;
             LatValue *val = stackvm_peek(vm, 0);
-            env_set(vm->env, name, value_clone_fast(val));
+            stackvm_global_set(vm, frame->chunk, name, value_clone_fast(val));
             if (vm->rt->tracking_active) { stackvm_record_history(vm, name, val); }
             break;
         }
@@ -4306,7 +4500,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             uint16_t idx = READ_U16();
             const char *name = frame->chunk->constants[idx].as.str_val;
             LatValue *val = stackvm_peek(vm, 0);
-            env_set(vm->env, name, value_clone_fast(val));
+            stackvm_global_set(vm, frame->chunk, name, value_clone_fast(val));
             if (vm->rt->tracking_active) { stackvm_record_history(vm, name, val); }
             break;
         }
@@ -4327,7 +4521,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 Chunk *ch = (Chunk *)val.as.closure.native_fn;
                 if (ch->param_phases) {
                     LatValue existing;
-                    if (env_get(vm->env, name, &existing)) {
+                    if (stackvm_global_get(vm, frame->chunk, name, &existing)) {
                         if (existing.type == VAL_CLOSURE && existing.as.closure.native_fn != NULL &&
                             existing.as.closure.default_values != VM_NATIVE_MARKER &&
                             existing.as.closure.default_values != VM_EXT_MARKER) {
@@ -4337,7 +4531,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                 LatValue arr = value_array(elems, 2);
                                 value_free(&existing);
                                 value_free(&val);
-                                env_define(vm->env, name, arr);
+                                stackvm_global_define(vm, frame->chunk, name, arr);
                                 break;
                             }
                         } else if (existing.type == VAL_ARRAY) {
@@ -4352,7 +4546,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                             free(new_elems);
                             value_free(&existing);
                             value_free(&val);
-                            env_define(vm->env, name, arr);
+                            stackvm_global_define(vm, frame->chunk, name, arr);
                             break;
                         }
                         value_free(&existing);
@@ -4360,7 +4554,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 }
             }
 
-            env_define(vm->env, name, val);
+            stackvm_global_define(vm, frame->chunk, name, val);
             break;
         }
 
@@ -4372,7 +4566,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             const char *name = frame->chunk->constants[idx].as.str_val;
             LatValue val = pop(vm);
             stackvm_promote_value(&val);
-            env_define(vm->env, name, val);
+            stackvm_global_define(vm, frame->chunk, name, val);
             break;
         }
 
@@ -4443,8 +4637,13 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         lbl_OP_JUMP_IF_NOT_NIL:
 #endif
         case OP_JUMP_IF_NOT_NIL: {
-            uint16_t offset = READ_U16();
-            if (stackvm_peek(vm, 0)->type != VAL_NIL) frame->ip += offset;
+            uint16_t encoded = READ_U16();
+            bool argument_presence = (encoded & 0x8000u) != 0;
+            uint16_t offset = (uint16_t)(encoded & 0x7fffu);
+            LatValue *value = stackvm_peek(vm, 0);
+            bool take = argument_presence ? !(value->type == VAL_NIL && value->region_id == REGION_MISSING_ARG)
+                                          : value->type != VAL_NIL;
+            if (take) frame->ip += offset;
             break;
         }
 
@@ -4712,6 +4911,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_RETURN: {
             LatValue ret = pop(vm);
+            stackvm_discard_handlers_from_frame(vm, vm->frame_count - 1);
             /* For defer frames (cleanup_base != NULL), only close upvalues
              * and free stack values above the entry point, preserving
              * the parent frame's locals that we share via next_frame_slots. */
@@ -4921,20 +5121,100 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             for (uint8_t i = 0; i < field_count; i++)
                 field_names[i] = frame->chunk->constants[base_const + i].as.str_val;
 
+            char fields_key[256];
+            snprintf(fields_key, sizeof(fields_key), "__struct_%s", struct_name);
+            LatValue *fields_ref = stackvm_global_ref(vm, frame->chunk, fields_key, 0);
+            if (!fields_ref || fields_ref->type != VAL_ARRAY) {
+                if (field_count > 16) {
+                    free(field_names);
+                    free(field_values);
+                }
+                VM_ERROR("unknown struct '%s'", struct_name);
+                break;
+            }
+            if (fields_ref->as.array.len != field_count) {
+                if (field_count > 16) {
+                    free(field_names);
+                    free(field_values);
+                }
+                VM_ERROR("struct '%s' field count mismatch", struct_name);
+                break;
+            }
+
+            bool seen[UINT8_MAX + 1] = {false};
+            const char *unknown_field = NULL;
+            const char *duplicate_field = NULL;
+            for (uint8_t i = 0; i < field_count; i++) {
+                size_t decl_index = field_count;
+                for (size_t j = 0; j < fields_ref->as.array.len; j++) {
+                    LatValue *decl_name = &fields_ref->as.array.elems[j];
+                    if (decl_name->type == VAL_STR && strcmp(field_names[i], decl_name->as.str_val) == 0) {
+                        decl_index = j;
+                        break;
+                    }
+                }
+                if (decl_index == field_count) {
+                    unknown_field = field_names[i];
+                    break;
+                }
+                if (seen[decl_index]) {
+                    duplicate_field = field_names[i];
+                    break;
+                }
+                seen[decl_index] = true;
+            }
+            if (unknown_field || duplicate_field) {
+                if (field_count > 16) {
+                    free(field_names);
+                    free(field_values);
+                }
+                if (unknown_field) VM_ERROR("struct '%s' has no field '%s'", struct_name, unknown_field);
+                else VM_ERROR("duplicate field '%s' in struct '%s'", duplicate_field, struct_name);
+                break;
+            }
+            const char *missing_field = NULL;
+            for (size_t i = 0; i < fields_ref->as.array.len; i++) {
+                if (seen[i]) continue;
+                missing_field = fields_ref->as.array.elems[i].type == VAL_STR ? fields_ref->as.array.elems[i].as.str_val
+                                                                              : "<invalid>";
+                break;
+            }
+            if (missing_field) {
+                if (field_count > 16) {
+                    free(field_names);
+                    free(field_values);
+                }
+                VM_ERROR("missing field '%s' in struct '%s'", missing_field, struct_name);
+                break;
+            }
+
             /* Pop field values in reverse */
             for (int i = field_count - 1; i >= 0; i--) field_values[i] = pop(vm);
             for (int i = 0; i < field_count; i++) stackvm_promote_value(&field_values[i]);
 
             LatValue s = value_struct_vm(struct_name, field_names, field_values, field_count);
 
-            /* Alloy enforcement: apply per-field phase from struct declaration */
+            /* Alloy enforcement: literal values are stored in source order, but
+             * phase metadata is stored in declaration order. Match by field name. */
             char phase_key[256];
             snprintf(phase_key, sizeof(phase_key), "__struct_phases_%s", struct_name);
-            LatValue *phase_ref = env_get_ref(vm->env, phase_key);
-            if (phase_ref && phase_ref->type == VAL_ARRAY && phase_ref->as.array.len == field_count) {
+            LatValue *phase_ref = stackvm_global_ref(vm, frame->chunk, phase_key, 0);
+            if (phase_ref && phase_ref->type == VAL_ARRAY && fields_ref && fields_ref->type == VAL_ARRAY &&
+                phase_ref->as.array.len == fields_ref->as.array.len) {
                 s.as.strct.field_phases = calloc(field_count, sizeof(PhaseTag));
                 for (uint8_t i = 0; s.as.strct.field_phases && i < field_count; i++) {
-                    int64_t p = phase_ref->as.array.elems[i].as.int_val;
+                    size_t decl_index = fields_ref->as.array.len;
+                    for (size_t j = 0; j < fields_ref->as.array.len; j++) {
+                        LatValue *decl_name = &fields_ref->as.array.elems[j];
+                        if (decl_name->type == VAL_STR && strcmp(decl_name->as.str_val, field_names[i]) == 0) {
+                            decl_index = j;
+                            break;
+                        }
+                    }
+                    int64_t p =
+                        decl_index < phase_ref->as.array.len && phase_ref->as.array.elems[decl_index].type == VAL_INT
+                            ? phase_ref->as.array.elems[decl_index].as.int_val
+                            : PHASE_UNSPECIFIED;
                     if (p == 1) { /* PHASE_CRYSTAL */
                         s.as.strct.field_values[i] = value_freeze(s.as.strct.field_values[i]);
                         s.as.strct.field_phases[i] = VTAG_CRYSTAL;
@@ -5302,7 +5582,11 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     } else {
                         /* Steal the value from the dying map */
                         LatValue stolen = *val;
-                        val->type = VAL_NIL;
+                        /* Clear the whole handle, including region_id. Merely
+                         * changing the type leaves a shared-region tag behind,
+                         * so freeing the map releases the stolen value's retain
+                         * a second time during flux destructuring. */
+                        *val = value_nil();
                         push(vm, stolen);
                     }
                 } else {
@@ -5709,7 +5993,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                                                   : value_type_name(obj);
                 char key[256];
                 snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                LatValue *method_ref = env_get_ref(vm->env, key);
+                LatValue *method_ref = stackvm_global_ref(vm, frame->chunk, key, 0);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
                     int m_arity = stackvm_method_arity(method_ref, fn_chunk);
@@ -6002,7 +6286,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                                                   : value_type_name(obj);
                 char key[256];
                 snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                LatValue *method_ref = env_get_ref(vm->env, key);
+                LatValue *method_ref = stackvm_global_ref(vm, frame->chunk, key, 0);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
                     int m_arity = stackvm_method_arity(method_ref, fn_chunk);
@@ -6032,13 +6316,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
+                    const char *tname = value_type_name(obj);
+                    int otype = obj->type;
                     for (int i = 0; i < arg_count; i++) {
                         LatValue v = pop(vm);
                         value_free(&v);
                     }
                     LatValue obj_popped = pop(vm);
                     value_free(&obj_popped);
-                    push(vm, value_nil());
+                    const char *msug = builtin_find_similar_method(otype, method_name);
+                    if (msug) VM_ERROR("type '%s' has no method '%s' (did you mean '%s'?)", tname, method_name, msug);
+                    else VM_ERROR("type '%s' has no method '%s'", tname, method_name);
                 }
             }
             break;
@@ -6220,7 +6508,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                                                   : value_type_name(obj);
                 char key[256];
                 snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                LatValue *method_ref = env_get_ref(vm->env, key);
+                LatValue *method_ref = stackvm_global_ref(vm, frame->chunk, key, 0);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
                     int m_arity = stackvm_method_arity(method_ref, fn_chunk);
@@ -6249,11 +6537,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
+                    const char *tname = value_type_name(obj);
+                    int otype = obj->type;
                     for (int i = 0; i < arg_count; i++) {
                         LatValue v = pop(vm);
                         value_free(&v);
                     }
-                    push(vm, value_nil());
+                    LatValue obj_popped = pop(vm);
+                    value_free(&obj_popped);
+                    const char *msug = builtin_find_similar_method(otype, method_name);
+                    if (msug) VM_ERROR("type '%s' has no method '%s' (did you mean '%s'?)", tname, method_name, msug);
+                    else VM_ERROR("type '%s' has no method '%s'", tname, method_name);
                 }
             }
             break;
@@ -6495,7 +6789,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                                                                   : value_type_name(obj);
                 char key[256];
                 snprintf(key, sizeof(key), "%s::%s", type_name, method_name);
-                LatValue *method_ref = env_get_ref(vm->env, key);
+                LatValue *method_ref = stackvm_global_ref(vm, frame->chunk, key, 0);
                 if (method_ref && method_ref->type == VAL_CLOSURE && method_ref->as.closure.native_fn) {
                     Chunk *fn_chunk = (Chunk *)method_ref->as.closure.native_fn;
                     int m_arity = stackvm_method_arity(method_ref, fn_chunk);
@@ -6524,13 +6818,17 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     new_frame->upvalue_count = method_ref->as.closure.upvalue_count;
                     frame = new_frame;
                 } else {
+                    const char *tname = value_type_name(obj);
+                    int otype = obj->type;
                     for (int i = 0; i < arg_count; i++) {
                         LatValue v = pop(vm);
                         value_free(&v);
                     }
                     LatValue obj_popped = pop(vm);
                     value_free(&obj_popped);
-                    push(vm, value_nil());
+                    const char *msug = builtin_find_similar_method(otype, method_name);
+                    if (msug) VM_ERROR("type '%s' has no method '%s' (did you mean '%s'?)", tname, method_name, msug);
+                    else VM_ERROR("type '%s' has no method '%s'", tname, method_name);
                 }
             }
             break;
@@ -7291,6 +7589,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             h->chunk = frame->chunk;
             h->frame_index = vm->frame_count - 1;
             h->stack_top = vm->stack_top;
+            h->defer_count = vm->defer_count;
             break;
         }
 
@@ -7311,27 +7610,36 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 /* Build structured error map before unwinding */
                 const char *msg = (err.type == VAL_STR) ? err.as.str_val : NULL;
                 char *repr = msg ? NULL : value_repr(&err);
-                LatValue err_map = stackvm_build_error_map(vm, msg ? msg : repr);
-                free(repr);
+                char *original = strdup(msg ? msg : repr);
+                LatValue err_map = stackvm_build_error_map(vm, original);
                 value_free(&err);
                 StackExceptionHandler h = vm->handlers[--vm->handler_count];
-                /* Unwind stack */
-                while (vm->frame_count - 1 > h.frame_index) { vm->frame_count--; }
-                frame = &vm->frames[vm->frame_count - 1];
-                /* Release abandoned slots BEFORE the err_map push (LAT-452). */
-                stackvm_unwind_release(vm, h.stack_top);
-                frame->ip = h.ip;
-                push(vm, err_map);
+                StackVMResult transfer = stackvm_transfer_to_handler(vm, &frame, h, err_map, original);
+                free(original);
+                free(repr);
+                if (transfer != STACKVM_OK) return transfer;
             } else {
-                StackVMResult res;
-                if (err.type == VAL_STR) {
-                    res = runtime_error(vm, "%s", err.as.str_val);
-                } else {
+                char *original = NULL;
+                if (err.type == VAL_STR) original = strdup(err.as.str_val);
+                else {
                     char *repr = value_repr(&err);
-                    res = runtime_error(vm, "unhandled exception: %s", repr);
+                    lat_asprintf(&original, "unhandled exception: %s", repr);
                     free(repr);
                 }
                 value_free(&err);
+                if (!vm->unwinding_defers && vm->defer_count > 0) {
+                    char *cleanup_error = stackvm_unwind_defers_to(vm, 0);
+                    if (cleanup_error) {
+                        char *combined = NULL;
+                        lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
+                                     original);
+                        free(cleanup_error);
+                        free(original);
+                        original = combined;
+                    }
+                }
+                StackVMResult res = runtime_error(vm, "%s", original);
+                free(original);
                 return res;
             }
             break;
@@ -7356,6 +7664,23 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     } else if (strcmp(tag->as.str_val, "err") == 0) {
                         /* Return the error from the current function */
                         LatValue err_map = pop(vm);
+                        size_t frame_idx = vm->frame_count - 1;
+                        size_t defer_base = vm->defer_count;
+                        while (defer_base > 0 && vm->defers[defer_base - 1].frame_index >= frame_idx) defer_base--;
+                        /* Keep the propagated Result rooted on the value stack
+                         * while arbitrary cleanup code runs. */
+                        push(vm, err_map);
+                        char *cleanup_error = stackvm_unwind_defers_to(vm, defer_base);
+                        err_map = pop(vm);
+                        if (cleanup_error) {
+                            value_free(&err_map);
+                            StackVMResult handled =
+                                stackvm_handle_error(vm, &frame, "defer cleanup failed: %s", cleanup_error);
+                            free(cleanup_error);
+                            if (handled != STACKVM_OK) return handled;
+                            break;
+                        }
+                        stackvm_discard_handlers_from_frame(vm, frame_idx);
                         close_upvalues(vm, frame->slots);
                         vm->frame_count--;
                         if (vm->frame_count == 0) {
@@ -7385,16 +7710,22 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_DEFER_PUSH: {
             uint8_t sdepth = READ_BYTE();
-            uint16_t offset = READ_U16();
-            if (vm->defer_count < STACKVM_DEFER_MAX) {
-                StackDeferEntry *d = &vm->defers[vm->defer_count++];
-                d->ip = frame->ip; /* points to start of defer body (current ip after reading offset) */
-                d->chunk = frame->chunk;
-                d->frame_index = vm->frame_count - 1;
-                d->slots = frame->slots;
-                d->scope_depth = sdepth;
+            (void)READ_U16(); /* reserved legacy body offset */
+            LatValue closure = pop(vm);
+            if (closure.type != VAL_CLOSURE || !closure.as.closure.native_fn) {
+                value_free(&closure);
+                VM_ERROR("defer requires a compiled closure");
+                break;
             }
-            frame->ip += offset; /* skip defer body */
+            if (vm->defer_count >= STACKVM_DEFER_MAX) {
+                value_free(&closure);
+                VM_ERROR("defer stack overflow");
+                break;
+            }
+            StackDeferEntry *d = &vm->defers[vm->defer_count++];
+            d->closure = closure;
+            d->frame_index = vm->frame_count - 1;
+            d->scope_depth = sdepth;
             break;
         }
 
@@ -7407,36 +7738,18 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
              * have scope_depth >= the operand (scope-aware execution). */
             uint8_t min_depth = READ_BYTE();
             size_t current_frame_idx = vm->frame_count - 1;
-            while (vm->defer_count > 0) {
-                StackDeferEntry *d = &vm->defers[vm->defer_count - 1];
-                if (d->frame_index != current_frame_idx) break;
-                if (d->scope_depth < min_depth) break;
-                vm->defer_count--;
-
-                /* Save return value (TOS) — we push it back after defer */
-                LatValue ret_val = pop(vm);
-
-                /* Create a view chunk over the defer body's bytecode.
-                 * The body starts at d->ip and ends with OP_RETURN.
-                 * stackvm_run will push a new frame and execute until OP_RETURN.
-                 * Use next_frame_slots so the defer body shares the parent
-                 * frame's locals (defer body bytecode uses parent slot indices). */
-                Chunk wrapper;
-                memset(&wrapper, 0, sizeof(wrapper));
-                wrapper.code = d->ip;
-                wrapper.code_len = (size_t)(d->chunk->code + d->chunk->code_len - d->ip);
-                wrapper.constants = d->chunk->constants;
-                wrapper.const_len = d->chunk->const_len;
-                wrapper.const_hashes = d->chunk->const_hashes;
-                wrapper.lines = d->chunk->lines ? d->chunk->lines + (d->ip - d->chunk->code) : NULL;
-
-                vm->next_frame_slots = d->slots;
-                LatValue defer_result;
-                stackvm_run(vm, &wrapper, &defer_result);
-                value_free(&defer_result);
-
-                /* Restore the return value */
-                push(vm, ret_val);
+            size_t defer_base = vm->defer_count;
+            while (defer_base > 0) {
+                StackDeferEntry *pending = &vm->defers[defer_base - 1];
+                if (pending->frame_index != current_frame_idx) break;
+                if (pending->scope_depth < min_depth) break;
+                defer_base--;
+            }
+            char *cleanup_error = stackvm_unwind_defers_to(vm, defer_base);
+            if (cleanup_error) {
+                StackVMResult handled = stackvm_handle_error(vm, &frame, "defer cleanup failed: %s", cleanup_error);
+                free(cleanup_error);
+                if (handled != STACKVM_OK) return handled;
             }
             break;
         }
@@ -8240,6 +8553,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
+            chunk_set_module_prefix(mod_chunk, resolved);
+
             /* Track the chunk for proper lifetime management */
             if (vm->fn_chunk_count >= vm->fn_chunk_cap) {
                 vm->fn_chunk_cap = vm->fn_chunk_cap ? vm->fn_chunk_cap * 2 : 8;
@@ -8263,23 +8578,38 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             /* Build module Map from the module scope */
             LatValue module_map = value_map_new();
             Scope *mod_scope = &vm->env->scopes[vm->env->count - 1];
+            size_t module_prefix_len = strlen(mod_chunk->module_prefix);
             for (size_t mi = 0; mi < mod_scope->cap; mi++) {
                 if (mod_scope->entries[mi].state != MAP_OCCUPIED) continue;
                 const char *name = mod_scope->entries[mi].key;
                 LatValue *val_ptr = (LatValue *)mod_scope->entries[mi].value;
 
-                /* Copy all module bindings to base scope so that closures
-                 * exported from the module can still resolve their globals
-                 * (OP_GET_GLOBAL) after the module scope is popped. */
+                if (strncmp(name, mod_chunk->module_prefix, module_prefix_len) != 0 || name[module_prefix_len] != ':' ||
+                    name[module_prefix_len + 1] != ':')
+                    continue;
+                const char *module_name = name + module_prefix_len + 2;
+
+                /* Retain module bindings under their path-qualified keys so
+                 * exported closures can resolve globals after this scope is
+                 * popped without exposing raw names to the importer. */
                 env_define_at(vm->env, 0, name, value_deep_clone(val_ptr));
 
-                /* Filter based on export declarations */
-                if (!module_should_export(name, (const char **)mod_chunk->export_names, mod_chunk->export_count,
+                /* Enum declarations are stored as __enum_Name markers. Export
+                 * the hidden marker when the public enum name is exported so
+                 * qualified construction can validate alias.Name. */
+                const char *export_name = strncmp(module_name, "__enum_", 7) == 0 ? module_name + 7 : module_name;
+                if (!module_should_export(export_name, (const char **)mod_chunk->export_names, mod_chunk->export_count,
                                           mod_chunk->has_exports))
                     continue;
 
                 LatValue exported = value_deep_clone(val_ptr);
-                lat_map_set(module_map.as.map.map, name, &exported);
+                lat_map_set(module_map.as.map.map, module_name, &exported);
+                if (strncmp(module_name, "__enum_", 7) == 0) {
+                    /* Selective imports bind the public type name to the same
+                     * descriptor used by alias-qualified enum construction. */
+                    LatValue public_descriptor = value_deep_clone(val_ptr);
+                    lat_map_set(module_map.as.map.map, export_name, &public_descriptor);
+                }
             }
 
             env_pop_scope(vm->env);
@@ -8682,6 +9012,168 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         }
 
 #ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_SELECT_CHOOSE:
+#endif
+        case OP_SELECT_CHOOSE: {
+            uint8_t arm_count = READ_BYTE();
+            const uint8_t *flags = frame->ip;
+            frame->ip += arm_count;
+
+            if ((size_t)(vm->stack_top - vm->stack) < arm_count) {
+                VM_ERROR("select operand stack underflow");
+                break;
+            }
+            LatValue *operand_base = vm->stack_top - arm_count;
+            LatChannel **channels = arm_count ? calloc(arm_count, sizeof(LatChannel *)) : NULL;
+            if (arm_count && !channels) {
+                while (vm->stack_top > operand_base) {
+                    LatValue operand = pop(vm);
+                    value_free(&operand);
+                }
+                VM_ERROR("out of memory preparing select");
+                break;
+            }
+
+            long timeout_ms = -1;
+            const char *type_error = NULL;
+            for (uint8_t i = 0; i < arm_count; i++) {
+                LatValue *operand = &operand_base[i];
+                if (flags[i] & LAT_SELECT_DEFAULT) {
+                    continue; /* compiler supplies Unit; the chooser does not use it */
+                }
+                if (flags[i] & LAT_SELECT_TIMEOUT) {
+                    if (operand->type != VAL_INT) {
+                        type_error = "select timeout must be an integer (milliseconds)";
+                        break;
+                    }
+                    timeout_ms = (long)operand->as.int_val;
+                    continue;
+                }
+                if (operand->type != VAL_CHANNEL || !operand->as.channel.ch) {
+                    type_error = "select arm: expression is not a Channel";
+                    break;
+                }
+                channels[i] = operand->as.channel.ch;
+            }
+
+            if (type_error) {
+                free(channels);
+                while (vm->stack_top > operand_base) {
+                    LatValue operand = pop(vm);
+                    value_free(&operand);
+                }
+                VM_ERROR("%s", type_error);
+                break;
+            }
+
+            size_t selected = SIZE_MAX;
+            LatValue received = value_unit();
+            bool selected_ok =
+                arm_count == 0 || channel_select(channels, flags, arm_count, timeout_ms, &selected, &received);
+            free(channels);
+            while (vm->stack_top > operand_base) {
+                LatValue operand = pop(vm);
+                value_free(&operand);
+            }
+
+            if (!selected_ok) {
+                value_free(&received);
+#ifdef __EMSCRIPTEN__
+                VM_ERROR("select is not supported in WASM builds");
+#else
+                    VM_ERROR("out of memory while selecting a channel");
+#endif
+                break;
+            }
+
+            LatValue *pair_elems = lat_alloc_routed(4 * sizeof(LatValue));
+            if (!pair_elems) {
+                value_free(&received);
+                VM_ERROR("out of memory building select result");
+                break;
+            }
+            pair_elems[0] = value_int(selected == SIZE_MAX ? -1 : (int64_t)selected);
+            pair_elems[1] = received;
+            LatValue pair = {.type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
+            pair.as.array.elems = pair_elems;
+            pair.as.array.len = 2;
+            pair.as.array.cap = 4;
+            push(vm, pair);
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_HAS_FIELD:
+#endif
+        case OP_HAS_FIELD: {
+            uint8_t name_idx = READ_BYTE();
+            const char *field_name = frame->chunk->constants[name_idx].as.str_val;
+            const char *interned_name = intern(field_name);
+            LatValue obj = pop(vm);
+            bool found = false;
+            if (obj.type == VAL_STRUCT) {
+                for (size_t i = 0; i < obj.as.strct.field_count; i++) {
+                    if (obj.as.strct.field_names[i] == interned_name) {
+                        found = true;
+                        break;
+                    }
+                }
+            } else if (obj.type == VAL_MAP) {
+                found = lat_map_get(obj.as.map.map, field_name) != NULL;
+            }
+            value_free(&obj);
+            push(vm, value_bool(found));
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_MATCH_RANGE:
+#endif
+        case OP_MATCH_RANGE: {
+            LatValue end = pop(vm);
+            LatValue start = pop(vm);
+            LatValue *candidate = stackvm_peek(vm, 0);
+            bool matched = candidate->type == VAL_INT && start.type == VAL_INT && end.type == VAL_INT &&
+                           candidate->as.int_val >= start.as.int_val && candidate->as.int_val <= end.as.int_val;
+            value_free(&start);
+            value_free(&end);
+            push(vm, value_bool(matched));
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_MATCH_FLUID:
+#endif
+        case OP_MATCH_FLUID: {
+            LatValue value = pop(vm);
+            bool matched = value.phase == VTAG_FLUID || value.phase == VTAG_UNPHASED;
+            value_free(&value);
+            push(vm, value_bool(matched));
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_MATCH_TYPE:
+#endif
+        case OP_MATCH_TYPE: {
+            uint8_t expected = READ_BYTE();
+            push(vm, value_bool(stackvm_peek(vm, 0)->type == (ValueType)expected));
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_CLOSE_UPVALUE_PRESERVE:
+#endif
+        case OP_CLOSE_UPVALUE_PRESERVE: {
+            LatValue result = pop(vm);
+            close_upvalues(vm, vm->stack_top - 1);
+            LatValue local = pop(vm);
+            value_free(&local);
+            push(vm, result);
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
         lbl_OP_LOAD_INT8:
 #endif
         case OP_LOAD_INT8: {
@@ -8703,7 +9195,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
             if (lv->type == VAL_INT) {
-                lv->as.int_val++;
+                lv->as.int_val = (int64_t)((uint64_t)lv->as.int_val + 1u);
             } else {
                 VM_ERROR("OP_INC_LOCAL: expected Int");
             }
@@ -8723,7 +9215,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
             if (lv->type == VAL_INT) {
-                lv->as.int_val--;
+                lv->as.int_val = (int64_t)((uint64_t)lv->as.int_val - 1u);
             } else {
                 VM_ERROR("OP_DEC_LOCAL: expected Int");
             }
@@ -8735,7 +9227,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_ADD_INT: {
             vm->stack_top--;
-            vm->stack_top[-1].as.int_val += vm->stack_top[0].as.int_val;
+            vm->stack_top[-1].as.int_val =
+                (int64_t)((uint64_t)vm->stack_top[-1].as.int_val + (uint64_t)vm->stack_top[0].as.int_val);
             break;
         }
 
@@ -8744,7 +9237,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_SUB_INT: {
             vm->stack_top--;
-            vm->stack_top[-1].as.int_val -= vm->stack_top[0].as.int_val;
+            vm->stack_top[-1].as.int_val =
+                (int64_t)((uint64_t)vm->stack_top[-1].as.int_val - (uint64_t)vm->stack_top[0].as.int_val);
             break;
         }
 
@@ -8753,7 +9247,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_MUL_INT: {
             vm->stack_top--;
-            vm->stack_top[-1].as.int_val *= vm->stack_top[0].as.int_val;
+            vm->stack_top[-1].as.int_val =
+                (int64_t)((uint64_t)vm->stack_top[-1].as.int_val * (uint64_t)vm->stack_top[0].as.int_val);
             break;
         }
 
@@ -8929,7 +9424,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 LatValue a2 = value_clone_fast(local);
                 LatValue result;
                 if (a2.type == VAL_INT && rhs.type == VAL_INT) {
-                    result = value_int(a2.as.int_val + rhs.as.int_val);
+                    result = value_int((int64_t)((uint64_t)a2.as.int_val + (uint64_t)rhs.as.int_val));
                 } else if (a2.type == VAL_FLOAT && rhs.type == VAL_FLOAT) {
                     result = value_float(a2.as.float_val + rhs.as.float_val);
                 } else if (a2.type == VAL_INT && rhs.type == VAL_FLOAT) {

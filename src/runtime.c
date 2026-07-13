@@ -350,12 +350,7 @@ static LatValue native_set_new(LatValue *args, int arg_count) {
 static LatValue native_set_from(LatValue *args, int arg_count) {
     if (arg_count != 1 || args[0].type != VAL_ARRAY) return value_set_new();
     LatValue set = value_set_new();
-    for (size_t i = 0; i < args[0].as.array.len; i++) {
-        char *key = value_hash_key(&args[0].as.array.elems[i]);
-        LatValue clone = value_deep_clone(&args[0].as.array.elems[i]);
-        lat_map_set(set.as.set.map, key, &clone);
-        free(key);
-    }
+    for (size_t i = 0; i < args[0].as.array.len; i++) { value_set_insert(&set, &args[0].as.array.elems[i]); }
     return set;
 }
 
@@ -1687,16 +1682,26 @@ static LatValue native_is_leap_year(LatValue *args, int ac) {
 
 /* ── Duration helpers ── */
 
+static bool checked_i64_add(int64_t a, int64_t b, int64_t *result) { return !__builtin_add_overflow(a, b, result); }
+
+static bool checked_i64_sub(int64_t a, int64_t b, int64_t *result) { return !__builtin_sub_overflow(a, b, result); }
+
+static bool checked_i64_mul(int64_t a, int64_t b, int64_t *result) { return !__builtin_mul_overflow(a, b, result); }
+
+static LatValue duration_overflow(const char *operation) {
+    char *err = NULL;
+    lat_asprintf(&err, "%s: total milliseconds exceed Int range", operation);
+    current_rt->error = err;
+    return value_nil();
+}
+
 static LatValue make_duration_map(int64_t total_ms) {
-    int64_t ms = total_ms % 1000;
-    if (ms < 0) ms = -ms;
-    int64_t rem = total_ms / 1000;
-    int64_t s = rem % 60;
-    if (s < 0) s = -s;
-    rem /= 60;
-    int64_t m = rem % 60;
-    if (m < 0) m = -m;
-    int64_t h = rem / 60;
+    int64_t h = total_ms / 3600000;
+    int64_t rem = total_ms % 3600000;
+    int64_t m = rem / 60000;
+    rem %= 60000;
+    int64_t s = rem / 1000;
+    int64_t ms = rem % 1000;
 
     LatValue map = value_map_new();
     LatValue vh = value_int(h);
@@ -1722,8 +1727,12 @@ static LatValue native_duration(LatValue *args, int ac) {
         current_rt->error = strdup("duration: expected (hours: Int, minutes: Int, seconds: Int, millis: Int)");
         return value_nil();
     }
-    int64_t total =
-        args[0].as.int_val * 3600000 + args[1].as.int_val * 60000 + args[2].as.int_val * 1000 + args[3].as.int_val;
+    int64_t h, m, s, partial, total;
+    if (!checked_i64_mul(args[0].as.int_val, 3600000, &h) || !checked_i64_mul(args[1].as.int_val, 60000, &m) ||
+        !checked_i64_mul(args[2].as.int_val, 1000, &s) || !checked_i64_add(h, m, &partial) ||
+        !checked_i64_add(partial, s, &partial) || !checked_i64_add(partial, args[3].as.int_val, &total)) {
+        return duration_overflow("duration");
+    }
     return make_duration_map(total);
 }
 
@@ -1736,7 +1745,9 @@ static LatValue native_duration_from_seconds(LatValue *args, int ac) {
         current_rt->error = strdup("duration_from_seconds: expected (seconds: Int)");
         return value_nil();
     }
-    return make_duration_map(args[0].as.int_val * 1000);
+    int64_t total;
+    if (!checked_i64_mul(args[0].as.int_val, 1000, &total)) return duration_overflow("duration_from_seconds");
+    return make_duration_map(total);
 }
 
 /// @builtin duration_from_millis(ms: Int) -> Map
@@ -1766,7 +1777,10 @@ static LatValue native_duration_add(LatValue *args, int ac) {
         current_rt->error = strdup("duration_add: expected (d1: Map, d2: Map)");
         return value_nil();
     }
-    int64_t t = duration_map_to_ms(&args[0]) + duration_map_to_ms(&args[1]);
+    int64_t t;
+    if (!checked_i64_add(duration_map_to_ms(&args[0]), duration_map_to_ms(&args[1]), &t)) {
+        return duration_overflow("duration_add");
+    }
     return make_duration_map(t);
 }
 
@@ -1778,7 +1792,10 @@ static LatValue native_duration_sub(LatValue *args, int ac) {
         current_rt->error = strdup("duration_sub: expected (d1: Map, d2: Map)");
         return value_nil();
     }
-    int64_t t = duration_map_to_ms(&args[0]) - duration_map_to_ms(&args[1]);
+    int64_t t;
+    if (!checked_i64_sub(duration_map_to_ms(&args[0]), duration_map_to_ms(&args[1]), &t)) {
+        return duration_overflow("duration_sub");
+    }
     return make_duration_map(t);
 }
 
@@ -1792,21 +1809,22 @@ static LatValue native_duration_to_string(LatValue *args, int ac) {
         return value_nil();
     }
     int64_t total = duration_map_to_ms(&args[0]);
-    int64_t ms = total % 1000;
-    if (ms < 0) ms = -ms;
-    int64_t rem = total / 1000;
-    int64_t s = rem % 60;
-    if (s < 0) s = -s;
-    rem /= 60;
-    int64_t m = rem % 60;
-    if (m < 0) m = -m;
-    int64_t h = rem / 60;
+    uint64_t magnitude = total < 0 ? (uint64_t)(-(total + 1)) + 1u : (uint64_t)total;
+    uint64_t h = magnitude / 3600000u;
+    uint64_t rem = magnitude % 3600000u;
+    uint64_t m = rem / 60000u;
+    rem %= 60000u;
+    uint64_t s = rem / 1000u;
+    uint64_t ms = rem % 1000u;
+    const char *sign = total < 0 ? "-" : "";
 
     char buf[128];
     if (ms > 0) {
-        snprintf(buf, sizeof(buf), "%lldh %lldm %llds %lldms", (long long)h, (long long)m, (long long)s, (long long)ms);
+        snprintf(buf, sizeof(buf), "%s%lluh %llum %llus %llums", sign, (unsigned long long)h, (unsigned long long)m,
+                 (unsigned long long)s, (unsigned long long)ms);
     } else {
-        snprintf(buf, sizeof(buf), "%lldh %lldm %llds", (long long)h, (long long)m, (long long)s);
+        snprintf(buf, sizeof(buf), "%s%lluh %llum %llus", sign, (unsigned long long)h, (unsigned long long)m,
+                 (unsigned long long)s);
     }
     return value_string(buf);
 }
@@ -2004,10 +2022,11 @@ static LatValue native_datetime_add_duration(LatValue *args, int ac) {
     }
     int64_t epoch = datetime_from_components(y, mo, d, h, mi, s, tz);
     int64_t dur_ms = duration_map_to_ms(&args[1]);
-    epoch += dur_ms / 1000;
+    if (!checked_i64_add(epoch, dur_ms / 1000, &epoch)) return duration_overflow("datetime_add_duration");
 
     /* Convert back, preserving original tz_offset */
-    int64_t utc_epoch = epoch + (int64_t)tz;
+    int64_t utc_epoch;
+    if (!checked_i64_add(epoch, (int64_t)tz, &utc_epoch)) return duration_overflow("datetime_add_duration");
     int ny, nmo, nd, nh, nmi, ns;
     datetime_to_utc_components(utc_epoch, &ny, &nmo, &nd, &nh, &nmi, &ns);
     return make_datetime_map(ny, nmo, nd, nh, nmi, ns, tz);
@@ -2030,7 +2049,11 @@ static LatValue native_datetime_sub(LatValue *args, int ac) {
     }
     int64_t e1 = datetime_from_components(y1, mo1, d1, h1, mi1, s1, tz1);
     int64_t e2 = datetime_from_components(y2, mo2, d2, h2, mi2, s2, tz2);
-    return make_duration_map((e1 - e2) * 1000);
+    int64_t delta_seconds, delta_ms;
+    if (!checked_i64_sub(e1, e2, &delta_seconds) || !checked_i64_mul(delta_seconds, 1000, &delta_ms)) {
+        return duration_overflow("datetime_sub");
+    }
+    return make_duration_map(delta_ms);
 }
 
 /// @builtin datetime_format(dt: Map, fmt: String) -> String
@@ -2140,7 +2163,12 @@ static LatValue native_day_of_week(LatValue *args, int ac) {
         current_rt->error = strdup("day_of_week: expected (year: Int, month: Int, day: Int)");
         return value_nil();
     }
-    return value_int(datetime_day_of_week((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val));
+    int r = datetime_day_of_week((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
+    if (r < 0) {
+        current_rt->error = strdup("day_of_week: invalid date");
+        return value_nil();
+    }
+    return value_int(r);
 }
 
 /// @builtin day_of_year(year: Int, month: Int, day: Int) -> Int
@@ -2154,7 +2182,7 @@ static LatValue native_day_of_year(LatValue *args, int ac) {
     }
     int r = datetime_day_of_year((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
     if (r < 0) {
-        current_rt->error = strdup("day_of_year: month must be 1-12");
+        current_rt->error = strdup("day_of_year: invalid date");
         return value_nil();
     }
     return value_int(r);
@@ -2355,14 +2383,35 @@ static LatValue native_range(LatValue *args, int ac) {
         return value_array(NULL, 0);
     }
     size_t rcount = 0;
-    if (rstep > 0 && rstart < rend) rcount = (size_t)((rend - rstart + rstep - 1) / rstep);
-    else if (rstep < 0 && rstart > rend) rcount = (size_t)((rstart - rend + (-rstep) - 1) / (-rstep));
+    if (rstep > 0 && rstart < rend) {
+        uint64_t distance = (uint64_t)rend - (uint64_t)rstart;
+        uint64_t step = (uint64_t)rstep;
+        uint64_t count = distance / step + (distance % step != 0);
+        if (count > SIZE_MAX) {
+            current_rt->error = strdup("range() is too large");
+            return value_array(NULL, 0);
+        }
+        rcount = (size_t)count;
+    } else if (rstep < 0 && rstart > rend) {
+        uint64_t distance = (uint64_t)rstart - (uint64_t)rend;
+        uint64_t step = (uint64_t)(-(rstep + 1)) + 1u;
+        uint64_t count = distance / step + (distance % step != 0);
+        if (count > SIZE_MAX) {
+            current_rt->error = strdup("range() is too large");
+            return value_array(NULL, 0);
+        }
+        rcount = (size_t)count;
+    }
+    if (rcount > SIZE_MAX / sizeof(LatValue)) {
+        current_rt->error = strdup("range() is too large");
+        return value_array(NULL, 0);
+    }
     LatValue *relems = malloc((rcount > 0 ? rcount : 1) * sizeof(LatValue));
     if (!relems) return value_unit();
     int64_t rcur = rstart;
     for (size_t i = 0; i < rcount; i++) {
         relems[i] = value_int(rcur);
-        rcur += rstep;
+        if (i + 1 < rcount) rcur = (int64_t)((uint64_t)rcur + (uint64_t)rstep);
     }
     LatValue r = value_array(relems, rcount);
     free(relems);

@@ -3,6 +3,68 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* All iterators use a one-value pushback layer. Most consumers never touch
+ * the buffer; zip uses it to restore a value when probing the other input
+ * discovers that the shorter iterator is exhausted. */
+typedef struct {
+    LatValue (*next_fn)(void *, bool *);
+    void *state;
+    void (*free_fn)(void *);
+    LatValue buffered;
+    bool has_buffered;
+    bool exhausted;
+} IterProtocolState;
+
+static LatValue iter_protocol_next(void *state, bool *done) {
+    IterProtocolState *s = (IterProtocolState *)state;
+    if (s->has_buffered) {
+        LatValue value = s->buffered;
+        s->buffered = value_nil();
+        s->has_buffered = false;
+        *done = false;
+        return value;
+    }
+    if (s->exhausted) {
+        *done = true;
+        return value_nil();
+    }
+    LatValue value = s->next_fn(s->state, done);
+    if (*done) s->exhausted = true;
+    return value;
+}
+
+static void iter_protocol_free(void *state) {
+    IterProtocolState *s = (IterProtocolState *)state;
+    if (s->has_buffered) value_free(&s->buffered);
+    if (s->free_fn) s->free_fn(s->state);
+    free(s);
+}
+
+static LatValue iter_with_protocol(LatValue (*next_fn)(void *, bool *), void *state, void (*free_fn)(void *)) {
+    IterProtocolState *s = malloc(sizeof(IterProtocolState));
+    if (!s) {
+        if (free_fn) free_fn(state);
+        return value_nil();
+    }
+    s->next_fn = next_fn;
+    s->state = state;
+    s->free_fn = free_fn;
+    s->buffered = value_nil();
+    s->has_buffered = false;
+    s->exhausted = false;
+    return value_iterator(iter_protocol_next, s, iter_protocol_free);
+}
+
+static bool iter_push_back(LatValue *iter, LatValue *value) {
+    if (iter->type != VAL_ITERATOR || iter->as.iterator.next_fn != iter_protocol_next) return false;
+    IterProtocolState *s = (IterProtocolState *)iter->as.iterator.state;
+    if (s->has_buffered) return false;
+    s->buffered = *value;
+    *value = value_nil();
+    s->has_buffered = true;
+    return true;
+}
+
 /* ── Array iterator ── */
 
 static LatValue iter_array_next(void *state, bool *done) {
@@ -33,7 +95,7 @@ LatValue iter_from_array(const LatValue *arr) {
         return value_nil();
     }
     for (size_t i = 0; i < s->len; i++) s->elems[i] = value_deep_clone(&arr->as.array.elems[i]);
-    return value_iterator(iter_array_next, s, iter_array_free);
+    return iter_with_protocol(iter_array_next, s, iter_array_free);
 }
 
 /* ── Map iterator (keys) ── */
@@ -70,7 +132,7 @@ LatValue iter_from_map(const LatValue *map) {
     for (size_t i = 0; i < m->cap; i++) {
         if (m->entries[i].state == MAP_OCCUPIED) { s->keys[s->len++] = strdup(m->entries[i].key); }
     }
-    return value_iterator(iter_map_next, s, iter_map_free);
+    return iter_with_protocol(iter_map_next, s, iter_map_free);
 }
 
 /* ── String iterator ── */
@@ -98,7 +160,7 @@ LatValue iter_from_string(const LatValue *str) {
     s->str = strdup(str->as.str_val);
     s->len = strlen(s->str);
     s->index = 0;
-    return value_iterator(iter_string_next, s, iter_string_free);
+    return iter_with_protocol(iter_string_next, s, iter_string_free);
 }
 
 /* ── Range iterator (lazy) ── */
@@ -115,7 +177,11 @@ static LatValue iter_range_next(void *state, bool *done) {
     }
     *done = false;
     int64_t val = s->current;
-    s->current += s->step;
+    if ((s->step > 0 && s->current > INT64_MAX - s->step) || (s->step < 0 && s->current < INT64_MIN - s->step)) {
+        s->current = s->end;
+    } else {
+        s->current += s->step;
+    }
     return value_int(val);
 }
 
@@ -126,8 +192,8 @@ LatValue iter_from_range(int64_t start, int64_t end) {
     if (!s) return value_nil();
     s->current = start;
     s->end = end;
-    s->step = (start <= end) ? 1 : -1;
-    return value_iterator(iter_range_next, s, iter_range_free);
+    s->step = 1;
+    return iter_with_protocol(iter_range_next, s, iter_range_free);
 }
 
 LatValue iter_range(int64_t start, int64_t end, int64_t step) {
@@ -136,7 +202,7 @@ LatValue iter_range(int64_t start, int64_t end, int64_t step) {
     s->current = start;
     s->end = end;
     s->step = step;
-    return value_iterator(iter_range_next, s, iter_range_free);
+    return iter_with_protocol(iter_range_next, s, iter_range_free);
 }
 
 /* ── Repeat iterator ── */
@@ -163,7 +229,7 @@ LatValue iter_repeat(LatValue value, int64_t count) {
     if (!s) return value_nil();
     s->value = value_deep_clone(&value);
     s->remaining = count; /* -1 = infinite */
-    return value_iterator(iter_repeat_next, s, iter_repeat_free);
+    return iter_with_protocol(iter_repeat_next, s, iter_repeat_free);
 }
 
 /* ── Map-transform iterator ── */
@@ -194,7 +260,7 @@ LatValue iter_map_transform(LatValue inner, LatValue closure, void *vm_ctx,
     s->closure = value_deep_clone(&closure);
     s->vm_ctx = vm_ctx;
     s->call_fn = call_fn;
-    return value_iterator(iter_map_transform_next, s, iter_map_transform_free);
+    return iter_with_protocol(iter_map_transform_next, s, iter_map_transform_free);
 }
 
 /* ── Filter iterator ── */
@@ -231,7 +297,7 @@ LatValue iter_filter(LatValue inner, LatValue closure, void *vm_ctx,
     s->closure = value_deep_clone(&closure);
     s->vm_ctx = vm_ctx;
     s->call_fn = call_fn;
-    return value_iterator(iter_filter_next, s, iter_filter_free);
+    return iter_with_protocol(iter_filter_next, s, iter_filter_free);
 }
 
 /* ── Take iterator ── */
@@ -258,7 +324,7 @@ LatValue iter_take(LatValue inner, int64_t n) {
     if (!s) return value_nil();
     s->inner = inner; /* takes ownership */
     s->remaining = n;
-    return value_iterator(iter_take_next, s, iter_take_free);
+    return iter_with_protocol(iter_take_next, s, iter_take_free);
 }
 
 /* ── Skip iterator ── */
@@ -288,7 +354,7 @@ LatValue iter_skip(LatValue inner, int64_t n) {
     s->inner = inner; /* takes ownership */
     s->skip_count = n;
     s->skipped = false;
-    return value_iterator(iter_skip_next, s, iter_skip_free);
+    return iter_with_protocol(iter_skip_next, s, iter_skip_free);
 }
 
 /* ── Enumerate iterator ── */
@@ -315,18 +381,25 @@ LatValue iter_enumerate(LatValue inner) {
     if (!s) return value_nil();
     s->inner = inner; /* takes ownership */
     s->index = 0;
-    return value_iterator(iter_enumerate_next, s, iter_enumerate_free);
+    return iter_with_protocol(iter_enumerate_next, s, iter_enumerate_free);
 }
 
 /* ── Zip iterator ── */
 
 static LatValue iter_zip_next(void *state, bool *done) {
     IterZipState *s = (IterZipState *)state;
-    bool left_done = false, right_done = false;
+    bool left_done = false;
     LatValue l = iter_next(&s->left, &left_done);
-    LatValue r = iter_next(&s->right, &right_done);
-    if (left_done || right_done) {
+    if (left_done) {
         value_free(&l);
+        *done = true;
+        return value_nil();
+    }
+
+    bool right_done = false;
+    LatValue r = iter_next(&s->right, &right_done);
+    if (right_done) {
+        if (!iter_push_back(&s->left, &l)) value_free(&l);
         value_free(&r);
         *done = true;
         return value_nil();
@@ -349,7 +422,7 @@ LatValue iter_zip(LatValue left, LatValue right) {
     if (!s) return value_nil();
     s->left = left;   /* takes ownership */
     s->right = right; /* takes ownership */
-    return value_iterator(iter_zip_next, s, iter_zip_free);
+    return iter_with_protocol(iter_zip_next, s, iter_zip_free);
 }
 
 /* ── Channel iterator ── */
@@ -377,7 +450,7 @@ LatValue iter_from_channel(LatChannel *ch) {
     if (!s) return value_nil();
     channel_retain(ch);
     s->ch = ch;
-    return value_iterator(iter_channel_next, s, iter_channel_free);
+    return iter_with_protocol(iter_channel_next, s, iter_channel_free);
 }
 
 /* ── Eager consumers ── */

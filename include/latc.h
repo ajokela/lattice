@@ -6,10 +6,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LATC_MAGIC   "LATC"
-#define LATC_FORMAT  2
-#define RLATC_MAGIC  "RLAT"
-#define RLATC_FORMAT 2
+#define LATC_MAGIC       "LATC"
+#define LATC_FORMAT      3
+#define LATC_MIN_FORMAT  2
+#define RLATC_MAGIC      "RLAT"
+#define RLATC_FORMAT     3
+#define RLATC_MIN_FORMAT 2
 
 /* Save a compiled chunk to a .latc file. Returns 0 on success, -1 on error. */
 int chunk_save(const Chunk *c, const char *path);

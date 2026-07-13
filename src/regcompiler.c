@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 
 /* ── Register compiler state ── */
 
@@ -49,10 +50,21 @@ typedef struct RegCompiler {
     size_t loop_continue_local_count;
     uint8_t loop_break_reg; /* Register to restore to on break */
     uint8_t loop_continue_reg;
+    int handler_depth; /* Active lexical try handlers in this function */
+    int loop_break_scope_depth;
+    int loop_continue_scope_depth;
+    int loop_break_handler_depth;
+    int loop_continue_handler_depth;
     /* Ensure contracts and return type for postcondition checking */
     ContractClause *ensures;
     size_t ensure_count;
     char *return_type;
+    /* Selective imports are runtime values, so `Color::Red` cannot use the
+     * compiler's declaration-only enum table. The root compiler records names
+     * introduced by selective imports and nested compilers consult that set. */
+    char **imported_enum_candidates;
+    size_t imported_enum_candidate_count;
+    size_t imported_enum_candidate_cap;
 } RegCompiler;
 
 static RegCompiler *rc = NULL; /* Current compiler */
@@ -66,26 +78,119 @@ static char *rc_error = NULL;
 static bool g_reg_stmt_tos = false;
 
 /* Track known enums (same as stack compiler) */
-static char **rc_known_enums = NULL;
+typedef struct {
+    char *name;
+    char **variant_names;
+    size_t *variant_counts;
+    size_t variant_count;
+} RegKnownEnum;
+static RegKnownEnum *rc_known_enums = NULL;
 static size_t rc_known_enum_count = 0;
 static size_t rc_known_enum_cap = 0;
 
-static void rc_register_enum(const char *name) {
-    if (rc_known_enum_count >= rc_known_enum_cap) {
-        rc_known_enum_cap = rc_known_enum_cap ? rc_known_enum_cap * 2 : 8;
-        rc_known_enums = realloc(rc_known_enums, rc_known_enum_cap * sizeof(char *));
+static void rc_register_enum(const EnumDecl *decl) {
+    RegKnownEnum *entry = NULL;
+    for (size_t i = 0; i < rc_known_enum_count; i++) {
+        if (strcmp(rc_known_enums[i].name, decl->name) != 0) continue;
+        entry = &rc_known_enums[i];
+        for (size_t j = 0; j < entry->variant_count; j++) free(entry->variant_names[j]);
+        free(entry->variant_names);
+        free(entry->variant_counts);
+        break;
     }
-    rc_known_enums[rc_known_enum_count++] = strdup(name);
+    if (!entry) {
+        if (rc_known_enum_count >= rc_known_enum_cap) {
+            rc_known_enum_cap = rc_known_enum_cap ? rc_known_enum_cap * 2 : 8;
+            rc_known_enums = realloc(rc_known_enums, rc_known_enum_cap * sizeof(RegKnownEnum));
+        }
+        entry = &rc_known_enums[rc_known_enum_count++];
+        entry->name = strdup(decl->name);
+    }
+    entry->variant_count = decl->variant_count;
+    entry->variant_names = calloc(decl->variant_count, sizeof(char *));
+    entry->variant_counts = calloc(decl->variant_count, sizeof(size_t));
+    for (size_t i = 0; i < decl->variant_count; i++) {
+        entry->variant_names[i] = strdup(decl->variants[i].name);
+        entry->variant_counts[i] = decl->variants[i].param_count;
+    }
 }
 
 static bool rc_is_known_enum(const char *name) {
     for (size_t i = 0; i < rc_known_enum_count; i++)
-        if (strcmp(rc_known_enums[i], name) == 0) return true;
+        if (strcmp(rc_known_enums[i].name, name) == 0) return true;
     return false;
 }
 
+static bool rc_known_enum_variant_ok(const char *enum_name, const char *variant_name, size_t argc) {
+    for (size_t i = 0; i < rc_known_enum_count; i++) {
+        if (strcmp(rc_known_enums[i].name, enum_name) != 0) continue;
+        for (size_t j = 0; j < rc_known_enums[i].variant_count; j++)
+            if (strcmp(rc_known_enums[i].variant_names[j], variant_name) == 0)
+                return rc_known_enums[i].variant_counts[j] == argc;
+        return false;
+    }
+    return true;
+}
+
+static RegCompiler *rc_root_compiler(void) {
+    RegCompiler *root = rc;
+    while (root && root->enclosing) root = root->enclosing;
+    return root;
+}
+
+static void rc_register_imported_enum_candidate(const char *name) {
+    RegCompiler *root = rc_root_compiler();
+    if (!root) return;
+    for (size_t i = 0; i < root->imported_enum_candidate_count; i++)
+        if (strcmp(root->imported_enum_candidates[i], name) == 0) return;
+    if (root->imported_enum_candidate_count >= root->imported_enum_candidate_cap) {
+        size_t cap = root->imported_enum_candidate_cap ? root->imported_enum_candidate_cap * 2 : 8;
+        char **names = realloc(root->imported_enum_candidates, cap * sizeof(char *));
+        if (!names) {
+            if (!rc_error) rc_error = strdup("out of memory tracking selective imports");
+            return;
+        }
+        root->imported_enum_candidates = names;
+        root->imported_enum_candidate_cap = cap;
+    }
+    root->imported_enum_candidates[root->imported_enum_candidate_count++] = strdup(name);
+}
+
+static bool rc_is_imported_enum_candidate(const char *name) {
+    RegCompiler *root = rc_root_compiler();
+    if (!root) return false;
+    for (size_t i = 0; i < root->imported_enum_candidate_count; i++)
+        if (strcmp(root->imported_enum_candidates[i], name) == 0) return true;
+    return false;
+}
+
+/* Module enum metadata is an ordinary immutable-by-convention array:
+ * [variant-name, payload-arity, ...]. Keeping it in the constant pool means
+ * module maps and selective imports can transport it without a second metadata
+ * registry or path-dependent compiler state. */
+static LatValue rc_enum_metadata_value(const EnumDecl *decl) {
+    size_t count = decl->variant_count * 2;
+    LatValue *items = count ? malloc(count * sizeof(LatValue)) : NULL;
+    if (count && !items) {
+        if (!rc_error) rc_error = strdup("out of memory building enum metadata");
+        return value_unit();
+    }
+    for (size_t i = 0; i < decl->variant_count; i++) {
+        items[i * 2] = value_string(decl->variants[i].name);
+        items[i * 2 + 1] = value_int((int64_t)decl->variants[i].param_count);
+    }
+    LatValue metadata = value_array(items, count);
+    free(items);
+    return metadata;
+}
+
 static void rc_free_known_enums(void) {
-    for (size_t i = 0; i < rc_known_enum_count; i++) free(rc_known_enums[i]);
+    for (size_t i = 0; i < rc_known_enum_count; i++) {
+        for (size_t j = 0; j < rc_known_enums[i].variant_count; j++) free(rc_known_enums[i].variant_names[j]);
+        free(rc_known_enums[i].variant_names);
+        free(rc_known_enums[i].variant_counts);
+        free(rc_known_enums[i].name);
+    }
     free(rc_known_enums);
     rc_known_enums = NULL;
     rc_known_enum_count = 0;
@@ -122,9 +227,17 @@ static void rc_init(RegCompiler *comp, RegCompiler *enclosing, RegFuncType type)
     comp->loop_continue_local_count = 0;
     comp->loop_break_reg = 0;
     comp->loop_continue_reg = 0;
+    comp->handler_depth = 0;
+    comp->loop_break_scope_depth = 0;
+    comp->loop_continue_scope_depth = 0;
+    comp->loop_break_handler_depth = 0;
+    comp->loop_continue_handler_depth = 0;
     comp->ensures = NULL;
     comp->ensure_count = 0;
     comp->return_type = NULL;
+    comp->imported_enum_candidates = NULL;
+    comp->imported_enum_candidate_count = 0;
+    comp->imported_enum_candidate_cap = 0;
 
     /* Reserve register 0 for function itself (convention) */
     if (type != REG_FUNC_SCRIPT) {
@@ -145,6 +258,8 @@ static void rc_cleanup(RegCompiler *comp) {
     free(comp->break_patches);
     free(comp->continue_patches);
     free(comp->func_name);
+    for (size_t i = 0; i < comp->imported_enum_candidate_count; i++) free(comp->imported_enum_candidates[i]);
+    free(comp->imported_enum_candidates);
 }
 
 /* ── Register management ── */
@@ -216,6 +331,14 @@ static void emit_setfield(uint8_t obj, uint16_t field_ki, uint8_t val, int line)
 /* Emit jump placeholder, return instruction index for patching */
 static size_t emit_jump_placeholder(uint8_t op, uint8_t a, int line) { return emit_AsBx(op, a, 0, line); }
 
+/* Two-word default check. A=0xff marks the conditional as argument-presence
+ * based; the data word carries the parameter register. */
+static size_t emit_default_skip(uint8_t param_reg, int line) {
+    size_t jump = emit_jump_placeholder(ROP_JMPNOTNIL, 0xff, line);
+    emit_ABC(ROP_MOVE, param_reg, 0, 0, line); /* data word, consumed by VM */
+    return jump;
+}
+
 static size_t emit_jmp_placeholder(int line) { return emit(REG_ENCODE_sBx(ROP_JMP, 0), line); }
 
 /* Patch a conditional jump (AsBx format, 16-bit signed offset) */
@@ -280,6 +403,15 @@ static uint16_t add_constant(LatValue val) {
         return 0;
     }
     return (uint16_t)idx;
+}
+
+static void emit_assert_reg(uint8_t condition, const char *message, int line) {
+    size_t ok = emit_jump_placeholder(ROP_JMPTRUE, condition, line);
+    uint8_t err_reg = alloc_reg();
+    emit_ABx(ROP_LOADK, err_reg, add_constant(value_string(message)), line);
+    emit_ABC(ROP_THROW, err_reg, 0, 0, line);
+    free_reg(err_reg);
+    patch_jump(ok);
 }
 
 /* Pack a name/string constant index into an 8-bit instruction operand.
@@ -398,10 +530,336 @@ static void push_continue_patch(size_t instr_idx) {
     rc->continue_patches[rc->continue_count++] = instr_idx;
 }
 
+/* Run cleanup for lexical scopes and try handlers crossed by a loop-control
+ * transfer. Defers run while their try handler is still active, so an error in
+ * deferred work follows the same catch semantics as normal scope exit. */
+static void emit_loop_control_cleanup(size_t keep_local_count, int target_scope_depth, int target_handler_depth,
+                                      int line) {
+    if (rc->scope_depth > target_scope_depth) {
+        emit_ABC(ROP_DEFER_RUN, (uint8_t)(target_scope_depth + 1), 0, 0, line);
+    }
+    for (size_t i = rc->local_count; i > keep_local_count; i--) {
+        RegLocal *local = &rc->locals[i - 1];
+        if (local->is_captured) emit_ABC(ROP_CLOSEUPVALUE, local->reg, 0, 0, line);
+    }
+    for (int depth = rc->handler_depth; depth > target_handler_depth; depth--) {
+        emit_ABC(ROP_POP_HANDLER, 0, 0, 0, line);
+    }
+}
+
 /* ── Forward declarations ── */
 
 static void compile_expr(const Expr *e, uint8_t dst, int line);
 static void compile_stmt(const Stmt *s);
+
+static void emit_check_enum_variant(uint8_t metadata_reg, const char *variant_name, size_t argc, int line) {
+    if (argc > UINT8_MAX) {
+        if (!rc_error) rc_error = strdup("enum payload has more than 255 values");
+        return;
+    }
+    uint16_t variant_ki = add_constant(value_string(variant_name));
+    emit_ABC(ROP_CHECK_ENUM_VARIANT, metadata_reg, (uint8_t)argc, 0, line);
+    emit_ABx(0, 0, variant_ki, line);
+}
+
+static void compile_enum_construction(const Expr *e, uint8_t dst, int line) {
+    if (e->as.enum_variant.arg_count == 0) {
+        emit_ABx(ROP_LOADK, dst,
+                 add_constant(value_enum(e->as.enum_variant.enum_name, e->as.enum_variant.variant_name, NULL, 0)),
+                 line);
+        return;
+    }
+
+    uint8_t base = alloc_reg();
+    for (size_t i = 0; i < e->as.enum_variant.arg_count; i++) {
+        uint8_t arg_reg = i == 0 ? base : alloc_reg();
+        compile_expr(e->as.enum_variant.args[i], arg_reg, line);
+    }
+    uint16_t name_ki = add_constant(value_string(e->as.enum_variant.enum_name));
+    uint16_t variant_ki = add_constant(value_string(e->as.enum_variant.variant_name));
+    emit_ABC(ROP_NEWENUM, dst, (uint8_t)(name_ki & 0xff), (uint8_t)e->as.enum_variant.arg_count, line);
+    emit_ABC(ROP_MOVE, base, name_ki8(variant_ki), (uint8_t)(name_ki >> 8), line);
+    free_regs_to(base);
+}
+
+typedef struct {
+    size_t *items;
+    size_t count;
+    size_t cap;
+} RegPatternFailList;
+
+static void pattern_fail_add(RegPatternFailList *fails, size_t jump) {
+    if (rc_error) return;
+    if (fails->count >= fails->cap) {
+        size_t new_cap = fails->cap ? fails->cap * 2 : 8;
+        size_t *grown = realloc(fails->items, new_cap * sizeof(size_t));
+        if (!grown) {
+            rc_error = strdup("out of memory compiling match pattern");
+            return;
+        }
+        fails->items = grown;
+        fails->cap = new_cap;
+    }
+    fails->items[fails->count++] = jump;
+}
+
+static void pattern_fail_if_false(RegPatternFailList *fails, uint8_t condition, int line) {
+    pattern_fail_add(fails, emit_jump_placeholder(ROP_JMPFALSE, condition, line));
+}
+
+static void emit_match_field(uint8_t present, uint8_t value, uint8_t object, uint16_t field_ki, int line) {
+    emit_ABC(ROP_MATCH_FIELD, present, value, object, line);
+    emit_ABx(0, 0, field_ki, line);
+}
+
+static void emit_pattern_size(uint8_t dst, size_t value, int line) {
+    if (value <= INT16_MAX) {
+        emit_AsBx(ROP_LOADI, dst, (int16_t)value, line);
+    } else if (value <= INT64_MAX) {
+        emit_ABx(ROP_LOADK, dst, add_constant(value_int((int64_t)value)), line);
+    } else if (!rc_error) {
+        rc_error = strdup("match pattern is too large");
+    }
+}
+
+/* Bindings are allocated before validation so every temporary produced by the
+ * recursive checker remains above them and can be reclaimed normally. */
+static void declare_pattern_bindings(const Pattern *pat) {
+    switch (pat->tag) {
+        case PAT_BINDING: add_local(pat->as.binding_name); break;
+        case PAT_ARRAY:
+            for (size_t i = 0; i < pat->as.array.count; i++) declare_pattern_bindings(pat->as.array.elems[i].pattern);
+            break;
+        case PAT_STRUCT:
+            for (size_t i = 0; i < pat->as.strct.count; i++) {
+                StructPatField *field = &pat->as.strct.fields[i];
+                if (field->value_pat) declare_pattern_bindings(field->value_pat);
+                else add_local(field->name);
+            }
+            break;
+        case PAT_ENUM_VARIANT:
+            for (size_t i = 0; i < pat->as.enum_variant.payload_count; i++)
+                declare_pattern_bindings(pat->as.enum_variant.payload_pats[i]);
+            break;
+        case PAT_LITERAL:
+        case PAT_WILDCARD:
+        case PAT_RANGE: break;
+    }
+}
+
+static uint8_t pattern_binding_reg(const char *name) {
+    int local = resolve_local(rc, name);
+    if (local < 0) {
+        if (!rc_error) rc_error = strdup("internal error: missing match binding");
+        return 0;
+    }
+    return local_reg(local);
+}
+
+/* Recursively validate one pattern and extract its predeclared bindings. Every
+ * failure path produces false rather than evaluating an unsafe child access. */
+static void compile_pattern_match(const Pattern *pat, uint8_t candidate, uint8_t result, int line) {
+    RegPatternFailList fails = {0};
+
+    switch (pat->tag) {
+        case PAT_WILDCARD: break;
+
+        case PAT_BINDING: emit_ABC(ROP_MOVE, pattern_binding_reg(pat->as.binding_name), candidate, 0, line); break;
+
+        case PAT_LITERAL: {
+            uint8_t expected = alloc_reg();
+            compile_expr(pat->as.literal, expected, line);
+            emit_ABC(ROP_EQ, result, candidate, expected, line);
+            pattern_fail_if_false(&fails, result, line);
+            free_reg(expected);
+            break;
+        }
+
+        case PAT_RANGE: {
+            uint8_t start = alloc_reg();
+            compile_expr(pat->as.range.start, start, line);
+            uint8_t end = alloc_reg();
+            compile_expr(pat->as.range.end, end, line);
+
+            emit_ABC(ROP_MATCH_TYPE, result, candidate, VAL_INT, line);
+            pattern_fail_if_false(&fails, result, line);
+            emit_ABC(ROP_MATCH_TYPE, result, start, VAL_INT, line);
+            pattern_fail_if_false(&fails, result, line);
+            emit_ABC(ROP_MATCH_TYPE, result, end, VAL_INT, line);
+            pattern_fail_if_false(&fails, result, line);
+            emit_ABC(ROP_GTEQ, result, candidate, start, line);
+            pattern_fail_if_false(&fails, result, line);
+            emit_ABC(ROP_LTEQ, result, candidate, end, line);
+            pattern_fail_if_false(&fails, result, line);
+
+            free_reg(end);
+            free_reg(start);
+            break;
+        }
+
+        case PAT_ARRAY: {
+            ArrayPatElem *elements = pat->as.array.elems;
+            size_t pattern_count = pat->as.array.count;
+            size_t fixed_count = 0;
+            int rest_index = -1;
+            bool multiple_rests = false;
+            for (size_t i = 0; i < pattern_count; i++) {
+                if (elements[i].is_rest) {
+                    if (rest_index >= 0) multiple_rests = true;
+                    rest_index = (int)i;
+                } else {
+                    fixed_count++;
+                }
+            }
+            if (multiple_rests) {
+                emit_ABC(ROP_LOADFALSE, result, 0, 0, line);
+                pattern_fail_if_false(&fails, result, line);
+                break;
+            }
+
+            emit_ABC(ROP_MATCH_TYPE, result, candidate, VAL_ARRAY, line);
+            pattern_fail_if_false(&fails, result, line);
+
+            uint8_t length = alloc_reg();
+            emit_ABC(ROP_LEN, length, candidate, 0, line);
+            uint8_t expected = alloc_reg();
+            emit_pattern_size(expected, fixed_count, line);
+            emit_ABC(rest_index >= 0 ? ROP_GTEQ : ROP_EQ, result, length, expected, line);
+            pattern_fail_if_false(&fails, result, line);
+            free_reg(expected);
+
+            for (size_t i = 0; i < pattern_count; i++) {
+                uint8_t child;
+                if (elements[i].is_rest) {
+                    size_t after_count = pattern_count - i - 1;
+                    uint8_t start = alloc_reg();
+                    emit_pattern_size(start, i, line);
+                    uint8_t end = alloc_reg();
+                    if (after_count > 0) {
+                        uint8_t after = alloc_reg();
+                        emit_pattern_size(after, after_count, line);
+                        emit_ABC(ROP_SUB, end, length, after, line);
+                        free_reg(after);
+                    } else {
+                        emit_ABC(ROP_MOVE, end, length, 0, line);
+                    }
+                    uint8_t range = alloc_reg();
+                    emit_ABC(ROP_BUILDRANGE, range, start, end, line);
+                    child = alloc_reg();
+                    emit_ABC(ROP_GETINDEX, child, candidate, range, line);
+                    compile_pattern_match(elements[i].pattern, child, result, line);
+                    pattern_fail_if_false(&fails, result, line);
+                    free_reg(child);
+                    free_reg(range);
+                    free_reg(end);
+                    free_reg(start);
+                    continue;
+                }
+
+                uint8_t index = alloc_reg();
+                if (rest_index >= 0 && (int)i > rest_index) {
+                    uint8_t offset = alloc_reg();
+                    emit_pattern_size(offset, pattern_count - i, line);
+                    emit_ABC(ROP_SUB, index, length, offset, line);
+                    free_reg(offset);
+                } else {
+                    emit_pattern_size(index, i, line);
+                }
+                child = alloc_reg();
+                emit_ABC(ROP_GETINDEX, child, candidate, index, line);
+                compile_pattern_match(elements[i].pattern, child, result, line);
+                pattern_fail_if_false(&fails, result, line);
+                free_reg(child);
+                free_reg(index);
+            }
+            free_reg(length);
+            break;
+        }
+
+        case PAT_STRUCT: {
+            emit_ABC(ROP_MATCH_TYPE, result, candidate, VAL_STRUCT, line);
+            pattern_fail_if_false(&fails, result, line);
+
+            for (size_t i = 0; i < pat->as.strct.count; i++) {
+                StructPatField *field = &pat->as.strct.fields[i];
+                uint16_t field_ki = add_constant(value_string(field->name));
+                uint8_t field_value = alloc_reg();
+                uint8_t present = alloc_reg();
+                emit_match_field(present, field_value, candidate, field_ki, line);
+                pattern_fail_if_false(&fails, present, line);
+                free_reg(present);
+
+                if (field->value_pat) {
+                    compile_pattern_match(field->value_pat, field_value, result, line);
+                    pattern_fail_if_false(&fails, result, line);
+                } else {
+                    emit_ABC(ROP_MOVE, pattern_binding_reg(field->name), field_value, 0, line);
+                }
+                free_reg(field_value);
+            }
+            break;
+        }
+
+        case PAT_ENUM_VARIANT: {
+            emit_ABC(ROP_MATCH_TYPE, result, candidate, VAL_ENUM, line);
+            pattern_fail_if_false(&fails, result, line);
+
+            uint8_t actual = alloc_reg();
+            emit_getfield(actual, candidate, add_constant(value_string("enum_name")), line);
+            uint8_t expected = alloc_reg();
+            emit_ABx(ROP_LOADK, expected, add_constant(value_string(pat->as.enum_variant.enum_name)), line);
+            emit_ABC(ROP_EQ, result, actual, expected, line);
+            pattern_fail_if_false(&fails, result, line);
+            free_reg(expected);
+            free_reg(actual);
+
+            actual = alloc_reg();
+            emit_getfield(actual, candidate, add_constant(value_string("variant_name")), line);
+            expected = alloc_reg();
+            emit_ABx(ROP_LOADK, expected, add_constant(value_string(pat->as.enum_variant.variant_name)), line);
+            emit_ABC(ROP_EQ, result, actual, expected, line);
+            pattern_fail_if_false(&fails, result, line);
+            free_reg(expected);
+            free_reg(actual);
+
+            uint8_t payload = alloc_reg();
+            emit_getfield(payload, candidate, add_constant(value_string("payload")), line);
+            uint8_t payload_len = alloc_reg();
+            emit_ABC(ROP_LEN, payload_len, payload, 0, line);
+            expected = alloc_reg();
+            emit_pattern_size(expected, pat->as.enum_variant.payload_count, line);
+            emit_ABC(ROP_EQ, result, payload_len, expected, line);
+            pattern_fail_if_false(&fails, result, line);
+            free_reg(expected);
+            free_reg(payload_len);
+
+            for (size_t i = 0; i < pat->as.enum_variant.payload_count; i++) {
+                uint8_t index = alloc_reg();
+                emit_pattern_size(index, i, line);
+                uint8_t child = alloc_reg();
+                emit_ABC(ROP_GETINDEX, child, payload, index, line);
+                compile_pattern_match(pat->as.enum_variant.payload_pats[i], child, result, line);
+                pattern_fail_if_false(&fails, result, line);
+                free_reg(child);
+                free_reg(index);
+            }
+            free_reg(payload);
+            break;
+        }
+    }
+
+    if (pat->phase_qualifier != PHASE_UNSPECIFIED) {
+        emit_ABC(ROP_MATCH_PHASE, result, candidate, (uint8_t)pat->phase_qualifier, line);
+        pattern_fail_if_false(&fails, result, line);
+    }
+
+    emit_ABC(ROP_LOADTRUE, result, 0, 0, line);
+    size_t done = emit_jmp_placeholder(line);
+    for (size_t i = 0; i < fails.count; i++) patch_jump(fails.items[i]);
+    emit_ABC(ROP_LOADFALSE, result, 0, 0, line);
+    patch_jmp(done);
+    free(fails.items);
+}
 static void emit_index_writeback(Expr *node, uint8_t modified_reg, int line);
 
 /* ── LAT-545: single-evaluation of non-idempotent indices in write-backs ──
@@ -510,13 +968,13 @@ static RegChunk *compile_reg_sub_body(Stmt **stmts, size_t count, int line) {
         for (size_t i = 0; i + 1 < count; i++) compile_stmt(stmts[i]);
         uint8_t result_reg = alloc_reg();
         compile_expr(stmts[count - 1]->as.expr, result_reg, line);
-        emit_ABC(ROP_RETURN, result_reg, 1, 0, line); /* B=1: has return value */
+        emit_return(result_reg, line);
         free_reg(result_reg);
     } else {
         for (size_t i = 0; i < count; i++) compile_stmt(stmts[i]);
         uint8_t result_reg = alloc_reg();
         emit_ABC(ROP_LOADUNIT, result_reg, 0, 0, line);
-        emit_ABC(ROP_RETURN, result_reg, 1, 0, line); /* B=1: has return value */
+        emit_return(result_reg, line);
         free_reg(result_reg);
     }
 
@@ -526,29 +984,6 @@ static RegChunk *compile_reg_sub_body(Stmt **stmts, size_t count, int line) {
     rc = saved;
     return ch;
 }
-
-#ifndef __EMSCRIPTEN__
-/* Compile a single expression into a standalone RegChunk that returns its value. */
-static RegChunk *compile_reg_sub_expr(const Expr *expr, int line) {
-    RegCompiler *saved = rc;
-    RegCompiler sub;
-    rc_init(&sub, NULL, REG_FUNC_SCRIPT);
-    sub.scope_depth = 1;
-    rc = &sub;
-    add_local("");
-
-    uint8_t result_reg = alloc_reg();
-    compile_expr(expr, result_reg, line);
-    emit_ABC(ROP_RETURN, result_reg, 1, 0, line); /* B=1: has return value */
-    free_reg(result_reg);
-
-    RegChunk *ch = sub.chunk;
-    sub.chunk = NULL;
-    rc_cleanup(&sub);
-    rc = saved;
-    return ch;
-}
-#endif
 
 /* Store a sub-RegChunk as a VAL_CLOSURE constant (body=NULL, native_fn=RegChunk*). */
 static uint16_t add_regchunk_constant(RegChunk *ch) {
@@ -649,15 +1084,22 @@ static bool try_const_fold(const Expr *e, LatValue *out) {
             int64_t ri = rv.type == VAL_INT ? rv.as.int_val : 0;
             double lf = lv.type == VAL_FLOAT ? lv.as.float_val : (double)li;
             double rf = rv.type == VAL_FLOAT ? rv.as.float_val : (double)ri;
+            ValueNumericCmp cmp = value_numeric_compare(&lv, &rv);
 
             switch (e->as.binop.op) {
-                case BINOP_ADD: *out = both_int ? value_int(li + ri) : value_float(lf + rf); return true;
-                case BINOP_SUB: *out = both_int ? value_int(li - ri) : value_float(lf - rf); return true;
-                case BINOP_MUL: *out = both_int ? value_int(li * ri) : value_float(lf * rf); return true;
+                case BINOP_ADD:
+                    *out = both_int ? value_int((int64_t)((uint64_t)li + (uint64_t)ri)) : value_float(lf + rf);
+                    return true;
+                case BINOP_SUB:
+                    *out = both_int ? value_int((int64_t)((uint64_t)li - (uint64_t)ri)) : value_float(lf - rf);
+                    return true;
+                case BINOP_MUL:
+                    *out = both_int ? value_int((int64_t)((uint64_t)li * (uint64_t)ri)) : value_float(lf * rf);
+                    return true;
                 case BINOP_DIV:
                     if (both_int) {
                         if (ri == 0) return false;
-                        *out = value_int(li / ri);
+                        *out = value_int(li == INT64_MIN && ri == -1 ? INT64_MIN : li / ri);
                     } else {
                         if (rf == 0.0) return false;
                         *out = value_float(lf / rf);
@@ -665,14 +1107,14 @@ static bool try_const_fold(const Expr *e, LatValue *out) {
                     return true;
                 case BINOP_MOD:
                     if (!both_int || ri == 0) return false;
-                    *out = value_int(li % ri);
+                    *out = value_int(li == INT64_MIN && ri == -1 ? 0 : li % ri);
                     return true;
-                case BINOP_LT: *out = value_bool(both_int ? li < ri : lf < rf); return true;
-                case BINOP_GT: *out = value_bool(both_int ? li > ri : lf > rf); return true;
-                case BINOP_LTEQ: *out = value_bool(both_int ? li <= ri : lf <= rf); return true;
-                case BINOP_GTEQ: *out = value_bool(both_int ? li >= ri : lf >= rf); return true;
-                case BINOP_EQ: *out = value_bool(both_int ? li == ri : lf == rf); return true;
-                case BINOP_NEQ: *out = value_bool(both_int ? li != ri : lf != rf); return true;
+                case BINOP_LT: *out = value_bool(cmp == VALUE_CMP_LESS); return true;
+                case BINOP_GT: *out = value_bool(cmp == VALUE_CMP_GREATER); return true;
+                case BINOP_LTEQ: *out = value_bool(cmp == VALUE_CMP_LESS || cmp == VALUE_CMP_EQUAL); return true;
+                case BINOP_GTEQ: *out = value_bool(cmp == VALUE_CMP_GREATER || cmp == VALUE_CMP_EQUAL); return true;
+                case BINOP_EQ: *out = value_bool(cmp == VALUE_CMP_EQUAL); return true;
+                case BINOP_NEQ: *out = value_bool(cmp != VALUE_CMP_EQUAL); return true;
                 /* Bitwise: integer only */
                 case BINOP_BIT_AND:
                     if (!both_int) return false;
@@ -688,7 +1130,7 @@ static bool try_const_fold(const Expr *e, LatValue *out) {
                     return true;
                 case BINOP_LSHIFT:
                     if (!both_int || ri < 0 || ri >= 64) return false;
-                    *out = value_int(li << ri);
+                    *out = value_int((int64_t)((uint64_t)li << (unsigned)ri));
                     return true;
                 case BINOP_RSHIFT:
                     if (!both_int || ri < 0 || ri >= 64) return false;
@@ -1279,6 +1721,13 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             emit_ABC(ROP_NEWSTRUCT, dst, (uint8_t)(name_ki & 0xFF), (uint8_t)e->as.struct_lit.field_count, line);
             /* Store the name constant index in a follow-up instruction for the VM */
             emit_ABx(ROP_LOADK, base, name_ki, line); /* Overloaded: VM reads this as struct name */
+            /* Preserve source field names as data words. RegVM used to pair
+             * source-order values with declaration-order metadata, so a literal
+             * such as P{y: 2, x: 1} silently swapped the two values. */
+            for (size_t i = 0; i < e->as.struct_lit.field_count; i++) {
+                uint16_t field_ki = add_constant(value_string(e->as.struct_lit.fields[i].name));
+                emit_ABx(ROP_LOADK, 0, field_ki, line);
+            }
             free_regs_to(base);
             break;
         }
@@ -1432,6 +1881,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
                 uint8_t err_reg = alloc_reg();
                 size_t handler_jump = emit_jump_placeholder(ROP_PUSH_HANDLER, err_reg, line);
+                rc->handler_depth++;
 
                 /* Compile contract closure and call it with the saved value */
                 uint8_t base = alloc_reg();
@@ -1444,6 +1894,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
                 /* Success — pop handler, jump past catch */
                 emit_ABC(ROP_POP_HANDLER, 0, 0, 0, line);
+                rc->handler_depth--;
                 size_t skip = emit_jmp_placeholder(line);
 
                 /* Catch: err_reg has error string */
@@ -1791,7 +2242,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     if (e->as.closure.default_values[i]) {
                         rc_default_count++;
                         uint8_t preg = local_reg((int)(i + 1));
-                        size_t skip = emit_jump_placeholder(ROP_JMPNOTNIL, preg, line);
+                        size_t skip = emit_default_skip(preg, line);
                         compile_expr(e->as.closure.default_values[i], preg, line);
                         patch_jump(skip);
                     }
@@ -1898,498 +2349,119 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         }
 
         case EXPR_MATCH: {
-            /* Simple match: compile scrutinee, then chain of comparisons */
             uint8_t scrutinee = alloc_reg();
             compile_expr(e->as.match_expr.scrutinee, scrutinee, line);
 
-            size_t *end_jumps = malloc(e->as.match_expr.arm_count * sizeof(size_t));
-            if (!end_jumps) return;
+            size_t arm_count = e->as.match_expr.arm_count;
+            size_t *end_jumps = arm_count ? malloc(arm_count * sizeof(size_t)) : NULL;
+            if (arm_count && !end_jumps) {
+                if (!rc_error) rc_error = strdup("out of memory compiling match expression");
+                free_reg(scrutinee);
+                break;
+            }
             size_t end_count = 0;
 
-            for (size_t i = 0; i < e->as.match_expr.arm_count; i++) {
+            for (size_t i = 0; i < arm_count; i++) {
                 MatchArm *arm = &e->as.match_expr.arms[i];
-                size_t next_arm = 0;
+                uint8_t matched = alloc_reg();
 
-                if (arm->pattern->tag == PAT_WILDCARD) {
-                    if (arm->pattern->phase_qualifier == PHASE_CRYSTAL) {
-                        /* crystal _ => check phase IS crystal */
-                        uint8_t cmp_reg = alloc_reg();
-                        emit_ABC(ROP_IS_CRYSTAL, cmp_reg, scrutinee, 0, line);
-                        next_arm = emit_jump_placeholder(ROP_JMPFALSE, cmp_reg, line);
-                        free_reg(cmp_reg);
-                    } else if (arm->pattern->phase_qualifier == PHASE_FLUID) {
-                        /* fluid _ => check phase is NOT crystal */
-                        uint8_t cmp_reg = alloc_reg();
-                        emit_ABC(ROP_IS_CRYSTAL, cmp_reg, scrutinee, 0, line);
-                        emit_ABC(ROP_NOT, cmp_reg, cmp_reg, 0, line);
-                        next_arm = emit_jump_placeholder(ROP_JMPFALSE, cmp_reg, line);
-                        free_reg(cmp_reg);
-                    }
-                    /* else PHASE_UNSPECIFIED: always matches */
-                } else if (arm->pattern->tag == PAT_LITERAL) {
-                    uint8_t pat_reg = alloc_reg();
-                    compile_expr(arm->pattern->as.literal, pat_reg, line);
-                    uint8_t cmp_reg = alloc_reg();
-                    emit_ABC(ROP_EQ, cmp_reg, scrutinee, pat_reg, line);
-                    next_arm = emit_jump_placeholder(ROP_JMPFALSE, cmp_reg, line);
-                    free_reg(cmp_reg);
-                    free_reg(pat_reg);
-                } else if (arm->pattern->tag == PAT_RANGE) {
-                    /* Range pattern: val >= start && val <= end.
-                     * Both fail paths need to skip to next arm. We emit:
-                     *   GTEQ cmp, scrutinee, start
-                     *   JMPFALSE cmp → next_arm
-                     *   LTEQ cmp, scrutinee, end
-                     *   JMPFALSE cmp → next_arm
-                     * Both JMPFALSE targets are patched later. Since patch_jump only
-                     * patches one slot, we handle the first fail by jumping to a trampoline. */
-                    uint8_t start_reg = alloc_reg();
-                    uint8_t cmp_reg = alloc_reg();
-                    compile_expr(arm->pattern->as.range.start, start_reg, line);
-                    emit_ABC(ROP_GTEQ, cmp_reg, scrutinee, start_reg, line);
-                    /* On fail: load false into cmp_reg so the second JMPFALSE also triggers */
-                    size_t range_fail1 = emit_jump_placeholder(ROP_JMPFALSE, cmp_reg, line);
-                    free_reg(start_reg);
-                    uint8_t end_reg = alloc_reg();
-                    compile_expr(arm->pattern->as.range.end, end_reg, line);
-                    emit_ABC(ROP_LTEQ, cmp_reg, scrutinee, end_reg, line);
-                    free_reg(end_reg);
-                    /* Skip past the trampoline on success */
-                    size_t skip_tramp = emit_jmp_placeholder(line);
-                    /* Trampoline: range_fail1 lands here, loads false for the final JMPFALSE */
-                    patch_jump(range_fail1);
-                    emit_ABC(ROP_LOADFALSE, cmp_reg, 0, 0, line);
-                    patch_jmp(skip_tramp);
-                    /* Final test: if either check failed, cmp_reg is false */
-                    next_arm = emit_jump_placeholder(ROP_JMPFALSE, cmp_reg, line);
-                    free_reg(cmp_reg);
-                } else if (arm->pattern->tag == PAT_BINDING) {
-                    /* Bind value to name */
-                    uint8_t bind_reg = add_local(arm->pattern->as.binding_name);
-                    emit_ABC(ROP_MOVE, bind_reg, scrutinee, 0, line);
-                    if (arm->guard) {
-                        uint8_t guard_reg = alloc_reg();
-                        compile_expr(arm->guard, guard_reg, line);
-                        next_arm = emit_jump_placeholder(ROP_JMPFALSE, guard_reg, line);
-                        free_reg(guard_reg);
-                    }
-                } else if (arm->pattern->tag == PAT_ARRAY) {
-                    /* Array destructuring pattern */
-                    ArrayPatElem *pelems = arm->pattern->as.array.elems;
-                    size_t pat_count = arm->pattern->as.array.count;
-                    int rest_idx = -1;
-                    size_t fixed_count = 0;
-                    for (size_t k = 0; k < pat_count; k++) {
-                        if (pelems[k].is_rest) rest_idx = (int)k;
-                        else fixed_count++;
-                    }
+                /* Pattern bindings and body locals share one arm-only scope.
+                 * Both success and failure execute the same cleanup sequence. */
+                begin_scope();
+                declare_pattern_bindings(arm->pattern);
+                compile_pattern_match(arm->pattern, scrutinee, matched, line);
+                size_t pattern_fail = emit_jump_placeholder(ROP_JMPFALSE, matched, line);
 
-                    /* Fail jumps: all need to be patched to next_arm */
-                    size_t fail_cap = 8, fail_count = 0;
-                    size_t *fail_jumps_arr = malloc(fail_cap * sizeof(size_t));
-
-                    /* Type check: typeof(scrutinee) == "Array" */
-                    {
-                        uint8_t fn_reg = alloc_reg();
-                        emit_ABx(ROP_GETGLOBAL, fn_reg, add_constant(value_string("typeof")), line);
-                        uint8_t arg_reg = alloc_reg();
-                        emit_ABC(ROP_MOVE, arg_reg, scrutinee, 0, line);
-                        emit_ABC(ROP_CALL, fn_reg, 1, 1, line);
-                        /* Result in fn_reg */
-                        uint8_t type_str = alloc_reg();
-                        emit_ABx(ROP_LOADK, type_str, add_constant(value_string("Array")), line);
-                        uint8_t tc_cmp = alloc_reg();
-                        emit_ABC(ROP_EQ, tc_cmp, fn_reg, type_str, line);
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, tc_cmp, line);
-                        free_reg(tc_cmp);
-                        free_reg(type_str);
-                        free_reg(arg_reg);
-                        free_reg(fn_reg);
-                    }
-
-                    /* Check array length */
-                    uint8_t len_reg = alloc_reg();
-                    emit_ABC(ROP_LEN, len_reg, scrutinee, 0, line);
-                    uint8_t cmp_reg = alloc_reg();
-                    uint8_t expected_reg = alloc_reg();
-                    emit_AsBx(ROP_LOADI, expected_reg, (int16_t)fixed_count, line);
-                    if (rest_idx >= 0) {
-                        emit_ABC(ROP_GTEQ, cmp_reg, len_reg, expected_reg, line);
-                    } else {
-                        emit_ABC(ROP_EQ, cmp_reg, len_reg, expected_reg, line);
-                    }
-                    free_reg(expected_reg);
-
-                    fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, cmp_reg, line);
-                    free_reg(cmp_reg);
-
-                    /* Extract elements */
-                    for (size_t k = 0; k < pat_count; k++) {
-                        Pattern *sub = pelems[k].pattern;
-                        if (pelems[k].is_rest) {
-                            /* ...rest: slice from rest_idx to len - after_count */
-                            size_t after_count = pat_count - 1 - (size_t)rest_idx;
-                            uint8_t start_r = alloc_reg();
-                            emit_AsBx(ROP_LOADI, start_r, (int16_t)rest_idx, line);
-                            uint8_t end_r = alloc_reg();
-                            if (after_count > 0) {
-                                uint8_t after_r = alloc_reg();
-                                emit_AsBx(ROP_LOADI, after_r, (int16_t)after_count, line);
-                                emit_ABC(ROP_SUB, end_r, len_reg, after_r, line);
-                                free_reg(after_r);
-                            } else {
-                                emit_ABC(ROP_MOVE, end_r, len_reg, 0, line);
-                            }
-                            uint8_t range_r = alloc_reg();
-                            emit_ABC(ROP_BUILDRANGE, range_r, start_r, end_r, line);
-                            if (sub->tag == PAT_BINDING) {
-                                uint8_t bind_r = add_local(sub->as.binding_name);
-                                emit_ABC(ROP_GETINDEX, bind_r, scrutinee, range_r, line);
-                            } else {
-                                uint8_t tmp_r = add_local("");
-                                emit_ABC(ROP_GETINDEX, tmp_r, scrutinee, range_r, line);
-                            }
-                            free_reg(range_r);
-                            free_reg(end_r);
-                            free_reg(start_r);
-                            continue;
-                        }
-
-                        uint8_t idx_r = alloc_reg();
-                        if (rest_idx >= 0 && (int)k > rest_idx) {
-                            /* After rest: len - (pat_count - 1 - k) */
-                            uint8_t off_r = alloc_reg();
-                            emit_AsBx(ROP_LOADI, off_r, (int16_t)(pat_count - 1 - k), line);
-                            emit_ABC(ROP_SUB, idx_r, len_reg, off_r, line);
-                            free_reg(off_r);
-                        } else {
-                            emit_AsBx(ROP_LOADI, idx_r, (int16_t)k, line);
-                        }
-
-                        if (sub->tag == PAT_BINDING) {
-                            uint8_t bind_r = add_local(sub->as.binding_name);
-                            emit_ABC(ROP_GETINDEX, bind_r, scrutinee, idx_r, line);
-                        } else if (sub->tag == PAT_WILDCARD) {
-                            uint8_t tmp_r = add_local("");
-                            emit_ABC(ROP_GETINDEX, tmp_r, scrutinee, idx_r, line);
-                        } else if (sub->tag == PAT_LITERAL) {
-                            uint8_t elem_r = alloc_reg();
-                            emit_ABC(ROP_GETINDEX, elem_r, scrutinee, idx_r, line);
-                            uint8_t pat_r = alloc_reg();
-                            compile_expr(sub->as.literal, pat_r, line);
-                            uint8_t eq_r = alloc_reg();
-                            emit_ABC(ROP_EQ, eq_r, elem_r, pat_r, line);
-                            if (fail_count >= fail_cap) {
-                                fail_cap *= 2;
-                                fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
-                            }
-                            fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, eq_r, line);
-                            free_reg(eq_r);
-                            free_reg(pat_r);
-                            free_reg(elem_r);
-                        } else {
-                            uint8_t tmp_r = add_local("");
-                            emit_ABC(ROP_GETINDEX, tmp_r, scrutinee, idx_r, line);
-                        }
-                        free_reg(idx_r);
-                    }
-                    free_reg(len_reg);
-
-                    /* Guard */
-                    if (arm->guard) {
-                        uint8_t guard_reg = alloc_reg();
-                        compile_expr(arm->guard, guard_reg, line);
-                        if (fail_count >= fail_cap) {
-                            fail_cap *= 2;
-                            fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
-                        }
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, guard_reg, line);
-                        free_reg(guard_reg);
-                    }
-
-                    /* We'll patch all fail jumps after arm body + end_jump */
-                    /* Store them for patching later */
-                    /* next_arm will be set to a dummy value; we'll patch fail_jumps manually */
-                    /* Compile arm body, then end_jump, then patch fail jumps */
-                    begin_scope();
-                    if (arm->body_count > 0) {
-                        for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt(arm->body[j]);
-                        Stmt *last = arm->body[arm->body_count - 1];
-                        if (last->tag == STMT_EXPR) compile_expr(last->as.expr, dst, line);
-                        else {
-                            compile_stmt(last);
-                            emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
-                        }
-                    } else {
-                        emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
-                    }
-                    end_scope(line);
-                    end_jumps[end_count++] = emit_jmp_placeholder(line);
-                    for (size_t fj = 0; fj < fail_count; fj++) patch_jump(fail_jumps_arr[fj]);
-                    free(fail_jumps_arr);
-                    continue; /* skip the normal body compilation below */
-                } else if (arm->pattern->tag == PAT_STRUCT) {
-                    /* Struct destructuring pattern */
-                    StructPatField *spfields = arm->pattern->as.strct.fields;
-                    size_t spat_count = arm->pattern->as.strct.count;
-
-                    size_t fail_cap = 8, fail_count = 0;
-                    size_t *fail_jumps_arr = malloc(fail_cap * sizeof(size_t));
-
-                    /* Type check: typeof(scrutinee) == "Struct" */
-                    {
-                        uint8_t fn_reg = alloc_reg();
-                        emit_ABx(ROP_GETGLOBAL, fn_reg, add_constant(value_string("typeof")), line);
-                        uint8_t arg_reg = alloc_reg();
-                        emit_ABC(ROP_MOVE, arg_reg, scrutinee, 0, line);
-                        emit_ABC(ROP_CALL, fn_reg, 1, 1, line);
-                        uint8_t type_str = alloc_reg();
-                        emit_ABx(ROP_LOADK, type_str, add_constant(value_string("Struct")), line);
-                        uint8_t tc_cmp = alloc_reg();
-                        emit_ABC(ROP_EQ, tc_cmp, fn_reg, type_str, line);
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, tc_cmp, line);
-                        free_reg(tc_cmp);
-                        free_reg(type_str);
-                        free_reg(arg_reg);
-                        free_reg(fn_reg);
-                    }
-
-                    for (size_t k = 0; k < spat_count; k++) {
-                        const char *fname = spfields[k].name;
-                        uint16_t field_ki = add_constant(value_string(fname));
-
-                        if (spfields[k].value_pat == NULL) {
-                            /* Shorthand: {x} => bind x to field value */
-                            uint8_t bind_r = add_local(fname);
-                            emit_getfield(bind_r, scrutinee, field_ki, line);
-                        } else {
-                            Pattern *vpat = spfields[k].value_pat;
-                            if (vpat->tag == PAT_BINDING) {
-                                uint8_t bind_r = add_local(vpat->as.binding_name);
-                                emit_getfield(bind_r, scrutinee, field_ki, line);
-                            } else if (vpat->tag == PAT_WILDCARD) {
-                                uint8_t tmp_r = add_local("");
-                                emit_getfield(tmp_r, scrutinee, field_ki, line);
-                            } else if (vpat->tag == PAT_LITERAL) {
-                                uint8_t fval_r = alloc_reg();
-                                emit_getfield(fval_r, scrutinee, field_ki, line);
-                                uint8_t pat_r = alloc_reg();
-                                compile_expr(vpat->as.literal, pat_r, line);
-                                uint8_t eq_r = alloc_reg();
-                                emit_ABC(ROP_EQ, eq_r, fval_r, pat_r, line);
-                                if (fail_count >= fail_cap) {
-                                    fail_cap *= 2;
-                                    fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
-                                }
-                                fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, eq_r, line);
-                                free_reg(eq_r);
-                                free_reg(pat_r);
-                                free_reg(fval_r);
-                            } else {
-                                uint8_t tmp_r = add_local("");
-                                emit_getfield(tmp_r, scrutinee, field_ki, line);
-                            }
-                        }
-                    }
-
-                    /* Guard */
-                    if (arm->guard) {
-                        uint8_t guard_reg = alloc_reg();
-                        compile_expr(arm->guard, guard_reg, line);
-                        if (fail_count >= fail_cap) {
-                            fail_cap *= 2;
-                            fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
-                        }
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, guard_reg, line);
-                        free_reg(guard_reg);
-                    }
-
-                    /* Compile arm body */
-                    begin_scope();
-                    if (arm->body_count > 0) {
-                        for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt(arm->body[j]);
-                        Stmt *last = arm->body[arm->body_count - 1];
-                        if (last->tag == STMT_EXPR) compile_expr(last->as.expr, dst, line);
-                        else {
-                            compile_stmt(last);
-                            emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
-                        }
-                    } else {
-                        emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
-                    }
-                    end_scope(line);
-                    end_jumps[end_count++] = emit_jmp_placeholder(line);
-                    for (size_t fj = 0; fj < fail_count; fj++) patch_jump(fail_jumps_arr[fj]);
-                    free(fail_jumps_arr);
-                    continue; /* skip the normal body compilation below */
-                } else if (arm->pattern->tag == PAT_ENUM_VARIANT) {
-                    /* Enum variant destructuring pattern: Enum::Variant(x, y) */
-                    size_t fail_cap = 8, fail_count = 0;
-                    size_t *fail_jumps_arr = malloc(fail_cap * sizeof(size_t));
-
-                    /* Type check: typeof(scrutinee) == "Enum" */
-                    {
-                        uint8_t fn_reg = alloc_reg();
-                        emit_ABx(ROP_GETGLOBAL, fn_reg, add_constant(value_string("typeof")), line);
-                        uint8_t arg_reg = alloc_reg();
-                        emit_ABC(ROP_MOVE, arg_reg, scrutinee, 0, line);
-                        emit_ABC(ROP_CALL, fn_reg, 1, 1, line);
-                        uint8_t type_str = alloc_reg();
-                        emit_ABx(ROP_LOADK, type_str, add_constant(value_string("Enum")), line);
-                        uint8_t tc_cmp = alloc_reg();
-                        emit_ABC(ROP_EQ, tc_cmp, fn_reg, type_str, line);
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, tc_cmp, line);
-                        free_reg(tc_cmp);
-                        free_reg(type_str);
-                        free_reg(arg_reg);
-                        free_reg(fn_reg);
-                    }
-
-                    /* Check enum name via .enum_name() */
-                    {
-                        uint8_t name_reg = alloc_reg();
-                        uint8_t args_base = alloc_reg();
-                        uint16_t name_ki = add_constant(value_string("enum_name"));
-                        emit_ABC(ROP_INVOKE, name_reg, (uint8_t)(name_ki & 0xFF), 0, line);
-                        emit_ABC(ROP_MOVE, scrutinee, args_base, (uint8_t)(name_ki >> 8), line); /* data word */
-                        free_reg(args_base);
-                        uint8_t expected = alloc_reg();
-                        emit_ABx(ROP_LOADK, expected,
-                                 add_constant(value_string(arm->pattern->as.enum_variant.enum_name)), line);
-                        uint8_t cmp = alloc_reg();
-                        emit_ABC(ROP_EQ, cmp, name_reg, expected, line);
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, cmp, line);
-                        free_reg(cmp);
-                        free_reg(expected);
-                        free_reg(name_reg);
-                    }
-
-                    /* Check variant name via .variant_name() */
-                    {
-                        uint8_t vname_reg = alloc_reg();
-                        uint8_t args_base = alloc_reg();
-                        uint16_t vname_ki = add_constant(value_string("variant_name"));
-                        emit_ABC(ROP_INVOKE, vname_reg, (uint8_t)(vname_ki & 0xFF), 0, line);
-                        emit_ABC(ROP_MOVE, scrutinee, args_base, (uint8_t)(vname_ki >> 8), line); /* data word */
-                        free_reg(args_base);
-                        uint8_t expected = alloc_reg();
-                        emit_ABx(ROP_LOADK, expected,
-                                 add_constant(value_string(arm->pattern->as.enum_variant.variant_name)), line);
-                        uint8_t cmp = alloc_reg();
-                        emit_ABC(ROP_EQ, cmp, vname_reg, expected, line);
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, cmp, line);
-                        free_reg(cmp);
-                        free_reg(expected);
-                        free_reg(vname_reg);
-                    }
-
-                    /* Extract payload elements */
-                    size_t evpc = arm->pattern->as.enum_variant.payload_count;
-                    uint8_t payload_reg = 0;
-                    if (evpc > 0) {
-                        /* Get payload array once via .payload() */
-                        payload_reg = alloc_reg();
-                        uint8_t args_base = alloc_reg();
-                        uint16_t payload_ki = add_constant(value_string("payload"));
-                        emit_ABC(ROP_INVOKE, payload_reg, (uint8_t)(payload_ki & 0xFF), 0, line);
-                        emit_ABC(ROP_MOVE, scrutinee, args_base, (uint8_t)(payload_ki >> 8), line); /* data word */
-                        free_reg(args_base);
-                    }
-
-                    for (size_t k = 0; k < evpc; k++) {
-                        Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
-                        uint8_t idx_r = alloc_reg();
-                        emit_AsBx(ROP_LOADI, idx_r, (int16_t)k, line);
-
-                        if (sub->tag == PAT_BINDING) {
-                            uint8_t bind_r = add_local(sub->as.binding_name);
-                            emit_ABC(ROP_GETINDEX, bind_r, payload_reg, idx_r, line);
-                        } else if (sub->tag == PAT_WILDCARD) {
-                            uint8_t tmp_r = add_local("");
-                            emit_ABC(ROP_GETINDEX, tmp_r, payload_reg, idx_r, line);
-                        } else if (sub->tag == PAT_LITERAL) {
-                            uint8_t elem_r = alloc_reg();
-                            emit_ABC(ROP_GETINDEX, elem_r, payload_reg, idx_r, line);
-                            uint8_t pat_r = alloc_reg();
-                            compile_expr(sub->as.literal, pat_r, line);
-                            uint8_t eq_r = alloc_reg();
-                            emit_ABC(ROP_EQ, eq_r, elem_r, pat_r, line);
-                            if (fail_count >= fail_cap) {
-                                fail_cap *= 2;
-                                fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
-                            }
-                            fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, eq_r, line);
-                            free_reg(eq_r);
-                            free_reg(pat_r);
-                            free_reg(elem_r);
-                        } else {
-                            uint8_t tmp_r = add_local("");
-                            emit_ABC(ROP_GETINDEX, tmp_r, payload_reg, idx_r, line);
-                        }
-                        free_reg(idx_r);
-                    }
-                    if (evpc > 0) free_reg(payload_reg);
-
-                    /* Guard */
-                    if (arm->guard) {
-                        uint8_t guard_reg = alloc_reg();
-                        compile_expr(arm->guard, guard_reg, line);
-                        if (fail_count >= fail_cap) {
-                            fail_cap *= 2;
-                            fail_jumps_arr = realloc(fail_jumps_arr, fail_cap * sizeof(size_t));
-                        }
-                        fail_jumps_arr[fail_count++] = emit_jump_placeholder(ROP_JMPFALSE, guard_reg, line);
-                        free_reg(guard_reg);
-                    }
-
-                    /* Compile arm body */
-                    begin_scope();
-                    if (arm->body_count > 0) {
-                        for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt(arm->body[j]);
-                        Stmt *last = arm->body[arm->body_count - 1];
-                        if (last->tag == STMT_EXPR) compile_expr(last->as.expr, dst, line);
-                        else {
-                            compile_stmt(last);
-                            emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
-                        }
-                    } else {
-                        emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
-                    }
-                    end_scope(line);
-                    end_jumps[end_count++] = emit_jmp_placeholder(line);
-                    for (size_t fj = 0; fj < fail_count; fj++) patch_jump(fail_jumps_arr[fj]);
-                    free(fail_jumps_arr);
-                    continue; /* skip the normal body compilation below */
+                size_t guard_fail = SIZE_MAX;
+                if (arm->guard) {
+                    uint8_t guard = alloc_reg();
+                    compile_expr(arm->guard, guard, line);
+                    guard_fail = emit_jump_placeholder(ROP_JMPFALSE, guard, line);
+                    free_reg(guard);
                 }
 
-                /* Compile arm body */
-                begin_scope();
                 if (arm->body_count > 0) {
                     for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt(arm->body[j]);
                     Stmt *last = arm->body[arm->body_count - 1];
-                    if (last->tag == STMT_EXPR) compile_expr(last->as.expr, dst, line);
-                    else {
+                    if (last->tag == STMT_EXPR) {
+                        compile_expr(last->as.expr, dst, line);
+                    } else {
                         compile_stmt(last);
                         emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
                     }
                 } else {
                     emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
                 }
-                end_scope(line);
 
+                emit_ABC(ROP_LOADTRUE, matched, 0, 0, line);
+                size_t success_to_cleanup = emit_jmp_placeholder(line);
+
+                patch_jump(pattern_fail);
+                if (guard_fail != SIZE_MAX) patch_jump(guard_fail);
+                emit_ABC(ROP_LOADFALSE, matched, 0, 0, line);
+                patch_jmp(success_to_cleanup);
+
+                end_scope(line);
+                size_t next_arm = emit_jump_placeholder(ROP_JMPFALSE, matched, line);
                 end_jumps[end_count++] = emit_jmp_placeholder(line);
-                if (next_arm != 0) patch_jump(next_arm);
+                patch_jump(next_arm);
+                free_reg(matched);
             }
 
-            /* Default: nil */
             emit_ABC(ROP_LOADNIL, dst, 0, 0, line);
             for (size_t i = 0; i < end_count; i++) patch_jmp(end_jumps[i]);
-            free_reg(scrutinee);
             free(end_jumps);
+            free_reg(scrutinee);
             break;
         }
-
         case EXPR_ENUM_VARIANT: {
+            if (e->as.enum_variant.module_alias) {
+                Expr alias_expr;
+                memset(&alias_expr, 0, sizeof(alias_expr));
+                alias_expr.tag = EXPR_IDENT;
+                alias_expr.line = line;
+                alias_expr.as.str_val = e->as.enum_variant.module_alias;
+                uint8_t metadata_reg = alloc_reg();
+                compile_expr(&alias_expr, metadata_reg, line);
+                char marker[256];
+                snprintf(marker, sizeof(marker), "__enum_%s", e->as.enum_variant.enum_name);
+                emit_getfield(metadata_reg, metadata_reg, add_constant(value_string(marker)), line);
+                size_t enum_ok = emit_jump_placeholder(ROP_JMPNOTNIL, metadata_reg, line);
+                uint8_t err_reg = alloc_reg();
+                char err[512];
+                snprintf(err, sizeof(err), "module '%s' has no enum '%s'", e->as.enum_variant.module_alias,
+                         e->as.enum_variant.enum_name);
+                emit_ABx(ROP_LOADK, err_reg, add_constant(value_string(err)), line);
+                emit_ABC(ROP_THROW, err_reg, 0, 0, line);
+                free_reg(err_reg);
+                patch_jump(enum_ok);
+                emit_check_enum_variant(metadata_reg, e->as.enum_variant.variant_name, e->as.enum_variant.arg_count,
+                                        line);
+                compile_enum_construction(e, dst, line);
+                free_reg(metadata_reg);
+                break;
+            }
+            if (rc_is_imported_enum_candidate(e->as.enum_variant.enum_name)) {
+                Expr metadata_expr;
+                memset(&metadata_expr, 0, sizeof(metadata_expr));
+                metadata_expr.tag = EXPR_IDENT;
+                metadata_expr.line = line;
+                metadata_expr.as.str_val = e->as.enum_variant.enum_name;
+                uint8_t metadata_reg = alloc_reg();
+                compile_expr(&metadata_expr, metadata_reg, line);
+                emit_check_enum_variant(metadata_reg, e->as.enum_variant.variant_name, e->as.enum_variant.arg_count,
+                                        line);
+                compile_enum_construction(e, dst, line);
+                free_reg(metadata_reg);
+                break;
+            }
+            if (rc_is_known_enum(e->as.enum_variant.enum_name) &&
+                !rc_known_enum_variant_ok(e->as.enum_variant.enum_name, e->as.enum_variant.variant_name,
+                                          e->as.enum_variant.arg_count)) {
+                rc_error = strdup("unknown enum variant or incorrect payload arity");
+                emit_ABC(ROP_LOADNIL, dst, 0, 0, line);
+                break;
+            }
             if (!rc_is_known_enum(e->as.enum_variant.enum_name)) {
                 /* Not a declared enum — fall back to global function call
                  * e.g. Map::new() calls the "Map::new" builtin */
@@ -2488,6 +2560,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
              * catch body */
             uint8_t error_reg = alloc_reg();
             size_t handler = emit_jump_placeholder(ROP_PUSH_HANDLER, error_reg, line);
+            rc->handler_depth++;
 
             /* Try body */
             begin_scope();
@@ -2505,6 +2578,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             end_scope(line);
 
             emit_ABC(ROP_POP_HANDLER, 0, 0, 0, line);
+            rc->handler_depth--;
             size_t skip_catch = emit_jmp_placeholder(line);
             patch_jump(handler);
 
@@ -2580,6 +2654,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
             /* 2. Wrap in try/catch for error prefix */
             uint8_t err_reg = alloc_reg();
             size_t handler = emit_jump_placeholder(ROP_PUSH_HANDLER, err_reg, line);
+            rc->handler_depth++;
 
             /* 3. Call closure with thawed value */
             uint8_t fn_reg = alloc_reg();
@@ -2615,6 +2690,7 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
 
             /* 5. End try — pop handler, jump past catch */
             emit_ABC(ROP_POP_HANDLER, 0, 0, 0, line);
+            rc->handler_depth--;
             size_t past_catch = emit_jmp_placeholder(line);
 
             /* 6. Catch: wrap with "anneal failed: " and rethrow */
@@ -2742,34 +2818,48 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
         }
 
         case EXPR_SCOPE: {
+            size_t total = e->as.block.count;
+            size_t spawn_count = 0;
+            for (size_t i = 0; i < total; i++) {
+                Stmt *stmt = e->as.block.stmts[i];
+                if (stmt->tag == STMT_EXPR && stmt->as.expr->tag == EXPR_SPAWN) spawn_count++;
+            }
+
+            /* A synchronous scope is an ordinary lexical block. Keeping it
+             * in the parent chunk preserves outer-local writes and lets
+             * return/break/continue use the enclosing control-flow targets. */
+            if (spawn_count == 0) {
+                begin_scope();
+                if (total > 0) {
+                    for (size_t i = 0; i + 1 < total; i++) compile_stmt(e->as.block.stmts[i]);
+                    Stmt *last = e->as.block.stmts[total - 1];
+                    if (last->tag == STMT_EXPR) compile_expr(last->as.expr, dst, line);
+                    else {
+                        compile_stmt(last);
+                        emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+                    }
+                } else {
+                    emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+                }
+                end_scope(line);
+                break;
+            }
+
 #ifdef __EMSCRIPTEN__
             /* WASM fallback: run as synchronous block */
             for (size_t i = 0; i < e->as.block.count; i++) compile_stmt(e->as.block.stmts[i]);
             emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
 #else
-            size_t total = e->as.block.count;
-
-            /* Count spawns and collect non-spawn stmts */
-            size_t spawn_count = 0;
+            /* Synchronous statements belong to the enclosing control-flow
+             * frame even when the scope also contains spawns. Compile them
+             * inline so writes, return/break/continue, handlers, and lexical
+             * defer cleanup retain their ordinary block semantics. ROP_SCOPE
+             * below is then only responsible for running and joining children. */
+            begin_scope();
+            uint8_t sync_idx = 0xFF;
             for (size_t i = 0; i < total; i++) {
                 Stmt *s = e->as.block.stmts[i];
-                if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN) spawn_count++;
-            }
-            size_t sync_count = total - spawn_count;
-
-            /* Compile sync body (all non-spawn stmts together) */
-            uint8_t sync_idx = 0xFF;
-            if (sync_count > 0) {
-                Stmt **sync_stmts = malloc(sync_count * sizeof(Stmt *));
-                if (!sync_stmts) return;
-                size_t si = 0;
-                for (size_t i = 0; i < total; i++) {
-                    Stmt *s = e->as.block.stmts[i];
-                    if (!(s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)) sync_stmts[si++] = s;
-                }
-                RegChunk *sync_ch = compile_reg_sub_body(sync_stmts, sync_count, line);
-                sync_idx = sub_idx8(add_regchunk_constant(sync_ch));
-                free(sync_stmts);
+                if (!(s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)) compile_stmt(s);
             }
 
             /* Compile each spawn body */
@@ -2801,53 +2891,98 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                 emit_ABC(0, a, b, c, line);
             }
             free(spawn_indices);
+            end_scope(line);
 #endif
             break;
         }
 
         case EXPR_SELECT: {
-#ifdef __EMSCRIPTEN__
-            emit_ABC(ROP_LOADNIL, dst, 0, 0, line);
-#else
             size_t arm_count = e->as.select_expr.arm_count;
             SelectArm *arms = e->as.select_expr.arms;
+            if (arm_count > UINT8_MAX) {
+                if (!rc_error) rc_error = strdup("select has too many arms (max 255)");
+                emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+                break;
+            }
 
-            /* Emit: ROP_SELECT dst */
-            emit_ABC(ROP_SELECT, dst, 0, 0, line);
-            /* Data word 1: arm_count in A */
-            emit_ABC(0, (uint8_t)arm_count, 0, 0, line);
-
+            uint8_t operand_base = 0;
+            uint8_t flags[UINT8_MAX] = {0};
             for (size_t i = 0; i < arm_count; i++) {
-                uint8_t flags = 0;
-                if (arms[i].is_default) flags |= 0x01;
-                if (arms[i].is_timeout) flags |= 0x02;
-                if (arms[i].binding_name) flags |= 0x04;
-
-                /* Channel or timeout expression chunk index */
-                uint8_t chan_idx = 0xFF;
+                uint8_t operand = alloc_reg();
+                if (i == 0) operand_base = operand;
                 if (arms[i].is_default) {
-                    chan_idx = 0xFF;
+                    flags[i] |= 0x01;
+                    emit_ABC(ROP_LOADUNIT, operand, 0, 0, line);
                 } else if (arms[i].is_timeout) {
-                    RegChunk *to_ch = compile_reg_sub_expr(arms[i].timeout_expr, line);
-                    chan_idx = sub_idx8(add_regchunk_constant(to_ch));
+                    flags[i] |= 0x02;
+                    compile_expr(arms[i].timeout_expr, operand, line);
                 } else {
-                    RegChunk *ch_ch = compile_reg_sub_expr(arms[i].channel_expr, line);
-                    chan_idx = sub_idx8(add_regchunk_constant(ch_ch));
+                    compile_expr(arms[i].channel_expr, operand, line);
+                }
+                if (arms[i].binding_name) flags[i] |= 0x04;
+            }
+
+            emit_ABC(ROP_SELECT_CHOOSE, dst, operand_base, (uint8_t)arm_count, line);
+            for (size_t i = 0; i < arm_count; i += 3) {
+                uint8_t a = flags[i];
+                uint8_t b = i + 1 < arm_count ? flags[i + 1] : 0;
+                uint8_t c = i + 2 < arm_count ? flags[i + 2] : 0;
+                emit_ABC(0, a, b, c, line);
+            }
+            if (arm_count > 0) free_regs_to(operand_base);
+
+            uint8_t pair_index = alloc_reg();
+            uint8_t zero = alloc_reg();
+            emit_AsBx(ROP_LOADI, zero, 0, line);
+            emit_ABC(ROP_GETINDEX, pair_index, dst, zero, line);
+            free_reg(zero);
+
+            size_t *end_jumps = arm_count > 0 ? malloc(arm_count * sizeof(size_t)) : NULL;
+            if (arm_count > 0 && !end_jumps) {
+                rc_error = strdup("out of memory compiling select");
+                free_reg(pair_index);
+                break;
+            }
+
+            size_t end_count = 0;
+            for (size_t i = 0; i < arm_count; i++) {
+                uint8_t expected = alloc_reg();
+                uint8_t selected = alloc_reg();
+                emit_AsBx(ROP_LOADI, expected, (int16_t)i, line);
+                emit_ABC(ROP_EQ, selected, pair_index, expected, line);
+                size_t next_arm = emit_jump_placeholder(ROP_JMPFALSE, selected, line);
+                free_reg(selected);
+                free_reg(expected);
+
+                begin_scope();
+                if (arms[i].binding_name) {
+                    uint8_t binding = add_local(arms[i].binding_name);
+                    uint8_t value_index = alloc_reg();
+                    emit_AsBx(ROP_LOADI, value_index, 1, line);
+                    emit_ABC(ROP_GETINDEX, binding, dst, value_index, line);
+                    free_reg(value_index);
                 }
 
-                /* Body chunk */
-                RegChunk *body_ch = compile_reg_sub_body(arms[i].body, arms[i].body_count, line);
-                uint8_t body_idx = sub_idx8(add_regchunk_constant(body_ch));
-
-                /* Binding name constant index */
-                uint8_t binding_idx = 0xFF;
-                if (arms[i].binding_name) binding_idx = sub_idx8(add_constant(value_string(arms[i].binding_name)));
-
-                /* Emit arm data: flags, chan_idx, body_idx, binding_idx */
-                emit_ABC(0, flags, chan_idx, body_idx, line);
-                emit_ABC(0, binding_idx, 0, 0, line);
+                if (arms[i].body_count > 0) {
+                    for (size_t j = 0; j + 1 < arms[i].body_count; j++) compile_stmt(arms[i].body[j]);
+                    Stmt *last = arms[i].body[arms[i].body_count - 1];
+                    if (last->tag == STMT_EXPR) compile_expr(last->as.expr, dst, line);
+                    else {
+                        compile_stmt(last);
+                        emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+                    }
+                } else {
+                    emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+                }
+                end_scope(line);
+                end_jumps[end_count++] = emit_jmp_placeholder(line);
+                patch_jump(next_arm);
             }
-#endif
+
+            emit_ABC(ROP_LOADUNIT, dst, 0, 0, line);
+            for (size_t i = 0; i < end_count; i++) patch_jmp(end_jumps[i]);
+            free(end_jumps);
+            free_reg(pair_index);
             break;
         }
 
@@ -3176,11 +3311,19 @@ static void compile_stmt(const Stmt *s) {
             uint8_t saved_continue_reg = rc->loop_continue_reg;
             size_t saved_break_lc = rc->loop_break_local_count;
             size_t saved_continue_lc = rc->loop_continue_local_count;
+            int saved_break_scope_depth = rc->loop_break_scope_depth;
+            int saved_continue_scope_depth = rc->loop_continue_scope_depth;
+            int saved_break_handler_depth = rc->loop_break_handler_depth;
+            int saved_continue_handler_depth = rc->loop_continue_handler_depth;
 
             rc->loop_break_local_count = rc->local_count;
             rc->loop_continue_local_count = rc->local_count;
             rc->loop_break_reg = rc->next_reg;
             rc->loop_continue_reg = rc->next_reg;
+            rc->loop_break_scope_depth = rc->scope_depth;
+            rc->loop_continue_scope_depth = rc->scope_depth;
+            rc->loop_break_handler_depth = rc->handler_depth;
+            rc->loop_continue_handler_depth = rc->handler_depth;
             rc->loop_start = current_chunk()->code_len;
             rc->loop_is_for = 0;
             rc->loop_depth++;
@@ -3206,6 +3349,10 @@ static void compile_stmt(const Stmt *s) {
             rc->loop_continue_reg = saved_continue_reg;
             rc->loop_break_local_count = saved_break_lc;
             rc->loop_continue_local_count = saved_continue_lc;
+            rc->loop_break_scope_depth = saved_break_scope_depth;
+            rc->loop_continue_scope_depth = saved_continue_scope_depth;
+            rc->loop_break_handler_depth = saved_break_handler_depth;
+            rc->loop_continue_handler_depth = saved_continue_handler_depth;
             break;
         }
 
@@ -3218,11 +3365,19 @@ static void compile_stmt(const Stmt *s) {
             uint8_t saved_continue_reg = rc->loop_continue_reg;
             size_t saved_break_lc = rc->loop_break_local_count;
             size_t saved_continue_lc = rc->loop_continue_local_count;
+            int saved_break_scope_depth = rc->loop_break_scope_depth;
+            int saved_continue_scope_depth = rc->loop_continue_scope_depth;
+            int saved_break_handler_depth = rc->loop_break_handler_depth;
+            int saved_continue_handler_depth = rc->loop_continue_handler_depth;
 
             rc->loop_break_local_count = rc->local_count;
             rc->loop_continue_local_count = rc->local_count;
             rc->loop_break_reg = rc->next_reg;
             rc->loop_continue_reg = rc->next_reg;
+            rc->loop_break_scope_depth = rc->scope_depth;
+            rc->loop_continue_scope_depth = rc->scope_depth;
+            rc->loop_break_handler_depth = rc->handler_depth;
+            rc->loop_continue_handler_depth = rc->handler_depth;
             rc->loop_start = current_chunk()->code_len;
             rc->loop_is_for = 0;
             rc->loop_depth++;
@@ -3242,6 +3397,10 @@ static void compile_stmt(const Stmt *s) {
             rc->loop_continue_reg = saved_continue_reg;
             rc->loop_break_local_count = saved_break_lc;
             rc->loop_continue_local_count = saved_continue_lc;
+            rc->loop_break_scope_depth = saved_break_scope_depth;
+            rc->loop_continue_scope_depth = saved_continue_scope_depth;
+            rc->loop_break_handler_depth = saved_break_handler_depth;
+            rc->loop_continue_handler_depth = saved_continue_handler_depth;
             break;
         }
 
@@ -3255,10 +3414,18 @@ static void compile_stmt(const Stmt *s) {
             uint8_t saved_continue_reg = rc->loop_continue_reg;
             size_t saved_break_lc = rc->loop_break_local_count;
             size_t saved_continue_lc = rc->loop_continue_local_count;
+            int saved_break_scope_depth = rc->loop_break_scope_depth;
+            int saved_continue_scope_depth = rc->loop_continue_scope_depth;
+            int saved_break_handler_depth = rc->loop_break_handler_depth;
+            int saved_continue_handler_depth = rc->loop_continue_handler_depth;
 
             rc->loop_break_local_count = rc->local_count;
+            rc->loop_break_scope_depth = rc->scope_depth;
+            rc->loop_break_handler_depth = rc->handler_depth;
 
             begin_scope();
+            rc->loop_continue_scope_depth = rc->scope_depth;
+            rc->loop_continue_handler_depth = rc->handler_depth;
 
             /* Compile iterator and init */
             uint8_t iter_reg = alloc_reg(); /* collection/range */
@@ -3309,6 +3476,12 @@ static void compile_stmt(const Stmt *s) {
             for (size_t i = 0; i < s->as.for_loop.body_count; i++) compile_stmt(s->as.for_loop.body[i]);
             end_scope(line);
 
+            {
+                int var_local = resolve_local(rc, s->as.for_loop.var);
+                if (var_local >= 0 && rc->locals[var_local].is_captured)
+                    emit_ABC(ROP_CLOSEUPVALUE, var_reg, 0, 0, line);
+            }
+
             /* Increment index — continue forward-jumps land here.
              * Patch continue jumps before emitting INC so code_len == inc addr. */
             for (size_t i = saved_continue_count; i < rc->continue_count; i++) patch_jmp(rc->continue_patches[i]);
@@ -3329,6 +3502,10 @@ static void compile_stmt(const Stmt *s) {
             rc->loop_continue_reg = saved_continue_reg;
             rc->loop_break_local_count = saved_break_lc;
             rc->loop_continue_local_count = saved_continue_lc;
+            rc->loop_break_scope_depth = saved_break_scope_depth;
+            rc->loop_continue_scope_depth = saved_continue_scope_depth;
+            rc->loop_break_handler_depth = saved_break_handler_depth;
+            rc->loop_continue_handler_depth = saved_continue_handler_depth;
             break;
         }
 
@@ -3337,6 +3514,8 @@ static void compile_stmt(const Stmt *s) {
                 rc_error = strdup("break outside of loop");
                 return;
             }
+            emit_loop_control_cleanup(rc->loop_break_local_count, rc->loop_break_scope_depth,
+                                      rc->loop_break_handler_depth, line);
             size_t jmp = emit_jmp_placeholder(line);
             push_break_patch(jmp);
             break;
@@ -3347,6 +3526,8 @@ static void compile_stmt(const Stmt *s) {
                 rc_error = strdup("continue outside of loop");
                 return;
             }
+            emit_loop_control_cleanup(rc->loop_continue_local_count, rc->loop_continue_scope_depth,
+                                      rc->loop_continue_handler_depth, line);
             if (rc->loop_is_for) {
                 /* For-loop: forward jump to increment, patched later */
                 size_t jmp = emit_jmp_placeholder(line);
@@ -3364,6 +3545,30 @@ static void compile_stmt(const Stmt *s) {
             compile_expr(s->as.destructure.value, src_reg, line);
 
             if (s->as.destructure.kind == DESTRUCT_ARRAY) {
+                /* Type and shape checks happen before any local/global is
+                 * defined, so a failed destructure cannot leave partial state. */
+                {
+                    uint8_t type_ok = alloc_reg();
+                    emit_ABC(ROP_MATCH_TYPE, type_ok, src_reg, VAL_ARRAY, line);
+                    emit_assert_reg(type_ok, "cannot destructure value as array", line);
+                    free_reg(type_ok);
+                }
+                {
+                    uint8_t actual_len = alloc_reg();
+                    uint8_t expected_len = alloc_reg();
+                    uint8_t shape_ok = alloc_reg();
+                    emit_ABC(ROP_LEN, actual_len, src_reg, 0, line);
+                    emit_AsBx(ROP_LOADI, expected_len, (int16_t)s->as.destructure.name_count, line);
+                    emit_ABC(s->as.destructure.rest_name ? ROP_GTEQ : ROP_EQ, shape_ok, actual_len, expected_len, line);
+                    emit_assert_reg(shape_ok,
+                                    s->as.destructure.rest_name ? "array destructure has too few elements"
+                                                                : "array destructure length mismatch",
+                                    line);
+                    free_reg(shape_ok);
+                    free_reg(expected_len);
+                    free_reg(actual_len);
+                }
+
                 /* Array destructuring: let [a, b, c] = expr */
                 for (size_t i = 0; i < s->as.destructure.name_count; i++) {
                     if (s->as.destructure.names[i][0] == '\0') continue; /* skip blank */
@@ -3372,9 +3577,15 @@ static void compile_stmt(const Stmt *s) {
                     if (rc->scope_depth > 0) {
                         uint8_t var_reg = add_local(s->as.destructure.names[i]);
                         emit_ABC(ROP_GETINDEX, var_reg, src_reg, idx_reg, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, var_reg, 0, 0, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL)
+                            emit_ABC(ROP_FREEZE, var_reg, var_reg, 0, line);
                     } else {
                         uint8_t val_reg = alloc_reg();
                         emit_ABC(ROP_GETINDEX, val_reg, src_reg, idx_reg, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, val_reg, 0, 0, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL)
+                            emit_ABC(ROP_FREEZE, val_reg, val_reg, 0, line);
                         uint16_t nki = add_constant(value_string(s->as.destructure.names[i]));
                         emit_ABx(ROP_DEFINEGLOBAL, val_reg, nki, line);
                         free_reg(val_reg);
@@ -3392,9 +3603,15 @@ static void compile_stmt(const Stmt *s) {
                     if (rc->scope_depth > 0) {
                         uint8_t var_reg = add_local(s->as.destructure.rest_name);
                         emit_ABC(ROP_GETINDEX, var_reg, src_reg, range_reg, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, var_reg, 0, 0, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL)
+                            emit_ABC(ROP_FREEZE, var_reg, var_reg, 0, line);
                     } else {
                         uint8_t val_reg = alloc_reg();
                         emit_ABC(ROP_GETINDEX, val_reg, src_reg, range_reg, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, val_reg, 0, 0, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL)
+                            emit_ABC(ROP_FREEZE, val_reg, val_reg, 0, line);
                         uint16_t nki = add_constant(value_string(s->as.destructure.rest_name));
                         emit_ABx(ROP_DEFINEGLOBAL, val_reg, nki, line);
                         free_reg(val_reg);
@@ -3404,15 +3621,46 @@ static void compile_stmt(const Stmt *s) {
                     free_reg(rest_start);
                 }
             } else {
+                /* Struct destructuring accepts only Struct and Map values. Check
+                 * the source before creating any local or global bindings. */
+                {
+                    uint8_t type_ok = alloc_reg();
+                    emit_ABC(ROP_MATCH_TYPE, type_ok, src_reg, VAL_STRUCT, line);
+                    size_t valid_struct = emit_jump_placeholder(ROP_JMPTRUE, type_ok, line);
+                    emit_ABC(ROP_MATCH_TYPE, type_ok, src_reg, VAL_MAP, line);
+                    patch_jump(valid_struct);
+                    emit_assert_reg(type_ok, "cannot destructure value as struct", line);
+                    free_reg(type_ok);
+                }
+
+                /* Validate every requested field before defining any binding.
+                 * MATCH_FIELD is a non-throwing probe for both Struct and Map;
+                 * the second pass below performs the actual extraction. */
+                for (size_t i = 0; i < s->as.destructure.name_count; i++) {
+                    uint16_t field_ki = add_constant(value_string(s->as.destructure.names[i]));
+                    uint8_t field_value = alloc_reg();
+                    uint8_t present = alloc_reg();
+                    emit_match_field(present, field_value, src_reg, field_ki, line);
+                    emit_assert_reg(present, "destructure field not found", line);
+                    free_reg(present);
+                    free_reg(field_value);
+                }
+
                 /* Struct destructuring: let { x, y } = expr */
                 for (size_t i = 0; i < s->as.destructure.name_count; i++) {
                     uint16_t field_ki = add_constant(value_string(s->as.destructure.names[i]));
                     if (rc->scope_depth > 0) {
                         uint8_t var_reg = add_local(s->as.destructure.names[i]);
                         emit_getfield(var_reg, src_reg, field_ki, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, var_reg, 0, 0, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL)
+                            emit_ABC(ROP_FREEZE, var_reg, var_reg, 0, line);
                     } else {
                         uint8_t val_reg = alloc_reg();
                         emit_getfield(val_reg, src_reg, field_ki, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_ABC(ROP_MARKFLUID, val_reg, 0, 0, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL)
+                            emit_ABC(ROP_FREEZE, val_reg, val_reg, 0, line);
                         uint16_t nki = add_constant(value_string(s->as.destructure.names[i]));
                         emit_ABx(ROP_DEFINEGLOBAL, val_reg, nki, line);
                         free_reg(val_reg);
@@ -3424,36 +3672,48 @@ static void compile_stmt(const Stmt *s) {
         }
 
         case STMT_DEFER: {
-            /* DEFER_PUSH A=scope_depth, sBx=offset past defer body
-             * defer body (compile stmts + RETURN)
-             * ...continues after jump... */
-            size_t defer_jmp = emit(REG_ENCODE_AsBx(ROP_DEFER_PUSH, (uint8_t)rc->scope_depth, 0), line);
+            Expr block = {0};
+            block.tag = EXPR_BLOCK;
+            block.line = line;
+            block.as.block.stmts = s->as.defer.body;
+            block.as.block.count = s->as.defer.body_count;
+            Expr closure_expr = {0};
+            closure_expr.tag = EXPR_CLOSURE;
+            closure_expr.line = line;
+            closure_expr.as.closure.body = &block;
 
-            /* Compile defer body */
-            for (size_t i = 0; i < s->as.defer.body_count; i++) compile_stmt(s->as.defer.body[i]);
-            /* Emit HALT to end defer body (not RETURN — DEFER_RUN handles cleanup) */
-            emit_ABC(ROP_HALT, 0, 0, 0, line);
-
-            /* Patch the jump to skip past defer body (AsBx format, preserves A=scope_depth) */
-            patch_jump(defer_jmp);
+            uint8_t closure_reg = alloc_reg();
+            compile_expr(&closure_expr, closure_reg, line);
+            emit_ABC(ROP_DEFER_PUSH, closure_reg, (uint8_t)rc->scope_depth, 0, line);
+            free_reg(closure_reg);
             break;
         }
 
         case STMT_IMPORT: {
-            /* ROP_IMPORT A=dst, Bx=path_ki */
-            uint8_t tmp = alloc_reg();
             uint16_t path_ki = add_constant(value_string(s->as.import.module_path));
-            emit_ABx(ROP_IMPORT, tmp, path_ki, line);
 
             if (s->as.import.alias) {
-                /* import "path" as alias → define alias = module */
-                uint16_t alias_ki = add_constant(value_string(s->as.import.alias));
-                emit_ABx(ROP_DEFINEGLOBAL, tmp, alias_ki, line);
+                if (rc->scope_depth > 0) {
+                    uint8_t alias_reg = add_local(s->as.import.alias);
+                    emit_ABx(ROP_IMPORT, alias_reg, path_ki, line);
+                } else {
+                    uint8_t tmp = alloc_reg();
+                    emit_ABx(ROP_IMPORT, tmp, path_ki, line);
+                    uint16_t alias_ki = add_constant(value_string(s->as.import.alias));
+                    emit_ABx(ROP_DEFINEGLOBAL, tmp, alias_ki, line);
+                    free_reg(tmp);
+                }
             } else if (s->as.import.selective_names && s->as.import.selective_count > 0) {
+                for (size_t i = 0; i < s->as.import.selective_count; i++)
+                    rc_register_imported_enum_candidate(s->as.import.selective_names[i]);
+                /* Keep the module in a hidden local while local exports are
+                 * extracted; this keeps register allocation contiguous. */
+                uint8_t tmp = rc->scope_depth > 0 ? add_local("") : alloc_reg();
+                emit_ABx(ROP_IMPORT, tmp, path_ki, line);
                 /* import { a, b } from "path" → extract each name */
                 for (size_t i = 0; i < s->as.import.selective_count; i++) {
                     uint16_t field_ki = add_constant(value_string(s->as.import.selective_names[i]));
-                    uint8_t val_reg = alloc_reg();
+                    uint8_t val_reg = rc->scope_depth > 0 ? add_local(s->as.import.selective_names[i]) : alloc_reg();
                     emit_getfield(val_reg, tmp, field_ki, line);
                     /* Check that the export exists (not nil) */
                     size_t ok = emit_jump_placeholder(ROP_JMPNOTNIL, val_reg, line);
@@ -3468,12 +3728,18 @@ static void compile_stmt(const Stmt *s) {
                         free_reg(err_reg);
                     }
                     patch_jump(ok);
-                    uint16_t name_ki = add_constant(value_string(s->as.import.selective_names[i]));
-                    emit_ABx(ROP_DEFINEGLOBAL, val_reg, name_ki, line);
-                    free_reg(val_reg);
+                    if (rc->scope_depth == 0) {
+                        uint16_t name_ki = add_constant(value_string(s->as.import.selective_names[i]));
+                        emit_ABx(ROP_DEFINEGLOBAL, val_reg, name_ki, line);
+                        free_reg(val_reg);
+                    }
                 }
+                if (rc->scope_depth == 0) free_reg(tmp);
+            } else {
+                uint8_t tmp = alloc_reg();
+                emit_ABx(ROP_IMPORT, tmp, path_ki, line);
+                free_reg(tmp);
             }
-            free_reg(tmp);
             break;
         }
 
@@ -3518,6 +3784,174 @@ static void emit_postconditions(uint8_t reg, int line) {
     }
 }
 
+/* Compile an impl method with the same semantic pipeline as an ordinary
+ * function. The receiver occupies R0; explicit arguments start at R1. */
+static void compile_impl_method(const char *type_name, FnDecl *method, int line) {
+    char key[256];
+    snprintf(key, sizeof(key), "%s::%s", type_name, method->name);
+
+    RegCompiler func_comp;
+    rc_init(&func_comp, rc, REG_FUNC_FUNCTION);
+    func_comp.func_name = strdup(key);
+    func_comp.chunk->name = strdup(key);
+    if (method->return_type && method->return_type->name) func_comp.return_type = method->return_type->name;
+
+    bool has_self = method->param_count > 0 && strcmp(method->params[0].name, "self") == 0;
+    size_t first_param = has_self ? 1 : 0;
+    if (has_self) {
+        free(func_comp.locals[0].name);
+        func_comp.locals[0].name = strdup("self");
+        regchunk_set_local_name(func_comp.chunk, 0, "self");
+    }
+
+    size_t declared_arity = method->param_count - first_param;
+    bool has_variadic = false;
+    for (size_t k = first_param; k < method->param_count; k++) {
+        if (method->params[k].is_variadic) {
+            declared_arity = k - first_param;
+            has_variadic = true;
+            break;
+        }
+    }
+    func_comp.arity = (int)declared_arity;
+
+    for (size_t k = first_param; k < method->param_count; k++) add_local(method->params[k].name);
+
+    func_comp.chunk->default_count = 0;
+    for (size_t k = first_param; k < method->param_count; k++) {
+        if (!method->params[k].default_value || method->params[k].is_variadic) continue;
+        func_comp.chunk->default_count++;
+        uint8_t preg = local_reg((int)(k - first_param + 1));
+        size_t skip = emit_default_skip(preg, line);
+        compile_expr(method->params[k].default_value, preg, line);
+        patch_jump(skip);
+    }
+
+    if (has_variadic) {
+        uint8_t var_reg = local_reg((int)(declared_arity + 1));
+        emit_ABC(ROP_COLLECT_VARARGS, var_reg, (uint8_t)(declared_arity + 1), 0, line);
+    }
+
+    /* Runtime parameter type checks, including an explicitly typed self. */
+    for (size_t k = 0; k < method->param_count; k++) {
+        if (method->params[k].is_variadic) break;
+        if (!method->params[k].ty.name || strcmp(method->params[k].ty.name, "Any") == 0 ||
+            strcmp(method->params[k].ty.name, "any") == 0)
+            continue;
+        uint8_t preg = has_self && k == 0 ? 0 : local_reg((int)(k - first_param + 1));
+        uint16_t type_ki = add_constant(value_string(method->params[k].ty.name));
+        emit_ABx(ROP_CHECK_TYPE, preg, type_ki, line);
+        char err_msg[512];
+        snprintf(err_msg, sizeof(err_msg), "function '%s' parameter '%s' expects type %s, got %%s", key,
+                 method->params[k].name, method->params[k].ty.name);
+        emit((uint32_t)add_constant(value_string(err_msg)), line);
+    }
+
+    for (size_t ci = 0; ci < method->contract_count; ci++) {
+        if (method->contracts[ci].is_ensure) continue;
+        uint8_t cond_reg = alloc_reg();
+        compile_expr(method->contracts[ci].condition, cond_reg, line);
+        size_t ok = emit_jump_placeholder(ROP_JMPTRUE, cond_reg, line);
+        uint8_t err_reg = alloc_reg();
+        const char *msg = method->contracts[ci].message ? method->contracts[ci].message : "condition not met";
+        char full_msg[512];
+        snprintf(full_msg, sizeof(full_msg), "require failed in '%s': %s", key, msg);
+        emit_ABx(ROP_LOADK, err_reg, add_constant(value_string(full_msg)), line);
+        emit_ABC(ROP_THROW, err_reg, 0, 0, line);
+        free_reg(err_reg);
+        patch_jump(ok);
+        free_reg(cond_reg);
+    }
+
+    func_comp.ensures = method->contracts;
+    func_comp.ensure_count = method->contract_count;
+
+    if (method->body_count > 0 && method->body[method->body_count - 1]->tag == STMT_EXPR) {
+        for (size_t k = 0; k + 1 < method->body_count; k++) compile_stmt(method->body[k]);
+        uint8_t ret_reg = alloc_reg();
+        compile_expr(method->body[method->body_count - 1]->as.expr, ret_reg, line);
+        emit_postconditions(ret_reg, line);
+        emit_return(ret_reg, line);
+        free_reg(ret_reg);
+    } else {
+        for (size_t k = 0; k < method->body_count; k++) compile_stmt(method->body[k]);
+        uint8_t ret_reg = alloc_reg();
+        emit_ABC(ROP_LOADUNIT, ret_reg, 0, 0, line);
+        emit_postconditions(ret_reg, line);
+        emit_return(ret_reg, line);
+        free_reg(ret_reg);
+    }
+
+    RegChunk *fn_chunk = func_comp.chunk;
+
+    /* Impl frames receive only the explicit arguments in R1+, with self in
+     * R0. Keep phase metadata indexed to those explicit arguments so every
+     * direct method-dispatch path can validate it before entering the frame. */
+    {
+        bool has_phase_constraints = false;
+        size_t checked_param_count = 0;
+        for (size_t k = first_param; k < method->param_count; k++) {
+            if (method->params[k].is_variadic) break;
+            checked_param_count++;
+            if (method->params[k].ty.phase != PHASE_UNSPECIFIED) { has_phase_constraints = true; }
+        }
+        if (has_phase_constraints) {
+            fn_chunk->param_phases = calloc(checked_param_count, sizeof(uint8_t));
+            if (!fn_chunk->param_phases) {
+                rc_error = strdup("out of memory compiling impl parameter phases");
+                return;
+            }
+            fn_chunk->param_phase_count = (int)checked_param_count;
+            for (size_t k = first_param; k < method->param_count; k++) {
+                if (method->params[k].is_variadic) break;
+                fn_chunk->param_phases[k - first_param] = (uint8_t)method->params[k].ty.phase;
+            }
+        }
+    }
+
+    size_t upvalue_count = func_comp.upvalue_count;
+    RegCompilerUpvalue *upvalues = NULL;
+    if (upvalue_count > 0) {
+        upvalues = malloc(upvalue_count * sizeof(RegCompilerUpvalue));
+        if (!upvalues) {
+            rc_error = strdup("out of memory compiling impl method");
+            return;
+        }
+        memcpy(upvalues, func_comp.upvalues, upvalue_count * sizeof(RegCompilerUpvalue));
+    }
+    rc_cleanup(&func_comp);
+    rc = func_comp.enclosing;
+
+    LatValue fn_val;
+    memset(&fn_val, 0, sizeof(fn_val));
+    fn_val.type = VAL_CLOSURE;
+    fn_val.phase = VTAG_UNPHASED;
+    fn_val.region_id = REGION_NONE;
+    fn_val.as.closure.upvalue_count = (uint32_t)upvalue_count;
+    fn_val.as.closure.native_fn = fn_chunk;
+    fn_val.as.closure.param_count = method->param_count;
+    fn_val.as.closure.has_variadic = has_variadic;
+    if (method->param_count > 0) {
+        fn_val.as.closure.param_names = malloc(method->param_count * sizeof(char *));
+        if (!fn_val.as.closure.param_names) {
+            free(upvalues);
+            rc_error = strdup("out of memory compiling impl method");
+            return;
+        }
+        for (size_t k = 0; k < method->param_count; k++)
+            fn_val.as.closure.param_names[k] = strdup(method->params[k].name);
+    }
+
+    uint16_t fn_ki = add_constant(fn_val);
+    uint8_t dst = alloc_reg();
+    emit_ABx(ROP_CLOSURE, dst, fn_ki, line);
+    for (size_t k = 0; k < upvalue_count; k++)
+        emit_ABC(ROP_MOVE, upvalues[k].is_local ? 1 : 0, upvalues[k].index, 0, line);
+    free(upvalues);
+    emit_ABx(ROP_DEFINEGLOBAL, dst, add_constant(value_string(key)), line);
+    free_reg(dst);
+}
+
 /* ── Function body compilation ── */
 
 static void compile_function_body(RegFuncType type, const char *name, Param *params, size_t param_count, Stmt **body,
@@ -3540,6 +3974,9 @@ static void compile_function_body(RegFuncType type, const char *name, Param *par
         }
     }
     func_comp.arity = (int)declared_arity;
+    func_comp.chunk->default_count = 0;
+    for (size_t i = 0; i < declared_arity; i++)
+        if (params[i].default_value) func_comp.chunk->default_count++;
 
     /* Add params as locals (they occupy R1..Rn) */
     for (size_t i = 0; i < param_count; i++) add_local(params[i].name);
@@ -3549,7 +3986,7 @@ static void compile_function_body(RegFuncType type, const char *name, Param *par
         if (params[i].default_value && !params[i].is_variadic) {
             /* If param is nil, use default value */
             uint8_t preg = local_reg((int)(i + 1)); /* +1 because slot 0 is reserved */
-            size_t skip = emit_jump_placeholder(ROP_JMPNOTNIL, preg, line);
+            size_t skip = emit_default_skip(preg, line);
             compile_expr(params[i].default_value, preg, line);
             patch_jump(skip);
         }
@@ -3669,6 +4106,7 @@ static void compile_function_body(RegFuncType type, const char *name, Param *par
     fn_val.as.closure.body = NULL;
     fn_val.as.closure.native_fn = fn_chunk;
     fn_val.as.closure.param_count = param_count;
+    fn_val.as.closure.has_variadic = has_variadic;
     if (param_count > 0 && params) {
         fn_val.as.closure.param_names = malloc(param_count * sizeof(char *));
         if (!fn_val.as.closure.param_names) return;
@@ -3758,11 +4196,11 @@ RegChunk *reg_compile(const Program *prog, char **error) {
 
             case ITEM_ENUM: {
                 EnumDecl *ed = &prog->items[i].as.enum_decl;
-                rc_register_enum(ed->name);
+                rc_register_enum(ed);
                 char meta_name[256];
                 snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
                 uint8_t tmp = alloc_reg();
-                emit_ABC(ROP_LOADTRUE, tmp, 0, 0, 0);
+                emit_ABx(ROP_LOADK, tmp, add_constant(rc_enum_metadata_value(ed)), 0);
                 uint16_t name_ki = add_constant(value_string(meta_name));
                 emit_ABx(ROP_DEFINEGLOBAL, tmp, name_ki, 0);
                 free_reg(tmp);
@@ -3771,6 +4209,12 @@ RegChunk *reg_compile(const Program *prog, char **error) {
 
             case ITEM_IMPL: {
                 ImplBlock *ib = &prog->items[i].as.impl_block;
+                for (size_t j = 0; j < ib->method_count; j++)
+                    compile_impl_method(ib->type_name, &ib->methods[j], ib->methods[j].line);
+                break;
+
+                /* Legacy inline lowering retained below temporarily for source
+                 * compatibility; the shared helper above is authoritative. */
                 for (size_t j = 0; j < ib->method_count; j++) {
                     FnDecl *method = &ib->methods[j];
                     char key[256];
@@ -3810,7 +4254,7 @@ RegChunk *reg_compile(const Program *prog, char **error) {
                     for (size_t k = first_param; k < method->param_count; k++) {
                         if (method->params[k].default_value && !method->params[k].is_variadic) {
                             uint8_t preg = local_reg((int)k);
-                            size_t skip = emit_jump_placeholder(ROP_JMPNOTNIL, preg, 0);
+                            size_t skip = emit_default_skip(preg, 0);
                             compile_expr(method->params[k].default_value, preg, 0);
                             patch_jump(skip);
                         }
@@ -3831,6 +4275,9 @@ RegChunk *reg_compile(const Program *prog, char **error) {
                     free_reg(ret_reg);
 
                     RegChunk *fn_chunk = func_comp.chunk;
+                    fn_chunk->default_count = 0;
+                    for (size_t k = first_param; k < method->param_count; k++)
+                        if (method->params[k].default_value) fn_chunk->default_count++;
                     size_t upvalue_count = func_comp.upvalue_count;
                     RegCompilerUpvalue *upvalues = NULL;
                     if (upvalue_count > 0) {
@@ -3850,6 +4297,7 @@ RegChunk *reg_compile(const Program *prog, char **error) {
                     fn_val.as.closure.body = NULL;
                     fn_val.as.closure.native_fn = fn_chunk;
                     fn_val.as.closure.param_count = method->param_count;
+                    fn_val.as.closure.has_variadic = m_has_variadic;
                     if (method->param_count > 0 && method->params) {
                         fn_val.as.closure.param_names = malloc(method->param_count * sizeof(char *));
                         if (!fn_val.as.closure.param_names) return NULL;
@@ -3990,11 +4438,11 @@ static RegChunk *reg_compile_internal(const Program *prog, char **error, bool au
 
             case ITEM_ENUM: {
                 EnumDecl *ed = &prog->items[i].as.enum_decl;
-                rc_register_enum(ed->name);
+                rc_register_enum(ed);
                 char meta_name[256];
                 snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
                 uint8_t tmp = alloc_reg();
-                emit_ABC(ROP_LOADTRUE, tmp, 0, 0, 0);
+                emit_ABx(ROP_LOADK, tmp, add_constant(rc_enum_metadata_value(ed)), 0);
                 uint16_t nk = add_constant(value_string(meta_name));
                 emit_ABx(ROP_DEFINEGLOBAL, tmp, nk, 0);
                 free_reg(tmp);
@@ -4003,6 +4451,10 @@ static RegChunk *reg_compile_internal(const Program *prog, char **error, bool au
 
             case ITEM_IMPL: {
                 ImplBlock *ib = &prog->items[i].as.impl_block;
+                for (size_t j = 0; j < ib->method_count; j++)
+                    compile_impl_method(ib->type_name, &ib->methods[j], ib->methods[j].line);
+                break;
+
                 for (size_t j = 0; j < ib->method_count; j++) {
                     FnDecl *method = &ib->methods[j];
                     char key[256];

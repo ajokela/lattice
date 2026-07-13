@@ -27,8 +27,9 @@ typedef struct {
     int param_phase_count;
     char **export_names; /* Module export list (NULL = export-all) */
     size_t export_count;
-    bool has_exports; /* true if module uses explicit exports */
-    PICTable pic;     /* Polymorphic inline cache for method dispatch */
+    bool has_exports;    /* true if module uses explicit exports */
+    char *module_prefix; /* Resolved module path used to isolate bytecode globals. */
+    PICTable pic;        /* Polymorphic inline cache for method dispatch */
 } Chunk;
 
 Chunk *chunk_new(void);
@@ -48,6 +49,11 @@ void chunk_write_u16(Chunk *c, uint16_t val, int line);
 
 /* Record a local variable name for a given stack slot (debug/tracking info) */
 void chunk_set_local_name(Chunk *c, size_t slot, const char *name);
+
+/* Assign a module namespace to this chunk and every compiled function chunk it
+ * owns. Module bytecode uses the prefix for global lookup while still falling
+ * back to unqualified runtime builtins. */
+void chunk_set_module_prefix(Chunk *c, const char *prefix);
 
 /* Disassemble chunk to stderr for debugging */
 void chunk_disassemble(const Chunk *c, const char *name);

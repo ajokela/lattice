@@ -76,8 +76,21 @@ void chunk_free(Chunk *c) {
         for (size_t i = 0; i < c->export_count; i++) free(c->export_names[i]);
         free(c->export_names);
     }
+    free(c->module_prefix);
     pic_table_free(&c->pic);
     free(c);
+}
+
+void chunk_set_module_prefix(Chunk *c, const char *prefix) {
+    if (!c) return;
+    free(c->module_prefix);
+    c->module_prefix = prefix ? strdup(prefix) : NULL;
+    for (size_t i = 0; i < c->const_len; i++) {
+        LatValue *v = &c->constants[i];
+        if (v->type == VAL_CLOSURE && v->as.closure.body == NULL && v->as.closure.native_fn != NULL &&
+            v->as.closure.default_values != VM_NATIVE_MARKER && v->as.closure.default_values != VM_EXT_MARKER)
+            chunk_set_module_prefix((Chunk *)v->as.closure.native_fn, prefix);
+    }
 }
 
 void chunk_set_local_name(Chunk *c, size_t slot, const char *name) {
@@ -199,6 +212,14 @@ static size_t jump_instruction(const char *name, int sign, const Chunk *c, size_
     return offset + 3;
 }
 
+static size_t jump_if_not_nil_instruction(const Chunk *c, size_t offset) {
+    uint16_t encoded = (uint16_t)(c->code[offset + 1] << 8) | c->code[offset + 2];
+    uint16_t jump = encoded & 0x7fffu;
+    fprintf(stderr, "%-20s %4zu -> %zu%s\n", "OP_JUMP_IF_NOT_NIL", offset, offset + 3 + jump,
+            encoded & 0x8000u ? " (argument presence)" : "");
+    return offset + 3;
+}
+
 static size_t closure_instruction(const Chunk *c, size_t offset) {
     uint8_t fn_idx = c->code[offset + 1];
     uint8_t upvalue_count = c->code[offset + 2];
@@ -306,7 +327,7 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
         case OP_JUMP: return jump_instruction("OP_JUMP", 1, c, offset);
         case OP_JUMP_IF_FALSE: return jump_instruction("OP_JUMP_IF_FALSE", 1, c, offset);
         case OP_JUMP_IF_TRUE: return jump_instruction("OP_JUMP_IF_TRUE", 1, c, offset);
-        case OP_JUMP_IF_NOT_NIL: return jump_instruction("OP_JUMP_IF_NOT_NIL", 1, c, offset);
+        case OP_JUMP_IF_NOT_NIL: return jump_if_not_nil_instruction(c, offset);
         case OP_LOOP: return jump_instruction("OP_LOOP", -1, c, offset);
         case OP_CALL: return byte_instruction("OP_CALL", c, offset);
         case OP_CLOSURE: return closure_instruction(c, offset);
@@ -324,6 +345,7 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
         case OP_SET_INDEX: return simple_instruction("OP_SET_INDEX", offset);
         case OP_GET_FIELD: return constant_instruction("OP_GET_FIELD", c, offset);
         case OP_SET_FIELD: return constant_instruction("OP_SET_FIELD", c, offset);
+        case OP_HAS_FIELD: return constant_instruction("OP_HAS_FIELD", c, offset);
         case OP_INVOKE: return invoke_instruction(c, offset);
         case OP_INVOKE_LOCAL: {
             uint8_t slot = c->code[offset + 1];
@@ -424,6 +446,17 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
             }
             return pos;
         }
+        case OP_SELECT_CHOOSE: {
+            uint8_t arm_count = c->code[offset + 1];
+            fprintf(stderr, "%-20s arms=%d", "OP_SELECT_CHOOSE", arm_count);
+            for (uint8_t i = 0; i < arm_count; i++) fprintf(stderr, " flags[%d]=%02x", i, c->code[offset + 2 + i]);
+            fprintf(stderr, "\n");
+            return offset + 2 + arm_count;
+        }
+        case OP_MATCH_RANGE: return simple_instruction("OP_MATCH_RANGE", offset);
+        case OP_MATCH_FLUID: return simple_instruction("OP_MATCH_FLUID", offset);
+        case OP_CLOSE_UPVALUE_PRESERVE: return simple_instruction("OP_CLOSE_UPVALUE_PRESERVE", offset);
+        case OP_MATCH_TYPE: return byte_instruction("OP_MATCH_TYPE", c, offset);
         case OP_INC_LOCAL: return byte_instruction("OP_INC_LOCAL", c, offset);
         case OP_DEC_LOCAL: return byte_instruction("OP_DEC_LOCAL", c, offset);
         case OP_ADD_INT: return simple_instruction("OP_ADD_INT", offset);
@@ -561,6 +594,9 @@ static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
         case OP_LTEQ_INT:
         case OP_RESET_EPHEMERAL:
         case OP_SET_SLICE:
+        case OP_MATCH_RANGE:
+        case OP_MATCH_FLUID:
+        case OP_CLOSE_UPVALUE_PRESERVE:
         case OP_HALT: return 1;
         /* 2-byte */
         case OP_CONSTANT:
@@ -575,6 +611,8 @@ static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
         case OP_CALL:
         case OP_GET_FIELD:
         case OP_SET_FIELD:
+        case OP_HAS_FIELD:
+        case OP_MATCH_TYPE:
         case OP_BUILD_ARRAY:
         case OP_BUILD_MAP:
         case OP_BUILD_TUPLE:
@@ -653,6 +691,12 @@ static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
             NEED(2 + arm_count * 4);
             return 2 + arm_count * 4;
         }
+        case OP_SELECT_CHOOSE: {
+            NEED(2);
+            size_t arm_count = c->code[off + 1];
+            NEED(2 + arm_count);
+            return 2 + arm_count;
+        }
         default: *err = verify_failf("unknown opcode %u at offset %zu", op, off); return 0;
     }
 #undef NEED
@@ -683,6 +727,10 @@ static char *verify_instr_operands(const Chunk *c, size_t off, const uint8_t *is
                                 (unsigned)(idx));                                                            \
     } while (0)
     switch (op) {
+        case OP_MATCH_TYPE:
+            if (c->code[off + 1] > VAL_ITERATOR)
+                return verify_failf("OP_MATCH_TYPE has invalid value type %u at offset %zu", c->code[off + 1], off);
+            break;
         case OP_CONSTANT: CK_BOUND(c->code[off + 1]); break;
         case OP_CONSTANT_16: CK_BOUND(U16(off + 1)); break;
         case OP_GET_GLOBAL:
@@ -690,6 +738,7 @@ static char *verify_instr_operands(const Chunk *c, size_t off, const uint8_t *is
         case OP_DEFINE_GLOBAL:
         case OP_GET_FIELD:
         case OP_SET_FIELD:
+        case OP_HAS_FIELD:
         case OP_IMPORT:
         case OP_REACT:
         case OP_UNREACT:
@@ -774,13 +823,27 @@ static char *verify_instr_operands(const Chunk *c, size_t off, const uint8_t *is
             }
             break;
         }
+        case OP_SELECT_CHOOSE: {
+            size_t arm_count = c->code[off + 1];
+            for (size_t i = 0; i < arm_count; i++) {
+                uint8_t flags = c->code[off + 2 + i];
+                if (flags & ~0x07)
+                    return verify_failf("OP_SELECT_CHOOSE has invalid flags 0x%02x for arm %zu at offset %zu", flags, i,
+                                        off);
+                if ((flags & 0x03) == 0x03)
+                    return verify_failf("OP_SELECT_CHOOSE arm %zu is both default and timeout at offset %zu", i, off);
+            }
+            break;
+        }
         case OP_JUMP:
         case OP_JUMP_IF_FALSE:
         case OP_JUMP_IF_TRUE:
         case OP_JUMP_IF_NOT_NIL:
         case OP_ITER_NEXT:
         case OP_PUSH_EXCEPTION_HANDLER: {
-            size_t target = off + 3 + U16(off + 1);
+            uint16_t jump = U16(off + 1);
+            if (op == OP_JUMP_IF_NOT_NIL) jump &= 0x7fffu;
+            size_t target = off + 3 + jump;
             if (target >= c->code_len || !is_start[target])
                 return verify_failf("forward jump target %zu invalid at offset %zu", target, off);
             break;

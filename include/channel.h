@@ -3,6 +3,7 @@
 
 #include "ds/vec.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifndef __EMSCRIPTEN__
 #include <pthread.h>
@@ -15,20 +16,21 @@ struct LatValue;
 typedef struct LatSelectWaiter {
 #ifndef __EMSCRIPTEN__
     pthread_mutex_t *mutex;
-    pthread_cond_t  *cond;
+    pthread_cond_t *cond;
 #endif
+    bool notified;
     struct LatSelectWaiter *next;
 } LatSelectWaiter;
 
 typedef struct LatChannel {
-    LatVec  buffer;       /* ring buffer of LatValue */
-    bool    closed;
-    size_t  refcount;
+    LatVec buffer; /* ring buffer of LatValue */
+    bool closed;
+    size_t refcount;
 #ifndef __EMSCRIPTEN__
     pthread_mutex_t mutex;
-    pthread_cond_t  cond_notempty;
+    pthread_cond_t cond_notempty;
 #endif
-    LatSelectWaiter *waiters;  /* linked list of select waiters */
+    LatSelectWaiter *waiters; /* linked list of select waiters */
 } LatChannel;
 
 /* Create a new channel (refcount=1) */
@@ -55,9 +57,20 @@ void channel_close(LatChannel *ch);
 bool channel_try_recv(LatChannel *ch, struct LatValue *out, bool *closed_out);
 
 /* Add a select waiter to be notified when data arrives or channel closes */
-void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w);
+bool channel_add_waiter(LatChannel *ch, LatSelectWaiter *w);
 
 /* Remove a select waiter from the channel */
 void channel_remove_waiter(LatChannel *ch, LatSelectWaiter *w);
+
+enum {
+    LAT_SELECT_DEFAULT = 0x01,
+    LAT_SELECT_TIMEOUT = 0x02,
+};
+
+/* Wait for one of the channel arms, a default arm, or a timeout arm. Channel
+ * entries are NULL for default/timeout arms. On success, selected_out is
+ * SIZE_MAX when every channel is closed and no default exists. */
+bool channel_select(LatChannel **channels, const uint8_t *flags, size_t count, long timeout_ms, size_t *selected_out,
+                    struct LatValue *received_out);
 
 #endif /* CHANNEL_H */

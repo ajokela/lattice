@@ -47,11 +47,12 @@ struct LatChannel;
 struct LatValue {
     ValueType type;
     PhaseTag phase;
-    size_t region_id;                 /* sentinel below, or tagged CrystalRegion* (REGION_IS_SHARED_ID) */
-#define REGION_NONE      ((size_t)-1) /* normal malloc (not in any arena) */
-#define REGION_EPHEMERAL ((size_t)-2) /* in ephemeral bump arena */
-#define REGION_INTERNED  ((size_t)-3) /* interned string — never cloned or freed */
-#define REGION_CONST     ((size_t)-4) /* constant pool string — borrowed, not freed */
+    size_t region_id;                   /* sentinel below, or tagged CrystalRegion* (REGION_IS_SHARED_ID) */
+#define REGION_NONE        ((size_t)-1) /* normal malloc (not in any arena) */
+#define REGION_EPHEMERAL   ((size_t)-2) /* in ephemeral bump arena */
+#define REGION_INTERNED    ((size_t)-3) /* interned string — never cloned or freed */
+#define REGION_CONST       ((size_t)-4) /* constant pool string — borrowed, not freed */
+#define REGION_MISSING_ARG ((size_t)-6) /* StackVM-only omitted-argument marker */
     union {
         int64_t int_val;
         double float_val;
@@ -203,6 +204,17 @@ LatValue value_map_new(void);
 LatValue value_channel(struct LatChannel *ch);
 LatValue value_enum(const char *enum_name, const char *variant_name, LatValue *payload, size_t count);
 LatValue value_set_new(void);
+size_t value_set_length(const LatValue *set);
+bool value_set_contains(const LatValue *set, const LatValue *value);
+bool value_set_insert(LatValue *set, const LatValue *value);
+bool value_set_remove(LatValue *set, const LatValue *value);
+void value_set_clear(LatValue *set);
+LatValue value_set_union(const LatValue *left, const LatValue *right);
+LatValue value_set_intersection(const LatValue *left, const LatValue *right);
+LatValue value_set_difference(const LatValue *left, const LatValue *right);
+LatValue value_set_symmetric_difference(const LatValue *left, const LatValue *right);
+bool value_set_is_subset(const LatValue *subset, const LatValue *superset);
+bool value_set_equal(const LatValue *left, const LatValue *right);
 LatValue value_tuple(LatValue *elems, size_t len);
 LatValue value_buffer(const uint8_t *data, size_t len);
 LatValue value_buffer_alloc(size_t cap);
@@ -286,6 +298,16 @@ char *value_repr(const LatValue *v);
 const char *value_type_name(const LatValue *v);
 
 /* ── Equality ── */
+typedef enum {
+    VALUE_CMP_LESS = -1,
+    VALUE_CMP_EQUAL = 0,
+    VALUE_CMP_GREATER = 1,
+    VALUE_CMP_UNORDERED = 2,
+    VALUE_CMP_NOT_NUMERIC = 3,
+} ValueNumericCmp;
+
+/* Compare Int/Float values without converting an arbitrary Int to double. */
+ValueNumericCmp value_numeric_compare(const LatValue *a, const LatValue *b);
 bool value_eq(const LatValue *a, const LatValue *b);
 
 /* ── Hash key ── */

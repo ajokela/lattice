@@ -92,7 +92,7 @@ typedef enum {
     OP_TRY_UNWRAP, /* ? operator: unwrap ok or return err */
 
     /* Defer */
-    OP_DEFER_PUSH, /* operand = 2-byte offset to defer body */
+    OP_DEFER_PUSH, /* scope depth + reserved u16; consumes cleanup closure */
     OP_DEFER_RUN,  /* Execute all defers for current scope */
 
     /* Phase system */
@@ -186,9 +186,23 @@ typedef enum {
      * the write-back chain (which stores the clone back, error-checking the parent
      * phase). If false, advance past the chain (frame->ip += skip_len) and resolve
      * exactly like OP_INVOKE (struct/enum/map closure field, impl Type::method,
-     * non-mutating builtin, or missing-method error). Appended last so existing
-     * opcode numbers stay stable for the self-hosted compiler. */
+     * non-mutating builtin, or missing-method error). Kept after the legacy
+     * opcode range so existing opcode numbers stay stable for the self-hosted
+     * compiler. */
     OP_INVOKE_MUT,
+
+    /* Inline select chooser (LAT-598). Operands were evaluated in source order
+     * before this instruction. Layout: [arm_count:u8][flags:u8 x arm_count].
+     * Consumes one Channel/timeout Int/default Unit per arm and pushes
+     * [selected_index, received_value]. Appended for bytecode compatibility. */
+    OP_SELECT_CHOOSE,
+
+    /* Recursive match helpers. Appended for bytecode compatibility. */
+    OP_HAS_FIELD,              /* operand = field-name constant. Pop value, push whether Struct/Map contains field. */
+    OP_MATCH_RANGE,            /* Pop end/start, preserve candidate below them, push integer inclusive-range match. */
+    OP_MATCH_FLUID,            /* Pop value, push phase == FLUID || phase == UNPHASED. */
+    OP_CLOSE_UPVALUE_PRESERVE, /* Close local below TOS, remove local, preserve TOS without swapping slots. */
+    OP_MATCH_TYPE,             /* operand = ValueType. Preserve candidate on TOS and push exact runtime-tag match. */
 } Opcode;
 
 const char *opcode_name(Opcode op);

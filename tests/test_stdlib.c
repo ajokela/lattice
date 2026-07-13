@@ -11961,6 +11961,25 @@ static void test_day_of_week(void) {
     ASSERT_OUTPUT("print(day_of_week(2026, 2, 24))\n", "2");
 }
 
+static void test_numeric_int64_boundaries(void) {
+    ASSERT_OUTPUT("print(9223372036854775807 + 1)\n"
+                  "print((-9223372036854775807 - 1) / -1)\n"
+                  "print(-1 << 1)\n",
+                  "-9223372036854775808\n-9223372036854775808\n-2");
+}
+
+static void test_range_int64_boundaries(void) {
+    ASSERT_OUTPUT("print(range(-9223372036854775807 - 1, 9223372036854775807, 9223372036854775807))\n",
+                  "[-9223372036854775808, -1, 9223372036854775806]");
+}
+
+static void test_datetime_invalid_date(void) {
+    ASSERT_OUTPUT_STARTS_WITH("print(day_of_week(2026, 0, 1))\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("datetime_from_iso(\"2026-02-31T10:00:00Z\")\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("datetime_from_iso(\"2026-02-24T10junk\")\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("datetime_from_iso(\"2026-02-24T10:30:00+99:99\")\n", "EVAL_ERROR:");
+}
+
 static void test_day_of_year(void) {
     /* Jan 1 = 1, Feb 24 in non-leap = 31+24 = 55 */
     ASSERT_OUTPUT("print(day_of_year(2026, 1, 1))\n"
@@ -12342,6 +12361,1230 @@ static void test_generic_fn_syntax(void) {
                   "    print(identity(42))\n"
                   "}\n",
                   "42");
+}
+
+/* ======================================================================
+ * LAT-593..619: correctness backlog regressions
+ * ====================================================================== */
+
+static void test_lat593_defer_local_scope(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let before = 1\n"
+                  "    defer {\n"
+                  "        let deferred_local = 7\n"
+                  "        print(\"defer:${deferred_local}\")\n"
+                  "    }\n"
+                  "    let after = 2\n"
+                  "    print(\"body:${before}:${after}\")\n"
+                  "}\n",
+                  "body:1:2\ndefer:7");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux outer = 1\n"
+                  "    {\n"
+                  "        defer { outer = outer + 4; let hidden = 9 }\n"
+                  "        outer = 3\n"
+                  "    }\n"
+                  "    print(outer)\n"
+                  "    let visibility = try { hidden } catch err { \"hidden\" }\n"
+                  "    print(visibility)\n"
+                  "}\n",
+                  "7\nhidden");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let before = 1\n"
+                  "    {\n"
+                  "        defer { let first_local = 10; print(\"first:${first_local}\") }\n"
+                  "        defer { let second_local = 20; print(\"second:${second_local}\") }\n"
+                  "        let nested_after = 2\n"
+                  "        print(\"body:${before}:${nested_after}\")\n"
+                  "    }\n"
+                  "    let after = 3\n"
+                  "    print(\"after:${after}\")\n"
+                  "}\n",
+                  "body:1:2\nsecond:20\nfirst:10\nafter:3");
+}
+
+static void test_lat594_try_handler_unwinds_on_break(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn probe() -> Int {\n"
+                              "    loop {\n"
+                              "        let ignored = try { break } catch err { return 42 }\n"
+                              "    }\n"
+                              "    return 10 / 0\n"
+                              "}\n"
+                              "fn main() { print(probe()) }\n",
+                              "EVAL_ERROR:");
+
+    ASSERT_OUTPUT("fn probe() -> Int {\n"
+                  "    flux i = 0\n"
+                  "    while i < 1 {\n"
+                  "        i = i + 1\n"
+                  "        let ignored = try { continue } catch err { return 42 }\n"
+                  "    }\n"
+                  "    return try { 10 / 0 } catch err { 8 }\n"
+                  "}\n"
+                  "fn main() { print(probe()) }\n",
+                  "8");
+
+    ASSERT_OUTPUT("fn probe() -> Int {\n"
+                  "    return try {\n"
+                  "        loop { let ignored = try { break } catch inner { return 41 } }\n"
+                  "        1 / 0\n"
+                  "    } catch outer { 9 }\n"
+                  "}\n"
+                  "fn main() { print(probe()) }\n",
+                  "9");
+
+    ASSERT_OUTPUT_STARTS_WITH("fn leave_try() -> Int {\n"
+                              "    return try { return 7 } catch stale { return 99 }\n"
+                              "}\n"
+                              "fn main() { print(leave_try()); print(10 / 0) }\n",
+                              "EVAL_ERROR:");
+
+    ASSERT_OUTPUT_STARTS_WITH("fn make_err() -> Map {\n"
+                              "    let result = Map::new()\n"
+                              "    result.set(\"tag\", \"err\")\n"
+                              "    result.set(\"value\", 12)\n"
+                              "    return result\n"
+                              "}\n"
+                              "fn leave_try() -> Map {\n"
+                              "    return try {\n"
+                              "        let ignored = make_err()?\n"
+                              "        return make_err()\n"
+                              "    } catch stale { return make_err() }\n"
+                              "}\n"
+                              "fn main() { let result = leave_try(); print(result.get(\"tag\")); print(10 / 0) }\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_lat595_defer_runs_on_break(void) {
+    ASSERT_OUTPUT("flux log = []\n"
+                  "fn main() {\n"
+                  "    loop {\n"
+                  "        defer { log.push(\"done\") }\n"
+                  "        break\n"
+                  "    }\n"
+                  "    print(log)\n"
+                  "}\n",
+                  "[done]");
+
+    ASSERT_OUTPUT("flux log = []\n"
+                  "fn fail() {\n"
+                  "    defer { log.push(\"defer\") }\n"
+                  "    let bad = 10 / 0\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    try { fail() } catch err { log.push(\"catch\") }\n"
+                  "    print(log)\n"
+                  "}\n",
+                  "[defer, catch]");
+
+    ASSERT_OUTPUT("flux log = []\n"
+                  "fn make_err() -> Map {\n"
+                  "    let result = Map::new()\n"
+                  "    result.set(\"tag\", \"err\")\n"
+                  "    result.set(\"value\", 12)\n"
+                  "    return result\n"
+                  "}\n"
+                  "fn propagate() -> Map {\n"
+                  "    defer { log.push(\"defer\") }\n"
+                  "    let value = make_err()?\n"
+                  "    return make_err()\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let result = propagate()\n"
+                  "    print(log)\n"
+                  "    print(result.get(\"tag\"))\n"
+                  "}\n",
+                  "[defer]\nerr");
+
+    ASSERT_OUTPUT("flux log = []\n"
+                  "fn early() -> Int {\n"
+                  "    defer { log.push(\"outer\") }\n"
+                  "    defer { log.push(\"inner\") }\n"
+                  "    return 7\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    flux i = 0\n"
+                  "    while i < 2 {\n"
+                  "        let current = i\n"
+                  "        defer { log.push(\"continue:${current}\") }\n"
+                  "        i = i + 1\n"
+                  "        continue\n"
+                  "    }\n"
+                  "    try {\n"
+                  "        defer { log.push(\"try\") }\n"
+                  "        let bad = 1 / 0\n"
+                  "    } catch err { log.push(\"catch\") }\n"
+                  "    print(early())\n"
+                  "    print(log)\n"
+                  "}\n",
+                  "7\n[continue:0, continue:1, try, catch, inner, outer]");
+
+    ASSERT_OUTPUT(
+        "flux log = []\n"
+        "fn main() {\n"
+        "    match 1 { value => { log.push(\"match-body:${value}\"); defer { log.push(\"match-defer:${value}\") } } }\n"
+        "    scope {\n"
+        "        defer { log.push(\"scope-defer\") }\n"
+        "        spawn { let child = 1 }\n"
+        "    }\n"
+        "    print(log)\n"
+        "}\n",
+        "[match-body:1, match-defer:1, scope-defer]");
+}
+
+static void test_lat595_defer_terminal_paths(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let cleanup = |value| {\n"
+                  "        let captured = \"closure\"\n"
+                  "        defer { print(\"${captured}-first\") }\n"
+                  "        defer { print(\"${captured}-second\") }\n"
+                  "        print(\"closure-body\")\n"
+                  "        value\n"
+                  "    }\n"
+                  "    print(cleanup(7))\n"
+                  "}\n",
+                  "closure-body\nclosure-second\nclosure-first\n7");
+
+    if (test_backend != BACKEND_STACK_VM) return;
+
+    ASSERT_OUTPUT("defer { print(\"top-defer\") }\n"
+                  "print(\"top-body\")\n",
+                  "top-body\ntop-defer");
+
+#ifndef _WIN32
+    char module_path[512];
+    snprintf(module_path, sizeof(module_path), "%s/lat595_defer_terminal_module.lat", test_tmp());
+    FILE *module = fopen(module_path, "wb");
+    ASSERT(module != NULL);
+    fputs("defer { print(\"module-defer\") }\n"
+          "print(\"module-body\")\n",
+          module);
+    fclose(module);
+
+    char source[1024];
+    snprintf(source, sizeof(source),
+             "import \"%s\" as deferred_module\n"
+             "defer { print(\"importer-defer\") }\n"
+             "print(\"importer-body\")\n",
+             module_path);
+    char *output = run_capture(source);
+    remove(module_path);
+    ASSERT(output != NULL);
+    ASSERT_STR_EQ(output, "module-body\nmodule-defer\nimporter-body\nimporter-defer");
+    free(output);
+#endif
+}
+
+static void test_lat596_regvm_struct_field_order(void) {
+    ASSERT_OUTPUT("struct Point { x: Int, y: Int }\n"
+                  "fn main() {\n"
+                  "    let p = Point { y: 2, x: 1 }\n"
+                  "    print(p.x)\n"
+                  "    print(p.y)\n"
+                  "}\n",
+                  "1\n2");
+
+    ASSERT_OUTPUT("struct Alloy { fixed: fix Array, mutable: flux Array }\n"
+                  "fn main() {\n"
+                  "    let value = Alloy { mutable: [1], fixed: [2] }\n"
+                  "    print(phase_of(value.mutable))\n"
+                  "    print(phase_of(value.fixed))\n"
+                  "}\n",
+                  "unphased\ncrystal");
+
+    ASSERT_OUTPUT_STARTS_WITH("struct Point { x: Int, y: Int }\n"
+                              "fn main() { let p = Point { x: 1 } }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("struct Point { x: Int, y: Int }\n"
+                              "fn main() { let p = Point { x: 1, x: 2 } }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("struct Point { x: Int, y: Int }\n"
+                              "fn main() { let p = Point { x: 1, extra: 2 } }\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_lat597_regvm_impl_implicit_return(void) {
+    ASSERT_OUTPUT("trait Readable { fn read(self: any) -> Int }\n"
+                  "struct Box { n: Int }\n"
+                  "impl Readable for Box {\n"
+                  "    fn read(self: any) -> Int { self.n }\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let box = Box { n: 7 }\n"
+                  "    print(box.read())\n"
+                  "}\n",
+                  "7");
+
+    ASSERT_OUTPUT("trait Readable { fn read(self: any) -> Int }\n"
+                  "struct Box { n: Int }\n"
+                  "impl Readable for Box { fn read(self: any) -> Int { self.n } }\n"
+                  "let global_box = Box { n: 8 }\n"
+                  "print(global_box.read())\n"
+                  "fn main() { let local_box = Box { n: 9 }; print(local_box.read()) }\n",
+                  "8\n9");
+
+    ASSERT_OUTPUT("trait Doubled { fn doubled(self: any) -> Int }\n"
+                  "trait Coded { fn code(self: any) -> Int }\n"
+                  "enum Color { Red }\n"
+                  "impl Doubled for Int { fn doubled(self: any) -> Int { self * 2 } }\n"
+                  "impl Coded for Color { fn code(self: any) -> Int { 7 } }\n"
+                  "let global_number = 4\n"
+                  "let global_color = Color::Red\n"
+                  "print(global_number.doubled())\n"
+                  "print(global_color.code())\n"
+                  "fn main() {\n"
+                  "    let local_number = 5\n"
+                  "    let local_color = Color::Red\n"
+                  "    print(local_number.doubled())\n"
+                  "    print(local_color.code())\n"
+                  "    print(Color::Red.code())\n"
+                  "}\n",
+                  "8\n7\n10\n7\n7");
+
+    /* Every RegVM method opcode must reject an omitted required argument
+     * before it constructs the impl frame. */
+    ASSERT_OUTPUT_STARTS_WITH("trait Readable { fn read(self: any, data: any) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Readable for Box { fn read(self: any, data: any) -> Int { self.n } }\n"
+                              "fn main() { let box = Box { n: 7 }; print(box.read()) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("trait Readable { fn read(self: any, data: any) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Readable for Box { fn read(self: any, data: any) -> Int { self.n } }\n"
+                              "fn make_box() -> Box { return Box { n: 7 } }\n"
+                              "fn main() { print(make_box().read()) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("trait Readable { fn read(self: any, data: any) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Readable for Box { fn read(self: any, data: any) -> Int { self.n } }\n"
+                              "fn main() { let boxes = [Box { n: 7 }]; print(boxes[0].read()) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("trait Readable { fn read(self: any, data: any) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Readable for Box { fn read(self: any, data: any) -> Int { self.n } }\n"
+                              "let box = Box { n: 7 }\n"
+                              "print(box.read())\n",
+                              "EVAL_ERROR:");
+
+    ASSERT_OUTPUT_STARTS_WITH("trait Readable { fn read(self: any, data: fix Map) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Readable for Box { fn read(self: any, data: fix Map) -> Int { self.n } }\n"
+                              "fn main() {\n"
+                              "    let box = Box { n: 7 }\n"
+                              "    flux data = Map::new()\n"
+                              "    print(box.read(data))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+
+    ASSERT_OUTPUT("trait Reader { fn read(self: any, value: Int = 4) -> Int }\n"
+                  "struct Box { n: Int }\n"
+                  "impl Reader for Box {\n"
+                  "    fn read(self: any, value: Int = 4) -> Int { self.n + value }\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let box = Box { n: 7 }\n"
+                  "    print(box.read())\n"
+                  "    print(box.read(5))\n"
+                  "}\n",
+                  "11\n12");
+
+    ASSERT_OUTPUT_STARTS_WITH("trait Reader { fn read(self: any, value: Int) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Reader for Box { fn read(self: any, value: Int) -> Int { return self.n } }\n"
+                              "fn main() { let box = Box { n: 7 }; print(box.read(\"bad\")) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("trait Reader { fn read(self: any) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Reader for Box { fn read(self: any) -> Int { return \"bad\" } }\n"
+                              "fn main() { let box = Box { n: 7 }; print(box.read()) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("trait Reader { fn read(self: any, value: Int) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Reader for Box {\n"
+                              "    fn read(self: any, value: Int) -> Int\n"
+                              "        require value > 0, \"positive\"\n"
+                              "    { return self.n + value }\n"
+                              "}\n"
+                              "fn main() { let box = Box { n: 7 }; print(box.read(-1)) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("trait Reader { fn read(self: any) -> Int }\n"
+                              "struct Box { n: Int }\n"
+                              "impl Reader for Box {\n"
+                              "    fn read(self: any) -> Int\n"
+                              "        ensure |result| { result > 0 }, \"positive result\"\n"
+                              "    { return -1 }\n"
+                              "}\n"
+                              "fn main() { let box = Box { n: 7 }; print(box.read()) }\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_lat598_scope_outer_write_and_return(void) {
+    ASSERT_OUTPUT("fn run() -> Int {\n"
+                  "    flux value = 10\n"
+                  "    scope { value = value + 5 }\n"
+                  "    print(value)\n"
+                  "    scope { return 41 }\n"
+                  "    return 99\n"
+                  "}\n"
+                  "fn main() { print(run()) }\n",
+                  "15\n41");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux value = 0\n"
+                  "    loop { scope { value = 3; break }; value = 99 }\n"
+                  "    flux i = 0\n"
+                  "    while i < 2 {\n"
+                  "        i = i + 1\n"
+                  "        scope { continue }\n"
+                  "        value = 99\n"
+                  "    }\n"
+                  "    print(value)\n"
+                  "    print(i)\n"
+                  "}\n",
+                  "3\n2");
+
+    ASSERT_OUTPUT("fn run() -> Int {\n"
+                  "    flux value = 0\n"
+                  "    let ch = Channel::new()\n"
+                  "    select {\n"
+                  "        item from ch => { value = item }\n"
+                  "        default => { value = 5 }\n"
+                  "    }\n"
+                  "    print(value)\n"
+                  "    select { default => { return 41 } }\n"
+                  "    return 99\n"
+                  "}\n"
+                  "fn main() { print(run()) }\n",
+                  "5\n41");
+
+    ASSERT_OUTPUT("fn ready() -> Int {\n"
+                  "    let ch = Channel::new()\n"
+                  "    ch.send(freeze(7))\n"
+                  "    select { value from ch => { return value } }\n"
+                  "    return 0\n"
+                  "}\n"
+                  "fn timed() -> Int {\n"
+                  "    let ch = Channel::new()\n"
+                  "    select {\n"
+                  "        value from ch => { return value }\n"
+                  "        timeout(1) => { return 8 }\n"
+                  "    }\n"
+                  "    return 0\n"
+                  "}\n"
+                  "fn main() { print(ready()); print(timed()) }\n",
+                  "7\n8");
+}
+
+static void test_lat598_scope_with_spawns_enclosing_control(void) {
+    ASSERT_OUTPUT("fn run() -> Int {\n"
+                  "    flux value = 1\n"
+                  "    let observed = Ref::new(0)\n"
+                  "    scope {\n"
+                  "        value = 5\n"
+                  "        let local = 7\n"
+                  "        spawn {\n"
+                  "            observed.set(local)\n"
+                  "            value = 99\n"
+                  "        }\n"
+                  "    }\n"
+                  "    print(observed.get())\n"
+                  "    return value\n"
+                  "}\n"
+                  "fn main() { print(run()) }\n",
+                  "7\n5");
+
+    /* Tree-walk still diagnoses control-flow signals from the synchronous
+     * portion of a concurrent scope separately. This regression targets the
+     * compiled backends' enclosing-frame lowering. */
+    if (test_backend == BACKEND_TREE_WALK) return;
+
+    ASSERT_OUTPUT("fn early() -> Int {\n"
+                  "    scope {\n"
+                  "        spawn { return 99 }\n"
+                  "        return 41\n"
+                  "    }\n"
+                  "    return 0\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    flux value = 0\n"
+                  "    loop {\n"
+                  "        scope { spawn { return 1 }; value = 3; break }\n"
+                  "        value = 99\n"
+                  "    }\n"
+                  "    flux i = 0\n"
+                  "    while i < 2 {\n"
+                  "        i = i + 1\n"
+                  "        scope { spawn { return 1 }; continue }\n"
+                  "        value = 99\n"
+                  "    }\n"
+                  "    print(early())\n"
+                  "    print(value)\n"
+                  "    print(i)\n"
+                  "}\n",
+                  "41\n3\n2");
+}
+
+static void test_lat599_regvm_match_guard(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let result = match 5 {\n"
+                  "        5 if false => \"wrong\",\n"
+                  "        _ => \"ok\"\n"
+                  "    }\n"
+                  "    print(result)\n"
+                  "}\n",
+                  "ok");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(match 5 { _ if false => \"wrong\", _ => \"wildcard\" })\n"
+                  "    print(match 5 { 5 if false => \"wrong\", 1..10 if true => \"range\", _ => \"miss\" })\n"
+                  "    print(match 5 { x if x == 5 => \"binding\", _ => \"miss\" })\n"
+                  "    print(match [5] { [x] if x > 3 => x, _ => 0 })\n"
+                  "    let hidden = try { x } catch err { \"hidden\" }\n"
+                  "    print(hidden)\n"
+                  "}\n",
+                  "wildcard\nrange\nbinding\n5\nhidden");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let closure = match [2] { [x] => |_| { x }, _ => |_| { -1 } }\n"
+                  "    print(closure(nil))\n"
+                  "}\n",
+                  "2");
+}
+
+static void test_lat600_nested_match_validation(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let result = match [[9, 9]] {\n"
+                  "        [[1, 2]] => \"wrong\",\n"
+                  "        _ => \"miss\"\n"
+                  "    }\n"
+                  "    print(result)\n"
+                  "}\n",
+                  "miss");
+
+    ASSERT_OUTPUT("struct Box { value: any }\n"
+                  "enum Wrap { Value(any), Empty }\n"
+                  "fn main() {\n"
+                  "    let subject = [Box { value: Wrap::Value([2, 3]) }]\n"
+                  "    print(match subject {\n"
+                  "        [{value: Wrap::Value([x, y])}] => x + y,\n"
+                  "        _ => 0\n"
+                  "    })\n"
+                  "    print(match subject {\n"
+                  "        [{value: Wrap::Value([2, 9])}] => \"wrong\",\n"
+                  "        _ => \"nested-miss\"\n"
+                  "    })\n"
+                  "    let box = Box { value: 1 }\n"
+                  "    print(match box { {missing: _} => \"wrong\", _ => \"field-miss\" })\n"
+                  "    let payload = Wrap::Value([2, 3])\n"
+                  "    print(match payload { Wrap::Value => \"wrong\", _ => \"arity-miss\" })\n"
+                  "}\n",
+                  "5\nnested-miss\nfield-miss\narity-miss");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(match [[5]] { [[1..9]] => \"nested-range\", _ => \"miss\" })\n"
+                  "}\n",
+                  "nested-range");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(match [1, 2, 3] { [...left, ...right] => \"wrong\", _ => \"miss\" })\n"
+                  "}\n",
+                  "miss");
+
+    ASSERT_OUTPUT("fn typeof(value: any) -> String { return \"shadowed\" }\n"
+                  "struct Box { value: Int }\n"
+                  "enum Choice { Value(Int) }\n"
+                  "fn main() {\n"
+                  "    let box = Box { value: 4 }\n"
+                  "    print(match [3] { [value] => value, _ => 0 })\n"
+                  "    print(match box { {value} => value, _ => 0 })\n"
+                  "    print(match Choice::Value(5) { Choice::Value(value) => value, _ => 0 })\n"
+                  "}\n",
+                  "3\n4\n5");
+}
+
+static void test_lat601_match_phase_qualifier(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux value = 42\n"
+                  "    let result = match value {\n"
+                  "        crystal 42 => \"wrong\",\n"
+                  "        fluid 42 => \"good\",\n"
+                  "        _ => \"none\"\n"
+                  "    }\n"
+                  "    print(result)\n"
+                  "}\n",
+                  "good");
+
+    ASSERT_OUTPUT("struct Point { x: Int }\n"
+                  "enum Item { Value(Int) }\n"
+                  "fn main() {\n"
+                  "    flux number = 5\n"
+                  "    print(match number { crystal _ => \"wrong\", fluid _ => \"wildcard\" })\n"
+                  "    print(match number { crystal 5 => \"wrong\", fluid 5 => \"literal\" })\n"
+                  "    print(match number { crystal x => \"wrong\", fluid x => \"binding\" })\n"
+                  "    print(match number { crystal 1..9 => \"wrong\", fluid 1..9 => \"range\" })\n"
+                  "    flux values = [5]\n"
+                  "    print(match values { crystal [x] => \"wrong\", fluid [x] => \"array\" })\n"
+                  "    flux point = Point { x: 5 }\n"
+                  "    print(match point { crystal {x} => \"wrong\", fluid {x} => \"struct\" })\n"
+                  "    flux item = Item::Value(5)\n"
+                  "    print(match item { crystal Item::Value(x) => \"wrong\", fluid Item::Value(x) => \"enum\" })\n"
+                  "    let plain = 5\n"
+                  "    print(match plain { fluid 5 => \"unphased\", _ => \"wrong\" })\n"
+                  "    fix frozen = 5\n"
+                  "    print(match frozen { crystal 5 => \"crystal\", _ => \"wrong\" })\n"
+                  "    flux shallow = [5]\n"
+                  "    sublimate(shallow)\n"
+                  "    print(match shallow { fluid [x] => \"wrong\", crystal [x] => \"wrong\", _ => \"sublimated\" })\n"
+                  "}\n",
+                  "wildcard\nliteral\nbinding\nrange\narray\nstruct\nenum\nunphased\ncrystal\nsublimated");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux child = [1]\n"
+                  "    sublimate(child)\n"
+                  "    let nested = [child]\n"
+                  "    print(match nested { [fluid value] => \"wrong\", [_] => \"nested-sublimated\" })\n"
+                  "}\n",
+                  "nested-sublimated");
+}
+
+static void test_lat602_array_match_post_rest(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let result = match [10, 20, 30, 40] {\n"
+                  "        [first, ...middle, last] => \"${first}|${middle}|${last}\",\n"
+                  "        _ => \"no\"\n"
+                  "    }\n"
+                  "    print(result)\n"
+                  "}\n",
+                  "10|[20, 30]|40");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(match [1, 2] { [...all] => all, _ => [] })\n"
+                  "    print(match [1, 2, 3, 4] { [first, ...middle, third, fourth] => [first, middle, third, fourth], "
+                  "_ => [] })\n"
+                  "    print(match [1] { [first, ...middle, third] => \"wrong\", _ => \"mismatch\" })\n"
+                  "}\n",
+                  "[1, 2]\n[1, [2], 3, 4]\nmismatch");
+}
+
+static void test_lat603_tree_logical_short_circuit(void) {
+    ASSERT_OUTPUT("flux calls = 0\n"
+                  "fn hit() -> Bool { calls = calls + 1; return true }\n"
+                  "fn main() {\n"
+                  "    false && hit()\n"
+                  "    true || hit()\n"
+                  "    print(false && hit())\n"
+                  "    print(true || hit())\n"
+                  "    print(true && hit())\n"
+                  "    print(false || hit())\n"
+                  "    print(nil || \"fallback\")\n"
+                  "    print(\"left\" && 7)\n"
+                  "    print(0 && \"right\")\n"
+                  "    print(\"left\" || 7)\n"
+                  "    print(calls)\n"
+                  "}\n",
+                  "false\ntrue\ntrue\ntrue\nfallback\n7\n0\nleft\n2");
+}
+
+static void test_lat604_regvm_direct_call_arity(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn pair(a: any, b: any) { return [a, b] }\n"
+                              "fn main() { print(pair(1)) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn pair(a: any, b: any) { return [a, b] }\n"
+                              "fn main() { print(pair(1, 2, 3)) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let pair = |a, b| { [a, b] }; print(pair(1)) }\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("struct Handler { call: Fn }\n"
+                              "fn main() {\n"
+                              "    let handler = Handler { call: |self, a, b| { a + b } }\n"
+                              "    print(handler.call(1))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let pair = |a, b| { a + b }\n"
+                              "    let handlers = Map::new()\n"
+                              "    handlers.set(\"pair\", pair)\n"
+                              "    print(handlers.pair(1))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { print([1].map(|a, b| { b })) }\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT("fn collect(first: any, ...rest: any) { return [first, rest] }\n"
+                  "fn main() { print(collect(1)); print(collect(1, 2, 3)) }\n",
+                  "[1, []]\n[1, [2, 3]]");
+}
+
+static void test_lat605_explicit_nil_does_not_use_default(void) {
+    ASSERT_OUTPUT("fn make_unit() {}\n"
+                  "fn show(value: any = 42) { print(value) }\n"
+                  "fn main() { show(); show(nil); show(make_unit()); show(7) }\n",
+                  "42\nnil\n()\n7");
+}
+
+static void test_lat606_regvm_variadic_preserves_nil(void) {
+    ASSERT_OUTPUT("fn gather(...items: any) { return items }\n"
+                  "fn make_unit() {}\n"
+                  "fn main() {\n"
+                  "    print(gather(nil, 1))\n"
+                  "    print(gather(1, nil, 3))\n"
+                  "    print(gather(1, nil))\n"
+                  "    print(gather(make_unit(), 1))\n"
+                  "    print(gather(1, make_unit(), 3))\n"
+                  "    print(gather(1, make_unit()))\n"
+                  "}\n",
+                  "[nil, 1]\n[1, nil, 3]\n[1, nil]\n[(), 1]\n[1, (), 3]\n[1, ()]");
+}
+
+static void test_lat607_tree_closures_share_bindings(void) {
+    ASSERT_OUTPUT("fn make_counter() {\n"
+                  "    flux value = 0\n"
+                  "    let increment = |_| { value = value + 1 }\n"
+                  "    let get = |_| { value }\n"
+                  "    return [increment, get]\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let pair = make_counter()\n"
+                  "    let increment = pair[0]\n"
+                  "    let get = pair[1]\n"
+                  "    increment(nil)\n"
+                  "    increment(nil)\n"
+                  "    print(get(nil))\n"
+                  "}\n",
+                  "2");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let factorial = |n| {\n"
+                  "        if n <= 1 { return 1 }\n"
+                  "        return n * factorial(n - 1)\n"
+                  "    }\n"
+                  "    print(factorial(5))\n"
+                  "    flux shared = 1\n"
+                  "    let outer = |_| { let inner = |_| { shared }; shared = 9; return inner }\n"
+                  "    let inner = outer(nil)\n"
+                  "    print(inner(nil))\n"
+                  "}\n",
+                  "120\n9");
+}
+
+static void test_lat608_for_loop_capture(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux funcs = []\n"
+                  "    for i in 0..3 { funcs.push(|_| { i }) }\n"
+                  "    let first = funcs[0]\n"
+                  "    let second = funcs[1]\n"
+                  "    let third = funcs[2]\n"
+                  "    print(first(nil))\n"
+                  "    print(second(nil))\n"
+                  "    print(third(nil))\n"
+                  "}\n",
+                  "0\n1\n2");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux funcs = []\n"
+                  "    for i in 0..3 {\n"
+                  "        funcs.push(|_| { i })\n"
+                  "        continue\n"
+                  "    }\n"
+                  "    let first = funcs[0]\n"
+                  "    let second = funcs[1]\n"
+                  "    let third = funcs[2]\n"
+                  "    print(first(nil))\n"
+                  "    print(second(nil))\n"
+                  "    print(third(nil))\n"
+                  "}\n",
+                  "0\n1\n2");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux funcs = []\n"
+                  "    for i in 0..3 { funcs.push(|_| { i }); break }\n"
+                  "    let first_reuse = 10\n"
+                  "    let second_reuse = 20\n"
+                  "    let third_reuse = 30\n"
+                  "    let first = funcs[0]\n"
+                  "    print(first(nil))\n"
+                  "}\n",
+                  "0");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    flux immediate = []\n"
+                  "    flux nested = []\n"
+                  "    for i in 0..2 {\n"
+                  "        let now = |_| { i }\n"
+                  "        immediate.push(now(nil))\n"
+                  "        for j in 0..2 { nested.push(|_| { i * 10 + j }) }\n"
+                  "    }\n"
+                  "    print(immediate)\n"
+                  "    let a = nested[0]; let b = nested[1]; let c = nested[2]; let d = nested[3]\n"
+                  "    print([a(nil), b(nil), c(nil), d(nil)])\n"
+                  "}\n",
+                  "[0, 1]\n[0, 1, 10, 11]");
+}
+
+static void test_lat609_flux_destructure_applies_phase(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    fix inner = freeze([1, 2])\n"
+                  "    let pair = [inner]\n"
+                  "    flux [value] = pair\n"
+                  "    value.push(3)\n"
+                  "    print(value)\n"
+                  "}\n",
+                  "[1, 2, 3]");
+
+    ASSERT_OUTPUT("struct Holder { value: any }\n"
+                  "fn main() {\n"
+                  "    fix frozen = freeze([1])\n"
+                  "    let map = Map::new()\n"
+                  "    map.set(\"value\", frozen)\n"
+                  "    flux {value} = map\n"
+                  "    value.push(2)\n"
+                  "    print(value)\n"
+                  "    let holder = Holder { value: frozen }\n"
+                  "    flux {value} = holder\n"
+                  "    value.push(3)\n"
+                  "    print(value)\n"
+                  "    flux [first, ...rest] = [frozen, frozen, frozen]\n"
+                  "    first.push(4)\n"
+                  "    rest.push([5])\n"
+                  "    print(first)\n"
+                  "    print(rest.len())\n"
+                  "    flux mutable = [9]\n"
+                  "    fix [locked] = [mutable]\n"
+                  "    print(phase_of(locked))\n"
+                  "}\n",
+                  "[1, 2]\n[1, 3]\n[1, 4]\n3\ncrystal");
+
+    ASSERT_OUTPUT("fix global_frozen = freeze([1])\n"
+                  "flux [global_value, ...global_rest] = [global_frozen, global_frozen]\n"
+                  "global_value.push(2)\n"
+                  "global_rest.push([3])\n"
+                  "print(global_value)\n"
+                  "print(global_rest.len())\n"
+                  "fn main() {\n"
+                  "    let nested_source = [[global_frozen]]\n"
+                  "    flux [nested_value] = nested_source\n"
+                  "    flux [deep_value] = nested_value\n"
+                  "    deep_value.push(4)\n"
+                  "    print(deep_value)\n"
+                  "}\n",
+                  "[1, 2]\n2\n[1, 4]");
+}
+
+static void test_lat610_destructure_validates_shape(void) {
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let [value] = [1, 2]; print(value) }\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let [first, second] = [1]; print(first) }\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT("fn main() { let [first, ...rest] = [1, 2, 3]; print(first); print(rest) }\n", "1\n[2, 3]");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let map = Map::new(); let {missing} = map; print(missing) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("struct Point { x: Int }\n"
+                              "fn main() { let point = Point { x: 1 }; let {missing} = point; print(missing) }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let source = Map::new()\n"
+                  "    source.set(\"present\", 1)\n"
+                  "    let result = try { let {present, missing} = source; present } catch err { \"error\" }\n"
+                  "    let leaked = try { present } catch err { \"hidden\" }\n"
+                  "    print(result)\n"
+                  "    print(leaked)\n"
+                  "}\n",
+                  "error\nhidden");
+    ASSERT_OUTPUT("fn typeof(value: any) -> String { return \"shadowed\" }\n"
+                  "struct Point { x: Int }\n"
+                  "fn main() {\n"
+                  "    let [array_value] = [1]\n"
+                  "    let map = Map::new()\n"
+                  "    map.set(\"map_value\", 2)\n"
+                  "    let {map_value} = map\n"
+                  "    let point = Point { x: 3 }\n"
+                  "    let {x} = point\n"
+                  "    print([array_value, map_value, x])\n"
+                  "}\n",
+                  "[1, 2, 3]");
+    ASSERT_OUTPUT_STARTS_WITH("enum Choice { A }\n"
+                              "fn main() { let value = Choice::A; let {tag} = value; print(tag) }\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_lat611_mixed_numeric_comparison(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let int_one = 1\n"
+                  "    let float_one = 1.0\n"
+                  "    print(1 == 1.0)\n"
+                  "    print(int_one == float_one)\n"
+                  "    print([1].contains(1.0))\n"
+                  "    let exact_int = 9007199254740993\n"
+                  "    let rounded_float = 9007199254740992.0\n"
+                  "    print(exact_int > rounded_float)\n"
+                  "    print([rounded_float, exact_int].max() == exact_int)\n"
+                  "    print([2, 1.5].sort())\n"
+                  "    print(Set::from([1, 1.0]).len())\n"
+                  "}\n",
+                  "true\ntrue\ntrue\ntrue\ntrue\n[1.5, 2]\n1");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let infinity = 1.0 / 0.0\n"
+                  "    let negative_infinity = -1.0 / 0.0\n"
+                  "    let nan = 0.0 / 0.0\n"
+                  "    print(infinity > 9223372036854775807)\n"
+                  "    print(negative_infinity < -9223372036854775807)\n"
+                  "    print(nan == nan)\n"
+                  "    print(nan != nan)\n"
+                  "}\n",
+                  "true\ntrue\nfalse\ntrue");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let nan = 0.0 / 0.0; print([nan, 1].min()) }\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let nan = 0.0 / 0.0; print([nan, 1].max()) }\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let nan = 0.0 / 0.0; print([nan, 1].sort()) }\n", "EVAL_ERROR:");
+}
+
+static void test_lat612_set_identity_is_typed(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let values = Set::from([1, \"1\", true, \"true\"])\n"
+                  "    print(values.len())\n"
+                  "    print(Set::from([1]) == Set::from([\"1\"]))\n"
+                  "}\n",
+                  "4\nfalse");
+
+    ASSERT_OUTPUT("enum Choice { IntegerCase(Int), StringCase(String) }\n"
+                  "struct Wrapper { value: any }\n"
+                  "fn main() {\n"
+                  "    print(Set::from([1.000000000000001, 1.000000000000002]).len())\n"
+                  "    print(Set::from([[1, 2], [1.0, 2.0], [2, 1]]).len())\n"
+                  "    print(Set::from([Choice::IntegerCase(1), Choice::StringCase(\"1\")]).len())\n"
+                  "    let numeric = Wrapper { value: 1 }\n"
+                  "    let equivalent = Wrapper { value: 1.0 }\n"
+                  "    let textual = Wrapper { value: \"1\" }\n"
+                  "    print(Set::from([numeric, equivalent, textual]).len())\n"
+                  "}\n",
+                  "2\n2\n2\n2");
+
+    ASSERT_OUTPUT("struct Entry { id: Int, callback: Fn }\n"
+                  "fn main() {\n"
+                  "    let first = Entry { id: 1, callback: |_| { 1 } }\n"
+                  "    let second = Entry { id: 1, callback: |_| { 2 } }\n"
+                  "    let third = Entry { id: 1, callback: |_| { 3 } }\n"
+                  "    flux values = Set::from([first, second])\n"
+                  "    print(values.len())\n"
+                  "    print(values.has(first))\n"
+                  "    values.add(third)\n"
+                  "    print(values.len())\n"
+                  "    values.add(first)\n"
+                  "    print(values.len())\n"
+                  "    values.remove(first)\n"
+                  "    print(values.len())\n"
+                  "    print(values.has(second))\n"
+                  "    values.add(first)\n"
+                  "    print(values.len())\n"
+                  "    values.remove(second)\n"
+                  "    print(values.len())\n"
+                  "    print(values.has(second))\n"
+                  "    values.add(second)\n"
+                  "    print(values.len())\n"
+                  "    flux count = 0\n"
+                  "    for entry in values { count = count + 1 }\n"
+                  "    print(count)\n"
+                  "    print(values == Set::from([second, first, third]))\n"
+                  "    let first_set = Set::from([first])\n"
+                  "    let second_set = Set::from([second])\n"
+                  "    print(first_set == Set::from([first]))\n"
+                  "    print(first_set == second_set)\n"
+                  "    print(Set::from([[first]]) == Set::from([[first]]))\n"
+                  "    print(Set::from([[first]]) == Set::from([[second]]))\n"
+                  "    print(first_set.union(first_set).len())\n"
+                  "    print(first_set.union(second_set).len())\n"
+                  "    print(first_set.intersection(second_set).len())\n"
+                  "    print(first_set.difference(second_set).len())\n"
+                  "    print(first_set.is_subset(second_set))\n"
+                  "}\n",
+                  "2\ntrue\n3\n3\n2\ntrue\n3\n2\nfalse\n3\n3\ntrue\ntrue\nfalse\ntrue\nfalse\n1\n2\n0\n1\nfalse");
+}
+
+static void test_lat613_range_direction_is_consistent(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let ascending = 1..5\n"
+                  "    print(ascending.len())\n"
+                  "    print(ascending.contains(3))\n"
+                  "    print(iter(ascending).collect())\n"
+                  "    let descending = 5..1\n"
+                  "    print(descending.len())\n"
+                  "    print(descending.contains(3))\n"
+                  "    print(iter(descending).collect())\n"
+                  "    print(iter(1..1).collect())\n"
+                  "    print(iter(1..2).collect())\n"
+                  "    print(range_iter(5, 1).collect())\n"
+                  "    print(range_iter(1, 6, 2).collect())\n"
+                  "    print(range_iter(5, 0, -2).collect())\n"
+                  "}\n",
+                  "4\ntrue\n[1, 2, 3, 4]\n0\nfalse\n[]\n[]\n[1]\n[5, 4, 3, 2]\n[1, 3, 5]\n[5, 3, 1]");
+}
+
+static void test_lat614_negative_epoch_milliseconds(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(time_second(-1))\n"
+                  "    print(time_second(-999))\n"
+                  "    print(time_second(-1000))\n"
+                  "    print(time_second(-1001))\n"
+                  "    print(time_second(0))\n"
+                  "    print(time_second(999))\n"
+                  "    print(time_second(1000))\n"
+                  "    print(time_format(-1, \"%S\"))\n"
+                  "    print(time_format(-1001, \"%S\"))\n"
+                  "}\n",
+                  "59\n59\n59\n58\n0\n0\n1\n59\n58");
+}
+
+static void test_lat615_negative_duration_sign(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let value = duration_from_millis(-1500)\n"
+                  "    print(value[\"seconds\"])\n"
+                  "    print(value[\"millis\"])\n"
+                  "    print(duration_to_string(value))\n"
+                  "}\n",
+                  "-1\n-500\n-0h 0m 1s 500ms");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let subsecond = duration_from_millis(-500)\n"
+                  "    print(duration_seconds(subsecond))\n"
+                  "    print(duration_millis(subsecond))\n"
+                  "    print(duration_to_string(subsecond))\n"
+                  "    let subhour = duration_from_seconds(-5400)\n"
+                  "    print(duration_hours(subhour))\n"
+                  "    print(duration_minutes(subhour))\n"
+                  "    let multihour = duration_from_millis(-9005000)\n"
+                  "    print(duration_hours(multihour))\n"
+                  "    print(duration_minutes(multihour))\n"
+                  "    print(duration_seconds(multihour))\n"
+                  "    let added = duration_add(duration_from_millis(-1500), duration_from_millis(500))\n"
+                  "    print(added[\"total_ms\"])\n"
+                  "    let subtracted = duration_sub(duration_from_millis(500), duration_from_millis(-1500))\n"
+                  "    print(subtracted[\"total_ms\"])\n"
+                  "    let earlier = datetime_from_epoch(0)\n"
+                  "    let later = datetime_from_epoch(2)\n"
+                  "    print(datetime_sub(earlier, later)[\"total_ms\"])\n"
+                  "}\n",
+                  "0\n-500\n-0h 0m 0s 500ms\n-1\n-30\n-2\n-30\n-5\n-1000\n2000\n-2000");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { print(duration_from_seconds(9223372036854775807)) }\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let max = duration_from_millis(9223372036854775807)\n"
+                              "    print(duration_add(max, duration_from_millis(1)))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let almost_min = duration_from_millis(-9223372036854775807)\n"
+                              "    let min = duration_sub(almost_min, duration_from_millis(1))\n"
+                              "    print(duration_sub(min, duration_from_millis(1)))\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_lat616_global_receiver_dispatch(void) {
+    ASSERT_OUTPUT("trait Readable { fn read(self: any) -> Int }\n"
+                  "struct Box { n: Int }\n"
+                  "impl Readable for Box { fn read(self: any) -> Int { return self.n } }\n"
+                  "let box = Box { n: 7 }\n"
+                  "print(box.read())\n",
+                  "7");
+
+    ASSERT_OUTPUT("trait Readable { fn read(self: any) -> Int }\n"
+                  "struct Box { n: Int }\n"
+                  "impl Readable for Box { fn read(self: any) -> Int { return self.n } }\n"
+                  "struct Greeter { name: String, greet: Fn }\n"
+                  "let global_array = [1, 2, 3]\n"
+                  "flux global_map = Map::new()\n"
+                  "global_map.set(\"answer\", 42)\n"
+                  "let global_box = Box { n: 7 }\n"
+                  "let global_greeter = Greeter { name: \"global\", greet: |self| { self.name.to_upper() } }\n"
+                  "print(global_array.len())\n"
+                  "print(global_map.get(\"answer\"))\n"
+                  "print(global_box.read())\n"
+                  "print(global_greeter.greet())\n"
+                  "fn main() {\n"
+                  "    let local_array = [1, 2, 3]\n"
+                  "    flux local_map = Map::new()\n"
+                  "    local_map.set(\"answer\", 42)\n"
+                  "    let local_box = Box { n: 7 }\n"
+                  "    let local_greeter = Greeter { name: \"local\", greet: |self| { self.name.to_upper() } }\n"
+                  "    print(local_array.len())\n"
+                  "    print(local_map.get(\"answer\"))\n"
+                  "    print(local_box.read())\n"
+                  "    print(local_greeter.greet())\n"
+                  "}\n",
+                  "3\n42\n7\nGLOBAL\n3\n42\n7\nLOCAL");
+    ASSERT_OUTPUT_STARTS_WITH("let values = [1]\nprint(values.definitely_missing())\n", "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { let values = [1]; print(values.definitely_missing()) }\n", "EVAL_ERROR:");
+
+    char wide_source[32768];
+    size_t used = (size_t)snprintf(wide_source, sizeof(wide_source), "let values = [1]\n");
+    for (int i = 0; i < 270; i++) {
+        int written =
+            snprintf(wide_source + used, sizeof(wide_source) - used, "let filler_%03d = \"constant_%03d\"\n", i, i);
+        if (written < 0 || (size_t)written >= sizeof(wide_source) - used) {
+            test_current_failed = 1;
+            return;
+        }
+        used += (size_t)written;
+    }
+    snprintf(wide_source + used, sizeof(wide_source) - used, "print(values.definitely_missing())\n");
+    ASSERT_OUTPUT_STARTS_WITH(wide_source, "EVAL_ERROR:");
+}
+
+static void test_lat617_module_qualified_enum_construction(void) {
+    ASSERT_OUTPUT("import \"tests/modules/export_enum\" as shapes\n"
+                  "fn main() {\n"
+                  "    let red = shapes.Color::Red\n"
+                  "    let circle = shapes.Shape::Circle(3)\n"
+                  "    print(red.variant_name())\n"
+                  "    print(circle.payload()[0])\n"
+                  "}\n",
+                  "Red\n3");
+
+    ASSERT_OUTPUT("import { Color, Shape } from \"tests/modules/export_enum\"\n"
+                  "fn main() {\n"
+                  "    let green = Color::Green\n"
+                  "    let rect = Shape::Rect(3, 4)\n"
+                  "    print(green.variant_name())\n"
+                  "    print(rect.payload()[0] * rect.payload()[1])\n"
+                  "}\n",
+                  "Green\n12");
+
+    ASSERT_OUTPUT("import \"tests/modules/ns_mod_a\" as first\n"
+                  "import \"tests/modules/ns_mod_b\" as second\n"
+                  "fn main() {\n"
+                  "    let active = first.Status::Active\n"
+                  "    let pending = second.Status::Pending\n"
+                  "    print(active.variant_name())\n"
+                  "    print(pending.variant_name())\n"
+                  "}\n",
+                  "Active\nPending");
+
+    ASSERT_OUTPUT_STARTS_WITH("import \"tests/modules/export_enum\" as shapes\n"
+                              "fn main() { let invalid = shapes.Color::Bogus }\n",
+                              "EVAL_ERROR:");
+    ASSERT_OUTPUT_STARTS_WITH("import \"tests/modules/export_enum\" as shapes\n"
+                              "fn main() { let invalid = shapes.Color::Red(1) }\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_lat618_function_import_stays_local(void) {
+    ASSERT_OUTPUT("fn load() {\n"
+                  "    import \"tests/modules/math_utils\" as localmod\n"
+                  "    print(localmod.add(2, 3))\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    load()\n"
+                  "    try { print(localmod.PI) } catch err { print(\"undefined\") }\n"
+                  "}\n",
+                  "5\nundefined");
+
+    ASSERT_OUTPUT("fn make_adder() {\n"
+                  "    import { add } from \"tests/modules/math_utils\"\n"
+                  "    return |value| { add(value, 2) }\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let add_two = make_adder()\n"
+                  "    print(add_two(5))\n"
+                  "    let leaked = try { add(1, 2) } catch err { \"hidden\" }\n"
+                  "    print(leaked)\n"
+                  "}\n",
+                  "7\nhidden");
+
+    ASSERT_OUTPUT("fn load_type() {\n"
+                  "    import \"tests/modules/export_enum\" as colors\n"
+                  "    let color = colors.Color::Green\n"
+                  "    print(color.variant_name())\n"
+                  "}\n"
+                  "fn main() { load_type(); load_type() }\n",
+                  "Green\nGreen");
+
+    if (test_backend == BACKEND_TREE_WALK) {
+        ASSERT_OUTPUT("import \"tests/modules/ns_mod_a\" as shapes\n"
+                      "fn load_type() {\n"
+                      "    import \"tests/modules/ns_mod_b\" as shapes\n"
+                      "    let inside = shapes.Status::Pending\n"
+                      "    print(inside.variant_name())\n"
+                      "}\n"
+                      "fn main() {\n"
+                      "    load_type()\n"
+                      "    let outside = shapes.Status::Active\n"
+                      "    print(outside.variant_name())\n"
+                      "}\n",
+                      "Pending\nActive");
+    }
+
+    ASSERT_OUTPUT_STARTS_WITH("fn load_type() {\n"
+                              "    import \"tests/modules/export_enum\" as shapes\n"
+                              "    let inside = shapes.Color::Green\n"
+                              "}\n"
+                              "fn main() {\n"
+                              "    load_type()\n"
+                              "    let leaked = shapes.Color::Red\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+
+    if (test_backend == BACKEND_TREE_WALK) {
+        ASSERT_OUTPUT("fn load_type() {\n"
+                      "    import \"tests/modules/export_struct\" as shapes\n"
+                      "    let inside = shapes.Point { x: 2, y: 3 }\n"
+                      "    print(inside.x + inside.y)\n"
+                      "}\n"
+                      "fn main() { load_type() }\n",
+                      "5");
+
+        ASSERT_OUTPUT_STARTS_WITH("fn load_type() {\n"
+                                  "    import \"tests/modules/export_struct\" as shapes\n"
+                                  "    let inside = shapes.Point { x: 1, y: 2 }\n"
+                                  "}\n"
+                                  "fn main() {\n"
+                                  "    load_type()\n"
+                                  "    let leaked = shapes.Point { x: 3, y: 4 }\n"
+                                  "}\n",
+                                  "EVAL_ERROR:");
+    }
+}
+
+static void test_lat619_zip_preserves_unmatched_item(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let left = iter([1])\n"
+                  "    let right = iter([\"a\", \"b\", \"c\"])\n"
+                  "    left.zip(right).collect()\n"
+                  "    print(right.next())\n"
+                  "}\n",
+                  "b");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let left = iter([1, 2, 3])\n"
+                  "    let left_alias = left\n"
+                  "    let right = iter([\"a\"])\n"
+                  "    left.zip(right).collect()\n"
+                  "    print(left_alias.next())\n"
+                  "}\n",
+                  "2");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let values = iter([1, 2, 3])\n"
+                  "    let alias = values\n"
+                  "    print(values.zip(values).collect())\n"
+                  "    print(alias.next())\n"
+                  "}\n",
+                  "[[1, 2]]\n3");
+
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let empty_left = iter([])\n"
+                  "    let right = iter([1])\n"
+                  "    empty_left.zip(right).collect()\n"
+                  "    print(right.next())\n"
+                  "    let left = iter([2])\n"
+                  "    let left_alias = left\n"
+                  "    let empty_right = iter([])\n"
+                  "    left.zip(empty_right).collect()\n"
+                  "    print(left_alias.next())\n"
+                  "    let equal_left = iter([3])\n"
+                  "    let equal_left_alias = equal_left\n"
+                  "    let equal_right = iter([4])\n"
+                  "    let equal_right_alias = equal_right\n"
+                  "    print(equal_left.zip(equal_right).collect())\n"
+                  "    print(equal_left_alias.next())\n"
+                  "    print(equal_right_alias.next())\n"
+                  "}\n",
+                  "1\n2\n[[3, 4]]\nnil\nnil");
 }
 
 void register_stdlib_tests(void) {
@@ -13745,6 +14988,9 @@ void register_stdlib_tests(void) {
     register_test("test_datetime_to_utc", test_datetime_to_utc);
     register_test("test_days_in_month", test_days_in_month);
     register_test("test_day_of_week", test_day_of_week);
+    register_test("test_numeric_int64_boundaries", test_numeric_int64_boundaries);
+    register_test("test_range_int64_boundaries", test_range_int64_boundaries);
+    register_test("test_datetime_invalid_date", test_datetime_invalid_date);
     register_test("test_day_of_year", test_day_of_year);
     register_test("test_timezone_offset", test_timezone_offset);
     register_test("test_is_leap_year_extended", test_is_leap_year_extended);
@@ -13803,4 +15049,35 @@ void register_stdlib_tests(void) {
     register_test("test_generic_struct_syntax", test_generic_struct_syntax);
     register_test("test_generic_enum_syntax", test_generic_enum_syntax);
     register_test("test_generic_fn_syntax", test_generic_fn_syntax);
+
+    /* LAT-593..619 correctness backlog */
+    register_test("test_lat593_defer_local_scope", test_lat593_defer_local_scope);
+    register_test("test_lat594_try_handler_unwinds_on_break", test_lat594_try_handler_unwinds_on_break);
+    register_test("test_lat595_defer_runs_on_break", test_lat595_defer_runs_on_break);
+    register_test("test_lat595_defer_terminal_paths", test_lat595_defer_terminal_paths);
+    register_test("test_lat596_regvm_struct_field_order", test_lat596_regvm_struct_field_order);
+    register_test("test_lat597_regvm_impl_implicit_return", test_lat597_regvm_impl_implicit_return);
+    register_test("test_lat598_scope_outer_write_and_return", test_lat598_scope_outer_write_and_return);
+    register_test("test_lat598_scope_with_spawns_enclosing_control", test_lat598_scope_with_spawns_enclosing_control);
+    register_test("test_lat599_regvm_match_guard", test_lat599_regvm_match_guard);
+    register_test("test_lat600_nested_match_validation", test_lat600_nested_match_validation);
+    register_test("test_lat601_match_phase_qualifier", test_lat601_match_phase_qualifier);
+    register_test("test_lat602_array_match_post_rest", test_lat602_array_match_post_rest);
+    register_test("test_lat603_tree_logical_short_circuit", test_lat603_tree_logical_short_circuit);
+    register_test("test_lat604_regvm_direct_call_arity", test_lat604_regvm_direct_call_arity);
+    register_test("test_lat605_explicit_nil_does_not_use_default", test_lat605_explicit_nil_does_not_use_default);
+    register_test("test_lat606_regvm_variadic_preserves_nil", test_lat606_regvm_variadic_preserves_nil);
+    register_test("test_lat607_tree_closures_share_bindings", test_lat607_tree_closures_share_bindings);
+    register_test("test_lat608_for_loop_capture", test_lat608_for_loop_capture);
+    register_test("test_lat609_flux_destructure_applies_phase", test_lat609_flux_destructure_applies_phase);
+    register_test("test_lat610_destructure_validates_shape", test_lat610_destructure_validates_shape);
+    register_test("test_lat611_mixed_numeric_comparison", test_lat611_mixed_numeric_comparison);
+    register_test("test_lat612_set_identity_is_typed", test_lat612_set_identity_is_typed);
+    register_test("test_lat613_range_direction_is_consistent", test_lat613_range_direction_is_consistent);
+    register_test("test_lat614_negative_epoch_milliseconds", test_lat614_negative_epoch_milliseconds);
+    register_test("test_lat615_negative_duration_sign", test_lat615_negative_duration_sign);
+    register_test("test_lat616_global_receiver_dispatch", test_lat616_global_receiver_dispatch);
+    register_test("test_lat617_module_qualified_enum_construction", test_lat617_module_qualified_enum_construction);
+    register_test("test_lat618_function_import_stays_local", test_lat618_function_import_stays_local);
+    register_test("test_lat619_zip_preserves_unmatched_item", test_lat619_zip_preserves_unmatched_item);
 }

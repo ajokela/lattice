@@ -126,6 +126,11 @@ static const char *names[] = {
     /* Nested-element mutating method call (LAT-544) */
     [ROP_INVOKE_MUT] = "INVOKE_MUT",
     [ROP_CHECK_MUTABLE] = "CHECK_MUTABLE",
+    [ROP_SELECT_CHOOSE] = "SELECT_CHOOSE",
+    [ROP_MATCH_TYPE] = "MATCH_TYPE",
+    [ROP_MATCH_FIELD] = "MATCH_FIELD",
+    [ROP_MATCH_PHASE] = "MATCH_PHASE",
+    [ROP_CHECK_ENUM_VARIANT] = "CHECK_ENUM_VARIANT",
 };
 
 const char *reg_opcode_name(RegOpcode op) {

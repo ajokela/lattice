@@ -7,6 +7,35 @@
 
 #define INITIAL_SCOPE_CAP 8
 
+/* Tree-walk closures capture lexical bindings through shared cells.  The
+ * marker is intentionally outside PhaseTag's public values and never escapes
+ * through env_get/env_get_ref; user-created Refs remain ordinary values. */
+#define CAPTURE_CELL_PHASE ((PhaseTag)0x7f)
+#define WEAK_CLOSURE_PHASE ((PhaseTag)0x7e)
+
+static bool is_capture_cell(const LatValue *v) { return v && v->type == VAL_REF && v->phase == CAPTURE_CELL_PHASE; }
+
+static bool is_weak_closure(const LatValue *v) { return v && v->type == VAL_CLOSURE && v->phase == WEAK_CLOSURE_PHASE; }
+
+static LatValue capture_cell_clone(const LatValue *cell) {
+    ref_lock(cell->as.ref.ref);
+    LatValue value = value_deep_clone(&cell->as.ref.ref->value);
+    ref_unlock(cell->as.ref.ref);
+    return value;
+}
+
+/* Consumes value while preserving the capture-cell wrapper shared by every
+ * closure that closed over this binding.  Cell contents stay detached from a
+ * particular evaluator's fluid heap because they can outlive its scope. */
+static void capture_cell_set(LatValue *cell, LatValue value) {
+    LatValue detached = value_detach(&value);
+    value_free(&value);
+    ref_lock(cell->as.ref.ref);
+    value_free(&cell->as.ref.ref->value);
+    cell->as.ref.ref->value = detached;
+    ref_unlock(cell->as.ref.ref);
+}
+
 static Scope scope_new(void) { return lat_map_new(sizeof(LatValue)); }
 
 static void scope_free_values(const char *key, void *value, void *ctx) {
@@ -116,6 +145,10 @@ void env_define_at(Env *env, size_t scope_idx, const char *name, LatValue value)
     if (scope_idx >= env->count) return;
     Scope *scope = &env->scopes[scope_idx];
     LatValue *existing = lat_map_get(scope, name);
+    if (is_capture_cell(existing)) {
+        capture_cell_set(existing, value);
+        return;
+    }
     if (existing) { value_free(existing); }
     lat_map_set(scope, name, &value);
 }
@@ -124,7 +157,7 @@ bool env_get(const Env *env, const char *name, LatValue *out) {
     if (env->count == 1) {
         LatValue *v = lat_map_get(&env->scopes[0], name);
         if (v) {
-            *out = value_deep_clone(v);
+            *out = is_capture_cell(v) ? capture_cell_clone(v) : value_deep_clone(v);
             return true;
         }
         return false;
@@ -132,7 +165,7 @@ bool env_get(const Env *env, const char *name, LatValue *out) {
     for (size_t i = env->count; i > 0; i--) {
         LatValue *v = lat_map_get(&env->scopes[i - 1], name);
         if (v) {
-            *out = value_deep_clone(v);
+            *out = is_capture_cell(v) ? capture_cell_clone(v) : value_deep_clone(v);
             return true;
         }
     }
@@ -140,19 +173,25 @@ bool env_get(const Env *env, const char *name, LatValue *out) {
 }
 
 LatValue *env_get_ref(const Env *env, const char *name) {
-    if (env->count == 1) return lat_map_get(&env->scopes[0], name);
+    if (env->count == 1) {
+        LatValue *v = lat_map_get(&env->scopes[0], name);
+        return is_capture_cell(v) ? &v->as.ref.ref->value : v;
+    }
     for (size_t i = env->count; i > 0; i--) {
         LatValue *v = lat_map_get(&env->scopes[i - 1], name);
-        if (v) return v;
+        if (v) return is_capture_cell(v) ? &v->as.ref.ref->value : v;
     }
     return NULL;
 }
 
 LatValue *env_get_ref_prehashed(const Env *env, const char *name, size_t hash) {
-    if (env->count == 1) return lat_map_get_prehashed(&env->scopes[0], name, hash);
+    if (env->count == 1) {
+        LatValue *v = lat_map_get_prehashed(&env->scopes[0], name, hash);
+        return is_capture_cell(v) ? &v->as.ref.ref->value : v;
+    }
     for (size_t i = env->count; i > 0; i--) {
         LatValue *v = lat_map_get_prehashed(&env->scopes[i - 1], name, hash);
-        if (v) return v;
+        if (v) return is_capture_cell(v) ? &v->as.ref.ref->value : v;
     }
     return NULL;
 }
@@ -161,6 +200,10 @@ bool env_set(Env *env, const char *name, LatValue value) {
     if (env->count == 1) {
         LatValue *existing = lat_map_get(&env->scopes[0], name);
         if (existing) {
+            if (is_capture_cell(existing)) {
+                capture_cell_set(existing, value);
+                return true;
+            }
             value_free(existing);
             lat_map_set(&env->scopes[0], name, &value);
             return true;
@@ -170,6 +213,10 @@ bool env_set(Env *env, const char *name, LatValue value) {
     for (size_t i = env->count; i > 0; i--) {
         LatValue *existing = lat_map_get(&env->scopes[i - 1], name);
         if (existing) {
+            if (is_capture_cell(existing)) {
+                capture_cell_set(existing, value);
+                return true;
+            }
             value_free(existing);
             lat_map_set(&env->scopes[i - 1], name, &value);
             return true;
@@ -182,6 +229,15 @@ bool env_remove(Env *env, const char *name, LatValue *out) {
     for (size_t i = env->count; i > 0; i--) {
         LatValue *existing = lat_map_get(&env->scopes[i - 1], name);
         if (existing) {
+            if (is_capture_cell(existing)) {
+                LatValue copy = capture_cell_clone(existing);
+                value_free(existing);
+                *existing = value_unit();
+                lat_map_remove(&env->scopes[i - 1], name);
+                if (out) *out = copy;
+                else value_free(&copy);
+                return true;
+            }
             if (out) *out = *existing;
             /* Remove without freeing the value (caller takes ownership) */
             /* We need to copy the value out before removing */
@@ -207,7 +263,7 @@ typedef struct {
 static void clone_entry(const char *key, void *value, void *ctx) {
     CloneCtx *cc = (CloneCtx *)ctx;
     LatValue *v = (LatValue *)value;
-    LatValue cloned = value_deep_clone(v);
+    LatValue cloned = is_capture_cell(v) ? capture_cell_clone(v) : value_deep_clone(v);
     lat_map_set(&cc->dest->scopes[cc->scope_idx], key, &cloned);
 }
 
@@ -236,7 +292,7 @@ static Env *env_clone_arena(const Env *env) {
                 dst->entries[j].state = MAP_OCCUPIED;
                 dst->entries[j].key = lat_strdup_routed(src->entries[j].key);
                 LatValue *sv = (LatValue *)src->entries[j].value;
-                LatValue cloned = value_deep_clone(sv);
+                LatValue cloned = is_capture_cell(sv) ? capture_cell_clone(sv) : value_deep_clone(sv);
                 *(LatValue *)dst->entries[j].value = cloned;
             } else if (src->entries[j].state == MAP_TOMBSTONE) {
                 dst->entries[j].state = MAP_TOMBSTONE;
@@ -269,6 +325,74 @@ Env *env_clone(const Env *env) {
         lat_map_iter(&env->scopes[i], clone_entry, &ctx);
     }
     return new_env;
+}
+
+/* Capture the current lexical environment without changing Env's public
+ * representation. Existing bindings are promoted in place to shared cells;
+ * the returned snapshot retains those same cells, so later outer writes and
+ * sibling closures observe one binding. Unlike env_clone, this is deliberately
+ * aliasing and is used only by the tree-walk closure constructor. */
+Env *env_capture(Env *env) {
+    Env *captured = malloc(sizeof(Env));
+    if (!captured) return NULL;
+    captured->cap = env->cap;
+    captured->count = 0;
+    captured->refcount = 1;
+    captured->arena_backed = false;
+    captured->scopes = malloc(captured->cap * sizeof(Scope));
+    if (!captured->scopes) {
+        free(captured);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < env->count; i++) {
+        captured->scopes[i] = scope_new();
+        captured->count++;
+        Scope *source = &env->scopes[i];
+        for (size_t j = 0; j < source->cap; j++) {
+            if (source->entries[j].state != MAP_OCCUPIED) continue;
+            LatValue *binding = (LatValue *)source->entries[j].value;
+            if (is_weak_closure(binding)) {
+                LatValue strong = value_deep_clone(binding);
+                lat_map_set(&captured->scopes[i], source->entries[j].key, &strong);
+                continue;
+            }
+            if (!is_capture_cell(binding)) {
+                LatValue original = *binding;
+                LatValue cell = value_ref(original);
+                if (cell.type != VAL_REF) {
+                    env_free(captured);
+                    return NULL;
+                }
+                value_free(&original);
+                cell.phase = CAPTURE_CELL_PHASE;
+                *binding = cell;
+            }
+            LatValue alias = value_deep_clone(binding);
+            lat_map_set(&captured->scopes[i], source->entries[j].key, &alias);
+        }
+    }
+    return captured;
+}
+
+/* Replace a recursive closure's self-cell in its captured environment with a
+ * non-owning closure alias. Reads clone that alias into a normal owning
+ * closure, while the stored alias breaks captured_env -> closure ->
+ * captured_env reference cycles at scope exit. */
+void env_weaken_recursive_binding(Env *captured, size_t scope_idx, const char *name, const LatValue *closure) {
+    if (!captured || scope_idx >= captured->count || !closure || closure->type != VAL_CLOSURE) return;
+    LatValue *slot = (LatValue *)lat_map_get(&captured->scopes[scope_idx], name);
+    if (!is_capture_cell(slot)) return;
+
+    /* The alias lives behind a detached capture cell graph that the fluid GC
+     * intentionally does not traverse, so its metadata must be detached too. */
+    LatValue weak = value_detach(closure);
+    if (weak.type != VAL_CLOSURE) return;
+    if (weak.as.closure.captured_env) env_release(weak.as.closure.captured_env); /* alias borrows */
+    weak.as.closure.upvalue_count = (uint32_t)closure->phase;
+    weak.phase = WEAK_CLOSURE_PHASE;
+    value_free(slot);
+    *slot = weak;
 }
 
 static void iter_scope_values(const char *key, void *value, void *ctx) {

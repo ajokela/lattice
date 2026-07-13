@@ -5,11 +5,13 @@
 #include "lexer.h"
 #include "parser.h"
 #include "stackcompiler.h"
+#include "stackopcode.h"
 #include "stackvm.h"
 #include "regvm.h"
 #include "latc.h"
 #include "runtime.h"
 #include "value.h"
+#include "memory.h"
 #include "test_backend.h"
 #include <unistd.h>
 
@@ -2012,6 +2014,305 @@ TEST(latc_stack_subchunk_preserves_param_count) {
 
     ASSERT_STACK_ROUNDTRIP(source);
     ASSERT_STACK_ROUNDTRIP_MEM(source);
+}
+
+TEST(latc_stack_preserves_call_metadata) {
+    ASSERT_STACK_ROUNDTRIP_MEM("fn with_default(value: Int = 7) { return value }\n"
+                               "fn main() { print(with_default()) }\n");
+    ASSERT_STACK_ROUNDTRIP_MEM("trait Reader { fn read(self: any, value: Int = 7) -> Int }\n"
+                               "struct Box { n: Int }\n"
+                               "impl Reader for Box { fn read(self: any, value: Int = 7) -> Int { self.n + value } }\n"
+                               "fn main() { let box = Box { n: 1 }; print(box.read()) }\n");
+
+    char *err = NULL;
+    int rc = stack_roundtrip_mem("fn locked(data: fix Map) { return 1 }\n"
+                                 "fn main() { flux value = Map::new(); print(locked(value)) }\n",
+                                 &err);
+    ASSERT(rc != 0);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "phase constraint violation") != NULL);
+    ASSERT(strstr(err, "locked") != NULL);
+    free(err);
+
+    err = NULL;
+    rc = stack_roundtrip_mem("trait Reader { fn read(self: any, data: fix Map) -> Int }\n"
+                             "struct Box { n: Int }\n"
+                             "impl Reader for Box { fn read(self: any, data: fix Map) -> Int { self.n } }\n"
+                             "fn main() { let box = Box { n: 1 }; flux value = Map::new(); print(box.read(value)) }\n",
+                             &err);
+    ASSERT(rc != 0);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "phase constraint violation") != NULL);
+    free(err);
+}
+
+TEST(latc_reg_preserves_call_metadata) {
+    ASSERT_REG_ROUNDTRIP_MEM("fn with_default(value: Int = 7) { return value }\n"
+                             "fn main() { print(with_default()) }\n");
+    ASSERT_REG_ROUNDTRIP_MEM("trait Reader { fn read(self: any, value: Int = 7) -> Int }\n"
+                             "struct Box { n: Int }\n"
+                             "impl Reader for Box { fn read(self: any, value: Int = 7) -> Int { self.n + value } }\n"
+                             "fn main() { let box = Box { n: 1 }; print(box.read()) }\n");
+
+    char *err = NULL;
+    int rc = reg_roundtrip_mem("fn locked(data: fix Map) { return 1 }\n"
+                               "fn main() { flux value = Map::new(); print(locked(value)) }\n",
+                               &err);
+    ASSERT(rc != 0);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "phase constraint violation") != NULL);
+    ASSERT(strstr(err, "locked") != NULL);
+    free(err);
+
+    err = NULL;
+    rc = reg_roundtrip_mem("trait Reader { fn read(self: any, data: fix Map) -> Int }\n"
+                           "struct Box { n: Int }\n"
+                           "impl Reader for Box { fn read(self: any, data: fix Map) -> Int { self.n } }\n"
+                           "fn main() { let box = Box { n: 1 }; flux value = Map::new(); print(box.read(value)) }\n",
+                           &err);
+    ASSERT(rc != 0);
+    ASSERT(err != NULL);
+    ASSERT(strstr(err, "phase constraint violation") != NULL);
+    free(err);
+}
+
+TEST(latc_reg_preserves_type_metadata) {
+    ASSERT_REG_ROUNDTRIP_MEM("struct Point { x: Int, y: Int }\n"
+                             "enum Shape { Circle(Int), Rect(Int, Int) }\n"
+                             "fn main() {\n"
+                             "    let point = Point { y: 2, x: 1 }\n"
+                             "    let shape = Shape::Rect(3, 4)\n"
+                             "    print(point.x + point.y)\n"
+                             "    print(shape.payload()[0] * shape.payload()[1])\n"
+                             "}\n");
+}
+
+TEST(latc_metadata_arrays_ignore_active_heap) {
+    struct DualHeap *saved_heap = value_get_heap();
+    struct CrystalRegion *saved_arena = value_get_arena();
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    LatValue stack_fields[] = {value_string("x"), value_string("y")};
+    Chunk *stack = chunk_new();
+    ASSERT(stack != NULL);
+    chunk_add_constant_nodupe(stack, value_array(stack_fields, 2));
+    chunk_write(stack, OP_HALT, 1);
+    size_t stack_len;
+    uint8_t *stack_data = chunk_serialize(stack, &stack_len);
+    chunk_free(stack);
+    ASSERT(stack_data != NULL);
+
+    struct DualHeap *stack_heap = dual_heap_new();
+    ASSERT(stack_heap != NULL);
+    value_set_heap(stack_heap);
+    char *stack_err = NULL;
+    Chunk *loaded_stack = chunk_deserialize(stack_data, stack_len, &stack_err);
+    value_set_heap(NULL);
+    free(stack_data);
+    bool stack_metadata_ok =
+        loaded_stack && loaded_stack->const_len == 1 && loaded_stack->constants[0].type == VAL_ARRAY &&
+        loaded_stack->constants[0].as.array.len == 2 && loaded_stack->constants[0].as.array.elems[0].type == VAL_STR &&
+        loaded_stack->constants[0].as.array.elems[1].type == VAL_STR &&
+        strcmp(loaded_stack->constants[0].as.array.elems[0].as.str_val, "x") == 0 &&
+        strcmp(loaded_stack->constants[0].as.array.elems[1].as.str_val, "y") == 0;
+    chunk_free(loaded_stack);
+    dual_heap_free(stack_heap);
+
+    LatValue reg_fields[] = {value_string("left"), value_string("right")};
+    RegChunk *reg = regchunk_new();
+    ASSERT(reg != NULL);
+    regchunk_add_constant(reg, value_array(reg_fields, 2));
+    regchunk_write(reg, REG_ENCODE_ABC(ROP_LOADUNIT, 0, 0, 0), 1);
+    regchunk_write(reg, REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0), 1);
+    reg->max_reg = 1;
+    size_t reg_len;
+    uint8_t *reg_data = regchunk_serialize(reg, &reg_len);
+    regchunk_free(reg);
+    ASSERT(reg_data != NULL);
+
+    struct DualHeap *reg_heap = dual_heap_new();
+    ASSERT(reg_heap != NULL);
+    value_set_heap(reg_heap);
+    char *reg_err = NULL;
+    RegChunk *loaded_reg = regchunk_deserialize(reg_data, reg_len, &reg_err);
+    value_set_heap(NULL);
+    free(reg_data);
+    bool reg_metadata_ok = loaded_reg && loaded_reg->const_len == 1 && loaded_reg->constants[0].type == VAL_ARRAY &&
+                           loaded_reg->constants[0].as.array.len == 2 &&
+                           loaded_reg->constants[0].as.array.elems[0].type == VAL_STR &&
+                           loaded_reg->constants[0].as.array.elems[1].type == VAL_STR &&
+                           strcmp(loaded_reg->constants[0].as.array.elems[0].as.str_val, "left") == 0 &&
+                           strcmp(loaded_reg->constants[0].as.array.elems[1].as.str_val, "right") == 0;
+    regchunk_free(loaded_reg);
+    dual_heap_free(reg_heap);
+
+    value_set_heap(saved_heap);
+    value_set_arena(saved_arena);
+    bool stack_loaded = stack_err == NULL;
+    bool reg_loaded = reg_err == NULL;
+    free(stack_err);
+    free(reg_err);
+    ASSERT(stack_loaded);
+    ASSERT(reg_loaded);
+    ASSERT(stack_metadata_ok);
+    ASSERT(reg_metadata_ok);
+}
+
+TEST(latc_v2_bytecode_remains_readable) {
+    Chunk *stack = chunk_new();
+    ASSERT(stack != NULL);
+    chunk_write(stack, OP_HALT, 0);
+    size_t stack_len;
+    uint8_t *stack_data = chunk_serialize(stack, &stack_len);
+    chunk_free(stack);
+    ASSERT(stack_data != NULL);
+    ASSERT(stack_len > 12);
+    stack_data[4] = 2;
+    stack_data[5] = 0;
+    char *err = NULL;
+    Chunk *old_stack = chunk_deserialize(stack_data, stack_len - 4, &err);
+    ASSERT(old_stack != NULL);
+    ASSERT(err == NULL);
+    chunk_free(old_stack);
+    free(stack_data);
+
+    RegChunk *reg = regchunk_new();
+    ASSERT(reg != NULL);
+    regchunk_write(reg, REG_ENCODE_ABC(ROP_LOADUNIT, 0, 0, 0), 0);
+    regchunk_write(reg, REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0), 0);
+    reg->max_reg = 1;
+    size_t reg_len;
+    uint8_t *reg_data = regchunk_serialize(reg, &reg_len);
+    regchunk_free(reg);
+    ASSERT(reg_data != NULL);
+    ASSERT(reg_len > 17);
+    reg_data[4] = 2;
+    reg_data[5] = 0;
+    RegChunk *old_reg = regchunk_deserialize(reg_data, reg_len - 9, &err);
+    ASSERT(old_reg != NULL);
+    ASSERT(err == NULL);
+    regchunk_free(old_reg);
+    free(reg_data);
+}
+
+typedef struct {
+    uint8_t data[512];
+    size_t len;
+} V2Fixture;
+
+static void v2_write_u8(V2Fixture *fixture, uint8_t value) { fixture->data[fixture->len++] = value; }
+
+static void v2_write_u16(V2Fixture *fixture, uint16_t value) {
+    v2_write_u8(fixture, (uint8_t)(value & 0xff));
+    v2_write_u8(fixture, (uint8_t)(value >> 8));
+}
+
+static void v2_write_u32(V2Fixture *fixture, uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) v2_write_u8(fixture, (uint8_t)(value >> shift));
+}
+
+static void v2_write_i64(V2Fixture *fixture, int64_t value) {
+    uint64_t bits = (uint64_t)value;
+    for (int shift = 0; shift < 64; shift += 8) v2_write_u8(fixture, (uint8_t)(bits >> shift));
+}
+
+static void v2_write_bytes(V2Fixture *fixture, const void *data, size_t len) {
+    memcpy(fixture->data + fixture->len, data, len);
+    fixture->len += len;
+}
+
+static void v2_write_stack_leaf(V2Fixture *fixture) {
+    v2_write_u32(fixture, 1);
+    v2_write_u8(fixture, OP_HALT);
+    v2_write_u32(fixture, 1);
+    v2_write_u32(fixture, 1);
+    v2_write_u32(fixture, 0); /* constants */
+    v2_write_u32(fixture, 0); /* local names */
+    v2_write_u8(fixture, 0);  /* chunk name */
+    v2_write_u8(fixture, 0);  /* variadic */
+    v2_write_u32(fixture, 0); /* defaults */
+}
+
+static void v2_write_reg_leaf(V2Fixture *fixture) {
+    v2_write_u32(fixture, 2);
+    v2_write_u32(fixture, REG_ENCODE_ABC(ROP_LOADUNIT, 0, 0, 0));
+    v2_write_u32(fixture, REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0));
+    v2_write_u32(fixture, 2);
+    v2_write_u32(fixture, 1);
+    v2_write_u32(fixture, 1);
+    v2_write_u32(fixture, 0); /* constants */
+    v2_write_u32(fixture, 0); /* local names */
+    v2_write_u8(fixture, 1);  /* max register */
+}
+
+TEST(latc_v2_nested_closures_remain_readable) {
+    enum { FIXTURE_TAG_INT = 0, FIXTURE_TAG_CLOSURE = 6 };
+
+    V2Fixture stack = {0};
+    v2_write_bytes(&stack, LATC_MAGIC, 4);
+    v2_write_u16(&stack, 2);
+    v2_write_u16(&stack, 0);
+    v2_write_u32(&stack, 1);
+    v2_write_u8(&stack, OP_HALT);
+    v2_write_u32(&stack, 1);
+    v2_write_u32(&stack, 1);
+    v2_write_u32(&stack, 2);
+    v2_write_u8(&stack, FIXTURE_TAG_CLOSURE);
+    v2_write_u32(&stack, 0); /* parameters */
+    v2_write_u8(&stack, 0);  /* variadic */
+    v2_write_stack_leaf(&stack);
+    v2_write_u8(&stack, FIXTURE_TAG_INT);
+    v2_write_i64(&stack, 42);
+    v2_write_u32(&stack, 0); /* local names */
+    v2_write_u8(&stack, 0);  /* chunk name */
+    v2_write_u8(&stack, 0);  /* variadic */
+    v2_write_u32(&stack, 0); /* defaults */
+
+    char *err = NULL;
+    Chunk *loaded_stack = chunk_deserialize(stack.data, stack.len, &err);
+    ASSERT(loaded_stack != NULL);
+    ASSERT(err == NULL);
+    ASSERT(loaded_stack->const_len == 2);
+    ASSERT(loaded_stack->constants[0].type == VAL_CLOSURE);
+    ASSERT(loaded_stack->constants[0].as.closure.native_fn != NULL);
+    ASSERT(((Chunk *)loaded_stack->constants[0].as.closure.native_fn)->code_len == 1);
+    ASSERT(loaded_stack->constants[1].type == VAL_INT);
+    ASSERT(loaded_stack->constants[1].as.int_val == 42);
+    chunk_free(loaded_stack);
+
+    V2Fixture reg = {0};
+    v2_write_bytes(&reg, RLATC_MAGIC, 4);
+    v2_write_u16(&reg, 2);
+    v2_write_u16(&reg, 0);
+    v2_write_u32(&reg, 2);
+    v2_write_u32(&reg, REG_ENCODE_ABC(ROP_LOADUNIT, 0, 0, 0));
+    v2_write_u32(&reg, REG_ENCODE_ABC(ROP_RETURN, 0, 1, 0));
+    v2_write_u32(&reg, 2);
+    v2_write_u32(&reg, 1);
+    v2_write_u32(&reg, 1);
+    v2_write_u32(&reg, 2);
+    v2_write_u8(&reg, FIXTURE_TAG_CLOSURE);
+    v2_write_u32(&reg, 0); /* parameters */
+    v2_write_u8(&reg, 0);  /* variadic */
+    v2_write_u32(&reg, 0); /* upvalues */
+    v2_write_reg_leaf(&reg);
+    v2_write_u8(&reg, FIXTURE_TAG_INT);
+    v2_write_i64(&reg, 42);
+    v2_write_u32(&reg, 0); /* local names */
+    v2_write_u8(&reg, 1);  /* max register */
+
+    err = NULL;
+    RegChunk *loaded_reg = regchunk_deserialize(reg.data, reg.len, &err);
+    ASSERT(loaded_reg != NULL);
+    ASSERT(err == NULL);
+    ASSERT(loaded_reg->const_len == 2);
+    ASSERT(loaded_reg->constants[0].type == VAL_CLOSURE);
+    ASSERT(loaded_reg->constants[0].as.closure.native_fn != NULL);
+    ASSERT(((RegChunk *)loaded_reg->constants[0].as.closure.native_fn)->code_len == 2);
+    ASSERT(loaded_reg->constants[1].type == VAL_INT);
+    ASSERT(loaded_reg->constants[1].as.int_val == 42);
+    regchunk_free(loaded_reg);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

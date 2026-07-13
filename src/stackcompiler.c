@@ -26,33 +26,86 @@ static void set_compile_error(int line, const char *msg) {
 }
 
 /* Track declared enums so EXPR_ENUM_VARIANT can fall back to function call */
-static char **known_enums = NULL;
+typedef struct {
+    char *name;
+    char **variant_names;
+    size_t *variant_counts;
+    size_t variant_count;
+} KnownEnum;
+static KnownEnum *known_enums = NULL;
 static size_t known_enum_count = 0;
 static size_t known_enum_cap = 0;
+static char **imported_enum_names = NULL;
+static size_t imported_enum_count = 0;
+static size_t imported_enum_cap = 0;
 
-static void register_enum(const char *name) {
+static void register_enum(const EnumDecl *decl) {
     if (known_enum_count >= known_enum_cap) {
         known_enum_cap = known_enum_cap ? known_enum_cap * 2 : 8;
-        known_enums = realloc(known_enums, known_enum_cap * sizeof(char *));
+        known_enums = realloc(known_enums, known_enum_cap * sizeof(KnownEnum));
     }
-    known_enums[known_enum_count++] = strdup(name);
+    KnownEnum *entry = &known_enums[known_enum_count++];
+    entry->name = strdup(decl->name);
+    entry->variant_count = decl->variant_count;
+    entry->variant_names = calloc(decl->variant_count, sizeof(char *));
+    entry->variant_counts = calloc(decl->variant_count, sizeof(size_t));
+    for (size_t i = 0; i < decl->variant_count; i++) {
+        entry->variant_names[i] = strdup(decl->variants[i].name);
+        entry->variant_counts[i] = decl->variants[i].param_count;
+    }
 }
 
 static bool is_known_enum(const char *name) {
     for (size_t i = 0; i < known_enum_count; i++)
-        if (strcmp(known_enums[i], name) == 0) return true;
+        if (strcmp(known_enums[i].name, name) == 0) return true;
+    return false;
+}
+
+static bool known_enum_variant_ok(const char *enum_name, const char *variant_name, size_t argc) {
+    for (size_t i = 0; i < known_enum_count; i++) {
+        if (strcmp(known_enums[i].name, enum_name) != 0) continue;
+        for (size_t j = 0; j < known_enums[i].variant_count; j++)
+            if (strcmp(known_enums[i].variant_names[j], variant_name) == 0)
+                return known_enums[i].variant_counts[j] == argc;
+        return false;
+    }
+    return true;
+}
+
+static void register_imported_enum_candidate(const char *name) {
+    if (!name || name[0] < 'A' || name[0] > 'Z') return;
+    for (size_t i = 0; i < imported_enum_count; i++)
+        if (strcmp(imported_enum_names[i], name) == 0) return;
+    if (imported_enum_count >= imported_enum_cap) {
+        imported_enum_cap = imported_enum_cap ? imported_enum_cap * 2 : 8;
+        imported_enum_names = realloc(imported_enum_names, imported_enum_cap * sizeof(char *));
+    }
+    imported_enum_names[imported_enum_count++] = strdup(name);
+}
+
+static bool is_imported_enum_candidate(const char *name) {
+    for (size_t i = 0; i < imported_enum_count; i++)
+        if (strcmp(imported_enum_names[i], name) == 0) return true;
     return false;
 }
 
 static void free_known_enums(void) {
-    for (size_t i = 0; i < known_enum_count; i++) free(known_enums[i]);
+    for (size_t i = 0; i < known_enum_count; i++) {
+        for (size_t j = 0; j < known_enums[i].variant_count; j++) free(known_enums[i].variant_names[j]);
+        free(known_enums[i].variant_names);
+        free(known_enums[i].variant_counts);
+        free(known_enums[i].name);
+    }
     free(known_enums);
     known_enums = NULL;
     known_enum_count = 0;
     known_enum_cap = 0;
+    for (size_t i = 0; i < imported_enum_count; i++) free(imported_enum_names[i]);
+    free(imported_enum_names);
+    imported_enum_names = NULL;
+    imported_enum_count = 0;
+    imported_enum_cap = 0;
 }
-
-static LatValue const_eval_expr(Expr *e);
 
 static void compiler_init(Compiler *comp, Compiler *enclosing, FunctionType type) {
     comp->enclosing = enclosing;
@@ -77,6 +130,10 @@ static void compiler_init(Compiler *comp, Compiler *enclosing, FunctionType type
     comp->loop_depth = 0;
     comp->loop_break_local_count = 0;
     comp->loop_continue_local_count = 0;
+    comp->loop_break_scope_depth = comp->scope_depth;
+    comp->loop_continue_scope_depth = comp->scope_depth;
+    comp->loop_handler_depth = 0;
+    comp->handler_depth = 0;
     comp->contracts = NULL;
     comp->contract_count = 0;
     comp->return_type_name = NULL;
@@ -146,10 +203,47 @@ static void emit_const8(size_t idx, int line) {
     emit_byte((uint8_t)idx, line);
 }
 
+/* Every compiler-generated frame exit must drain that frame's remaining
+ * defers while its locals and return value are still live. Scope exits may
+ * have already consumed a subset; OP_DEFER_RUN only sees the current frame,
+ * so emitting it here is also the exactly-once fallback for implicit exits. */
+static void emit_deferred_return(int line) {
+    emit_byte(OP_DEFER_RUN, line);
+    emit_byte(0, line);
+    emit_byte(OP_RETURN, line);
+}
+
+static void emit_assert_tos(const char *message, int line);
+
 static size_t emit_constant(LatValue val, int line) {
     size_t idx = chunk_add_constant(current_chunk(), val);
     emit_constant_idx(OP_CONSTANT, OP_CONSTANT_16, idx, line);
     return idx;
+}
+
+static void emit_enum_metadata(const EnumDecl *decl, int line) {
+    LatValue metadata = value_map_new();
+    for (size_t i = 0; i < decl->variant_count; i++) {
+        LatValue arity = value_int((int64_t)decl->variants[i].param_count);
+        lat_map_set(metadata.as.map.map, decl->variants[i].name, &arity);
+    }
+    emit_constant(metadata, line);
+    char meta_name[256];
+    snprintf(meta_name, sizeof(meta_name), "__enum_%s", decl->name);
+    size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
+    emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line);
+}
+
+/* Validate a descriptor Map already on TOS, then consume it. Enum descriptors
+ * map each variant name to its exact payload arity. */
+static void compile_imported_enum_check(const char *variant_name, size_t argc, int line) {
+    emit_byte(OP_DUP, line);
+    size_t variant_idx = chunk_add_constant(current_chunk(), value_string(variant_name));
+    emit_op_const8(OP_GET_FIELD, variant_idx, line);
+    emit_constant(value_int((int64_t)argc), line);
+    emit_byte(OP_EQ, line);
+    emit_assert_tos("unknown enum variant or incorrect payload arity", line);
+    emit_byte(OP_POP, line);
 }
 
 static size_t emit_jump(uint8_t op, int line) {
@@ -157,6 +251,17 @@ static size_t emit_jump(uint8_t op, int line) {
     emit_byte(0xff, line);
     emit_byte(0xff, line);
     return current_chunk()->code_len - 2;
+}
+
+static size_t emit_push_exception_handler(int line) {
+    size_t jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line);
+    current->handler_depth++;
+    return jump;
+}
+
+static void emit_pop_exception_handler(int line) {
+    emit_byte(OP_POP_EXCEPTION_HANDLER, line);
+    current->handler_depth--;
 }
 
 static void patch_jump(size_t offset) {
@@ -167,6 +272,32 @@ static void patch_jump(size_t offset) {
     }
     current_chunk()->code[offset] = (uint8_t)((jump >> 8) & 0xff);
     current_chunk()->code[offset + 1] = (uint8_t)(jump & 0xff);
+}
+
+/* Default-parameter checks use the high bit of the 16-bit jump operand to
+ * distinguish "argument supplied" from the ordinary "value is non-nil"
+ * branch. The VM masks this bit before applying the offset. */
+static size_t emit_default_jump(int line) { return emit_jump(OP_JUMP_IF_NOT_NIL, line); }
+
+static void patch_default_jump(size_t offset) {
+    patch_jump(offset);
+    if (compile_error) return;
+    if (current_chunk()->code[offset] & 0x80) {
+        compile_error = strdup("default parameter initializer jump exceeds 32767 bytes");
+        return;
+    }
+    current_chunk()->code[offset] |= 0x80;
+}
+
+/* Consume a boolean on TOS, throwing `message` when it is false. Values below
+ * the condition (for example a destructuring source) remain untouched. */
+static void emit_assert_tos(const char *message, int line) {
+    size_t ok = emit_jump(OP_JUMP_IF_TRUE, line);
+    emit_byte(OP_POP, line);
+    emit_constant(value_string(message), line);
+    emit_byte(OP_THROW, line);
+    patch_jump(ok);
+    emit_byte(OP_POP, line);
 }
 
 static void emit_loop(size_t loop_start, int line) {
@@ -213,10 +344,10 @@ static void end_scope_preserve_tos(int line) {
     emit_byte((uint8_t)current->scope_depth, line);
     current->scope_depth--;
     while (current->local_count > 0 && current->locals[current->local_count - 1].depth > current->scope_depth) {
-        emit_byte(OP_SWAP, line);
         if (current->locals[current->local_count - 1].is_captured) {
-            emit_byte(OP_CLOSE_UPVALUE, line);
+            emit_byte(OP_CLOSE_UPVALUE_PRESERVE, line);
         } else {
+            emit_byte(OP_SWAP, line);
             emit_byte(OP_POP, line);
         }
         free(current->locals[current->local_count - 1].name);
@@ -294,11 +425,368 @@ static void push_break_jump(size_t offset) {
     current->break_jumps[current->break_count++] = offset;
 }
 
+static void emit_loop_control_unwind(size_t keep_local_count, int keep_scope_depth, int keep_handler_depth, int line) {
+    /* Defers must run while exited locals and their captured cells are still
+     * live. OP_DEFER_RUN preserves a TOS value, so provide a temporary unit. */
+    if (current->scope_depth > keep_scope_depth) {
+        emit_byte(OP_UNIT, line);
+        emit_byte(OP_DEFER_RUN, line);
+        emit_byte((uint8_t)(keep_scope_depth + 1), line);
+        emit_byte(OP_POP, line);
+    }
+
+    for (size_t i = current->local_count; i > keep_local_count; i--) {
+        if (current->locals[i - 1].is_captured) {
+            emit_byte(OP_CLOSE_UPVALUE, line);
+        } else {
+            emit_byte(OP_POP, line);
+        }
+    }
+
+    for (int depth = current->handler_depth; depth > keep_handler_depth; depth--)
+        emit_byte(OP_POP_EXCEPTION_HANDLER, line);
+}
+
 /* ── Compile expressions ── */
 
 static void compile_expr(const Expr *e, int line);
 static void compile_stmt(const Stmt *s);
+static void compile_stmt_reset(const Stmt *s);
 static void emit_index_write_back(Expr *node, int line);
+
+/* Input [candidate], output [candidate, bool]. Runtime tags are intrinsic and
+ * cannot be shadowed by a user binding named `typeof`. */
+static void compile_pattern_type_check(ValueType type, int line) { emit_bytes(OP_MATCH_TYPE, (uint8_t)type, line); }
+
+/* Input [array], output [array, selected]. Structural validation guarantees the
+ * index/slice is in bounds before this helper runs. */
+static void compile_array_pattern_value(size_t index, size_t count, int rest_index, bool is_rest, int line) {
+    emit_byte(OP_DUP, line);
+    if (is_rest) {
+        emit_byte(OP_DUP, line);
+        size_t len_idx = chunk_add_constant(current_chunk(), value_string("len"));
+        emit_op_const8(OP_INVOKE, len_idx, line);
+        emit_byte(0, line);
+        size_t after = count - 1 - (size_t)rest_index;
+        if (after > 0) {
+            emit_constant(value_int((int64_t)after), line);
+            emit_byte(OP_SUB, line);
+        }
+        emit_constant(value_int((int64_t)rest_index), line);
+        emit_byte(OP_SWAP, line);
+        emit_byte(OP_BUILD_RANGE, line);
+    } else if (rest_index >= 0 && (int)index > rest_index) {
+        emit_byte(OP_DUP, line);
+        size_t len_idx = chunk_add_constant(current_chunk(), value_string("len"));
+        emit_op_const8(OP_INVOKE, len_idx, line);
+        emit_byte(0, line);
+        emit_constant(value_int((int64_t)(count - index)), line);
+        emit_byte(OP_SUB, line);
+    } else {
+        emit_constant(value_int((int64_t)index), line);
+    }
+    emit_byte(OP_INDEX, line);
+}
+
+static void compile_pattern_phase_check(const Pattern *pat, int line) {
+    if (pat->phase_qualifier == PHASE_UNSPECIFIED) return;
+    size_t structural_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+    emit_byte(OP_POP, line);
+    emit_byte(OP_DUP, line);
+    emit_byte(pat->phase_qualifier == PHASE_CRYSTAL ? OP_IS_CRYSTAL : OP_MATCH_FLUID, line);
+    patch_jump(structural_fail);
+}
+
+/* Recursive structural validator. Input [candidate], output [candidate, bool].
+ * It never extracts bindings and shape mismatches never throw. */
+static void compile_nested_pattern_check(const Pattern *pat, int line) {
+    switch (pat->tag) {
+        case PAT_LITERAL:
+            emit_byte(OP_DUP, line);
+            compile_expr(pat->as.literal, line);
+            emit_byte(OP_EQ, line);
+            break;
+        case PAT_WILDCARD:
+        case PAT_BINDING: emit_byte(OP_TRUE, line); break;
+        case PAT_RANGE:
+            compile_expr(pat->as.range.start, line);
+            compile_expr(pat->as.range.end, line);
+            emit_byte(OP_MATCH_RANGE, line);
+            break;
+        case PAT_ARRAY: {
+            ArrayPatElem *elems = pat->as.array.elems;
+            size_t count = pat->as.array.count;
+            int rest_idx = -1;
+            size_t fixed = 0;
+            bool multiple_rests = false;
+            for (size_t i = 0; i < count; i++) {
+                if (elems[i].is_rest) {
+                    if (rest_idx >= 0) multiple_rests = true;
+                    rest_idx = (int)i;
+                } else fixed++;
+            }
+
+            if (multiple_rests) {
+                emit_byte(OP_FALSE, line);
+                break;
+            }
+
+            compile_pattern_type_check(VAL_ARRAY, line);
+            size_t type_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+            emit_byte(OP_POP, line);
+            emit_byte(OP_DUP, line);
+            size_t len_idx = chunk_add_constant(current_chunk(), value_string("len"));
+            emit_op_const8(OP_INVOKE, len_idx, line);
+            emit_byte(0, line);
+            emit_constant(value_int((int64_t)(rest_idx >= 0 ? fixed : count)), line);
+            emit_byte(rest_idx >= 0 ? OP_GTEQ : OP_EQ, line);
+            patch_jump(type_fail);
+
+            for (size_t i = 0; i < count; i++) {
+                Pattern *sub = elems[i].pattern;
+                size_t prior_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+                emit_byte(OP_POP, line);
+                compile_array_pattern_value(i, count, rest_idx, elems[i].is_rest, line);
+                compile_nested_pattern_check(sub, line);
+                emit_byte(OP_SWAP, line);
+                emit_byte(OP_POP, line); /* discard child candidate, retain bool */
+                patch_jump(prior_fail);
+            }
+            break;
+        }
+        case PAT_STRUCT: {
+            compile_pattern_type_check(VAL_STRUCT, line);
+            for (size_t i = 0; i < pat->as.strct.count; i++) {
+                StructPatField *field = &pat->as.strct.fields[i];
+                size_t prior_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+                emit_byte(OP_POP, line);
+                emit_byte(OP_DUP, line);
+                size_t field_idx = chunk_add_constant(current_chunk(), value_string(field->name));
+                emit_op_const8(OP_HAS_FIELD, field_idx, line);
+                patch_jump(prior_fail);
+
+                if (field->value_pat) {
+                    size_t missing = emit_jump(OP_JUMP_IF_FALSE, line);
+                    emit_byte(OP_POP, line);
+                    emit_byte(OP_DUP, line);
+                    emit_op_const8(OP_GET_FIELD, field_idx, line);
+                    compile_nested_pattern_check(field->value_pat, line);
+                    emit_byte(OP_SWAP, line);
+                    emit_byte(OP_POP, line);
+                    patch_jump(missing);
+                }
+            }
+            break;
+        }
+        case PAT_ENUM_VARIANT: {
+            compile_pattern_type_check(VAL_ENUM, line);
+
+            size_t type_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+            emit_byte(OP_POP, line);
+            emit_byte(OP_DUP, line);
+            size_t enum_name_idx = chunk_add_constant(current_chunk(), value_string("enum_name"));
+            emit_op_const8(OP_INVOKE, enum_name_idx, line);
+            emit_byte(0, line);
+            emit_constant(value_string(pat->as.enum_variant.enum_name), line);
+            emit_byte(OP_EQ, line);
+            patch_jump(type_fail);
+
+            size_t enum_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+            emit_byte(OP_POP, line);
+            emit_byte(OP_DUP, line);
+            size_t variant_idx = chunk_add_constant(current_chunk(), value_string("variant_name"));
+            emit_op_const8(OP_INVOKE, variant_idx, line);
+            emit_byte(0, line);
+            emit_constant(value_string(pat->as.enum_variant.variant_name), line);
+            emit_byte(OP_EQ, line);
+            patch_jump(enum_fail);
+
+            size_t variant_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+            emit_byte(OP_POP, line);
+            emit_byte(OP_DUP, line);
+            size_t payload_idx = chunk_add_constant(current_chunk(), value_string("payload"));
+            emit_op_const8(OP_INVOKE, payload_idx, line);
+            emit_byte(0, line);
+            size_t len_idx = chunk_add_constant(current_chunk(), value_string("len"));
+            emit_op_const8(OP_INVOKE, len_idx, line);
+            emit_byte(0, line);
+            emit_constant(value_int((int64_t)pat->as.enum_variant.payload_count), line);
+            emit_byte(OP_EQ, line);
+            patch_jump(variant_fail);
+
+            for (size_t i = 0; i < pat->as.enum_variant.payload_count; i++) {
+                size_t prior_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+                emit_byte(OP_POP, line);
+                emit_byte(OP_DUP, line);
+                emit_op_const8(OP_INVOKE, payload_idx, line);
+                emit_byte(0, line);
+                emit_constant(value_int((int64_t)i), line);
+                emit_byte(OP_INDEX, line);
+                compile_nested_pattern_check(pat->as.enum_variant.payload_pats[i], line);
+                emit_byte(OP_SWAP, line);
+                emit_byte(OP_POP, line);
+                patch_jump(prior_fail);
+            }
+            break;
+        }
+    }
+
+    compile_pattern_phase_check(pat, line);
+}
+
+/* Structural validation runs before this pass, so every extraction is safe.
+ * Input [candidate]; output is only the hidden locals and user bindings claimed
+ * with add_local(). */
+static void compile_pattern_bindings(const Pattern *pat, int line) {
+    switch (pat->tag) {
+        case PAT_BINDING: add_local(pat->as.binding_name); break;
+        case PAT_WILDCARD:
+        case PAT_LITERAL:
+        case PAT_RANGE: emit_byte(OP_POP, line); break;
+        case PAT_ARRAY: {
+            add_local("");
+            size_t source_slot = current->local_count - 1;
+            int rest_idx = -1;
+            for (size_t i = 0; i < pat->as.array.count; i++) {
+                if (pat->as.array.elems[i].is_rest) rest_idx = (int)i;
+            }
+            for (size_t i = 0; i < pat->as.array.count; i++) {
+                emit_bytes(OP_GET_LOCAL, (uint8_t)source_slot, line);
+                compile_array_pattern_value(i, pat->as.array.count, rest_idx, pat->as.array.elems[i].is_rest, line);
+                emit_byte(OP_SWAP, line);
+                emit_byte(OP_POP, line);
+                compile_pattern_bindings(pat->as.array.elems[i].pattern, line);
+            }
+            break;
+        }
+        case PAT_STRUCT: {
+            add_local("");
+            size_t source_slot = current->local_count - 1;
+            for (size_t i = 0; i < pat->as.strct.count; i++) {
+                StructPatField *field = &pat->as.strct.fields[i];
+                emit_bytes(OP_GET_LOCAL, (uint8_t)source_slot, line);
+                size_t field_idx = chunk_add_constant(current_chunk(), value_string(field->name));
+                emit_op_const8(OP_GET_FIELD, field_idx, line);
+                if (field->value_pat) compile_pattern_bindings(field->value_pat, line);
+                else add_local(field->name);
+            }
+            break;
+        }
+        case PAT_ENUM_VARIANT: {
+            add_local("");
+            size_t source_slot = current->local_count - 1;
+            size_t payload_idx = chunk_add_constant(current_chunk(), value_string("payload"));
+            for (size_t i = 0; i < pat->as.enum_variant.payload_count; i++) {
+                emit_bytes(OP_GET_LOCAL, (uint8_t)source_slot, line);
+                emit_op_const8(OP_INVOKE, payload_idx, line);
+                emit_byte(0, line);
+                emit_constant(value_int((int64_t)i), line);
+                emit_byte(OP_INDEX, line);
+                compile_pattern_bindings(pat->as.enum_variant.payload_pats[i], line);
+            }
+            break;
+        }
+    }
+}
+
+/* Emit runtime cleanup without changing compiler metadata. This lets success,
+ * guard-failure, and structural-failure paths share one lexical local table. */
+static void emit_match_local_cleanup(size_t keep_local_count, bool preserve_tos, int line) {
+    for (size_t i = current->local_count; i > keep_local_count; i--) {
+        if (preserve_tos && current->locals[i - 1].is_captured) {
+            emit_byte(OP_CLOSE_UPVALUE_PRESERVE, line);
+        } else {
+            if (preserve_tos) emit_byte(OP_SWAP, line);
+            emit_byte(current->locals[i - 1].is_captured ? OP_CLOSE_UPVALUE : OP_POP, line);
+        }
+    }
+}
+
+static void discard_match_locals(size_t keep_local_count) {
+    while (current->local_count > keep_local_count) {
+        free(current->locals[current->local_count - 1].name);
+        current->local_count--;
+    }
+}
+
+static void compile_match_expression(const Expr *e, int line) {
+    compile_expr(e->as.match_expr.scrutinee, line);
+
+    begin_scope();
+    size_t match_base = current->local_count;
+    add_local("");
+    size_t scrutinee_slot = current->local_count - 1;
+
+    size_t arm_count = e->as.match_expr.arm_count;
+    size_t *end_jumps = malloc((arm_count ? arm_count : 1) * sizeof(size_t));
+    if (!end_jumps) {
+        if (!compile_error) compile_error = strdup("out of memory compiling match expression");
+        discard_match_locals(match_base);
+        current->scope_depth--;
+        return;
+    }
+    size_t end_count = 0;
+
+    for (size_t i = 0; i < arm_count; i++) {
+        MatchArm *arm = &e->as.match_expr.arms[i];
+
+        emit_bytes(OP_GET_LOCAL, (uint8_t)scrutinee_slot, line);
+        compile_nested_pattern_check(arm->pattern, line);
+        size_t structural_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+        emit_byte(OP_POP, line);
+        emit_byte(OP_POP, line);
+
+        begin_scope();
+        size_t arm_base = current->local_count;
+        emit_bytes(OP_GET_LOCAL, (uint8_t)scrutinee_slot, line);
+        compile_pattern_bindings(arm->pattern, line);
+
+        if (arm->guard) compile_expr(arm->guard, line);
+        else emit_byte(OP_TRUE, line);
+        size_t guard_fail = emit_jump(OP_JUMP_IF_FALSE, line);
+        emit_byte(OP_POP, line);
+
+        begin_scope();
+        if (arm->body_count > 0 && arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
+            for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
+            compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
+            end_scope_preserve_tos(line);
+        } else {
+            for (size_t j = 0; j < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
+            end_scope(line);
+            emit_byte(OP_UNIT, line);
+        }
+
+        /* Successful arm: remove bindings and the saved scrutinee while keeping
+         * the result. Captured bindings are closed before their slots disappear. */
+        emit_match_local_cleanup(match_base, true, line);
+        end_jumps[end_count++] = emit_jump(OP_JUMP, line);
+
+        /* Guard failure happened after extraction, so unwind only this arm's
+         * hidden values and bindings; the match scrutinee remains for later arms. */
+        patch_jump(guard_fail);
+        emit_byte(OP_POP, line);
+        emit_match_local_cleanup(arm_base, false, line);
+        size_t guard_cleanup_done = emit_jump(OP_JUMP, line);
+
+        discard_match_locals(arm_base);
+        current->scope_depth--;
+
+        /* Structural/phase failure happened before extraction. */
+        patch_jump(structural_fail);
+        emit_byte(OP_POP, line);
+        emit_byte(OP_POP, line);
+        patch_jump(guard_cleanup_done);
+    }
+
+    emit_byte(OP_POP, line);
+    emit_byte(OP_NIL, line);
+    for (size_t i = 0; i < end_count; i++) patch_jump(end_jumps[i]);
+    free(end_jumps);
+
+    discard_match_locals(match_base);
+    current->scope_depth--;
+}
 
 /* ── LAT-545: single-evaluation of non-idempotent indices in write-backs ──
  *
@@ -440,30 +928,16 @@ static Chunk *compile_sub_body(Stmt **stmts, size_t count, int line) {
         for (size_t i = 0; i < count; i++) compile_stmt(stmts[i]);
         emit_byte(OP_UNIT, line);
     }
-    emit_byte(OP_RETURN, line);
+    /* Scope/spawn/select bodies are standalone call frames. Drain defers while
+     * that frame and its captured locals are still live, preserving the body
+     * result already on TOS. */
+    emit_deferred_return(line);
 
     Chunk *ch = sub.chunk;
     compiler_cleanup(&sub);
     current = saved;
     return ch;
 }
-
-#ifndef __EMSCRIPTEN__
-/* Compile a single expression into a standalone sub-chunk (evaluates and returns value). */
-static Chunk *compile_sub_expr(const Expr *expr, int line) {
-    Compiler *saved = current;
-    Compiler sub;
-    compiler_init(&sub, NULL, FUNC_SCRIPT);
-
-    compile_expr(expr, line);
-    emit_byte(OP_RETURN, line);
-
-    Chunk *ch = sub.chunk;
-    compiler_cleanup(&sub);
-    current = saved;
-    return ch;
-}
-#endif
 
 /* Store a pre-compiled Chunk* as a VAL_CLOSURE constant in the current chunk. */
 static size_t add_chunk_constant(Chunk *ch) {
@@ -574,15 +1048,22 @@ static bool try_const_fold(const Expr *e, LatValue *out) {
             int64_t ri = rv.type == VAL_INT ? rv.as.int_val : 0;
             double lf = lv.type == VAL_FLOAT ? lv.as.float_val : (double)li;
             double rf = rv.type == VAL_FLOAT ? rv.as.float_val : (double)ri;
+            ValueNumericCmp cmp = value_numeric_compare(&lv, &rv);
 
             switch (e->as.binop.op) {
-                case BINOP_ADD: *out = both_int ? value_int(li + ri) : value_float(lf + rf); return true;
-                case BINOP_SUB: *out = both_int ? value_int(li - ri) : value_float(lf - rf); return true;
-                case BINOP_MUL: *out = both_int ? value_int(li * ri) : value_float(lf * rf); return true;
+                case BINOP_ADD:
+                    *out = both_int ? value_int((int64_t)((uint64_t)li + (uint64_t)ri)) : value_float(lf + rf);
+                    return true;
+                case BINOP_SUB:
+                    *out = both_int ? value_int((int64_t)((uint64_t)li - (uint64_t)ri)) : value_float(lf - rf);
+                    return true;
+                case BINOP_MUL:
+                    *out = both_int ? value_int((int64_t)((uint64_t)li * (uint64_t)ri)) : value_float(lf * rf);
+                    return true;
                 case BINOP_DIV:
                     if (both_int) {
                         if (ri == 0) return false;
-                        *out = value_int(li / ri);
+                        *out = value_int(li == INT64_MIN && ri == -1 ? INT64_MIN : li / ri);
                     } else {
                         if (rf == 0.0) return false;
                         *out = value_float(lf / rf);
@@ -590,14 +1071,14 @@ static bool try_const_fold(const Expr *e, LatValue *out) {
                     return true;
                 case BINOP_MOD:
                     if (!both_int || ri == 0) return false;
-                    *out = value_int(li % ri);
+                    *out = value_int(li == INT64_MIN && ri == -1 ? 0 : li % ri);
                     return true;
-                case BINOP_LT: *out = value_bool(both_int ? li < ri : lf < rf); return true;
-                case BINOP_GT: *out = value_bool(both_int ? li > ri : lf > rf); return true;
-                case BINOP_LTEQ: *out = value_bool(both_int ? li <= ri : lf <= rf); return true;
-                case BINOP_GTEQ: *out = value_bool(both_int ? li >= ri : lf >= rf); return true;
-                case BINOP_EQ: *out = value_bool(both_int ? li == ri : lf == rf); return true;
-                case BINOP_NEQ: *out = value_bool(both_int ? li != ri : lf != rf); return true;
+                case BINOP_LT: *out = value_bool(cmp == VALUE_CMP_LESS); return true;
+                case BINOP_GT: *out = value_bool(cmp == VALUE_CMP_GREATER); return true;
+                case BINOP_LTEQ: *out = value_bool(cmp == VALUE_CMP_LESS || cmp == VALUE_CMP_EQUAL); return true;
+                case BINOP_GTEQ: *out = value_bool(cmp == VALUE_CMP_GREATER || cmp == VALUE_CMP_EQUAL); return true;
+                case BINOP_EQ: *out = value_bool(cmp == VALUE_CMP_EQUAL); return true;
+                case BINOP_NEQ: *out = value_bool(cmp != VALUE_CMP_EQUAL); return true;
                 /* Bitwise: integer only */
                 case BINOP_BIT_AND:
                     if (!both_int) return false;
@@ -613,7 +1094,7 @@ static bool try_const_fold(const Expr *e, LatValue *out) {
                     return true;
                 case BINOP_LSHIFT:
                     if (!both_int || ri < 0 || ri >= 64) return false;
-                    *out = value_int(li << ri);
+                    *out = value_int((int64_t)((uint64_t)li << (unsigned)ri));
                     return true;
                 case BINOP_RSHIFT:
                     if (!both_int || ri < 0 || ri >= 64) return false;
@@ -938,6 +1419,11 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_ARRAY: {
+            if (e->as.array.count > UINT8_MAX) {
+                set_compile_error(line, "array literal has more than 255 elements");
+                emit_byte(OP_NIL, line);
+                break;
+            }
             bool has_spread = false;
             for (size_t i = 0; i < e->as.array.count; i++) {
                 if (e->as.array.elems[i]->tag == EXPR_SPREAD) {
@@ -959,6 +1445,11 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_TUPLE: {
+            if (e->as.tuple.count > UINT8_MAX) {
+                set_compile_error(line, "tuple literal has more than 255 elements");
+                emit_byte(OP_NIL, line);
+                break;
+            }
             for (size_t i = 0; i < e->as.tuple.count; i++) compile_expr(e->as.tuple.elems[i], line);
             emit_bytes(OP_BUILD_TUPLE, (uint8_t)e->as.tuple.count, line);
             break;
@@ -1193,6 +1684,22 @@ static void compile_expr(const Expr *e, int line) {
             /* Add params as locals */
             for (size_t i = 0; i < e->as.closure.param_count; i++) add_local(e->as.closure.params[i]);
 
+            /* Evaluate omitted closure defaults in parameter scope. */
+            for (size_t i = 0; i < e->as.closure.param_count; i++) {
+                if (!e->as.closure.default_values || !e->as.closure.default_values[i]) continue;
+                int slot = resolve_local(current, e->as.closure.params[i]);
+                if (slot < 0) continue;
+                emit_bytes(OP_GET_LOCAL, (uint8_t)slot, line);
+                size_t skip = emit_default_jump(line);
+                emit_byte(OP_POP, line);
+                compile_expr(e->as.closure.default_values[i], line);
+                emit_bytes(OP_SET_LOCAL_POP, (uint8_t)slot, line);
+                size_t done = emit_jump(OP_JUMP, line);
+                patch_default_jump(skip);
+                emit_byte(OP_POP, line);
+                patch_jump(done);
+            }
+
             /* Compile body - if the body is a block, compile statements directly
              * at the closure's scope level (no extra begin_scope/end_scope) so
              * that OP_RETURN handles cleanup and the result value isn't lost. */
@@ -1208,7 +1715,7 @@ static void compile_expr(const Expr *e, int line) {
             } else {
                 compile_expr(e->as.closure.body, line);
             }
-            emit_byte(OP_RETURN, line);
+            emit_deferred_return(line);
 
             Chunk *fn_chunk = func_comp.chunk;
             size_t upvalue_count = func_comp.upvalue_count;
@@ -1236,7 +1743,7 @@ static void compile_expr(const Expr *e, int line) {
                     int di = 0;
                     for (size_t i = 0; i < e->as.closure.param_count; i++) {
                         if (e->as.closure.default_values && e->as.closure.default_values[i]) {
-                            fn_chunk->default_values[di++] = const_eval_expr(e->as.closure.default_values[i]);
+                            fn_chunk->default_values[di++] = value_nil();
                         }
                     }
                 }
@@ -1286,487 +1793,12 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_MATCH: {
-            compile_expr(e->as.match_expr.scrutinee, line);
-            size_t *end_jumps = malloc(e->as.match_expr.arm_count * sizeof(size_t));
-            if (!end_jumps) return;
-            size_t end_jump_count = 0;
-
-            /* Stack invariant: scrutinee S stays on stack across all arms.
-             * Non-binding: DUP -> [S, S']. Check -> [S, S', bool].
-             *   Match: pop bool+S'+S, body -> [result].
-             *   No match: pop bool+S' -> [S], next arm.
-             * Binding: DUP -> [S, S']. S' becomes local, guard references it.
-             *   Match: body -> [S, n, result], swap+end_scope+swap+pop -> [result].
-             *   No match: pop guard_bool, pop n -> [S], next arm. */
-
-            for (size_t i = 0; i < e->as.match_expr.arm_count; i++) {
-                MatchArm *arm = &e->as.match_expr.arms[i];
-
-                if (arm->pattern->tag == PAT_BINDING) {
-                    /* Binding: Track scrutinee with a dummy local so that the
-                     * binding variable and body-locals get correct slot indices.
-                     * Stack: [..., S]. After DUP: [..., S, S']. */
-                    begin_scope();
-                    add_local("");           /* dummy slot tracks scrutinee S */
-                    emit_byte(OP_DUP, line); /* [S, S'] */
-                    add_local(arm->pattern->as.binding_name);
-
-                    /* Compile guard (or TRUE if none) */
-                    if (arm->guard) compile_expr(arm->guard, line); /* [S, n, guard_bool] */
-                    else emit_byte(OP_TRUE, line);                  /* [S, n, true] */
-
-                    size_t next_arm = emit_jump(OP_JUMP_IF_FALSE, line);
-                    emit_byte(OP_POP, line); /* pop bool: [S, n] */
-
-                    /* Compile arm body in a nested scope so body-locals
-                     * are cleaned up before the binding variable. */
-                    begin_scope();
-                    if (arm->body_count > 0 && arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
-                        for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
-                        compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
-                        end_scope_preserve_tos(line);
-                    } else {
-                        for (size_t j = 0; j < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
-                        end_scope(line);
-                        emit_byte(OP_UNIT, line);
-                    }
-
-                    /* Stack: [S(dummy), n(binding), result].
-                     * Swap result past n, then pop n and S via end_scope. */
-                    emit_byte(OP_SWAP, line); /* [S, result, n] */
-                    emit_byte(OP_POP, line);  /* [S, result] — pop n manually */
-                    emit_byte(OP_SWAP, line); /* [result, S] */
-                    emit_byte(OP_POP, line);  /* [result] — pop S manually */
-                    /* Remove locals from compiler without emitting more pops */
-                    current->scope_depth--;
-                    while (current->local_count > 0 &&
-                           current->locals[current->local_count - 1].depth > current->scope_depth) {
-                        free(current->locals[current->local_count - 1].name);
-                        current->local_count--;
-                    }
-
-                    end_jumps[end_jump_count++] = emit_jump(OP_JUMP, line);
-
-                    patch_jump(next_arm);
-                    /* JUMP_IF_FALSE doesn't pop: [S, n, false] */
-                    emit_byte(OP_POP, line); /* pop false: [S, n] */
-                    emit_byte(OP_POP, line); /* pop n: [S] */
-                } else if (arm->pattern->tag == PAT_ARRAY || arm->pattern->tag == PAT_STRUCT ||
-                           arm->pattern->tag == PAT_ENUM_VARIANT) {
-                    /* Array/Struct/EnumVariant destructuring patterns.
-                     * Two-phase approach:
-                     * Phase 1: DUP S -> [S, S']. Run structural checks (type, length, literal values)
-                     *          producing a single bool on the stack: [S, S', bool].
-                     *          All checks are chained via short-circuit AND.
-                     * Phase 2: If bool is true, pop bool + S', then re-extract bindings into scope.
-                     *          If bool is false, pop bool + S', continue to next arm. */
-                    emit_byte(OP_DUP, line); /* [S, S'] */
-
-                    /* Phase 1: check pattern — leave [S, S', bool] on stack */
-                    if (arm->pattern->tag == PAT_ENUM_VARIANT) {
-                        /* Check typeof(S') == "Enum" */
-                        emit_byte(OP_DUP, line);
-                        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16,
-                                          chunk_add_constant(current_chunk(), value_string("typeof")), line);
-                        emit_byte(OP_SWAP, line);
-                        emit_bytes(OP_CALL, 1, line);
-                        emit_constant(value_string("Enum"), line);
-                        emit_byte(OP_EQ, line); /* [S, S', bool] */
-
-                        /* Check enum_name via .enum_name() */
-                        size_t skip_name = emit_jump(OP_JUMP_IF_FALSE, line);
-                        emit_byte(OP_POP, line);
-                        emit_byte(OP_DUP, line);
-                        {
-                            size_t nci = chunk_add_constant(current_chunk(), value_string("enum_name"));
-                            emit_op_const8(OP_INVOKE, nci, line);
-                            emit_byte(0, line);
-                        }
-                        emit_constant(value_string(arm->pattern->as.enum_variant.enum_name), line);
-                        emit_byte(OP_EQ, line);
-                        size_t name_done = emit_jump(OP_JUMP, line);
-                        patch_jump(skip_name);
-                        patch_jump(name_done);
-
-                        /* Check variant_name via .variant_name() */
-                        size_t skip_var = emit_jump(OP_JUMP_IF_FALSE, line);
-                        emit_byte(OP_POP, line);
-                        emit_byte(OP_DUP, line);
-                        {
-                            size_t vci = chunk_add_constant(current_chunk(), value_string("variant_name"));
-                            emit_op_const8(OP_INVOKE, vci, line);
-                            emit_byte(0, line);
-                        }
-                        emit_constant(value_string(arm->pattern->as.enum_variant.variant_name), line);
-                        emit_byte(OP_EQ, line);
-                        size_t var_done = emit_jump(OP_JUMP, line);
-                        patch_jump(skip_var);
-                        patch_jump(var_done);
-
-                        /* Check literal payload elements if any */
-                        size_t evpc = arm->pattern->as.enum_variant.payload_count;
-                        for (size_t k = 0; k < evpc; k++) {
-                            Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
-                            if (sub->tag != PAT_LITERAL) continue;
-                            size_t skip_pl = emit_jump(OP_JUMP_IF_FALSE, line);
-                            emit_byte(OP_POP, line);
-                            emit_byte(OP_DUP, line);
-                            {
-                                size_t pci = chunk_add_constant(current_chunk(), value_string("payload"));
-                                emit_op_const8(OP_INVOKE, pci, line);
-                                emit_byte(0, line);
-                            }
-                            emit_constant(value_int((int64_t)k), line);
-                            emit_byte(OP_INDEX, line);
-                            compile_expr(sub->as.literal, line);
-                            emit_byte(OP_EQ, line);
-                            size_t pl_done = emit_jump(OP_JUMP, line);
-                            patch_jump(skip_pl);
-                            patch_jump(pl_done);
-                        }
-                    } else if (arm->pattern->tag == PAT_ARRAY) {
-                        ArrayPatElem *pelems = arm->pattern->as.array.elems;
-                        size_t pat_count = arm->pattern->as.array.count;
-                        int rest_idx = -1;
-                        size_t fixed_count = 0;
-                        for (size_t k = 0; k < pat_count; k++) {
-                            if (pelems[k].is_rest) rest_idx = (int)k;
-                            else fixed_count++;
-                        }
-
-                        /* typeof(S') == "Array" */
-                        emit_byte(OP_DUP, line); /* [S, S', S''] */
-                        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16,
-                                          chunk_add_constant(current_chunk(), value_string("typeof")), line);
-                        emit_byte(OP_SWAP, line);     /* [S, S', typeof, S''] */
-                        emit_bytes(OP_CALL, 1, line); /* [S, S', type_str] */
-                        emit_constant(value_string("Array"), line);
-                        emit_byte(OP_EQ, line); /* [S, S', bool] */
-
-                        /* Short-circuit: if false, skip length check */
-                        size_t skip_len = emit_jump(OP_JUMP_IF_FALSE, line);
-                        emit_byte(OP_POP, line); /* pop true */
-
-                        /* Check length */
-                        emit_byte(OP_DUP, line); /* [S, S', S''] */
-                        {
-                            size_t len_ci = chunk_add_constant(current_chunk(), value_string("len"));
-                            emit_op_const8(OP_INVOKE, len_ci, line);
-                            emit_byte(0, line); /* [S, S', arr_len] */
-                        }
-                        if (rest_idx >= 0) {
-                            emit_constant(value_int((int64_t)fixed_count), line);
-                            emit_byte(OP_GTEQ, line); /* [S, S', bool] */
-                        } else {
-                            emit_constant(value_int((int64_t)pat_count), line);
-                            emit_byte(OP_EQ, line); /* [S, S', bool] */
-                        }
-
-                        /* Check literal elements if any */
-                        for (size_t k = 0; k < pat_count; k++) {
-                            Pattern *sub = pelems[k].pattern;
-                            if (pelems[k].is_rest) continue;
-                            if (sub->tag != PAT_LITERAL) continue;
-                            /* Short-circuit: if already false, skip */
-                            size_t skip_lit = emit_jump(OP_JUMP_IF_FALSE, line);
-                            emit_byte(OP_POP, line); /* pop true */
-                            /* Extract element and compare */
-                            emit_byte(OP_DUP, line); /* [S, S', S''] */
-                            emit_constant(value_int((int64_t)k), line);
-                            emit_byte(OP_INDEX, line);           /* [S, S', elem] */
-                            compile_expr(sub->as.literal, line); /* [S, S', elem, lit] */
-                            emit_byte(OP_EQ, line);              /* [S, S', bool] */
-                            size_t lit_done = emit_jump(OP_JUMP, line);
-                            patch_jump(skip_lit);
-                            patch_jump(lit_done);
-                        }
-
-                        size_t len_done = emit_jump(OP_JUMP, line);
-                        patch_jump(skip_len);
-                        patch_jump(len_done);
-                        /* Stack: [S, S', bool] */
-                    } else {
-                        /* PAT_STRUCT: typeof(S') == "Struct" */
-                        emit_byte(OP_DUP, line); /* [S, S', S''] */
-                        emit_constant_idx(OP_GET_GLOBAL, OP_GET_GLOBAL_16,
-                                          chunk_add_constant(current_chunk(), value_string("typeof")), line);
-                        emit_byte(OP_SWAP, line);
-                        emit_bytes(OP_CALL, 1, line);
-                        emit_constant(value_string("Struct"), line);
-                        emit_byte(OP_EQ, line); /* [S, S', bool] */
-
-                        /* Check literal field values */
-                        StructPatField *spfields = arm->pattern->as.strct.fields;
-                        size_t spat_count = arm->pattern->as.strct.count;
-                        for (size_t k = 0; k < spat_count; k++) {
-                            if (spfields[k].value_pat == NULL) continue;
-                            if (spfields[k].value_pat->tag != PAT_LITERAL) continue;
-                            size_t skip_fld = emit_jump(OP_JUMP_IF_FALSE, line);
-                            emit_byte(OP_POP, line);
-                            emit_byte(OP_DUP, line); /* [S, S', S''] */
-                            size_t fci = chunk_add_constant(current_chunk(), value_string(spfields[k].name));
-                            emit_op_const8(OP_GET_FIELD, fci, line);
-                            compile_expr(spfields[k].value_pat->as.literal, line);
-                            emit_byte(OP_EQ, line);
-                            size_t fld_done = emit_jump(OP_JUMP, line);
-                            patch_jump(skip_fld);
-                            patch_jump(fld_done);
-                        }
-                    }
-
-                    /* Guard: chain with the bool */
-                    if (arm->guard) {
-                        size_t skip_guard = emit_jump(OP_JUMP_IF_FALSE, line);
-                        emit_byte(OP_POP, line);
-                        compile_expr(arm->guard, line);
-                        size_t guard_done = emit_jump(OP_JUMP, line);
-                        patch_jump(skip_guard);
-                        patch_jump(guard_done);
-                    }
-
-                    /* Stack: [S, S', bool]. Branch on result. */
-                    size_t next_arm = emit_jump(OP_JUMP_IF_FALSE, line);
-                    emit_byte(OP_POP, line); /* pop true: [S, S'] */
-                    emit_byte(OP_POP, line); /* pop S': [S] */
-
-                    /* Phase 2: Extract bindings into scope and compile body */
-                    begin_scope();
-                    add_local(""); /* dummy for S */
-
-                    if (arm->pattern->tag == PAT_ENUM_VARIANT) {
-                        /* Extract payload bindings */
-                        size_t evpc = arm->pattern->as.enum_variant.payload_count;
-                        size_t s_slot = current->local_count - 1;
-                        for (size_t k = 0; k < evpc; k++) {
-                            Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
-                            /* Get S.payload()[k] */
-                            emit_byte(OP_GET_LOCAL, line);
-                            emit_byte((uint8_t)s_slot, line);
-                            {
-                                size_t pci = chunk_add_constant(current_chunk(), value_string("payload"));
-                                emit_op_const8(OP_INVOKE, pci, line);
-                                emit_byte(0, line);
-                            }
-                            emit_constant(value_int((int64_t)k), line);
-                            emit_byte(OP_INDEX, line);
-                            if (sub->tag == PAT_BINDING) add_local(sub->as.binding_name);
-                            else add_local("");
-                        }
-                    } else if (arm->pattern->tag == PAT_ARRAY) {
-                        ArrayPatElem *pelems = arm->pattern->as.array.elems;
-                        size_t pat_count = arm->pattern->as.array.count;
-                        int rest_idx = -1;
-                        for (size_t k = 0; k < pat_count; k++) {
-                            if (pelems[k].is_rest) rest_idx = (int)k;
-                        }
-
-                        /* Re-extract from S (on stack as local 'dummy') */
-                        size_t s_slot = current->local_count - 1;
-
-                        for (size_t k = 0; k < pat_count; k++) {
-                            Pattern *sub = pelems[k].pattern;
-                            if (pelems[k].is_rest) {
-                                /* ...rest: invoke .slice(start, end) */
-                                emit_byte(OP_GET_LOCAL, line);
-                                emit_byte((uint8_t)s_slot, line);
-                                emit_constant(value_int((int64_t)rest_idx), line);
-                                /* end = arr_len - after_count */
-                                emit_byte(OP_GET_LOCAL, line);
-                                emit_byte((uint8_t)s_slot, line);
-                                {
-                                    size_t lci = chunk_add_constant(current_chunk(), value_string("len"));
-                                    emit_op_const8(OP_INVOKE, lci, line);
-                                    emit_byte(0, line);
-                                }
-                                size_t after = pat_count - 1 - (size_t)rest_idx;
-                                if (after > 0) {
-                                    emit_constant(value_int((int64_t)after), line);
-                                    emit_byte(OP_SUB, line);
-                                }
-                                {
-                                    size_t sci = chunk_add_constant(current_chunk(), value_string("slice"));
-                                    emit_op_const8(OP_INVOKE, sci, line);
-                                    emit_byte(2, line);
-                                }
-                                if (sub->tag == PAT_BINDING) add_local(sub->as.binding_name);
-                                else add_local("");
-                                continue;
-                            }
-                            if (rest_idx >= 0 && (int)k > rest_idx) {
-                                emit_byte(OP_GET_LOCAL, line);
-                                emit_byte((uint8_t)s_slot, line);
-                                {
-                                    size_t lci = chunk_add_constant(current_chunk(), value_string("len"));
-                                    emit_op_const8(OP_INVOKE, lci, line);
-                                    emit_byte(0, line);
-                                }
-                                emit_constant(value_int((int64_t)(pat_count - 1 - k)), line);
-                                emit_byte(OP_SUB, line);
-                                emit_byte(OP_GET_LOCAL, line);
-                                emit_byte((uint8_t)s_slot, line);
-                                emit_byte(OP_SWAP, line);
-                                emit_byte(OP_INDEX, line);
-                            } else {
-                                emit_byte(OP_GET_LOCAL, line);
-                                emit_byte((uint8_t)s_slot, line);
-                                emit_constant(value_int((int64_t)k), line);
-                                emit_byte(OP_INDEX, line);
-                            }
-                            if (sub->tag == PAT_BINDING) add_local(sub->as.binding_name);
-                            else add_local("");
-                        }
-                    } else {
-                        /* PAT_STRUCT: extract fields */
-                        StructPatField *spfields = arm->pattern->as.strct.fields;
-                        size_t spat_count = arm->pattern->as.strct.count;
-                        size_t s_slot = current->local_count - 1;
-
-                        for (size_t k = 0; k < spat_count; k++) {
-                            emit_byte(OP_GET_LOCAL, line);
-                            emit_byte((uint8_t)s_slot, line);
-                            size_t fci = chunk_add_constant(current_chunk(), value_string(spfields[k].name));
-                            emit_op_const8(OP_GET_FIELD, fci, line);
-
-                            if (spfields[k].value_pat == NULL) add_local(spfields[k].name);
-                            else if (spfields[k].value_pat->tag == PAT_BINDING)
-                                add_local(spfields[k].value_pat->as.binding_name);
-                            else add_local("");
-                        }
-                    }
-
-                    /* Compile arm body in nested scope */
-                    size_t bindings_pushed = current->local_count - (current->scope_depth > 0 ? 1 : 0);
-                    (void)bindings_pushed;
-                    begin_scope();
-                    if (arm->body_count > 0 && arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
-                        for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
-                        compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
-                        end_scope_preserve_tos(line);
-                    } else {
-                        for (size_t j = 0; j < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
-                        end_scope(line);
-                        emit_byte(OP_UNIT, line);
-                    }
-
-                    /* Result on top: [..., S, bindings..., result].
-                     * Swap result past all binding locals + S via end_scope. */
-                    {
-                        /* Count how many locals are in current scope (including dummy for S) */
-                        size_t n_scope_locals = 0;
-                        for (size_t li = current->local_count; li > 0; li--) {
-                            if (current->locals[li - 1].depth < current->scope_depth) break;
-                            n_scope_locals++;
-                        }
-                        for (size_t sl = 0; sl < n_scope_locals; sl++) {
-                            emit_byte(OP_SWAP, line);
-                            emit_byte(OP_POP, line);
-                        }
-                    }
-
-                    /* Remove locals from compiler */
-                    current->scope_depth--;
-                    while (current->local_count > 0 &&
-                           current->locals[current->local_count - 1].depth > current->scope_depth) {
-                        free(current->locals[current->local_count - 1].name);
-                        current->local_count--;
-                    }
-
-                    end_jumps[end_jump_count++] = emit_jump(OP_JUMP, line);
-
-                    /* Fail path: [S, S', false] */
-                    patch_jump(next_arm);
-                    emit_byte(OP_POP, line); /* pop false: [S, S'] */
-                    emit_byte(OP_POP, line); /* pop S': [S] */
-                } else {
-                    /* Non-binding: LITERAL, WILDCARD, RANGE */
-                    emit_byte(OP_DUP, line); /* [S, S'] */
-
-                    /* Pattern check — all leave [S, S', bool] */
-                    switch (arm->pattern->tag) {
-                        case PAT_LITERAL:
-                            emit_byte(OP_DUP, line); /* [S, S', S''] */
-                            compile_expr(arm->pattern->as.literal, line);
-                            emit_byte(OP_EQ, line); /* [S, S', bool] */
-                            break;
-                        case PAT_WILDCARD:
-                            if (arm->pattern->phase_qualifier == PHASE_FLUID) {
-                                /* fluid _ => check phase is NOT crystal */
-                                emit_byte(OP_DUP, line);        /* [S, S', S''] */
-                                emit_byte(OP_IS_CRYSTAL, line); /* [S, S', is_crystal] */
-                                emit_byte(OP_NOT, line);        /* [S, S', !is_crystal] */
-                            } else if (arm->pattern->phase_qualifier == PHASE_CRYSTAL) {
-                                /* crystal _ => check phase IS crystal */
-                                emit_byte(OP_DUP, line);        /* [S, S', S''] */
-                                emit_byte(OP_IS_CRYSTAL, line); /* [S, S', is_crystal] */
-                            } else {
-                                emit_byte(OP_TRUE, line); /* [S, S', true] */
-                            }
-                            break;
-                        case PAT_RANGE:
-                            emit_byte(OP_DUP, line);
-                            compile_expr(arm->pattern->as.range.start, line);
-                            emit_byte(OP_GTEQ, line);
-                            {
-                                size_t range_fail = emit_jump(OP_JUMP_IF_FALSE, line);
-                                emit_byte(OP_POP, line);
-                                emit_byte(OP_DUP, line);
-                                compile_expr(arm->pattern->as.range.end, line);
-                                emit_byte(OP_LTEQ, line);
-                                size_t range_done = emit_jump(OP_JUMP, line);
-                                patch_jump(range_fail);
-                                patch_jump(range_done);
-                            }
-                            break;
-                        default: break;
-                    }
-
-                    /* Guard */
-                    if (arm->guard) {
-                        size_t guard_skip = emit_jump(OP_JUMP_IF_FALSE, line);
-                        emit_byte(OP_POP, line);
-                        compile_expr(arm->guard, line);
-                        size_t guard_done = emit_jump(OP_JUMP, line);
-                        patch_jump(guard_skip);
-                        patch_jump(guard_done);
-                    }
-
-                    size_t next_arm = emit_jump(OP_JUMP_IF_FALSE, line);
-                    emit_byte(OP_POP, line); /* pop bool: [S, S'] */
-                    emit_byte(OP_POP, line); /* pop S': [S] */
-                    emit_byte(OP_POP, line); /* pop S: [] */
-
-                    /* Compile arm body (scoped so body-locals are cleaned up) */
-                    begin_scope();
-                    if (arm->body_count > 0 && arm->body[arm->body_count - 1]->tag == STMT_EXPR) {
-                        for (size_t j = 0; j + 1 < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
-                        compile_expr(arm->body[arm->body_count - 1]->as.expr, line);
-                        end_scope_preserve_tos(line);
-                    } else {
-                        for (size_t j = 0; j < arm->body_count; j++) compile_stmt_reset(arm->body[j]);
-                        end_scope(line);
-                        emit_byte(OP_UNIT, line);
-                    }
-
-                    end_jumps[end_jump_count++] = emit_jump(OP_JUMP, line);
-
-                    patch_jump(next_arm);
-                    /* JUMP_IF_FALSE doesn't pop: [S, S', false] */
-                    emit_byte(OP_POP, line); /* pop false: [S, S'] */
-                    emit_byte(OP_POP, line); /* pop S': [S] */
-                }
-            }
-
-            /* No arm matched - pop scrutinee, push nil */
-            emit_byte(OP_POP, line);
-            emit_byte(OP_NIL, line);
-
-            for (size_t i = 0; i < end_jump_count; i++) patch_jump(end_jumps[i]);
-            free(end_jumps);
+            compile_match_expression(e, line);
             break;
         }
 
         case EXPR_TRY_CATCH: {
-            size_t handler_jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line);
+            size_t handler_jump = emit_push_exception_handler(line);
 
             /* Save compiler state before try body so we can restore it
              * for the catch path (the error handler resets the stack). */
@@ -1786,7 +1818,7 @@ static void compile_expr(const Expr *e, int line) {
                 emit_byte(OP_UNIT, line);
             }
 
-            emit_byte(OP_POP_EXCEPTION_HANDLER, line);
+            emit_pop_exception_handler(line);
             size_t end_jump = emit_jump(OP_JUMP, line);
 
             /* Catch block — restore compiler state to match the stack
@@ -1871,6 +1903,67 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_ENUM_VARIANT: {
+            if (e->as.enum_variant.module_alias) {
+                /* Validate that the alias exports this enum. Import execution
+                 * retains a hidden __enum_Name marker in the module map. */
+                Expr alias_expr;
+                memset(&alias_expr, 0, sizeof(alias_expr));
+                alias_expr.tag = EXPR_IDENT;
+                alias_expr.line = line;
+                alias_expr.as.str_val = e->as.enum_variant.module_alias;
+                compile_expr(&alias_expr, line);
+                char marker[256];
+                snprintf(marker, sizeof(marker), "__enum_%s", e->as.enum_variant.enum_name);
+                size_t marker_idx = chunk_add_constant(current_chunk(), value_string(marker));
+                emit_op_const8(OP_GET_FIELD, marker_idx, line);
+                emit_byte(OP_DUP, line);
+                size_t enum_ok = emit_jump(OP_JUMP_IF_NOT_NIL, line);
+                emit_byte(OP_POP, line);
+                emit_byte(OP_POP, line);
+                char err[512];
+                snprintf(err, sizeof(err), "module '%s' has no enum '%s'", e->as.enum_variant.module_alias,
+                         e->as.enum_variant.enum_name);
+                emit_constant(value_string(err), line);
+                emit_byte(OP_THROW, line);
+                patch_jump(enum_ok);
+                emit_byte(OP_POP, line);
+                compile_imported_enum_check(e->as.enum_variant.variant_name, e->as.enum_variant.arg_count, line);
+
+                for (size_t i = 0; i < e->as.enum_variant.arg_count; i++)
+                    compile_expr(e->as.enum_variant.args[i], line);
+                size_t enum_idx = chunk_add_constant(current_chunk(), value_string(e->as.enum_variant.enum_name));
+                size_t var_idx = chunk_add_constant(current_chunk(), value_string(e->as.enum_variant.variant_name));
+                emit_byte(OP_BUILD_ENUM, line);
+                emit_const8(enum_idx, line);
+                emit_const8(var_idx, line);
+                emit_byte((uint8_t)e->as.enum_variant.arg_count, line);
+                break;
+            }
+            if (is_known_enum(e->as.enum_variant.enum_name) &&
+                !known_enum_variant_ok(e->as.enum_variant.enum_name, e->as.enum_variant.variant_name,
+                                       e->as.enum_variant.arg_count)) {
+                set_compile_error(line, "unknown enum variant or incorrect payload arity");
+                emit_byte(OP_NIL, line);
+                break;
+            }
+            if (is_imported_enum_candidate(e->as.enum_variant.enum_name)) {
+                Expr descriptor;
+                memset(&descriptor, 0, sizeof(descriptor));
+                descriptor.tag = EXPR_IDENT;
+                descriptor.line = line;
+                descriptor.as.str_val = e->as.enum_variant.enum_name;
+                compile_expr(&descriptor, line);
+                compile_imported_enum_check(e->as.enum_variant.variant_name, e->as.enum_variant.arg_count, line);
+                for (size_t i = 0; i < e->as.enum_variant.arg_count; i++)
+                    compile_expr(e->as.enum_variant.args[i], line);
+                size_t enum_idx = chunk_add_constant(current_chunk(), value_string(e->as.enum_variant.enum_name));
+                size_t var_idx = chunk_add_constant(current_chunk(), value_string(e->as.enum_variant.variant_name));
+                emit_byte(OP_BUILD_ENUM, line);
+                emit_const8(enum_idx, line);
+                emit_const8(var_idx, line);
+                emit_byte((uint8_t)e->as.enum_variant.arg_count, line);
+                break;
+            }
             if (!is_known_enum(e->as.enum_variant.enum_name)) {
                 /* Not a declared enum — fall back to global function call
                  * e.g. Map::new() calls the "Map::new" builtin */
@@ -1988,14 +2081,14 @@ static void compile_expr(const Expr *e, int line) {
             /* Freeze contract: freeze(x) where |v| { ... } */
             if (e->as.freeze.contract && e->as.freeze.expr->tag == EXPR_IDENT) {
                 /* Stack: [value]. Handler saves this state. */
-                size_t handler_jump = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line);
+                size_t handler_jump = emit_push_exception_handler(line);
                 emit_byte(OP_DUP, line);
                 compile_expr(e->as.freeze.contract, line);
                 emit_byte(OP_SWAP, line);
                 emit_byte(OP_CALL, line);
                 emit_byte(1, line);
                 emit_byte(OP_POP, line);
-                emit_byte(OP_POP_EXCEPTION_HANDLER, line);
+                emit_pop_exception_handler(line);
                 size_t past_catch = emit_jump(OP_JUMP, line);
                 /* Catch: stack restored to [value], then error pushed → [value, error] */
                 patch_jump(handler_jump);
@@ -2112,7 +2205,7 @@ static void compile_expr(const Expr *e, int line) {
             patch_jump(anneal_past_check);
 
             /* Wrap in try/catch for error prefix */
-            size_t anneal_handler = emit_jump(OP_PUSH_EXCEPTION_HANDLER, line);
+            size_t anneal_handler = emit_push_exception_handler(line);
             size_t saved_lc = current->local_count;
             int saved_sd = current->scope_depth;
 
@@ -2148,7 +2241,7 @@ static void compile_expr(const Expr *e, int line) {
             }
 
             /* End of try block — pop handler, jump past catch */
-            emit_byte(OP_POP_EXCEPTION_HANDLER, line);
+            emit_pop_exception_handler(line);
             size_t anneal_end = emit_jump(OP_JUMP, line);
 
             /* Catch block — wrap error with "anneal failed: " prefix */
@@ -2333,42 +2426,47 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_SCOPE: {
-#ifdef __EMSCRIPTEN__
-            /* WASM fallback: run as synchronous block */
-            for (size_t i = 0; i < e->as.block.count; i++) compile_stmt(e->as.block.stmts[i]);
-            emit_byte(OP_UNIT, line);
-#else
             size_t total = e->as.block.count;
 
-            /* Count spawns and collect non-spawn stmts */
+            /* A scope without spawns is an ordinary lexical block. Keeping it
+             * in this chunk lets return/break/continue target the enclosing
+             * function and loop instead of being trapped in a sub-chunk. */
             size_t spawn_count = 0;
             for (size_t i = 0; i < total; i++) {
                 Stmt *s = e->as.block.stmts[i];
                 if (s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN) spawn_count++;
             }
-            size_t sync_count = total - spawn_count;
-
-            /* Compile sync body (all non-spawn stmts together) */
-            uint8_t sync_idx = 0xFF;
-            if (sync_count > 0) {
-                Stmt **sync_stmts = malloc(sync_count * sizeof(Stmt *));
-                if (!sync_stmts) return;
-                size_t si = 0;
-                for (size_t i = 0; i < total; i++) {
-                    Stmt *s = e->as.block.stmts[i];
-                    if (!(s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)) sync_stmts[si++] = s;
-                }
-                Chunk *sync_chunk = compile_sub_body(sync_stmts, sync_count, line);
-                sync_idx = add_subchunk_const8(sync_chunk);
-                free(sync_stmts);
+            if (spawn_count == 0) {
+                Expr block = *e;
+                block.tag = EXPR_BLOCK;
+                compile_expr(&block, line);
+                break;
             }
 
-            /* Compile each spawn body */
-            uint8_t *spawn_indices = NULL;
-            if (spawn_count > 0) {
-                spawn_indices = malloc(spawn_count * sizeof(uint8_t));
-                if (!spawn_indices) return;
+#ifdef __EMSCRIPTEN__
+            /* WASM fallback: run scopes containing spawns synchronously. */
+            for (size_t i = 0; i < total; i++) compile_stmt(e->as.block.stmts[i]);
+            emit_byte(OP_UNIT, line);
+#else
+            uint8_t *spawn_indices = malloc(spawn_count * sizeof(uint8_t));
+            if (!spawn_indices) {
+                if (!compile_error) compile_error = strdup("out of memory compiling scope spawns");
+                emit_byte(OP_UNIT, line);
+                break;
             }
+
+            /* Synchronous statements remain in the enclosing function so
+             * writes and control flow use its locals, loops, handlers, and
+             * return target. The lexical scope stays live through OP_SCOPE so
+             * spawned children can still receive any locals declared here. */
+            begin_scope();
+            for (size_t i = 0; i < total; i++) {
+                Stmt *s = e->as.block.stmts[i];
+                if (!(s->tag == STMT_EXPR && s->as.expr->tag == EXPR_SPAWN)) compile_stmt_reset(s);
+            }
+
+            /* Spawn bodies remain standalone chunks and execute only in the
+             * isolated child VMs created by OP_SCOPE. */
             size_t spi = 0;
             for (size_t i = 0; i < total; i++) {
                 Stmt *s = e->as.block.stmts[i];
@@ -2382,9 +2480,10 @@ static void compile_expr(const Expr *e, int line) {
             /* Emit: OP_SCOPE spawn_count sync_idx [spawn_idx...] */
             emit_byte(OP_SCOPE, line);
             emit_byte((uint8_t)spawn_count, line);
-            emit_byte(sync_idx, line);
+            emit_byte(0xFF, line); /* synchronous statements were emitted inline */
             for (size_t i = 0; i < spawn_count; i++) emit_byte(spawn_indices[i], line);
             free(spawn_indices);
+            end_scope_preserve_tos(line);
 #endif
             break;
         }
@@ -2395,40 +2494,87 @@ static void compile_expr(const Expr *e, int line) {
 #else
             size_t arm_count = e->as.select_expr.arm_count;
             SelectArm *arms = e->as.select_expr.arms;
+            if (arm_count > UINT8_MAX) {
+                set_compile_error(line, "select has more than 255 arms");
+                emit_byte(OP_NIL, line);
+                break;
+            }
 
-            emit_byte(OP_SELECT, line);
+            size_t *end_jumps = arm_count ? malloc(arm_count * sizeof(size_t)) : NULL;
+            if (arm_count && !end_jumps) {
+                if (!compile_error) compile_error = strdup("out of memory");
+                emit_byte(OP_NIL, line);
+                break;
+            }
+
+            /* Evaluate every chooser operand once, in source order. */
+            for (size_t i = 0; i < arm_count; i++) {
+                if (arms[i].is_default) {
+                    emit_byte(OP_UNIT, line);
+                } else if (arms[i].is_timeout) {
+                    compile_expr(arms[i].timeout_expr, line);
+                } else {
+                    compile_expr(arms[i].channel_expr, line);
+                }
+            }
+
+            emit_byte(OP_SELECT_CHOOSE, line);
             emit_byte((uint8_t)arm_count, line);
-
             for (size_t i = 0; i < arm_count; i++) {
                 uint8_t flags = 0;
                 if (arms[i].is_default) flags |= 0x01;
                 if (arms[i].is_timeout) flags |= 0x02;
                 if (arms[i].binding_name) flags |= 0x04;
                 emit_byte(flags, line);
-
-                /* Channel or timeout expression chunk */
-                if (arms[i].is_default) {
-                    emit_byte(0xFF, line);
-                } else if (arms[i].is_timeout) {
-                    Chunk *to_ch = compile_sub_expr(arms[i].timeout_expr, line);
-                    emit_byte(add_subchunk_const8(to_ch), line);
-                } else {
-                    Chunk *ch_ch = compile_sub_expr(arms[i].channel_expr, line);
-                    emit_byte(add_subchunk_const8(ch_ch), line);
-                }
-
-                /* Body chunk */
-                Chunk *body_ch = compile_sub_body(arms[i].body, arms[i].body_count, line);
-                emit_byte(add_subchunk_const8(body_ch), line);
-
-                /* Binding name (string constant or 0xFF) */
-                if (arms[i].binding_name) {
-                    size_t bind_idx = chunk_add_constant(current_chunk(), value_string(arms[i].binding_name));
-                    emit_const8(bind_idx, line);
-                } else {
-                    emit_byte(0xFF, line);
-                }
             }
+
+            /* Keep the chooser pair alive until all inline arm bodies converge. */
+            begin_scope();
+            size_t pair_slot = current->local_count;
+            add_local("");
+            size_t end_jump_count = 0;
+
+            for (size_t i = 0; i < arm_count; i++) {
+                /* pair[0] == i */
+                emit_bytes(OP_GET_LOCAL, (uint8_t)pair_slot, line);
+                emit_constant(value_int(0), line);
+                emit_byte(OP_INDEX, line);
+                emit_constant(value_int((int64_t)i), line);
+                emit_byte(OP_EQ, line);
+                size_t next_arm = emit_jump(OP_JUMP_IF_FALSE, line);
+                emit_byte(OP_POP, line);
+
+                begin_scope();
+                if (arms[i].binding_name) {
+                    emit_bytes(OP_GET_LOCAL, (uint8_t)pair_slot, line);
+                    emit_constant(value_int(1), line);
+                    emit_byte(OP_INDEX, line);
+                    add_local(arms[i].binding_name);
+                }
+
+                /* Compile the arm as a normal lexical block expression. */
+                if (arms[i].body_count > 0 && arms[i].body[arms[i].body_count - 1]->tag == STMT_EXPR) {
+                    for (size_t j = 0; j + 1 < arms[i].body_count; j++) compile_stmt_reset(arms[i].body[j]);
+                    compile_expr(arms[i].body[arms[i].body_count - 1]->as.expr, line);
+                    end_scope_preserve_tos(line);
+                } else {
+                    for (size_t j = 0; j < arms[i].body_count; j++) compile_stmt_reset(arms[i].body[j]);
+                    end_scope(line);
+                    emit_byte(OP_UNIT, line);
+                }
+
+                end_jumps[end_jump_count++] = emit_jump(OP_JUMP, line);
+                patch_jump(next_arm);
+                emit_byte(OP_POP, line);
+            }
+
+            /* selected_index == -1: no arm was eligible. */
+            emit_byte(OP_UNIT, line);
+            for (size_t i = 0; i < end_jump_count; i++) patch_jump(end_jumps[i]);
+            free(end_jumps);
+
+            /* Remove the hidden chooser pair while preserving the arm result. */
+            end_scope_preserve_tos(line);
 #endif
             break;
         }
@@ -2543,6 +2689,18 @@ static void compile_stmt(const Stmt *s) {
             break;
 
         case STMT_BINDING: {
+            bool recursive_local =
+                current->scope_depth > 0 && s->as.binding.value && s->as.binding.value->tag == EXPR_CLOSURE;
+            size_t recursive_slot = 0;
+            if (recursive_local) {
+                /* Make the binding visible while compiling the closure so a
+                 * reference to its own name resolves to an upvalue. The
+                 * closure captures this nil slot, which is replaced below. */
+                emit_byte(OP_NIL, line);
+                add_local(s->as.binding.name);
+                recursive_slot = current->local_count - 1;
+            }
+
             if (s->as.binding.value) {
                 g_stmt_tos_expr = true; /* LAT-545 */
                 compile_expr(s->as.binding.value, line);
@@ -2552,7 +2710,9 @@ static void compile_stmt(const Stmt *s) {
             if (s->as.binding.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
             else if (s->as.binding.phase == PHASE_CRYSTAL) emit_byte(OP_FREEZE, line);
 
-            if (current->scope_depth > 0) {
+            if (recursive_local) {
+                emit_bytes(OP_SET_LOCAL_POP, (uint8_t)recursive_slot, line);
+            } else if (current->scope_depth > 0) {
                 add_local(s->as.binding.name);
             } else {
                 size_t idx = chunk_add_constant(current_chunk(), value_string(s->as.binding.name));
@@ -2796,9 +2956,7 @@ static void compile_stmt(const Stmt *s) {
             } else emit_byte(OP_UNIT, line);
             emit_return_type_check(line);
             emit_ensure_checks(line);
-            emit_byte(OP_DEFER_RUN, line);
-            emit_byte(0, line); /* scope_depth 0 = run all defers */
-            emit_byte(OP_RETURN, line);
+            emit_deferred_return(line);
             break;
 
         case STMT_WHILE: {
@@ -2807,9 +2965,15 @@ static void compile_stmt(const Stmt *s) {
             int saved_loop_depth = current->loop_depth;
             size_t saved_break_lc = current->loop_break_local_count;
             size_t saved_continue_lc = current->loop_continue_local_count;
+            int saved_break_sd = current->loop_break_scope_depth;
+            int saved_continue_sd = current->loop_continue_scope_depth;
+            int saved_loop_hd = current->loop_handler_depth;
 
             current->loop_break_local_count = current->local_count;
             current->loop_continue_local_count = current->local_count;
+            current->loop_break_scope_depth = current->scope_depth;
+            current->loop_continue_scope_depth = current->scope_depth;
+            current->loop_handler_depth = current->handler_depth;
             current->loop_start = current_chunk()->code_len;
             current->loop_depth++;
 
@@ -2832,6 +2996,9 @@ static void compile_stmt(const Stmt *s) {
             current->loop_depth = saved_loop_depth;
             current->loop_break_local_count = saved_break_lc;
             current->loop_continue_local_count = saved_continue_lc;
+            current->loop_break_scope_depth = saved_break_sd;
+            current->loop_continue_scope_depth = saved_continue_sd;
+            current->loop_handler_depth = saved_loop_hd;
             break;
         }
 
@@ -2841,9 +3008,15 @@ static void compile_stmt(const Stmt *s) {
             int saved_loop_depth = current->loop_depth;
             size_t saved_break_lc = current->loop_break_local_count;
             size_t saved_continue_lc = current->loop_continue_local_count;
+            int saved_break_sd = current->loop_break_scope_depth;
+            int saved_continue_sd = current->loop_continue_scope_depth;
+            int saved_loop_hd = current->loop_handler_depth;
 
             current->loop_break_local_count = current->local_count;
             current->loop_continue_local_count = current->local_count;
+            current->loop_break_scope_depth = current->scope_depth;
+            current->loop_continue_scope_depth = current->scope_depth;
+            current->loop_handler_depth = current->handler_depth;
             current->loop_start = current_chunk()->code_len;
             current->loop_depth++;
 
@@ -2860,6 +3033,9 @@ static void compile_stmt(const Stmt *s) {
             current->loop_depth = saved_loop_depth;
             current->loop_break_local_count = saved_break_lc;
             current->loop_continue_local_count = saved_continue_lc;
+            current->loop_break_scope_depth = saved_break_sd;
+            current->loop_continue_scope_depth = saved_continue_sd;
+            current->loop_handler_depth = saved_loop_hd;
             break;
         }
 
@@ -2869,8 +3045,12 @@ static void compile_stmt(const Stmt *s) {
             int saved_loop_depth = current->loop_depth;
             size_t saved_break_lc = current->loop_break_local_count;
             size_t saved_continue_lc = current->loop_continue_local_count;
+            int saved_break_sd = current->loop_break_scope_depth;
+            int saved_continue_sd = current->loop_continue_scope_depth;
+            int saved_loop_hd = current->loop_handler_depth;
 
             current->loop_break_local_count = current->local_count;
+            current->loop_break_scope_depth = current->scope_depth;
 
             begin_scope();
             /* Compile iterator expression and init */
@@ -2884,6 +3064,8 @@ static void compile_stmt(const Stmt *s) {
 
             /* continue should preserve iterator state but pop loop var + body locals */
             current->loop_continue_local_count = current->local_count;
+            current->loop_continue_scope_depth = current->scope_depth;
+            current->loop_handler_depth = current->handler_depth;
 
             current->loop_start = current_chunk()->code_len;
             current->loop_depth++;
@@ -2899,8 +3081,10 @@ static void compile_stmt(const Stmt *s) {
             for (size_t i = 0; i < s->as.for_loop.body_count; i++) compile_stmt_reset(s->as.for_loop.body[i]);
             end_scope(0);
 
-            /* Pop loop variable */
-            emit_byte(OP_POP, line);
+            /* A captured loop binding is a distinct cell per iteration. Close
+             * it before the slot is popped and reused by ITER_NEXT. */
+            if (current->locals[current->local_count - 1].is_captured) emit_byte(OP_CLOSE_UPVALUE, line);
+            else emit_byte(OP_POP, line);
             free(current->locals[current->local_count - 1].name);
             current->local_count--;
 
@@ -2925,6 +3109,9 @@ static void compile_stmt(const Stmt *s) {
             current->loop_depth = saved_loop_depth;
             current->loop_break_local_count = saved_break_lc;
             current->loop_continue_local_count = saved_continue_lc;
+            current->loop_break_scope_depth = saved_break_sd;
+            current->loop_continue_scope_depth = saved_continue_sd;
+            current->loop_handler_depth = saved_loop_hd;
             break;
         }
 
@@ -2933,14 +3120,8 @@ static void compile_stmt(const Stmt *s) {
                 set_compile_error(s->line, "break outside of loop");
                 return;
             }
-            /* Pop locals declared inside the loop before jumping out */
-            for (size_t i = current->local_count; i > current->loop_break_local_count; i--) {
-                if (current->locals[i - 1].is_captured) {
-                    emit_byte(OP_CLOSE_UPVALUE, line);
-                } else {
-                    emit_byte(OP_POP, line);
-                }
-            }
+            emit_loop_control_unwind(current->loop_break_local_count, current->loop_break_scope_depth,
+                                     current->loop_handler_depth, line);
             size_t jump = emit_jump(OP_JUMP, line);
             push_break_jump(jump);
             break;
@@ -2951,20 +3132,48 @@ static void compile_stmt(const Stmt *s) {
                 set_compile_error(s->line, "continue outside of loop");
                 return;
             }
-            /* Pop locals declared inside the loop before jumping back */
-            for (size_t i = current->local_count; i > current->loop_continue_local_count; i--) {
-                if (current->locals[i - 1].is_captured) {
-                    emit_byte(OP_CLOSE_UPVALUE, line);
-                } else {
-                    emit_byte(OP_POP, line);
-                }
-            }
+            emit_loop_control_unwind(current->loop_continue_local_count, current->loop_continue_scope_depth,
+                                     current->loop_handler_depth, line);
             emit_loop(current->loop_start, line);
             break;
         }
 
         case STMT_DESTRUCTURE: {
             compile_expr(s->as.destructure.value, line);
+            if (s->as.destructure.kind == DESTRUCT_ARRAY) {
+                /* Validate type and shape before creating any bindings. */
+                compile_pattern_type_check(VAL_ARRAY, line);
+                emit_assert_tos("cannot destructure value as array", line);
+
+                emit_byte(OP_DUP, line);
+                size_t len_idx = chunk_add_constant(current_chunk(), value_string("len"));
+                emit_op_const8(OP_INVOKE, len_idx, line);
+                emit_byte(0, line);
+                emit_constant(value_int((int64_t)s->as.destructure.name_count), line);
+                emit_byte(s->as.destructure.rest_name ? OP_GTEQ : OP_EQ, line);
+                emit_assert_tos(s->as.destructure.rest_name ? "array destructure has too few elements"
+                                                            : "array destructure length mismatch",
+                                line);
+            } else {
+                /* Struct destructuring accepts only Struct and Map values. Check
+                 * the source before creating any local or global bindings. */
+                compile_pattern_type_check(VAL_STRUCT, line);
+                size_t is_struct = emit_jump(OP_JUMP_IF_TRUE, line);
+                emit_byte(OP_POP, line);
+                compile_pattern_type_check(VAL_MAP, line);
+                patch_jump(is_struct);
+                emit_assert_tos("cannot destructure value as struct", line);
+
+                /* Validate the complete shape before claiming a hidden source
+                 * slot or defining any user binding. This keeps destructuring
+                 * atomic when a later requested field is absent. */
+                for (size_t i = 0; i < s->as.destructure.name_count; i++) {
+                    emit_byte(OP_DUP, line);
+                    size_t field_idx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
+                    emit_op_const8(OP_HAS_FIELD, field_idx, line);
+                    emit_assert_tos("destructure field not found", line);
+                }
+            }
             if (current->scope_depth > 0) {
                 /* Store source as hidden local so each extraction can reference it */
                 size_t src_slot = current->local_count;
@@ -2974,6 +3183,8 @@ static void compile_stmt(const Stmt *s) {
                         emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
                         emit_constant(value_int((int64_t)i), line);
                         emit_byte(OP_INDEX, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL) emit_byte(OP_FREEZE, line);
                         add_local(s->as.destructure.names[i]);
                     }
                     if (s->as.destructure.rest_name) {
@@ -2988,6 +3199,8 @@ static void compile_stmt(const Stmt *s) {
                         emit_byte(0, line); /* 0 args to .len() */
                         emit_byte(OP_BUILD_RANGE, line);
                         emit_byte(OP_INDEX, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL) emit_byte(OP_FREEZE, line);
                         add_local(s->as.destructure.rest_name);
                     }
                 } else {
@@ -2995,6 +3208,8 @@ static void compile_stmt(const Stmt *s) {
                         emit_bytes(OP_GET_LOCAL, (uint8_t)src_slot, line);
                         size_t fidx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
                         emit_op_const8(OP_GET_FIELD, fidx, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL) emit_byte(OP_FREEZE, line);
                         add_local(s->as.destructure.names[i]);
                     }
                 }
@@ -3006,6 +3221,8 @@ static void compile_stmt(const Stmt *s) {
                         emit_byte(OP_DUP, line);
                         emit_constant(value_int((int64_t)i), line);
                         emit_byte(OP_INDEX, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL) emit_byte(OP_FREEZE, line);
                         size_t idx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, idx, line);
                     }
@@ -3022,6 +3239,8 @@ static void compile_stmt(const Stmt *s) {
                         emit_byte(OP_SWAP, line);              /* [source, source, start, len] */
                         emit_byte(OP_BUILD_RANGE, line);       /* [source, source, Range(start..len)] */
                         emit_byte(OP_INDEX, line);             /* [source, rest_slice] */
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL) emit_byte(OP_FREEZE, line);
                         size_t rest_idx =
                             chunk_add_constant(current_chunk(), value_string(s->as.destructure.rest_name));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, rest_idx, line);
@@ -3031,6 +3250,8 @@ static void compile_stmt(const Stmt *s) {
                         emit_byte(OP_DUP, line);
                         size_t fidx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
                         emit_op_const8(OP_GET_FIELD, fidx, line);
+                        if (s->as.destructure.phase == PHASE_FLUID) emit_byte(OP_MARK_FLUID, line);
+                        else if (s->as.destructure.phase == PHASE_CRYSTAL) emit_byte(OP_FREEZE, line);
                         size_t nidx = chunk_add_constant(current_chunk(), value_string(s->as.destructure.names[i]));
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, nidx, line);
                     }
@@ -3041,20 +3262,24 @@ static void compile_stmt(const Stmt *s) {
         }
 
         case STMT_DEFER: {
-            /* Emit OP_DEFER_PUSH with scope_depth + offset past the defer body.
-             * Format: OP_DEFER_PUSH, scope_depth(1), offset(2).
-             * The scope_depth byte lets OP_DEFER_RUN run only defers
-             * registered at a given scope level. */
+            Expr block = {0};
+            block.tag = EXPR_BLOCK;
+            block.line = line;
+            block.as.block.stmts = s->as.defer.body;
+            block.as.block.count = s->as.defer.body_count;
+            Expr closure = {0};
+            closure.tag = EXPR_CLOSURE;
+            closure.line = line;
+            closure.as.closure.body = &block;
+            compile_expr(&closure, line);
+
+            /* The closure is consumed immediately and owns its lexical locals;
+             * outer bindings are ordinary upvalues. Keep the legacy offset
+             * operand at zero for bytecode-format compatibility. */
             emit_byte(OP_DEFER_PUSH, line);
             emit_byte((uint8_t)current->scope_depth, line);
-            /* Emit 2-byte jump offset placeholder */
-            emit_byte(0xff, line);
-            emit_byte(0xff, line);
-            size_t defer_jump = current_chunk()->code_len - 2;
-            for (size_t i = 0; i < s->as.defer.body_count; i++) compile_stmt(s->as.defer.body[i]);
-            emit_byte(OP_UNIT, line);   /* implicit return value for defer block */
-            emit_byte(OP_RETURN, line); /* return from defer block */
-            patch_jump(defer_jump);
+            emit_byte(0, line);
+            emit_byte(0, line);
             break;
         }
 
@@ -3070,8 +3295,16 @@ static void compile_stmt(const Stmt *s) {
                 }
             } else if (s->as.import.selective_names && s->as.import.selective_count > 0) {
                 /* Selective import: import { x, y } from "path" */
+                bool local_import = current->scope_depth > 0;
+                size_t module_slot = 0;
+                if (local_import) {
+                    add_local("");
+                    module_slot = current->local_count - 1;
+                }
                 for (size_t i = 0; i < s->as.import.selective_count; i++) {
-                    emit_byte(OP_DUP, line); /* duplicate module map */
+                    register_imported_enum_candidate(s->as.import.selective_names[i]);
+                    if (local_import) emit_bytes(OP_GET_LOCAL, (uint8_t)module_slot, line);
+                    else emit_byte(OP_DUP, line); /* duplicate module map */
                     size_t field_idx =
                         chunk_add_constant(current_chunk(), value_string(s->as.import.selective_names[i]));
                     emit_op_const8(OP_GET_FIELD, field_idx, line);
@@ -3079,9 +3312,9 @@ static void compile_stmt(const Stmt *s) {
                     emit_byte(OP_DUP, line);
                     size_t import_ok = emit_jump(OP_JUMP_IF_NOT_NIL, line);
                     /* nil → error: module does not export this name */
-                    emit_byte(OP_POP, line); /* pop nil dup */
-                    emit_byte(OP_POP, line); /* pop nil val */
-                    emit_byte(OP_POP, line); /* pop module map */
+                    emit_byte(OP_POP, line);                    /* pop nil dup */
+                    emit_byte(OP_POP, line);                    /* pop nil val */
+                    if (!local_import) emit_byte(OP_POP, line); /* pop module map */
                     {
                         char err_msg[512];
                         snprintf(err_msg, sizeof(err_msg), "module '%s' does not export '%s'", s->as.import.module_path,
@@ -3091,7 +3324,7 @@ static void compile_stmt(const Stmt *s) {
                     }
                     patch_jump(import_ok);
                     emit_byte(OP_POP, line); /* pop non-nil dup */
-                    if (current->scope_depth > 0) {
+                    if (local_import) {
                         add_local(s->as.import.selective_names[i]);
                     } else {
                         size_t name_idx =
@@ -3099,7 +3332,7 @@ static void compile_stmt(const Stmt *s) {
                         emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, line);
                     }
                 }
-                emit_byte(OP_POP, line); /* pop original module map */
+                if (!local_import) emit_byte(OP_POP, line); /* pop original module map */
             } else {
                 emit_byte(OP_POP, line);
             }
@@ -3108,15 +3341,6 @@ static void compile_stmt(const Stmt *s) {
 
         default: break;
     }
-}
-
-/* ── Constant-evaluate a default parameter expression ── */
-
-static LatValue const_eval_expr(Expr *e) {
-    if (!e) return value_nil();
-    LatValue result;
-    if (try_const_fold(e, &result)) return result;
-    return value_nil();
 }
 
 /* ── Compile function body (for ITEM_FUNCTION and closures) ── */
@@ -3147,6 +3371,23 @@ static void compile_function_body(FunctionType type, const char *name, Param *pa
 
     /* Add remaining params as locals */
     for (size_t i = first_param; i < param_count; i++) add_local(params[i].name);
+
+    /* Evaluate omitted defaults in callee scope, after earlier parameters have
+     * been installed.  The call path pads missing arguments with Nil. */
+    for (size_t i = first_param; i < param_count; i++) {
+        if (!params[i].default_value || params[i].is_variadic) continue;
+        int slot = resolve_local(current, params[i].name);
+        if (slot < 0) continue;
+        emit_bytes(OP_GET_LOCAL, (uint8_t)slot, line);
+        size_t skip = emit_default_jump(line);
+        emit_byte(OP_POP, line);
+        compile_expr(params[i].default_value, line);
+        emit_bytes(OP_SET_LOCAL_POP, (uint8_t)slot, line);
+        size_t done = emit_jump(OP_JUMP, line);
+        patch_default_jump(skip);
+        emit_byte(OP_POP, line);
+        patch_jump(done);
+    }
 
     /* Emit runtime parameter type checks */
     for (size_t i = first_param; i < param_count; i++) {
@@ -3196,9 +3437,7 @@ static void compile_function_body(FunctionType type, const char *name, Param *pa
     }
     emit_return_type_check(line);
     emit_ensure_checks(line);
-    emit_byte(OP_DEFER_RUN, line);
-    emit_byte(0, line); /* scope_depth 0 = run all defers */
-    emit_byte(OP_RETURN, line);
+    emit_deferred_return(line);
 
     Chunk *fn_chunk = func_comp.chunk;
     size_t upvalue_count = func_comp.upvalue_count;
@@ -3223,7 +3462,7 @@ static void compile_function_body(FunctionType type, const char *name, Param *pa
         if (!fn_chunk->default_values) return;
         int di = 0;
         for (size_t i = first_param; i < param_count; i++) {
-            if (params[i].default_value) { fn_chunk->default_values[di++] = const_eval_expr(params[i].default_value); }
+            if (params[i].default_value) { fn_chunk->default_values[di++] = value_nil(); }
         }
     }
 
@@ -3238,7 +3477,8 @@ static void compile_function_body(FunctionType type, const char *name, Param *pa
             }
         }
         if (has_phase_constraints) {
-            int pc = (int)(param_count - first_param);
+            int pc = 0;
+            for (size_t i = first_param; i < param_count && !params[i].is_variadic; i++) pc++;
             fn_chunk->param_phases = calloc(pc, sizeof(uint8_t));
             if (!fn_chunk->param_phases) return;
             fn_chunk->param_phase_count = pc;
@@ -3364,12 +3604,8 @@ Chunk *stack_compile(const Program *prog, char **error) {
             case ITEM_ENUM: {
                 /* Store enum metadata */
                 EnumDecl *ed = &prog->items[i].as.enum_decl;
-                register_enum(ed->name);
-                char meta_name[256];
-                snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
-                emit_byte(OP_TRUE, 0);
-                size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                register_enum(ed);
+                emit_enum_metadata(ed, 0);
                 break;
             }
 
@@ -3425,7 +3661,7 @@ Chunk *stack_compile(const Program *prog, char **error) {
     }
 
     emit_byte(OP_UNIT, last_line);
-    emit_byte(OP_RETURN, last_line);
+    emit_deferred_return(last_line);
 
     Chunk *result = top.chunk;
     compiler_cleanup(&top);
@@ -3490,12 +3726,8 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
             }
             case ITEM_ENUM: {
                 EnumDecl *ed = &prog->items[i].as.enum_decl;
-                register_enum(ed->name);
-                char meta_name[256];
-                snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
-                emit_byte(OP_TRUE, 0);
-                size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                register_enum(ed);
+                emit_enum_metadata(ed, 0);
                 break;
             }
             case ITEM_IMPL: {
@@ -3530,7 +3762,7 @@ Chunk *stack_compile_module(const Program *prog, char **error) {
 
     /* No auto-call of main() for modules */
     emit_byte(OP_UNIT, 0);
-    emit_byte(OP_RETURN, 0);
+    emit_deferred_return(0);
 
     Chunk *result = top.chunk;
 
@@ -3618,12 +3850,8 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
             }
             case ITEM_ENUM: {
                 EnumDecl *ed = &prog->items[i].as.enum_decl;
-                register_enum(ed->name);
-                char meta_name[256];
-                snprintf(meta_name, sizeof(meta_name), "__enum_%s", ed->name);
-                emit_byte(OP_TRUE, 0);
-                size_t name_idx = chunk_add_constant(current_chunk(), value_string(meta_name));
-                emit_constant_idx(OP_DEFINE_GLOBAL, OP_DEFINE_GLOBAL_16, name_idx, 0);
+                register_enum(ed);
+                emit_enum_metadata(ed, 0);
                 break;
             }
             case ITEM_IMPL: {
@@ -3661,10 +3889,10 @@ Chunk *stack_compile_repl(const Program *prog, char **error) {
                          prog->items[prog->item_count - 1].as.stmt->tag == STMT_EXPR);
 
     if (last_is_expr) {
-        emit_byte(OP_RETURN, 0);
+        emit_deferred_return(0);
     } else {
         emit_byte(OP_UNIT, 0);
-        emit_byte(OP_RETURN, 0);
+        emit_deferred_return(0);
     }
 
     Chunk *result = top.chunk;

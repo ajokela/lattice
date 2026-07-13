@@ -44,8 +44,13 @@ typedef struct RegChunk {
     char **export_names; /* Module export list (NULL = export-all) */
     size_t export_count;
     bool has_exports; /* true if module uses explicit exports */
-    uint8_t max_reg;  /* High-water register count (for bounded init/cleanup) */
-    PICTable pic;     /* Polymorphic inline cache for method dispatch */
+    /* Imported modules keep their globals private while their exported
+     * closures retain access to them. Nested function chunks borrow this
+     * environment; only the module's root chunk owns it. */
+    Env *module_env;
+    bool owns_module_env;
+    uint8_t max_reg; /* High-water register count (for bounded init/cleanup) */
+    PICTable pic;    /* Polymorphic inline cache for method dispatch */
 } RegChunk;
 
 RegChunk *regchunk_new(void);
@@ -77,15 +82,14 @@ typedef struct {
     RegChunk *chunk;
     size_t frame_index;
     size_t reg_stack_top;
-    uint8_t error_reg; /* Register to store error value */
+    uint8_t error_reg;  /* Register to store error value */
+    size_t defer_count; /* Defer stack depth at handler registration */
 } RegHandler;
 
 /* Defer entry */
 typedef struct {
-    RegInstr *ip; /* Defer body start */
-    RegChunk *chunk;
+    LatValue closure; /* Hidden zero-argument cleanup closure */
     size_t frame_index;
-    LatValue *regs;
     int scope_depth; /* Scope depth when defer was registered */
 } RegDefer;
 
@@ -110,6 +114,7 @@ typedef struct RegVM {
     /* Defer stack */
     RegDefer defers[REGVM_DEFER_MAX];
     size_t defer_count;
+    bool unwinding_defers;
     /* Per-VM module cache (for OP_IMPORT in dispatch loop) */
     LatMap *module_cache;
     /* Ephemeral bump arena */

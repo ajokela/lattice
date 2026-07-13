@@ -5491,6 +5491,7 @@ static uint8_t *build_latc_image(const uint8_t *code, uint32_t code_len, const L
     lb_byte(&b, 0); /* has_name */
     lb_byte(&b, 0); /* fn_has_variadic */
     lb_u32(&b, 0);  /* default_count */
+    lb_u32(&b, 0);  /* param_phase_count (v3) */
     *out_len = b.len;
     return b.d;
 }
@@ -5624,6 +5625,9 @@ static uint8_t *build_rlatc_image(const uint32_t *code, uint32_t code_len, const
     }
     lb_u32(&b, 0);        /* local_name_count */
     lb_byte(&b, max_reg); /* max_reg */
+    lb_u32(&b, 0);        /* default_count (v3) */
+    lb_u32(&b, 0);        /* param_phase_count (v3) */
+    lb_byte(&b, 0);       /* has_name (v3) */
     *out_len = b.len;
     return b.d;
 }

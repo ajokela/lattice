@@ -179,16 +179,12 @@ LatValue math_min(const LatValue *a, const LatValue *b, char **err) {
         return value_unit();
     }
 
-    /* Both same type */
-    if (a->type == VAL_INT && b->type == VAL_INT) {
-        return value_int(a->as.int_val < b->as.int_val ? a->as.int_val : b->as.int_val);
+    ValueNumericCmp cmp = value_numeric_compare(a, b);
+    if (cmp == VALUE_CMP_UNORDERED) {
+        *err = strdup("min() cannot compare NaN");
+        return value_unit();
     }
-    if (a->type == VAL_FLOAT && b->type == VAL_FLOAT) { return value_float(fmin(a->as.float_val, b->as.float_val)); }
-
-    /* Mixed: promote to Float */
-    double da = to_double(a);
-    double db = to_double(b);
-    return value_float(fmin(da, db));
+    return value_deep_clone(cmp == VALUE_CMP_GREATER ? b : a);
 }
 
 /* ── max ── */
@@ -199,16 +195,12 @@ LatValue math_max(const LatValue *a, const LatValue *b, char **err) {
         return value_unit();
     }
 
-    /* Both same type */
-    if (a->type == VAL_INT && b->type == VAL_INT) {
-        return value_int(a->as.int_val > b->as.int_val ? a->as.int_val : b->as.int_val);
+    ValueNumericCmp cmp = value_numeric_compare(a, b);
+    if (cmp == VALUE_CMP_UNORDERED) {
+        *err = strdup("max() cannot compare NaN");
+        return value_unit();
     }
-    if (a->type == VAL_FLOAT && b->type == VAL_FLOAT) { return value_float(fmax(a->as.float_val, b->as.float_val)); }
-
-    /* Mixed: promote to Float */
-    double da = to_double(a);
-    double db = to_double(b);
-    return value_float(fmax(da, db));
+    return value_deep_clone(cmp == VALUE_CMP_LESS ? b : a);
 }
 
 /* ── random ── */
@@ -252,7 +244,10 @@ LatValue math_random_int(const LatValue *low, const LatValue *high, char **err) 
         return value_int((int64_t)math_rand_u64());
     }
     uint64_t range = span + 1;
-    int64_t result = lo + (int64_t)((uint64_t)rand() % range);
+    uint64_t sample;
+    uint64_t limit = UINT64_MAX - (UINT64_MAX % range);
+    do { sample = math_rand_u64(); } while (sample >= limit);
+    int64_t result = (int64_t)((uint64_t)lo + (sample % range));
     return value_int(result);
 }
 
@@ -452,14 +447,18 @@ LatValue math_gcd(const LatValue *a, const LatValue *b, char **err) {
     }
     int64_t x = a->as.int_val;
     int64_t y = b->as.int_val;
-    if (x < 0) x = -x;
-    if (y < 0) y = -y;
-    while (y != 0) {
-        int64_t t = y;
-        y = x % y;
-        x = t;
+    uint64_t ux = x < 0 ? (uint64_t)(-(x + 1)) + 1u : (uint64_t)x;
+    uint64_t uy = y < 0 ? (uint64_t)(-(y + 1)) + 1u : (uint64_t)y;
+    while (uy != 0) {
+        uint64_t t = uy;
+        uy = ux % uy;
+        ux = t;
     }
-    return value_int(x);
+    if (ux > (uint64_t)INT64_MAX) {
+        *err = strdup("gcd(): result does not fit in Int");
+        return value_unit();
+    }
+    return value_int((int64_t)ux);
 }
 
 /* ── lcm ── */
@@ -473,16 +472,20 @@ LatValue math_lcm(const LatValue *a, const LatValue *b, char **err) {
     int64_t y = b->as.int_val;
     if (x == 0 || y == 0) return value_int(0);
     /* compute gcd first */
-    int64_t ax = x < 0 ? -x : x;
-    int64_t ay = y < 0 ? -y : y;
-    int64_t gx = ax, gy = ay;
+    uint64_t ax = x < 0 ? (uint64_t)(-(x + 1)) + 1u : (uint64_t)x;
+    uint64_t ay = y < 0 ? (uint64_t)(-(y + 1)) + 1u : (uint64_t)y;
+    uint64_t gx = ax, gy = ay;
     while (gy != 0) {
-        int64_t t = gy;
+        uint64_t t = gy;
         gy = gx % gy;
         gx = t;
     }
-    /* lcm = abs(a*b) / gcd(a,b) — divide first to reduce overflow risk */
-    return value_int((ax / gx) * ay);
+    uint64_t result = (ax / gx) * ay;
+    if (result > (uint64_t)INT64_MAX) {
+        *err = strdup("lcm(): result does not fit in Int");
+        return value_unit();
+    }
+    return value_int((int64_t)result);
 }
 
 /* ── is_nan ── */

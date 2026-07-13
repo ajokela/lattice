@@ -137,7 +137,7 @@ typedef enum {
     ROP_TRY_UNWRAP,   /* A         : unwrap ok or propagate err        */
 
     /* Defer */
-    ROP_DEFER_PUSH, /* sBx       : register defer body, skip past    */
+    ROP_DEFER_PUSH, /* A, B      : closure register, scope depth     */
     ROP_DEFER_RUN,  /*           : execute defers in LIFO order      */
 
     /* Destructuring (compiler-only, uses existing ops) */
@@ -231,6 +231,21 @@ typedef enum {
      * if R[A] is crystal/sublimated, else no-op. Appended at the end to
      * preserve every existing opcode number for already-serialized .rlatc. */
     ROP_CHECK_MUTABLE, /* A : throw if R[A].phase is CRYSTAL/SUBLIMATED */
+
+    /* LAT-598: select chooser over pre-evaluated contiguous arm operands.
+     * A=pair destination, B=operand base, C=arm count; followed by
+     * ceil(C/3) raw words packing one arm's flags per A/B/C field. Produces
+     * [selected_index, received_value], with index -1 when no arm fires. */
+    ROP_SELECT_CHOOSE,
+
+    /* Recursive match lowering helpers. Appended for bytecode compatibility. */
+    ROP_MATCH_TYPE,  /* A=result, B=value, C=ValueType */
+    ROP_MATCH_FIELD, /* 2-word: A=present, B=value, C=object; data Bx=field key */
+    ROP_MATCH_PHASE, /* A=result, B=value, C=AstPhase */
+
+    /* Runtime validation for enum metadata obtained through a module import.
+     * Two-word: A=metadata array, B=payload arity; data Bx=variant key. */
+    ROP_CHECK_ENUM_VARIANT,
 
     ROP_COUNT /* number of opcodes                             */
 } RegOpcode;

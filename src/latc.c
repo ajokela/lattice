@@ -11,6 +11,7 @@
 #define TAG_NIL     4
 #define TAG_UNIT    5
 #define TAG_CLOSURE 6
+#define TAG_ARRAY   7 /* v3 metadata arrays (struct fields/phases) */
 
 /* ── Growable byte buffer (writer) ── */
 
@@ -128,6 +129,121 @@ static bool br_read_bytes(ByteReader *br, void *dst, size_t n) {
  * lengths/counts before they drive an allocation or a loop. */
 static size_t br_remaining(const ByteReader *br) { return br->len - br->pos; }
 
+/* Struct declaration metadata is stored in constant-pool arrays. Keep the
+ * on-disk element surface deliberately scalar; executable/nested constants do
+ * not belong in these tables. */
+static void serialize_metadata_array(ByteBuf *bb, const LatValue *array) {
+    bb_write_u32_le(bb, (uint32_t)array->as.array.len);
+    for (size_t i = 0; i < array->as.array.len; i++) {
+        const LatValue *v = &array->as.array.elems[i];
+        switch (v->type) {
+            case VAL_INT:
+                bb_write_u8(bb, TAG_INT);
+                bb_write_i64_le(bb, v->as.int_val);
+                break;
+            case VAL_FLOAT:
+                bb_write_u8(bb, TAG_FLOAT);
+                bb_write_f64_le(bb, v->as.float_val);
+                break;
+            case VAL_BOOL:
+                bb_write_u8(bb, TAG_BOOL);
+                bb_write_u8(bb, v->as.bool_val ? 1 : 0);
+                break;
+            case VAL_STR: {
+                bb_write_u8(bb, TAG_STR);
+                uint32_t len = (uint32_t)strlen(v->as.str_val);
+                bb_write_u32_le(bb, len);
+                bb_write_bytes(bb, v->as.str_val, len);
+                break;
+            }
+            case VAL_UNIT: bb_write_u8(bb, TAG_UNIT); break;
+            default: bb_write_u8(bb, TAG_NIL); break;
+        }
+    }
+}
+
+static bool deserialize_metadata_array(ByteReader *br, LatValue *out, char **err) {
+    uint32_t count;
+    if (!br_read_u32_le(br, &count) || count > UINT16_MAX || (size_t)count > br_remaining(br)) {
+        *err = strdup("invalid or truncated metadata array");
+        return false;
+    }
+
+    /* Chunks outlive whichever runtime happens to load them. Keep their
+     * metadata constants malloc-owned instead of routing them through the
+     * caller's active fluid heap or arena. */
+    struct DualHeap *saved_heap = value_get_heap();
+    struct CrystalRegion *saved_arena = value_get_arena();
+    value_set_heap(NULL);
+    value_set_arena(NULL);
+
+    LatValue *elems = count ? calloc(count, sizeof(LatValue)) : NULL;
+    if (count && !elems) {
+        value_set_heap(saved_heap);
+        value_set_arena(saved_arena);
+        *err = strdup("out of memory: metadata array");
+        return false;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t tag;
+        bool ok = br_read_u8(br, &tag);
+        if (ok) {
+            switch (tag) {
+                case TAG_INT: {
+                    int64_t value;
+                    ok = br_read_i64_le(br, &value);
+                    if (ok) elems[i] = value_int(value);
+                    break;
+                }
+                case TAG_FLOAT: {
+                    double value;
+                    ok = br_read_f64_le(br, &value);
+                    if (ok) elems[i] = value_float(value);
+                    break;
+                }
+                case TAG_BOOL: {
+                    uint8_t value;
+                    ok = br_read_u8(br, &value);
+                    if (ok) elems[i] = value_bool(value != 0);
+                    break;
+                }
+                case TAG_STR: {
+                    uint32_t len;
+                    ok = br_read_u32_le(br, &len) && len != UINT32_MAX && (size_t)len <= br_remaining(br);
+                    if (ok) {
+                        char *value = malloc((size_t)len + 1);
+                        ok = value && br_read_bytes(br, value, len);
+                        if (ok) {
+                            value[len] = '\0';
+                            elems[i] = value_string_owned(value);
+                        } else {
+                            free(value);
+                        }
+                    }
+                    break;
+                }
+                case TAG_NIL: elems[i] = value_nil(); break;
+                case TAG_UNIT: elems[i] = value_unit(); break;
+                default: ok = false; break;
+            }
+        }
+        if (!ok) {
+            for (uint32_t j = 0; j < i; j++) value_free(&elems[j]);
+            free(elems);
+            value_set_heap(saved_heap);
+            value_set_arena(saved_arena);
+            *err = strdup("invalid or truncated metadata array element");
+            return false;
+        }
+    }
+    *out = value_array(elems, count);
+    /* value_array copies the handles and takes their ownership. */
+    free(elems);
+    value_set_heap(saved_heap);
+    value_set_arena(saved_arena);
+    return true;
+}
+
 /* ── Serialize a single chunk (recursive) ── */
 
 static void serialize_chunk(ByteBuf *bb, const Chunk *c) {
@@ -165,6 +281,10 @@ static void serialize_chunk(ByteBuf *bb, const Chunk *c) {
             }
             case VAL_NIL: bb_write_u8(bb, TAG_NIL); break;
             case VAL_UNIT: bb_write_u8(bb, TAG_UNIT); break;
+            case VAL_ARRAY:
+                bb_write_u8(bb, TAG_ARRAY);
+                serialize_metadata_array(bb, v);
+                break;
             case VAL_CLOSURE:
                 /* Compiled sub-chunk: body==NULL, native_fn holds Chunk* */
                 if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) {
@@ -241,11 +361,17 @@ static void serialize_chunk(ByteBuf *bb, const Chunk *c) {
             default: bb_write_u8(bb, TAG_NIL); break;
         }
     }
+
+    /* v3: parameter phase constraints. A zero count represents an
+     * unconstrained chunk and avoids serializing a meaningless NULL table. */
+    uint32_t phase_count = c->param_phases && c->param_phase_count > 0 ? (uint32_t)c->param_phase_count : 0;
+    bb_write_u32_le(bb, phase_count);
+    if (phase_count > 0) bb_write_bytes(bb, c->param_phases, phase_count);
 }
 
 /* ── Deserialize a single chunk (recursive) ── */
 
-static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
+static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth, uint16_t version) {
     /* Bound recursion so a deeply nested closure tree in an untrusted .latc
      * cannot overflow the C stack during load. */
     if (depth > 200) {
@@ -409,6 +535,15 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
             }
             case TAG_NIL: chunk_add_constant_nodupe(c, value_nil()); break;
             case TAG_UNIT: chunk_add_constant_nodupe(c, value_unit()); break;
+            case TAG_ARRAY: {
+                LatValue array;
+                if (!deserialize_metadata_array(br, &array, err)) {
+                    chunk_free(c);
+                    return NULL;
+                }
+                chunk_add_constant_nodupe(c, array);
+                break;
+            }
             case TAG_CLOSURE: {
                 uint32_t param_count;
                 uint8_t has_variadic;
@@ -422,8 +557,15 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
                     chunk_free(c);
                     return NULL;
                 }
-                Chunk *sub = deserialize_chunk(br, err, depth + 1);
+                Chunk *sub = deserialize_chunk(br, err, depth + 1, version);
                 if (!sub) {
+                    chunk_free(c);
+                    return NULL;
+                }
+                if (param_count > UINT8_MAX || sub->default_count > (int)param_count ||
+                    sub->param_phase_count > (int)param_count) {
+                    *err = strdup("invalid closure call metadata");
+                    chunk_free(sub);
                     chunk_free(c);
                     return NULL;
                 }
@@ -617,6 +759,38 @@ static Chunk *deserialize_chunk(ByteReader *br, char **err, int depth) {
         }
     }
 
+    if (version >= 3) {
+        uint32_t phase_count;
+        if (!br_read_u32_le(br, &phase_count)) {
+            *err = strdup("truncated: missing parameter phase metadata");
+            chunk_free(c);
+            return NULL;
+        }
+        if (phase_count > UINT8_MAX || (size_t)phase_count > br_remaining(br)) {
+            *err = strdup("invalid or truncated parameter phase metadata");
+            chunk_free(c);
+            return NULL;
+        }
+        if (phase_count > 0) {
+            c->param_phases = malloc(phase_count);
+            if (!c->param_phases) {
+                *err = strdup("out of memory: parameter phases");
+                chunk_free(c);
+                return NULL;
+            }
+            for (uint32_t i = 0; i < phase_count; i++) {
+                uint8_t phase;
+                if (!br_read_u8(br, &phase) || phase > PHASE_UNSPECIFIED) {
+                    *err = strdup("invalid or truncated parameter phase value");
+                    chunk_free(c);
+                    return NULL;
+                }
+                c->param_phases[i] = phase;
+            }
+            c->param_phase_count = (int)phase_count;
+        }
+    }
+
     return c;
 }
 
@@ -656,7 +830,7 @@ Chunk *chunk_deserialize(const uint8_t *data, size_t len, char **err) {
         *err = strdup("truncated: missing format version");
         return NULL;
     }
-    if (version != LATC_FORMAT) {
+    if (version < LATC_MIN_FORMAT || version > LATC_FORMAT) {
         char msg[64];
         snprintf(msg, sizeof(msg), "unsupported .latc format version: %u", version);
         *err = strdup(msg);
@@ -669,7 +843,7 @@ Chunk *chunk_deserialize(const uint8_t *data, size_t len, char **err) {
         return NULL;
     }
 
-    Chunk *c = deserialize_chunk(&br, err, 0);
+    Chunk *c = deserialize_chunk(&br, err, 0, version);
     if (!c) return NULL;
 
     /* Reject untrusted bytecode with invalid opcodes/operands before it can
@@ -748,6 +922,9 @@ Chunk *chunk_load(const char *path, char **err) {
  *   lines_len(u32) + lines(u32[])
  *   const_len(u32) + tagged constants
  *   local_name_cap(u32) + local names
+ *   max_reg(u8)
+ *   v3: default_count(u32) + param_phase_count(u32) + phase bytes
+ *       + optional chunk name
  * ═══════════════════════════════════════════════════════ */
 
 static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
@@ -785,6 +962,10 @@ static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
             }
             case VAL_NIL: bb_write_u8(bb, TAG_NIL); break;
             case VAL_UNIT: bb_write_u8(bb, TAG_UNIT); break;
+            case VAL_ARRAY:
+                bb_write_u8(bb, TAG_ARRAY);
+                serialize_metadata_array(bb, v);
+                break;
             case VAL_CLOSURE:
                 /* Compiled sub-chunk: body==NULL, native_fn holds RegChunk* */
                 if (v->as.closure.body == NULL && v->as.closure.native_fn != NULL) {
@@ -817,9 +998,25 @@ static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
 
     /* max_reg (high-water register count for bounded init/cleanup) */
     bb_write_u8(bb, c->max_reg);
+
+    /* v3 function call and diagnostic metadata. RegVM default expressions are
+     * bytecode, so only the count is needed for arity checks. */
+    uint32_t default_count = c->default_count > 0 ? (uint32_t)c->default_count : 0;
+    bb_write_u32_le(bb, default_count);
+    uint32_t phase_count = c->param_phases && c->param_phase_count > 0 ? (uint32_t)c->param_phase_count : 0;
+    bb_write_u32_le(bb, phase_count);
+    if (phase_count > 0) bb_write_bytes(bb, c->param_phases, phase_count);
+    if (c->name) {
+        bb_write_u8(bb, 1);
+        uint32_t name_len = (uint32_t)strlen(c->name);
+        bb_write_u32_le(bb, name_len);
+        bb_write_bytes(bb, c->name, name_len);
+    } else {
+        bb_write_u8(bb, 0);
+    }
 }
 
-static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
+static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth, uint16_t version) {
     /* Bound recursion so a deeply nested closure tree in an untrusted .rlatc
      * cannot overflow the C stack during load. */
     if (depth > 200) {
@@ -974,6 +1171,15 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
             }
             case TAG_NIL: regchunk_add_constant(c, value_nil()); break;
             case TAG_UNIT: regchunk_add_constant(c, value_unit()); break;
+            case TAG_ARRAY: {
+                LatValue array;
+                if (!deserialize_metadata_array(br, &array, err)) {
+                    regchunk_free(c);
+                    return NULL;
+                }
+                regchunk_add_constant(c, array);
+                break;
+            }
             case TAG_CLOSURE: {
                 uint32_t param_count;
                 uint8_t has_variadic;
@@ -995,8 +1201,15 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
                     regchunk_free(c);
                     return NULL;
                 }
-                RegChunk *sub = deserialize_regchunk(br, err, depth + 1);
+                RegChunk *sub = deserialize_regchunk(br, err, depth + 1, version);
                 if (!sub) {
+                    regchunk_free(c);
+                    return NULL;
+                }
+                if (param_count > UINT8_MAX || upvalue_count > UINT8_MAX || sub->default_count > (int)param_count ||
+                    sub->param_phase_count > (int)param_count) {
+                    *err = strdup("invalid closure call metadata");
+                    regchunk_free(sub);
                     regchunk_free(c);
                     return NULL;
                 }
@@ -1085,6 +1298,67 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth) {
     }
     c->max_reg = max_reg;
 
+    if (version >= 3) {
+        uint32_t default_count;
+        uint32_t phase_count;
+        if (!br_read_u32_le(br, &default_count) || !br_read_u32_le(br, &phase_count)) {
+            *err = strdup("truncated: missing function call metadata");
+            regchunk_free(c);
+            return NULL;
+        }
+        if (default_count > UINT8_MAX || phase_count > UINT8_MAX || (size_t)phase_count > br_remaining(br)) {
+            *err = strdup("invalid or truncated function call metadata");
+            regchunk_free(c);
+            return NULL;
+        }
+        c->default_count = (int)default_count;
+        if (phase_count > 0) {
+            c->param_phases = malloc(phase_count);
+            if (!c->param_phases) {
+                *err = strdup("out of memory: parameter phases");
+                regchunk_free(c);
+                return NULL;
+            }
+            for (uint32_t i = 0; i < phase_count; i++) {
+                uint8_t phase;
+                if (!br_read_u8(br, &phase) || phase > PHASE_UNSPECIFIED) {
+                    *err = strdup("invalid or truncated parameter phase value");
+                    regchunk_free(c);
+                    return NULL;
+                }
+                c->param_phases[i] = phase;
+            }
+            c->param_phase_count = (int)phase_count;
+        }
+
+        uint8_t has_name;
+        if (!br_read_u8(br, &has_name) || has_name > 1) {
+            *err = strdup("invalid or truncated chunk name flag");
+            regchunk_free(c);
+            return NULL;
+        }
+        if (has_name) {
+            uint32_t name_len;
+            if (!br_read_u32_le(br, &name_len) || name_len == UINT32_MAX || (size_t)name_len > br_remaining(br)) {
+                *err = strdup("invalid or truncated chunk name");
+                regchunk_free(c);
+                return NULL;
+            }
+            c->name = malloc((size_t)name_len + 1);
+            if (!c->name) {
+                *err = strdup("out of memory: chunk name");
+                regchunk_free(c);
+                return NULL;
+            }
+            if (!br_read_bytes(br, c->name, name_len)) {
+                *err = strdup("truncated: incomplete chunk name");
+                regchunk_free(c);
+                return NULL;
+            }
+            c->name[name_len] = '\0';
+        }
+    }
+
     return c;
 }
 
@@ -1115,14 +1389,14 @@ RegChunk *regchunk_deserialize(const uint8_t *data, size_t len, char **err) {
         *err = strdup("truncated version");
         return NULL;
     }
-    if (version != RLATC_FORMAT) {
+    if (version < RLATC_MIN_FORMAT || version > RLATC_FORMAT) {
         *err = strdup("unsupported .rlatc format version");
         return NULL;
     }
     uint16_t reserved;
     br_read_u16_le(&br, &reserved);
 
-    RegChunk *c = deserialize_regchunk(&br, err, 0);
+    RegChunk *c = deserialize_regchunk(&br, err, 0, version);
     if (!c) return NULL;
 
     /* Reject untrusted bytecode with invalid opcodes/operands before it can

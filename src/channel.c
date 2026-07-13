@@ -1,7 +1,10 @@
 #include "channel.h"
 #include "value.h"
+#include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef __EMSCRIPTEN__
 /* Per-channel waiter node.
@@ -78,6 +81,7 @@ bool channel_send(LatChannel *ch, LatValue val) {
     /* Wake any select waiters */
     for (ChWaiterNode *w = (ChWaiterNode *)ch->waiters; w; w = w->next) {
         pthread_mutex_lock(w->mutex);
+        w->owner->notified = true;
         pthread_cond_signal(w->cond);
         pthread_mutex_unlock(w->mutex);
     }
@@ -125,6 +129,7 @@ void channel_close(LatChannel *ch) {
     /* Wake any select waiters */
     for (ChWaiterNode *w = (ChWaiterNode *)ch->waiters; w; w = w->next) {
         pthread_mutex_lock(w->mutex);
+        w->owner->notified = true;
         pthread_cond_signal(w->cond);
         pthread_mutex_unlock(w->mutex);
     }
@@ -156,12 +161,12 @@ bool channel_try_recv(LatChannel *ch, LatValue *out, bool *closed_out) {
     return true;
 }
 
-void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w) {
+bool channel_add_waiter(LatChannel *ch, LatSelectWaiter *w) {
 #ifndef __EMSCRIPTEN__
     /* Allocate a node private to THIS channel so the owner's single `next`
      * pointer is never shared between channel lists (see ChWaiterNode above). */
     ChWaiterNode *node = malloc(sizeof(ChWaiterNode));
-    if (!node) return; /* OOM: skip registration; the select still re-polls */
+    if (!node) return false;
     node->owner = w;
     node->mutex = w->mutex;
     node->cond = w->cond;
@@ -169,9 +174,11 @@ void channel_add_waiter(LatChannel *ch, LatSelectWaiter *w) {
     node->next = (ChWaiterNode *)ch->waiters;
     ch->waiters = (LatSelectWaiter *)node;
     pthread_mutex_unlock(&ch->mutex);
+    return true;
 #else
     (void)ch;
     (void)w;
+    return false;
 #endif
 }
 
@@ -199,5 +206,129 @@ void channel_remove_waiter(LatChannel *ch, LatSelectWaiter *w) {
 #else
     (void)ch;
     (void)w;
+#endif
+}
+
+bool channel_select(LatChannel **channels, const uint8_t *flags, size_t count, long timeout_ms, size_t *selected_out,
+                    LatValue *received_out) {
+    *selected_out = SIZE_MAX;
+    *received_out = value_unit();
+
+#ifdef __EMSCRIPTEN__
+    (void)channels;
+    (void)flags;
+    (void)count;
+    (void)timeout_ms;
+    return false;
+#else
+    int default_arm = -1;
+    int timeout_arm = -1;
+    size_t channel_count = 0;
+    size_t *indices = count ? malloc(count * sizeof(size_t)) : NULL;
+    if (count && !indices) return false;
+
+    for (size_t i = 0; i < count; i++) {
+        if (flags[i] & LAT_SELECT_DEFAULT) default_arm = (int)i;
+        else if (flags[i] & LAT_SELECT_TIMEOUT) timeout_arm = (int)i;
+        else indices[channel_count++] = i;
+    }
+    for (size_t i = channel_count; i > 1; i--) {
+        size_t j = (size_t)rand() % i;
+        size_t tmp = indices[i - 1];
+        indices[i - 1] = indices[j];
+        indices[j] = tmp;
+    }
+
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+    LatSelectWaiter waiter = {.mutex = &mutex, .cond = &cond, .notified = false, .next = NULL};
+    struct timespec deadline = {0};
+    if (timeout_ms >= 0) {
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += timeout_ms / 1000;
+        deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+    }
+
+    bool done = false;
+    while (!done) {
+        bool all_closed = true;
+        for (size_t k = 0; k < channel_count; k++) {
+            size_t i = indices[k];
+            bool closed = false;
+            LatValue received;
+            if (channel_try_recv(channels[i], &received, &closed)) {
+                *selected_out = i;
+                *received_out = received;
+                done = true;
+                break;
+            }
+            if (!closed) all_closed = false;
+        }
+        if (done) break;
+
+        if (all_closed && channel_count > 0) {
+            if (default_arm >= 0) *selected_out = (size_t)default_arm;
+            break;
+        }
+        if (default_arm >= 0) {
+            *selected_out = (size_t)default_arm;
+            break;
+        }
+
+        bool registered = true;
+        for (size_t k = 0; k < channel_count; k++) {
+            if (!channel_add_waiter(channels[indices[k]], &waiter)) {
+                registered = false;
+                break;
+            }
+        }
+        if (!registered) {
+            for (size_t k = 0; k < channel_count; k++) channel_remove_waiter(channels[indices[k]], &waiter);
+            pthread_cond_destroy(&cond);
+            pthread_mutex_destroy(&mutex);
+            free(indices);
+            return false;
+        }
+
+        /* Close the poll/register race before sleeping. A sender either leaves
+         * a value for this pass or sets waiter.notified under mutex. */
+        for (size_t k = 0; k < channel_count; k++) {
+            size_t i = indices[k];
+            bool closed = false;
+            LatValue received;
+            if (channel_try_recv(channels[i], &received, &closed)) {
+                *selected_out = i;
+                *received_out = received;
+                done = true;
+                break;
+            }
+        }
+
+        pthread_mutex_lock(&mutex);
+        int wait_result = 0;
+        if (!done && !waiter.notified) {
+            wait_result =
+                timeout_ms >= 0 ? pthread_cond_timedwait(&cond, &mutex, &deadline) : pthread_cond_wait(&cond, &mutex);
+        }
+        bool was_notified = waiter.notified;
+        waiter.notified = false;
+        pthread_mutex_unlock(&mutex);
+        for (size_t k = 0; k < channel_count; k++) channel_remove_waiter(channels[indices[k]], &waiter);
+
+        if (done) break;
+        if (wait_result == ETIMEDOUT && !was_notified) {
+            if (timeout_arm >= 0) *selected_out = (size_t)timeout_arm;
+            break;
+        }
+    }
+
+    pthread_cond_destroy(&cond);
+    pthread_mutex_destroy(&mutex);
+    free(indices);
+    return true;
 #endif
 }

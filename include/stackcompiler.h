@@ -6,42 +6,46 @@
 
 typedef struct {
     char *name;
-    int   depth;       /* Scope depth (-1 = uninitialized) */
-    bool  is_captured; /* True if captured as upvalue by an inner function */
+    int depth;        /* Scope depth (-1 = uninitialized) */
+    bool is_captured; /* True if captured as upvalue by an inner function */
 } Local;
 
 typedef struct {
-    uint8_t index;     /* Stack slot in enclosing function */
-    bool    is_local;  /* true = local in immediate enclosing, false = upvalue in enclosing */
+    uint8_t index; /* Stack slot in enclosing function */
+    bool is_local; /* true = local in immediate enclosing, false = upvalue in enclosing */
 } CompilerUpvalue;
 
 typedef enum { FUNC_SCRIPT, FUNC_FUNCTION, FUNC_CLOSURE } FunctionType;
 
 typedef struct Compiler {
-    struct Compiler *enclosing;  /* enclosing compiler (for upvalue resolution) */
-    Chunk       *chunk;
+    struct Compiler *enclosing; /* enclosing compiler (for upvalue resolution) */
+    Chunk *chunk;
     FunctionType type;
-    char        *func_name;     /* name of the function being compiled (NULL for script) */
-    int          arity;         /* parameter count */
-    Local       *locals;
-    size_t       local_count;
-    size_t       local_cap;
+    char *func_name; /* name of the function being compiled (NULL for script) */
+    int arity;       /* parameter count */
+    Local *locals;
+    size_t local_count;
+    size_t local_cap;
     CompilerUpvalue *upvalues;
-    size_t       upvalue_count;
-    int          scope_depth;
+    size_t upvalue_count;
+    int scope_depth;
     /* Break/continue tracking */
-    size_t      *break_jumps;
-    size_t       break_count;
-    size_t       break_cap;
-    size_t       loop_start;
-    int          loop_depth;
-    size_t       loop_break_local_count;    /* locals to keep on break */
-    size_t       loop_continue_local_count; /* locals to keep on continue */
+    size_t *break_jumps;
+    size_t break_count;
+    size_t break_cap;
+    size_t loop_start;
+    int loop_depth;
+    size_t loop_break_local_count;    /* locals to keep on break */
+    size_t loop_continue_local_count; /* locals to keep on continue */
+    int loop_break_scope_depth;       /* lexical scope retained by break */
+    int loop_continue_scope_depth;    /* lexical scope retained by continue */
+    int loop_handler_depth;           /* exception handlers active at loop entry */
+    int handler_depth;                /* lexically active exception handlers */
     /* Ensure contracts (postconditions) for the current function */
     ContractClause *contracts;
-    size_t       contract_count;
+    size_t contract_count;
     /* Return type name (borrowed from AST, NULL if none) */
-    const char  *return_type_name;
+    const char *return_type_name;
 } Compiler;
 
 /* Compile a program to bytecode. Returns a Chunk on success.

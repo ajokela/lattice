@@ -70,6 +70,11 @@ bool env_remove(Env *env, const char *name, LatValue *out);
 /* Deep-clone the entire environment (for closure capture) */
 Env *env_clone(const Env *env);
 
+/* Tree-walk lexical capture: share existing bindings while retaining a
+ * snapshot of which names were visible when the closure was created. */
+Env *env_capture(Env *env);
+void env_weaken_recursive_binding(Env *captured, size_t scope_idx, const char *name, const LatValue *closure);
+
 /* Iterate all values in all scopes (for GC marking) */
 typedef void (*EnvIterFn)(LatValue *value, void *ctx);
 void env_iter_values(Env *env, EnvIterFn fn, void *ctx);

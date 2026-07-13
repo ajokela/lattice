@@ -208,6 +208,7 @@ static EvalResult eval_signal(ControlFlowTag tag, LatValue v) {
 static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr);
 static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt);
 static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count);
+static EvalResult run_defers_for_scope(Evaluator *ev, size_t scope_depth);
 
 /* eval_expr now directly calls eval_expr_inner; temporaries are protected
  * by GC_PUSH/GC_POP at individual expression sites instead of the blunt
@@ -731,10 +732,8 @@ static inline void ref_write_unlock(LatRef *cell) {
  */
 static LatValue *resolve_lvalue(Evaluator *ev, const Expr *expr, char **err) {
     if (expr->tag == EXPR_IDENT) {
-        for (size_t s = ev->env->count; s > 0; s--) {
-            LatValue *v = lat_map_get(&ev->env->scopes[s - 1], expr->as.str_val);
-            if (v) return v;
-        }
+        LatValue *v = env_get_ref(ev->env, expr->as.str_val);
+        if (v) return v;
         const char *suggestion = env_find_similar_name(ev->env, expr->as.str_val);
         if (suggestion) lat_asprintf(err, "undefined variable '%s' (did you mean '%s'?)", expr->as.str_val, suggestion);
         else lat_asprintf(err, "undefined variable '%s'", expr->as.str_val);
@@ -1596,10 +1595,27 @@ static void register_fn_overload(LatMap *fn_defs, FnDecl *new_fn) {
     lat_map_set(fn_defs, new_fn->name, &new_fn);
 }
 
-/* Resolve a module alias to its resolved path. Returns NULL if not found. */
+/* Resolve through the lexical alias binding. Module maps carry their resolved
+ * path so local imports and shadowing follow the same scope rules as values. */
 static const char *resolve_module_alias(Evaluator *ev, const char *alias) {
-    char **pp = lat_map_get(&ev->module_paths, alias);
-    return pp ? *pp : NULL;
+    LatValue *module = env_get_ref(ev->env, alias);
+    if (!module || module->type != VAL_MAP) return NULL;
+    LatValue *path = lat_map_get(module->as.map.map, "__module_path__");
+    return path && path->type == VAL_STR ? path->as.str_val : NULL;
+}
+
+/* Selective type imports are ordinary lexical bindings whose value records the
+ * declaration's module namespace. This keeps function-local imports local and
+ * lets closures capture them without mutating the evaluator-wide registries. */
+static const char *resolve_imported_type(Evaluator *ev, const char *name, const char *kind) {
+    LatValue *marker = env_get_ref(ev->env, name);
+    if (!marker || marker->type != VAL_MAP) return NULL;
+    LatValue *marker_kind = lat_map_get(marker->as.map.map, "__type_kind__");
+    LatValue *module_path = lat_map_get(marker->as.map.map, "__module_path__");
+    if (!marker_kind || marker_kind->type != VAL_STR || strcmp(marker_kind->as.str_val, kind) != 0 || !module_path ||
+        module_path->type != VAL_STR)
+        return NULL;
+    return module_path->as.str_val;
 }
 
 static StructDecl *find_struct(Evaluator *ev, const char *name) {
@@ -2031,17 +2047,202 @@ static EvalResult call_closure(Evaluator *ev, char **params, size_t param_count,
 
 /* ── Value equality (for pattern matching) ── */
 
-static bool value_equal(const LatValue *a, const LatValue *b) {
-    if (a->type != b->type) return false;
-    switch (a->type) {
-        case VAL_INT: return a->as.int_val == b->as.int_val;
-        case VAL_FLOAT: return a->as.float_val == b->as.float_val;
-        case VAL_BOOL: return a->as.bool_val == b->as.bool_val;
-        case VAL_STR: return strcmp(a->as.str_val, b->as.str_val) == 0;
-        case VAL_UNIT: return true;
-        case VAL_NIL: return true;
-        default: return false;
+static bool value_equal(const LatValue *a, const LatValue *b) { return value_eq(a, b); }
+
+typedef struct {
+    char **names;
+    LatValue values; /* Rooted array containing values captured by a pattern. */
+} MatchBindings;
+
+static void match_bindings_truncate(MatchBindings *bindings, size_t count) {
+    while (bindings->values.as.array.len > count) {
+        size_t i = --bindings->values.as.array.len;
+        value_free(&bindings->values.as.array.elems[i]);
     }
+}
+
+static bool match_bindings_add(MatchBindings *bindings, const char *name, const LatValue *value) {
+    size_t count = bindings->values.as.array.len;
+    if (count == bindings->values.as.array.cap) {
+        size_t next = bindings->values.as.array.cap ? bindings->values.as.array.cap * 2 : 4;
+        if (next < bindings->values.as.array.cap || next > SIZE_MAX / sizeof(LatValue)) return false;
+        LatValue *values = lat_realloc_routed(bindings->values.as.array.elems, next * sizeof(LatValue));
+        if (!values) return false;
+        char **names = realloc(bindings->names, next * sizeof(char *));
+        if (!names) {
+            bindings->values.as.array.elems = values;
+            bindings->values.as.array.cap = next;
+            return false;
+        }
+        bindings->values.as.array.elems = values;
+        bindings->values.as.array.cap = next;
+        bindings->names = names;
+    }
+    bindings->names[count] = (char *)name;
+    bindings->values.as.array.elems[count] = value_deep_clone(value);
+    bindings->values.as.array.len++;
+    return true;
+}
+
+static bool match_phase(const Pattern *pattern, const LatValue *value) {
+    if (pattern->phase_qualifier == PHASE_UNSPECIFIED) return true;
+    if (pattern->phase_qualifier == PHASE_CRYSTAL) return value->phase == VTAG_CRYSTAL;
+    return value->phase == VTAG_FLUID || value->phase == VTAG_UNPHASED;
+}
+
+/* Match one pattern node and recursively collect its bindings. A false result
+ * rolls back every binding produced below this node; expression errors are
+ * propagated with the same rollback guarantee. */
+static EvalResult eval_pattern_match(Evaluator *ev, const Pattern *pattern, const LatValue *value,
+                                     MatchBindings *bindings) {
+    size_t bind_start = bindings->values.as.array.len;
+    bool matched = false;
+
+    switch (pattern->tag) {
+        case PAT_WILDCARD: matched = true; break;
+        case PAT_BINDING:
+            if (!match_bindings_add(bindings, pattern->as.binding_name, value))
+                return eval_err(strdup("out of memory"));
+            matched = true;
+            break;
+        case PAT_LITERAL: {
+            EvalResult literal = eval_expr(ev, pattern->as.literal);
+            if (!IS_OK(literal)) {
+                match_bindings_truncate(bindings, bind_start);
+                return literal;
+            }
+            matched = value_equal(value, &literal.value);
+            value_free(&literal.value);
+            break;
+        }
+        case PAT_RANGE: {
+            EvalResult start = eval_expr(ev, pattern->as.range.start);
+            if (!IS_OK(start)) {
+                match_bindings_truncate(bindings, bind_start);
+                return start;
+            }
+            EvalResult end = eval_expr(ev, pattern->as.range.end);
+            if (!IS_OK(end)) {
+                value_free(&start.value);
+                match_bindings_truncate(bindings, bind_start);
+                return end;
+            }
+            matched = value->type == VAL_INT && start.value.type == VAL_INT && end.value.type == VAL_INT &&
+                      value->as.int_val >= start.value.as.int_val && value->as.int_val <= end.value.as.int_val;
+            value_free(&start.value);
+            value_free(&end.value);
+            break;
+        }
+        case PAT_ARRAY: {
+            if (value->type != VAL_ARRAY) break;
+            ArrayPatElem *elements = pattern->as.array.elems;
+            size_t pattern_count = pattern->as.array.count;
+            size_t fixed_count = 0;
+            int rest_index = -1;
+            bool multiple_rests = false;
+            for (size_t i = 0; i < pattern_count; i++) {
+                if (elements[i].is_rest) {
+                    if (rest_index >= 0) {
+                        multiple_rests = true;
+                        break;
+                    }
+                    rest_index = (int)i;
+                } else {
+                    fixed_count++;
+                }
+            }
+            if (multiple_rests || (rest_index < 0 && value->as.array.len != pattern_count) ||
+                (rest_index >= 0 && value->as.array.len < fixed_count))
+                break;
+
+            matched = true;
+            for (size_t i = 0; i < pattern_count && matched; i++) {
+                EvalResult child;
+                if (elements[i].is_rest) {
+                    size_t rest_len = value->as.array.len - fixed_count;
+                    LatValue *rest_elems = rest_len ? malloc(rest_len * sizeof(LatValue)) : NULL;
+                    if (rest_len && !rest_elems) {
+                        match_bindings_truncate(bindings, bind_start);
+                        return eval_err(strdup("out of memory"));
+                    }
+                    for (size_t j = 0; j < rest_len; j++)
+                        rest_elems[j] = value_deep_clone(&value->as.array.elems[i + j]);
+                    LatValue rest = value_array(rest_elems, rest_len);
+                    free(rest_elems);
+                    GC_PUSH(ev, &rest);
+                    child = eval_pattern_match(ev, elements[i].pattern, &rest, bindings);
+                    GC_POP(ev);
+                    value_free(&rest);
+                } else {
+                    size_t value_index =
+                        rest_index >= 0 && (int)i > rest_index ? value->as.array.len - (pattern_count - i) : i;
+                    child = eval_pattern_match(ev, elements[i].pattern, &value->as.array.elems[value_index], bindings);
+                }
+                if (!IS_OK(child)) {
+                    match_bindings_truncate(bindings, bind_start);
+                    return child;
+                }
+                matched = child.value.type == VAL_BOOL && child.value.as.bool_val;
+                value_free(&child.value);
+            }
+            break;
+        }
+        case PAT_STRUCT: {
+            if (value->type != VAL_STRUCT) break;
+            matched = true;
+            for (size_t i = 0; i < pattern->as.strct.count && matched; i++) {
+                StructPatField *field = &pattern->as.strct.fields[i];
+                const LatValue *field_value = NULL;
+                for (size_t j = 0; j < value->as.strct.field_count; j++) {
+                    if (strcmp(value->as.strct.field_names[j], field->name) == 0) {
+                        field_value = &value->as.strct.field_values[j];
+                        break;
+                    }
+                }
+                if (!field_value) {
+                    matched = false;
+                    break;
+                }
+                if (!field->value_pat) {
+                    if (!match_bindings_add(bindings, field->name, field_value)) {
+                        match_bindings_truncate(bindings, bind_start);
+                        return eval_err(strdup("out of memory"));
+                    }
+                    continue;
+                }
+                EvalResult child = eval_pattern_match(ev, field->value_pat, field_value, bindings);
+                if (!IS_OK(child)) {
+                    match_bindings_truncate(bindings, bind_start);
+                    return child;
+                }
+                matched = child.value.type == VAL_BOOL && child.value.as.bool_val;
+                value_free(&child.value);
+            }
+            break;
+        }
+        case PAT_ENUM_VARIANT: {
+            if (value->type != VAL_ENUM || strcmp(value->as.enm.enum_name, pattern->as.enum_variant.enum_name) != 0 ||
+                strcmp(value->as.enm.variant_name, pattern->as.enum_variant.variant_name) != 0 ||
+                value->as.enm.payload_count != pattern->as.enum_variant.payload_count)
+                break;
+            matched = true;
+            for (size_t i = 0; i < pattern->as.enum_variant.payload_count && matched; i++) {
+                EvalResult child = eval_pattern_match(ev, pattern->as.enum_variant.payload_pats[i],
+                                                      &value->as.enm.payload[i], bindings);
+                if (!IS_OK(child)) {
+                    match_bindings_truncate(bindings, bind_start);
+                    return child;
+                }
+                matched = child.value.type == VAL_BOOL && child.value.as.bool_val;
+                value_free(&child.value);
+            }
+            break;
+        }
+    }
+
+    if (matched) matched = match_phase(pattern, value);
+    if (!matched) match_bindings_truncate(bindings, bind_start);
+    return eval_ok(value_bool(matched));
 }
 
 /* ── Binary operations ── */
@@ -2051,15 +2252,16 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
     if (lv->type == VAL_INT && rv->type == VAL_INT) {
         int64_t a = lv->as.int_val, b = rv->as.int_val;
         switch (op) {
-            case BINOP_ADD: return eval_ok(value_int(a + b));
-            case BINOP_SUB: return eval_ok(value_int(a - b));
-            case BINOP_MUL: return eval_ok(value_int(a * b));
+            case BINOP_ADD: return eval_ok(value_int((int64_t)((uint64_t)a + (uint64_t)b)));
+            case BINOP_SUB: return eval_ok(value_int((int64_t)((uint64_t)a - (uint64_t)b)));
+            case BINOP_MUL: return eval_ok(value_int((int64_t)((uint64_t)a * (uint64_t)b)));
             case BINOP_DIV:
                 if (b == 0) return eval_err(strdup("division by zero"));
+                if (a == INT64_MIN && b == -1) return eval_ok(value_int(INT64_MIN));
                 return eval_ok(value_int(a / b));
             case BINOP_MOD:
                 if (b == 0) return eval_err(strdup("modulo by zero"));
-                return eval_ok(value_int(a % b));
+                return eval_ok(value_int(a == INT64_MIN && b == -1 ? 0 : a % b));
             case BINOP_EQ: return eval_ok(value_bool(a == b));
             case BINOP_NEQ: return eval_ok(value_bool(a != b));
             case BINOP_LT: return eval_ok(value_bool(a < b));
@@ -2071,7 +2273,7 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
             case BINOP_BIT_XOR: return eval_ok(value_int(a ^ b));
             case BINOP_LSHIFT:
                 if (b < 0 || b > 63) return eval_err(strdup("shift amount out of range (0..63)"));
-                return eval_ok(value_int(a << b));
+                return eval_ok(value_int((int64_t)((uint64_t)a << (unsigned)b)));
             case BINOP_RSHIFT:
                 if (b < 0 || b > 63) return eval_err(strdup("shift amount out of range (0..63)"));
                 return eval_ok(value_int(a >> b));
@@ -2103,11 +2305,18 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
     if ((lv->type == VAL_INT && rv->type == VAL_FLOAT) || (lv->type == VAL_FLOAT && rv->type == VAL_INT)) {
         double a = lv->type == VAL_FLOAT ? lv->as.float_val : (double)lv->as.int_val;
         double b = rv->type == VAL_FLOAT ? rv->as.float_val : (double)rv->as.int_val;
+        ValueNumericCmp cmp = value_numeric_compare(lv, rv);
         switch (op) {
             case BINOP_ADD: return eval_ok(value_float(a + b));
             case BINOP_SUB: return eval_ok(value_float(a - b));
             case BINOP_MUL: return eval_ok(value_float(a * b));
             case BINOP_DIV: return eval_ok(value_float(a / b));
+            case BINOP_EQ: return eval_ok(value_bool(cmp == VALUE_CMP_EQUAL));
+            case BINOP_NEQ: return eval_ok(value_bool(cmp != VALUE_CMP_EQUAL));
+            case BINOP_LT: return eval_ok(value_bool(cmp == VALUE_CMP_LESS));
+            case BINOP_GT: return eval_ok(value_bool(cmp == VALUE_CMP_GREATER));
+            case BINOP_LTEQ: return eval_ok(value_bool(cmp == VALUE_CMP_LESS || cmp == VALUE_CMP_EQUAL));
+            case BINOP_GTEQ: return eval_ok(value_bool(cmp == VALUE_CMP_GREATER || cmp == VALUE_CMP_EQUAL));
             default: break;
         }
     }
@@ -2139,13 +2348,10 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
         return eval_ok(value_bool(op == BINOP_EQ ? eq : !eq));
     }
     /* General equality using value_eq (enums, arrays, structs, etc.) */
-    if (lv->type == rv->type && (op == BINOP_EQ || op == BINOP_NEQ)) {
+    if (op == BINOP_EQ || op == BINOP_NEQ) {
         bool eq = value_eq(lv, rv);
         return eval_ok(value_bool(op == BINOP_EQ ? eq : !eq));
     }
-    /* Cross-type equality: different types are never equal */
-    if (op == BINOP_EQ) return eval_ok(value_bool(false));
-    if (op == BINOP_NEQ) return eval_ok(value_bool(true));
 
     char *err = NULL;
     lat_asprintf(&err, "unsupported binary operation on %s and %s", value_type_name(lv), value_type_name(rv));
@@ -2160,6 +2366,46 @@ static EvalResult eval_unaryop(UnaryOpKind op, LatValue *val) {
     char *err = NULL;
     lat_asprintf(&err, "unsupported unary operation on %s", value_type_name(val));
     return eval_err(err);
+}
+
+static bool eval_checked_i64_add(int64_t a, int64_t b, int64_t *result) {
+    return !__builtin_add_overflow(a, b, result);
+}
+
+static bool eval_checked_i64_sub(int64_t a, int64_t b, int64_t *result) {
+    return !__builtin_sub_overflow(a, b, result);
+}
+
+static bool eval_checked_i64_mul(int64_t a, int64_t b, int64_t *result) {
+    return !__builtin_mul_overflow(a, b, result);
+}
+
+static EvalResult eval_duration_overflow(const char *operation) {
+    char *err = NULL;
+    lat_asprintf(&err, "%s: total milliseconds exceed Int range", operation);
+    return eval_err(err);
+}
+
+static LatValue eval_make_duration_map(int64_t total_ms) {
+    int64_t hours = total_ms / 3600000;
+    int64_t rem = total_ms % 3600000;
+    int64_t minutes = rem / 60000;
+    rem %= 60000;
+    int64_t seconds = rem / 1000;
+    int64_t millis = rem % 1000;
+
+    LatValue map = value_map_new();
+    LatValue vh = value_int(hours);
+    LatValue vm = value_int(minutes);
+    LatValue vs = value_int(seconds);
+    LatValue vms = value_int(millis);
+    LatValue vtotal = value_int(total_ms);
+    lat_map_set(map.as.map.map, "hours", &vh);
+    lat_map_set(map.as.map.map, "minutes", &vm);
+    lat_map_set(map.as.map.map, "seconds", &vs);
+    lat_map_set(map.as.map.map, "millis", &vms);
+    lat_map_set(map.as.map.map, "total_ms", &vtotal);
+    return map;
 }
 
 /* ── Concurrency infrastructure ── */
@@ -2338,6 +2584,17 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 EvalResult lr = eval_expr(ev, expr->as.binop.left);
                 if (!IS_OK(lr)) return lr;
                 if (lr.value.type != VAL_NIL) return lr;
+                value_free(&lr.value);
+                return eval_expr(ev, expr->as.binop.right);
+            }
+            /* Logical operators preserve the selected operand, matching both
+             * compiled backends.  In particular, the right side must not run
+             * when the left side already determines the result. */
+            if (expr->as.binop.op == BINOP_AND || expr->as.binop.op == BINOP_OR) {
+                EvalResult lr = eval_expr(ev, expr->as.binop.left);
+                if (!IS_OK(lr)) return lr;
+                bool truthy = value_is_truthy(&lr.value);
+                if ((expr->as.binop.op == BINOP_AND && !truthy) || (expr->as.binop.op == BINOP_OR && truthy)) return lr;
                 value_free(&lr.value);
                 return eval_expr(ev, expr->as.binop.right);
             }
@@ -4174,10 +4431,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     LatValue set = value_set_new();
                     for (size_t i = 0; i < args[0].as.array.len; i++) {
                         LatValue *elem = &args[0].as.array.elems[i];
-                        char *key = value_hash_key(elem);
-                        LatValue cloned = value_deep_clone(elem);
-                        lat_map_set(set.as.set.map, key, &cloned);
-                        free(key);
+                        value_set_insert(&set, elem);
                     }
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -5583,16 +5837,25 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     /* Calculate count and build array */
                     size_t rcount = 0;
                     if (rstep > 0 && rstart < rend) {
-                        rcount = (size_t)((rend - rstart + rstep - 1) / rstep);
+                        uint64_t distance = (uint64_t)rend - (uint64_t)rstart;
+                        uint64_t step = (uint64_t)rstep;
+                        uint64_t count = distance / step + (distance % step != 0);
+                        if (count > SIZE_MAX) return eval_err(strdup("range() is too large"));
+                        rcount = (size_t)count;
                     } else if (rstep < 0 && rstart > rend) {
-                        rcount = (size_t)((rstart - rend + (-rstep) - 1) / (-rstep));
+                        uint64_t distance = (uint64_t)rstart - (uint64_t)rend;
+                        uint64_t step = (uint64_t)(-(rstep + 1)) + 1u;
+                        uint64_t count = distance / step + (distance % step != 0);
+                        if (count > SIZE_MAX) return eval_err(strdup("range() is too large"));
+                        rcount = (size_t)count;
                     }
+                    if (rcount > SIZE_MAX / sizeof(LatValue)) return eval_err(strdup("range() is too large"));
                     LatValue *relems = malloc((rcount > 0 ? rcount : 1) * sizeof(LatValue));
                     if (!relems) return eval_err(strdup("out of memory"));
                     int64_t rcur = rstart;
                     for (size_t ri = 0; ri < rcount; ri++) {
                         relems[ri] = value_int(rcur);
-                        rcur += rstep;
+                        if (ri + 1 < rcount) rcur = (int64_t)((uint64_t)rcur + (uint64_t)rstep);
                     }
                     LatValue range_arr = value_array(relems, rcount);
                     free(relems);
@@ -6906,6 +7169,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         datetime_day_of_week((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
+                    if (r < 0) return eval_err(strdup("day_of_week: invalid date"));
                     return eval_ok(value_int(r));
                 }
 
@@ -6923,7 +7187,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         datetime_day_of_year((int)args[0].as.int_val, (int)args[1].as.int_val, (int)args[2].as.int_val);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    if (r < 0) return eval_err(strdup("day_of_year: month must be 1-12"));
+                    if (r < 0) return eval_err(strdup("day_of_year: invalid date"));
                     return eval_ok(value_int(r));
                 }
 
@@ -6950,32 +7214,17 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         free(args);
                         return eval_err(strdup("duration() expects (Int hours, Int minutes, Int seconds, Int millis)"));
                     }
-                    int64_t total = args[0].as.int_val * 3600000 + args[1].as.int_val * 60000 +
-                                    args[2].as.int_val * 1000 + args[3].as.int_val;
+                    int64_t hours_ms, minutes_ms, seconds_ms, partial, total;
+                    bool valid = eval_checked_i64_mul(args[0].as.int_val, 3600000, &hours_ms) &&
+                                 eval_checked_i64_mul(args[1].as.int_val, 60000, &minutes_ms) &&
+                                 eval_checked_i64_mul(args[2].as.int_val, 1000, &seconds_ms) &&
+                                 eval_checked_i64_add(hours_ms, minutes_ms, &partial) &&
+                                 eval_checked_i64_add(partial, seconds_ms, &partial) &&
+                                 eval_checked_i64_add(partial, args[3].as.int_val, &total);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    /* Build duration map */
-                    int64_t ms = total % 1000;
-                    if (ms < 0) ms = -ms;
-                    int64_t rem = total / 1000;
-                    int64_t s = rem % 60;
-                    if (s < 0) s = -s;
-                    rem /= 60;
-                    int64_t m = rem % 60;
-                    if (m < 0) m = -m;
-                    int64_t h = rem / 60;
-                    LatValue map = value_map_new();
-                    LatValue vh = value_int(h);
-                    lat_map_set(map.as.map.map, "hours", &vh);
-                    LatValue vm = value_int(m);
-                    lat_map_set(map.as.map.map, "minutes", &vm);
-                    LatValue vs = value_int(s);
-                    lat_map_set(map.as.map.map, "seconds", &vs);
-                    LatValue vms = value_int(ms);
-                    lat_map_set(map.as.map.map, "millis", &vms);
-                    LatValue vtot = value_int(total);
-                    lat_map_set(map.as.map.map, "total_ms", &vtot);
-                    return eval_ok(map);
+                    if (!valid) return eval_duration_overflow("duration");
+                    return eval_ok(eval_make_duration_map(total));
                 }
 
                 /// @builtin duration_from_seconds(s: Int) -> Map
@@ -6987,30 +7236,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         free(args);
                         return eval_err(strdup("duration_from_seconds() expects (Int seconds)"));
                     }
-                    int64_t total = args[0].as.int_val * 1000;
+                    int64_t total;
+                    bool valid = eval_checked_i64_mul(args[0].as.int_val, 1000, &total);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    int64_t ms = total % 1000;
-                    if (ms < 0) ms = -ms;
-                    int64_t rem = total / 1000;
-                    int64_t s = rem % 60;
-                    if (s < 0) s = -s;
-                    rem /= 60;
-                    int64_t m = rem % 60;
-                    if (m < 0) m = -m;
-                    int64_t h = rem / 60;
-                    LatValue map = value_map_new();
-                    LatValue vh = value_int(h);
-                    lat_map_set(map.as.map.map, "hours", &vh);
-                    LatValue vm = value_int(m);
-                    lat_map_set(map.as.map.map, "minutes", &vm);
-                    LatValue vs = value_int(s);
-                    lat_map_set(map.as.map.map, "seconds", &vs);
-                    LatValue vms = value_int(ms);
-                    lat_map_set(map.as.map.map, "millis", &vms);
-                    LatValue vtot = value_int(total);
-                    lat_map_set(map.as.map.map, "total_ms", &vtot);
-                    return eval_ok(map);
+                    if (!valid) return eval_duration_overflow("duration_from_seconds");
+                    return eval_ok(eval_make_duration_map(total));
                 }
 
                 /// @builtin duration_from_millis(ms: Int) -> Map
@@ -7025,27 +7256,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     int64_t total = args[0].as.int_val;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    int64_t ms = total % 1000;
-                    if (ms < 0) ms = -ms;
-                    int64_t rem = total / 1000;
-                    int64_t s = rem % 60;
-                    if (s < 0) s = -s;
-                    rem /= 60;
-                    int64_t m = rem % 60;
-                    if (m < 0) m = -m;
-                    int64_t h = rem / 60;
-                    LatValue map = value_map_new();
-                    LatValue vh = value_int(h);
-                    lat_map_set(map.as.map.map, "hours", &vh);
-                    LatValue vm = value_int(m);
-                    lat_map_set(map.as.map.map, "minutes", &vm);
-                    LatValue vs = value_int(s);
-                    lat_map_set(map.as.map.map, "seconds", &vs);
-                    LatValue vms = value_int(ms);
-                    lat_map_set(map.as.map.map, "millis", &vms);
-                    LatValue vtot = value_int(total);
-                    lat_map_set(map.as.map.map, "total_ms", &vtot);
-                    return eval_ok(map);
+                    return eval_ok(eval_make_duration_map(total));
                 }
 
                 /// @builtin duration_add(d1: Map, d2: Map) -> Map
@@ -7059,31 +7270,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     LatValue *t1 = lat_map_get(args[0].as.map.map, "total_ms");
                     LatValue *t2 = lat_map_get(args[1].as.map.map, "total_ms");
-                    int64_t total = ((t1 && t1->type == VAL_INT) ? t1->as.int_val : 0) +
-                                    ((t2 && t2->type == VAL_INT) ? t2->as.int_val : 0);
+                    int64_t total;
+                    bool valid = eval_checked_i64_add((t1 && t1->type == VAL_INT) ? t1->as.int_val : 0,
+                                                      (t2 && t2->type == VAL_INT) ? t2->as.int_val : 0, &total);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    int64_t ms = total % 1000;
-                    if (ms < 0) ms = -ms;
-                    int64_t rem = total / 1000;
-                    int64_t s = rem % 60;
-                    if (s < 0) s = -s;
-                    rem /= 60;
-                    int64_t m = rem % 60;
-                    if (m < 0) m = -m;
-                    int64_t h = rem / 60;
-                    LatValue map = value_map_new();
-                    LatValue vh = value_int(h);
-                    lat_map_set(map.as.map.map, "hours", &vh);
-                    LatValue vm = value_int(m);
-                    lat_map_set(map.as.map.map, "minutes", &vm);
-                    LatValue vs = value_int(s);
-                    lat_map_set(map.as.map.map, "seconds", &vs);
-                    LatValue vms = value_int(ms);
-                    lat_map_set(map.as.map.map, "millis", &vms);
-                    LatValue vtot = value_int(total);
-                    lat_map_set(map.as.map.map, "total_ms", &vtot);
-                    return eval_ok(map);
+                    if (!valid) return eval_duration_overflow("duration_add");
+                    return eval_ok(eval_make_duration_map(total));
                 }
 
                 /// @builtin duration_sub(d1: Map, d2: Map) -> Map
@@ -7097,31 +7290,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     LatValue *t1 = lat_map_get(args[0].as.map.map, "total_ms");
                     LatValue *t2 = lat_map_get(args[1].as.map.map, "total_ms");
-                    int64_t total = ((t1 && t1->type == VAL_INT) ? t1->as.int_val : 0) -
-                                    ((t2 && t2->type == VAL_INT) ? t2->as.int_val : 0);
+                    int64_t total;
+                    bool valid = eval_checked_i64_sub((t1 && t1->type == VAL_INT) ? t1->as.int_val : 0,
+                                                      (t2 && t2->type == VAL_INT) ? t2->as.int_val : 0, &total);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    int64_t ms = total % 1000;
-                    if (ms < 0) ms = -ms;
-                    int64_t rem = total / 1000;
-                    int64_t s = rem % 60;
-                    if (s < 0) s = -s;
-                    rem /= 60;
-                    int64_t m = rem % 60;
-                    if (m < 0) m = -m;
-                    int64_t h = rem / 60;
-                    LatValue map = value_map_new();
-                    LatValue vh = value_int(h);
-                    lat_map_set(map.as.map.map, "hours", &vh);
-                    LatValue vm = value_int(m);
-                    lat_map_set(map.as.map.map, "minutes", &vm);
-                    LatValue vs = value_int(s);
-                    lat_map_set(map.as.map.map, "seconds", &vs);
-                    LatValue vms = value_int(ms);
-                    lat_map_set(map.as.map.map, "millis", &vms);
-                    LatValue vtot = value_int(total);
-                    lat_map_set(map.as.map.map, "total_ms", &vtot);
-                    return eval_ok(map);
+                    if (!valid) return eval_duration_overflow("duration_sub");
+                    return eval_ok(eval_make_duration_map(total));
                 }
 
                 /// @builtin duration_to_string(d: Map) -> String
@@ -7137,21 +7312,21 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     int64_t total = (tot && tot->type == VAL_INT) ? tot->as.int_val : 0;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    int64_t ms = total % 1000;
-                    if (ms < 0) ms = -ms;
-                    int64_t rem = total / 1000;
-                    int64_t s = rem % 60;
-                    if (s < 0) s = -s;
-                    rem /= 60;
-                    int64_t m = rem % 60;
-                    if (m < 0) m = -m;
-                    int64_t h = rem / 60;
+                    uint64_t magnitude = total < 0 ? (uint64_t)(-(total + 1)) + 1u : (uint64_t)total;
+                    uint64_t h = magnitude / 3600000u;
+                    uint64_t rem = magnitude % 3600000u;
+                    uint64_t m = rem / 60000u;
+                    rem %= 60000u;
+                    uint64_t s = rem / 1000u;
+                    uint64_t ms = rem % 1000u;
+                    const char *sign = total < 0 ? "-" : "";
                     char buf[128];
                     if (ms > 0) {
-                        snprintf(buf, sizeof(buf), "%lldh %lldm %llds %lldms", (long long)h, (long long)m, (long long)s,
-                                 (long long)ms);
+                        snprintf(buf, sizeof(buf), "%s%lluh %llum %llus %llums", sign, (unsigned long long)h,
+                                 (unsigned long long)m, (unsigned long long)s, (unsigned long long)ms);
                     } else {
-                        snprintf(buf, sizeof(buf), "%lldh %lldm %llds", (long long)h, (long long)m, (long long)s);
+                        snprintf(buf, sizeof(buf), "%s%lluh %llum %llus", sign, (unsigned long long)h,
+                                 (unsigned long long)m, (unsigned long long)s);
                     }
                     return eval_ok(value_string(buf));
                 }
@@ -7411,8 +7586,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     int64_t dur_ms = (dur_tot && dur_tot->type == VAL_INT) ? dur_tot->as.int_val : 0;
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    epoch += dur_ms / 1000;
-                    int64_t utc_epoch = epoch + (int64_t)tz;
+                    if (!eval_checked_i64_add(epoch, dur_ms / 1000, &epoch))
+                        return eval_duration_overflow("datetime_add_duration");
+                    int64_t utc_epoch;
+                    if (!eval_checked_i64_add(epoch, (int64_t)tz, &utc_epoch))
+                        return eval_duration_overflow("datetime_add_duration");
                     int ny, nmo, nd, nh, nmi, ns;
                     datetime_to_utc_components(utc_epoch, &ny, &nmo, &nd, &nh, &nmi, &ns);
                     LatValue map = value_map_new();
@@ -7477,28 +7655,11 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                                                  (vtz2 && vtz2->type == VAL_INT) ? (int)vtz2->as.int_val : 0);
                     for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
                     free(args);
-                    int64_t total = (e1 - e2) * 1000;
-                    int64_t ms = total % 1000;
-                    if (ms < 0) ms = -ms;
-                    int64_t rem = total / 1000;
-                    int64_t s = rem % 60;
-                    if (s < 0) s = -s;
-                    rem /= 60;
-                    int64_t m = rem % 60;
-                    if (m < 0) m = -m;
-                    int64_t h = rem / 60;
-                    LatValue map = value_map_new();
-                    LatValue vh_r = value_int(h);
-                    lat_map_set(map.as.map.map, "hours", &vh_r);
-                    LatValue vm_r = value_int(m);
-                    lat_map_set(map.as.map.map, "minutes", &vm_r);
-                    LatValue vs_r = value_int(s);
-                    lat_map_set(map.as.map.map, "seconds", &vs_r);
-                    LatValue vms_r = value_int(ms);
-                    lat_map_set(map.as.map.map, "millis", &vms_r);
-                    LatValue vtot = value_int(total);
-                    lat_map_set(map.as.map.map, "total_ms", &vtot);
-                    return eval_ok(map);
+                    int64_t delta_seconds, total;
+                    if (!eval_checked_i64_sub(e1, e2, &delta_seconds) ||
+                        !eval_checked_i64_mul(delta_seconds, 1000, &total))
+                        return eval_duration_overflow("datetime_sub");
+                    return eval_ok(eval_make_duration_map(total));
                 }
 
                 /// @builtin datetime_format(dt: Map, fmt: String) -> String
@@ -8342,8 +8503,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
              * obviously non-mutating calls. */
             {
                 const char *_m = expr->as.method_call.method;
-                if (builtin_method_mutates(VAL_ARRAY, _m) || builtin_method_mutates(VAL_MAP, _m) ||
-                    builtin_method_mutates(VAL_SET, _m) || builtin_method_mutates(VAL_BUFFER, _m)) {
+                if (expr->as.method_call.object->tag != EXPR_INDEX &&
+                    (builtin_method_mutates(VAL_ARRAY, _m) || builtin_method_mutates(VAL_MAP, _m) ||
+                     builtin_method_mutates(VAL_SET, _m) || builtin_method_mutates(VAL_BUFFER, _m))) {
                     char *lv_err = NULL;
                     LatValue *recv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
                     if (lv_err) free(lv_err);
@@ -8657,12 +8819,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (set_lv && set_lv->type == VAL_SET) {
                     EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(vr)) return vr;
-                    char *key = value_hash_key(&vr.value);
-                    /* If key already exists, free old value */
-                    LatValue *old = (LatValue *)lat_map_get(set_lv->as.set.map, key);
-                    if (old) value_free(old);
-                    lat_map_set(set_lv->as.set.map, key, &vr.value);
-                    free(key);
+                    value_set_insert(set_lv, &vr.value);
+                    value_free(&vr.value);
                     return eval_ok(value_unit());
                 }
                 if (lv_err) free(lv_err);
@@ -8678,11 +8836,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (set_lv && set_lv->type == VAL_SET) {
                     EvalResult vr = eval_expr(ev, expr->as.method_call.args[0]);
                     if (!IS_OK(vr)) return vr;
-                    char *key = value_hash_key(&vr.value);
-                    LatValue *old = (LatValue *)lat_map_get(set_lv->as.set.map, key);
-                    if (old) value_free(old);
-                    lat_map_remove(set_lv->as.set.map, key);
-                    free(key);
+                    value_set_remove(set_lv, &vr.value);
                     value_free(&vr.value);
                     return eval_ok(value_unit());
                 }
@@ -8693,8 +8847,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 char *lv_err = NULL;
                 LatValue *set_lv = resolve_lvalue(ev, expr->as.method_call.object, &lv_err);
                 if (set_lv && set_lv->type == VAL_SET) {
-                    lat_map_free(set_lv->as.set.map);
-                    *set_lv->as.set.map = lat_map_new(sizeof(LatValue));
+                    value_set_clear(set_lv);
                     return eval_ok(value_unit());
                 }
                 if (lv_err) free(lv_err);
@@ -9264,10 +9417,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_err(err);
                 }
             } else {
-                sd = find_struct(ev, sname);
+                const char *mod_path = resolve_imported_type(ev, sname, "struct");
+                sd = mod_path ? find_struct_in_module(ev, mod_path, sname) : find_struct(ev, sname);
             }
             if (sd) {
                 for (size_t i = 0; i < fc; i++) {
+                    for (size_t j = 0; j < i; j++) {
+                        if (strcmp(expr->as.struct_lit.fields[i].name, expr->as.struct_lit.fields[j].name) == 0) {
+                            char *err = NULL;
+                            lat_asprintf(&err, "duplicate field '%s' in struct '%s'",
+                                         expr->as.struct_lit.fields[i].name, sname);
+                            return eval_err(err);
+                        }
+                    }
                     bool found = false;
                     for (size_t j = 0; j < sd->field_count; j++) {
                         if (strcmp(expr->as.struct_lit.fields[i].name, sd->fields[j].name) == 0) {
@@ -9280,6 +9442,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         lat_asprintf(&err, "struct '%s' has no field '%s'", sname, expr->as.struct_lit.fields[i].name);
                         return eval_err(err);
                     }
+                }
+                if (fc != sd->field_count) {
+                    char *err = NULL;
+                    lat_asprintf(&err, "struct '%s' expects %zu field%s, got %zu", sname, sd->field_count,
+                                 sd->field_count == 1 ? "" : "s", fc);
+                    return eval_err(err);
                 }
             }
             char **names = malloc(fc * sizeof(char *));
@@ -9379,13 +9547,22 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
                 /* Run contract if present */
                 if (expr->as.freeze.contract) {
+                    /* Creating/evaluating a closure can promote the parent
+                     * binding into a shared capture cell. Snapshot the value
+                     * before that promotion and reacquire the lvalue after the
+                     * contract rather than retaining a pointer into the old
+                     * binding representation. */
+                    LatValue check_val = value_deep_clone(&parent->as.strct.field_values[fi]);
                     EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
-                    if (!IS_OK(cr)) return cr;
+                    if (!IS_OK(cr)) {
+                        value_free(&check_val);
+                        return cr;
+                    }
                     if (cr.value.type != VAL_CLOSURE) {
                         value_free(&cr.value);
+                        value_free(&check_val);
                         return eval_err(strdup("freeze contract must be a function"));
                     }
-                    LatValue check_val = value_deep_clone(&parent->as.strct.field_values[fi]);
                     EvalResult vr =
                         call_closure(ev, cr.value.as.closure.param_names, cr.value.as.closure.param_count,
                                      cr.value.as.closure.body, cr.value.as.closure.captured_env, &check_val, 1,
@@ -9398,6 +9575,23 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(msg);
                     }
                     value_free(&vr.value);
+
+                    lv_err = NULL;
+                    parent = resolve_lvalue(ev, expr->as.freeze.expr->as.field_access.object, &lv_err);
+                    if (!parent) return eval_err(lv_err);
+                    if (parent->type != VAL_STRUCT) return eval_err(strdup("partial freeze requires a struct"));
+                    fi = (size_t)-1;
+                    for (size_t i = 0; i < parent->as.strct.field_count; i++) {
+                        if (parent->as.strct.field_names[i] == intern(fname)) {
+                            fi = i;
+                            break;
+                        }
+                    }
+                    if (fi == (size_t)-1) {
+                        char *field_err = NULL;
+                        lat_asprintf(&field_err, "struct has no field '%s'", fname);
+                        return eval_err(field_err);
+                    }
                 }
                 /* Freeze the field value */
                 parent->as.strct.field_values[fi] = value_freeze(parent->as.strct.field_values[fi]);
@@ -9444,17 +9638,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 }
                 /* Run contract if present */
                 if (expr->as.freeze.contract) {
+                    LatValue check_val = value_deep_clone(val_ptr);
                     EvalResult cr = eval_expr(ev, expr->as.freeze.contract);
                     if (!IS_OK(cr)) {
+                        value_free(&check_val);
                         free(key);
                         return cr;
                     }
                     if (cr.value.type != VAL_CLOSURE) {
                         value_free(&cr.value);
+                        value_free(&check_val);
                         free(key);
                         return eval_err(strdup("freeze contract must be a function"));
                     }
-                    LatValue check_val = value_deep_clone(val_ptr);
                     EvalResult vr =
                         call_closure(ev, cr.value.as.closure.param_names, cr.value.as.closure.param_count,
                                      cr.value.as.closure.body, cr.value.as.closure.captured_env, &check_val, 1,
@@ -9468,6 +9664,24 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(msg);
                     }
                     value_free(&vr.value);
+
+                    lv_err = NULL;
+                    parent = resolve_lvalue(ev, idx_expr->as.index.object, &lv_err);
+                    if (!parent) {
+                        free(key);
+                        return eval_err(lv_err);
+                    }
+                    if (parent->type != VAL_MAP) {
+                        free(key);
+                        return eval_err(strdup("partial freeze requires a map"));
+                    }
+                    val_ptr = (LatValue *)lat_map_get(parent->as.map.map, key);
+                    if (!val_ptr) {
+                        char *key_err = NULL;
+                        lat_asprintf(&key_err, "map has no key '%s'", key);
+                        free(key);
+                        return eval_err(key_err);
+                    }
                 }
                 /* Freeze the value at this key */
                 *val_ptr = value_freeze(*val_ptr);
@@ -10139,7 +10353,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
         case EXPR_CLOSURE: {
             stats_closure(&ev->stats);
             gc_maybe_collect(ev);
-            Env *captured = env_clone(ev->env);
+            Env *captured = env_capture(ev->env);
+            if (!captured) return eval_err(strdup("out of memory"));
             return eval_ok(value_closure(expr->as.closure.params, expr->as.closure.param_count, expr->as.closure.body,
                                          captured, expr->as.closure.default_values, expr->as.closure.has_variadic));
         }
@@ -10242,11 +10457,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
             /* Run non-spawn statements synchronously, spawn tasks in parallel */
             SpawnTask *tasks = calloc(spawn_count, sizeof(SpawnTask));
-            if (!tasks) {
-                env_pop_scope(ev->env);
-                stats_scope_pop(&ev->stats);
-                return eval_err(strdup("out of memory"));
-            }
+            if (!tasks) { return eval_err(strdup("out of memory")); }
             size_t task_idx = 0;
             char *first_error = NULL;
 
@@ -10307,6 +10518,23 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 free_child_evaluator(tasks[i].child_ev);
             }
             free(tasks);
+
+            /* The synchronous statements are evaluated individually so spawn
+             * environments can be captured at their source positions. Drain
+             * this lexical scope's defers explicitly while its bindings are
+             * still visible, including when a sync statement or child failed. */
+            EvalResult defer_result = run_defers_for_scope(ev, ev->stats.current_scope_depth);
+            if (!IS_OK(defer_result)) {
+                if (IS_ERR(defer_result)) {
+                    if (!first_error) first_error = defer_result.error;
+                    else free(defer_result.error);
+                } else {
+                    if (!first_error) first_error = strdup("unexpected control flow in scope defer");
+                    value_free(&defer_result.cf.value);
+                }
+            } else {
+                value_free(&defer_result.value);
+            }
 
             env_pop_scope(ev->env);
             stats_scope_pop(&ev->stats);
@@ -10369,295 +10597,44 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
             for (size_t i = 0; i < expr->as.match_expr.arm_count; i++) {
                 MatchArm *arm = &expr->as.match_expr.arms[i];
-                bool matched = false;
-
-                /* Bindings collected during pattern matching */
-                size_t bind_cap = 4, bind_count = 0;
-                char **bind_names = malloc(bind_cap * sizeof(char *));
-                LatValue *bind_vals = malloc(bind_cap * sizeof(LatValue));
-
-                switch (arm->pattern->tag) {
-                    case PAT_WILDCARD: matched = true; break;
-                    case PAT_BINDING:
-                        matched = true;
-                        if (bind_count >= bind_cap) {
-                            bind_cap *= 2;
-                            bind_names = realloc(bind_names, bind_cap * sizeof(char *));
-                            bind_vals = realloc(bind_vals, bind_cap * sizeof(LatValue));
-                        }
-                        bind_names[bind_count] = arm->pattern->as.binding_name;
-                        bind_vals[bind_count] = value_deep_clone(&scr.value);
-                        bind_count++;
-                        break;
-                    case PAT_LITERAL: {
-                        EvalResult pr = eval_expr(ev, arm->pattern->as.literal);
-                        if (!IS_OK(pr)) {
-                            free(bind_names);
-                            free(bind_vals);
-                            GC_POP(ev);
-                            value_free(&scr.value);
-                            return pr;
-                        }
-                        matched = value_equal(&scr.value, &pr.value);
-                        value_free(&pr.value);
-                        break;
-                    }
-                    case PAT_RANGE: {
-                        EvalResult sr = eval_expr(ev, arm->pattern->as.range.start);
-                        if (!IS_OK(sr)) {
-                            free(bind_names);
-                            free(bind_vals);
-                            GC_POP(ev);
-                            value_free(&scr.value);
-                            return sr;
-                        }
-                        EvalResult er = eval_expr(ev, arm->pattern->as.range.end);
-                        if (!IS_OK(er)) {
-                            free(bind_names);
-                            free(bind_vals);
-                            GC_POP(ev);
-                            value_free(&scr.value);
-                            value_free(&sr.value);
-                            return er;
-                        }
-                        if (scr.value.type == VAL_INT && sr.value.type == VAL_INT && er.value.type == VAL_INT) {
-                            matched = scr.value.as.int_val >= sr.value.as.int_val &&
-                                      scr.value.as.int_val <= er.value.as.int_val;
-                        }
-                        value_free(&sr.value);
-                        value_free(&er.value);
-                        break;
-                    }
-                    case PAT_ARRAY: {
-                        if (scr.value.type != VAL_ARRAY) {
-                            matched = false;
-                            break;
-                        }
-                        size_t arr_len = scr.value.as.array.len;
-                        size_t pat_count = arm->pattern->as.array.count;
-                        ArrayPatElem *pelems = arm->pattern->as.array.elems;
-
-                        /* Find if there's a rest element */
-                        int rest_idx = -1;
-                        size_t fixed_count = 0;
-                        for (size_t k = 0; k < pat_count; k++) {
-                            if (pelems[k].is_rest) rest_idx = (int)k;
-                            else fixed_count++;
-                        }
-
-                        if (rest_idx >= 0) {
-                            /* With rest: need at least fixed_count elements */
-                            if (arr_len < fixed_count) {
-                                matched = false;
-                                break;
-                            }
-                        } else {
-                            /* Exact match: array length must equal pattern count */
-                            if (arr_len != pat_count) {
-                                matched = false;
-                                break;
-                            }
-                        }
-
-                        matched = true;
-                        for (size_t k = 0; k < pat_count && matched; k++) {
-                            Pattern *sub = pelems[k].pattern;
-                            if (pelems[k].is_rest) {
-                                /* ...rest: collect remaining elements into an array */
-                                size_t rest_start = k;
-                                size_t rest_len = arr_len - fixed_count;
-                                if (sub->tag == PAT_BINDING) {
-                                    LatValue *rest_elems = NULL;
-                                    if (rest_len > 0) {
-                                        rest_elems = malloc(rest_len * sizeof(LatValue));
-                                        for (size_t r = 0; r < rest_len; r++)
-                                            rest_elems[r] = value_deep_clone(&scr.value.as.array.elems[rest_start + r]);
-                                    }
-                                    if (bind_count >= bind_cap) {
-                                        bind_cap *= 2;
-                                        bind_names = realloc(bind_names, bind_cap * sizeof(char *));
-                                        bind_vals = realloc(bind_vals, bind_cap * sizeof(LatValue));
-                                    }
-                                    bind_names[bind_count] = sub->as.binding_name;
-                                    bind_vals[bind_count] = value_array(rest_elems, rest_len);
-                                    bind_count++;
-                                } else if (sub->tag != PAT_WILDCARD) {
-                                    matched = false;
-                                }
-                                continue;
-                            }
-                            /* Map pattern index to array index, accounting for rest */
-                            size_t arr_idx;
-                            if (rest_idx >= 0 && (int)k > rest_idx) arr_idx = arr_len - (pat_count - k);
-                            else arr_idx = k;
-                            LatValue *elem = &scr.value.as.array.elems[arr_idx];
-                            if (sub->tag == PAT_WILDCARD) {
-                                /* always matches, no binding */
-                            } else if (sub->tag == PAT_BINDING) {
-                                if (bind_count >= bind_cap) {
-                                    bind_cap *= 2;
-                                    bind_names = realloc(bind_names, bind_cap * sizeof(char *));
-                                    bind_vals = realloc(bind_vals, bind_cap * sizeof(LatValue));
-                                }
-                                bind_names[bind_count] = sub->as.binding_name;
-                                bind_vals[bind_count] = value_deep_clone(elem);
-                                bind_count++;
-                            } else if (sub->tag == PAT_LITERAL) {
-                                EvalResult pr = eval_expr(ev, sub->as.literal);
-                                if (!IS_OK(pr)) {
-                                    for (size_t b = 0; b < bind_count; b++) value_free(&bind_vals[b]);
-                                    free(bind_names);
-                                    free(bind_vals);
-                                    GC_POP(ev);
-                                    value_free(&scr.value);
-                                    return pr;
-                                }
-                                matched = value_equal(elem, &pr.value);
-                                value_free(&pr.value);
-                            } else {
-                                matched = false;
-                            }
-                        }
-                        break;
-                    }
-                    case PAT_STRUCT: {
-                        if (scr.value.type != VAL_STRUCT) {
-                            matched = false;
-                            break;
-                        }
-                        size_t spat_count = arm->pattern->as.strct.count;
-                        StructPatField *spfields = arm->pattern->as.strct.fields;
-
-                        matched = true;
-                        for (size_t k = 0; k < spat_count && matched; k++) {
-                            const char *fname = spfields[k].name;
-                            /* Find field in struct */
-                            int found_idx = -1;
-                            for (size_t f = 0; f < scr.value.as.strct.field_count; f++) {
-                                if (strcmp(scr.value.as.strct.field_names[f], fname) == 0) {
-                                    found_idx = (int)f;
-                                    break;
-                                }
-                            }
-                            if (found_idx < 0) {
-                                matched = false;
-                                break;
-                            }
-                            LatValue *fval = &scr.value.as.strct.field_values[found_idx];
-
-                            if (spfields[k].value_pat == NULL) {
-                                /* Shorthand: {x} => bind x to field value */
-                                if (bind_count >= bind_cap) {
-                                    bind_cap *= 2;
-                                    bind_names = realloc(bind_names, bind_cap * sizeof(char *));
-                                    bind_vals = realloc(bind_vals, bind_cap * sizeof(LatValue));
-                                }
-                                bind_names[bind_count] = (char *)fname;
-                                bind_vals[bind_count] = value_deep_clone(fval);
-                                bind_count++;
-                            } else {
-                                Pattern *vpat = spfields[k].value_pat;
-                                if (vpat->tag == PAT_WILDCARD) {
-                                    /* matches anything */
-                                } else if (vpat->tag == PAT_BINDING) {
-                                    if (bind_count >= bind_cap) {
-                                        bind_cap *= 2;
-                                        bind_names = realloc(bind_names, bind_cap * sizeof(char *));
-                                        bind_vals = realloc(bind_vals, bind_cap * sizeof(LatValue));
-                                    }
-                                    bind_names[bind_count] = vpat->as.binding_name;
-                                    bind_vals[bind_count] = value_deep_clone(fval);
-                                    bind_count++;
-                                } else if (vpat->tag == PAT_LITERAL) {
-                                    EvalResult pr = eval_expr(ev, vpat->as.literal);
-                                    if (!IS_OK(pr)) {
-                                        for (size_t b = 0; b < bind_count; b++) value_free(&bind_vals[b]);
-                                        free(bind_names);
-                                        free(bind_vals);
-                                        GC_POP(ev);
-                                        value_free(&scr.value);
-                                        return pr;
-                                    }
-                                    matched = value_equal(fval, &pr.value);
-                                    value_free(&pr.value);
-                                } else {
-                                    matched = false;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    case PAT_ENUM_VARIANT: {
-                        if (scr.value.type != VAL_ENUM) {
-                            matched = false;
-                            break;
-                        }
-                        const char *pat_enum = arm->pattern->as.enum_variant.enum_name;
-                        const char *pat_var = arm->pattern->as.enum_variant.variant_name;
-                        /* Check enum name and variant name */
-                        if (strcmp(scr.value.as.enm.enum_name, pat_enum) != 0 ||
-                            strcmp(scr.value.as.enm.variant_name, pat_var) != 0) {
-                            matched = false;
-                            break;
-                        }
-                        /* Check payload count matches */
-                        size_t evpc = arm->pattern->as.enum_variant.payload_count;
-                        if (evpc > 0 && evpc != scr.value.as.enm.payload_count) {
-                            matched = false;
-                            break;
-                        }
-                        /* Match and extract payload sub-patterns */
-                        matched = true;
-                        for (size_t k = 0; k < evpc && matched; k++) {
-                            Pattern *sub = arm->pattern->as.enum_variant.payload_pats[k];
-                            LatValue *pval = &scr.value.as.enm.payload[k];
-                            if (sub->tag == PAT_WILDCARD) {
-                                /* matches anything */
-                            } else if (sub->tag == PAT_BINDING) {
-                                if (bind_count >= bind_cap) {
-                                    bind_cap *= 2;
-                                    bind_names = realloc(bind_names, bind_cap * sizeof(char *));
-                                    bind_vals = realloc(bind_vals, bind_cap * sizeof(LatValue));
-                                }
-                                bind_names[bind_count] = sub->as.binding_name;
-                                bind_vals[bind_count] = value_deep_clone(pval);
-                                bind_count++;
-                            } else if (sub->tag == PAT_LITERAL) {
-                                EvalResult pr = eval_expr(ev, sub->as.literal);
-                                if (!IS_OK(pr)) {
-                                    for (size_t b = 0; b < bind_count; b++) value_free(&bind_vals[b]);
-                                    free(bind_names);
-                                    free(bind_vals);
-                                    GC_POP(ev);
-                                    value_free(&scr.value);
-                                    return pr;
-                                }
-                                matched = value_equal(pval, &pr.value);
-                                value_free(&pr.value);
-                            } else {
-                                matched = false;
-                            }
-                        }
-                        break;
-                    }
+                MatchBindings collected = {.names = malloc(4 * sizeof(char *)), .values = value_array(NULL, 0)};
+                if (!collected.names) {
+                    value_free(&collected.values);
+                    GC_POP(ev);
+                    value_free(&scr.value);
+                    return eval_err(strdup("out of memory"));
                 }
-
-                /* Check phase qualifier */
-                if (matched && arm->pattern->phase_qualifier != PHASE_UNSPECIFIED) {
-                    bool phase_ok = false;
-                    if (arm->pattern->phase_qualifier == PHASE_FLUID)
-                        phase_ok = (scr.value.phase == VTAG_FLUID || scr.value.phase == VTAG_UNPHASED);
-                    else if (arm->pattern->phase_qualifier == PHASE_CRYSTAL)
-                        phase_ok = (scr.value.phase == VTAG_CRYSTAL);
-                    if (!phase_ok) {
-                        for (size_t b = 0; b < bind_count; b++) value_free(&bind_vals[b]);
-                        bind_count = 0;
-                        matched = false;
-                    }
+                GC_PUSH(ev, &collected.values);
+                EvalResult pattern_result = eval_pattern_match(ev, arm->pattern, &scr.value, &collected);
+                if (!IS_OK(pattern_result)) {
+                    GC_POP(ev);
+                    free(collected.names);
+                    value_free(&collected.values);
+                    GC_POP(ev);
+                    value_free(&scr.value);
+                    return pattern_result;
                 }
+                bool matched = pattern_result.value.type == VAL_BOOL && pattern_result.value.as.bool_val;
+                value_free(&pattern_result.value);
 
+                size_t bind_count = collected.values.as.array.len;
+                char **bind_names = collected.names;
+                LatValue *bind_vals = bind_count ? malloc(bind_count * sizeof(LatValue)) : NULL;
+                if (bind_count && !bind_vals) {
+                    GC_POP(ev);
+                    free(bind_names);
+                    value_free(&collected.values);
+                    GC_POP(ev);
+                    value_free(&scr.value);
+                    return eval_err(strdup("out of memory"));
+                }
+                for (size_t b = 0; b < bind_count; b++) {
+                    bind_vals[b] = collected.values.as.array.elems[b];
+                    collected.values.as.array.elems[b] = value_unit();
+                }
+                GC_POP(ev);
+                value_free(&collected.values);
                 if (!matched) {
-                    for (size_t b = 0; b < bind_count; b++) value_free(&bind_vals[b]);
                     free(bind_names);
                     free(bind_vals);
                     continue;
@@ -10688,18 +10665,18 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                 }
 
-                /* Execute arm body */
+                /* Execute the arm as a real lexical block. Besides keeping the
+                 * binding scope reflected in defer depth, eval_block_stmts runs
+                 * defers on normal, error, and nonlocal exits before bindings
+                 * are removed. */
+                stats_scope_push(&ev->stats);
                 env_push_scope(ev->env);
                 for (size_t b = 0; b < bind_count; b++) env_define(ev->env, bind_names[b], bind_vals[b]);
                 free(bind_names);
                 free(bind_vals);
-                EvalResult result = eval_ok(value_unit());
-                for (size_t j = 0; j < arm->body_count; j++) {
-                    value_free(&result.value);
-                    result = eval_stmt(ev, arm->body[j]);
-                    if (!IS_OK(result)) break;
-                }
+                EvalResult result = eval_block_stmts(ev, arm->body, arm->body_count);
                 env_pop_scope(ev->env);
+                stats_scope_pop(&ev->stats);
                 GC_POP(ev);
                 value_free(&scr.value);
                 return result;
@@ -10725,7 +10702,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_err(err);
                 }
             } else {
-                ed = find_enum(ev, enum_name);
+                const char *mod_path = resolve_imported_type(ev, enum_name, "enum");
+                ed = mod_path ? find_enum_in_module(ev, mod_path, enum_name) : find_enum(ev, enum_name);
             }
             if (!ed) {
                 /* Fall back to static call: Name::method(args)
@@ -11213,6 +11191,37 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
 
     /* Export functions as closures */
     for (size_t j = 0; j < mod_prog.item_count; j++) {
+        const char *name = NULL;
+        const char *kind = NULL;
+        const char *key_prefix = NULL;
+        if (mod_prog.items[j].tag == ITEM_STRUCT) {
+            name = mod_prog.items[j].as.struct_decl.name;
+            kind = "struct";
+            key_prefix = "__struct_";
+        } else if (mod_prog.items[j].tag == ITEM_ENUM) {
+            name = mod_prog.items[j].as.enum_decl.name;
+            kind = "enum";
+            key_prefix = "__enum_";
+        } else {
+            continue;
+        }
+        if (!module_should_export(name, (const char **)mod_prog.export_names, mod_prog.export_count,
+                                  mod_prog.has_exports))
+            continue;
+
+        LatValue marker = value_map_new();
+        LatValue marker_kind = value_string(kind);
+        LatValue marker_path = value_string(resolved);
+        lat_map_set(marker.as.map.map, "__type_kind__", &marker_kind);
+        lat_map_set(marker.as.map.map, "__module_path__", &marker_path);
+
+        char marker_key[512];
+        snprintf(marker_key, sizeof(marker_key), "%s%s", key_prefix, name);
+        lat_map_set(module_map.as.map.map, marker_key, &marker);
+    }
+
+    /* Export functions as closures */
+    for (size_t j = 0; j < mod_prog.item_count; j++) {
         if (mod_prog.items[j].tag == ITEM_FUNCTION) {
             FnDecl *fn = &mod_prog.items[j].as.fn_decl;
 
@@ -11281,11 +11290,31 @@ static EvalResult load_module(Evaluator *ev, const char *raw_path) {
 
 /* ── Statement evaluation ── */
 
+static void remove_binding_at(Env *env, size_t scope_idx, const char *name) {
+    if (scope_idx >= env->count) return;
+    LatValue *value = (LatValue *)lat_map_get(&env->scopes[scope_idx], name);
+    if (!value) return;
+    value_free(value);
+    *value = value_unit();
+    lat_map_remove(&env->scopes[scope_idx], name);
+}
+
 static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
     switch (stmt->tag) {
         case STMT_BINDING: {
+            size_t binding_scope =
+                (ev->lat_eval_scope > 0 && ev->env->count == ev->lat_eval_scope) ? 0 : ev->env->count - 1;
+            bool recursive_placeholder = false;
+            if (stmt->as.binding.value->tag == EXPR_CLOSURE &&
+                !lat_map_contains(&ev->env->scopes[binding_scope], stmt->as.binding.name)) {
+                env_define_at(ev->env, binding_scope, stmt->as.binding.name, value_nil());
+                recursive_placeholder = true;
+            }
             EvalResult vr = eval_expr(ev, stmt->as.binding.value);
-            if (!IS_OK(vr)) return vr;
+            if (!IS_OK(vr)) {
+                if (recursive_placeholder) remove_binding_at(ev->env, binding_scope, stmt->as.binding.name);
+                return vr;
+            }
 
             if (ev->mode == MODE_CASUAL) {
                 switch (stmt->as.binding.phase) {
@@ -11315,6 +11344,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                             lat_asprintf(&err, "strict mode: 'flux' binding '%s' produced a crystal value",
                                          stmt->as.binding.name);
                             value_free(&vr.value);
+                            if (recursive_placeholder) remove_binding_at(ev->env, binding_scope, stmt->as.binding.name);
                             return eval_err(err);
                         }
                         /* Crystals error above, so a shared handle (always
@@ -11337,9 +11367,14 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         lat_asprintf(&err, "strict mode: binding '%s' requires an explicit phase (flux/fix)",
                                      stmt->as.binding.name);
                         value_free(&vr.value);
+                        if (recursive_placeholder) remove_binding_at(ev->env, binding_scope, stmt->as.binding.name);
                         return eval_err(err);
                     }
                 }
+            }
+            if (recursive_placeholder && vr.value.type == VAL_CLOSURE) {
+                env_weaken_recursive_binding(vr.value.as.closure.captured_env, binding_scope, stmt->as.binding.name,
+                                             &vr.value);
             }
             stats_binding(&ev->stats);
             /* In lat_eval context, top-level bindings go to the root scope
@@ -12120,7 +12155,16 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     return eval_err(err);
                 }
 
-                for (size_t i = 0; i < stmt->as.destructure.name_count; i++) {
+                size_t field_count = stmt->as.destructure.name_count;
+                LatValue *field_values = field_count ? malloc(field_count * sizeof(LatValue)) : NULL;
+                if (field_count && !field_values) {
+                    value_free(&vr.value);
+                    return eval_err(strdup("out of memory"));
+                }
+
+                /* Resolve and clone every field before publishing any binding.
+                 * A missing later field must not leave an earlier name defined. */
+                for (size_t i = 0; i < field_count; i++) {
                     const char *fname = stmt->as.destructure.names[i];
                     LatValue elem = value_unit();
                     bool found = false;
@@ -12145,10 +12189,17 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     if (!found) {
                         char *err = NULL;
                         lat_asprintf(&err, "destructure: field '%s' not found", fname);
+                        for (size_t j = 0; j < i; j++) value_free(&field_values[j]);
+                        free(field_values);
                         value_free(&vr.value);
                         return eval_err(err);
                     }
+                    field_values[i] = elem;
+                }
 
+                for (size_t i = 0; i < field_count; i++) {
+                    const char *fname = stmt->as.destructure.names[i];
+                    LatValue elem = field_values[i];
                     /* H9: see array path above — unshare before fluid flip. */
                     if (stmt->as.destructure.phase == PHASE_FLUID) {
                         value_unshare(&elem);
@@ -12161,6 +12212,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     stats_binding(&ev->stats);
                     env_define(ev->env, fname, elem);
                 }
+                free(field_values);
                 value_free(&vr.value);
             }
             return eval_ok(value_unit());
@@ -12188,21 +12240,21 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                     const char *name = selective[i];
                     LatValue *exported = (LatValue *)lat_map_get(module_map.as.map.map, name);
                     if (!exported) {
+                        char marker_key[512];
+                        snprintf(marker_key, sizeof(marker_key), "__struct_%s", name);
+                        exported = (LatValue *)lat_map_get(module_map.as.map.map, marker_key);
+                        if (!exported) {
+                            snprintf(marker_key, sizeof(marker_key), "__enum_%s", name);
+                            exported = (LatValue *)lat_map_get(module_map.as.map.map, marker_key);
+                        }
+                    }
+                    if (!exported) {
                         char *err = NULL;
                         lat_asprintf(&err, "module '%s' does not export '%s'", path, name);
                         value_free(&module_map);
                         return eval_err(err);
                     }
                     env_define(ev->env, name, value_deep_clone(exported));
-
-                    /* For selective struct/enum imports, ensure the unprefixed
-                     * registry entry points to this module's definition */
-                    if (mod_resolved_path) {
-                        StructDecl *sd = find_struct_in_module(ev, mod_resolved_path, name);
-                        if (sd) { lat_map_set(&ev->struct_defs, name, &sd); }
-                        EnumDecl *ed = find_enum_in_module(ev, mod_resolved_path, name);
-                        if (ed) { lat_map_set(&ev->enum_defs, name, &ed); }
-                    }
                 }
                 value_free(&module_map);
                 return eval_ok(value_unit());
@@ -12649,29 +12701,21 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
         if (strcmp(method, "add") == 0 && arg_count == 1) {
             if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             value_unshare_detached(inner);
-            char *key = value_hash_key(&args[0]);
-            LatValue *old = (LatValue *)lat_map_get(inner->as.set.map, key);
-            if (old) value_free(old);
             LatValue stored = value_detach(&args[0]);
-            lat_map_set(inner->as.set.map, key, &stored);
-            free(key);
+            value_set_insert(inner, &stored);
+            value_free(&stored);
             return eval_ok(value_unit());
         }
         if (strcmp(method, "remove") == 0 && arg_count == 1) {
             if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             value_unshare_detached(inner);
-            char *key = value_hash_key(&args[0]);
-            LatValue *old = (LatValue *)lat_map_get(inner->as.set.map, key);
-            if (old) value_free(old);
-            lat_map_remove(inner->as.set.map, key);
-            free(key);
+            value_set_remove(inner, &args[0]);
             return eval_ok(value_unit());
         }
         if (strcmp(method, "clear") == 0 && arg_count == 0) {
             if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             value_unshare_detached(inner);
-            lat_map_free(inner->as.set.map);
-            *inner->as.set.map = lat_map_new(sizeof(LatValue));
+            value_set_clear(inner);
             return eval_ok(value_unit());
         }
     }
@@ -13186,11 +13230,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             }
             return eval_ok(r);
         }
-        char *err2 = NULL;
-        const char *esug = builtin_find_similar_method(VAL_ENUM, method);
-        if (esug) lat_asprintf(&err2, "Enum has no method '%s' (did you mean '%s'?)", method, esug);
-        else lat_asprintf(&err2, "Enum has no method '%s'", method);
-        return eval_err(err2);
+        /* Unknown enum methods may be supplied by a trait impl below. */
     }
 
     /* ── Set methods ── */
@@ -13201,10 +13241,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// @example s.has(42)
         if (strcmp(method, "has") == 0) {
             if (arg_count != 1) return eval_err(strdup(".has() expects 1 argument"));
-            char *key = value_hash_key(&args[0]);
-            bool result = lat_map_contains(obj.as.set.map, key);
-            free(key);
-            return eval_ok(value_bool(result));
+            return eval_ok(value_bool(value_set_contains(&obj, &args[0])));
         }
         /// @method Set.len() -> Int
         /// @category Set Methods
@@ -13239,24 +13276,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// @example s1.union(s2)
         if (strcmp(method, "union") == 0) {
             if (arg_count != 1 || args[0].type != VAL_SET) return eval_err(strdup(".union() expects 1 Set argument"));
-            LatValue result = value_set_new();
-            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
-                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
-                    LatValue cloned = value_deep_clone(sv);
-                    lat_map_set(result.as.set.map, obj.as.set.map->entries[i].key, &cloned);
-                }
-            }
-            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
-                if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    if (!lat_map_contains(result.as.set.map, args[0].as.set.map->entries[i].key)) {
-                        LatValue *sv = (LatValue *)args[0].as.set.map->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
-                        lat_map_set(result.as.set.map, args[0].as.set.map->entries[i].key, &cloned);
-                    }
-                }
-            }
-            return eval_ok(result);
+            return eval_ok(value_set_union(&obj, &args[0]));
         }
         /// @method Set.intersection(other: Set) -> Set
         /// @category Set Methods
@@ -13265,18 +13285,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "intersection") == 0) {
             if (arg_count != 1 || args[0].type != VAL_SET)
                 return eval_err(strdup(".intersection() expects 1 Set argument"));
-            LatValue result = value_set_new();
-            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
-                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    const char *key = obj.as.set.map->entries[i].key;
-                    if (lat_map_contains(args[0].as.set.map, key)) {
-                        LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
-                        lat_map_set(result.as.set.map, key, &cloned);
-                    }
-                }
-            }
-            return eval_ok(result);
+            return eval_ok(value_set_intersection(&obj, &args[0]));
         }
         /// @method Set.difference(other: Set) -> Set
         /// @category Set Methods
@@ -13285,18 +13294,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "difference") == 0) {
             if (arg_count != 1 || args[0].type != VAL_SET)
                 return eval_err(strdup(".difference() expects 1 Set argument"));
-            LatValue result = value_set_new();
-            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
-                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    const char *key = obj.as.set.map->entries[i].key;
-                    if (!lat_map_contains(args[0].as.set.map, key)) {
-                        LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
-                        lat_map_set(result.as.set.map, key, &cloned);
-                    }
-                }
-            }
-            return eval_ok(result);
+            return eval_ok(value_set_difference(&obj, &args[0]));
         }
         /// @method Set.symmetric_difference(other: Set) -> Set
         /// @category Set Methods
@@ -13305,30 +13303,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "symmetric_difference") == 0) {
             if (arg_count != 1 || args[0].type != VAL_SET)
                 return eval_err(strdup(".symmetric_difference() expects 1 Set argument"));
-            LatValue result = value_set_new();
-            /* Add elements in self but not in other */
-            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
-                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    const char *key = obj.as.set.map->entries[i].key;
-                    if (!lat_map_contains(args[0].as.set.map, key)) {
-                        LatValue *sv = (LatValue *)obj.as.set.map->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
-                        lat_map_set(result.as.set.map, key, &cloned);
-                    }
-                }
-            }
-            /* Add elements in other but not in self */
-            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
-                if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    const char *key = args[0].as.set.map->entries[i].key;
-                    if (!lat_map_contains(obj.as.set.map, key)) {
-                        LatValue *sv = (LatValue *)args[0].as.set.map->entries[i].value;
-                        LatValue cloned = value_deep_clone(sv);
-                        lat_map_set(result.as.set.map, key, &cloned);
-                    }
-                }
-            }
-            return eval_ok(result);
+            return eval_ok(value_set_symmetric_difference(&obj, &args[0]));
         }
         /// @method Set.is_subset(other: Set) -> Bool
         /// @category Set Methods
@@ -13337,13 +13312,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "is_subset") == 0) {
             if (arg_count != 1 || args[0].type != VAL_SET)
                 return eval_err(strdup(".is_subset() expects 1 Set argument"));
-            for (size_t i = 0; i < obj.as.set.map->cap; i++) {
-                if (obj.as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    if (!lat_map_contains(args[0].as.set.map, obj.as.set.map->entries[i].key))
-                        return eval_ok(value_bool(false));
-                }
-            }
-            return eval_ok(value_bool(true));
+            return eval_ok(value_bool(value_set_is_subset(&obj, &args[0])));
         }
         /// @method Set.is_superset(other: Set) -> Bool
         /// @category Set Methods
@@ -13352,13 +13321,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "is_superset") == 0) {
             if (arg_count != 1 || args[0].type != VAL_SET)
                 return eval_err(strdup(".is_superset() expects 1 Set argument"));
-            for (size_t i = 0; i < args[0].as.set.map->cap; i++) {
-                if (args[0].as.set.map->entries[i].state == MAP_OCCUPIED) {
-                    if (!lat_map_contains(obj.as.set.map, args[0].as.set.map->entries[i].key))
-                        return eval_ok(value_bool(false));
-                }
-            }
-            return eval_ok(value_bool(true));
+            return eval_ok(value_bool(value_set_is_subset(&args[0], &obj)));
         }
         if (strcmp(method, "clear") == 0) {
             if (arg_count != 0) return eval_err(strdup(".clear() takes no arguments"));
@@ -13842,6 +13805,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
         if (obj.type == VAL_TUPLE) return eval_ok(value_int((int64_t)obj.as.tuple.len));
         if (obj.type == VAL_BUFFER) return eval_ok(value_int((int64_t)obj.as.buffer.len));
+        if (obj.type == VAL_RANGE) {
+            int64_t length = obj.as.range.end - obj.as.range.start;
+            return eval_ok(value_int(length > 0 ? length : 0));
+        }
         if (obj.type == VAL_REF) {
             LatValue *inner = &obj.as.ref.ref->value;
             if (inner->type == VAL_ARRAY) return eval_ok(value_int((int64_t)inner->as.array.len));
@@ -13850,6 +13817,13 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (inner->type == VAL_BUFFER) return eval_ok(value_int((int64_t)inner->as.buffer.len));
         }
         return eval_err(strdup(".len()/.length() is not defined on this type"));
+    }
+
+    if (strcmp(method, "contains") == 0 && obj.type == VAL_RANGE) {
+        if (arg_count != 1) return eval_err(strdup("Range.contains() expects exactly 1 argument"));
+        if (args[0].type != VAL_INT) return eval_ok(value_bool(false));
+        int64_t value = args[0].as.int_val;
+        return eval_ok(value_bool(value >= obj.as.range.start && value < obj.as.range.end));
     }
     /// @method Array.map(fn: Closure) -> Array
     /// @category Array Methods
@@ -14544,27 +14518,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     if (strcmp(method, "min") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".min() takes no arguments"));
         if (obj.as.array.len == 0) return eval_err(strdup(".min() on empty array"));
-        bool min_has_float = false;
-        for (size_t i = 0; i < obj.as.array.len; i++) {
-            if (obj.as.array.elems[i].type == VAL_FLOAT) min_has_float = true;
-            else if (obj.as.array.elems[i].type != VAL_INT)
-                return eval_err(strdup(".min() requires all elements to be numeric"));
-        }
-        if (min_has_float) {
-            double fmin = (obj.as.array.elems[0].type == VAL_FLOAT) ? obj.as.array.elems[0].as.float_val
-                                                                    : (double)obj.as.array.elems[0].as.int_val;
-            for (size_t i = 1; i < obj.as.array.len; i++) {
-                double v = (obj.as.array.elems[i].type == VAL_FLOAT) ? obj.as.array.elems[i].as.float_val
-                                                                     : (double)obj.as.array.elems[i].as.int_val;
-                if (v < fmin) fmin = v;
-            }
-            return eval_ok(value_float(fmin));
-        }
-        int64_t imin = obj.as.array.elems[0].as.int_val;
+        LatValue *best = &obj.as.array.elems[0];
+        if (best->type != VAL_INT && best->type != VAL_FLOAT)
+            return eval_err(strdup(".min() requires all elements to be numeric"));
         for (size_t i = 1; i < obj.as.array.len; i++) {
-            if (obj.as.array.elems[i].as.int_val < imin) imin = obj.as.array.elems[i].as.int_val;
+            ValueNumericCmp cmp = value_numeric_compare(&obj.as.array.elems[i], best);
+            if (cmp == VALUE_CMP_NOT_NUMERIC) return eval_err(strdup(".min() requires all elements to be numeric"));
+            if (cmp == VALUE_CMP_UNORDERED) return eval_err(strdup(".min() cannot compare NaN"));
+            if (cmp == VALUE_CMP_LESS) best = &obj.as.array.elems[i];
         }
-        return eval_ok(value_int(imin));
+        return eval_ok(value_deep_clone(best));
     }
     /// @method Array.max() -> Int|Float
     /// @category Array Methods
@@ -14574,27 +14537,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     if (strcmp(method, "max") == 0 && obj.type == VAL_ARRAY) {
         if (arg_count != 0) return eval_err(strdup(".max() takes no arguments"));
         if (obj.as.array.len == 0) return eval_err(strdup(".max() on empty array"));
-        bool max_has_float = false;
-        for (size_t i = 0; i < obj.as.array.len; i++) {
-            if (obj.as.array.elems[i].type == VAL_FLOAT) max_has_float = true;
-            else if (obj.as.array.elems[i].type != VAL_INT)
-                return eval_err(strdup(".max() requires all elements to be numeric"));
-        }
-        if (max_has_float) {
-            double fmax = (obj.as.array.elems[0].type == VAL_FLOAT) ? obj.as.array.elems[0].as.float_val
-                                                                    : (double)obj.as.array.elems[0].as.int_val;
-            for (size_t i = 1; i < obj.as.array.len; i++) {
-                double v = (obj.as.array.elems[i].type == VAL_FLOAT) ? obj.as.array.elems[i].as.float_val
-                                                                     : (double)obj.as.array.elems[i].as.int_val;
-                if (v > fmax) fmax = v;
-            }
-            return eval_ok(value_float(fmax));
-        }
-        int64_t imax = obj.as.array.elems[0].as.int_val;
+        LatValue *best = &obj.as.array.elems[0];
+        if (best->type != VAL_INT && best->type != VAL_FLOAT)
+            return eval_err(strdup(".max() requires all elements to be numeric"));
         for (size_t i = 1; i < obj.as.array.len; i++) {
-            if (obj.as.array.elems[i].as.int_val > imax) imax = obj.as.array.elems[i].as.int_val;
+            ValueNumericCmp cmp = value_numeric_compare(&obj.as.array.elems[i], best);
+            if (cmp == VALUE_CMP_NOT_NUMERIC) return eval_err(strdup(".max() requires all elements to be numeric"));
+            if (cmp == VALUE_CMP_UNORDERED) return eval_err(strdup(".max() cannot compare NaN"));
+            if (cmp == VALUE_CMP_GREATER) best = &obj.as.array.elems[i];
         }
-        return eval_ok(value_int(imax));
+        return eval_ok(value_deep_clone(best));
     }
     /// @method Array.first() -> Any|Unit
     /// @category Array Methods
@@ -15273,6 +15225,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     {
         const char *type_name = NULL;
         if (obj.type == VAL_STRUCT) type_name = obj.as.strct.name;
+        else if (obj.type == VAL_ENUM) type_name = obj.as.enm.enum_name;
         else if (obj.type == VAL_INT) type_name = "Int";
         else if (obj.type == VAL_FLOAT) type_name = "Float";
         else if (obj.type == VAL_STR) type_name = "String";
@@ -15303,6 +15256,14 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
                 }
             }
         }
+    }
+
+    if (obj.type == VAL_ENUM) {
+        char *err = NULL;
+        const char *suggestion = builtin_find_similar_method(VAL_ENUM, method);
+        if (suggestion) lat_asprintf(&err, "Enum has no method '%s' (did you mean '%s'?)", method, suggestion);
+        else lat_asprintf(&err, "Enum has no method '%s'", method);
+        return eval_err(err);
     }
 
     /* ── Ref methods ── */

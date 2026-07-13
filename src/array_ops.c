@@ -12,26 +12,23 @@ static int sort_comparator(const void *a, const void *b) {
     const LatValue *va = (const LatValue *)a;
     const LatValue *vb = (const LatValue *)b;
 
-    if (va->type != vb->type) {
-        sort_error = 1;
-        return 0;
-    }
-
-    switch (va->type) {
-        case VAL_INT: {
-            int64_t ai = va->as.int_val, bi = vb->as.int_val;
-            return (ai > bi) - (ai < bi);
-        }
-        case VAL_FLOAT: {
-            double af = va->as.float_val, bf = vb->as.float_val;
-            return (af > bf) - (af < bf);
-        }
-        case VAL_STR:
-            return strcmp(va->as.str_val, vb->as.str_val);
-        default:
+    if ((va->type == VAL_INT || va->type == VAL_FLOAT) && (vb->type == VAL_INT || vb->type == VAL_FLOAT)) {
+        ValueNumericCmp cmp = value_numeric_compare(va, vb);
+        if (cmp == VALUE_CMP_UNORDERED) {
             sort_error = 1;
             return 0;
+        }
+        return cmp == VALUE_CMP_LESS ? -1 : cmp == VALUE_CMP_GREATER ? 1 : 0;
     }
+
+    if (va->type == VAL_STR && vb->type == VAL_STR) return strcmp(va->as.str_val, vb->as.str_val);
+    sort_error = 1;
+    return 0;
+}
+
+static bool sort_types_compatible(ValueType first, ValueType current) {
+    if ((first == VAL_INT || first == VAL_FLOAT) && (current == VAL_INT || current == VAL_FLOAT)) { return true; }
+    return first == current;
 }
 
 LatValue array_sort(const LatValue *arr, char **err) {
@@ -49,8 +46,8 @@ LatValue array_sort(const LatValue *arr, char **err) {
         return value_unit();
     }
     for (size_t i = 1; i < n; i++) {
-        if (arr->as.array.elems[i].type != sort_type) {
-            *err = strdup(".sort() requires all elements to be the same type");
+        if (!sort_types_compatible(sort_type, arr->as.array.elems[i].type)) {
+            *err = strdup(".sort() requires all elements to be numeric or all String");
             return value_unit();
         }
     }
@@ -61,9 +58,7 @@ LatValue array_sort(const LatValue *arr, char **err) {
         *err = strdup("sort: out of memory");
         return value_unit();
     }
-    for (size_t i = 0; i < n; i++) {
-        buf[i] = value_deep_clone(&arr->as.array.elems[i]);
-    }
+    for (size_t i = 0; i < n; i++) { buf[i] = value_deep_clone(&arr->as.array.elems[i]); }
 
     sort_error = 0;
     qsort(buf, n, sizeof(LatValue), sort_comparator);
@@ -113,9 +108,7 @@ LatValue array_flat(const LatValue *arr) {
         if (arr->as.array.elems[i].type == VAL_ARRAY) {
             LatValue *inner = arr->as.array.elems[i].as.array.elems;
             size_t inner_len = arr->as.array.elems[i].as.array.len;
-            for (size_t j = 0; j < inner_len; j++) {
-                buf[pos++] = value_deep_clone(&inner[j]);
-            }
+            for (size_t j = 0; j < inner_len; j++) { buf[pos++] = value_deep_clone(&inner[j]); }
         } else {
             buf[pos++] = value_deep_clone(&arr->as.array.elems[i]);
         }
@@ -150,9 +143,7 @@ LatValue array_slice(const LatValue *arr, int64_t start, int64_t end, char **err
         *err = strdup("slice: out of memory");
         return value_unit();
     }
-    for (size_t i = 0; i < count; i++) {
-        buf[i] = value_deep_clone(&arr->as.array.elems[start + (int64_t)i]);
-    }
+    for (size_t i = 0; i < count; i++) { buf[i] = value_deep_clone(&arr->as.array.elems[start + (int64_t)i]); }
 
     *err = NULL;
     LatValue result = value_array(buf, count);

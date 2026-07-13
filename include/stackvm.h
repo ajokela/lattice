@@ -46,13 +46,12 @@ typedef struct {
     Chunk *chunk;        /* Which chunk the handler is in */
     size_t frame_index;  /* Which call frame */
     LatValue *stack_top; /* Stack top at handler registration */
+    size_t defer_count;  /* Defer stack depth at handler registration */
 } StackExceptionHandler;
 
 typedef struct {
-    uint8_t *ip;         /* Start of defer body */
-    Chunk *chunk;        /* Which chunk */
-    size_t frame_index;  /* Which call frame */
-    LatValue *slots;     /* Frame slots */
+    LatValue closure;    /* Hidden zero-argument cleanup closure */
+    size_t frame_index;  /* Registering call frame */
     uint8_t scope_depth; /* Compiler scope depth at registration */
 } StackDeferEntry;
 
@@ -76,6 +75,7 @@ typedef struct {
     /* Defer stack */
     StackDeferEntry defers[STACKVM_DEFER_MAX];
     size_t defer_count;
+    bool unwinding_defers;
     /* Struct metadata (name -> field names array) for OP_BUILD_STRUCT */
     Env *struct_meta;
     /* Chunks allocated for functions (freed with StackVM) */
@@ -92,7 +92,7 @@ typedef struct {
     bool ephemeral_on_stack;
     /* Pre-built wrapper chunk for stackvm_call_closure [OP_CALL, arg_count, OP_RETURN] */
     Chunk call_wrapper;
-    /* Override for next stackvm_run frame's slots (used by defer to share parent locals) */
+    /* Legacy frame-slot override retained for bytecode compatibility. */
     LatValue *next_frame_slots;
     /* Shared runtime (not owned by StackVM) */
     LatRuntime *rt;
