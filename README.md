@@ -6,7 +6,7 @@ A crystallization-based programming language implemented in C, where data transi
 
 Lattice is an interpreted programming language built around the metaphor of crystallization. Values begin in a **fluid** state where they can be freely modified, then **freeze** into an immutable **crystal** state for safe sharing and long-term storage. This phase system gives you explicit, fine-grained control over mutability — rather than relying on convention, the language enforces it.
 
-The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, traits with `impl` blocks, expression-based control flow, pattern matching with exhaustiveness checking and array/struct destructuring, enums, sets, tuples, lazy iterators with chainable transforms, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system with namespace isolation, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, phase borrowing, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), `@fluid`/`@crystal` annotations, composite phase constraints, bytecode compilation to `.latc` files (with both C and self-hosted compiler backends), opt-in mark-sweep garbage collector, built-in test framework with assertions, `clat fmt` source formatter, `clat doc` documentation generator, interactive debugger (`--debug`) and in-code `breakpoint()`, REPL with tab completion and auto-display, and a self-hosted package registry.
+The language features a familiar C-like syntax with modern conveniences: first-class closures, structs with callable fields, traits with `impl` blocks, expression-based control flow, pattern matching with exhaustiveness checking and array/struct destructuring, enums, sets, tuples, lazy iterators with chainable transforms, default parameters, variadic functions, string interpolation, nil coalescing, optional chaining (`?.`), bitwise operators, import/module system with namespace isolation, native extensions via `require_ext()`, try/catch error handling, `defer` for guaranteed cleanup, Result `?` operator for ergonomic error propagation, function contracts (`require`/`ensure`), runtime type checking, structured concurrency with channels and `select` multiplexing, phase constraints with phase-dependent dispatch, phase reactions, crystallize blocks, phase borrowing, sublimation (shallow freeze), freeze-except (defects), seed/grow contracts, phase pressure, bond strategies, alloy structs (per-field phase declarations), `@fluid`/`@crystal` annotations, composite phase constraints, bytecode compilation to standalone `.latc`/`.rlat` bytecode files that serialize the full language including `match`/`select`/`defer` (with both C and self-hosted compiler backends), opt-in mark-sweep garbage collector, built-in test framework with assertions, `clat fmt` source formatter, `clat doc` documentation generator, interactive debugger (`--debug`) and in-code `breakpoint()`, REPL with tab completion and auto-display, and a self-hosted package registry.
 
 Lattice compiles and runs on macOS and Linux with no dependencies beyond a C11 compiler and libedit. Optional features like TLS networking and cryptographic hashing are available when OpenSSL is present.
 
@@ -1743,6 +1743,13 @@ Lattice can compile source files to standalone `.latc` bytecode files using the 
 ./clat program.latc                           # run compiled bytecode
 ```
 
+The register VM has its own bytecode format:
+
+```sh
+./clat compile --regvm program.lat -o program.rlat   # compile for the register VM
+./clat program.rlat                                   # run compiled bytecode
+```
+
 A self-hosted compiler written in Lattice itself (`compiler/latc.lat`) can also produce `.latc` files:
 
 ```sh
@@ -1751,6 +1758,8 @@ A self-hosted compiler written in Lattice itself (`compiler/latc.lat`) can also 
 ```
 
 Both backends produce identical output. The self-hosted compiler supports the full language including structs, enums, traits/impl, closures, match expressions, destructuring, phase semantics (fix/freeze/thaw/clone), and nil coalescing.
+
+Compiled bytecode is fully self-contained: `match`, `select`, and `defer` lower to dedicated opcodes instead of referencing the in-memory AST, so any program can be saved to bytecode and re-run, with default parameter values, parameter phase constraints, and struct/enum layout preserved across the round-trip. This is bytecode format v3; the loader still reads v2 files, so bytecode produced by earlier releases keeps working.
 
 ## CLI Reference
 
