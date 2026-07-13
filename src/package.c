@@ -419,10 +419,11 @@ static char *pkg_compute_checksum(const char *name) {
         n = snprintf(single, sizeof(single), "lat_modules/%s.lat", name);
         if (n < 0 || (size_t)n >= sizeof(single) || !fs_file_exists(single)) ok = false;
         else {
-            char *rel = malloc(strlen(name) + 5);
+            size_t rel_len = strlen(name) + 5; /* name + ".lat" + NUL */
+            char *rel = malloc(rel_len);
             if (!rel) ok = false;
             else {
-                sprintf(rel, "%s.lat", name);
+                snprintf(rel, rel_len, "%s.lat", name);
                 ok = pkg_hash_path(&buf, single, rel);
                 free(rel);
             }
