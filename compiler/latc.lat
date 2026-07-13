@@ -145,6 +145,10 @@ let OP_GET_FIELD_LOCAL = 112
 let OP_HALT           = 113
 let OP_INDEX_GLOBAL   = 114
 let OP_SET_INDEX_GLOBAL = 115
+// LAT-621: upvalue-receiver method call (write-back through the upvalue cell).
+// Appended opcodes — numbers mirror the C enum's tail (after OP_MATCH_TYPE=122).
+let OP_INVOKE_UPVALUE    = 123
+let OP_INVOKE_UPVALUE_16 = 124
 
 // .latc constant tags
 let TAG_INT     = 0
@@ -629,20 +633,39 @@ fn resolve_upvalue(name: any) {
     return resolve_upvalue_in(stack_idx, name)
 }
 
-// Tracks the most recent global emit_variable_get so the '[' postfix handler
-// can rewrite GET_GLOBAL(_16) + OP_INDEX into OP_INDEX_GLOBAL (no container clone).
+// Tracks the most recent emit_variable_get of each kind (position stamps) so
+// postfix handlers can soundly rewrite a bare-variable load into a fused
+// opcode (OP_INDEX_GLOBAL, OP_INVOKE_LOCAL/GLOBAL/UPVALUE). A rewrite is valid
+// only when the stamp equals the receiver's code position: byte-scanning the
+// tail of `code` is NOT sound (an operand byte can equal an opcode number).
+// Stamps must be invalidated whenever `code` is popped or swapped, because
+// positions can recur with different contents.
 flux vget_global_idx = 0
 flux vget_global_end = -1
+flux vget_local_slot = 0
+flux vget_local_end = -1
+flux vget_upvalue_idx = 0
+flux vget_upvalue_end = -1
+
+fn vget_reset() {
+    vget_global_end = -1
+    vget_local_end = -1
+    vget_upvalue_end = -1
+}
 
 fn emit_variable_get(name: any, line: any) {
     let slot = resolve_local(name)
     if slot >= 0 {
         emit_bytes(OP_GET_LOCAL, slot, line)
+        vget_local_slot = slot
+        vget_local_end = code.len()
         return
     }
     let up = resolve_upvalue(name)
     if up >= 0 {
         emit_bytes(OP_GET_UPVALUE, up, line)
+        vget_upvalue_idx = up
+        vget_upvalue_end = code.len()
         return
     }
     let idx = string_constant(name)
@@ -735,6 +758,41 @@ fn emit_return_type_check(line: any) {
 // src/stackcompiler.c: slot 0 is reserved (or holds self), params occupy
 // the following slots; unannotated, any-typed and variadic params are
 // skipped (variadic params get "" in the types array).
+// Bytecode format v3: fill omitted defaulted parameters in the callee
+// prologue. The caller pushes a REGION_MISSING_ARG-marked nil for each
+// omitted argument; OP_JUMP_IF_NOT_NIL with the presence bit (0x80 on the
+// first offset byte) branches on "argument supplied" instead of "value is
+// non-nil", so an explicit nil argument still overrides the default.
+// Mirrors compile_function_body in src/stackcompiler.c — defaults run
+// BEFORE the parameter type checks.
+fn emit_default_prologue(pnames: any, pdefaults: any, is_variadic: any, first_param: any, line: any) {
+    let dc = pdefaults.len()
+    if dc == 0 { return 0 }
+    let n = pnames.len()
+    flux non_variadic = n
+    if is_variadic { non_variadic = n - 1 }
+    let first_defaulted = non_variadic - dc
+    flux i = first_defaulted
+    while i < non_variadic {
+        let slot = i + 1 - first_param
+        emit_bytes(OP_GET_LOCAL, slot, line)
+        let skip = emit_jump(OP_JUMP_IF_NOT_NIL, line)
+        emit_byte(OP_POP, line)
+        emit_constant(pdefaults[i - first_defaulted], line)
+        emit_bytes(OP_SET_LOCAL_POP, slot, line)
+        let done = emit_jump(OP_JUMP, line)
+        patch_jump(skip)
+        if code[skip] >= 128 {
+            compiler_error("default parameter initializer jump exceeds 32767 bytes", line)
+        }
+        code[skip] = code[skip] + 128  // presence bit
+        emit_byte(OP_POP, line)
+        patch_jump(done)
+        i = i + 1
+    }
+    return 0
+}
+
 fn emit_param_type_checks(fname: any, pnames: any, ptypes: any, first_param: any, line: any) {
     let n = len(pnames)
     for i in first_param..n {
@@ -1096,7 +1154,7 @@ fn parse_postfix() {
                     ri = ri + 1
                 }
             }
-            vget_global_end = -1
+            vget_reset()
             parse_expression()
             expect(nil, "]")
             if is_local_obj {
@@ -1125,17 +1183,28 @@ fn parse_postfix() {
             if peek_type() == "(" {
                 // Method call
                 if !optional {
-                    // Check if receiver was a simple local or global load
-                    let is_local_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_LOCAL
-                    let is_global_recv = receiver_code_pos >= 2 && code[receiver_code_pos - 2] == OP_GET_GLOBAL && !(receiver_code_pos >= 3 && code[receiver_code_pos - 3] == OP_GET_GLOBAL_16)
-                    let receiver_slot = 0
-                    if is_local_recv || is_global_recv {
-                        receiver_slot = code[receiver_code_pos - 1]
-                        // Remove the GET_LOCAL/GET_GLOBAL we already emitted
+                    // Receiver-kind detection via position stamps (sound): the
+                    // receiver was a bare variable load iff the corresponding
+                    // vget stamp equals its code position. Byte-scanning the code
+                    // tail false-positives when an operand byte equals an opcode
+                    // number (e.g. local slot 33 == OP_GET_UPVALUE). Wide global
+                    // loads (idx > 255) are excluded, as before.
+                    let is_local_recv = vget_local_end == receiver_code_pos
+                    let is_global_recv = vget_global_end == receiver_code_pos && vget_global_idx <= 255
+                    // LAT-621: captured receiver — rewrite to OP_INVOKE_UPVALUE so
+                    // in-place builtin mutations write back through the upvalue cell.
+                    let is_upvalue_recv = vget_upvalue_end == receiver_code_pos
+                    flux receiver_slot = 0
+                    if is_local_recv { receiver_slot = vget_local_slot }
+                    if is_global_recv { receiver_slot = vget_global_idx }
+                    if is_upvalue_recv { receiver_slot = vget_upvalue_idx }
+                    if is_local_recv || is_global_recv || is_upvalue_recv {
+                        // Remove the 2-byte GET_LOCAL/GET_GLOBAL/GET_UPVALUE we already emitted
                         code.pop()
                         code.pop()
                         c_lines.pop()
                         c_lines.pop()
+                        vget_reset()
                     }
 
                     advance()
@@ -1178,11 +1247,24 @@ fn parse_postfix() {
                             emit_byte(name_idx, line)
                             emit_byte(arg_count, line)
                         }
+                    } else { if is_upvalue_recv {
+                        if name_idx > 255 {
+                            emit_byte(OP_INVOKE_UPVALUE_16, line)
+                            emit_byte(receiver_slot, line)
+                            emit_byte(name_idx / 256, line)
+                            emit_byte(name_idx % 256, line)
+                            emit_byte(arg_count, line)
+                        } else {
+                            emit_byte(OP_INVOKE_UPVALUE, line)
+                            emit_byte(receiver_slot, line)
+                            emit_byte(name_idx, line)
+                            emit_byte(arg_count, line)
+                        }
                     } else {
                         emit_byte(OP_INVOKE, line)
                         emit_byte(name_idx, line)
                         emit_byte(arg_count, line)
-                    } }
+                    } } }
                 } else {
                     // Optional method call: obj?.method(args)
                     // TOS = object. Check if nil.
@@ -1232,6 +1314,7 @@ fn parse_postfix() {
                         code.pop()
                         c_lines.pop()
                         c_lines.pop()
+                        vget_reset()
                         emit_byte(OP_GET_FIELD_LOCAL, line)
                         emit_byte(field_slot, line)
                         emit_byte(name_idx, line)
@@ -2651,6 +2734,7 @@ fn parse_closure_literal() {
     save_compiler()
 
     code = []
+    vget_reset()
     c_lines = []
     constants = []
     local_names = []
@@ -2747,6 +2831,7 @@ fn init_sub_compiler() {
     let saved_stack = compiler_stack
     compiler_stack = []
     code = []
+    vget_reset()
     c_lines = []
     constants = []
     local_names = []
@@ -3665,6 +3750,7 @@ fn parse_fn_declaration() {
     save_compiler()
 
     code = []
+    vget_reset()
     c_lines = []
     constants = []
     local_names = []
@@ -3698,6 +3784,10 @@ fn parse_fn_declaration() {
     for i in 0..param_count {
         add_local(param_names_arr[i])
     }
+
+    // v3: fill omitted defaulted params (before type checks, like
+    // compile_function_body in src/stackcompiler.c)
+    emit_default_prologue(param_names_arr, param_defaults_arr, has_variadic, 0, line)
 
     // Emit runtime parameter type checks (before require contracts, like
     // compile_function_body in src/stackcompiler.c)
@@ -4667,15 +4757,44 @@ fn parse_defer() {
     let line = current_line()
     advance()
 
-    // OP_DEFER_PUSH format: opcode(1) + scope_depth(1) + offset(2)
-    emit_byte(OP_DEFER_PUSH, line)
-    emit_byte(scope_depth, line)
-    emit_byte(255, line)
-    emit_byte(255, line)
-    let jump = code.len() - 2
+    // Bytecode format v3: the defer body is compiled as a zero-parameter
+    // closure (outer bindings become ordinary upvalues, exactly like a
+    // | | { ... } literal); OP_DEFER_PUSH then consumes the closure from the
+    // stack. Mirrors the C compiler's STMT_DEFER lowering — the legacy
+    // inline-body + forward-offset form is gone (the v3 VM would treat
+    // whatever sat on the stack as the cleanup closure and run arbitrary
+    // code).
+    save_compiler()
+
+    code = []
+    vget_reset()
+    c_lines = []
+    constants = []
+    local_names = []
+    local_name_arr = []
+    local_depth_arr = []
+    local_captured_arr = []
+    local_count = 0
+    scope_depth = 0
+    upvalue_index_arr = []
+    upvalue_islocal_arr = []
+    upvalue_count = 0
+    func_type = "function"
+    break_jumps = []
+    break_count = 0
+    loop_start_pos = 0
+    loop_depth = 0
+    string_intern_map = Map::new()
+    current_return_type = ""
+    current_chunk_name = nil
+    cur_chunk_variadic = false
+    cur_chunk_defaults = []
+
+    // Reserve slot 0 for the closure itself (VM convention)
+    add_local("")
+    begin_scope()
 
     expect(nil, "{")
-    begin_scope()
     while peek_text() != "}" {
         if peek() == nil {
             compiler_error("unexpected end of input in defer body", line)
@@ -4683,10 +4802,41 @@ fn parse_defer() {
         parse_statement_or_expression()
     }
     expect(nil, "}")
-    end_scope(line)
-    emit_byte(OP_UNIT, line)   // implicit return value for defer block
+    emit_byte(OP_UNIT, line)   // implicit unit result for the defer body
+
+    emit_byte(OP_DEFER_RUN, line)
+    emit_byte(0, line)  // scope_depth 0 = run all defers
     emit_byte(OP_RETURN, line)
-    patch_jump(jump)
+
+    let fn_snap = snapshot_chunk()
+    let fn_uv_idx = upvalue_index_arr
+    let fn_uv_loc = upvalue_islocal_arr
+    let fn_uv_count = upvalue_count
+
+    restore_compiler()
+
+    let fn_const = make_closure_const(0, false, fn_snap)
+    let fn_idx = add_constant(fn_const)
+
+    emit_wide_op(OP_CLOSURE, OP_CLOSURE_16, fn_idx, line)
+    emit_byte(fn_uv_count, line)
+    flux di = 0
+    while di < fn_uv_count {
+        if fn_uv_loc[di] {
+            emit_byte(1, line)
+        } else {
+            emit_byte(0, line)
+        }
+        emit_byte(fn_uv_idx[di], line)
+        di = di + 1
+    }
+
+    // OP_DEFER_PUSH format: opcode(1) + scope_depth(1) + reserved u16 (zero).
+    // Consumes the closure pushed above.
+    emit_byte(OP_DEFER_PUSH, line)
+    emit_byte(scope_depth, line)
+    emit_byte(0, line)
+    emit_byte(0, line)
 }
 
 fn parse_import() {
@@ -5158,6 +5308,7 @@ fn parse_impl_block() {
         save_compiler()
 
         code = []
+        vget_reset()
         c_lines = []
         constants = []
         local_names = []
@@ -5198,6 +5349,10 @@ fn parse_impl_block() {
         for i in first_param..param_count {
             add_local(param_names_arr[i])
         }
+
+        // v3: fill omitted defaulted params (before type checks, like
+        // compile_function_body in src/stackcompiler.c)
+        emit_default_prologue(param_names_arr, param_defaults_arr, has_variadic, first_param, line)
 
         // Emit runtime parameter type checks (before require contracts, like
         // compile_function_body in src/stackcompiler.c)

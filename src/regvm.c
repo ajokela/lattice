@@ -1142,20 +1142,37 @@ static uint16_t rvm_pic_resolve(uint8_t type_tag, uint32_t mhash) {
 /* Returns true if handled, false if not a builtin */
 
 static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, LatValue *args, int arg_count,
-                               LatValue *result, const char *var_name) {
+                               LatValue *result, const char *var_name, bool cell_receiver) {
     uint32_t mhash = method_hash(method);
     /* LAT-441: reject mutating builtin methods on crystal/sublimated receivers
      * before any method body runs. */
     if ((obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) && builtin_method_mutates(obj->type, method)) {
-        if (var_name && obj->phase == VTAG_CRYSTAL)
-            lat_asprintf(&vm->error,
-                         "cannot call mutating method '%s' on crystal value '%s' (use thaw(%s) to make it mutable)",
-                         method, var_name, var_name);
-        else
-            lat_asprintf(&vm->error, "cannot call mutating method '%s' on a %s value", method,
-                         obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
-        *result = value_unit();
-        return true;
+        /* LAT-445 Decision 1: freeze-except exemption. set(k,v)/remove(k) on a
+         * crystal map WITH a key_phases table are allowed when the evaluated
+         * key is exempt (non-crystal key_phases entry — the index-assign
+         * predicate). Whole-map mutators (clear/merge/...) stay blocked (they
+         * touch non-exempt keys by definition). Cell receivers only
+         * (local/global/upvalue bindings); rvalue copies keep erroring
+         * (Decision 2). The evaluated key is args[0]. */
+        bool fe_exempt = false;
+        if (cell_receiver && obj->phase == VTAG_CRYSTAL && obj->type == VAL_MAP && obj->as.map.key_phases &&
+            args != NULL && args[0].type == VAL_STR &&
+            ((mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) ||
+             (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1))) {
+            PhaseTag *kp = lat_map_get(obj->as.map.key_phases, args[0].as.str_val);
+            if (kp && *kp != VTAG_CRYSTAL) fe_exempt = true;
+        }
+        if (!fe_exempt) {
+            if (var_name && obj->phase == VTAG_CRYSTAL)
+                lat_asprintf(&vm->error,
+                             "cannot call mutating method '%s' on crystal value '%s' (use thaw(%s) to make it mutable)",
+                             method, var_name, var_name);
+            else
+                lat_asprintf(&vm->error, "cannot call mutating method '%s' on a %s value", method,
+                             obj->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+            *result = value_unit();
+            return true;
+        }
     }
     if (obj->type == VAL_ARRAY) {
         if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
@@ -3199,6 +3216,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         [ROP_SETINDEX_LOCAL] = &&L_SETINDEX_LOCAL,
         [ROP_INVOKE_GLOBAL] = &&L_INVOKE_GLOBAL,
         [ROP_INVOKE_LOCAL] = &&L_INVOKE_LOCAL,
+        [ROP_INVOKE_UPVALUE] = &&L_INVOKE_UPVALUE,
         /* Phase query */
         [ROP_IS_CRYSTAL] = &&L_IS_CRYSTAL,
         [ROP_IS_FLUID] = &&L_IS_FLUID,
@@ -4808,7 +4826,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Try builtin */
         LatValue invoke_result;
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
-        if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL)) {
+        if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL,
+                               /*cell_receiver=*/false)) {
             if (vm->error) return REGVM_RUNTIME_ERROR;
             /* Object was mutated in-place at R[obj_reg]; result goes to R[dst] */
             reg_set(&R[dst], invoke_result);
@@ -5036,7 +5055,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Try builtin */
         LatValue invoke_result;
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
-        if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL)) {
+        if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL,
+                               /*cell_receiver=*/true)) {
             if (vm->error) return REGVM_RUNTIME_ERROR; /* frozen/sublimated/arity guard fired */
             reg_set(&R[dst], invoke_result);
             /* CHOKE POINT (a): a real in-place mutation falls through to run the
@@ -7181,7 +7201,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         {
             LatValue invoke_result;
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
-            if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, global_name)) {
+            if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, global_name,
+                                   /*cell_receiver=*/true)) {
                 if (vm->error) return REGVM_RUNTIME_ERROR;
                 /* Cache builtin hit */
                 if (!_rgpic) {
@@ -7395,7 +7416,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             LatValue obj_copy = rvm_clone(obj_ref);
             LatValue fb_result;
             LatValue *fb_args = (argc > 0) ? &R[args_base] : NULL;
-            if (rvm_invoke_builtin(vm, &obj_copy, method_name, fb_args, argc, &fb_result, global_name)) {
+            if (rvm_invoke_builtin(vm, &obj_copy, method_name, fb_args, argc, &fb_result, global_name,
+                                   /*cell_receiver=*/true)) {
                 /* Write back the mutated copy to the global */
                 value_free(obj_ref);
                 *obj_ref = obj_copy;
@@ -7442,7 +7464,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                                              : NULL;
             LatValue invoke_result;
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
-            if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result, local_var_name)) {
+            if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result, local_var_name,
+                                   /*cell_receiver=*/true)) {
                 if (vm->error) return REGVM_RUNTIME_ERROR;
                 /* Cache builtin hit */
                 if (!_rpic) {
@@ -7649,6 +7672,273 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                           lmsug);
             else RVM_ERROR("no method '%s' on %s", method_name, value_type_name(&R[loc_reg]));
         }
+    }
+
+    CASE(INVOKE_UPVALUE) {
+        /* Two-instruction sequence:
+         *   INVOKE_UPVALUE dst, uv_idx, argc
+         *   data:          method_ki, args_base, 0
+         * Upvalue-receiver method call (LAT-621): the receiver is read through
+         * the upvalue cell (open ⇒ enclosing frame's live register, closed ⇒
+         * the cell's own storage), so an in-place builtin mutation persists
+         * through the capture — the same cell discipline as SETUPVALUE. */
+        size_t _rupic_off = (size_t)(frame->ip - frame->chunk->code - 1);
+        uint8_t dst = REG_GET_A(instr);
+        uint8_t uv_idx = REG_GET_B(instr);
+        uint8_t argc = REG_GET_C(instr);
+
+        RegInstr data = *frame->ip++;
+        uint8_t args_base = REG_GET_B(data);
+        /* 16-bit method key (lo in data A, hi in data C — LAT-463 encoding). */
+        uint16_t method_ki = (uint16_t)REG_GET_A(data) | ((uint16_t)REG_GET_C(data) << 8);
+
+        const char *method_name = frame->chunk->constants[method_ki].as.str_val;
+
+        LatValue *obj_ref = (frame->upvalues && uv_idx < frame->upvalue_count && frame->upvalues[uv_idx])
+                                ? frame->upvalues[uv_idx]->location
+                                : NULL;
+        if (!obj_ref) RVM_ERROR("invalid upvalue in method call");
+
+        /* ── PIC fast path ── */
+        uint8_t _ruobj_type = (uint8_t)obj_ref->type;
+        uint32_t _rumhash = method_hash(method_name);
+        PICSlot *_rupic = pic_slot_for(&frame->chunk->pic, _rupic_off);
+        uint16_t _rupic_id = _rupic ? pic_lookup(_rupic, _ruobj_type, _rumhash) : 0;
+        if (_rupic_id == PIC_NOT_BUILTIN) goto rvm_invoke_upvalue_not_builtin;
+
+        /* Try builtin — mutates the cell in-place */
+        {
+            LatValue invoke_result;
+            LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
+            if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, NULL,
+                                   /*cell_receiver=*/true)) {
+                if (vm->error) return REGVM_RUNTIME_ERROR;
+                /* Cache builtin hit */
+                if (!_rupic) {
+                    pic_table_ensure(&frame->chunk->pic);
+                    _rupic = pic_slot_for(&frame->chunk->pic, _rupic_off);
+                }
+                if (_rupic && _rupic_id == 0) {
+                    uint16_t _rid = rvm_pic_resolve(_ruobj_type, _rumhash);
+                    if (_rid) pic_update(_rupic, _ruobj_type, _rumhash, _rid);
+                }
+                reg_set(&R[dst], invoke_result);
+                DISPATCH();
+            }
+        }
+        /* Cache as NOT_BUILTIN */
+        if (!_rupic) {
+            pic_table_ensure(&frame->chunk->pic);
+            _rupic = pic_slot_for(&frame->chunk->pic, _rupic_off);
+        }
+        if (_rupic) pic_update(_rupic, _ruobj_type, _rumhash, PIC_NOT_BUILTIN);
+    rvm_invoke_upvalue_not_builtin:
+
+        /* Check for callable closure field in struct (self is a deep clone —
+         * language semantics — so no cell write-back applies on this path). */
+        if (obj_ref->type == VAL_STRUCT) {
+            for (size_t fi = 0; fi < obj_ref->as.strct.field_count; fi++) {
+                if (strcmp(obj_ref->as.strct.field_names[fi], method_name) != 0) continue;
+                LatValue *field = &obj_ref->as.strct.field_values[fi];
+                if (field->type == VAL_CLOSURE) {
+                    LatValue closure = rvm_clone(field);
+                    if (closure.as.closure.body == NULL && closure.as.closure.native_fn != NULL &&
+                        closure.as.closure.default_values != VM_NATIVE_MARKER &&
+                        closure.as.closure.default_values != VM_EXT_MARKER) {
+                        /* Compiled closure */
+                        RegChunk *fn_chunk = (RegChunk *)closure.as.closure.native_fn;
+                        char arity_error[128];
+                        if (!rvm_compiled_closure_accepts_arity(&closure, fn_chunk, (int)argc + 1, arity_error,
+                                                                sizeof(arity_error))) {
+                            value_free(&closure);
+                            RVM_ERROR("%s", arity_error);
+                        }
+                        if (vm->frame_count >= REGVM_FRAMES_MAX) {
+                            value_free(&closure);
+                            RVM_ERROR("call stack overflow");
+                        }
+                        /* Save upvalue info BEFORE freeing the closure */
+                        ObjUpvalue **upvals = (ObjUpvalue **)closure.as.closure.captured_env;
+                        size_t uv_count = closure.as.closure.upvalue_count;
+
+                        LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
+                        vm->reg_stack_top += REGVM_REG_MAX;
+                        int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                        for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+
+                        /* Slot 0 = reserved, slot 1 = self, slots 2+ = args */
+                        new_regs[0] = value_unit();
+                        new_regs[1] = rvm_clone(obj_ref); /* self = first param */
+                        value_free(&closure);
+                        for (int ai = 0; ai < argc && ai + 2 < REGVM_REG_MAX; ai++)
+                            new_regs[ai + 2] = rvm_clone(&R[args_base + ai]);
+                        new_regs[REGVM_REG_MAX - 1] = value_int((int64_t)argc + 1);
+
+                        RegCallFrame *nf = &vm->frames[vm->frame_count++];
+                        nf->chunk = fn_chunk;
+                        nf->ip = fn_chunk->code;
+                        nf->regs = new_regs;
+                        nf->reg_count = mr;
+                        nf->caller_result_reg = dst;
+                        nf->upvalues = upvals;
+                        nf->upvalue_count = uv_count;
+
+                        frame = nf;
+                        R = frame->regs;
+                        DISPATCH();
+                    }
+                    value_free(&closure);
+                }
+                break;
+            }
+        }
+
+        /* Check for callable closure field in map */
+        if (obj_ref->type == VAL_MAP) {
+            LatValue *field = lat_map_get(obj_ref->as.map.map, method_name);
+            if (field && field->type == VAL_CLOSURE) {
+                if (field->as.closure.default_values == VM_NATIVE_MARKER) {
+                    VMNativeFn native = (VMNativeFn)field->as.closure.native_fn;
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = native(call_args, argc);
+                    if (vm->rt->error) {
+                        vm->error = vm->rt->error;
+                        vm->rt->error = NULL;
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                if (field->as.closure.default_values == VM_EXT_MARKER) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = ext_call_native(field->as.closure.native_fn, call_args, (size_t)argc);
+                    if (ret.type == VAL_STR && ret.as.str_val && strncmp(ret.as.str_val, "EVAL_ERROR:", 11) == 0) {
+                        vm->error = strdup(ret.as.str_val + 11);
+                        value_free(&ret);
+                        return REGVM_RUNTIME_ERROR;
+                    }
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+                RegChunk *fn_chunk = (RegChunk *)field->as.closure.native_fn;
+                if (fn_chunk) {
+                    uint32_t magic;
+                    memcpy(&magic, fn_chunk, sizeof(uint32_t));
+                    if (magic == REGCHUNK_MAGIC) {
+                        char arity_error[128];
+                        if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, argc, arity_error,
+                                                                sizeof(arity_error)))
+                            RVM_ERROR("%s", arity_error);
+                        if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                        LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
+                        vm->reg_stack_top += REGVM_REG_MAX;
+                        int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                        for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+                        new_regs[0] = value_unit();
+                        for (int ai = 0; ai < argc; ai++) new_regs[1 + ai] = rvm_clone(&R[args_base + ai]);
+                        new_regs[REGVM_REG_MAX - 1] = value_int((int64_t)argc);
+
+                        ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
+                        size_t uv_count = field->as.closure.upvalue_count;
+
+                        RegCallFrame *nf = &vm->frames[vm->frame_count++];
+                        nf->chunk = fn_chunk;
+                        nf->ip = fn_chunk->code;
+                        nf->regs = new_regs;
+                        nf->reg_count = mr;
+                        nf->upvalues = upvals;
+                        nf->upvalue_count = uv_count;
+                        nf->caller_result_reg = dst;
+                        frame = nf;
+                        R = frame->regs;
+                        DISPATCH();
+                    }
+                }
+                /* Stack-VM closure in map — use regvm bridge */
+                if (field->as.closure.native_fn) {
+                    LatValue *call_args = (argc > 0) ? &R[args_base] : NULL;
+                    LatValue ret = regvm_call_closure(vm, field, call_args, argc);
+                    if (vm->error) return REGVM_RUNTIME_ERROR;
+                    reg_set(&R[dst], ret);
+                    DISPATCH();
+                }
+            }
+        }
+
+        /* Captured receivers participate in impl dispatch just like local and
+         * global receivers. */
+        {
+            char key[256];
+            snprintf(key, sizeof(key), "%s::%s", rvm_impl_receiver_type(obj_ref), method_name);
+            LatValue *impl_fn = rvm_global_get_ref(vm, frame, key);
+            if (impl_fn && impl_fn->type == VAL_CLOSURE && impl_fn->as.closure.native_fn) {
+                RegChunk *fn_chunk = (RegChunk *)impl_fn->as.closure.native_fn;
+                uint32_t magic;
+                memcpy(&magic, fn_chunk, sizeof(magic));
+                if (magic == REGCHUNK_MAGIC) {
+                    int formal = (int)impl_fn->as.closure.param_count - 1; /* exclude self */
+                    bool variadic = impl_fn->as.closure.has_variadic;
+                    int non_variadic = variadic ? formal - 1 : formal;
+                    int required = non_variadic - fn_chunk->default_count;
+                    if ((int)argc < required || (!variadic && (int)argc > non_variadic)) {
+                        if (variadic) RVM_ERROR("expected at least %d arguments but got %d", required, (int)argc);
+                        if (fn_chunk->default_count > 0)
+                            RVM_ERROR("expected %d to %d arguments but got %d", required, non_variadic, (int)argc);
+                        RVM_ERROR("expected %d arguments but got %d", non_variadic, (int)argc);
+                    }
+                    if (fn_chunk->param_phases) {
+                        for (int i = 0; i < fn_chunk->param_phase_count && i < (int)argc; i++) {
+                            uint8_t pp = fn_chunk->param_phases[i];
+                            LatValue *arg = &R[args_base + i];
+                            if ((pp == PHASE_FLUID && arg->phase == VTAG_CRYSTAL) ||
+                                (pp == PHASE_CRYSTAL && arg->phase == VTAG_FLUID))
+                                RVM_ERROR("phase constraint violation in function '%s'",
+                                          fn_chunk->name ? fn_chunk->name : "<anonymous>");
+                        }
+                    }
+                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+
+                    LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
+                    vm->reg_stack_top += REGVM_REG_MAX;
+                    int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
+                    for (int i = 0; i < mr; i++) new_regs[i] = value_nil();
+                    new_regs[0] = rvm_clone(obj_ref); /* self */
+                    for (int i = 0; i < argc; i++) new_regs[1 + i] = rvm_clone(&R[args_base + i]);
+                    new_regs[REGVM_REG_MAX - 1] = value_int((int64_t)argc);
+
+                    RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->chunk = fn_chunk;
+                    new_frame->ip = fn_chunk->code;
+                    new_frame->regs = new_regs;
+                    new_frame->reg_count = mr;
+                    new_frame->upvalues = (ObjUpvalue **)impl_fn->as.closure.captured_env;
+                    new_frame->upvalue_count = impl_fn->as.closure.upvalue_count;
+                    new_frame->caller_result_reg = dst;
+                    frame = new_frame;
+                    R = new_regs;
+                    DISPATCH();
+                }
+            }
+        }
+
+        /* Fallback: builtin probe directly on the cell (reached when the PIC
+         * mispredicted NOT_BUILTIN for this receiver type), else no-method. */
+        {
+            LatValue fb_result;
+            LatValue *fb_args = (argc > 0) ? &R[args_base] : NULL;
+            if (rvm_invoke_builtin(vm, obj_ref, method_name, fb_args, argc, &fb_result, NULL,
+                                   /*cell_receiver=*/true)) {
+                if (vm->error) return REGVM_RUNTIME_ERROR;
+                reg_set(&R[dst], fb_result);
+            } else {
+                const char *msug = builtin_find_similar_method(obj_ref->type, method_name);
+                if (msug)
+                    RVM_ERROR("no method '%s' on %s (did you mean '%s'?)", method_name, value_type_name(obj_ref), msug);
+                RVM_ERROR("no method '%s' on %s", method_name, value_type_name(obj_ref));
+            }
+        }
+        DISPATCH();
     }
 
     CASE(IS_CRYSTAL) {
@@ -8148,6 +8438,7 @@ static size_t reg_instr_words(const RegChunk *c, size_t i, char **err) {
         case ROP_NEWENUM:
         case ROP_INVOKE_GLOBAL:
         case ROP_INVOKE_LOCAL:
+        case ROP_INVOKE_UPVALUE:
         case ROP_CHECK_TYPE:
         case ROP_FREEZE_EXCEPT:
         case ROP_GETFIELD_16:
@@ -8352,6 +8643,17 @@ static char *reg_verify_operands(const RegChunk *c, size_t i, const uint8_t *is_
             RCK_WINDOW(REG_GET_B(w2), C); /* H-12: args_base + argc */
             RCK_WINDOW(A, 1);             /* dst */
             RCK_WINDOW(B, 1);             /* loc_reg */
+            break;
+        }
+        case ROP_INVOKE_UPVALUE: {
+            /* B = upvalue index — validated at runtime against the live
+             * frame's upvalue_count (a chunk carries no static upvalue
+             * arity for its own frame). */
+            RegInstr w2 = c->code[i + 1];
+            uint16_t method_ki = (uint16_t)(REG_GET_A(w2) | (REG_GET_C(w2) << 8));
+            RCK_STR(method_ki);           /* method name (16-bit) */
+            RCK_WINDOW(REG_GET_B(w2), C); /* args_base + argc */
+            RCK_WINDOW(A, 1);             /* dst */
             break;
         }
         case ROP_CHECK_TYPE: {

@@ -8511,19 +8511,32 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (lv_err) free(lv_err);
                     if (recv && (recv->phase == VTAG_CRYSTAL || recv->phase == VTAG_SUBLIMATED) &&
                         builtin_method_mutates(recv->type, _m)) {
-                        char *err = NULL;
-                        if (expr->as.method_call.object->tag == EXPR_IDENT && recv->phase == VTAG_CRYSTAL) {
-                            /* Match the VM backends' hint when the receiver is a named variable. */
-                            const char *_vn = expr->as.method_call.object->as.str_val;
-                            lat_asprintf(&err,
-                                         "cannot call mutating method '%s' on crystal value '%s' (use thaw(%s) to make "
-                                         "it mutable)",
-                                         _m, _vn, _vn);
-                        } else {
-                            lat_asprintf(&err, "cannot call mutating method '%s' on a %s value", _m,
-                                         recv->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                        /* LAT-445 Decision 1: freeze-except — set(k,v)/remove(k)
+                         * on a crystal map WITH a key_phases table defer the
+                         * per-key decision to the inline handlers below, which
+                         * have the EVALUATED key (exempt key ⇒ allowed,
+                         * non-exempt ⇒ error there). Everything else — maps
+                         * without key_phases, sublimated receivers, whole-map
+                         * mutators like clear/merge — still errors here. */
+                        bool fe_defer = recv->phase == VTAG_CRYSTAL && recv->type == VAL_MAP &&
+                                        recv->as.map.key_phases &&
+                                        ((strcmp(_m, "set") == 0 && expr->as.method_call.arg_count == 2) ||
+                                         (strcmp(_m, "remove") == 0 && expr->as.method_call.arg_count == 1));
+                        if (!fe_defer) {
+                            char *err = NULL;
+                            if (expr->as.method_call.object->tag == EXPR_IDENT && recv->phase == VTAG_CRYSTAL) {
+                                /* Match the VM backends' hint when the receiver is a named variable. */
+                                const char *_vn = expr->as.method_call.object->as.str_val;
+                                lat_asprintf(&err,
+                                             "cannot call mutating method '%s' on crystal value '%s' (use thaw(%s) to "
+                                             "make it mutable)",
+                                             _m, _vn, _vn);
+                            } else {
+                                lat_asprintf(&err, "cannot call mutating method '%s' on a %s value", _m,
+                                             recv->phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+                            }
+                            return eval_err(err);
                         }
-                        return eval_err(err);
                     }
                 }
             }
@@ -8608,6 +8621,30 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (!IS_OK(vr)) {
                         value_free(&kr.value);
                         return vr;
+                    }
+                    /* LAT-445 Decision 1: on a crystal map, .set is allowed only
+                     * for a freeze-except exempt key (non-crystal key_phases
+                     * entry — the index-assign predicate). Both args were
+                     * evaluated first to match the VM backends' ordering. */
+                    if (map_lv->phase == VTAG_CRYSTAL) {
+                        PhaseTag *kp = map_lv->as.map.key_phases
+                                           ? lat_map_get(map_lv->as.map.key_phases, kr.value.as.str_val)
+                                           : NULL;
+                        if (!(kp && *kp != VTAG_CRYSTAL)) {
+                            value_free(&kr.value);
+                            value_free(&vr.value);
+                            char *err = NULL;
+                            if (expr->as.method_call.object->tag == EXPR_IDENT) {
+                                const char *_vn = expr->as.method_call.object->as.str_val;
+                                lat_asprintf(&err,
+                                             "cannot call mutating method 'set' on crystal value '%s' (use thaw(%s) "
+                                             "to make it mutable)",
+                                             _vn, _vn);
+                            } else {
+                                lat_asprintf(&err, "cannot call mutating method 'set' on a frozen value");
+                            }
+                            return eval_err(err);
+                        }
                     }
                     /* Free old value if key exists */
                     LatValue *old = (LatValue *)lat_map_get(map_lv->as.map.map, kr.value.as.str_val);
@@ -8798,6 +8835,28 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     if (kr.value.type != VAL_STR) {
                         value_free(&kr.value);
                         return eval_err(strdup(".remove() key must be a string"));
+                    }
+                    /* LAT-445 Decision 1: on a crystal map, .remove is allowed
+                     * only for a freeze-except exempt key (non-crystal
+                     * key_phases entry — the index-assign predicate). */
+                    if (map_lv->phase == VTAG_CRYSTAL) {
+                        PhaseTag *kp = map_lv->as.map.key_phases
+                                           ? lat_map_get(map_lv->as.map.key_phases, kr.value.as.str_val)
+                                           : NULL;
+                        if (!(kp && *kp != VTAG_CRYSTAL)) {
+                            value_free(&kr.value);
+                            char *err = NULL;
+                            if (expr->as.method_call.object->tag == EXPR_IDENT) {
+                                const char *_vn = expr->as.method_call.object->as.str_val;
+                                lat_asprintf(&err,
+                                             "cannot call mutating method 'remove' on crystal value '%s' (use "
+                                             "thaw(%s) to make it mutable)",
+                                             _vn, _vn);
+                            } else {
+                                lat_asprintf(&err, "cannot call mutating method 'remove' on a frozen value");
+                            }
+                            return eval_err(err);
+                        }
                     }
                     /* Free old value if key exists */
                     LatValue *old = (LatValue *)lat_map_get(map_lv->as.map.map, kr.value.as.str_val);
@@ -13199,6 +13258,22 @@ cleanup:
 }
 
 static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *method, LatValue *args, size_t arg_count) {
+    /* LAT-445 Decision 2: mutating builtin methods on crystal/sublimated
+     * receivers that reach the value-based dispatch (rvalue receivers —
+     * function results, freeze(...) expressions — for which no lvalue
+     * resolution succeeded upstream) must ERROR like both VMs do, never
+     * silently mutate the evaluated temporary. Before this guard, rvalue
+     * array .pop()/.insert()/.remove_at() and Buffer .push()/write_* were
+     * silent no-ops on this backend. The freeze-except exemption (Decision 1)
+     * deliberately does NOT apply here: there is no binding for the mutation
+     * to land in. builtin_method_mutates() covers only ARRAY/MAP/SET/BUFFER,
+     * so Ref receivers still route to the locked Ref dispatch untouched. */
+    if ((obj.phase == VTAG_CRYSTAL || obj.phase == VTAG_SUBLIMATED) && builtin_method_mutates(obj.type, method)) {
+        char *err = NULL;
+        lat_asprintf(&err, "cannot call mutating method '%s' on a %s value", method,
+                     obj.phase == VTAG_CRYSTAL ? "frozen" : "sublimated");
+        return eval_err(err);
+    }
     /* ── Enum methods ── */
     if (obj.type == VAL_ENUM) {
         if (strcmp(method, "variant_name") == 0 || strcmp(method, "tag") == 0) {

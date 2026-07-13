@@ -247,6 +247,16 @@ typedef enum {
      * Two-word: A=metadata array, B=payload arity; data Bx=variant key. */
     ROP_CHECK_ENUM_VARIANT,
 
+    /* Upvalue-receiver method call (LAT-621). Mirrors ROP_INVOKE_LOCAL, but
+     * the receiver is read through the frame's upvalue cell (ObjUpvalue->
+     * location: open ⇒ enclosing frame's register, closed ⇒ the cell's own
+     * storage) so in-place builtin mutations (push/set/...) persist through
+     * the capture instead of mutating a discarded GETUPVALUE copy.
+     * 2-word: [INVOKE_UPVALUE dst, uv_idx, argc] [method_ki_lo, args_base,
+     * method_ki_hi]. Appended at the end to preserve every existing opcode
+     * number for already-serialized .rlatc files. */
+    ROP_INVOKE_UPVALUE,
+
     ROP_COUNT /* number of opcodes                             */
 } RegOpcode;
 

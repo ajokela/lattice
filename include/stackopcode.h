@@ -203,6 +203,17 @@ typedef enum {
     OP_MATCH_FLUID,            /* Pop value, push phase == FLUID || phase == UNPHASED. */
     OP_CLOSE_UPVALUE_PRESERVE, /* Close local below TOS, remove local, preserve TOS without swapping slots. */
     OP_MATCH_TYPE,             /* operand = ValueType. Preserve candidate on TOS and push exact runtime-tag match. */
+
+    /* Upvalue-receiver method call (LAT-621). Mirrors OP_INVOKE_LOCAL, but the
+     * receiver is read through the frame's upvalue cell (ObjUpvalue->location:
+     * open ⇒ enclosing frame's stack slot, closed ⇒ the cell's own storage), so
+     * in-place builtin mutations (push/set/...) persist through the capture
+     * instead of being applied to a discarded OP_GET_UPVALUE copy. Layout:
+     * [uv_slot:u8][method_idx:u8][argc:u8]. Appended after the legacy range so
+     * existing serialized bytecode keeps its numbering. */
+    OP_INVOKE_UPVALUE,
+    OP_INVOKE_UPVALUE_16, /* Like INVOKE_UPVALUE but method name constant is BE16: [uv_slot:u8][method_idx:u16][argc:u8]
+                           */
 } Opcode;
 
 const char *opcode_name(Opcode op);

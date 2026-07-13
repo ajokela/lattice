@@ -709,6 +709,142 @@ static void discard_match_locals(size_t keep_local_count) {
     }
 }
 
+/* ── Escape scan for expression-position match (v3 repair) ──
+ * A match compiled inside a larger expression runs in a synthetic
+ * immediately-invoked closure (see EXPR_MATCH), so control flow that must
+ * leave the enclosing function/loop frame — `return` anywhere, or a
+ * `break`/`continue` not bound to a loop nested inside the match itself —
+ * cannot be honored and is rejected at compile time instead of silently
+ * mis-compiling. Closure/spawn/scope bodies execute in their own frames, so
+ * the scan does not descend into them. */
+static bool match_stmts_escape(Stmt **stmts, size_t count, int loop_depth);
+
+static bool match_expr_escapes(const Expr *e, int loop_depth) {
+    if (!e) return false;
+    switch (e->tag) {
+        case EXPR_BLOCK:
+        case EXPR_FORGE: return match_stmts_escape(e->as.block.stmts, e->as.block.count, loop_depth);
+        case EXPR_IF:
+            return match_expr_escapes(e->as.if_expr.cond, loop_depth) ||
+                   match_stmts_escape(e->as.if_expr.then_stmts, e->as.if_expr.then_count, loop_depth) ||
+                   match_stmts_escape(e->as.if_expr.else_stmts, e->as.if_expr.else_count, loop_depth);
+        case EXPR_MATCH: {
+            if (match_expr_escapes(e->as.match_expr.scrutinee, loop_depth)) return true;
+            for (size_t i = 0; i < e->as.match_expr.arm_count; i++) {
+                const MatchArm *arm = &e->as.match_expr.arms[i];
+                if (match_expr_escapes(arm->guard, loop_depth)) return true;
+                if (match_stmts_escape(arm->body, arm->body_count, loop_depth)) return true;
+            }
+            return false;
+        }
+        case EXPR_TRY_CATCH:
+            return match_stmts_escape(e->as.try_catch.try_stmts, e->as.try_catch.try_count, loop_depth) ||
+                   match_stmts_escape(e->as.try_catch.catch_stmts, e->as.try_catch.catch_count, loop_depth);
+        case EXPR_CRYSTALLIZE:
+            return match_expr_escapes(e->as.crystallize.expr, loop_depth) ||
+                   match_stmts_escape(e->as.crystallize.body, e->as.crystallize.body_count, loop_depth);
+        case EXPR_BORROW:
+            return match_expr_escapes(e->as.borrow.expr, loop_depth) ||
+                   match_stmts_escape(e->as.borrow.body, e->as.borrow.body_count, loop_depth);
+        case EXPR_BINOP:
+            return match_expr_escapes(e->as.binop.left, loop_depth) ||
+                   match_expr_escapes(e->as.binop.right, loop_depth);
+        case EXPR_UNARYOP: return match_expr_escapes(e->as.unaryop.operand, loop_depth);
+        case EXPR_CALL: {
+            if (match_expr_escapes(e->as.call.func, loop_depth)) return true;
+            for (size_t i = 0; i < e->as.call.arg_count; i++)
+                if (match_expr_escapes(e->as.call.args[i], loop_depth)) return true;
+            return false;
+        }
+        case EXPR_METHOD_CALL: {
+            if (match_expr_escapes(e->as.method_call.object, loop_depth)) return true;
+            for (size_t i = 0; i < e->as.method_call.arg_count; i++)
+                if (match_expr_escapes(e->as.method_call.args[i], loop_depth)) return true;
+            return false;
+        }
+        case EXPR_FIELD_ACCESS: return match_expr_escapes(e->as.field_access.object, loop_depth);
+        case EXPR_INDEX:
+            return match_expr_escapes(e->as.index.object, loop_depth) ||
+                   match_expr_escapes(e->as.index.index, loop_depth);
+        case EXPR_ARRAY: {
+            for (size_t i = 0; i < e->as.array.count; i++)
+                if (match_expr_escapes(e->as.array.elems[i], loop_depth)) return true;
+            return false;
+        }
+        case EXPR_TUPLE: {
+            for (size_t i = 0; i < e->as.tuple.count; i++)
+                if (match_expr_escapes(e->as.tuple.elems[i], loop_depth)) return true;
+            return false;
+        }
+        case EXPR_STRUCT_LIT: {
+            for (size_t i = 0; i < e->as.struct_lit.field_count; i++)
+                if (match_expr_escapes(e->as.struct_lit.fields[i].value, loop_depth)) return true;
+            return false;
+        }
+        case EXPR_INTERP_STRING: {
+            for (size_t i = 0; i < e->as.interp.count; i++)
+                if (match_expr_escapes(e->as.interp.exprs[i], loop_depth)) return true;
+            return false;
+        }
+        case EXPR_RANGE:
+            return match_expr_escapes(e->as.range.start, loop_depth) || match_expr_escapes(e->as.range.end, loop_depth);
+        case EXPR_THAW:
+        case EXPR_CLONE:
+        case EXPR_SUBLIMATE: return match_expr_escapes(e->as.freeze_expr, loop_depth);
+        case EXPR_FREEZE: return match_expr_escapes(e->as.freeze.expr, loop_depth);
+        case EXPR_SPREAD: return match_expr_escapes(e->as.spread_expr, loop_depth);
+        case EXPR_TRY_PROPAGATE: return match_expr_escapes(e->as.try_propagate_expr, loop_depth);
+        case EXPR_PRINT: {
+            for (size_t i = 0; i < e->as.print.arg_count; i++)
+                if (match_expr_escapes(e->as.print.args[i], loop_depth)) return true;
+            return false;
+        }
+        default: return false; /* leaves, and frame-owning bodies (closure/spawn/scope/select) */
+    }
+}
+
+static bool match_stmts_escape(Stmt **stmts, size_t count, int loop_depth) {
+    for (size_t i = 0; i < count; i++) {
+        const Stmt *s = stmts[i];
+        if (!s) continue;
+        switch (s->tag) {
+            case STMT_RETURN: return true; /* would return from the synthetic frame */
+            case STMT_BREAK:
+            case STMT_CONTINUE:
+                if (loop_depth == 0) return true; /* targets an enclosing loop */
+                break;
+            case STMT_BINDING:
+                if (match_expr_escapes(s->as.binding.value, loop_depth)) return true;
+                break;
+            case STMT_ASSIGN:
+                if (match_expr_escapes(s->as.assign.target, loop_depth) ||
+                    match_expr_escapes(s->as.assign.value, loop_depth))
+                    return true;
+                break;
+            case STMT_EXPR:
+                if (match_expr_escapes(s->as.expr, loop_depth)) return true;
+                break;
+            case STMT_FOR:
+                if (match_expr_escapes(s->as.for_loop.iter, loop_depth)) return true;
+                if (match_stmts_escape(s->as.for_loop.body, s->as.for_loop.body_count, loop_depth + 1)) return true;
+                break;
+            case STMT_WHILE:
+                if (match_expr_escapes(s->as.while_loop.cond, loop_depth)) return true;
+                if (match_stmts_escape(s->as.while_loop.body, s->as.while_loop.body_count, loop_depth + 1)) return true;
+                break;
+            case STMT_LOOP:
+                if (match_stmts_escape(s->as.loop.body, s->as.loop.body_count, loop_depth + 1)) return true;
+                break;
+            case STMT_DESTRUCTURE:
+                if (match_expr_escapes(s->as.destructure.value, loop_depth)) return true;
+                break;
+            case STMT_DEFER: break; /* defer bodies run in their own closure frame */
+            case STMT_IMPORT: break;
+        }
+    }
+    return false;
+}
+
 static void compile_match_expression(const Expr *e, int line) {
     compile_expr(e->as.match_expr.scrutinee, line);
 
@@ -1551,9 +1687,44 @@ static void compile_expr(const Expr *e, int line) {
                     if (opt) patch_jump(end_jump);
                     break;
                 }
+                /* Captured variable — use OP_INVOKE_UPVALUE so in-place builtin
+                 * mutations (push/set/...) go through the upvalue cell and
+                 * persist, instead of mutating a discarded OP_GET_UPVALUE copy
+                 * (LAT-621). */
+                int upvalue = resolve_upvalue(current, e->as.method_call.object->as.str_val);
+                if (upvalue >= 0) {
+                    size_t end_jump = 0;
+                    if (opt) {
+                        /* Check the upvalue for nil before invoking */
+                        emit_bytes(OP_GET_UPVALUE, (uint8_t)upvalue, line);
+                        size_t skip = emit_jump(OP_JUMP_IF_NOT_NIL, line);
+                        /* Is nil — pop the peeked value, push nil as result */
+                        emit_byte(OP_POP, line);
+                        emit_byte(OP_NIL, line);
+                        end_jump = emit_jump(OP_JUMP, line);
+                        patch_jump(skip);
+                        emit_byte(OP_POP, line); /* pop the peeked non-nil value */
+                    }
+                    for (size_t i = 0; i < e->as.method_call.arg_count; i++)
+                        compile_expr(e->as.method_call.args[i], line);
+                    size_t idx = chunk_add_constant(current_chunk(), value_string(e->as.method_call.method));
+                    if (idx > 255) {
+                        emit_byte(OP_INVOKE_UPVALUE_16, line);
+                        emit_byte((uint8_t)upvalue, line);
+                        emit_byte((uint8_t)((idx >> 8) & 0xff), line);
+                        emit_byte((uint8_t)(idx & 0xff), line);
+                        emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    } else {
+                        emit_byte(OP_INVOKE_UPVALUE, line);
+                        emit_byte((uint8_t)upvalue, line);
+                        emit_byte((uint8_t)idx, line);
+                        emit_byte((uint8_t)e->as.method_call.arg_count, line);
+                    }
+                    if (opt) patch_jump(end_jump);
+                    break;
+                }
                 /* If not a local and not an upvalue, it's a global —
                  * use OP_INVOKE_GLOBAL for write-back of mutating builtins */
-                int upvalue = resolve_upvalue(current, e->as.method_call.object->as.str_val);
                 if (upvalue < 0) {
                     size_t end_jump = 0;
                     if (opt) {
@@ -1707,12 +1878,14 @@ static void compile_expr(const Expr *e, int line) {
                 Expr *block = e->as.closure.body;
                 if (block->as.block.count > 0 && block->as.block.stmts[block->as.block.count - 1]->tag == STMT_EXPR) {
                     for (size_t i = 0; i + 1 < block->as.block.count; i++) compile_stmt(block->as.block.stmts[i]);
+                    g_stmt_tos_expr = true; /* tail expression of a fresh frame ⇒ clean-adjacent stack */
                     compile_expr(block->as.block.stmts[block->as.block.count - 1]->as.expr, line);
                 } else {
                     for (size_t i = 0; i < block->as.block.count; i++) compile_stmt(block->as.block.stmts[i]);
                     emit_byte(OP_UNIT, line);
                 }
             } else {
+                g_stmt_tos_expr = true; /* body of a fresh frame ⇒ clean-adjacent stack */
                 compile_expr(e->as.closure.body, line);
             }
             emit_deferred_return(line);
@@ -1793,7 +1966,35 @@ static void compile_expr(const Expr *e, int line) {
         }
 
         case EXPR_MATCH: {
-            compile_match_expression(e, line);
+            if (at_tos) {
+                /* Statement-top expression: the operand stack is clean-adjacent
+                 * (TOS == locals window), so the hidden-scrutinee-local lowering
+                 * is sound. */
+                compile_match_expression(e, line);
+                break;
+            }
+            /* Expression-position match (operand / argument / element): pending
+             * operand temporaries sit between the locals window and TOS, so the
+             * hidden scrutinee local in compile_match_expression would mis-slot
+             * (OP_GET_LOCAL would read a neighboring temporary — the LAT-545
+             * hazard class; bytecode-format-v3 regression). Compile the match
+             * inside an immediately-invoked zero-parameter closure instead: the
+             * fresh frame gives a clean stack, and outer bindings become
+             * ordinary upvalues. Control flow that must leave this synthetic
+             * frame cannot be honored — reject it loudly. */
+            if (match_expr_escapes(e, 0)) {
+                set_compile_error(line, "return/break/continue inside a match used as an operand is not supported "
+                                        "(bind the match result with 'let' first)");
+                emit_byte(OP_NIL, line);
+                break;
+            }
+            Expr synth;
+            memset(&synth, 0, sizeof(synth));
+            synth.tag = EXPR_CLOSURE;
+            synth.line = line;
+            synth.as.closure.body = (Expr *)e;
+            compile_expr(&synth, line);
+            emit_bytes(OP_CALL, 0, line);
             break;
         }
 

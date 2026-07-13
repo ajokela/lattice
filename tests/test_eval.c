@@ -7494,3 +7494,482 @@ TEST(lat545_idempotent_index_nested_writeback_all_backends) {
                 "  assert(g[0][0][0] == 1 && g[1][1][0] == 4, \"idempotent: siblings untouched\")\n"
                 "}\n");
 }
+
+/* ── LAT-621: mutating builtin methods through upvalue receivers ──
+ * A fluid container captured as an upvalue must observe in-place builtin
+ * mutations (push/set/...) made inside the closure, on every backend. Before
+ * the OP_INVOKE_UPVALUE / ROP_INVOKE_UPVALUE prongs, both VMs mutated a
+ * discarded GET_UPVALUE copy while the tree-walker (reference) mutated the
+ * captured binding. */
+
+TEST(lat621_upvalue_map_set_writes_back) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"k\"] = 1\n"
+                "    let f = | | { m.set(\"k\", 99) }\n"
+                "    f()\n"
+                "    assert(m[\"k\"] == 99, \"map .set through upvalue was lost\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+TEST(lat621_upvalue_array_push_writes_back) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux a = [1]\n"
+                "    let f = | | { a.push(2) }\n"
+                "    f()\n"
+                "    assert(a.len() == 2, \"array .push through upvalue was lost\")\n"
+                "    assert(a[1] == 2, \"pushed element wrong\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+TEST(lat621_upvalue_map_remove_writes_back) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"k\"] = 1\n"
+                "    m[\"j\"] = 2\n"
+                "    let f = | | { m.remove(\"k\") }\n"
+                "    f()\n"
+                "    assert(!m.has(\"k\"), \"map .remove through upvalue was lost\")\n"
+                "    assert(m.has(\"j\"), \"unrelated key removed\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* Two-level capture: the inner closure reaches the root local through a
+ * chained upvalue (upvalue-of-upvalue shares the same cell). */
+TEST(lat621_nested_upvalue_chain_writes_back) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"k\"] = 1\n"
+                "    let outer = | | {\n"
+                "        let inner = | | { m.set(\"k\", 99) }\n"
+                "        inner()\n"
+                "    }\n"
+                "    outer()\n"
+                "    assert(m[\"k\"] == 99, \"two-level upvalue .set was lost\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* Closed-cell case: the enclosing function returned, so both escaped closures
+ * share the same closed ObjUpvalue. Mutations through one must be visible
+ * through the other (tree-walk reference behavior). */
+TEST(lat621_closed_upvalue_shared_cell) {
+    ASSERT_RUNS("fn make_counter() {\n"
+                "    flux arr = []\n"
+                "    let add = |x| { arr.push(x) }\n"
+                "    let size = | | { return arr.len() }\n"
+                "    return [add, size]\n"
+                "}\n"
+                "fn run_it() {\n"
+                "    let fns = make_counter()\n"
+                "    let add = fns[0]\n"
+                "    let size = fns[1]\n"
+                "    add(10)\n"
+                "    add(20)\n"
+                "    assert(size() == 2, \"closed upvalue cell not shared\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* The Anneal workaround (index assignment through an upvalue) predates the
+ * INVOKE_UPVALUE prongs and must keep working unchanged. */
+TEST(lat621_upvalue_index_assign_still_works) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux arr = [0, 0, 0]\n"
+                "    flux idx = 0\n"
+                "    let f = |v| {\n"
+                "        arr[idx] = v\n"
+                "        idx = idx + 1\n"
+                "    }\n"
+                "    f(7)\n"
+                "    f(8)\n"
+                "    assert(arr[0] == 7 && arr[1] == 8 && idx == 2, \"index-assign workaround broken\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* Optional chaining through the upvalue prong: a non-nil receiver mutates
+ * and writes back. (nil?.push() is not pinned here: the tree-walker errors on
+ * it for every receiver shape while both VMs yield nil — a pre-existing
+ * divergence outside LAT-621's scope.) */
+TEST(lat621_upvalue_optional_invoke) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux a = [1]\n"
+                "    let f = | | { a?.push(2) }\n"
+                "    f()\n"
+                "    assert(a.len() == 2, \"a?.push through upvalue was lost\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* Crystal guard still applies through the new prong: a frozen receiver
+ * captured as an upvalue must reject mutating methods on every backend. */
+TEST(lat621_upvalue_crystal_receiver_still_errors) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux a = [1]\n"
+                     "    freeze(a)\n"
+                     "    let f = | | { a.push(2) }\n"
+                     "    f()\n"
+                     "}\n"
+                     "run_it()\n",
+                     "mutating method");
+}
+
+/* Non-builtin resolution through the upvalue prong: trait impl methods and
+ * struct-closure fields still dispatch (self stays a copy per language
+ * semantics — no write-back for non-builtin methods). */
+TEST(lat621_upvalue_impl_method_dispatch) {
+    ASSERT_RUNS("trait Summable {\n"
+                "    fn total(self: any) -> Int\n"
+                "}\n"
+                "struct Point { x: Int, y: Int }\n"
+                "impl Summable for Point {\n"
+                "    fn total(self: any) -> Int { return self.x + self.y }\n"
+                "}\n"
+                "fn run_it() {\n"
+                "    let p = Point { x: 2, y: 3 }\n"
+                "    let f = | | { return p.total() }\n"
+                "    assert(f() == 5, \"impl method through upvalue broken\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* Buffer builtin through upvalue: byte push persists. */
+TEST(lat621_upvalue_buffer_push_writes_back) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux b = Buffer::new(0)\n"
+                "    let f = | | { b.push(72) }\n"
+                "    f()\n"
+                "    assert(b.len() == 1, \"buffer .push through upvalue was lost\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* ── LAT-445 Decision 1: freeze-except exemption for method mutation ──
+ * On a crystal Map carrying a key_phases table (freeze(m) except [...]),
+ * set(k,v) and remove(k) are allowed when the EVALUATED key is exempt (its
+ * key_phases entry is non-crystal — the same predicate the index-assign path
+ * uses) and error otherwise. Maps without key_phases, sublimated receivers,
+ * and whole-map mutators (merge, ...) keep erroring. Pinned across local,
+ * global, and upvalue receivers on every backend. */
+
+TEST(lat445_d1_exempt_set_local_receiver) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"host\"] = \"h\"\n"
+                "    m[\"retries\"] = 0\n"
+                "    freeze(m) except [\"retries\"]\n"
+                "    m.set(\"retries\", 99)\n"
+                "    assert(m[\"retries\"] == 99, \"exempt-key set did not mutate\")\n"
+                "    assert(m[\"host\"] == \"h\", \"non-exempt key changed\")\n"
+                "    assert(phase_of(m) == \"crystal\", \"map lost crystal phase\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+TEST(lat445_d1_exempt_set_global_receiver) {
+    ASSERT_RUNS("flux gm = Map::new()\n"
+                "gm[\"host\"] = \"h\"\n"
+                "gm[\"retries\"] = 0\n"
+                "freeze(gm) except [\"retries\"]\n"
+                "fn run_it() {\n"
+                "    gm.set(\"retries\", 42)\n"
+                "}\n"
+                "run_it()\n"
+                "assert(gm[\"retries\"] == 42, \"exempt-key set on global did not mutate\")\n");
+}
+
+TEST(lat445_d1_exempt_set_upvalue_receiver) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"host\"] = \"h\"\n"
+                "    m[\"retries\"] = 0\n"
+                "    freeze(m) except [\"retries\"]\n"
+                "    let f = | | { m.set(\"retries\", 33) }\n"
+                "    f()\n"
+                "    assert(m[\"retries\"] == 33, \"exempt-key set through upvalue did not mutate\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+TEST(lat445_d1_exempt_remove_all_receiver_shapes) {
+    ASSERT_RUNS("flux gm = Map::new()\n"
+                "gm[\"retries\"] = 0\n"
+                "freeze(gm) except [\"retries\"]\n"
+                "fn run_it() {\n"
+                "    flux lm = Map::new()\n"
+                "    lm[\"retries\"] = 0\n"
+                "    freeze(lm) except [\"retries\"]\n"
+                "    lm.remove(\"retries\")\n"
+                "    assert(!lm.has(\"retries\"), \"exempt-key remove (local) lost\")\n"
+                "    gm.remove(\"retries\")\n"
+                "    assert(!gm.has(\"retries\"), \"exempt-key remove (global) lost\")\n"
+                "    flux um = Map::new()\n"
+                "    um[\"retries\"] = 0\n"
+                "    freeze(um) except [\"retries\"]\n"
+                "    let f = | | { um.remove(\"retries\") }\n"
+                "    f()\n"
+                "    assert(!um.has(\"retries\"), \"exempt-key remove (upvalue) lost\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+TEST(lat445_d1_nonexempt_key_set_errors) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux m = Map::new()\n"
+                     "    m[\"host\"] = \"h\"\n"
+                     "    m[\"retries\"] = 0\n"
+                     "    freeze(m) except [\"retries\"]\n"
+                     "    m.set(\"host\", \"x\")\n"
+                     "}\n"
+                     "run_it()\n",
+                     "mutating method 'set'");
+}
+
+TEST(lat445_d1_nonexempt_key_remove_errors) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux m = Map::new()\n"
+                     "    m[\"host\"] = \"h\"\n"
+                     "    m[\"retries\"] = 0\n"
+                     "    freeze(m) except [\"retries\"]\n"
+                     "    m.remove(\"host\")\n"
+                     "}\n"
+                     "run_it()\n",
+                     "mutating method 'remove'");
+}
+
+/* A key absent from key_phases inherits the map's crystal phase (same rule as
+ * index assignment of a fresh key). */
+TEST(lat445_d1_new_key_set_errors) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux m = Map::new()\n"
+                     "    m[\"host\"] = \"h\"\n"
+                     "    freeze(m) except [\"host\"]\n"
+                     "    m.set(\"fresh\", 1)\n"
+                     "}\n"
+                     "run_it()\n",
+                     "mutating method 'set'");
+}
+
+TEST(lat445_d1_plain_crystal_set_still_errors) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux m = Map::new()\n"
+                     "    m[\"k\"] = 1\n"
+                     "    freeze(m)\n"
+                     "    m.set(\"k\", 2)\n"
+                     "}\n"
+                     "run_it()\n",
+                     "mutating method 'set'");
+}
+
+TEST(lat445_d1_sublimated_set_still_errors) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux m = Map::new()\n"
+                     "    m[\"retries\"] = 0\n"
+                     "    freeze(m) except [\"retries\"]\n"
+                     "    sublimate(m)\n"
+                     "    m.set(\"retries\", 1)\n"
+                     "}\n"
+                     "run_it()\n",
+                     "sublimated");
+}
+
+/* Whole-map mutators cannot be scoped to one key — merge stays blocked on a
+ * freeze-except map even when the incoming map only touches exempt keys. */
+TEST(lat445_d1_merge_still_blocked_on_freeze_except) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux m = Map::new()\n"
+                     "    m[\"retries\"] = 0\n"
+                     "    freeze(m) except [\"retries\"]\n"
+                     "    flux o = Map::new()\n"
+                     "    o[\"retries\"] = 5\n"
+                     "    m.merge(o)\n"
+                     "}\n"
+                     "run_it()\n",
+                     "mutating method 'merge'");
+}
+
+/* Fluid maps are untouched by Decision 1: set/remove keep working with or
+ * without key_phases entries. */
+TEST(lat445_d1_fluid_maps_unaffected) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"a\"] = 1\n"
+                "    m.set(\"a\", 2)\n"
+                "    m.set(\"b\", 3)\n"
+                "    m.remove(\"a\")\n"
+                "    assert(m[\"b\"] == 3 && !m.has(\"a\"), \"fluid map set/remove broken\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* Nested receiver (freeze-except element of a fluid container): .set on the
+ * exempt key now matches the (already-working) index-assign equivalent
+ * arr[0][k] = v on every backend. */
+TEST(lat445_d1_nested_exempt_set_uniform) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux inner = Map::new()\n"
+                "    inner[\"host\"] = \"h\"\n"
+                "    inner[\"retries\"] = 0\n"
+                "    freeze(inner) except [\"retries\"]\n"
+                "    flux arr = [inner]\n"
+                "    arr[0].set(\"retries\", 99)\n"
+                "    assert(arr[0][\"retries\"] == 99, \"nested exempt-key set lost\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* Fully-crystal element of a fluid container: .set must ERROR on every
+ * backend. (Before LAT-445 the tree-walker wrote into sealed shared-region
+ * memory here — SIGBUS.) */
+TEST(lat445_d1_nested_crystal_set_errors) {
+    ASSERT_FAILS_MSG("fn run_it() {\n"
+                     "    flux inner = Map::new()\n"
+                     "    inner[\"k\"] = 1\n"
+                     "    freeze(inner)\n"
+                     "    flux arr = [inner]\n"
+                     "    arr[0].set(\"k\", 99)\n"
+                     "}\n"
+                     "run_it()\n",
+                     "frozen");
+}
+
+/* The index-assign reference behavior Decision 1 mirrors — kept green. */
+TEST(lat445_d1_index_assign_reference_still_green) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    flux m = Map::new()\n"
+                "    m[\"host\"] = \"h\"\n"
+                "    m[\"retries\"] = 0\n"
+                "    freeze(m) except [\"retries\"]\n"
+                "    m[\"retries\"] = 7\n"
+                "    let f = | | { m[\"retries\"] = 8 }\n"
+                "    f()\n"
+                "    assert(m[\"retries\"] == 8, \"index-assign reference behavior broke\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+/* ── LAT-445 Decision 2: mutating methods on crystal RVALUE receivers ──
+ * A mutating builtin invoked on a crystal rvalue (function result, freeze(...)
+ * expression) has no binding to mutate — every backend must ERROR. Before this
+ * fix the tree-walker silently no-opped on rvalue array .pop()/.insert()/
+ * .remove_at() and Buffer .push() (mutating the evaluated temporary) while
+ * both VMs errored. */
+
+TEST(lat445_d2_rvalue_array_pop_errors) {
+    ASSERT_FAILS_MSG("fn make_arr() { return freeze([1, 2]) }\n"
+                     "make_arr().pop()\n",
+                     "mutating method 'pop'");
+}
+
+TEST(lat445_d2_rvalue_array_push_errors) { ASSERT_FAILS_MSG("freeze([1, 2]).push(3)\n", "push"); }
+
+TEST(lat445_d2_rvalue_array_insert_errors) {
+    ASSERT_FAILS_MSG("fn make_arr() { return freeze([1, 2]) }\n"
+                     "make_arr().insert(0, 9)\n",
+                     "mutating method 'insert'");
+}
+
+TEST(lat445_d2_rvalue_array_remove_at_errors) {
+    ASSERT_FAILS_MSG("fn make_arr() { return freeze([1, 2]) }\n"
+                     "make_arr().remove_at(0)\n",
+                     "mutating method 'remove_at'");
+}
+
+TEST(lat445_d2_rvalue_buffer_push_errors) {
+    ASSERT_FAILS_MSG("fn make_buf() { flux b = Buffer::new(0) return freeze(b) }\n"
+                     "make_buf().push(72)\n",
+                     "mutating method 'push'");
+}
+
+TEST(lat445_d2_rvalue_map_set_errors) {
+    ASSERT_FAILS("fn make_map() { flux m = Map::new() m[\"k\"] = 1 return freeze(m) }\n"
+                 "make_map().set(\"k\", 2)\n");
+}
+
+TEST(lat445_d2_rvalue_set_add_errors) {
+    ASSERT_FAILS("fn make_set() { flux s = Set::new() s.add(1) return freeze(s) }\n"
+                 "make_set().add(2)\n");
+}
+
+/* The freeze-except exemption (Decision 1) must NOT leak to rvalue receivers:
+ * even an exempt key has no binding to land in. */
+TEST(lat445_d2_rvalue_freeze_except_set_still_errors) {
+    ASSERT_FAILS("fn make_map() {\n"
+                 "    flux m = Map::new()\n"
+                 "    m[\"r\"] = 0\n"
+                 "    freeze(m) except [\"r\"]\n"
+                 "    return m\n"
+                 "}\n"
+                 "make_map().set(\"r\", 5)\n");
+}
+
+/* Fluid rvalues are untouched by Decision 2: mutating a fluid temporary is
+ * legal (the mutation applies to the copy; .pop still returns the element). */
+TEST(lat445_d2_fluid_rvalue_pop_still_works) {
+    ASSERT_RUNS("fn make_arr() { return [1, 2, 3] }\n"
+                "assert(make_arr().pop() == 3, \"fluid rvalue pop broke\")\n");
+}
+
+/* ── Bytecode-format-v3 repair: match in expression position ──
+ * The v3 lowering gives the match a hidden scrutinee local; in operand or
+ * argument position pending temporaries sit between the locals window and
+ * TOS, so the stack VM read a neighboring temporary as the scrutinee
+ * (10 + match 2 {...} evaluated the wildcard arm). Expression-position
+ * matches now compile inside an immediately-invoked closure (fresh frame ⇒
+ * clean stack). regvm and tree-walk were unaffected — pinned across all
+ * three backends. */
+
+TEST(match_in_binop_operand_position) {
+    ASSERT_RUNS("let x = 2\n"
+                "let result = 10 + match x {\n"
+                "    1 => 100,\n"
+                "    2 => 200,\n"
+                "    _ => 0\n"
+                "}\n"
+                "assert(result == 210, \"match in operand position mis-evaluated\")\n");
+}
+
+TEST(match_in_call_argument_position) {
+    ASSERT_RUNS("fn add(a: Int, b: Int) -> Int { return a + b }\n"
+                "let r = add(7, match 3 { 3 => 30, _ => -1 })\n"
+                "assert(r == 37, \"match in argument position mis-evaluated\")\n");
+}
+
+TEST(match_in_operand_position_with_binding_arm) {
+    ASSERT_RUNS("fn run_it() {\n"
+                "    let x = 5\n"
+                "    let r = 1 + match x {\n"
+                "        n if n > 3 => n * 100,\n"
+                "        _ => 0\n"
+                "    }\n"
+                "    assert(r == 501, \"binding arm in operand-position match broke\")\n"
+                "}\n"
+                "run_it()\n");
+}
+
+TEST(match_in_while_condition) {
+    ASSERT_RUNS("flux i = 0\n"
+                "while match i { 3 => false, _ => true } {\n"
+                "    i = i + 1\n"
+                "}\n"
+                "assert(i == 3, \"match in while condition broke\")\n");
+}
+
+TEST(match_in_array_literal_element) {
+    ASSERT_RUNS("let a = [match 1 { 1 => 11, _ => 0 }, match 2 { 2 => 22, _ => 0 }]\n"
+                "assert(a[0] == 11 && a[1] == 22, \"match in array element broke\")\n");
+}
+
+/* Statement-position matches (let/assign/return/expression statements) keep
+ * the direct lowering — upvalue captures from arm bodies still work. */
+TEST(match_statement_positions_still_direct) {
+    ASSERT_RUNS("fn pick(x: Int) -> Int {\n"
+                "    return match x { 1 => 10, _ => 20 }\n"
+                "}\n"
+                "let a = match 1 { 1 => 1, _ => 0 }\n"
+                "assert(pick(1) == 10 && pick(9) == 20 && a == 1, \"statement-position match broke\")\n");
+}

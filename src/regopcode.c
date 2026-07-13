@@ -131,6 +131,8 @@ static const char *names[] = {
     [ROP_MATCH_FIELD] = "MATCH_FIELD",
     [ROP_MATCH_PHASE] = "MATCH_PHASE",
     [ROP_CHECK_ENUM_VARIANT] = "CHECK_ENUM_VARIANT",
+    /* Upvalue-receiver method call (LAT-621) */
+    [ROP_INVOKE_UPVALUE] = "INVOKE_UPVALUE",
 };
 
 const char *reg_opcode_name(RegOpcode op) {

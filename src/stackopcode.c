@@ -125,6 +125,8 @@ static const char *names[] = {
     [OP_MATCH_FLUID] = "OP_MATCH_FLUID",
     [OP_CLOSE_UPVALUE_PRESERVE] = "OP_CLOSE_UPVALUE_PRESERVE",
     [OP_MATCH_TYPE] = "OP_MATCH_TYPE",
+    [OP_INVOKE_UPVALUE] = "OP_INVOKE_UPVALUE",
+    [OP_INVOKE_UPVALUE_16] = "OP_INVOKE_UPVALUE_16",
 };
 
 const char *opcode_name(Opcode op) {

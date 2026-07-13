@@ -379,6 +379,32 @@ size_t chunk_disassemble_instruction(const Chunk *c, size_t offset) {
             fprintf(stderr, "' (%d args)\n", argc);
             return offset + 4;
         }
+        case OP_INVOKE_UPVALUE: {
+            uint8_t slot = c->code[offset + 1];
+            uint8_t method_idx = c->code[offset + 2];
+            uint8_t argc = c->code[offset + 3];
+            fprintf(stderr, "%-20s uv=%d '", "OP_INVOKE_UPVALUE", slot);
+            if (method_idx < c->const_len) {
+                char *repr = value_repr(&c->constants[method_idx]);
+                fprintf(stderr, "%s", repr);
+                free(repr);
+            }
+            fprintf(stderr, "' (%d args)\n", argc);
+            return offset + 4;
+        }
+        case OP_INVOKE_UPVALUE_16: {
+            uint8_t slot = c->code[offset + 1];
+            uint16_t method_idx = (uint16_t)(c->code[offset + 2] << 8) | c->code[offset + 3];
+            uint8_t argc = c->code[offset + 4];
+            fprintf(stderr, "%-20s uv=%d '", "OP_INVOKE_UPVALUE_16", slot);
+            if (method_idx < c->const_len) {
+                char *repr = value_repr(&c->constants[method_idx]);
+                fprintf(stderr, "%s", repr);
+                free(repr);
+            }
+            fprintf(stderr, "' (%d args)\n", argc);
+            return offset + 5;
+        }
         case OP_INVOKE_LOCAL_16: {
             uint8_t slot = c->code[offset + 1];
             uint16_t method_idx = (uint16_t)(c->code[offset + 2] << 8) | c->code[offset + 3];
@@ -654,6 +680,7 @@ static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
         case OP_BUILD_ENUM:
         case OP_INVOKE_LOCAL:
         case OP_INVOKE_GLOBAL:
+        case OP_INVOKE_UPVALUE:
         case OP_FREEZE_VAR:
         case OP_THAW_VAR:
         case OP_SUBLIMATE_VAR:
@@ -662,6 +689,7 @@ static size_t verify_instr_length(const Chunk *c, size_t off, char **err) {
         case OP_DEFER_PUSH: NEED(4); return 4;
         /* 5-byte */
         case OP_INVOKE_LOCAL_16:
+        case OP_INVOKE_UPVALUE_16:
         case OP_INVOKE_MUT:
         case OP_FREEZE_EXCEPT: NEED(5); return 5;
         /* 6-byte */
@@ -762,11 +790,13 @@ static char *verify_instr_operands(const Chunk *c, size_t off, const uint8_t *is
             break;
         }
         case OP_INVOKE_LOCAL: CK_STR(c->code[off + 2]); break;
+        case OP_INVOKE_UPVALUE: CK_STR(c->code[off + 2]); break;
         case OP_INVOKE_GLOBAL:
             CK_STR(c->code[off + 1]);
             CK_STR(c->code[off + 2]);
             break;
         case OP_INVOKE_LOCAL_16: CK_STR(U16(off + 2)); break;
+        case OP_INVOKE_UPVALUE_16: CK_STR(U16(off + 2)); break;
         case OP_INVOKE_GLOBAL_16:
             CK_STR(U16(off + 1));
             CK_STR(U16(off + 3));

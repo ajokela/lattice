@@ -2148,6 +2148,35 @@ static void compile_expr(const Expr *e, uint8_t dst, int line) {
                     if (opt_skip) patch_jmp(opt_skip);
                     break;
                 }
+
+                /* Captured variable — use INVOKE_UPVALUE so in-place builtin
+                 * mutations (push/set/...) go through the upvalue cell and
+                 * persist, instead of mutating a discarded GETUPVALUE copy
+                 * (LAT-621). */
+                int uv = resolve_upvalue(rc, e->as.method_call.object->as.str_val);
+                if (uv >= 0) {
+                    /* INVOKE_UPVALUE two-instruction sequence:
+                     *   INVOKE_UPVALUE dst, uv_idx, argc
+                     *   data:          method_ki, args_base, 0
+                     * VM mutates the upvalue cell in-place. */
+                    uint8_t args_base = alloc_reg();
+                    for (size_t i = 0; i < e->as.method_call.arg_count; i++) {
+                        uint8_t arg_reg = (i == 0) ? args_base : alloc_reg();
+                        compile_expr(e->as.method_call.args[i], arg_reg, line);
+                    }
+
+                    uint16_t method_ki = add_constant(value_string(e->as.method_call.method));
+
+                    /* Method key is 16-bit — lo in data-word A, hi in data-word
+                     * C (same encoding as INVOKE_LOCAL, LAT-463). */
+                    emit_ABC(ROP_INVOKE_UPVALUE, dst, (uint8_t)uv, (uint8_t)e->as.method_call.arg_count, line);
+                    emit_ABC(ROP_MOVE, (uint8_t)(method_ki & 0xFF), args_base, (uint8_t)(method_ki >> 8), line);
+
+                    if (e->as.method_call.arg_count == 0) free_reg(args_base);
+                    else free_regs_to(args_base);
+                    if (opt_skip) patch_jmp(opt_skip);
+                    break;
+                }
             }
 
             /* Upvalue or expression object: two-instruction INVOKE sequence:

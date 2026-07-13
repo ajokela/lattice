@@ -1544,13 +1544,31 @@ static uint16_t pic_resolve_builtin_id(uint8_t type_tag, uint32_t mhash) {
     return 0;
 }
 
-static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *method, int arg_count,
-                                   const char *var_name) {
+static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *method, int arg_count, const char *var_name,
+                                   bool cell_receiver) {
     uint32_t mhash = method_hash(method);
 
     /* LAT-441: reject mutating builtin methods on crystal/sublimated receivers
      * before any method body runs. */
     if ((obj->phase == VTAG_CRYSTAL || obj->phase == VTAG_SUBLIMATED) && builtin_method_mutates(obj->type, method)) {
+        /* LAT-445 Decision 1: freeze-except exemption. set(k,v)/remove(k) on a
+         * crystal map WITH a key_phases table are allowed when the evaluated
+         * key is exempt (its key_phases entry is non-crystal — the exact
+         * predicate the index-assign path uses). Only these two methods can be
+         * scoped to a single key; whole-map mutators (clear/merge/...) touch
+         * non-exempt keys by definition and stay blocked. Restricted to cell
+         * receivers (local/global/upvalue bindings) where the mutation lands
+         * in the binding — rvalue copies keep erroring (Decision 2). The key
+         * is still on the stack: first arg == peek(arg_count-1). */
+        if (cell_receiver && obj->phase == VTAG_CRYSTAL && obj->type == VAL_MAP && obj->as.map.key_phases &&
+            ((mhash == MHASH_set && strcmp(method, "set") == 0 && arg_count == 2) ||
+             (mhash == MHASH_remove && strcmp(method, "remove") == 0 && arg_count == 1))) {
+            LatValue *fe_key = stackvm_peek(vm, arg_count - 1);
+            if (fe_key->type == VAL_STR) {
+                PhaseTag *kp = lat_map_get(obj->as.map.key_phases, fe_key->as.str_val);
+                if (kp && *kp != VTAG_CRYSTAL) goto freeze_except_exempt;
+            }
+        }
         for (int i = 0; i < arg_count; i++) {
             LatValue a = pop(vm);
             value_free(&a);
@@ -1567,6 +1585,7 @@ static bool stackvm_invoke_builtin(StackVM *vm, LatValue *obj, const char *metho
         push(vm, value_unit());
         return true;
     }
+freeze_except_exempt:
 
     switch (obj->type) {
         /* Array methods */
@@ -3524,7 +3543,7 @@ static LatValue stackvm_dispatch_call_closure(void *vm_ptr, LatValue *closure, L
  * non-OK StackVMResult that the caller must propagate (uncaught error). */
 static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame_ref, LatValue *obj,
                                              const char *method_name, int arg_count) {
-    if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL)) {
+    if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL, /*cell_receiver=*/false)) {
         if (vm->error) { return stackvm_handle_native_error(vm, frame_ref); }
         /* Builtin handled it. Pop the object and replace with result. */
         LatValue result_val = pop(vm);
@@ -3866,6 +3885,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         [OP_MATCH_FLUID] = &&lbl_OP_MATCH_FLUID,
         [OP_CLOSE_UPVALUE_PRESERVE] = &&lbl_OP_CLOSE_UPVALUE_PRESERVE,
         [OP_MATCH_TYPE] = &&lbl_OP_MATCH_TYPE,
+        [OP_INVOKE_UPVALUE] = &&lbl_OP_INVOKE_UPVALUE,
+        [OP_INVOKE_UPVALUE_16] = &&lbl_OP_INVOKE_UPVALUE_16,
     };
 #endif
 
@@ -5770,7 +5791,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
             if (builtin_method_mutates(obj->type, method_name)) {
                 /* CONTAINER path: run the in-place builtin on the cloned receiver. */
-                if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL)) {
+                if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL, /*cell_receiver=*/true)) {
                     if (vm->error) {
                         /* On a caught error the unwinder repoints frame->ip to the
                          * catch handler, so the trailing write-back is not run; on a
@@ -5807,6 +5828,54 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         }
 
 #ifdef VM_USE_COMPUTED_GOTO
+        lbl_OP_INVOKE_UPVALUE:
+        lbl_OP_INVOKE_UPVALUE_16:
+#endif
+        case OP_INVOKE_UPVALUE:
+        case OP_INVOKE_UPVALUE_16: {
+            /* Upvalue-receiver method call (LAT-621). Mirrors OP_INVOKE_LOCAL,
+             * but the receiver is read through the upvalue cell so in-place
+             * builtin mutations persist through the capture. */
+            uint8_t slot = READ_BYTE();
+            uint16_t method_idx = (op == OP_INVOKE_UPVALUE_16) ? READ_U16() : READ_BYTE();
+            uint8_t arg_count = READ_BYTE();
+            const char *method_name = frame->chunk->constants[method_idx].as.str_val;
+
+            /* ObjUpvalue cell discipline (same as OP_GET/SET_UPVALUE): open
+             * cells alias an enclosing frame's live stack slot; closed cells
+             * own their storage via location == &uv->closed. Mutating through
+             * `location` IS the write-back in both states. */
+            LatValue *obj = (frame->upvalues && slot < frame->upvalue_count && frame->upvalues[slot])
+                                ? frame->upvalues[slot]->location
+                                : NULL;
+            if (obj && stackvm_invoke_builtin(vm, obj, method_name, arg_count, NULL, /*cell_receiver=*/true)) {
+                if (vm->error) {
+                    StackVMResult r = stackvm_handle_native_error(vm, &frame);
+                    if (r != STACKVM_OK) return r;
+                    break;
+                }
+                /* Builtin popped args and pushed result; the receiver was
+                 * mutated in-place through the cell. */
+                break;
+            }
+
+            /* Non-builtin (map/struct closure field, impl Type::method, or
+             * missing method) — resolve exactly like OP_INVOKE on a copy of
+             * the receiver. Every such path deep-clones self anyway (language
+             * semantics: self is a copy), so no cell write-back applies. A
+             * missing cell dispatches on nil, giving the standard no-method
+             * error. value_clone_fast borrows shared crystal handles (S3-R1),
+             * so this stays O(1) for regionized receivers. */
+            push(vm, value_nil()); /* make room */
+            LatValue *base = vm->stack_top - arg_count - 1;
+            memmove(base + 1, base, arg_count * sizeof(LatValue));
+            *base = obj ? value_clone_fast(obj) : value_nil();
+            StackVMResult r = stackvm_dispatch_invoke(vm, &frame, base, method_name, arg_count);
+            if (r != STACKVM_OK) return r;
+            break;
+        }
+
+#ifdef VM_USE_COMPUTED_GOTO
         lbl_OP_INVOKE_LOCAL:
 #endif
         case OP_INVOKE_LOCAL: {
@@ -5827,7 +5896,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             const char *local_var_name = (frame->chunk->local_names && slot < frame->chunk->local_name_cap)
                                              ? frame->chunk->local_names[slot]
                                              : NULL;
-            if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, local_var_name)) {
+            if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, local_var_name, /*cell_receiver=*/true)) {
                 if (vm->error) {
                     StackVMResult r = stackvm_handle_native_error(vm, &frame);
                     if (r != STACKVM_OK) return r;
@@ -6080,7 +6149,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     }
                     break;
                 }
-                if (stackvm_invoke_builtin(vm, ref, method_name, arg_count, global_name)) {
+                if (stackvm_invoke_builtin(vm, ref, method_name, arg_count, global_name, /*cell_receiver=*/true)) {
                     if (vm->error) {
                         StackVMResult r = stackvm_handle_native_error(vm, &frame);
                         if (r != STACKVM_OK) return r;
@@ -6113,7 +6182,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
-            if (!_gpic_skip_builtin && stackvm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name)) {
+            if (!_gpic_skip_builtin &&
+                stackvm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name, /*cell_receiver=*/true)) {
                 if (vm->error) {
                     value_free(&obj_val);
                     StackVMResult r = stackvm_handle_native_error(vm, &frame);
@@ -6353,7 +6423,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
             const char *local_var_name = (frame->chunk->local_names && slot < frame->chunk->local_name_cap)
                                              ? frame->chunk->local_names[slot]
                                              : NULL;
-            if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, local_var_name)) {
+            if (stackvm_invoke_builtin(vm, obj, method_name, arg_count, local_var_name, /*cell_receiver=*/true)) {
                 if (vm->error) {
                     StackVMResult r = stackvm_handle_native_error(vm, &frame);
                     if (r != STACKVM_OK) return r;
@@ -6589,7 +6659,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     }
                     break;
                 }
-                if (stackvm_invoke_builtin(vm, ref, method_name, arg_count, global_name)) {
+                if (stackvm_invoke_builtin(vm, ref, method_name, arg_count, global_name, /*cell_receiver=*/true)) {
                     if (vm->error) {
                         StackVMResult r = stackvm_handle_native_error(vm, &frame);
                         if (r != STACKVM_OK) return r;
@@ -6621,7 +6691,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 break;
             }
 
-            if (!_gpic16_skip && stackvm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name)) {
+            if (!_gpic16_skip &&
+                stackvm_invoke_builtin(vm, &obj_val, method_name, arg_count, global_name, /*cell_receiver=*/true)) {
                 if (vm->error) {
                     value_free(&obj_val);
                     StackVMResult r = stackvm_handle_native_error(vm, &frame);
