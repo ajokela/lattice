@@ -39,6 +39,14 @@ jobs:
       - name: Test self-hosted compiler bootstrap fixed point
         run: make test-bootstrap
 
+      # Behavioral corpus for the self-hosted compiler. The bootstrap fixed
+      # point alone cannot catch a miscompile both stages share (stage1 ==
+      # stage2 holds even when both emit the same broken bytecode); the v3
+      # defer regression hung this corpus while bootstrap stayed green.
+      - name: Test self-hosted compiler corpus (latc)
+        timeout-minutes: 10
+        run: make test-latc
+
       - name: Build extensions
         run: |
           make ext-sqlite
