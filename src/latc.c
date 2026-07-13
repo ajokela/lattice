@@ -12,6 +12,7 @@
 #define TAG_UNIT    5
 #define TAG_CLOSURE 6
 #define TAG_ARRAY   7 /* v3 metadata arrays (struct fields/phases) */
+#define TAG_ENUM    8 /* LAT-620: nullary enum variant constant (regvm pools these) */
 
 /* ── Growable byte buffer (writer) ── */
 
@@ -979,6 +980,23 @@ static void serialize_regchunk(ByteBuf *bb, const RegChunk *c) {
                     bb_write_u8(bb, TAG_NIL);
                 }
                 break;
+            case VAL_ENUM:
+                /* LAT-620: the reg compiler pools nullary variants (Color::Red) as
+                 * pre-built VAL_ENUM constants; without a tag they fell through to
+                 * TAG_NIL and deserialized as nil. Payload variants are built at
+                 * runtime and never pooled, so nullary is the only shape here. */
+                if (v->as.enm.payload_count == 0) {
+                    bb_write_u8(bb, TAG_ENUM);
+                    uint32_t elen = (uint32_t)strlen(v->as.enm.enum_name);
+                    bb_write_u32_le(bb, elen);
+                    bb_write_bytes(bb, v->as.enm.enum_name, elen);
+                    uint32_t vlen = (uint32_t)strlen(v->as.enm.variant_name);
+                    bb_write_u32_le(bb, vlen);
+                    bb_write_bytes(bb, v->as.enm.variant_name, vlen);
+                } else {
+                    bb_write_u8(bb, TAG_NIL);
+                }
+                break;
             default: bb_write_u8(bb, TAG_NIL); break;
         }
     }
@@ -1227,6 +1245,32 @@ static RegChunk *deserialize_regchunk(ByteReader *br, char **err, int depth, uin
                 fn_val.as.closure.has_variadic = (has_variadic != 0);
                 fn_val.as.closure.native_fn = sub;
                 regchunk_add_constant(c, fn_val);
+                break;
+            }
+            case TAG_ENUM: {
+                /* LAT-620: nullary enum variant constant — enum name + variant name */
+                char *names[2] = {NULL, NULL};
+                for (int ni = 0; ni < 2; ni++) {
+                    uint32_t nlen;
+                    if (!br_read_u32_le(br, &nlen) || (size_t)nlen > br_remaining(br)) {
+                        free(names[0]);
+                        *err = strdup("truncated enum constant");
+                        regchunk_free(c);
+                        return NULL;
+                    }
+                    names[ni] = malloc((size_t)nlen + 1);
+                    if (!names[ni] || !br_read_bytes(br, names[ni], nlen)) {
+                        free(names[0]);
+                        if (ni == 1) free(names[1]);
+                        *err = strdup("truncated enum constant");
+                        regchunk_free(c);
+                        return NULL;
+                    }
+                    names[ni][nlen] = '\0';
+                }
+                regchunk_add_constant(c, value_enum(names[0], names[1], NULL, 0));
+                free(names[0]);
+                free(names[1]);
                 break;
             }
             default: {

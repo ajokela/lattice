@@ -2087,6 +2087,22 @@ TEST(latc_reg_preserves_type_metadata) {
                              "}\n");
 }
 
+/* LAT-620: the reg compiler pools nullary enum variants (Color::Red) as
+ * pre-built VAL_ENUM constants; the serializer lacked a tag for them, so they
+ * fell through to TAG_NIL and deserialized as nil. Pin the nullary shape,
+ * which latc_reg_preserves_type_metadata (payload variants only) missed. */
+TEST(latc_reg_preserves_nullary_enum_variants) {
+    ASSERT_REG_ROUNDTRIP_MEM("enum Color { Red, Green, Rgb(Int, Int, Int) }\n"
+                             "fn main() {\n"
+                             "    let c = Color::Red\n"
+                             "    print(c)\n"
+                             "    print(c.variant_name())\n"
+                             "    let g = Color::Green\n"
+                             "    print(g == Color::Green)\n"
+                             "    print(Color::Rgb(1, 2, 3))\n"
+                             "}\n");
+}
+
 TEST(latc_metadata_arrays_ignore_active_heap) {
     struct DualHeap *saved_heap = value_get_heap();
     struct CrystalRegion *saved_arena = value_get_arena();
