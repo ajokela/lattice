@@ -1809,11 +1809,15 @@ static bool hash_key_append_value(HashKeyBuilder *b, const LatValue *v, size_t d
             return n >= 0 && hash_key_append(b, tmp, (size_t)n);
         case VAL_MAP: {
             size_t len = lat_map_len(v->as.map.map);
+            /* entries is an array of LatMapEntry pointers; sizeof of the pointer
+             * element is intended (not sizeof of the struct). */
+            // NOLINTNEXTLINE(bugprone-sizeof-expression)
             LatMapEntry **entries = len ? malloc(len * sizeof(*entries)) : NULL;
             if (len && !entries) return false;
             size_t count = 0;
             for (size_t i = 0; i < v->as.map.map->cap; i++)
                 if (v->as.map.map->entries[i].state == MAP_OCCUPIED) entries[count++] = &v->as.map.map->entries[i];
+            // NOLINTNEXTLINE(bugprone-sizeof-expression)
             if (count > 1) qsort(entries, count, sizeof(*entries), hash_key_entry_cmp);
             bool ok = hash_key_append_cstr(b, "m") && hash_key_append_size(b, count) && hash_key_append_cstr(b, "{");
             for (size_t i = 0; ok && i < count; i++) {

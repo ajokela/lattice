@@ -13316,6 +13316,9 @@ static void test_lat613_range_direction_is_consistent(void) {
                   "4\ntrue\n[1, 2, 3, 4]\n0\nfalse\n[]\n[]\n[1]\n[5, 4, 3, 2]\n[1, 3, 5]\n[5, 3, 1]");
 }
 
+/* Negative-epoch time_second/time_format require gmtime with a negative time_t,
+ * which the Windows CRT does not support (returns NULL) — gate off Windows. */
+#ifndef _WIN32
 static void test_lat614_negative_epoch_milliseconds(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    print(time_second(-1))\n"
@@ -13330,6 +13333,7 @@ static void test_lat614_negative_epoch_milliseconds(void) {
                   "}\n",
                   "59\n59\n59\n58\n0\n0\n1\n59\n58");
 }
+#endif /* !_WIN32 */
 
 static void test_lat615_negative_duration_sign(void) {
     ASSERT_OUTPUT("fn main() {\n"
@@ -15074,7 +15078,9 @@ void register_stdlib_tests(void) {
     register_test("test_lat611_mixed_numeric_comparison", test_lat611_mixed_numeric_comparison);
     register_test("test_lat612_set_identity_is_typed", test_lat612_set_identity_is_typed);
     register_test("test_lat613_range_direction_is_consistent", test_lat613_range_direction_is_consistent);
+#ifndef _WIN32
     register_test("test_lat614_negative_epoch_milliseconds", test_lat614_negative_epoch_milliseconds);
+#endif
     register_test("test_lat615_negative_duration_sign", test_lat615_negative_duration_sign);
     register_test("test_lat616_global_receiver_dispatch", test_lat616_global_receiver_dispatch);
     register_test("test_lat617_module_qualified_enum_construction", test_lat617_module_qualified_enum_construction);
