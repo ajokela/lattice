@@ -267,6 +267,15 @@ int main(int argc, char **argv) {
         static const unsigned char bytes[] = {'A', 0, 'B'};
         return fwrite(bytes, 1, sizeof(bytes), stdout) == sizeof(bytes) ? 0 : 74;
     }
+    if (strcmp(argv[1], "json-nul-contamination") == 0) {
+        static const char envelope[] =
+            "{\"schema_version\":1,\"status\":\"error\",\"error\":{\"code\":\"internal_error\","
+            "\"message\":\"fixture\",\"path\":null,\"line\":null,\"column\":null}}";
+        if (fwrite(envelope, 1, sizeof(envelope) - 1, stdout) != sizeof(envelope) - 1 || fputc(0, stdout) == EOF ||
+            fputs("contamination", stdout) == EOF)
+            return 74;
+        return 1;
+    }
     if (strcmp(argv[1], "pressure") == 0) return pressure();
     if (strcmp(argv[1], "pressure-interleaved") == 0) return pressure_interleaved();
     if (strcmp(argv[1], "sleep") == 0) {

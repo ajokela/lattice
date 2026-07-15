@@ -1303,7 +1303,8 @@ static LatValue native_json_parse(LatValue *args, int ac) {
         return value_nil();
     }
     char *err = NULL;
-    LatValue r = json_parse(args[0].as.str_val, &err);
+    size_t len = args[0].as.str_len ? args[0].as.str_len : strlen(args[0].as.str_val);
+    LatValue r = json_parse_len(args[0].as.str_val, len, &err);
     if (err) {
         current_rt->error = err;
         return value_nil();

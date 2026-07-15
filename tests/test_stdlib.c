@@ -1806,6 +1806,15 @@ static bool json_parse_fails_with(const char *json, const char *message) {
     return matches;
 }
 
+static bool json_parse_len_fails_with(const char *json, size_t len, const char *message) {
+    char *err = NULL;
+    LatValue value = json_parse_len(json, len, &err);
+    bool matches = err != NULL && strstr(err, message) != NULL;
+    value_free(&value);
+    free(err);
+    return matches;
+}
+
 static void test_json_parse_rejects_duplicate_keys(void) {
     ASSERT(json_parse_fails_with("{\"a\":1,\"a\":2}", "duplicate object key"));
     ASSERT(json_parse_fails_with("{\"a\":1,\"\\u0061\":2}", "duplicate object key"));
@@ -1823,6 +1832,83 @@ static void test_json_parse_rejects_duplicate_keys(void) {
 
 static void test_json_parse_rejects_nul_object_keys(void) {
     ASSERT(json_parse_fails_with("{\"a\\u0000b\":1}", "object key contains an embedded NUL"));
+}
+
+static void test_json_parse_rejects_embedded_nul_input(void) {
+    const char contaminated[] = {'1', '\0', '2'};
+    ASSERT(json_parse_len_fails_with(contaminated, sizeof(contaminated), "embedded NUL byte"));
+    ASSERT(json_parse_len_fails_with("x", SIZE_MAX, "input is too large"));
+
+    /* Pin all native dispatch paths: the first parse constructs a legitimate
+     * length-aware NUL String, and the second must inspect its full length. */
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let nul = json_parse(\"\\\"\\\\u0000\\\"\")\n"
+                              "    json_parse(nul)\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_json_parse_rejects_unescaped_controls(void) {
+    const char newline[] = {'"', 'a', '\n', 'b', '"'};
+    const char unit_separator[] = {'"', 'a', 0x1F, 'b', '"'};
+    ASSERT(json_parse_len_fails_with(newline, sizeof(newline), "unescaped control character"));
+    ASSERT(json_parse_len_fails_with(unit_separator, sizeof(unit_separator), "unescaped control character"));
+
+    char *err = NULL;
+    LatValue escaped = json_parse("\"line\\n\\t\\u0000\"", &err);
+    bool escaped_ok = err == NULL && escaped.type == VAL_STR && escaped.as.str_len == 7;
+    value_free(&escaped);
+    free(err);
+    ASSERT(escaped_ok);
+}
+
+static void test_json_roundtrips_embedded_nul_string(void) {
+    char *parse_err = NULL;
+    LatValue parsed = json_parse("\"a\\u0000b\"", &parse_err);
+    bool parsed_ok = parse_err == NULL && parsed.type == VAL_STR && parsed.as.str_len == 3 &&
+                     memcmp(parsed.as.str_val, "a\0b", 3) == 0;
+
+    char *stringify_err = NULL;
+    char *serialized = parsed_ok ? json_stringify(&parsed, &stringify_err) : NULL;
+    bool serialized_ok = stringify_err == NULL && serialized != NULL && strcmp(serialized, "\"a\\u0000b\"") == 0;
+
+    char *roundtrip_err = NULL;
+    LatValue roundtrip = serialized_ok ? json_parse(serialized, &roundtrip_err) : value_unit();
+    bool roundtrip_ok = roundtrip_err == NULL && roundtrip.type == VAL_STR && roundtrip.as.str_len == 3 &&
+                        memcmp(roundtrip.as.str_val, "a\0b", 3) == 0;
+
+    value_free(&parsed);
+    value_free(&roundtrip);
+    free(parse_err);
+    free(stringify_err);
+    free(roundtrip_err);
+    free(serialized);
+    ASSERT(parsed_ok);
+    ASSERT(serialized_ok);
+    ASSERT(roundtrip_ok);
+}
+
+static void test_json_parse_validates_utf8(void) {
+    const char lone_continuation[] = {'"', (char)0x80, '"'};
+    const char overlong[] = {'"', (char)0xC0, (char)0xAF, '"'};
+    const char truncated[] = {'"', (char)0xE2, (char)0x82};
+    const char bad_continuation[] = {'"', (char)0xE2, '(', (char)0xA1, '"'};
+    const char surrogate[] = {'"', (char)0xED, (char)0xA0, (char)0x80, '"'};
+    const char above_unicode[] = {'"', (char)0xF4, (char)0x90, (char)0x80, (char)0x80, '"'};
+    ASSERT(json_parse_len_fails_with(lone_continuation, sizeof(lone_continuation), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(overlong, sizeof(overlong), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(truncated, sizeof(truncated), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(bad_continuation, sizeof(bad_continuation), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(surrogate, sizeof(surrogate), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(above_unicode, sizeof(above_unicode), "malformed UTF-8"));
+
+    const char emoji[] = {'"', (char)0xF0, (char)0x9F, (char)0x98, (char)0x80, '"'};
+    char *err = NULL;
+    LatValue value = json_parse_len(emoji, sizeof(emoji), &err);
+    bool valid = err == NULL && value.type == VAL_STR && value.as.str_len == 4;
+    value_free(&value);
+    free(err);
+    ASSERT(valid);
 }
 
 static void test_json_parse_checks_integer_range(void) {
@@ -14162,6 +14248,10 @@ void register_stdlib_tests(void) {
     register_test("test_json_parse_error", test_json_parse_error);
     register_test("test_json_parse_rejects_duplicate_keys", test_json_parse_rejects_duplicate_keys);
     register_test("test_json_parse_rejects_nul_object_keys", test_json_parse_rejects_nul_object_keys);
+    register_test("test_json_parse_rejects_embedded_nul_input", test_json_parse_rejects_embedded_nul_input);
+    register_test("test_json_parse_rejects_unescaped_controls", test_json_parse_rejects_unescaped_controls);
+    register_test("test_json_roundtrips_embedded_nul_string", test_json_roundtrips_embedded_nul_string);
+    register_test("test_json_parse_validates_utf8", test_json_parse_validates_utf8);
     register_test("test_json_parse_checks_integer_range", test_json_parse_checks_integer_range);
     register_test("test_json_stringify_error", test_json_stringify_error);
 

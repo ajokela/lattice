@@ -33,7 +33,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     /* Parse JSON */
     char *err = NULL;
-    LatValue val = json_parse(src, &err);
+    LatValue val = json_parse_len(src, size, &err);
     if (err) {
         free(err);
     } else {

@@ -5013,7 +5013,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("json_parse() expects (String)"));
                     }
                     char *jerr = NULL;
-                    LatValue result = json_parse(args[0].as.str_val, &jerr);
+                    size_t len = args[0].as.str_len ? args[0].as.str_len : strlen(args[0].as.str_val);
+                    LatValue result = json_parse_len(args[0].as.str_val, len, &jerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (jerr) return eval_err(jerr);
