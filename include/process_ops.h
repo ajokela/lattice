@@ -15,6 +15,18 @@ LatValue process_exec(const char *cmd, char **err);
  * On failure (e.g. fork fails), sets *err to a heap-allocated message. */
 LatValue process_shell(const char *cmd, char **err);
 
+/* Run a program directly, without a shell.
+ *
+ * args must be exactly:
+ *   program (String)     - executable name/path and argv[0]
+ *   argv    ([String])   - arguments after argv[0]
+ *   stdin   (String|Nil) - exact standard input; Nil closes stdin immediately
+ *
+ * Returns a Map with "exit_code", "stdout", and "stderr". A non-zero child
+ * exit is returned as data. Validation and process/spawn failures set *err.
+ * This function owns no values in args. */
+LatValue process_exec_argv(LatValue *args, int arg_count, char **err);
+
 /* Return the current working directory as a heap-allocated string.
  * On failure, sets *err and returns NULL. */
 char *process_cwd(char **err);

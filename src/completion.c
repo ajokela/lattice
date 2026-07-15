@@ -64,7 +64,7 @@ static const char *lattice_builtins[] = {
     /* Calendar */
     "days_in_month", "day_of_week", "day_of_year",
     /* Environment / Process */
-    "env", "env_set", "env_keys", "cwd", "exec", "shell", "platform", "hostname", "pid",
+    "env", "env_set", "env_keys", "cwd", "exec", "exec_argv", "shell", "platform", "hostname", "pid",
     /* Conversion */
     "to_int", "to_float", "struct_name", "struct_fields", "struct_to_map", "struct_from_map", "repr", "format", "range",
     "print_raw", "eprint", "identity", "debug_assert", "panic",

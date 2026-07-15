@@ -408,6 +408,9 @@ jobs:
       - name: Build thin runtime (cross-compile)
         run: make WINDOWS=1 runtime
 
+      - name: Build process fixture (cross-compile)
+        run: make WINDOWS=1 build/process_fixture.exe
+
   windows-native:
     name: Windows Native (Build & Test)
     runs-on: windows-latest
@@ -428,3 +431,8 @@ jobs:
 
       - name: Test
         run: make test WINDOWS=1
+
+      - name: Test exec_argv on alternate backends
+        run: |
+          LATTICE_EXT_ALLOW_CWD=1 ./build/test_runner --backend tree-walk --filter exec_argv
+          LATTICE_EXT_ALLOW_CWD=1 ./build/test_runner --backend regvm --filter exec_argv

@@ -30,6 +30,12 @@
 #include "runtime.h"
 #include "test_backend.h"
 
+#ifdef _WIN32
+#define PROCESS_FIXTURE_PATH "./build/process_fixture.exe"
+#else
+#define PROCESS_FIXTURE_PATH "./build/process_fixture"
+#endif
+
 /* Stage 5 (LAT-457): fork() from a TSan-instrumented process that has
  * already run multi-threaded tests is unsupported (the child inherits TSan
  * runtime state from a threaded parent and aborts), so fork-based tests
@@ -3205,6 +3211,115 @@ static void test_exec_failure(void) {
                   "    print(r.get(\"exit_code\"))\n"
                   "}\n",
                   "42");
+}
+
+static void test_exec_argv_preserves_arguments(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", ['argv', 'plain', 'two words', '\"quoted\"', ';touch nope', '$HOME', 'a&b', '*', '', "
+                  "'trail\\\\', 'space tail\\\\', 'slash\\\\\"quote'], nil)\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stderr\").len())\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "}\n",
+                  "0\n0\n"
+                  "0:5:706c61696e\n"
+                  "1:9:74776f20776f726473\n"
+                  "2:8:2271756f74656422\n"
+                  "3:11:3b746f756368206e6f7065\n"
+                  "4:5:24484f4d45\n"
+                  "5:3:612662\n"
+                  "6:1:2a\n"
+                  "7:0:\n"
+                  "8:6:747261696c5c\n"
+                  "9:11:7370616365207461696c5c\n"
+                  "10:12:736c6173685c2271756f7465");
+}
+
+static void test_exec_argv_stdin_and_eof(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let input = \"line one\\n$;*&\"\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], input)\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "    let eof = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], nil)\n"
+                  "    print(eof.get(\"stdout\").trim())\n"
+                  "    let binary = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"binary\"], nil)\n"
+                  "    let binary_echo = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], binary.get(\"stdout\"))\n"
+                  "    print(binary_echo.get(\"stdout\").trim())\n"
+                  "}\n",
+                  "13:6c696e65206f6e650a243b2a26\n0:\n3:410042");
+}
+
+static void test_exec_argv_nonzero_is_data(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"streams\", \"23\"], nil)\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "    print(r.get(\"stderr\").trim())\n"
+                  "}\n",
+                  "23\nstdout\nstderr");
+}
+
+static void test_exec_argv_missing_program_is_catchable(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let message = try {\n"
+                  "        exec_argv(\"lattice-mba-1297-program-that-does-not-exist\", [], nil)\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.starts_with(\"exec_argv: failed to spawn\"))\n"
+                  "}\n",
+                  "true");
+}
+
+static void test_exec_argv_validation_errors(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(try { exec_argv(\"only\", []) } catch e { e.message })\n"
+                  "    print(try { exec_argv(1, [], nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", 1, nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", [\"ok\", 1], nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", [], 1) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"\", [], nil) } catch e { e.message })\n"
+                  "}\n",
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
+                  "exec_argv: args[1] must be a String\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
+                  "exec_argv: program must not be empty");
+}
+
+static void test_exec_argv_rejects_nul_in_program_and_args(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let binary = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"binary\"], nil).get(\"stdout\")\n"
+                  "    print(binary.len())\n"
+                  "    print(try { exec_argv(binary, [], nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", [binary], nil) } catch e { e.message })\n"
+                  "}\n",
+                  "3\nexec_argv: program must not contain NUL bytes\n"
+                  "exec_argv: args[0] must not contain NUL bytes");
+}
+
+static void test_exec_argv_os_module(void) {
+    ASSERT_OUTPUT("import \"os\" as os\n"
+                  "fn main() {\n"
+                  "    let run = os.get(\"exec_argv\")\n"
+                  "    let r = run(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"os module\")\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "}\n",
+                  "0\n9:6f73206d6f64756c65");
+}
+
+static void test_exec_argv_three_pipe_pressure(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let input = \"I\".repeat(262144)\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"pressure\"], input)\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stdout\").len())\n"
+                  "    print(r.get(\"stderr\").len())\n"
+                  "    print(r.get(\"stdout\").ends_with(\"stdin=262144\\n\"))\n"
+                  "}\n",
+                  "0\n262157\n262144\ntrue");
 }
 
 /* ======================================================================
@@ -13951,6 +14066,14 @@ void register_stdlib_tests(void) {
     register_test("test_shell_builtin", test_shell_builtin);
     register_test("test_shell_stderr", test_shell_stderr);
     register_test("test_exec_failure", test_exec_failure);
+    register_test("test_exec_argv_preserves_arguments", test_exec_argv_preserves_arguments);
+    register_test("test_exec_argv_stdin_and_eof", test_exec_argv_stdin_and_eof);
+    register_test("test_exec_argv_nonzero_is_data", test_exec_argv_nonzero_is_data);
+    register_test("test_exec_argv_missing_program_is_catchable", test_exec_argv_missing_program_is_catchable);
+    register_test("test_exec_argv_validation_errors", test_exec_argv_validation_errors);
+    register_test("test_exec_argv_rejects_nul_in_program_and_args", test_exec_argv_rejects_nul_in_program_and_args);
+    register_test("test_exec_argv_os_module", test_exec_argv_os_module);
+    register_test("test_exec_argv_three_pipe_pressure", test_exec_argv_three_pipe_pressure);
 
     /* Array: flat_map, chunk, group_by, sum, min, max, first, last */
     register_test("test_array_flat_map", test_array_flat_map);

@@ -4610,7 +4610,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("len() expects 1 argument"));
                     }
                     int64_t l = -1;
-                    if (args[0].type == VAL_STR) l = (int64_t)strlen(args[0].as.str_val);
+                    if (args[0].type == VAL_STR)
+                        l = (int64_t)(args[0].as.str_len ? args[0].as.str_len : strlen(args[0].as.str_val));
                     else if (args[0].type == VAL_ARRAY) l = (int64_t)args[0].as.array.len;
                     else if (args[0].type == VAL_MAP) l = (int64_t)lat_map_len(args[0].as.map.map);
                     else if (args[0].type == VAL_SET) l = (int64_t)lat_map_len(args[0].as.set.map);
@@ -6209,10 +6210,24 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
+                /// @builtin exec_argv(program: String, args: [String], stdin: String|Nil) -> Map
+                /// @category Process
+                /// Execute a program directly without a shell. The args array excludes argv[0].
+                /// Nil stdin closes the child input immediately. Returns stdout, stderr, and exit_code.
+                /// @example exec_argv("printf", ["%s", "hello"], nil)
+                if (strcmp(fn_name, "exec_argv") == 0) {
+                    char *exec_argv_err = NULL;
+                    LatValue result = process_exec_argv(args, (int)argc, &exec_argv_err);
+                    for (size_t i = 0; i < argc; i++) value_free(&args[i]);
+                    free(args);
+                    if (exec_argv_err) return eval_err(exec_argv_err);
+                    return eval_ok(result);
+                }
+
                 /// @builtin shell(cmd: String) -> Map
                 /// @category Process
-                /// Execute a command via the system shell, returning {stdout, stderr, status}.
-                /// @example shell("echo hello")  // {stdout: "hello\n", stderr: "", status: 0}
+                /// Execute a command via the system shell, returning {stdout, stderr, exit_code}.
+                /// @example shell("echo hello")  // {stdout: "hello\n", stderr: "", exit_code: 0}
                 if (strcmp(fn_name, "shell") == 0) {
                     if (argc != 1) {
                         for (size_t i = 0; i < argc; i++) { value_free(&args[i]); }
@@ -12451,7 +12466,8 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
      * this must match the old inline handler's coverage to avoid a regression. */
     if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && arg_count == 0) {
         if (inner->type == VAL_ARRAY) return eval_ok(value_int((int64_t)inner->as.array.len));
-        if (inner->type == VAL_STR) return eval_ok(value_int((int64_t)strlen(inner->as.str_val)));
+        if (inner->type == VAL_STR)
+            return eval_ok(value_int((int64_t)(inner->as.str_len ? inner->as.str_len : strlen(inner->as.str_val))));
         if (inner->type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(inner->as.map.map)));
         if (inner->type == VAL_BUFFER) return eval_ok(value_int((int64_t)inner->as.buffer.len));
         return eval_err(strdup(".len()/.length() is not defined on this Ref inner type"));
@@ -13876,7 +13892,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
      * reading the inner here would race a concurrent r.set (UAF). */
     if ((strcmp(method, "len") == 0 || strcmp(method, "length") == 0) && obj.type != VAL_REF) {
         if (obj.type == VAL_ARRAY) return eval_ok(value_int((int64_t)obj.as.array.len));
-        if (obj.type == VAL_STR) return eval_ok(value_int((int64_t)strlen(obj.as.str_val)));
+        if (obj.type == VAL_STR)
+            return eval_ok(value_int((int64_t)(obj.as.str_len ? obj.as.str_len : strlen(obj.as.str_val))));
         if (obj.type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(obj.as.map.map)));
         if (obj.type == VAL_TUPLE) return eval_ok(value_int((int64_t)obj.as.tuple.len));
         if (obj.type == VAL_BUFFER) return eval_ok(value_int((int64_t)obj.as.buffer.len));
@@ -13887,7 +13904,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (obj.type == VAL_REF) {
             LatValue *inner = &obj.as.ref.ref->value;
             if (inner->type == VAL_ARRAY) return eval_ok(value_int((int64_t)inner->as.array.len));
-            if (inner->type == VAL_STR) return eval_ok(value_int((int64_t)strlen(inner->as.str_val)));
+            if (inner->type == VAL_STR)
+                return eval_ok(value_int((int64_t)(inner->as.str_len ? inner->as.str_len : strlen(inner->as.str_val))));
             if (inner->type == VAL_MAP) return eval_ok(value_int((int64_t)lat_map_len(inner->as.map.map)));
             if (inner->type == VAL_BUFFER) return eval_ok(value_int((int64_t)inner->as.buffer.len));
         }

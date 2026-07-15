@@ -524,7 +524,11 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
                 out.as.str_val = v->as.str_val;
                 out.region_id = REGION_INTERNED;
             } else {
-                out.as.str_val = lat_strdup(v->as.str_val);
+                size_t len = v->as.str_len ? v->as.str_len : strlen(v->as.str_val);
+                out.as.str_val = lat_alloc(len + 1);
+                memcpy(out.as.str_val, v->as.str_val, len);
+                out.as.str_val[len] = '\0';
+                out.as.str_len = len;
             }
             break;
         case VAL_ARRAY: {

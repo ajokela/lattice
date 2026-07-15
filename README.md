@@ -944,7 +944,7 @@ import { parse } from "json"
 | `crypto` | `sha256`, `md5`, `base64_encode`, `base64_decode`, `url_encode`, `url_decode` |
 | `http` | `get`, `post`, `request` |
 | `net` | `tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_read`, `tcp_read_bytes`, `tcp_write`, `tcp_close`, `tcp_peer_addr`, `tcp_set_timeout`, `tls_connect`, `tls_read`, `tls_read_bytes`, `tls_write`, `tls_close`, `tls_available` |
-| `os` | `exec`, `shell`, `env`, `env_set`, `env_keys`, `cwd`, `platform`, `hostname`, `pid`, `args` |
+| `os` | `exec`, `exec_argv`, `shell`, `env`, `env_set`, `env_keys`, `cwd`, `platform`, `hostname`, `pid`, `args` |
 | `time` | `now`, `sleep`, `format`, `parse` |
 | `regex` | `match`, `find_all`, `replace` |
 
@@ -1397,11 +1397,31 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `env_keys()` | Array of all environment variable names |
 | `cwd()` | Current working directory |
 | `args()` | Command-line arguments as array |
-| `exec(cmd)` | Run shell command, return stdout (error on non-zero exit) |
-| `shell(cmd)` | Run shell command, return Map with `stdout`, `stderr`, `exit_code` |
+| `exec(cmd)` | Run a command through the platform shell; return stdout (error on non-zero exit) |
+| `exec_argv(program, args, stdin)` | Run a program directly, without a shell; return a Map with `stdout`, `stderr`, `exit_code` |
+| `shell(cmd)` | Run a command through the platform shell; return a Map with `stdout`, `stderr`, `exit_code` |
 | `platform()` | OS name (`"macos"`, `"linux"`, `"windows"`, `"wasm"`) |
 | `hostname()` | System hostname |
 | `pid()` | Current process ID |
+
+`exec_argv` takes the executable name, an array of argument strings that excludes
+`argv[0]`, and either a String to write to standard input or `nil` to close it
+immediately. A non-zero child exit is returned as `exit_code` data; only failures
+to start or communicate with the process raise an error.
+
+POSIX example:
+
+```lattice
+let result = exec_argv("printf", ["%s", "hello; not shell syntax"], nil)
+print(result.get("stdout"))
+```
+
+Because it never parses a shell command, `exec_argv` avoids shell-injection and
+quoting hazards in argument data. It is not a sandbox: the child still runs with
+the Lattice process's operating-system permissions, environment, and working
+directory. The compatibility APIs `exec` and `shell` do invoke a platform shell,
+so do not interpolate untrusted values into their command strings. Browser/WASM
+builds report `exec_argv: not available in browser` as a catchable error.
 
 ### Date & Time
 

@@ -535,12 +535,15 @@ static LatValue rvm_clone_inner(const LatValue *src) {
              * returns an UNPHASED value, which silently dropped the crystal
              * phase of short legacy-crystal strings (reachable once the
              * FORCE_COPY oracle materializes non-interned crystal copies). */
-            if (slen <= INTERN_THRESHOLD) {
+            if (slen <= INTERN_THRESHOLD && memchr(src->as.str_val, '\0', slen) == NULL) {
                 LatValue iv = value_string_interned(src->as.str_val);
                 iv.phase = src->phase;
                 return iv;
             }
-            v.as.str_val = strdup(src->as.str_val);
+            v.as.str_val = malloc(slen + 1);
+            if (!v.as.str_val) return value_unit();
+            memcpy(v.as.str_val, src->as.str_val, slen);
+            v.as.str_val[slen] = '\0';
             v.as.str_len = slen; /* preserve cached length */
             v.region_id = REGION_NONE;
             return v;
@@ -1283,7 +1286,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
              (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
             arg_count == 0) {
-            *result = value_int((int64_t)strlen(obj->as.str_val));
+            *result = value_int((int64_t)(obj->as.str_len ? obj->as.str_len : strlen(obj->as.str_val)));
             return true;
         }
         if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
@@ -2773,12 +2776,13 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             }
         }
         /* String proxy (LAT-540): len/length under the per-cell lock.
-         * Mirrors eval_ref_method_locked — strlen, matches tree-walker. */
+         * Mirrors eval_ref_method_locked, including cached binary length. */
         if (ref->value.type == VAL_STR) {
             if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                  (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                 arg_count == 0) {
-                *result = value_int((int64_t)strlen(ref->value.as.str_val));
+                *result =
+                    value_int((int64_t)(ref->value.as.str_len ? ref->value.as.str_len : strlen(ref->value.as.str_val)));
                 ref_unlock(ref);
                 return true;
             }
@@ -4775,7 +4779,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (R[b].type == VAL_ARRAY) {
             reg_set(&R[a], value_int((int64_t)R[b].as.array.len));
         } else if (R[b].type == VAL_STR) {
-            reg_set(&R[a], value_int((int64_t)strlen(R[b].as.str_val)));
+            reg_set(&R[a], value_int((int64_t)(R[b].as.str_len ? R[b].as.str_len : strlen(R[b].as.str_val))));
         } else if (R[b].type == VAL_RANGE) {
             int64_t len = R[b].as.range.end - R[b].as.range.start;
             if (len < 0) len = 0;

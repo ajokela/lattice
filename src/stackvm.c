@@ -396,9 +396,13 @@ static LatValue value_clone_fast_inner(const LatValue *src) {
             size_t slen = src->as.str_len ? src->as.str_len : strlen(src->as.str_val);
             /* Intern short strings on clone to avoid strdup and enable
              * pointer-equality comparisons. */
-            if (slen <= INTERN_THRESHOLD) return value_string_interned(src->as.str_val);
+            if (slen <= INTERN_THRESHOLD && memchr(src->as.str_val, '\0', slen) == NULL)
+                return value_string_interned(src->as.str_val);
             LatValue v = *src;
-            v.as.str_val = strdup(src->as.str_val);
+            v.as.str_val = malloc(slen + 1);
+            if (!v.as.str_val) return value_unit();
+            memcpy(v.as.str_val, src->as.str_val, slen);
+            v.as.str_val[slen] = '\0';
             v.as.str_len = slen; /* preserve cached length */
             v.region_id = REGION_NONE;
             return v;
@@ -2010,7 +2014,7 @@ freeze_except_exempt:
             if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                  (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                 arg_count == 0) {
-                push(vm, value_int((int64_t)strlen(obj->as.str_val)));
+                push(vm, value_int((int64_t)(obj->as.str_len ? obj->as.str_len : strlen(obj->as.str_val))));
                 return true;
             }
             if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
@@ -3134,12 +3138,12 @@ freeze_except_exempt:
             }
 
             /* String proxy (LAT-540): len/length under the per-cell lock.
-             * Mirrors eval_ref_method_locked — strlen, matches tree-walker. */
+             * Mirrors eval_ref_method_locked, including cached binary length. */
             if (inner->type == VAL_STR) {
                 if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                      (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                     arg_count == 0) {
-                    push(vm, value_int((int64_t)strlen(inner->as.str_val)));
+                    push(vm, value_int((int64_t)(inner->as.str_len ? inner->as.str_len : strlen(inner->as.str_val))));
                     ref_unlock(ref);
                     return true;
                 }

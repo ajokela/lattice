@@ -277,6 +277,11 @@ TEST_SRCS = $(TEST_DIR)/test_main.c \
 
 TEST_OBJS   = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/tests/%.o)
 TEST_TARGET = $(BUILD_DIR)/test_runner
+ifdef WINDOWS
+PROCESS_FIXTURE = $(BUILD_DIR)/process_fixture.exe
+else
+PROCESS_FIXTURE = $(BUILD_DIR)/process_fixture
+endif
 
 # WASM build — exclude tree-walk evaluator and CLI-only modules to reduce binary size
 WASM_EXCLUDE = $(SRC_DIR)/eval.c $(SRC_DIR)/phase_check.c $(SRC_DIR)/match_check.c \
@@ -390,11 +395,15 @@ $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
+$(PROCESS_FIXTURE): $(TEST_DIR)/process_fixture.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $<
+
 # Auto-generated header dependencies: without these, header edits (e.g. a
 # LATC_FORMAT bump) leave stale objects behind and incremental builds lie
 -include $(wildcard $(BUILD_DIR)/*.d $(BUILD_DIR)/ds/*.d $(BUILD_DIR)/vendor/*.d $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/fuzz/*.d)
 
-$(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS)
+$(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS) | $(PROCESS_FIXTURE)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # LAT-520: require_ext() no longer searches the CWD-relative ./extensions/ by
