@@ -1,0 +1,30 @@
+// Drive exec_argv through the real clat entry point, whose SIGPIPE disposition
+// is intentionally the platform default. The C test runner ignores SIGPIPE so
+// it cannot catch a pending writer-thread signal escaping on Darwin.
+
+fn fixture() -> String {
+    if platform() == "windows" {
+        return ".\\build\\process_fixture.exe"
+    }
+    return "./build/process_fixture"
+}
+
+fn stdout_limit(bytes: Int) -> Map {
+    let options = Map::new()
+    options.set("max_stdout_bytes", bytes)
+    return options
+}
+
+fn main() {
+    let input = "I".repeat(262144)
+    let message = try {
+        exec_argv(fixture(), ["pressure"], input, stdout_limit(8192))
+        "exec_argv unexpectedly accepted oversized stdout"
+    } catch error {
+        error.message
+    }
+
+    assert(message == "exec_argv: stdout exceeded max_stdout_bytes (8192 bytes)",
+        "managed EPIPE did not return the structured stdout-limit error: " + message)
+    print("exec_argv SIGPIPE integration passed")
+}

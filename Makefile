@@ -364,7 +364,7 @@ FUZZ_PARSER_SRC    = $(FUZZ_DIR)/fuzz_parser.c
 FUZZ_PARSER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_parser.o
 FUZZ_PARSER_TARGET = $(BUILD_DIR)/fuzz_parser
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-ballistics-lab test-repl test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-ballistics-lab test-repl test-process test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -410,7 +410,7 @@ $(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS) | $(PROCESS_FIXTURE)
 # default (library-planting hardening). The in-tree test extensions live in
 # ./extensions/<name>/; the test runner executes from the trusted repo root, so
 # it opts in explicitly via LATTICE_EXT_ALLOW_CWD=1.
-test: $(TEST_TARGET) $(LSP_TARGET) test-repl
+test: $(TEST_TARGET) $(LSP_TARGET) test-repl test-process
 	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner
 
 test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
@@ -432,6 +432,13 @@ test-ballistics-lab: $(TARGET)
 
 test-repl: $(TARGET)
 	./$(TARGET) tests/repl_integration.lat
+
+test-process: $(TARGET) $(PROCESS_FIXTURE)
+	@for backend in "" "--tree-walk" "--regvm"; do \
+		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
+		echo "=== process integration backend $$label ==="; \
+		./$(TARGET) $$backend tests/process_integration.lat || exit 1; \
+	done
 
 test-all-backends: $(TEST_TARGET) $(LSP_TARGET) test-ballistics-lab test-repl
 	@echo "=== stack-vm ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend stack-vm
