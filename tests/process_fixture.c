@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,7 +8,43 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#include <process.h>
+#include <windows.h>
+#else
+#include <signal.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 #endif
+
+static int sleep_millis(uint64_t milliseconds) {
+#ifdef _WIN32
+    while (milliseconds > 0) {
+        DWORD part = milliseconds > 60000 ? 60000 : (DWORD)milliseconds;
+        Sleep(part);
+        milliseconds -= part;
+    }
+    return 0;
+#else
+    struct timespec remaining = {
+        .tv_sec = (time_t)(milliseconds / 1000),
+        .tv_nsec = (long)(milliseconds % 1000) * 1000000L,
+    };
+    while (nanosleep(&remaining, &remaining) != 0) {
+        if (errno != EINTR) return 74;
+    }
+    return 0;
+#endif
+}
+
+static int parse_u64(const char *text, uint64_t *out) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno != 0 || !end || *end != '\0') return 64;
+    *out = (uint64_t)parsed;
+    return 0;
+}
 
 static void print_hex(const unsigned char *data, size_t len) {
     static const char digits[] = "0123456789abcdef";
@@ -92,6 +129,116 @@ static int pressure(void) {
     return ferror(stdout) ? 74 : 0;
 }
 
+static int pressure_interleaved(void) {
+    for (size_t i = 0; i < 64; i++) {
+        if (emit_repeated(stdout, 'O', 4096) != 0) return 74;
+        if (emit_repeated(stderr, 'E', 4096) != 0) return 74;
+    }
+
+    unsigned char block[4096];
+    while (fread(block, 1, sizeof(block), stdin) > 0) {}
+    return ferror(stdin) ? 74 : 0;
+}
+
+static int write_marker(const char *path, const char *contents) {
+    FILE *file = fopen(path, "wb");
+    if (!file) return 74;
+    bool write_failed = fputs(contents, file) == EOF;
+    bool close_failed = fclose(file) != 0;
+    return write_failed || close_failed ? 74 : 0;
+}
+
+static int spawn_descendant(const char *program, const char *pid_path, const char *marker_path, bool hold_parent) {
+#ifdef _WIN32
+    intptr_t raw = marker_path ? _spawnl(_P_NOWAIT, program, program, "descendant-worker", marker_path, NULL)
+                               : _spawnl(_P_NOWAIT, program, program, "descendant-worker", NULL);
+    if (raw == -1) return 71;
+    HANDLE child = (HANDLE)raw;
+    DWORD pid = GetProcessId(child);
+    CloseHandle(child);
+    if (pid == 0) return 71;
+#else
+    pid_t pid = fork();
+    if (pid < 0) return 71;
+    if (pid == 0) {
+        if (marker_path) execl(program, program, "descendant-worker", marker_path, (char *)NULL);
+        else execl(program, program, "descendant-worker", (char *)NULL);
+        _exit(127);
+    }
+#endif
+    FILE *file = fopen(pid_path, "wb");
+    if (!file) return 74;
+    bool write_failed = fprintf(file, "%lu\n", (unsigned long)pid) < 0;
+    bool close_failed = fclose(file) != 0;
+    if (write_failed || close_failed) return 74;
+    return hold_parent ? sleep_millis(2000) : 0;
+}
+
+static int spawn_detached_marker(const char *program, const char *marker_path) {
+#ifdef _WIN32
+    intptr_t raw = _spawnl(_P_NOWAIT, program, program, "detached-marker-worker", marker_path, NULL);
+    if (raw == -1) return 71;
+    CloseHandle((HANDLE)raw);
+#else
+    pid_t pid = fork();
+    if (pid < 0) return 71;
+    if (pid == 0) {
+        execl(program, program, "detached-marker-worker", marker_path, (char *)NULL);
+        _exit(127);
+    }
+#endif
+    return 0;
+}
+
+static int detached_marker_worker(const char *marker_path) {
+#ifdef _WIN32
+    _close(0);
+    _close(1);
+    _close(2);
+#else
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+#endif
+    if (sleep_millis(100) != 0) return 74;
+    return write_marker(marker_path, "alive\n");
+}
+
+static int pid_is_alive(const char *text) {
+    uint64_t parsed = 0;
+    if (parse_u64(text, &parsed) != 0 || parsed == 0) return 64;
+#ifdef _WIN32
+    if (parsed > UINT32_MAX) return 64;
+    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)parsed);
+    if (!process) return GetLastError() == ERROR_INVALID_PARAMETER ? 1 : 74;
+    DWORD state = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return state == WAIT_TIMEOUT ? 0 : 1;
+#else
+    if (parsed > (uint64_t)INT32_MAX) return 64;
+    if (kill((pid_t)parsed, 0) == 0 || errno == EPERM) {
+#ifdef __linux__
+        /* An orphan killed with its process group may briefly remain as a
+         * zombie under a container PID 1. It is no longer running, even
+         * though kill(pid, 0) still finds its process-table entry. */
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%llu/stat", (unsigned long long)parsed);
+        FILE *stat_file = fopen(path, "rb");
+        if (stat_file) {
+            char stat_line[512];
+            bool read_stat = fgets(stat_line, sizeof(stat_line), stat_file) != NULL;
+            char *name_end = read_stat ? strrchr(stat_line, ')') : NULL;
+            bool zombie = name_end && name_end[1] == ' ' && name_end[2] == 'Z';
+            fclose(stat_file);
+            if (zombie) return 1;
+        }
+#endif
+        return 0;
+    }
+    return errno == ESRCH ? 1 : 74;
+#endif
+}
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     /* Keep the byte-oriented fixture identical on Windows: the CRT otherwise
@@ -121,6 +268,47 @@ int main(int argc, char **argv) {
         return fwrite(bytes, 1, sizeof(bytes), stdout) == sizeof(bytes) ? 0 : 74;
     }
     if (strcmp(argv[1], "pressure") == 0) return pressure();
+    if (strcmp(argv[1], "pressure-interleaved") == 0) return pressure_interleaved();
+    if (strcmp(argv[1], "sleep") == 0) {
+        uint64_t milliseconds = 0;
+        if (argc != 3 || parse_u64(argv[2], &milliseconds) != 0) return 64;
+        return sleep_millis(milliseconds);
+    }
+    if (strcmp(argv[1], "flood") == 0) {
+        uint64_t count = 0;
+        if (argc != 4 || parse_u64(argv[3], &count) != 0 || count > SIZE_MAX) return 64;
+        FILE *stream = strcmp(argv[2], "stdout") == 0 ? stdout : strcmp(argv[2], "stderr") == 0 ? stderr : NULL;
+        if (!stream) return 64;
+        return emit_repeated(stream, stream == stdout ? 'O' : 'E', (size_t)count);
+    }
+    if (strcmp(argv[1], "descendant") == 0) {
+        if (argc != 3) return 64;
+        return spawn_descendant(argv[0], argv[2], NULL, true);
+    }
+    if (strcmp(argv[1], "descendant-exit") == 0) {
+        if (argc != 4) return 64;
+        return spawn_descendant(argv[0], argv[2], argv[3], false);
+    }
+    if (strcmp(argv[1], "descendant-worker") == 0) {
+        if (argc == 2) return sleep_millis(2000);
+        if (argc == 3) {
+            if (sleep_millis(250) != 0) return 74;
+            return write_marker(argv[2], "survived\n");
+        }
+        return 64;
+    }
+    if (strcmp(argv[1], "detached-marker") == 0) {
+        if (argc != 3) return 64;
+        return spawn_detached_marker(argv[0], argv[2]);
+    }
+    if (strcmp(argv[1], "detached-marker-worker") == 0) {
+        if (argc != 3) return 64;
+        return detached_marker_worker(argv[2]);
+    }
+    if (strcmp(argv[1], "pid-alive") == 0) {
+        if (argc != 3) return 64;
+        return pid_is_alive(argv[2]);
+    }
 
     fputs("unknown mode\n", stderr);
     return 64;

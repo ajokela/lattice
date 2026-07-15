@@ -1,4 +1,7 @@
 #include "process_ops.h"
+#include "ds/hashmap.h"
+#include <math.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -19,12 +22,105 @@ static bool process_string_has_nul(const LatValue *value) {
     return len > 0 && memchr(value->as.str_val, '\0', len) != NULL;
 }
 
+typedef struct {
+    bool has_timeout;
+    uint64_t timeout_ms;
+    bool has_stdout_limit;
+    size_t max_stdout_bytes;
+    bool has_stderr_limit;
+    size_t max_stderr_bytes;
+} ProcessExecOptions;
+
+static bool process_exec_options_are_managed(const ProcessExecOptions *options) {
+    return options->has_timeout || options->has_stdout_limit || options->has_stderr_limit;
+}
+
+static bool process_parse_positive_integer(const LatValue *value, const char *field, uint64_t maximum, uint64_t *out,
+                                           char **err) {
+    uint64_t parsed = 0;
+    if (value->type == VAL_INT) {
+        if (value->as.int_val <= 0) goto invalid;
+        parsed = (uint64_t)value->as.int_val;
+    } else if (value->type == VAL_FLOAT) {
+        double whole = 0.0;
+        double number = value->as.float_val;
+        if (!isfinite(number) || number <= 0.0 || modf(number, &whole) != 0.0) goto invalid;
+        /* maximum + 1 is intentional: both supported maxima are below 2^63,
+         * whose exclusive double boundary is represented exactly. */
+        if (number >= (double)maximum + 1.0) goto overflow;
+        parsed = (uint64_t)number;
+    } else {
+        goto invalid;
+    }
+    if (parsed > maximum) goto overflow;
+    *out = parsed;
+    return true;
+
+invalid: {
+    char message[192];
+    snprintf(message, sizeof(message), "exec_argv: options.%s must be a positive finite integer", field);
+    process_set_error(err, message);
+    return false;
+}
+overflow: {
+    char message[192];
+    snprintf(message, sizeof(message), "exec_argv: options.%s is too large", field);
+    process_set_error(err, message);
+    return false;
+}
+}
+
+static bool process_exec_argv_parse_options(LatValue *args, int arg_count, ProcessExecOptions *options, char **err) {
+    memset(options, 0, sizeof(*options));
+    if (arg_count == 3 || args[3].type == VAL_NIL) return true;
+
+    LatMap *map = args[3].as.map.map;
+    for (size_t i = 0; map && i < map->cap; i++) {
+        if (map->entries[i].state != MAP_OCCUPIED) continue;
+        const char *key = map->entries[i].key;
+        if (strcmp(key, "timeout_ms") != 0 && strcmp(key, "max_stdout_bytes") != 0 &&
+            strcmp(key, "max_stderr_bytes") != 0) {
+            char message[256];
+            snprintf(message, sizeof(message), "exec_argv: unknown option '%s'", key);
+            process_set_error(err, message);
+            return false;
+        }
+    }
+
+    LatValue *value = map ? lat_map_get(map, "timeout_ms") : NULL;
+    if (value) {
+        uint64_t parsed = 0;
+        if (!process_parse_positive_integer(value, "timeout_ms", INT64_MAX, &parsed, err)) return false;
+        options->has_timeout = true;
+        options->timeout_ms = parsed;
+    }
+    value = map ? lat_map_get(map, "max_stdout_bytes") : NULL;
+    if (value) {
+        uint64_t parsed = 0;
+        uint64_t maximum = SIZE_MAX - 1 < (size_t)INT64_MAX ? (uint64_t)(SIZE_MAX - 1) : (uint64_t)INT64_MAX;
+        if (!process_parse_positive_integer(value, "max_stdout_bytes", maximum, &parsed, err)) return false;
+        options->has_stdout_limit = true;
+        options->max_stdout_bytes = (size_t)parsed;
+    }
+    value = map ? lat_map_get(map, "max_stderr_bytes") : NULL;
+    if (value) {
+        uint64_t parsed = 0;
+        uint64_t maximum = SIZE_MAX - 1 < (size_t)INT64_MAX ? (uint64_t)(SIZE_MAX - 1) : (uint64_t)INT64_MAX;
+        if (!process_parse_positive_integer(value, "max_stderr_bytes", maximum, &parsed, err)) return false;
+        options->has_stderr_limit = true;
+        options->max_stderr_bytes = (size_t)parsed;
+    }
+    return true;
+}
+
 /* Keep all user-facing validation here rather than in eval.c/runtime.c so the
  * tree walker, StackVM, RegVM, and WASM return byte-for-byte identical errors. */
-static bool process_exec_argv_validate(LatValue *args, int arg_count, char **err) {
-    if (arg_count != 3 || !args || args[0].type != VAL_STR || args[1].type != VAL_ARRAY ||
-        (args[2].type != VAL_STR && args[2].type != VAL_NIL)) {
-        process_set_error(err, "exec_argv() expects (program: String, args: [String], stdin: String|Nil)");
+static bool process_exec_argv_validate(LatValue *args, int arg_count, ProcessExecOptions *options, char **err) {
+    if ((arg_count != 3 && arg_count != 4) || !args || args[0].type != VAL_STR || args[1].type != VAL_ARRAY ||
+        (args[2].type != VAL_STR && args[2].type != VAL_NIL) ||
+        (arg_count == 4 && args[3].type != VAL_MAP && args[3].type != VAL_NIL)) {
+        process_set_error(
+            err, "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)");
         return false;
     }
     if (!args[0].as.str_val || process_string_len(&args[0]) == 0) {
@@ -50,7 +146,7 @@ static bool process_exec_argv_validate(LatValue *args, int arg_count, char **err
             return false;
         }
     }
-    return true;
+    return process_exec_argv_parse_options(args, arg_count, options, err);
 }
 
 #ifndef __EMSCRIPTEN__
@@ -86,7 +182,6 @@ static void process_set_spawn_error(char **err, const char *program, const char 
     *err = message;
 }
 
-#include "ds/hashmap.h"
 #include <errno.h>
 #include <pthread.h>
 
@@ -102,6 +197,7 @@ static void process_set_spawn_error(char **err, const char *program, const char 
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <time.h>
 extern char **environ;
 #endif
 
@@ -110,12 +206,49 @@ typedef struct {
     size_t len;
     size_t cap;
     bool oom;
+    bool limited;
+    size_t max_len;
+    bool limit_exceeded;
 } ProcessBuffer;
 
-static bool process_buffer_init(ProcessBuffer *buffer) {
+typedef enum {
+    PROCESS_STOP_NONE = 0,
+    PROCESS_STOP_TIMEOUT,
+    PROCESS_STOP_STDOUT_LIMIT,
+    PROCESS_STOP_STDERR_LIMIT,
+} ProcessStopReason;
+
+static void process_signal_stop(_Atomic int *reason, ProcessStopReason requested) {
+    int expected = PROCESS_STOP_NONE;
+    atomic_compare_exchange_strong_explicit(reason, &expected, (int)requested, memory_order_release,
+                                            memory_order_relaxed);
+}
+
+static void process_set_stop_error(char **err, ProcessStopReason reason, const ProcessExecOptions *options) {
+    char message[256];
+    if (reason == PROCESS_STOP_TIMEOUT) {
+        snprintf(message, sizeof(message), "exec_argv: timed out after %llu ms",
+                 (unsigned long long)options->timeout_ms);
+    } else if (reason == PROCESS_STOP_STDOUT_LIMIT) {
+        snprintf(message, sizeof(message), "exec_argv: stdout exceeded max_stdout_bytes (%zu bytes)",
+                 options->max_stdout_bytes);
+    } else if (reason == PROCESS_STOP_STDERR_LIMIT) {
+        snprintf(message, sizeof(message), "exec_argv: stderr exceeded max_stderr_bytes (%zu bytes)",
+                 options->max_stderr_bytes);
+    } else {
+        return;
+    }
+    process_set_error(err, message);
+}
+
+static bool process_buffer_init_with_limit(ProcessBuffer *buffer, bool limited, size_t max_len) {
     buffer->cap = 1024;
+    if (limited && max_len < buffer->cap - 1) buffer->cap = max_len + 1;
     buffer->len = 0;
     buffer->oom = false;
+    buffer->limited = limited;
+    buffer->max_len = max_len;
+    buffer->limit_exceeded = false;
     buffer->data = malloc(buffer->cap);
     if (!buffer->data) {
         buffer->cap = 0;
@@ -131,11 +264,20 @@ static bool process_buffer_init(ProcessBuffer *buffer) {
  * the child have been reaped. */
 static void process_buffer_append(ProcessBuffer *buffer, const char *data, size_t len) {
     if (buffer->oom || len == 0) return;
-    if (len > SIZE_MAX - buffer->len - 1) {
+    size_t append_len = len;
+    if (buffer->limited) {
+        size_t remaining = buffer->max_len - buffer->len;
+        if (append_len > remaining) {
+            append_len = remaining;
+            buffer->limit_exceeded = true;
+        }
+    }
+    if (append_len == 0) return;
+    if (append_len > SIZE_MAX - buffer->len - 1) {
         buffer->oom = true;
         return;
     }
-    size_t needed = buffer->len + len + 1;
+    size_t needed = buffer->len + append_len + 1;
     if (needed > buffer->cap) {
         size_t next = buffer->cap;
         while (next < needed) {
@@ -145,6 +287,7 @@ static void process_buffer_append(ProcessBuffer *buffer, const char *data, size_
             }
             next *= 2;
         }
+        if (buffer->limited && next > buffer->max_len + 1) next = buffer->max_len + 1;
         char *grown = realloc(buffer->data, next);
         if (!grown) {
             buffer->oom = true;
@@ -153,8 +296,8 @@ static void process_buffer_append(ProcessBuffer *buffer, const char *data, size_
         buffer->data = grown;
         buffer->cap = next;
     }
-    memcpy(buffer->data + buffer->len, data, len);
-    buffer->len += len;
+    memcpy(buffer->data + buffer->len, data, append_len);
+    buffer->len += append_len;
     buffer->data[buffer->len] = '\0';
 }
 
@@ -493,6 +636,8 @@ LatValue process_shell(const char *cmd, char **err) {
 typedef struct {
     int fd;
     ProcessBuffer *buffer;
+    _Atomic int *stop_reason;
+    ProcessStopReason limit_reason;
     int io_error;
 } PosixReadWorker;
 
@@ -510,6 +655,10 @@ static void *posix_read_worker(void *opaque) {
         ssize_t count = read(worker->fd, chunk, sizeof(chunk));
         if (count > 0) {
             process_buffer_append(worker->buffer, chunk, (size_t)count);
+            if (worker->buffer->limit_exceeded) {
+                process_signal_stop(worker->stop_reason, worker->limit_reason);
+                break;
+            }
             continue;
         }
         if (count == 0) break;
@@ -623,10 +772,24 @@ static void posix_set_system_error(char **err, const char *operation, int error_
     process_set_error(err, message);
 }
 
-static LatValue process_exec_argv_posix(LatValue *args, char **err) {
+static bool posix_monotonic_ms(uint64_t *out) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return false;
+    *out = (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+    return true;
+}
+
+static void posix_terminate_managed_child(pid_t child, bool process_group_isolated) {
+    if (process_group_isolated && kill(-child, SIGKILL) == 0) return;
+    kill(child, SIGKILL);
+}
+
+static LatValue process_exec_argv_posix(LatValue *args, const ProcessExecOptions *options, char **err) {
+    bool managed_invocation = process_exec_options_are_managed(options);
     ProcessBuffer stdout_buffer = {0};
     ProcessBuffer stderr_buffer = {0};
-    if (!process_buffer_init(&stdout_buffer) || !process_buffer_init(&stderr_buffer)) {
+    if (!process_buffer_init_with_limit(&stdout_buffer, options->has_stdout_limit, options->max_stdout_bytes) ||
+        !process_buffer_init_with_limit(&stderr_buffer, options->has_stderr_limit, options->max_stderr_bytes)) {
         process_buffer_free(&stdout_buffer);
         process_buffer_free(&stderr_buffer);
         process_set_error(err, "exec_argv: out of memory");
@@ -688,8 +851,51 @@ static LatValue process_exec_argv_posix(LatValue *args, char **err) {
         return value_unit();
     }
 
+    posix_spawnattr_t attributes;
+    int attribute_error = 0;
+    bool attributes_initialized = false;
+    bool process_group_isolated = false;
+    if (managed_invocation) {
+        attribute_error = posix_spawnattr_init(&attributes);
+        attributes_initialized = attribute_error == 0;
+#ifdef POSIX_SPAWN_SETPGROUP
+        if (attribute_error == 0) attribute_error = posix_spawnattr_setpgroup(&attributes, 0);
+        if (attribute_error == 0) attribute_error = posix_spawnattr_setflags(&attributes, (short)POSIX_SPAWN_SETPGROUP);
+        process_group_isolated = attribute_error == 0;
+#endif
+    }
+    if (attribute_error != 0) {
+        if (attributes_initialized) posix_spawnattr_destroy(&attributes);
+        posix_spawn_file_actions_destroy(&actions);
+        posix_close_pipe(stdin_pipe);
+        posix_close_pipe(stdout_pipe);
+        posix_close_pipe(stderr_pipe);
+        free(argv);
+        process_buffer_free(&stdout_buffer);
+        process_buffer_free(&stderr_buffer);
+        posix_set_system_error(err, "failed to configure child process group", attribute_error);
+        return value_unit();
+    }
+
+    uint64_t started_ms = 0;
+    if (options->has_timeout && !posix_monotonic_ms(&started_ms)) {
+        int saved = errno;
+        if (attributes_initialized) posix_spawnattr_destroy(&attributes);
+        posix_spawn_file_actions_destroy(&actions);
+        posix_close_pipe(stdin_pipe);
+        posix_close_pipe(stdout_pipe);
+        posix_close_pipe(stderr_pipe);
+        free(argv);
+        process_buffer_free(&stdout_buffer);
+        process_buffer_free(&stderr_buffer);
+        posix_set_system_error(err, "failed to read monotonic clock", saved);
+        return value_unit();
+    }
+
     pid_t child = -1;
-    int spawn_error = posix_spawnp(&child, argv[0], &actions, NULL, argv, environ);
+    int spawn_error =
+        posix_spawnp(&child, argv[0], &actions, attributes_initialized ? &attributes : NULL, argv, environ);
+    if (attributes_initialized) posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     free(argv);
 
@@ -711,8 +917,21 @@ static LatValue process_exec_argv_posix(LatValue *args, char **err) {
     close(stderr_pipe[1]);
     stderr_pipe[1] = -1;
 
-    PosixReadWorker stdout_worker = {.fd = stdout_pipe[0], .buffer = &stdout_buffer, .io_error = 0};
-    PosixReadWorker stderr_worker = {.fd = stderr_pipe[0], .buffer = &stderr_buffer, .io_error = 0};
+    _Atomic int stop_reason = PROCESS_STOP_NONE;
+    PosixReadWorker stdout_worker = {
+        .fd = stdout_pipe[0],
+        .buffer = &stdout_buffer,
+        .stop_reason = &stop_reason,
+        .limit_reason = PROCESS_STOP_STDOUT_LIMIT,
+        .io_error = 0,
+    };
+    PosixReadWorker stderr_worker = {
+        .fd = stderr_pipe[0],
+        .buffer = &stderr_buffer,
+        .stop_reason = &stop_reason,
+        .limit_reason = PROCESS_STOP_STDERR_LIMIT,
+        .io_error = 0,
+    };
     pthread_t stdout_thread;
     pthread_t stderr_thread;
     pthread_t stdin_thread;
@@ -755,12 +974,61 @@ static LatValue process_exec_argv_posix(LatValue *args, char **err) {
         }
     }
 
-    if (worker_error != 0) kill(child, SIGKILL);
-
     int status = 0;
-    pid_t waited;
-    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
-    int wait_error = waited < 0 ? errno : 0;
+    pid_t waited = -1;
+    int wait_error = 0;
+    int monitor_error = 0;
+    ProcessStopReason managed_stop = PROCESS_STOP_NONE;
+
+    if (worker_error != 0) {
+        posix_terminate_managed_child(child, process_group_isolated);
+        do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+        if (waited < 0) wait_error = errno;
+    } else if (!managed_invocation) {
+        do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+        if (waited < 0) wait_error = errno;
+    } else {
+        for (;;) {
+            managed_stop = (ProcessStopReason)atomic_load_explicit(&stop_reason, memory_order_acquire);
+            if (managed_stop == PROCESS_STOP_NONE && options->has_timeout) {
+                uint64_t now_ms = 0;
+                if (!posix_monotonic_ms(&now_ms)) {
+                    monitor_error = errno;
+                    posix_terminate_managed_child(child, process_group_isolated);
+                    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+                    if (waited < 0) wait_error = errno;
+                    break;
+                }
+                if (now_ms - started_ms >= options->timeout_ms) {
+                    process_signal_stop(&stop_reason, PROCESS_STOP_TIMEOUT);
+                    managed_stop = (ProcessStopReason)atomic_load_explicit(&stop_reason, memory_order_acquire);
+                }
+            }
+            if (managed_stop != PROCESS_STOP_NONE) {
+                posix_terminate_managed_child(child, process_group_isolated);
+                do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+                if (waited < 0) wait_error = errno;
+                break;
+            }
+
+            waited = waitpid(child, &status, WNOHANG);
+            if (waited == child) {
+                /* A managed primary may exit after spawning a descendant that
+                 * still owns a capture pipe. End the isolated group before
+                 * joining readers so that bounded execution cannot hang. */
+                if (process_group_isolated) kill(-child, SIGKILL);
+                break;
+            }
+            if (waited < 0) {
+                if (errno == EINTR) continue;
+                wait_error = errno;
+                if (process_group_isolated) kill(-child, SIGKILL);
+                break;
+            }
+            struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
+            while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+        }
+    }
 
     int join_error = 0;
     if (stdout_started) {
@@ -776,9 +1044,14 @@ static LatValue process_exec_argv_posix(LatValue *args, char **err) {
         if (joined != 0 && join_error == 0) join_error = joined;
     }
 
+    ProcessStopReason final_stop = (ProcessStopReason)atomic_load_explicit(&stop_reason, memory_order_acquire);
+    if (managed_stop == PROCESS_STOP_NONE) managed_stop = final_stop;
+
     if (worker_error != 0) posix_set_system_error(err, "failed to start I/O worker", worker_error);
     else if (wait_error != 0) posix_set_system_error(err, "failed to wait for child", wait_error);
+    else if (monitor_error != 0) posix_set_system_error(err, "failed to read monotonic clock", monitor_error);
     else if (join_error != 0) posix_set_system_error(err, "failed to join I/O worker", join_error);
+    else if (managed_stop != PROCESS_STOP_NONE) process_set_stop_error(err, managed_stop, options);
     else if (stdout_worker.io_error != 0)
         posix_set_system_error(err, "failed to read child stdout", stdout_worker.io_error);
     else if (stderr_worker.io_error != 0)
@@ -805,6 +1078,8 @@ static LatValue process_exec_argv_posix(LatValue *args, char **err) {
 typedef struct {
     HANDLE handle;
     ProcessBuffer *buffer;
+    _Atomic int *stop_reason;
+    ProcessStopReason limit_reason;
     DWORD io_error;
 } Win32ReadWorker;
 
@@ -826,6 +1101,34 @@ static void win32_set_system_error(char **err, const char *operation, DWORD erro
     process_set_error(err, message);
 }
 
+static HANDLE win32_create_managed_job(char **err) {
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (!job) {
+        win32_set_system_error(err, "failed to create child job", GetLastError());
+        return NULL;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    ZeroMemory(&limits, sizeof(limits));
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        DWORD code = GetLastError();
+        CloseHandle(job);
+        win32_set_system_error(err, "failed to configure child job", code);
+        return NULL;
+    }
+    return job;
+}
+
+static DWORD win32_terminate_invocation(HANDLE job, HANDLE process, bool managed_invocation) {
+    if (managed_invocation) {
+        if (TerminateJobObject(job, 127)) return ERROR_SUCCESS;
+        DWORD job_error = GetLastError();
+        TerminateProcess(process, 127);
+        return job_error;
+    }
+    return TerminateProcess(process, 127) ? ERROR_SUCCESS : GetLastError();
+}
+
 static void *win32_read_worker(void *opaque) {
     Win32ReadWorker *worker = opaque;
     char chunk[8192];
@@ -834,6 +1137,10 @@ static void *win32_read_worker(void *opaque) {
         BOOL ok = ReadFile(worker->handle, chunk, (DWORD)sizeof(chunk), &count, NULL);
         if (ok && count > 0) {
             process_buffer_append(worker->buffer, chunk, (size_t)count);
+            if (worker->buffer->limit_exceeded) {
+                process_signal_stop(worker->stop_reason, worker->limit_reason);
+                break;
+            }
             continue;
         }
         if (ok) break;
@@ -938,12 +1245,14 @@ static wchar_t *win32_utf8_to_wide(const char *utf8, char **err) {
     return wide;
 }
 
-static LatValue process_exec_argv_windows(LatValue *args, char **err) {
+static LatValue process_exec_argv_windows(LatValue *args, const ProcessExecOptions *options, char **err) {
+    bool managed_invocation = process_exec_options_are_managed(options);
     ProcessBuffer command = {0};
     ProcessBuffer stdout_buffer = {0};
     ProcessBuffer stderr_buffer = {0};
-    if (!process_buffer_init(&command) || !process_buffer_init(&stdout_buffer) ||
-        !process_buffer_init(&stderr_buffer)) {
+    if (!process_buffer_init_with_limit(&command, false, 0) ||
+        !process_buffer_init_with_limit(&stdout_buffer, options->has_stdout_limit, options->max_stdout_bytes) ||
+        !process_buffer_init_with_limit(&stderr_buffer, options->has_stderr_limit, options->max_stderr_bytes)) {
         process_buffer_free(&command);
         process_buffer_free(&stdout_buffer);
         process_buffer_free(&stderr_buffer);
@@ -1061,9 +1370,39 @@ static LatValue process_exec_argv_windows(LatValue *args, char **err) {
         return value_unit();
     }
 
-    BOOL spawned = CreateProcessW(NULL, command_line, NULL, NULL, TRUE, EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+    HANDLE job = managed_invocation ? win32_create_managed_job(err) : NULL;
+    if (managed_invocation && !job) {
+        DeleteProcThreadAttributeList(startup.lpAttributeList);
+        free(startup.lpAttributeList);
+        win32_close_handle(&stdin_read);
+        win32_close_handle(&stdin_write);
+        win32_close_handle(&stdout_read);
+        win32_close_handle(&stdout_write);
+        win32_close_handle(&stderr_read);
+        win32_close_handle(&stderr_write);
+        free(command_line);
+        process_buffer_free(&stdout_buffer);
+        process_buffer_free(&stderr_buffer);
+        return value_unit();
+    }
+
+    ULONGLONG started_ms = GetTickCount64();
+    DWORD creation_flags = EXTENDED_STARTUPINFO_PRESENT;
+    if (managed_invocation) creation_flags |= CREATE_SUSPENDED;
+    BOOL spawned = CreateProcessW(NULL, command_line, NULL, NULL, TRUE, creation_flags, NULL, NULL,
                                   &startup.StartupInfo, &process);
     DWORD spawn_error = spawned ? ERROR_SUCCESS : GetLastError();
+    DWORD containment_error = ERROR_SUCCESS;
+    const char *containment_operation = NULL;
+    if (spawned && managed_invocation && !AssignProcessToJobObject(job, process.hProcess)) {
+        containment_error = GetLastError();
+        containment_operation = "failed to contain child process";
+    }
+    if (spawned && managed_invocation && containment_error == ERROR_SUCCESS &&
+        ResumeThread(process.hThread) == (DWORD)-1) {
+        containment_error = GetLastError();
+        containment_operation = "failed to resume child process";
+    }
     DeleteProcThreadAttributeList(startup.lpAttributeList);
     free(startup.lpAttributeList);
     free(command_line);
@@ -1075,6 +1414,7 @@ static LatValue process_exec_argv_windows(LatValue *args, char **err) {
     win32_close_handle(&stderr_write);
 
     if (!spawned) {
+        win32_close_handle(&job);
         win32_close_handle(&stdin_write);
         win32_close_handle(&stdout_read);
         win32_close_handle(&stderr_read);
@@ -1085,9 +1425,36 @@ static LatValue process_exec_argv_windows(LatValue *args, char **err) {
         process_set_spawn_error(err, args[0].as.str_val, detail);
         return value_unit();
     }
+    if (containment_error != ERROR_SUCCESS) {
+        TerminateProcess(process.hProcess, 127);
+        WaitForSingleObject(process.hProcess, INFINITE);
+        win32_close_handle(&process.hThread);
+        win32_close_handle(&process.hProcess);
+        win32_close_handle(&job);
+        win32_close_handle(&stdin_write);
+        win32_close_handle(&stdout_read);
+        win32_close_handle(&stderr_read);
+        process_buffer_free(&stdout_buffer);
+        process_buffer_free(&stderr_buffer);
+        win32_set_system_error(err, containment_operation, containment_error);
+        return value_unit();
+    }
 
-    Win32ReadWorker stdout_worker = {.handle = stdout_read, .buffer = &stdout_buffer, .io_error = 0};
-    Win32ReadWorker stderr_worker = {.handle = stderr_read, .buffer = &stderr_buffer, .io_error = 0};
+    _Atomic int stop_reason = PROCESS_STOP_NONE;
+    Win32ReadWorker stdout_worker = {
+        .handle = stdout_read,
+        .buffer = &stdout_buffer,
+        .stop_reason = &stop_reason,
+        .limit_reason = PROCESS_STOP_STDOUT_LIMIT,
+        .io_error = 0,
+    };
+    Win32ReadWorker stderr_worker = {
+        .handle = stderr_read,
+        .buffer = &stderr_buffer,
+        .stop_reason = &stop_reason,
+        .limit_reason = PROCESS_STOP_STDERR_LIMIT,
+        .io_error = 0,
+    };
     pthread_t stdout_thread;
     pthread_t stderr_thread;
     pthread_t stdin_thread;
@@ -1126,16 +1493,46 @@ static LatValue process_exec_argv_windows(LatValue *args, char **err) {
         }
     }
 
-    if (worker_error != 0) TerminateProcess(process.hProcess, 127);
-    DWORD wait_result = WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD wait_error = wait_result == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+    DWORD wait_result = WAIT_TIMEOUT;
+    DWORD wait_error = ERROR_SUCCESS;
+    DWORD termination_error = ERROR_SUCCESS;
+    ProcessStopReason managed_stop = PROCESS_STOP_NONE;
+
+    if (worker_error != 0) {
+        termination_error = win32_terminate_invocation(job, process.hProcess, managed_invocation);
+        wait_result = WaitForSingleObject(process.hProcess, INFINITE);
+    } else if (!managed_invocation) {
+        wait_result = WaitForSingleObject(process.hProcess, INFINITE);
+    } else {
+        for (;;) {
+            managed_stop = (ProcessStopReason)atomic_load_explicit(&stop_reason, memory_order_acquire);
+            if (managed_stop == PROCESS_STOP_NONE && options->has_timeout &&
+                GetTickCount64() - started_ms >= options->timeout_ms) {
+                process_signal_stop(&stop_reason, PROCESS_STOP_TIMEOUT);
+                managed_stop = (ProcessStopReason)atomic_load_explicit(&stop_reason, memory_order_acquire);
+            }
+            if (managed_stop != PROCESS_STOP_NONE) {
+                termination_error = win32_terminate_invocation(job, process.hProcess, true);
+                wait_result = WaitForSingleObject(process.hProcess, INFINITE);
+                break;
+            }
+            wait_result = WaitForSingleObject(process.hProcess, 1);
+            if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_FAILED) break;
+        }
+    }
     if (wait_result == WAIT_FAILED) {
-        TerminateProcess(process.hProcess, 127);
+        wait_error = GetLastError();
+        DWORD failed_termination = win32_terminate_invocation(job, process.hProcess, managed_invocation);
+        if (termination_error == ERROR_SUCCESS) termination_error = failed_termination;
         WaitForSingleObject(process.hProcess, INFINITE);
     }
     DWORD exit_code = 0;
     DWORD exit_error = ERROR_SUCCESS;
     if (wait_result != WAIT_FAILED && !GetExitCodeProcess(process.hProcess, &exit_code)) exit_error = GetLastError();
+
+    /* Closing a kill-on-close job after the primary process exits prevents a
+     * surviving descendant from retaining the capture pipes indefinitely. */
+    win32_close_handle(&job);
 
     int join_error = 0;
     if (stdout_started) {
@@ -1153,17 +1550,23 @@ static LatValue process_exec_argv_windows(LatValue *args, char **err) {
     win32_close_handle(&process.hThread);
     win32_close_handle(&process.hProcess);
 
+    ProcessStopReason final_stop = (ProcessStopReason)atomic_load_explicit(&stop_reason, memory_order_acquire);
+    if (managed_stop == PROCESS_STOP_NONE) managed_stop = final_stop;
+
     if (worker_error != 0) {
         char message[256];
         snprintf(message, sizeof(message), "exec_argv: failed to start I/O worker: %s", strerror(worker_error));
         process_set_error(err, message);
     } else if (wait_error != ERROR_SUCCESS) win32_set_system_error(err, "failed to wait for child", wait_error);
+    else if (termination_error != ERROR_SUCCESS)
+        win32_set_system_error(err, "failed to terminate child job", termination_error);
     else if (exit_error != ERROR_SUCCESS) win32_set_system_error(err, "failed to obtain child exit code", exit_error);
     else if (join_error != 0) {
         char message[256];
         snprintf(message, sizeof(message), "exec_argv: failed to join I/O worker: %s", strerror(join_error));
         process_set_error(err, message);
-    } else if (stdout_worker.io_error != ERROR_SUCCESS)
+    } else if (managed_stop != PROCESS_STOP_NONE) process_set_stop_error(err, managed_stop, options);
+    else if (stdout_worker.io_error != ERROR_SUCCESS)
         win32_set_system_error(err, "failed to read child stdout", stdout_worker.io_error);
     else if (stderr_worker.io_error != ERROR_SUCCESS)
         win32_set_system_error(err, "failed to read child stderr", stderr_worker.io_error);
@@ -1184,11 +1587,12 @@ static LatValue process_exec_argv_windows(LatValue *args, char **err) {
 
 LatValue process_exec_argv(LatValue *args, int arg_count, char **err) {
     if (err) *err = NULL;
-    if (!process_exec_argv_validate(args, arg_count, err)) return value_unit();
+    ProcessExecOptions options;
+    if (!process_exec_argv_validate(args, arg_count, &options, err)) return value_unit();
 #ifdef _WIN32
-    return process_exec_argv_windows(args, err);
+    return process_exec_argv_windows(args, &options, err);
 #else
-    return process_exec_argv_posix(args, err);
+    return process_exec_argv_posix(args, &options, err);
 #endif
 }
 
@@ -1231,7 +1635,8 @@ int process_pid(void) {
 
 LatValue process_exec_argv(LatValue *args, int arg_count, char **err) {
     if (err) *err = NULL;
-    if (!process_exec_argv_validate(args, arg_count, err)) return value_unit();
+    ProcessExecOptions options;
+    if (!process_exec_argv_validate(args, arg_count, &options, err)) return value_unit();
     process_set_error(err, "exec_argv: not available in browser");
     return value_unit();
 }

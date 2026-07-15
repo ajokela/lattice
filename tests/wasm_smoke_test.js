@@ -233,7 +233,7 @@ function assertIncludes(haystack, needle, msg) {
     assertIncludes(r.output, "caught", "try-catch division by zero");
   }
   {
-    const r = run('try { exec_argv("program", [], nil) } catch e { e.message }');
+    const r = run('try { exec_argv("program", [], nil, Map::new()) } catch e { e.message }');
     assertIncludes(r.output, "exec_argv: not available in browser", "exec_argv reports unsupported on wasm");
   }
 
@@ -309,7 +309,7 @@ function assertIncludes(haystack, needle, msg) {
 
   /* -- Unsupported process API -- */
   {
-    const r = runRegvm('try { exec_argv("program", [], nil) } catch e { e.message }');
+    const r = runRegvm('try { exec_argv("program", [], nil, Map::new()) } catch e { e.message }');
     assertIncludes(r.output, "exec_argv: not available in browser", "regvm exec_argv reports unsupported on wasm");
   }
 

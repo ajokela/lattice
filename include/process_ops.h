@@ -17,14 +17,16 @@ LatValue process_shell(const char *cmd, char **err);
 
 /* Run a program directly, without a shell.
  *
- * args must be exactly:
+ * args must contain:
  *   program (String)     - executable name/path and argv[0]
  *   argv    ([String])   - arguments after argv[0]
  *   stdin   (String|Nil) - exact standard input; Nil closes stdin immediately
+ *   options  (Map|Nil)   - optional positive integer timeout/output limits
  *
  * Returns a Map with "exit_code", "stdout", and "stderr". A non-zero child
- * exit is returned as data. Validation and process/spawn failures set *err.
- * This function owns no values in args. */
+ * exit is returned as data. Timeout/output-limit, validation, and process/spawn
+ * failures set *err. Three arguments retain the unbounded behavior. This
+ * function owns no values in args. */
 LatValue process_exec_argv(LatValue *args, int arg_count, char **err);
 
 /* Return the current working directory as a heap-allocated string.

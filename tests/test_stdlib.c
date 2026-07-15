@@ -3280,12 +3280,41 @@ static void test_exec_argv_validation_errors(void) {
                   "    print(try { exec_argv(\"program\", [], 1) } catch e { e.message })\n"
                   "    print(try { exec_argv(\"\", [], nil) } catch e { e.message })\n"
                   "}\n",
-                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
-                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
-                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
                   "exec_argv: args[1] must be a String\n"
-                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
                   "exec_argv: program must not be empty");
+}
+
+static void test_exec_argv_option_validation(void) {
+    ASSERT_OUTPUT("fn call(options: Map) {\n"
+                  "    return try { exec_argv(\"program\", [], nil, options) } catch e { e.message }\n"
+                  "}\n"
+                  "fn option(name: String, value: any) {\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(name, value)\n"
+                  "    return options\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    print(try { exec_argv(\"program\", [], nil, 1) } catch e { e.message })\n"
+                  "    print(call(option(\"unknown\", 1)))\n"
+                  "    print(call(option(\"timeout_ms\", \"fast\")))\n"
+                  "    print(call(option(\"timeout_ms\", 0)))\n"
+                  "    print(call(option(\"max_stdout_bytes\", -1)))\n"
+                  "    print(call(option(\"max_stderr_bytes\", 1.5)))\n"
+                  "    print(call(option(\"timeout_ms\", 0.0 / 0.0)))\n"
+                  "    print(call(option(\"max_stdout_bytes\", 100000000000000000000.0)))\n"
+                  "}\n",
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv: unknown option 'unknown'\n"
+                  "exec_argv: options.timeout_ms must be a positive finite integer\n"
+                  "exec_argv: options.timeout_ms must be a positive finite integer\n"
+                  "exec_argv: options.max_stdout_bytes must be a positive finite integer\n"
+                  "exec_argv: options.max_stderr_bytes must be a positive finite integer\n"
+                  "exec_argv: options.timeout_ms must be a positive finite integer\n"
+                  "exec_argv: options.max_stdout_bytes is too large");
 }
 
 static void test_exec_argv_rejects_nul_in_program_and_args(void) {
@@ -3303,7 +3332,9 @@ static void test_exec_argv_os_module(void) {
     ASSERT_OUTPUT("import \"os\" as os\n"
                   "fn main() {\n"
                   "    let run = os.get(\"exec_argv\")\n"
-                  "    let r = run(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"os module\")\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"max_stdout_bytes\", 100)\n"
+                  "    let r = run(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"os module\", options)\n"
                   "    print(r.get(\"exit_code\"))\n"
                   "    print(r.get(\"stdout\").trim())\n"
                   "}\n",
@@ -3320,6 +3351,118 @@ static void test_exec_argv_three_pipe_pressure(void) {
                   "    print(r.get(\"stdout\").ends_with(\"stdin=262144\\n\"))\n"
                   "}\n",
                   "0\n262157\n262144\ntrue");
+}
+
+static void test_exec_argv_omitted_options_are_compatible(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let direct = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"same\")\n"
+                  "    let explicit_nil = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"same\", nil)\n"
+                  "    let empty_options = Map::new()\n"
+                  "    let explicit_empty = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"stdin\"], \"same\", empty_options)\n"
+                  "    print(direct.get(\"stdout\") == explicit_nil.get(\"stdout\") && "
+                  "direct.get(\"stderr\") == explicit_nil.get(\"stderr\") && "
+                  "direct.get(\"exit_code\") == explicit_nil.get(\"exit_code\"))\n"
+                  "    print(direct.get(\"stdout\") == explicit_empty.get(\"stdout\") && "
+                  "direct.get(\"stderr\") == explicit_empty.get(\"stderr\") && "
+                  "direct.get(\"exit_code\") == explicit_empty.get(\"exit_code\"))\n"
+                  "    let marker = tempfile()\n"
+                  "    delete_file(marker)\n"
+                  "    let detached = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"detached-marker\", marker], nil)\n"
+                  "    sleep(1000)\n"
+                  "    print(detached.get(\"exit_code\"))\n"
+                  "    print(file_exists(marker))\n"
+                  "    delete_file(marker)\n"
+                  "}\n",
+                  "true\ntrue\n0\ntrue");
+}
+
+static void test_exec_argv_timeout(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"timeout_ms\", 25)\n"
+                  "    let message = try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"sleep\", \"2000\"], nil, options)\n"
+                  "        \"NO_ERROR\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "}\n",
+                  "exec_argv: timed out after 25 ms");
+}
+
+static void test_exec_argv_output_limits(void) {
+    ASSERT_OUTPUT("fn option(name: String, value: any) {\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(name, value)\n"
+                  "    return options\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let exact = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"flood\", \"stdout\", \"4096\"], nil, option(\"max_stdout_bytes\", 4096))\n"
+                  "    print(exact.get(\"stdout\").len())\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"flood\", \"stdout\", \"4096\"], nil, option(\"max_stdout_bytes\", 4095))\n"
+                  "    } catch e { e.message })\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"flood\", \"stderr\", \"4096\"], nil, option(\"max_stderr_bytes\", 4095))\n"
+                  "    } catch e { e.message })\n"
+                  "    let input = \"I\".repeat(262144)\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"pressure\"], input, option(\"max_stdout_bytes\", 8192))\n"
+                  "    } catch e { e.message })\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"pressure-interleaved\"], input, option(\"max_stderr_bytes\", 8192))\n"
+                  "    } catch e { e.message })\n"
+                  "}\n",
+                  "4096\n"
+                  "exec_argv: stdout exceeded max_stdout_bytes (4095 bytes)\n"
+                  "exec_argv: stderr exceeded max_stderr_bytes (4095 bytes)\n"
+                  "exec_argv: stdout exceeded max_stdout_bytes (8192 bytes)\n"
+                  "exec_argv: stderr exceeded max_stderr_bytes (8192 bytes)");
+}
+
+static void test_exec_argv_timeout_kills_descendant(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let pidfile = tempfile()\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"timeout_ms\", 1000)\n"
+                  "    let message = try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"descendant\", pidfile], nil, options)\n"
+                  "        \"NO_ERROR\"\n"
+                  "    } catch e { e.message }\n"
+                  "    sleep(200)\n"
+                  "    let child_pid = read_file(pidfile).trim()\n"
+                  "    let probe = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"pid-alive\", child_pid], nil)\n"
+                  "    delete_file(pidfile)\n"
+                  "    print(message)\n"
+                  "    print(probe.get(\"exit_code\"))\n"
+                  "}\n",
+                  "exec_argv: timed out after 1000 ms\n1");
+}
+
+static void test_exec_argv_managed_primary_exit_kills_descendant(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let pidfile = tempfile()\n"
+                  "    let marker = tempfile()\n"
+                  "    delete_file(marker)\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"max_stdout_bytes\", 100)\n"
+                  "    let result = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"descendant-exit\", pidfile, marker], nil, options)\n"
+                  "    sleep(400)\n"
+                  "    let child_pid = read_file(pidfile).trim()\n"
+                  "    let probe = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"pid-alive\", child_pid], nil)\n"
+                  "    delete_file(pidfile)\n"
+                  "    print(result.get(\"exit_code\"))\n"
+                  "    print(probe.get(\"exit_code\"))\n"
+                  "    print(file_exists(marker))\n"
+                  "    if file_exists(marker) { delete_file(marker) }\n"
+                  "}\n",
+                  "0\n1\nfalse");
 }
 
 /* ======================================================================
@@ -14071,9 +14214,16 @@ void register_stdlib_tests(void) {
     register_test("test_exec_argv_nonzero_is_data", test_exec_argv_nonzero_is_data);
     register_test("test_exec_argv_missing_program_is_catchable", test_exec_argv_missing_program_is_catchable);
     register_test("test_exec_argv_validation_errors", test_exec_argv_validation_errors);
+    register_test("test_exec_argv_option_validation", test_exec_argv_option_validation);
     register_test("test_exec_argv_rejects_nul_in_program_and_args", test_exec_argv_rejects_nul_in_program_and_args);
     register_test("test_exec_argv_os_module", test_exec_argv_os_module);
     register_test("test_exec_argv_three_pipe_pressure", test_exec_argv_three_pipe_pressure);
+    register_test("test_exec_argv_omitted_options_are_compatible", test_exec_argv_omitted_options_are_compatible);
+    register_test("test_exec_argv_timeout", test_exec_argv_timeout);
+    register_test("test_exec_argv_output_limits", test_exec_argv_output_limits);
+    register_test("test_exec_argv_timeout_kills_descendant", test_exec_argv_timeout_kills_descendant);
+    register_test("test_exec_argv_managed_primary_exit_kills_descendant",
+                  test_exec_argv_managed_primary_exit_kills_descendant);
 
     /* Array: flat_map, chunk, group_by, sum, min, max, first, last */
     register_test("test_array_flat_map", test_array_flat_map);

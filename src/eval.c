@@ -6210,10 +6210,14 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     return eval_ok(result);
                 }
 
-                /// @builtin exec_argv(program: String, args: [String], stdin: String|Nil) -> Map
+                // clang-format off
+                /// @builtin exec_argv(program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil) -> Map
+                // clang-format on
                 /// @category Process
                 /// Execute a program directly without a shell. The args array excludes argv[0].
-                /// Nil stdin closes the child input immediately. Returns stdout, stderr, and exit_code.
+                /// Nil stdin closes the child input immediately. Optional positive integer timeout_ms,
+                /// max_stdout_bytes, and max_stderr_bytes bound managed execution. Returns stdout,
+                /// stderr, and exit_code.
                 /// @example exec_argv("printf", ["%s", "hello"], nil)
                 if (strcmp(fn_name, "exec_argv") == 0) {
                     char *exec_argv_err = NULL;

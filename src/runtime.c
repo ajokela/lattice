@@ -4521,7 +4521,7 @@ void lat_runtime_init(LatRuntime *rt) {
     /* Process */
     rt_register_native(rt, "cwd", native_cwd, 0);
     rt_register_native(rt, "exec", native_exec_cmd, 1);
-    rt_register_native(rt, "exec_argv", native_exec_argv, 3);
+    rt_register_native(rt, "exec_argv", native_exec_argv, -1);
     rt_register_native(rt, "shell", native_shell, 1);
     rt_register_native(rt, "platform", native_platform, 0);
     rt_register_native(rt, "hostname", native_hostname, 0);

@@ -1398,7 +1398,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `cwd()` | Current working directory |
 | `args()` | Command-line arguments as array |
 | `exec(cmd)` | Run a command through the platform shell; return stdout (error on non-zero exit) |
-| `exec_argv(program, args, stdin)` | Run a program directly, without a shell; return a Map with `stdout`, `stderr`, `exit_code` |
+| `exec_argv(program, args, stdin, options = nil)` | Run a program directly, optionally with timeout/output bounds; return a Map with `stdout`, `stderr`, `exit_code` |
 | `shell(cmd)` | Run a command through the platform shell; return a Map with `stdout`, `stderr`, `exit_code` |
 | `platform()` | OS name (`"macos"`, `"linux"`, `"windows"`, `"wasm"`) |
 | `hostname()` | System hostname |
@@ -1406,8 +1406,10 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 
 `exec_argv` takes the executable name, an array of argument strings that excludes
 `argv[0]`, and either a String to write to standard input or `nil` to close it
-immediately. A non-zero child exit is returned as `exit_code` data; only failures
-to start or communicate with the process raise an error.
+immediately. An optional Map accepts positive integer `timeout_ms`,
+`max_stdout_bytes`, and `max_stderr_bytes` values. A non-zero child exit is
+returned as `exit_code` data; failures to start or communicate with the process,
+timeouts, and exceeded output limits raise catchable errors.
 
 POSIX example:
 
@@ -1415,6 +1417,23 @@ POSIX example:
 let result = exec_argv("printf", ["%s", "hello; not shell syntax"], nil)
 print(result.get("stdout"))
 ```
+
+Bounded example:
+
+```lattice
+let limits = Map::new()
+limits.set("timeout_ms", 5000)
+limits.set("max_stdout_bytes", 1048576)
+limits.set("max_stderr_bytes", 262144)
+let result = exec_argv("solver", ["--json"], "{}", limits)
+```
+
+Omitting options, passing `nil`, or passing an empty Map keeps the original
+unbounded behavior. When any limit is present, the child is a managed invocation:
+timeouts and output overruns terminate its contained descendants as well as the
+primary process. Captured strings never grow past their configured ceiling (plus
+the terminating NUL byte); each reader uses a fixed 8 KiB stack buffer while
+draining its pipe.
 
 Because it never parses a shell command, `exec_argv` avoids shell-injection and
 quoting hazards in argument data. It is not a sandbox: the child still runs with
