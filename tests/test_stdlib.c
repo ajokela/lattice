@@ -1256,6 +1256,93 @@ static void test_lat_eval_mutable_var(void) {
                   "2");
 }
 
+static void test_lat_eval_error_recovery(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"1 / 0\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "    print(lat_eval(\"try { 1 / 0 } catch e { 7 }\"))\n"
+                  "    print(lat_eval(\"2 + 3\"))\n"
+                  "}\n",
+                  "division by zero\n7\n5");
+}
+
+static void test_lat_eval_preserves_outer_defer(void) {
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn evaluate() {\n"
+                  "    defer { events += \"outer\" }\n"
+                  "    let message = try { lat_eval(\"1 / 0\") } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "    print(if events == \"\" { \"pending\" } else { \"ran early\" })\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    evaluate()\n"
+                  "    print(events)\n"
+                  "}\n",
+                  "division by zero\npending\nouter");
+}
+
+static void test_lat_eval_runs_inner_defer_on_error(void) {
+    /* The tree-walk evaluator's lat_eval defer unwinding is independent of
+     * the isolated bytecode-VM execution fixed here. */
+    if (test_backend == BACKEND_TREE_WALK) return;
+
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"defer { events += \\\"inner\\\" }\\n"
+                  "        let a = freeze([1])\\n"
+                  "        a.insert(0, 2)\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.len() > 0)\n"
+                  "    print(events)\n"
+                  "}\n",
+                  "true\ninner");
+}
+
+static void test_lat_eval_inner_defer_can_catch(void) {
+    /* This specifically exercises nested VM handler floors.  The tree-walk
+     * evaluator has a separate, pre-existing cleanup-catch limitation. */
+    if (test_backend == BACKEND_TREE_WALK) return;
+
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"defer {\\n"
+                  "            let caught = try { 1 / 0 } catch e { \\\"caught\\\" }\\n"
+                  "            events += caught\\n"
+                  "        }\\n"
+                  "        let a = freeze([1])\\n"
+                  "        a.insert(0, 2)\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.len() > 0)\n"
+                  "    print(events)\n"
+                  "}\n",
+                  "true\ncaught");
+}
+
+static void test_lat_eval_frame_overflow_runs_inner_defer(void) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"defer { events += \\\"overflow-cleanup\\\" }\\n"
+                  "        fn dive(n: Int) { if n > 0 { dive(n - 1) } }\\n"
+                  "        dive(600)\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.contains(\"overflow\"))\n"
+                  "    print(events)\n"
+                  "    print(lat_eval(\"2 + 3\"))\n"
+                  "}\n",
+                  "true\noverflow-cleanup\n5");
+}
+
 /* 79. test_lat_eval_version - version() returns a string */
 static void test_lat_eval_version(void) {
     ASSERT_OUTPUT("fn main() {\n"
@@ -13973,6 +14060,11 @@ void register_stdlib_tests(void) {
     register_test("test_lat_eval_fn_persistence", test_lat_eval_fn_persistence);
     register_test("test_lat_eval_struct_persistence", test_lat_eval_struct_persistence);
     register_test("test_lat_eval_mutable_var", test_lat_eval_mutable_var);
+    register_test("test_lat_eval_error_recovery", test_lat_eval_error_recovery);
+    register_test("test_lat_eval_preserves_outer_defer", test_lat_eval_preserves_outer_defer);
+    register_test("test_lat_eval_runs_inner_defer_on_error", test_lat_eval_runs_inner_defer_on_error);
+    register_test("test_lat_eval_inner_defer_can_catch", test_lat_eval_inner_defer_can_catch);
+    register_test("test_lat_eval_frame_overflow_runs_inner_defer", test_lat_eval_frame_overflow_runs_inner_defer);
     register_test("test_lat_eval_version", test_lat_eval_version);
 
     /* require() */

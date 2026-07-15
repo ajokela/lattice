@@ -3006,9 +3006,9 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
 
                 /* ── Built-in functions ── */
 
-                /// @builtin input(prompt?: String) -> String
+                /// @builtin input(prompt?: String) -> String|Nil
                 /// @category Core
-                /// Read a line of input from stdin, optionally displaying a prompt.
+                /// Read a line of input from stdin, returning nil at EOF.
                 /// @example input("Name: ")  // reads user input
                 if (strcmp(fn_name, "input") == 0) {
                     const char *prompt = NULL;
@@ -3016,7 +3016,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     char *line = builtin_input(prompt);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
-                    if (!line) return eval_ok(value_unit());
+                    if (!line) return eval_ok(value_nil());
                     return eval_ok(value_string_owned(line));
                 }
 

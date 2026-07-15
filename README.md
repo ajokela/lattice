@@ -442,7 +442,7 @@ for i in 0..5 {
 ```lattice
 loop {
     let line = input("> ")
-    if typeof(line) == "Unit" { break }
+    if line == nil { break }
     print(line)
 }
 ```
@@ -1200,7 +1200,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `print(args...)` | Print values to stdout with newline |
 | `eprint(args...)` | Print to stderr with newline |
 | `print_raw(args...)` | Print to stdout without newline |
-| `input(prompt?)` | Read a line from stdin (Unit on EOF) |
+| `input(prompt?)` | Read a line from stdin (`nil` on EOF) |
 | `typeof(val)` | Type name of a value (`"Int"`, `"String"`, etc.) |
 | `phase_of(val)` | Phase of a value (`"fluid"`, `"crystal"`, `"sublimated"`, `"unphased"`) |
 | `to_string(val)` | Convert any value to its string representation |

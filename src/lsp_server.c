@@ -162,7 +162,7 @@ static const LspBuiltinDoc builtin_docs[] = {
     {"parse_float", "parse_float(s: String) -> Float", "Parses a string as a float."},
     {"to_int", "to_int(val: Any) -> Int", "Converts a value to an integer."},
     {"to_float", "to_float(val: Any) -> Float", "Converts a value to a float."},
-    {"input", "input(prompt?: String) -> String", "Reads a line of input from stdin."},
+    {"input", "input(prompt?: String) -> String|Nil", "Reads a line of input from stdin, returning nil at EOF."},
     {"error", "error(msg: String) -> String", "Creates an error value with the given message."},
     {"panic", "panic(msg: String) -> Unit", "Terminates the program with an error message."},
     {"is_error", "is_error(val: Any) -> Bool", "Returns true if the value is an error."},

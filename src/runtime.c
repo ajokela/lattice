@@ -3464,6 +3464,17 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
     return arr;
 }
 
+static void native_lat_eval_propagate_error(char **vm_error) {
+    if (*vm_error) {
+        char *error = *vm_error;
+        *vm_error = NULL;
+        if (current_rt->error != error) free(current_rt->error);
+        current_rt->error = error;
+    } else if (!current_rt->error) {
+        current_rt->error = strdup("lat_eval: runtime error");
+    }
+}
+
 static LatValue native_lat_eval(LatValue *args, int arg_count) {
     if (arg_count < 1 || args[0].type != VAL_STR) return value_nil();
     const char *source = args[0].as.str_val;
@@ -3502,8 +3513,11 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
         RegVM *rvm = (RegVM *)current_rt->active_vm;
         regvm_track_chunk(rvm, rchunk);
         LatValue result;
-        RegVMResult rr = regvm_run(rvm, rchunk, &result);
-        if (rr != REGVM_OK) return value_nil();
+        RegVMResult rr = regvm_run_isolated(rvm, rchunk, &result);
+        if (rr != REGVM_OK) {
+            native_lat_eval_propagate_error(&rvm->error);
+            return value_nil();
+        }
         return result;
     }
 
@@ -3524,8 +3538,11 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     }
     vm->fn_chunks[vm->fn_chunk_count++] = chunk;
     LatValue result;
-    StackVMResult r = stackvm_run(vm, chunk, &result);
-    if (r != STACKVM_OK) return value_nil();
+    StackVMResult r = stackvm_run_isolated(vm, chunk, &result);
+    if (r != STACKVM_OK) {
+        native_lat_eval_propagate_error(&vm->error);
+        return value_nil();
+    }
     return result;
 }
 
