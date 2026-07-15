@@ -364,7 +364,7 @@ FUZZ_PARSER_SRC    = $(FUZZ_DIR)/fuzz_parser.c
 FUZZ_PARSER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_parser.o
 FUZZ_PARSER_TARGET = $(BUILD_DIR)/fuzz_parser
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-ballistics-lab test-repl test-process test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-ballistics-lab test-ballistics-lab-engine test-repl test-process test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -419,15 +419,29 @@ test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
 test-regvm: $(TEST_TARGET) $(LSP_TARGET)
 	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
-BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat reference_experiment.lat
+BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat reference_experiment.lat
 
-test-ballistics-lab: $(TARGET)
+test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE)
 	@for backend in "" "--tree-walk" "--regvm"; do \
 		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
 		echo "=== ballistics_lab backend $$label ==="; \
 		for test_file in $(BALLISTICS_LAB_TESTS); do \
 			./$(TARGET) $$backend examples/ballistics_lab/$$test_file || exit 1; \
 		done; \
+	done
+
+# Cross-repository smoke. The ordinary target remains hermetic through its
+# checked fake child; callers opt into a real engine with an explicit path.
+test-ballistics-lab-engine: $(TARGET)
+	@if [ -z "$${BALLISTICS_ENGINE:-}" ]; then \
+		echo "BALLISTICS_ENGINE=/absolute/path/to/ballistics is required" >&2; \
+		exit 2; \
+	fi
+	@for backend in "" "--tree-walk" "--regvm"; do \
+		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
+		echo "=== ballistics_lab real engine $$label ==="; \
+		./$(TARGET) $$backend examples/ballistics_lab/test_engine_backend.lat \
+			"$${BALLISTICS_ENGINE}" "$${BALLISTICS_ENGINE_VERSION:-}" || exit 1; \
 	done
 
 test-repl: $(TARGET)

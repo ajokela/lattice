@@ -1,0 +1,295 @@
+// Portable child used by process_backend tests. It accepts one compact request
+// on stdin and emits selected checked or hostile response shapes.
+
+let FIXTURES = "examples/ballistics_lab/fixtures/"
+
+fn success_prefix(document: String) -> String {
+    let marker = "  \"samples\": ["
+    let position = document.index_of(marker)
+    assert(position >= 0, "fake engine: success fixture has no samples field")
+    return document.substring(0, position) + "\"samples\":["
+}
+
+fn structural_sample_success(document: String, sample_count: Int) -> String {
+    // This is a structural/cardinality fixture: repeated regular observations
+    // isolate the decoder's ceiling without modeling a many-thousand-step solve.
+    assert(sample_count > 0, "fake engine: structural sample count must be positive")
+    let regular = "{\"distance_m\":0,\"time_s\":0,\"speed_mps\":823,\"energy_j\":3840,\"drop_m\":0,\"windage_m\":0,\"mach\":2,\"flags\":[]},"
+    let terminal = "{\"distance_m\":50,\"time_s\":0.06191400316677915,\"speed_mps\":792.4430484357767,\"energy_j\":3560.5671350304387,\"drop_m\":0,\"windage_m\":0,\"mach\":2,\"flags\":[\"terminal\"]}"
+    return success_prefix(document) + regular.repeat(sample_count - 1) + terminal + "]}"
+}
+
+fn oversized_sample_success(document: String) -> String {
+    // The decoder checks the array length before decoding individual samples,
+    // so compact scalar elements exercise 10,001 without a multi-megabyte fixture.
+    return success_prefix(document) + "0,".repeat(10000) + "0]}"
+}
+
+fn checked_request() -> Map {
+    let input = input("")
+    if typeof(input) != "String" {
+        eprint("fake engine: expected one request on stdin")
+        exit(1)
+    }
+    let request = try {
+        json_parse(input)
+    } catch error {
+        eprint("fake engine: invalid request: " + error.message)
+        exit(1)
+    }
+    if typeof(request) != "Map" || request.get("schema_version") != 1 {
+        eprint("fake engine: expected solve-json v1 request")
+        exit(1)
+    }
+    return request
+}
+
+fn main() {
+    checked_request()
+    let arguments = args()
+    if len(arguments) < 2 {
+        eprint("fake engine: missing scenario")
+        exit(1)
+    }
+    let scenario = arguments[1]
+    let success = read_file(FIXTURES + "representative.success.json")
+    let validation = read_file(FIXTURES + "validation.error.json")
+
+    if scenario == "success" {
+        print(success)
+        return
+    }
+    if scenario == "success-stderr" {
+        eprint("unexpected success diagnostic")
+        print(success)
+        return
+    }
+    if scenario == "timeout" {
+        sleep(1000)
+        print(success)
+        return
+    }
+    if scenario == "stdout-overflow" {
+        print("fake stdout overflow ".repeat(512))
+        return
+    }
+    if scenario == "stderr-overflow" {
+        eprint("fake stderr overflow ".repeat(512))
+        return
+    }
+    if scenario == "validation-error" {
+        print(validation)
+        exit(2)
+    }
+    if scenario == "located-error" {
+        print(read_file(FIXTURES + "invalid-json.error.json"))
+        exit(2)
+    }
+    if scenario == "stderr-error" {
+        eprint("fake engine diagnostic")
+        print(validation)
+        exit(2)
+    }
+    if scenario == "whitespace-stderr-error" {
+        eprint("   ")
+        print(validation)
+        exit(2)
+    }
+    if scenario == "resource-error" {
+        print(read_file(FIXTURES + "resource.error.json"))
+        exit(3)
+    }
+    if scenario == "internal-error" {
+        print(read_file(FIXTURES + "internal.error.json"))
+        exit(1)
+    }
+    if scenario == "contaminated" {
+        print("unexpected banner")
+        print(success)
+        return
+    }
+    if scenario == "trailing" {
+        print(success)
+        print("unexpected trailer")
+        return
+    }
+    if scenario == "concatenated" {
+        print(success)
+        print(success)
+        return
+    }
+    if scenario == "truncated" {
+        print("{\"schema_version\":1,\"status\":\"ok\"")
+        return
+    }
+    if scenario == "duplicate-envelope-key" {
+        print(success.replace(
+        "\"status\": \"ok\",",
+        "\"status\": \"ok\",\n  \"sta\\u0074us\": \"ok\","
+        ))
+        return
+    }
+    if scenario == "oversized-integer" {
+        print(success.replace(
+        "\"schema_version\": 1",
+        "\"schema_version\": 9223372036854775808"
+        ))
+        return
+    }
+    if scenario == "nonfinite" {
+        print(success.replace("\"actual_range_m\": 50.0", "\"actual_range_m\": 1e309"))
+        return
+    }
+    if scenario == "nonfinite-resolved" {
+        print(success.replace("\"mass_kg\": 0.01134", "\"mass_kg\": 1e309"))
+        return
+    }
+    if scenario == "invalid-resolved-altitude" {
+        print(success.replace("\"altitude_m\": 0.0", "\"altitude_m\": 84000.1"))
+        return
+    }
+    if scenario == "invalid-resolved-ground" {
+        print(success.replace("\"ground_threshold_m\": -100.0", "\"ground_threshold_m\": 1.2"))
+        return
+    }
+    if scenario == "invalid-resolved-effects" {
+        print(success.replace(
+        "\"magnus\": false,\n      \"coriolis\": false,\n      \"enhanced_spin_drift\": false",
+        "\"magnus\": true,\n      \"coriolis\": false,\n      \"enhanced_spin_drift\": true"
+        ))
+        return
+    }
+    if scenario == "invalid-resolved-coriolis" {
+        print(success.replace("\"coriolis\": false", "\"coriolis\": true"))
+        return
+    }
+    if scenario == "invalid-resolved-zero-range" {
+        print(success.replace(
+        "\"max_range_m\": 50.0,",
+        "\"max_range_m\": 50.0,\n      \"zero_distance_m\": 1e308,"
+        ))
+        return
+    }
+    if scenario == "nonfinite-sample" {
+        print(success.replace("\"mach\": 2.394233725500156", "\"mach\": 1e309"))
+        return
+    }
+    if scenario == "empty-samples" {
+        print(success_prefix(success) + "]}")
+        return
+    }
+    if scenario == "missing-terminal" {
+        print(success.replace(
+        "\"flags\": [\n        \"terminal\"\n      ]",
+        "\"flags\": []"
+        ))
+        return
+    }
+    if scenario == "early-terminal" {
+        let with_early = success.replace(
+        "\"mach\": 2.394233725500156,\n      \"flags\": []",
+        "\"mach\": 2.394233725500156,\n      \"flags\": [\"terminal\"]"
+        )
+        print(with_early.replace(
+        "\"flags\": [\n        \"terminal\"\n      ]",
+        "\"flags\": []"
+        ))
+        return
+    }
+    if scenario == "multiple-terminal" {
+        print(success.replace(
+        "\"mach\": 2.394233725500156,\n      \"flags\": []",
+        "\"mach\": 2.394233725500156,\n      \"flags\": [\"terminal\"]"
+        ))
+        return
+    }
+    if scenario == "summary-distance-mismatch" {
+        print(success.replace("\"actual_range_m\": 50.0", "\"actual_range_m\": 51.0"))
+        return
+    }
+    if scenario == "summary-within-tolerance" {
+        print(success.replace("\"actual_range_m\": 50.0", "\"actual_range_m\": 50.00000001"))
+        return
+    }
+    if scenario == "summary-time-mismatch" {
+        print(success.replace(
+        "\"time_of_flight_s\": 0.06191400316677915",
+        "\"time_of_flight_s\": 0.5"
+        ))
+        return
+    }
+    if scenario == "summary-speed-mismatch" {
+        print(success.replace(
+        "\"terminal_speed_mps\": 792.4430484357767",
+        "\"terminal_speed_mps\": 700.0"
+        ))
+        return
+    }
+    if scenario == "summary-energy-mismatch" {
+        print(success.replace(
+        "\"terminal_energy_j\": 3560.5671350304387",
+        "\"terminal_energy_j\": 3000.0"
+        ))
+        return
+    }
+    if scenario == "notice-path-absent" {
+        print(success.replace(
+        "\",\n      \"path\": \"$.wind.vertical_speed_mps\"",
+        "\""
+        ))
+        return
+    }
+    if scenario == "notice-path-null" {
+        print(success.replace(
+        "\"path\": \"$.wind.vertical_speed_mps\"",
+        "\"path\": null"
+        ))
+        return
+    }
+    if scenario == "sample-limit-exact" {
+        print(structural_sample_success(success, 10000))
+        return
+    }
+    if scenario.starts_with("sample-count-") {
+        let count = parse_int(scenario.substring(len("sample-count-"), len(scenario)))
+        print(structural_sample_success(success, count))
+        return
+    }
+    if scenario == "sample-limit-exceeded" {
+        print(oversized_sample_success(success))
+        return
+    }
+    if scenario == "unknown-schema" {
+        print(success.replace("\"schema_version\": 1", "\"schema_version\": 2"))
+        return
+    }
+    if scenario == "unknown-status" {
+        print(success.replace("\"status\": \"ok\"", "\"status\": \"future\""))
+        return
+    }
+    if scenario == "wrong-version" {
+        print(success.replace("\"engine_version\": \"0.24.1\"", "\"engine_version\": \"9.9.9\""))
+        return
+    }
+    if scenario == "unknown-field" {
+        print(success.replace("\"status\": \"ok\",", "\"status\": \"ok\",\n  \"future_field\": true,"))
+        return
+    }
+    if scenario == "exit-mismatch" {
+        print(validation)
+        exit(3)
+    }
+    if scenario == "malformed-error-location" {
+        print(validation.replace("\"line\": null", "\"line\": 3"))
+        exit(2)
+    }
+    if scenario == "unknown-error-field" {
+        print(validation.replace(
+        "\"column\": null",
+        "\"column\": null,\n    \"future\": true"
+        ))
+        exit(2)
+    }
+    eprint("fake engine: unknown scenario " + scenario)
+    exit(1)
+}

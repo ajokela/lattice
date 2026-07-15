@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "status": "error",
+  "error": {
+    "code": "invalid_json",
+    "message": "expected value",
+    "path": null,
+    "line": 3,
+    "column": 18
+  }
+}

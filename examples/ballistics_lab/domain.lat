@@ -103,8 +103,10 @@ export struct TrajectorySummary {
 }
 
 export struct Trajectory {
+    schema_version: fix Int,
     engine_version: fix String,
     experiment: fix any,
+    resolved_request: fix any,
     observations: fix Array,
     assumptions: fix Array,
     warnings: fix Array,
@@ -116,6 +118,8 @@ export struct LaboratoryError {
     code: fix String,
     message: fix String,
     path: fix any,
+    line: fix any,
+    column: fix any,
     stderr: fix any,
     exit_code: fix any
 }
@@ -204,6 +208,16 @@ fn _require_optional_path(value: any, field: String) -> any {
         return nil
     }
     return _require_nonempty(value, field)
+}
+
+fn _require_positive_int(value: any, field: String) -> Int {
+    if typeof(value) != "Int" {
+        assert(false, field + ": expected Int, got " + typeof(value))
+    }
+    if value <= 0 {
+        assert(false, field + ": must be greater than zero")
+    }
+    return value
 }
 
 fn _frozen(value: any) -> any {
@@ -612,11 +626,26 @@ observations: any,
 assumptions: any,
 warnings: any,
 summary: any,
-verified: any = false
+verified: any = false,
+resolved_request: any = nil,
+schema_version: any = 1
 ) -> Trajectory {
     let checked_version = _require_nonempty(engine_version, "trajectory.engine_version")
+    if typeof(schema_version) != "Int" {
+        assert(false, "trajectory.schema_version: expected Int, got " + typeof(schema_version))
+    }
+    if schema_version != 1 {
+        assert(false, "trajectory.schema_version: unsupported value " + to_string(schema_version))
+    }
     _require_struct(experiment_value, "Experiment", "trajectory.experiment")
     _require_struct(summary, "TrajectorySummary", "trajectory.summary")
+    flux checked_resolved = nil
+    if resolved_request != nil {
+        if typeof(resolved_request) != "Map" {
+            assert(false, "trajectory.resolved_request: expected Map, got " + typeof(resolved_request))
+        }
+        checked_resolved = freeze(resolved_request)
+    }
     if typeof(observations) != "Array" {
         assert(false, "trajectory.observations: expected Array, got " + typeof(observations))
     }
@@ -637,8 +666,10 @@ verified: any = false
     }
     let checked_verified = _require_bool(verified, "trajectory.verified")
     return _frozen(Trajectory {
+        schema_version: schema_version,
         engine_version: checked_version,
         experiment: experiment_value,
+        resolved_request: checked_resolved,
         observations: observations,
         assumptions: assumptions,
         warnings: warnings,
@@ -653,7 +684,9 @@ code: any,
 message: any,
 path: any = nil,
 stderr: any = nil,
-exit_code: any = nil
+exit_code: any = nil,
+line: any = nil,
+column: any = nil
 ) -> LaboratoryError {
     flux checked_stderr = nil
     if stderr != nil {
@@ -666,10 +699,28 @@ exit_code: any = nil
         }
         checked_exit = exit_code
     }
+    let checked_path = _require_optional_path(path, "laboratory_error.path")
+    flux checked_line = nil
+    flux checked_column = nil
+    if line == nil && column != nil {
+        assert(false, "laboratory_error.location: line and column must be supplied together")
+    }
+    if line != nil && column == nil {
+        assert(false, "laboratory_error.location: line and column must be supplied together")
+    }
+    if line != nil {
+        if checked_path != nil {
+            assert(false, "laboratory_error.location: path conflicts with line and column")
+        }
+        checked_line = _require_positive_int(line, "laboratory_error.line")
+        checked_column = _require_positive_int(column, "laboratory_error.column")
+    }
     return _frozen(LaboratoryError {
         code: _require_nonempty(code, "laboratory_error.code"),
         message: _require_nonempty(message, "laboratory_error.message"),
-        path: _require_optional_path(path, "laboratory_error.path"),
+        path: checked_path,
+        line: checked_line,
+        column: checked_column,
         stderr: checked_stderr,
         exit_code: checked_exit
     }

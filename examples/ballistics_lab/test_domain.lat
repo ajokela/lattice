@@ -311,6 +311,8 @@ fn test_result_values_are_typed_and_immutable() {
     assert(phase_of(observation) == "crystal")
     assert(phase_of(trajectory) == "crystal")
     assert(trajectory.verified)
+    assert(trajectory.schema_version == 1)
+    assert(trajectory.resolved_request == nil)
     assert(trajectory.observations[0].windage.si_value < 0)
 
     assert(phase_of(trajectory.observations) == "crystal")
@@ -318,6 +320,20 @@ fn test_result_values_are_typed_and_immutable() {
     assert(struct_name(failure) == "LaboratoryError")
     assert(phase_of(failure) == "crystal")
     assert(failure.exit_code == 2)
+    assert(failure.line == nil)
+    assert(failure.column == nil)
+
+    let located = domain.laboratory_error(
+    "invalid_json",
+    "bad JSON",
+    nil,
+    nil,
+    2,
+    4,
+    9
+    )
+    assert(located.line == 4)
+    assert(located.column == 9)
 }
 
 fn main() {

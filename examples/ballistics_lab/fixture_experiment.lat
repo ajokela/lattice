@@ -1,0 +1,63 @@
+// Domain construction matching the checked solve-json v1 representative fixture.
+
+import {
+    kg, m, kelvin, pa, mps, rad, wind_mps
+}
+from "examples/ballistics_lab/units"
+import {
+    projectile, rifle, atmosphere, shot, solver_config, experiment, wind
+}
+from "examples/ballistics_lab/domain"
+
+export fn representative_fixture_experiment() -> any {
+    let projectile_value = projectile(
+    "representative 175 gr",
+    kg(0.01134),
+    m(0.00782),
+    0.243,
+    "G7",
+    m(0.031)
+    )
+    let rifle_value = rifle(
+    "representative rifle",
+    m(0.05),
+    m(1.2),
+    m(0.2032),
+    "right"
+    )
+    let atmosphere_value = atmosphere(
+    m(0),
+    kelvin(293.15),
+    pa(100000),
+    0.4
+    )
+    let shot_value = shot(
+    mps(823),
+    m(50),
+    nil,
+    rad(0.001),
+    rad(0),
+    rad(0),
+    rad(0),
+    rad(0),
+    m(1.25),
+    m(-100)
+    )
+    let solver = solver_config(
+    "rk45",
+    0.001,
+    m(10),
+    false,
+    false,
+    false
+    )
+    return experiment(
+    "solve-json v1 representative fixture",
+    projectile_value,
+    rifle_value,
+    atmosphere_value,
+    [wind(wind_mps(4), rad(1.5707963267948966))],
+    shot_value,
+    solver
+    )
+}
