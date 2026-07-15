@@ -535,12 +535,15 @@ static LatValue rvm_clone_inner(const LatValue *src) {
              * returns an UNPHASED value, which silently dropped the crystal
              * phase of short legacy-crystal strings (reachable once the
              * FORCE_COPY oracle materializes non-interned crystal copies). */
-            if (slen <= INTERN_THRESHOLD) {
+            if (slen <= INTERN_THRESHOLD && memchr(src->as.str_val, '\0', slen) == NULL) {
                 LatValue iv = value_string_interned(src->as.str_val);
                 iv.phase = src->phase;
                 return iv;
             }
-            v.as.str_val = strdup(src->as.str_val);
+            v.as.str_val = malloc(slen + 1);
+            if (!v.as.str_val) return value_unit();
+            memcpy(v.as.str_val, src->as.str_val, slen);
+            v.as.str_val[slen] = '\0';
             v.as.str_len = slen; /* preserve cached length */
             v.region_id = REGION_NONE;
             return v;
@@ -687,7 +690,8 @@ static void rvm_close_frame_upvalues(RegVM *vm, LatValue *base) {
 /* A return or `?` can bypass the lexical POP_HANDLER instructions. Handlers
  * are frame-owned, so remove them before their register window disappears. */
 static void rvm_discard_handlers_from_frame(RegVM *vm, size_t frame_index) {
-    while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame_index >= frame_index) vm->handler_count--;
+    while (vm->handler_count > vm->handler_floor && vm->handlers[vm->handler_count - 1].frame_index >= frame_index)
+        vm->handler_count--;
 }
 
 /* Pop and release frames down to target_frame_count. Mirrors
@@ -721,7 +725,7 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
     va_end(args);
 
     /* If there's an active handler, build structured error map before unwinding */
-    if (vm->handler_count > 0) {
+    if (vm->handler_count > vm->handler_floor) {
         LatValue err_map = regvm_build_error_map(vm, inner);
         RegHandler h = vm->handlers[--vm->handler_count];
         RegVMResult result = rvm_transfer_to_handler(vm, frame_ptr, R_ptr, h, err_map, inner);
@@ -731,8 +735,8 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
 
     /* Uncaught — all active frames are leaving. Run their cleanup before
      * surfacing the error, with cleanup failure taking precedence. */
-    if (!vm->unwinding_defers && vm->defer_count > 0) {
-        char *cleanup_error = rvm_unwind_defers_to(vm, 0);
+    if (!vm->unwinding_defers && vm->defer_count > vm->defer_floor) {
+        char *cleanup_error = rvm_unwind_defers_to(vm, vm->defer_floor);
         if (cleanup_error) {
             char *combined = NULL;
             lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error, inner);
@@ -742,6 +746,38 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
         }
     }
     vm->error = inner;
+    return REGVM_RUNTIME_ERROR;
+}
+
+/* Route an already-owned backend error through the caller's exception
+ * boundary.  Re-entrant builtin callbacks set vm->error before returning to
+ * the suspended dispatch loop; consuming a caller handler inside the nested
+ * dispatch would resume bytecode while the C builtin still owns partial
+ * results. */
+static RegVMResult rvm_handle_native_error(RegVM *vm, RegCallFrame **frame_ptr, LatValue **R_ptr) {
+    if (vm->handler_count > vm->handler_floor) {
+        char *original = vm->error;
+        LatValue err_map = regvm_build_error_map(vm, original);
+        vm->error = NULL;
+        RegHandler h = vm->handlers[--vm->handler_count];
+        RegVMResult result = rvm_transfer_to_handler(vm, frame_ptr, R_ptr, h, err_map, original);
+        free(original);
+        return result;
+    }
+
+    if (!vm->unwinding_defers && vm->defer_count > vm->defer_floor) {
+        char *original = vm->error;
+        vm->error = NULL;
+        char *cleanup_error = rvm_unwind_defers_to(vm, vm->defer_floor);
+        if (cleanup_error) {
+            lat_asprintf(&vm->error, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
+                         original ? original : "runtime error");
+            free(cleanup_error);
+            free(original);
+        } else {
+            vm->error = original;
+        }
+    }
     return REGVM_RUNTIME_ERROR;
 }
 
@@ -781,6 +817,7 @@ static bool rvm_global_set(RegVM *vm, const RegCallFrame *frame, const char *nam
 
 /* Forward declarations for recursive closure calls */
 static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result);
+static LatValue regvm_call_closure_impl(RegVM *vm, LatValue *closure, LatValue *args, int argc, bool isolate_caller);
 static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args, int argc);
 
 /* One arity contract for every compiled-closure entry point. `actual` includes
@@ -812,6 +849,15 @@ static LatValue regvm_builtin_callback(void *closure, LatValue *args, int arg_co
     return regvm_call_closure((RegVM *)ctx, (LatValue *)closure, args, arg_count);
 }
 
+/* Preserve nil as a valid callback result while exposing nested VM failure to
+ * Array.map's shared eager loop.  The error remains owned by RegVM and is
+ * propagated by the surrounding invoke opcode. */
+static bool regvm_builtin_fallible_callback(void *closure, LatValue *args, int arg_count, void *ctx, LatValue *result) {
+    RegVM *vm = (RegVM *)ctx;
+    *result = regvm_call_closure_impl(vm, (LatValue *)closure, args, arg_count, true);
+    return vm->error == NULL;
+}
+
 /* Iterator callback adapter: ctx is RegVM*, closure is LatValue* */
 static LatValue regvm_iter_callback(void *ctx, LatValue *closure, LatValue *args, int argc) {
     return regvm_call_closure((RegVM *)ctx, closure, args, argc);
@@ -824,7 +870,7 @@ static RegVMResult regvm_run_sub(RegVM *vm, RegChunk *chunk, LatValue *result) {
      * REGION_IS_SHARED_ID would reach crystal_region_release (the exact
      * stackvm_run bug class Stage 3 fixed). */
     *result = value_nil();
-    if (vm->frame_count >= REGVM_FRAMES_MAX) return rvm_error(vm, "call stack overflow");
+    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) return rvm_error(vm, "call stack overflow");
     size_t new_base = vm->reg_stack_top;
     if (new_base + REGVM_REG_MAX > REGVM_REG_MAX * REGVM_FRAMES_MAX) return rvm_error(vm, "register stack overflow");
     LatValue *new_regs = &vm->reg_stack[new_base];
@@ -1264,7 +1310,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         }
         if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
             char *err = NULL;
-            *result = builtin_array_map(obj, &args[0], regvm_builtin_callback, vm, &err);
+            *result = builtin_array_map(obj, &args[0], regvm_builtin_fallible_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
@@ -1283,7 +1329,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
              (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
             arg_count == 0) {
-            *result = value_int((int64_t)strlen(obj->as.str_val));
+            *result = value_int((int64_t)(obj->as.str_len ? obj->as.str_len : strlen(obj->as.str_val)));
             return true;
         }
         if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
@@ -2773,12 +2819,13 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             }
         }
         /* String proxy (LAT-540): len/length under the per-cell lock.
-         * Mirrors eval_ref_method_locked — strlen, matches tree-walker. */
+         * Mirrors eval_ref_method_locked, including cached binary length. */
         if (ref->value.type == VAL_STR) {
             if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                  (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                 arg_count == 0) {
-                *result = value_int((int64_t)strlen(ref->value.as.str_val));
+                *result =
+                    value_int((int64_t)(ref->value.as.str_len ? ref->value.as.str_len : strlen(ref->value.as.str_val)));
                 ref_unlock(ref);
                 return true;
             }
@@ -2941,7 +2988,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
 typedef LatValue (*VMNativeFn)(LatValue *args, int arg_count);
 
 /* Call a closure from within a builtin handler (map, filter, etc.). */
-static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args, int argc) {
+static LatValue regvm_call_closure_impl(RegVM *vm, LatValue *closure, LatValue *args, int argc, bool isolate_caller) {
     if (vm->error) return value_nil();
     if (closure->type != VAL_CLOSURE) return value_nil();
 
@@ -2982,10 +3029,17 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
         return value_nil();
     }
 
-    if (vm->frame_count >= REGVM_FRAMES_MAX) return value_nil();
+    size_t frame_limit = vm->unwinding_defers ? REGVM_FRAMES_MAX : REGVM_USER_FRAMES_MAX;
+    if ((size_t)vm->frame_count >= frame_limit) {
+        vm->error = strdup("call stack overflow");
+        return value_nil();
+    }
 
     size_t new_base = vm->reg_stack_top;
-    if (new_base + REGVM_REG_MAX > REGVM_REG_MAX * REGVM_FRAMES_MAX) return value_nil();
+    if (new_base + REGVM_REG_MAX > REGVM_REG_MAX * REGVM_FRAMES_MAX) {
+        vm->error = strdup("register stack overflow");
+        return value_nil();
+    }
 
     LatValue *new_regs = &vm->reg_stack[new_base];
     vm->reg_stack_top += REGVM_REG_MAX;
@@ -2999,6 +3053,21 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
     ObjUpvalue **upvals = (ObjUpvalue **)closure->as.closure.captured_env;
     size_t uv_count = closure->as.closure.upvalue_count;
 
+    size_t entry_handler_count = vm->handler_count;
+    size_t entry_defer_count = vm->defer_count;
+    size_t saved_handler_floor = vm->handler_floor;
+    size_t saved_defer_floor = vm->defer_floor;
+    bool saved_unwinding_defers = vm->unwinding_defers;
+
+    /* A callback is a native dispatch boundary.  Its own try/defer entries
+     * remain active, but an escaping failure must return to the eager
+     * builtin before a handler in the suspended caller can run. */
+    if (isolate_caller) {
+        vm->handler_floor = entry_handler_count;
+        vm->defer_floor = entry_defer_count;
+        vm->unwinding_defers = false;
+    }
+
     int saved_base = vm->frame_count;
     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
     new_frame->chunk = fn_chunk;
@@ -3011,13 +3080,60 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
 
     LatValue ret;
     RegVMResult res = regvm_dispatch(vm, saved_base, &ret);
+
+    /* Direct error paths can bypass the callback's normal defer epilogue.
+     * Mirror regvm_run_isolated so only callback-owned defers run here. */
+    if (isolate_caller && vm->defer_count > entry_defer_count) {
+        char *original_error = vm->error;
+        vm->error = NULL;
+        if (vm->rt && vm->rt->error) {
+            char *runtime_error = vm->rt->error;
+            vm->rt->error = NULL;
+            if (!original_error) original_error = runtime_error;
+            else if (runtime_error != original_error) free(runtime_error);
+        }
+
+        char *cleanup_error = rvm_unwind_defers_to(vm, entry_defer_count);
+        if (cleanup_error) {
+            char *combined = NULL;
+            if (original_error) {
+                lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error, original_error);
+                free(cleanup_error);
+                free(original_error);
+            } else {
+                combined = cleanup_error;
+            }
+            vm->error = combined;
+            if (res == REGVM_OK) {
+                value_free(&ret);
+                ret = value_nil();
+                res = REGVM_RUNTIME_ERROR;
+            }
+        } else {
+            vm->error = original_error;
+        }
+    }
+
     if (res != REGVM_OK) {
         /* Unwind any frames left by the failed dispatch back to saved_base
          * (closes upvalues + releases abandoned registers, LAT-456) */
         rvm_unwind_frames(vm, saved_base);
-        return value_nil();
+        value_free(&ret);
+        ret = value_nil();
+    }
+
+    if (isolate_caller) {
+        vm->handler_count = entry_handler_count;
+        vm->defer_count = entry_defer_count;
+        vm->handler_floor = saved_handler_floor;
+        vm->defer_floor = saved_defer_floor;
+        vm->unwinding_defers = saved_unwinding_defers;
     }
     return ret;
+}
+
+static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args, int argc) {
+    return regvm_call_closure_impl(vm, closure, args, argc, false);
 }
 
 /* Execute and remove defers above a saved handler/frame boundary. Outer
@@ -3032,7 +3148,9 @@ static char *rvm_unwind_defers_to(RegVM *vm, size_t target_count) {
         RegHandler saved_handlers[REGVM_HANDLER_MAX];
         size_t saved_handler_count = vm->handler_count;
         if (saved_handler_count > 0) memcpy(saved_handlers, vm->handlers, saved_handler_count * sizeof(RegHandler));
-        vm->handler_count = 0;
+        /* Preserve isolated-caller entries below the inactive floor so a
+         * cleanup's own try/catch can append a live handler above it. */
+        vm->handler_count = vm->handler_floor;
 
         LatValue defer_result = regvm_call_closure(vm, &d.closure, NULL, 0);
         value_free(&defer_result);
@@ -4409,7 +4527,10 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 char *err = vm->rt->error;
                 vm->rt->error = NULL;
                 value_free(&ret);
-                RVM_ERROR("%s", err);
+                RegVMResult handled = rvm_handle_error(vm, &frame, &R, "%s", err);
+                free(err);
+                if (handled != REGVM_OK) return handled;
+                DISPATCH();
             }
             /* Also check if regvm itself got an error (from re-entrant dispatch callbacks) */
             if (vm->error) {
@@ -4477,7 +4598,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             }
         }
 
-        if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+        if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
         /* Allocate new register window */
         size_t new_base = vm->reg_stack_top;
@@ -4775,7 +4896,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         if (R[b].type == VAL_ARRAY) {
             reg_set(&R[a], value_int((int64_t)R[b].as.array.len));
         } else if (R[b].type == VAL_STR) {
-            reg_set(&R[a], value_int((int64_t)strlen(R[b].as.str_val)));
+            reg_set(&R[a], value_int((int64_t)(R[b].as.str_len ? R[b].as.str_len : strlen(R[b].as.str_val))));
         } else if (R[b].type == VAL_RANGE) {
             int64_t len = R[b].as.range.end - R[b].as.range.start;
             if (len < 0) len = 0;
@@ -4824,11 +4945,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         const char *method_name = frame->chunk->constants[method_ki].as.str_val;
 
         /* Try builtin */
-        LatValue invoke_result;
+        LatValue invoke_result = value_nil();
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
         if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL,
                                /*cell_receiver=*/false)) {
-            if (vm->error) return REGVM_RUNTIME_ERROR;
+            if (vm->error) {
+                value_free(&invoke_result);
+                RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                if (handled != REGVM_OK) return handled;
+                DISPATCH();
+            }
             /* Object was mutated in-place at R[obj_reg]; result goes to R[dst] */
             reg_set(&R[dst], invoke_result);
             DISPATCH();
@@ -4870,7 +4996,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     char arity_error[128];
                     if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, argc, arity_error, sizeof(arity_error)))
                         RVM_ERROR("%s", arity_error);
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base];
@@ -4920,7 +5046,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, (int)argc + 1, arity_error,
                                                             sizeof(arity_error)))
                         RVM_ERROR("%s", arity_error);
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base];
@@ -4985,7 +5111,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     }
                 }
 
-                if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                 size_t new_base = vm->reg_stack_top;
                 LatValue *new_regs = &vm->reg_stack[new_base];
@@ -5053,11 +5179,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         bool want_wb = builtin_method_mutates(R[obj_reg].type, method_name);
 
         /* Try builtin */
-        LatValue invoke_result;
+        LatValue invoke_result = value_nil();
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
         if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL,
                                /*cell_receiver=*/true)) {
-            if (vm->error) return REGVM_RUNTIME_ERROR; /* frozen/sublimated/arity guard fired */
+            if (vm->error) {
+                value_free(&invoke_result);
+                RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                if (handled != REGVM_OK) return handled;
+                DISPATCH();
+            }
             reg_set(&R[dst], invoke_result);
             /* CHOKE POINT (a): a real in-place mutation falls through to run the
              * write-back chain; a non-mutating builtin (sort/reverse copies, a
@@ -5110,7 +5241,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     char arity_error[128];
                     if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, argc, arity_error, sizeof(arity_error)))
                         RVM_ERROR("%s", arity_error);
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base];
@@ -5160,7 +5291,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, (int)argc + 1, arity_error,
                                                             sizeof(arity_error)))
                         RVM_ERROR("%s", arity_error);
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base];
@@ -5224,7 +5355,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     }
                 }
 
-                if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                 size_t new_base = vm->reg_stack_top;
                 LatValue *new_regs = &vm->reg_stack[new_base];
@@ -5577,7 +5708,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
     }
 
     CASE(POP_HANDLER) {
-        if (vm->handler_count > 0) vm->handler_count--;
+        if (vm->handler_count > vm->handler_floor) vm->handler_count--;
         DISPATCH();
     }
 
@@ -5585,7 +5716,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         uint8_t a = REG_GET_A(instr);
         LatValue thrown = rvm_clone(&R[a]);
 
-        if (vm->handler_count == 0) {
+        if (vm->handler_count <= vm->handler_floor) {
             /* Match stack VM behavior: string exceptions pass directly,
              * non-string exceptions get "unhandled exception:" wrapper.
              * No [line N] prefix for thrown exceptions. */
@@ -5599,8 +5730,8 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             char *original = vm->error;
             vm->error = NULL;
             value_free(&thrown);
-            if (!vm->unwinding_defers && vm->defer_count > 0) {
-                char *cleanup_error = rvm_unwind_defers_to(vm, 0);
+            if (!vm->unwinding_defers && vm->defer_count > vm->defer_floor) {
+                char *cleanup_error = rvm_unwind_defers_to(vm, vm->defer_floor);
                 if (cleanup_error) {
                     lat_asprintf(&vm->error, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
                                  original ? original : "runtime error");
@@ -7199,11 +7330,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Try builtin — mutates obj_ref in-place */
         {
-            LatValue invoke_result;
+            LatValue invoke_result = value_nil();
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, global_name,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&invoke_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Cache builtin hit */
                 if (!_rgpic) {
                     pic_table_ensure(&frame->chunk->pic);
@@ -7247,7 +7383,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                             value_free(&closure);
                             RVM_ERROR("%s", arity_error);
                         }
-                        if (vm->frame_count >= REGVM_FRAMES_MAX) {
+                        if (vm->frame_count >= REGVM_USER_FRAMES_MAX) {
                             value_free(&closure);
                             RVM_ERROR("stack overflow");
                             DISPATCH();
@@ -7326,7 +7462,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, argc, arity_error,
                                                                 sizeof(arity_error)))
                             RVM_ERROR("%s", arity_error);
-                        if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                        if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
                         int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
@@ -7386,7 +7522,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                                           fn_chunk->name ? fn_chunk->name : "<anonymous>");
                         }
                     }
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                     vm->reg_stack_top += REGVM_REG_MAX;
@@ -7414,10 +7550,17 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Fallback: copy global into temp, do regular invoke */
         {
             LatValue obj_copy = rvm_clone(obj_ref);
-            LatValue fb_result;
+            LatValue fb_result = value_nil();
             LatValue *fb_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, &obj_copy, method_name, fb_args, argc, &fb_result, global_name,
                                    /*cell_receiver=*/true)) {
+                if (vm->error) {
+                    value_free(&fb_result);
+                    value_free(&obj_copy);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Write back the mutated copy to the global */
                 value_free(obj_ref);
                 *obj_ref = obj_copy;
@@ -7462,11 +7605,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             const char *local_var_name = (frame->chunk->local_names && loc_reg < frame->chunk->local_name_cap)
                                              ? frame->chunk->local_names[loc_reg]
                                              : NULL;
-            LatValue invoke_result;
+            LatValue invoke_result = value_nil();
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result, local_var_name,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&invoke_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Cache builtin hit */
                 if (!_rpic) {
                     pic_table_ensure(&frame->chunk->pic);
@@ -7524,7 +7672,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     char arity_error[128];
                     if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, argc, arity_error, sizeof(arity_error)))
                         RVM_ERROR("%s", arity_error);
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base];
@@ -7574,7 +7722,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                     if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, (int)argc + 1, arity_error,
                                                             sizeof(arity_error)))
                         RVM_ERROR("%s", arity_error);
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base_s = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base_s];
@@ -7634,7 +7782,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                                           fn_chunk->name ? fn_chunk->name : "<anonymous>");
                         }
                     }
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     size_t new_base_i = vm->reg_stack_top;
                     LatValue *new_regs = &vm->reg_stack[new_base_i];
@@ -7708,11 +7856,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Try builtin — mutates the cell in-place */
         {
-            LatValue invoke_result;
+            LatValue invoke_result = value_nil();
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, NULL,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&invoke_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Cache builtin hit */
                 if (!_rupic) {
                     pic_table_ensure(&frame->chunk->pic);
@@ -7753,7 +7906,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                             value_free(&closure);
                             RVM_ERROR("%s", arity_error);
                         }
-                        if (vm->frame_count >= REGVM_FRAMES_MAX) {
+                        if (vm->frame_count >= REGVM_USER_FRAMES_MAX) {
                             value_free(&closure);
                             RVM_ERROR("call stack overflow");
                         }
@@ -7830,7 +7983,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                         if (!rvm_compiled_closure_accepts_arity(field, fn_chunk, argc, arity_error,
                                                                 sizeof(arity_error)))
                             RVM_ERROR("%s", arity_error);
-                        if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                        if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
                         LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                         vm->reg_stack_top += REGVM_REG_MAX;
                         int mr = fn_chunk->max_reg ? fn_chunk->max_reg : REGVM_REG_MAX;
@@ -7897,7 +8050,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                                           fn_chunk->name ? fn_chunk->name : "<anonymous>");
                         }
                     }
-                    if (vm->frame_count >= REGVM_FRAMES_MAX) RVM_ERROR("call stack overflow");
+                    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) RVM_ERROR("call stack overflow");
 
                     LatValue *new_regs = &vm->reg_stack[vm->reg_stack_top];
                     vm->reg_stack_top += REGVM_REG_MAX;
@@ -7925,11 +8078,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Fallback: builtin probe directly on the cell (reached when the PIC
          * mispredicted NOT_BUILTIN for this receiver type), else no-method. */
         {
-            LatValue fb_result;
+            LatValue fb_result = value_nil();
             LatValue *fb_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, obj_ref, method_name, fb_args, argc, &fb_result, NULL,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&fb_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 reg_set(&R[dst], fb_result);
             } else {
                 const char *msug = builtin_find_similar_method(obj_ref->type, method_name);
@@ -8359,7 +8517,7 @@ RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
      * This is safe for recursive calls (e.g. native_lat_eval, native_require)
      * because we don't clobber existing frames. */
     int base_frame = vm->frame_count;
-    if (vm->frame_count >= REGVM_FRAMES_MAX) {
+    if (vm->frame_count >= REGVM_USER_FRAMES_MAX) {
         vm->error = strdup("regvm_run: frame overflow");
         return REGVM_RUNTIME_ERROR;
     }
@@ -8377,6 +8535,64 @@ RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result) {
     for (int i = 0; i < (int)frame->reg_count; i++) frame->regs[i] = value_nil();
 
     return regvm_dispatch(vm, base_frame, result);
+}
+
+RegVMResult regvm_run_isolated(RegVM *vm, RegChunk *chunk, LatValue *result) {
+    size_t entry_handler_count = vm->handler_count;
+    size_t entry_defer_count = vm->defer_count;
+    size_t saved_handler_floor = vm->handler_floor;
+    size_t saved_defer_floor = vm->defer_floor;
+    bool saved_unwinding_defers = vm->unwinding_defers;
+
+    vm->handler_floor = entry_handler_count;
+    vm->defer_floor = entry_defer_count;
+    vm->unwinding_defers = false;
+
+    int entry_frame_count = vm->frame_count;
+    RegVMResult run_result = regvm_run(vm, chunk, result);
+
+    /* Some direct native/method error paths return before dispatch reaches a
+     * normal unwind. Execute nested defers before dropping their register
+     * windows, while keeping the caller's saved defer stack isolated. */
+    if (vm->defer_count > entry_defer_count) {
+        char *original_error = vm->error;
+        vm->error = NULL;
+        if (vm->rt->error) {
+            char *runtime_error = vm->rt->error;
+            vm->rt->error = NULL;
+            if (!original_error) original_error = runtime_error;
+            else if (runtime_error != original_error) free(runtime_error);
+        }
+
+        char *cleanup_error = rvm_unwind_defers_to(vm, entry_defer_count);
+        if (cleanup_error) {
+            char *combined = NULL;
+            if (original_error) {
+                lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error, original_error);
+                free(cleanup_error);
+                free(original_error);
+            } else {
+                combined = cleanup_error;
+            }
+            vm->error = combined;
+            if (run_result == REGVM_OK) {
+                value_free(result);
+                *result = value_nil();
+                run_result = REGVM_RUNTIME_ERROR;
+            }
+        } else {
+            vm->error = original_error;
+        }
+    }
+
+    if (run_result != REGVM_OK && vm->frame_count > entry_frame_count) { rvm_unwind_frames(vm, entry_frame_count); }
+
+    vm->handler_count = entry_handler_count;
+    vm->defer_count = entry_defer_count;
+    vm->handler_floor = saved_handler_floor;
+    vm->defer_floor = saved_defer_floor;
+    vm->unwinding_defers = saved_unwinding_defers;
+    return run_result;
 }
 
 /* REPL variant: reuses existing frame 0 registers (preserves globals/locals) */

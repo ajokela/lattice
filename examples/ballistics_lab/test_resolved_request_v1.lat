@@ -1,0 +1,287 @@
+// MBA-1310 strict solve-json v1 resolved-request validation tests.
+
+import "examples/ballistics_lab/resolved_request_v1" as resolved
+
+fn fixture_request() -> Map {
+    let envelope = json_parse(
+    read_file("examples/ballistics_lab/fixtures/representative.success.json")
+    )
+    return clone(envelope.get("resolved_request"))
+}
+
+fn validation_error(value: any) -> String {
+    return try {
+        resolved.validate_resolved_request_v1(value)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+}
+
+fn assert_invalid(value: any, expected: String, label: String) {
+    let message = validation_error(value)
+    assert(message != "NO_ERROR", label + ": expected validation failure")
+    assert(message.contains(expected), label + ": unexpected error: " + message)
+}
+
+fn set_field(request: Map, section: String, key: String, value: any) -> Map {
+    let child = request.get(section)
+    child.set(key, value)
+    request.set(section, child)
+    return request
+}
+
+fn remove_field(request: Map, section: String, key: String) -> Map {
+    let child = request.get(section)
+    child.remove(key)
+    request.set(section, child)
+    return request
+}
+
+fn segment(until_distance: Number, speed: Number = 4.0) -> Map {
+    let value = Map::new()
+    value.set("until_distance_m", until_distance)
+    value.set("speed_mps", speed)
+    value.set("direction_from_rad", 1.5707963267948966)
+    value.set("vertical_speed_mps", 0.0)
+    return value
+}
+
+fn with_segments(segments: Array) -> Map {
+    let request = fixture_request()
+    let wind = Map::new()
+    wind.set("segments", segments)
+    request.set("wind", wind)
+    return request
+}
+
+fn test_representative_snapshot_is_detached_and_frozen() {
+    let source = fixture_request()
+    let checked = resolved.validate_resolved_request_v1(source)
+    assert(typeof(checked) == "Map")
+    assert(phase_of(checked) == "crystal")
+    assert(phase_of(checked.get("projectile")) == "crystal")
+    assert(checked == source, "validation must preserve the request exactly")
+    assert(
+    json_parse(json_stringify(checked)) == source,
+    "validated snapshot must preserve the JSON data model"
+    )
+    assert(source.get("projectile").get("mass_kg") == 0.01134)
+
+    // The validator freezes a detached copy, not the caller's working Map.
+    source = set_field(source, "projectile", "mass_kg", 0.02)
+    assert(source.get("projectile").get("mass_kg") == 0.02)
+    assert(checked.get("projectile").get("mass_kg") == 0.01134)
+
+    let top_mutation = try {
+        checked.set("schema_version", 2)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(top_mutation != "NO_ERROR", "validated root must reject mutation")
+    assert(top_mutation.contains("frozen") || top_mutation.contains("crystal"))
+
+    let frozen_projectile = checked.get("projectile")
+    let nested_mutation = try {
+        frozen_projectile.set("mass_kg", 0.02)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(nested_mutation != "NO_ERROR", "validated children must reject mutation")
+    assert(nested_mutation.contains("frozen") || nested_mutation.contains("crystal"))
+}
+
+fn test_exact_keys_and_schema_version() {
+    let missing_top = fixture_request()
+    missing_top.remove("sampling")
+    assert_invalid(missing_top, "missing required field 'sampling'", "missing top-level field")
+
+    let unknown_top = fixture_request()
+    unknown_top.set("future", true)
+    assert_invalid(unknown_top, "unknown field 'future'", "unknown top-level field")
+
+    let cases = [
+        ["projectile", "mass_kg"],
+        ["rifle", "muzzle_velocity_mps"],
+        ["shot", "max_range_m"],
+        ["atmosphere", "temperature_k"],
+        ["wind", "speed_mps"],
+        ["solver", "method"],
+        ["effects", "magnus"],
+        ["sampling", "interval_m"]
+    ]
+    for item in cases {
+        let missing = remove_field(fixture_request(), item[0], item[1])
+        assert_invalid(
+        missing,
+        "$.resolved_request." + item[0] + ": missing required field '" + item[1] + "'",
+        item[0] + " missing key"
+        )
+
+        let unknown = set_field(fixture_request(), item[0], "future", true)
+        assert_invalid(
+        unknown,
+        "$.resolved_request." + item[0] + ": unknown field 'future'",
+        item[0] + " unknown key"
+        )
+    }
+
+    let wrong_version_type = fixture_request()
+    wrong_version_type.set("schema_version", 1.0)
+    assert_invalid(wrong_version_type, "schema_version: expected Int", "schema type")
+
+    let wrong_version = fixture_request()
+    wrong_version.set("schema_version", 2)
+    assert_invalid(wrong_version, "unsupported schema version", "schema version")
+}
+
+fn test_types_finiteness_ranges_and_choices() {
+    assert_invalid([], "expected Map, got Array", "top-level type")
+
+    let wrong_section = fixture_request()
+    wrong_section.set("projectile", "bad")
+    assert_invalid(wrong_section, "projectile: expected Map", "section type")
+
+    assert_invalid(
+    set_field(fixture_request(), "projectile", "mass_kg", "heavy"),
+    "mass_kg: expected Number",
+    "number type"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "projectile", "mass_kg", 0.0 / 0.0),
+    "mass_kg: must be finite",
+    "NaN"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "shot", "muzzle_angle_rad", 1.0 / 0.0),
+    "muzzle_angle_rad: must be finite",
+    "infinity"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "shot", "zero_distance_m", parse_float("1e308")),
+    "zero_distance_m: too large for a finite zeroing range",
+    "zero-distance overflow"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "projectile", "diameter_m", 0),
+    "diameter_m: must be greater than zero",
+    "positive range"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "rifle", "sight_height_m", -0.01),
+    "sight_height_m: must be non-negative",
+    "nonnegative range"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "atmosphere", "altitude_m", 84000.1),
+    "altitude_m: must be between -5000 and 84000",
+    "altitude range"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "atmosphere", "relative_humidity", 1.01),
+    "relative_humidity: must be between 0 and 1",
+    "humidity range"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "atmosphere", "latitude_rad", 1.5707963267948968),
+    "latitude_rad: must be between -pi/2 and pi/2",
+    "latitude range"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "effects", "magnus", 1),
+    "effects.magnus: expected Bool",
+    "boolean type"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "projectile", "drag_model", "G99"),
+    "drag_model: unsupported value 'G99'",
+    "drag-model choice"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "rifle", "twist_direction", "clockwise"),
+    "twist_direction: unsupported value 'clockwise'",
+    "twist choice"
+    )
+    assert_invalid(
+    set_field(fixture_request(), "solver", "method", "future"),
+    "solver.method: unsupported value 'future'",
+    "solver choice"
+    )
+}
+
+fn test_optional_fields() {
+    let request = remove_field(fixture_request(), "projectile", "length_m")
+    request = set_field(request, "shot", "zero_distance_m", 100.0)
+    request = set_field(request, "atmosphere", "latitude_rad", 0.5)
+    request = set_field(request, "effects", "coriolis", true)
+    let checked = resolved.validate_resolved_request_v1(request)
+    assert(!checked.get("projectile").has("length_m"))
+    assert(checked.get("shot").get("zero_distance_m") == 100.0)
+    assert(checked.get("atmosphere").get("latitude_rad") == 0.5)
+    assert(checked.get("effects").get("coriolis"))
+}
+
+fn test_segmented_wind_and_relationships() {
+    let segmented = with_segments([segment(20), segment(50, 6)])
+    let checked = resolved.validate_resolved_request_v1(segmented)
+    assert(phase_of(checked) == "crystal")
+    assert(len(checked.get("wind").get("segments")) == 2)
+
+    assert_invalid(with_segments([]), "segments: must not be empty", "empty segments")
+    assert_invalid(
+    with_segments([segment(20), segment(20, 6)]),
+    "boundaries must increase strictly",
+    "segment order"
+    )
+    assert_invalid(
+    with_segments([segment(20, -1)]),
+    "segments[0].speed_mps: must be non-negative",
+    "segment speed"
+    )
+
+    let unknown_segment = segment(20)
+    unknown_segment.set("future", true)
+    assert_invalid(
+    with_segments([unknown_segment]),
+    "segments[0]: unknown field 'future'",
+    "segment exact keys"
+    )
+
+    let ground = set_field(
+    fixture_request(),
+    "shot",
+    "ground_threshold_m",
+    1.2
+    )
+    assert_invalid(
+    ground,
+    "ground_threshold_m: must be below the resolved muzzle height",
+    "ground threshold relationship"
+    )
+
+    let coriolis = set_field(fixture_request(), "effects", "coriolis", true)
+    assert_invalid(
+    coriolis,
+    "latitude_rad: required when coriolis is enabled",
+    "coriolis relationship"
+    )
+
+    let conflicting = set_field(fixture_request(), "effects", "magnus", true)
+    conflicting = set_field(conflicting, "effects", "enhanced_spin_drift", true)
+    assert_invalid(
+    conflicting,
+    "magnus and enhanced_spin_drift cannot both be enabled",
+    "effect relationship"
+    )
+}
+
+fn main() {
+    test_representative_snapshot_is_detached_and_frozen()
+    test_exact_keys_and_schema_version()
+    test_types_finiteness_ranges_and_choices()
+    test_optional_fields()
+    test_segmented_wind_and_relationships()
+    print("ballistics_lab resolved request v1: all tests passed")
+}

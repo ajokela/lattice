@@ -232,6 +232,10 @@ function assertIncludes(haystack, needle, msg) {
     const r = run('try { 10 / 0 } catch e { "caught" }');
     assertIncludes(r.output, "caught", "try-catch division by zero");
   }
+  {
+    const r = run('try { exec_argv("program", [], nil, Map::new()) } catch e { e.message }');
+    assertIncludes(r.output, "exec_argv: not available in browser", "exec_argv reports unsupported on wasm");
+  }
 
   /* -- lat_is_complete -- */
   console.log("[Completeness Check]");
@@ -301,6 +305,12 @@ function assertIncludes(haystack, needle, msg) {
   {
     const r = runRegvm('print("regvm hello")');
     assertIncludes(r.output, "regvm hello", "regvm print");
+  }
+
+  /* -- Unsupported process API -- */
+  {
+    const r = runRegvm('try { exec_argv("program", [], nil, Map::new()) } catch e { e.message }');
+    assertIncludes(r.output, "exec_argv: not available in browser", "regvm exec_argv reports unsupported on wasm");
   }
 
   /* Clean up RegVM */

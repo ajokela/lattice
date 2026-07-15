@@ -1,0 +1,724 @@
+// Explicit verification and strict persistence for completed laboratory runs.
+//
+// A RunRecord is still working-session data. verify_run() is the only transition
+// into VerifiedRun, a detached crystal containing no backend closure, Ref, process,
+// trajectory object, or session state. Artifact documents are closed schemas: every
+// object rejects unknown and missing fields before domain values are reconstructed.
+
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/persistence" as persistence
+import "examples/ballistics_lab/resolved_request_v1" as resolved_v1
+
+let VERIFIED_RUN_KIND = "lattice-ballistics/verified-run"
+let VERIFIED_RUN_SCHEMA_VERSION = 1
+let SOLVE_SCHEMA_VERSION = 1
+
+export struct VerifiedRun {
+    kind: fix String,
+    artifact_schema_version: fix Int,
+    backend_name: fix String,
+    solve_schema_version: fix Int,
+    engine_version: fix String,
+    experiment: fix any,
+    resolved_request: fix Map,
+    assumptions: fix Array,
+    warnings: fix Array,
+    summary: fix any,
+    termination: fix String,
+    selected_observations: fix Array,
+    note: fix any
+}
+
+fn _fail(path: String, message: String) {
+    assert(false, "verified artifact " + path + ": " + message)
+}
+
+fn _is_struct(value: any, expected: String) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == expected
+}
+
+fn _require_struct(value: any, expected: String, path: String) {
+    if !_is_struct(value, expected) {
+        flux actual = typeof(value)
+        if actual == "Struct" {
+            actual = struct_name(value)
+        }
+        _fail(path, "expected " + expected + ", got " + actual)
+    }
+}
+
+fn _map(value: any, path: String) -> Map {
+    if typeof(value) != "Map" {
+        _fail(path, "expected Map, got " + typeof(value))
+    }
+    return value
+}
+
+fn _array(value: any, path: String) -> Array {
+    if typeof(value) != "Array" {
+        _fail(path, "expected Array, got " + typeof(value))
+    }
+    return value
+}
+
+fn _string(value: any, path: String) -> String {
+    if typeof(value) != "String" {
+        _fail(path, "expected String, got " + typeof(value))
+    }
+    return value
+}
+
+fn _nonempty_string(value: any, path: String) -> String {
+    let checked = _string(value, path)
+    if len(checked.trim()) == 0 {
+        _fail(path, "must not be empty")
+    }
+    return checked
+}
+
+fn _integer(value: any, path: String) -> Int {
+    if typeof(value) != "Int" {
+        _fail(path, "expected Int, got " + typeof(value))
+    }
+    return value
+}
+
+fn _finite_number(value: any, path: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        _fail(path, "expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        _fail(path, "must be finite")
+    }
+    return value
+}
+
+fn _optional_note(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _nonempty_string(value, path)
+}
+
+fn _require_exact_keys(object: Map, expected: Array, path: String) {
+    for key in expected {
+        if !object.has(key) {
+            _fail(path, "missing required field '" + key + "'")
+        }
+    }
+    for key in object.keys() {
+        if typeof(key) != "String" {
+            _fail(path, "object keys must be strings")
+        }
+        if !expected.contains(key) {
+            _fail(path, "unknown field '" + key + "'")
+        }
+    }
+}
+
+fn _require_schema_version(value: any, expected: Int, path: String) -> Int {
+    let checked = _integer(value, path)
+    if checked != expected {
+        _fail(path, "unsupported value " + to_string(checked))
+    }
+    return checked
+}
+
+fn _copy_distance(value: any) -> any {
+    return persistence.distance_from_map(persistence.distance_to_map(value))
+}
+
+fn _copy_velocity(value: any) -> any {
+    return persistence.velocity_from_map(persistence.velocity_to_map(value))
+}
+
+fn _copy_energy(value: any) -> any {
+    return persistence.energy_from_map(persistence.energy_to_map(value))
+}
+
+fn _copy_experiment(value: any) -> any {
+    return persistence.experiment_value_from_map(persistence.experiment_value_to_map(value))
+}
+
+fn _copy_assumptions(values: any, path: String) -> Array {
+    let source = _array(values, path)
+    flux copied = []
+    flux index = 0
+    for value in source {
+        let item_path = path + "[" + to_string(index) + "]"
+        _require_struct(value, "Assumption", item_path)
+        copied.push(domain.assumption(value.code, value.message, value.path))
+        index = index + 1
+    }
+    return copied
+}
+
+fn _copy_warnings(values: any, path: String) -> Array {
+    let source = _array(values, path)
+    flux copied = []
+    flux index = 0
+    for value in source {
+        let item_path = path + "[" + to_string(index) + "]"
+        _require_struct(value, "Warning", item_path)
+        copied.push(domain.warning(value.code, value.message, value.path))
+        index = index + 1
+    }
+    return copied
+}
+
+fn _copy_summary(value: any, path: String) -> any {
+    _require_struct(value, "TrajectorySummary", path)
+    flux stability_factor = nil
+    if value.stability_factor != nil {
+        stability_factor = _finite_number(value.stability_factor, path + ".stability_factor")
+    }
+    flux spin_drift = nil
+    if value.spin_drift != nil {
+        spin_drift = _copy_distance(value.spin_drift)
+    }
+    return domain.trajectory_summary(
+    _copy_distance(value.actual_range),
+    _copy_distance(value.maximum_height),
+    _finite_number(value.time_of_flight_s, path + ".time_of_flight_s"),
+    _copy_velocity(value.terminal_velocity),
+    _copy_energy(value.terminal_energy),
+    value.termination,
+    stability_factor,
+    spin_drift
+    )
+}
+
+fn _copy_observation(value: any, path: String) -> any {
+    _require_struct(value, "Observation", path)
+    return domain.observation(
+    _copy_distance(value.distance),
+    _finite_number(value.time_s, path + ".time_s"),
+    _copy_velocity(value.velocity),
+    _copy_energy(value.energy),
+    _copy_distance(value.drop),
+    _copy_distance(value.windage),
+    _finite_number(value.mach, path + ".mach"),
+    value.flags
+    )
+}
+
+fn _copy_observations(values: any, path: String) -> Array {
+    let source = _array(values, path)
+    if len(source) == 0 {
+        _fail(path, "must not be empty")
+    }
+    flux copied = []
+    flux index = 0
+    for value in source {
+        copied.push(_copy_observation(value, path + "[" + to_string(index) + "]"))
+        index = index + 1
+    }
+    return copied
+}
+
+fn _default_indices(count: Int) -> Array {
+    if count <= 0 {
+        _fail("verify_run.record.result.observations", "must not be empty")
+    }
+    if count == 1 {
+        return [0]
+    }
+    if count == 2 {
+        return [0, 1]
+    }
+    let middle = to_int(floor((count - 1) / 2.0))
+    return [0, middle, count - 1]
+}
+
+fn _checked_indices(value: any, count: Int) -> Array {
+    flux source = value
+    if source == nil {
+        source = _default_indices(count)
+    } else {
+        source = _array(source, "verify_run.observation_indices")
+    }
+    if len(source) == 0 {
+        _fail("verify_run.observation_indices", "must not be empty")
+    }
+    flux checked = []
+    flux position = 0
+    for index in source {
+        let path = "verify_run.observation_indices[" + to_string(position) + "]"
+        let selected = _integer(index, path)
+        if selected < 0 || selected >= count {
+            _fail(path, "index " + to_string(selected) + " is outside the observation range")
+        }
+        if checked.contains(selected) {
+            _fail(path, "duplicate index " + to_string(selected))
+        }
+        checked.push(selected)
+        position = position + 1
+    }
+    return checked
+}
+
+fn _freeze_verified(
+backend_name: String,
+solve_schema_version: Int,
+engine_version: String,
+experiment: any,
+resolved_request: Map,
+assumptions: Array,
+warnings: Array,
+summary: any,
+termination: String,
+selected_observations: Array,
+note: any
+) -> VerifiedRun {
+    return freeze(VerifiedRun {
+        kind: VERIFIED_RUN_KIND,
+        artifact_schema_version: VERIFIED_RUN_SCHEMA_VERSION,
+        backend_name: backend_name,
+        solve_schema_version: solve_schema_version,
+        engine_version: engine_version,
+        experiment: experiment,
+        resolved_request: resolved_request,
+        assumptions: assumptions,
+        warnings: warnings,
+        summary: summary,
+        termination: termination,
+        selected_observations: selected_observations,
+        note: note
+    }
+    )
+}
+
+// Promote a completed session RunRecord into a detached, immutable artifact.
+// A Trajectory is never accepted directly, regardless of its legacy `verified` flag.
+export fn verify_run(
+record: any,
+observation_indices: any = nil,
+note: any = nil
+) -> VerifiedRun {
+    _require_struct(record, "RunRecord", "verify_run.record")
+    let backend_name = _nonempty_string(record.backend_name, "verify_run.record.backend_name")
+    let solve_schema = _require_schema_version(
+    record.schema_version,
+    SOLVE_SCHEMA_VERSION,
+    "verify_run.record.schema_version"
+    )
+    let engine_version = _nonempty_string(
+    record.engine_version,
+    "verify_run.record.engine_version"
+    )
+    _require_struct(record.result, "Trajectory", "verify_run.record.result")
+    let result = record.result
+    if result.experiment != record.experiment {
+        _fail("verify_run.record.result.experiment", "does not match the RunRecord snapshot")
+    }
+    if result.resolved_request != record.resolved_request {
+        _fail("verify_run.record.result.resolved_request", "does not match the RunRecord snapshot")
+    }
+    if result.schema_version != solve_schema {
+        _fail("verify_run.record.result.schema_version", "does not match the RunRecord")
+    }
+    if result.engine_version != engine_version {
+        _fail("verify_run.record.result.engine_version", "does not match the RunRecord")
+    }
+    if result.assumptions != record.assumptions {
+        _fail("verify_run.record.result.assumptions", "does not match the RunRecord")
+    }
+    if result.warnings != record.warnings {
+        _fail("verify_run.record.result.warnings", "does not match the RunRecord")
+    }
+    _require_struct(result.summary, "TrajectorySummary", "verify_run.record.result.summary")
+    if result.summary.termination != record.termination {
+        _fail("verify_run.record.termination", "does not match the trajectory summary")
+    }
+
+    // Validate the untrusted transport snapshot before allocating any reconstructed
+    // crystal graph. This keeps hostile requests outside the artifact boundary.
+    let resolved_request = resolved_v1.validate_resolved_request_v1(record.resolved_request)
+
+    let source_observations = _array(
+    result.observations,
+    "verify_run.record.result.observations"
+    )
+    let indices = _checked_indices(observation_indices, len(source_observations))
+    flux selected = []
+    for index in indices {
+        selected.push(_copy_observation(
+        source_observations[index],
+        "verify_run.record.result.observations[" + to_string(index) + "]"
+        ))
+    }
+
+    let experiment = _copy_experiment(record.experiment)
+    let assumptions = _copy_assumptions(record.assumptions, "verify_run.record.assumptions")
+    let warnings = _copy_warnings(record.warnings, "verify_run.record.warnings")
+    let summary = _copy_summary(result.summary, "verify_run.record.result.summary")
+    let checked_note = _optional_note(note, "verify_run.note")
+    return _freeze_verified(
+    backend_name,
+    solve_schema,
+    engine_version,
+    experiment,
+    resolved_request,
+    assumptions,
+    warnings,
+    summary,
+    summary.termination,
+    selected,
+    checked_note
+    )
+}
+
+fn _reconstruct_verified(value: any) -> VerifiedRun {
+    _require_struct(value, "VerifiedRun", "value")
+    if phase_of(value) != "crystal" {
+        _fail("value", "VerifiedRun must be a crystal created by verify_run or a loader")
+    }
+    if value.kind != VERIFIED_RUN_KIND {
+        _fail("value.kind", "unsupported value '" + to_string(value.kind) + "'")
+    }
+    _require_schema_version(
+    value.artifact_schema_version,
+    VERIFIED_RUN_SCHEMA_VERSION,
+    "value.artifact_schema_version"
+    )
+    let backend_name = _nonempty_string(value.backend_name, "value.backend_name")
+    let solve_schema = _require_schema_version(
+    value.solve_schema_version,
+    SOLVE_SCHEMA_VERSION,
+    "value.solve_schema_version"
+    )
+    let engine_version = _nonempty_string(value.engine_version, "value.engine_version")
+    let resolved_request = resolved_v1.validate_resolved_request_v1(value.resolved_request)
+    if resolved_request.get("schema_version") != solve_schema {
+        _fail("value.resolved_request.schema_version", "does not match solve_schema_version")
+    }
+    let experiment = _copy_experiment(value.experiment)
+    let assumptions = _copy_assumptions(value.assumptions, "value.assumptions")
+    let warnings = _copy_warnings(value.warnings, "value.warnings")
+    let summary = _copy_summary(value.summary, "value.summary")
+    let termination = _nonempty_string(value.termination, "value.termination")
+    if termination != summary.termination {
+        _fail("value.termination", "does not match summary.termination")
+    }
+    let observations = _copy_observations(
+    value.selected_observations,
+    "value.selected_observations"
+    )
+    let note = _optional_note(value.note, "value.note")
+    return _freeze_verified(
+    backend_name,
+    solve_schema,
+    engine_version,
+    experiment,
+    resolved_request,
+    assumptions,
+    warnings,
+    summary,
+    termination,
+    observations,
+    note
+    )
+}
+
+fn _notice_to_map(value: any) -> Map {
+    flux out = Map::new()
+    out.set("code", value.code)
+    out.set("message", value.message)
+    out.set("path", value.path)
+    return out
+}
+
+fn _notices_to_maps(values: Array) -> Array {
+    flux out = []
+    for value in values {
+        out.push(_notice_to_map(value))
+    }
+    return out
+}
+
+fn _notice_from_map(value: any, path: String, warning: Bool) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(object, ["code", "message", "path"], path)
+    let code = _nonempty_string(object.get("code"), path + ".code")
+    let message = _nonempty_string(object.get("message"), path + ".message")
+    flux notice_path = nil
+    if object.get("path") != nil {
+        notice_path = _nonempty_string(object.get("path"), path + ".path")
+    }
+    if warning {
+        return domain.warning(code, message, notice_path)
+    }
+    return domain.assumption(code, message, notice_path)
+}
+
+fn _notices_from_maps(values: any, path: String, warning: Bool) -> Array {
+    let source = _array(values, path)
+    flux out = []
+    flux index = 0
+    for value in source {
+        out.push(_notice_from_map(
+        value,
+        path + "[" + to_string(index) + "]",
+        warning
+        ))
+        index = index + 1
+    }
+    return out
+}
+
+fn _summary_to_map(value: any) -> Map {
+    flux out = Map::new()
+    out.set("actual_range", persistence.distance_to_map(value.actual_range))
+    out.set("maximum_height", persistence.distance_to_map(value.maximum_height))
+    out.set("time_of_flight_s", value.time_of_flight_s)
+    out.set("terminal_velocity", persistence.velocity_to_map(value.terminal_velocity))
+    out.set("terminal_energy", persistence.energy_to_map(value.terminal_energy))
+    out.set("stability_factor", value.stability_factor)
+    flux spin_drift = nil
+    if value.spin_drift != nil {
+        spin_drift = persistence.distance_to_map(value.spin_drift)
+    }
+    out.set("spin_drift", spin_drift)
+    out.set("termination", value.termination)
+    return out
+}
+
+fn _summary_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    [
+        "actual_range", "maximum_height", "time_of_flight_s",
+        "terminal_velocity", "terminal_energy", "stability_factor",
+        "spin_drift", "termination"
+    ],
+    path
+    )
+    flux stability_factor = nil
+    if object.get("stability_factor") != nil {
+        stability_factor = _finite_number(
+        object.get("stability_factor"),
+        path + ".stability_factor"
+        )
+    }
+    flux spin_drift = nil
+    if object.get("spin_drift") != nil {
+        spin_drift = persistence.distance_from_map(object.get("spin_drift"))
+    }
+    return domain.trajectory_summary(
+    persistence.distance_from_map(object.get("actual_range")),
+    persistence.distance_from_map(object.get("maximum_height")),
+    _finite_number(object.get("time_of_flight_s"), path + ".time_of_flight_s"),
+    persistence.velocity_from_map(object.get("terminal_velocity")),
+    persistence.energy_from_map(object.get("terminal_energy")),
+    _nonempty_string(object.get("termination"), path + ".termination"),
+    stability_factor,
+    spin_drift
+    )
+}
+
+fn _observation_to_map(value: any) -> Map {
+    flux out = Map::new()
+    out.set("distance", persistence.distance_to_map(value.distance))
+    out.set("time_s", value.time_s)
+    out.set("velocity", persistence.velocity_to_map(value.velocity))
+    out.set("energy", persistence.energy_to_map(value.energy))
+    out.set("drop", persistence.distance_to_map(value.drop))
+    out.set("windage", persistence.distance_to_map(value.windage))
+    out.set("mach", value.mach)
+    // Build an ordinary detached Array. clone() of a frozen sub-array may retain
+    // the artifact's shared crystal region, which is not appropriate for a
+    // programmable serialization Map.
+    flux flags = []
+    for flag in value.flags {
+        flags.push(flag)
+    }
+    out.set("flags", flags)
+    return out
+}
+
+fn _observations_to_maps(values: Array) -> Array {
+    flux out = []
+    for value in values {
+        out.push(_observation_to_map(value))
+    }
+    return out
+}
+
+fn _observation_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["distance", "time_s", "velocity", "energy", "drop", "windage", "mach", "flags"],
+    path
+    )
+    return domain.observation(
+    persistence.distance_from_map(object.get("distance")),
+    _finite_number(object.get("time_s"), path + ".time_s"),
+    persistence.velocity_from_map(object.get("velocity")),
+    persistence.energy_from_map(object.get("energy")),
+    persistence.distance_from_map(object.get("drop")),
+    persistence.distance_from_map(object.get("windage")),
+    _finite_number(object.get("mach"), path + ".mach"),
+    _array(object.get("flags"), path + ".flags")
+    )
+}
+
+fn _observations_from_maps(values: any, path: String) -> Array {
+    let source = _array(values, path)
+    if len(source) == 0 {
+        _fail(path, "must not be empty")
+    }
+    flux out = []
+    flux index = 0
+    for value in source {
+        out.push(_observation_from_map(value, path + "[" + to_string(index) + "]"))
+        index = index + 1
+    }
+    return out
+}
+
+fn _json_copy(value: any, path: String) -> any {
+    let kind = typeof(value)
+    if kind == "Map" {
+        flux out = Map::new()
+        for key in value.keys() {
+            if typeof(key) != "String" {
+                _fail(path, "object keys must be strings")
+            }
+            out.set(key, _json_copy(value.get(key), path + "." + key))
+        }
+        return out
+    }
+    if kind == "Array" {
+        flux out = []
+        flux index = 0
+        for item in value {
+            out.push(_json_copy(item, path + "[" + to_string(index) + "]"))
+            index = index + 1
+        }
+        return out
+    }
+    if kind == "Int" || kind == "Float" {
+        return _finite_number(value, path)
+    }
+    if kind == "String" || kind == "Bool" || kind == "Nil" {
+        return value
+    }
+    _fail(path, "expected JSON data, got " + kind)
+}
+
+// Return a detached, programmable Map with exactly the artifact schema fields.
+export fn verified_run_to_map(value: any) -> Map {
+    let checked = _reconstruct_verified(value)
+    flux out = Map::new()
+    out.set("kind", checked.kind)
+    out.set("artifact_schema_version", checked.artifact_schema_version)
+    out.set("backend_name", checked.backend_name)
+    out.set("solve_schema_version", checked.solve_schema_version)
+    out.set("engine_version", checked.engine_version)
+    out.set("experiment", persistence.experiment_value_to_map(checked.experiment))
+    out.set("resolved_request", _json_copy(checked.resolved_request, "$.resolved_request"))
+    out.set("assumptions", _notices_to_maps(checked.assumptions))
+    out.set("warnings", _notices_to_maps(checked.warnings))
+    out.set("summary", _summary_to_map(checked.summary))
+    out.set("termination", checked.termination)
+    out.set("selected_observations", _observations_to_maps(checked.selected_observations))
+    out.set("note", checked.note)
+    // Strings copied out of a shared crystal can retain that region even inside an
+    // otherwise fluid Map. A JSON data-model round trip detaches every scalar too,
+    // ensuring callers receive no hidden reference to the VerifiedRun crystal.
+    return json_parse(json_stringify(out))
+}
+
+export fn verified_run_from_map(value: any) -> VerifiedRun {
+    let document = _map(value, "$")
+    _require_exact_keys(
+    document,
+    [
+        "kind", "artifact_schema_version", "backend_name", "solve_schema_version",
+        "engine_version", "experiment", "resolved_request", "assumptions", "warnings",
+        "summary", "termination", "selected_observations", "note"
+    ],
+    "$"
+    )
+    let kind = _nonempty_string(document.get("kind"), "$.kind")
+    if kind != VERIFIED_RUN_KIND {
+        _fail("$.kind", "unsupported value '" + kind + "'")
+    }
+    _require_schema_version(
+    document.get("artifact_schema_version"),
+    VERIFIED_RUN_SCHEMA_VERSION,
+    "$.artifact_schema_version"
+    )
+    let backend_name = _nonempty_string(document.get("backend_name"), "$.backend_name")
+    let solve_schema = _require_schema_version(
+    document.get("solve_schema_version"),
+    SOLVE_SCHEMA_VERSION,
+    "$.solve_schema_version"
+    )
+    let engine_version = _nonempty_string(document.get("engine_version"), "$.engine_version")
+    let resolved_request = resolved_v1.validate_resolved_request_v1(
+    document.get("resolved_request")
+    )
+    if resolved_request.get("schema_version") != solve_schema {
+        _fail("$.resolved_request.schema_version", "does not match solve_schema_version")
+    }
+    let experiment = persistence.experiment_value_from_map(document.get("experiment"))
+    let assumptions = _notices_from_maps(document.get("assumptions"), "$.assumptions", false)
+    let warnings = _notices_from_maps(document.get("warnings"), "$.warnings", true)
+    let summary = _summary_from_map(document.get("summary"), "$.summary")
+    let termination = _nonempty_string(document.get("termination"), "$.termination")
+    if termination != summary.termination {
+        _fail("$.termination", "does not match $.summary.termination")
+    }
+    let observations = _observations_from_maps(
+    document.get("selected_observations"),
+    "$.selected_observations"
+    )
+    let note = _optional_note(document.get("note"), "$.note")
+    return _freeze_verified(
+    backend_name,
+    solve_schema,
+    engine_version,
+    experiment,
+    resolved_request,
+    assumptions,
+    warnings,
+    summary,
+    termination,
+    observations,
+    note
+    )
+}
+
+export fn verified_run_to_json(value: any) -> String {
+    return json_stringify(verified_run_to_map(value))
+}
+
+export fn verified_run_from_json(value: any) -> VerifiedRun {
+    return verified_run_from_map(json_parse(_string(value, "verified run JSON")))
+}
+
+fn _path(value: any, operation: String) -> String {
+    let path = _string(value, operation + ".path")
+    if len(path) == 0 {
+        _fail(operation + ".path", "must not be empty")
+    }
+    return path
+}
+
+export fn save_verified_run(path: any, value: any) {
+    let checked_path = _path(path, "save_verified_run")
+    // Validate and serialize completely before mutating the filesystem.
+    let source = verified_run_to_json(value)
+    if !write_file(checked_path, source) {
+        _fail("save_verified_run", "unable to write '" + checked_path + "'")
+    }
+}
+
+export fn load_verified_run(path: any) -> VerifiedRun {
+    let checked_path = _path(path, "load_verified_run")
+    return verified_run_from_json(read_file(checked_path))
+}

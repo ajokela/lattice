@@ -1,0 +1,85 @@
+// Transport-independent engine backend seam for the source-level laboratory.
+//
+// Backends are ordinary immutable Lattice values containing one solve closure.
+// The domain and later session modules depend only on solve_with(), so a future
+// native, HTTP, or WASM implementation does not change user experiment code.
+
+import {
+    laboratory_error
+}
+from "examples/ballistics_lab/domain"
+
+export struct EngineBackend {
+    name: fix String,
+    solve_fn: fix Fn
+}
+
+fn _nonempty(value: any, field: String) -> String {
+    if typeof(value) != "String" {
+        assert(false, field + ": expected String, got " + typeof(value))
+    }
+    if len(value.trim()) == 0 {
+        assert(false, field + ": must not be empty")
+    }
+    return value
+}
+
+fn _is_struct(value: any, name: String) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == name
+}
+
+export fn engine_backend(name: any, solve_fn: any) -> EngineBackend {
+    let checked_name = _nonempty(name, "backend.name")
+    if typeof(solve_fn) != "Closure" {
+        assert(false, "backend.solve_fn: expected Closure, got " + typeof(solve_fn))
+    }
+    // The fields themselves are alloy `fix` fields. Avoid crystallizing a
+    // closure-bearing struct: closures may capture independently frozen config,
+    // and nesting those shared regions in another crystal is unnecessary.
+    return EngineBackend {
+        name: checked_name,
+        solve_fn: solve_fn
+    }
+}
+
+export fn solve_with(backend: any, experiment: any) -> any {
+    if !_is_struct(backend, "EngineBackend") {
+        return laboratory_error(
+        "backend_contract_error",
+        "solve_with: expected EngineBackend, got " + typeof(backend)
+        )
+    }
+    if !_is_struct(experiment, "Experiment") {
+        return laboratory_error(
+        "backend_contract_error",
+        "solve_with: expected Experiment, got " + typeof(experiment)
+        )
+    }
+
+    let solve_fn = backend.solve_fn
+    let result = try {
+        solve_fn(experiment)
+    } catch error {
+        return laboratory_error(
+        "backend_contract_error",
+        "backend '" + backend.name + "' failed: " + error.message
+        )
+    }
+
+    if _is_struct(result, "Trajectory") || _is_struct(result, "LaboratoryError") {
+        return result
+    }
+    return laboratory_error(
+    "backend_contract_error",
+    "backend '" + backend.name + "' returned " + typeof(result) +
+    "; expected Trajectory or LaboratoryError"
+    )
+}
+
+export fn solve_succeeded(result: any) -> Bool {
+    return _is_struct(result, "Trajectory")
+}
+
+export fn solve_failed(result: any) -> Bool {
+    return _is_struct(result, "LaboratoryError")
+}

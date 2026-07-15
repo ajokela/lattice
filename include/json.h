@@ -8,6 +8,10 @@
  * Returns a LatValue. On error, sets *err to a heap-allocated error string. */
 LatValue json_parse(const char *json, char **err);
 
+/* Parse exactly len bytes. Embedded NUL and malformed UTF-8 are rejected
+ * instead of silently truncating at the first C-string terminator. */
+LatValue json_parse_len(const char *json, size_t len, char **err);
+
 /* Serialize a LatValue to a JSON string.
  * Maps -> objects, Arrays -> arrays, String -> quoted string,
  * Int/Float -> number, Bool -> true/false, Unit -> null.

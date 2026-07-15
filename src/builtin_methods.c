@@ -398,15 +398,23 @@ LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, cha
 /// @category Array Methods
 /// Apply fn to each element and return a new array of results.
 /// @example [1, 2, 3].map(|x| x * 2)  // [2, 4, 6]
-LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error) {
+LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinFallibleCallback cb, void *ctx, char **error) {
     (void)error;
     size_t len = obj->as.array.len;
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
     if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++) {
         LatValue arg = value_deep_clone(&obj->as.array.elems[i]);
-        elems[i] = cb(closure, &arg, 1, ctx);
+        LatValue mapped = value_nil();
+        bool ok = cb(closure, &arg, 1, ctx, &mapped);
         value_free(&arg);
+        if (!ok) {
+            value_free(&mapped);
+            for (size_t j = 0; j < i; j++) value_free(&elems[j]);
+            free(elems);
+            return value_nil();
+        }
+        elems[i] = mapped;
     }
     LatValue result = value_array(elems, len);
     free(elems);

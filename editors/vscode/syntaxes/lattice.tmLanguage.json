@@ -268,7 +268,7 @@
         },
         {
           "name": "support.function.builtin.process.lattice",
-          "match": "\\b(exec|shell)\\b"
+          "match": "\\b(exec|exec_argv|shell)\\b"
         },
         {
           "name": "support.function.builtin.meta.lattice",

@@ -1,0 +1,285 @@
+// MBA-1307 trajectory query and calculation workflow tests.
+// Run on every backend with the ballistics-lab source test target.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/fixture_experiment" as fixture
+import "examples/ballistics_lab/analysis" as analysis
+
+fn assert_near(actual: Number, expected: Number, tolerance: Number, label: String) {
+    assert(
+    abs(actual - expected) <= tolerance,
+    label + ": expected " + to_string(expected) + ", got " + to_string(actual)
+    )
+}
+
+fn fixture_trajectory() -> any {
+    let result = Map::new()
+    result.set("stdout", read_file("examples/ballistics_lab/fixtures/representative.success.json"))
+    result.set("stderr", "")
+    result.set("exit_code", 0)
+    let decoded = process.decode_v1_process_result(
+    fixture.representative_fixture_experiment(),
+    result,
+    "0.24.1"
+    )
+    assert(struct_name(decoded) == "Trajectory", "fixture response must decode as Trajectory")
+    return decoded
+}
+
+fn observation_with_terminal(item: any) -> any {
+    return domain.observation(
+    units.m(item.distance.si_value),
+    item.time_s,
+    units.mps(item.velocity.si_value),
+    units.joules(item.energy.si_value),
+    units.m(item.drop.si_value),
+    units.m(item.windage.si_value),
+    item.mach,
+    ["terminal"]
+    )
+}
+
+fn copied_notices(values: Array, warning_values: Bool) -> Array {
+    flux output = []
+    for item in values {
+        if warning_values {
+            output.push(domain.warning(
+            item.code.substring(0, len(item.code)),
+            item.message.substring(0, len(item.message)),
+            item.path.substring(0, len(item.path))
+            ))
+        } else {
+            output.push(domain.assumption(
+            item.code.substring(0, len(item.code)),
+            item.message.substring(0, len(item.message)),
+            item.path.substring(0, len(item.path))
+            ))
+        }
+    }
+    return output
+}
+
+fn trajectory_with_grid(source: any, distances: Array, termination: String = "max_range") -> any {
+    flux observations = []
+    for distance in distances {
+        observations.push(analysis.trajectory_at(source, distance))
+    }
+    let last = observations[len(observations) - 1]
+    observations[len(observations) - 1] = observation_with_terminal(last)
+    let terminal = observations[len(observations) - 1]
+    let summary = domain.trajectory_summary(
+    units.m(terminal.distance.si_value),
+    units.m(source.summary.maximum_height.si_value),
+    terminal.time_s,
+    units.mps(terminal.velocity.si_value),
+    units.joules(terminal.energy.si_value),
+    termination,
+    source.summary.stability_factor,
+    nil
+    )
+    return domain.trajectory(
+    source.engine_version.substring(0, len(source.engine_version)),
+    fixture.representative_fixture_experiment(),
+    observations,
+    copied_notices(source.assumptions, false),
+    copied_notices(source.warnings, true),
+    summary,
+    source.verified,
+    nil,
+    source.schema_version
+    )
+}
+
+fn test_trajectory_at_fixture_endpoints_and_interpolation() {
+    let trajectory = fixture_trajectory()
+    let at_zero = analysis.trajectory_at(trajectory, units.yd(0))
+    assert(at_zero.distance.display_unit == "yd")
+    assert(at_zero.distance.display_value == 0)
+    assert(at_zero.velocity.si_value == 823.0)
+
+    let terminal_yards = units.distance_as(units.m(50), "yd")
+    let at_terminal = analysis.trajectory_at(trajectory, units.yd(terminal_yards))
+    assert(at_terminal.distance.display_unit == "yd")
+    assert_near(at_terminal.distance.display_value, terminal_yards, 0.000000000001, "terminal display distance")
+    assert(at_terminal.flags == ["terminal"])
+    assert(at_terminal.time_s == trajectory.summary.time_of_flight_s)
+
+    let midpoint = analysis.trajectory_at(trajectory, units.m(25))
+    assert_near(midpoint.time_s,(0.024490886649346125 + 0.036874337229338305) / 2.0, 0.000000000000001, "interpolated time")
+    assert_near(midpoint.velocity.si_value,(810.7044270019984 + 804.593589005882) / 2.0, 0.000000000001, "interpolated velocity")
+    assert_near(midpoint.drop.si_value,(0.03301960051891939 + 0.02673698121022916) / 2.0, 0.000000000000001, "interpolated drop")
+    assert(midpoint.flags == [])
+
+    let beyond_message = try {
+        analysis.trajectory_at(trajectory, units.m(50.01))
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(beyond_message.contains("outside computed trajectory"), "query beyond terminal: " + beyond_message)
+    let before_message = try {
+        analysis.trajectory_at(trajectory, units.m(-1))
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(before_message.contains("outside computed trajectory"), "query before first sample: " + before_message)
+}
+
+fn test_bounded_sample_preserves_early_terminal_once() {
+    let source = fixture_trajectory()
+    let early = trajectory_with_grid(
+    source,
+    [units.m(0), units.m(10), units.m(25)],
+    "ground_threshold"
+    )
+    let sampled = analysis.sample(early, units.yd(0), units.yd(100), units.m(10))
+    assert(len(sampled) == 4, "expected 0, 10, 20, and exact 25 m terminal")
+    assert_near(sampled[3].distance.si_value, 25.0, 0.000000000001, "early terminal distance")
+    assert(sampled[3].distance.display_unit == "yd", "terminal should honor requested stop display unit")
+    flux terminal_count = 0
+    for item in sampled {
+        if item.flags.contains("terminal") {
+            terminal_count = terminal_count + 1
+        }
+    }
+    assert(terminal_count == 1, "terminal observation must appear exactly once")
+
+    let on_grid = analysis.sample(source, units.m(0), units.m(50), units.m(10))
+    assert(len(on_grid) == 6, "on-grid terminal must not be duplicated")
+    flux on_grid_terminal_count = 0
+    for item in on_grid {
+        if item.flags.contains("terminal") {
+            on_grid_terminal_count = on_grid_terminal_count + 1
+        }
+    }
+    assert(on_grid_terminal_count == 1, "on-grid terminal must appear exactly once")
+
+    let partial = analysis.sample(source, units.m(5), units.yd(20), units.m(8))
+    assert_near(partial[len(partial) - 1].distance.si_value, units.yd(20).si_value, 0.000000000001, "requested stop endpoint")
+    assert(!partial[len(partial) - 1].flags.contains("terminal"))
+
+    let zero_message = try {
+        analysis.sample(source, units.m(0), units.m(50), units.m(0))
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(zero_message.contains("interval: must be greater than zero"), "zero sample interval: " + zero_message)
+    let bound_message = try {
+        analysis.sample(source, units.m(0), units.m(50), units.m(0.001))
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(bound_message.contains("10000-observation"), "sample bound: " + bound_message)
+}
+
+fn test_dope_units_and_provenance() {
+    let trajectory = fixture_trajectory()
+    let table = analysis.dope(
+    trajectory,
+    [units.yd(10), units.yd(20)],
+    "in",
+    "moa",
+    "ft/s",
+    "ft-lb"
+    )
+    assert(table.kind == "dope")
+    assert(phase_of(table) == "crystal")
+    assert(table.columns[0].unit == "yd")
+    assert(table.columns[1].unit == "in")
+    assert(table.rows[0].get("distance") == 10)
+    assert(table.rows[0].get("drop") > 0)
+    assert(table.rows[0].get("come_up") < 0, "positive fixture drop requires a negative come-up")
+    assert(table.rows[0].get("velocity") > 2600)
+    assert(table.provenance[0].engine_version == "0.24.1")
+    assert(table.provenance[0].solver_method == "rk45")
+    assert(table.provenance[0].termination == "max_range")
+    assert(table.provenance[0].assumptions[0].code == "default_applied")
+    assert(table.provenance[0].warnings[0].code == "rk45_time_step_ignored")
+}
+
+fn test_wind_card_sign_convention() {
+    let trajectory = fixture_trajectory()
+    let table = analysis.wind_card(
+    [trajectory],
+    [units.m(10), units.m(20)],
+    "in",
+    "moa",
+    "mph",
+    "deg"
+    )
+    let row = table.rows[0]
+    assert_near(row.get("wind_speed"), 4.0 / 0.44704, 0.000000001, "wind speed conversion")
+    assert_near(row.get("direction_from"), 90.0, 0.000000001, "wind direction conversion")
+    assert(row.get("windage") < 0, "from-right fixture wind must drift left")
+    assert(row.get("wind_hold") > 0, "left drift must require a positive/right hold")
+    assert(table.provenance[0].termination == "max_range")
+}
+
+fn test_comparison_aligns_mismatched_grids() {
+    let source = fixture_trajectory()
+    let mismatched = trajectory_with_grid(
+    source,
+    [units.m(0), units.m(15), units.m(30), units.m(50)]
+    )
+    let table = analysis.compare_trajectories(
+    [source, mismatched],
+    "yd",
+    "in",
+    "in",
+    "ft/s",
+    "ft-lb"
+    )
+    // Union grid: 0, 10, 15, 20, 30, 40, 50; two series per distance.
+    assert(len(table.rows) == 14, "mismatched grids must align on their sorted union")
+    flux found_fifteen = false
+    for row in table.rows {
+        if row.get("series_index") == 1 && abs(row.get("distance") - units.distance_as(units.m(15), "yd")) < 0.000000000001 {
+            found_fifteen = true
+            assert_near(row.get("delta_drop"), 0.0, 0.000000000001, "interpolated comparison drop")
+            assert_near(row.get("delta_velocity"), 0.0, 0.000000000001, "interpolated comparison velocity")
+        }
+    }
+    assert(found_fifteen, "comparison union must retain the second grid's 15 m sample")
+    assert(len(table.provenance) == 2)
+    assert(table.columns[2].unit == "yd")
+    let arity_message = try {
+        analysis.compare_trajectories([source])
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(arity_message.contains("at least two trajectories"), "comparison arity: " + arity_message)
+}
+
+fn main() {
+    let arguments = args()
+    if len(arguments) >= 2 {
+        let selected = arguments[1]
+        if selected == "query" {
+            test_trajectory_at_fixture_endpoints_and_interpolation()
+        } else if selected == "sample" {
+            test_bounded_sample_preserves_early_terminal_once()
+        } else if selected == "dope" {
+            test_dope_units_and_provenance()
+        } else if selected == "wind" {
+            test_wind_card_sign_convention()
+        } else if selected == "compare" {
+            test_comparison_aligns_mismatched_grids()
+        } else {
+            assert(false, "unknown analysis test selection: " + selected)
+        }
+        print("ballistics_lab analysis " + selected + ": passed")
+        return
+    }
+    test_trajectory_at_fixture_endpoints_and_interpolation()
+    test_bounded_sample_preserves_early_terminal_once()
+    test_dope_units_and_provenance()
+    test_wind_card_sign_convention()
+    test_comparison_aligns_mismatched_grids()
+    print("ballistics_lab analysis: all tests passed")
+}

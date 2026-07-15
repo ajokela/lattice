@@ -1,0 +1,343 @@
+// Hermetic process/JSON backend tests. Each fake engine is a real child driven
+// through argv and stdin, while the outer test runs on every Lattice backend.
+
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/protocol_v1" as protocol
+import "examples/ballistics_lab/fixture_experiment" as fixture
+
+let FAKE_ENGINE = "examples/ballistics_lab/fixtures/fake_solve_json_engine.lat"
+
+fn clat_executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn process_fixture_executable() -> String {
+    if platform() == "windows" {
+        return ".\\build\\process_fixture.exe"
+    }
+    return "./build/process_fixture"
+}
+
+fn limits() -> Map {
+    let options = Map::new()
+    options.set("timeout_ms", 5000)
+    options.set("max_stdout_bytes", 2097152)
+    options.set("max_stderr_bytes", 65536)
+    return options
+}
+
+fn fake_backend(scenario: String, expected_version: any = nil) -> any {
+    return process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, scenario],
+    expected_version,
+    limits()
+    )
+}
+
+fn fake_solve(scenario: String, expected_version: any = nil) -> any {
+    return backends.solve_with(
+    fake_backend(scenario, expected_version),
+    fixture.representative_fixture_experiment()
+    )
+}
+
+fn assert_error(result: any, code: String) {
+    assert(backends.solve_failed(result), "expected LaboratoryError, got " + typeof(result))
+    assert(result.code == code, "expected error " + code + ", got " + result.code + ": " + result.message)
+    assert(phase_of(result) == "crystal")
+}
+
+fn test_golden_request() {
+    let experiment = fixture.representative_fixture_experiment()
+    let actual = json_parse(protocol.v1_request_json(experiment))
+    let expected = json_parse(read_file("examples/ballistics_lab/fixtures/representative.request.json"))
+    assert(
+    actual == expected,
+    "canonical v1 request drifted from fixture"
+    )
+}
+
+fn test_success_mapping() {
+    let result = fake_solve("success")
+    if !backends.solve_succeeded(result) {
+        assert(false, "fake success failed: " + result.message)
+    }
+    assert(struct_name(result) == "Trajectory")
+    assert(phase_of(result) == "crystal")
+    assert(result.schema_version == 1)
+    assert(result.engine_version == "0.24.1")
+    assert(!result.verified)
+    assert(typeof(result.resolved_request) == "Map")
+    assert(phase_of(result.resolved_request) == "crystal")
+    assert(result.resolved_request.get("sampling").get("interval_m") == 10.0)
+    assert(len(result.observations) == 6)
+    assert(len(result.assumptions) == 1)
+    assert(len(result.warnings) == 1)
+    assert(result.assumptions[0].code == "default_applied")
+    assert(result.warnings[0].code == "rk45_time_step_ignored")
+    assert(result.summary.actual_range.si_value == 50.0)
+    assert(result.summary.termination == "max_range")
+    assert(result.observations[5].flags == ["terminal"])
+    assert(result.observations[5].windage.si_value < 0)
+}
+
+fn test_engine_errors_preserve_provenance() {
+    let validation = fake_solve("validation-error")
+    assert_error(validation, "invalid_value")
+    assert(validation.path == "$.projectile.mass_kg")
+    assert(validation.exit_code == 2)
+    assert(validation.stderr == nil)
+
+    let located = fake_solve("located-error")
+    assert_error(located, "invalid_json")
+    assert(located.path == nil)
+    assert(located.line == 3)
+    assert(located.column == 18)
+
+    let diagnostic = fake_solve("stderr-error")
+    assert_error(diagnostic, "invalid_value")
+    assert(diagnostic.stderr.contains("fake engine diagnostic"))
+    assert(diagnostic.exit_code == 2)
+
+    let blank_diagnostic = fake_solve("whitespace-stderr-error")
+    assert_error(blank_diagnostic, "invalid_value")
+    assert(blank_diagnostic.stderr == nil)
+    assert(blank_diagnostic.exit_code == 2)
+
+    let resource = fake_solve("resource-error")
+    assert_error(resource, "resource_limit")
+    assert(resource.path == "$.sampling.interval_m")
+    assert(resource.exit_code == 3)
+
+    let internal = fake_solve("internal-error")
+    assert_error(internal, "internal_error")
+    assert(internal.path == nil)
+    assert(internal.exit_code == 1)
+}
+
+fn test_fail_closed_responses() {
+    for scenario in [
+        "contaminated", "trailing", "concatenated", "truncated", "nonfinite",
+        "nonfinite-resolved", "invalid-resolved-altitude", "invalid-resolved-ground",
+        "invalid-resolved-effects", "invalid-resolved-coriolis", "invalid-resolved-zero-range",
+        "nonfinite-sample", "empty-samples", "missing-terminal",
+        "early-terminal", "multiple-terminal", "summary-distance-mismatch",
+        "summary-time-mismatch", "summary-speed-mismatch", "summary-energy-mismatch",
+        "sample-limit-exceeded", "unknown-status", "unknown-field", "exit-mismatch",
+        "malformed-error-location", "unknown-error-field", "success-stderr"
+    ] {
+        assert_error(fake_solve(scenario), "invalid_engine_response")
+    }
+
+    let schema = fake_solve("unknown-schema")
+    assert_error(schema, "unsupported_schema_version")
+    assert(schema.path == "$.schema_version")
+
+    assert_error(fake_solve("wrong-version", "0.24.1"), "incompatible_engine_version")
+}
+
+fn test_hostile_json_parser_integration() {
+    let duplicate = fake_solve("duplicate-envelope-key")
+    assert_error(duplicate, "invalid_engine_response")
+    assert(duplicate.message.contains("duplicate object key"))
+
+    let oversized = fake_solve("oversized-integer")
+    assert_error(oversized, "invalid_engine_response")
+    assert(oversized.message.contains("integer out of signed 64-bit range"))
+
+    let nul_contaminated = backends.solve_with(
+    process.process_backend_with_argv(
+    process_fixture_executable(),
+    ["json-nul-contamination"],
+    nil,
+    limits()
+    ),
+    fixture.representative_fixture_experiment()
+    )
+    assert_error(nul_contaminated, "invalid_engine_response")
+    assert(nul_contaminated.message.contains("embedded NUL byte"))
+}
+
+fn test_optional_notice_paths() {
+    let absent = fake_solve("notice-path-absent")
+    assert(backends.solve_succeeded(absent))
+    assert(absent.assumptions[0].path == nil)
+
+    let null_path = fake_solve("notice-path-null")
+    assert(backends.solve_succeeded(null_path))
+    assert(null_path.assumptions[0].path == nil)
+}
+
+fn test_sample_limit_boundary() {
+    let exact = fake_solve("sample-limit-exact")
+    if backends.solve_failed(exact) {
+        assert(false, "exact 10,000-sample response failed: " + exact.message)
+    }
+    assert(len(exact.observations) == 10000)
+    assert(exact.observations[9999].flags == ["terminal"])
+
+    let rounded = fake_solve("summary-within-tolerance")
+    assert(backends.solve_succeeded(rounded), "tight summary rounding tolerance must be accepted")
+}
+
+fn test_process_and_backend_failures() {
+    let missing = process.process_backend(
+    "lattice-mba-1306-engine-that-does-not-exist",
+    nil,
+    limits()
+    )
+    assert_error(
+    backends.solve_with(missing, fixture.representative_fixture_experiment()),
+    "process_error"
+    )
+
+    let timeout_limits = Map::new()
+    timeout_limits.set("timeout_ms", 100)
+    let timed_out = backends.solve_with(
+    process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "timeout"],
+    nil,
+    timeout_limits
+    ),
+    fixture.representative_fixture_experiment()
+    )
+    assert_error(timed_out, "process_error")
+    assert(timed_out.message.contains("timed out"))
+
+    let stdout_limits = Map::new()
+    stdout_limits.set("max_stdout_bytes", 256)
+    let stdout_overflow = backends.solve_with(
+    process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "stdout-overflow"],
+    nil,
+    stdout_limits
+    ),
+    fixture.representative_fixture_experiment()
+    )
+    assert_error(stdout_overflow, "process_error")
+    assert(stdout_overflow.message.contains("stdout exceeded"))
+
+    let stderr_limits = Map::new()
+    stderr_limits.set("max_stderr_bytes", 256)
+    let stderr_overflow = backends.solve_with(
+    process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "stderr-overflow"],
+    nil,
+    stderr_limits
+    ),
+    fixture.representative_fixture_experiment()
+    )
+    assert_error(stderr_overflow, "process_error")
+    assert(stderr_overflow.message.contains("stderr exceeded"))
+
+    let declared_error = backends.engine_backend("declared-error", |experiment| {
+        return domain.laboratory_error("injected", experiment.name)
+    }
+    )
+    assert_error(
+    backends.solve_with(declared_error, fixture.representative_fixture_experiment()),
+    "injected"
+    )
+    let mutation_error = try {
+        declared_error.name = "changed"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(mutation_error.contains("frozen"), "EngineBackend fix fields must reject mutation")
+
+    let throwing = backends.engine_backend("throwing", |experiment| {
+        return experiment.projectile.mass.si_value / 0
+    }
+    )
+    assert_error(
+    backends.solve_with(throwing, fixture.representative_fixture_experiment()),
+    "backend_contract_error"
+    )
+
+    let wrong_result = backends.engine_backend("wrong-result", |experiment| {
+        return experiment.name
+    }
+    )
+    assert_error(
+    backends.solve_with(wrong_result, fixture.representative_fixture_experiment()),
+    "backend_contract_error"
+    )
+    assert_error(backends.solve_with(123, fixture.representative_fixture_experiment()), "backend_contract_error")
+    assert_error(backends.solve_with(wrong_result, 123), "backend_contract_error")
+
+    let missing_stdout = Map::new()
+    missing_stdout.set("stderr", "typed shape diagnostic")
+    missing_stdout.set("exit_code", 3)
+    let shape_error = process.decode_v1_process_result(
+    fixture.representative_fixture_experiment(),
+    missing_stdout
+    )
+    assert_error(shape_error, "invalid_engine_response")
+    assert(shape_error.stderr == "typed shape diagnostic")
+    assert(shape_error.exit_code == 3)
+
+    let wrong_stdout = Map::new()
+    wrong_stdout.set("stdout", 123)
+    wrong_stdout.set("stderr", "typed field diagnostic")
+    wrong_stdout.set("exit_code", 1)
+    let type_error = process.decode_v1_process_result(
+    fixture.representative_fixture_experiment(),
+    wrong_stdout
+    )
+    assert_error(type_error, "invalid_engine_response")
+    assert(type_error.stderr == "typed field diagnostic")
+    assert(type_error.exit_code == 1)
+}
+
+fn test_configuration_validation() {
+    let bad_option = Map::new()
+    bad_option.set("future", 1)
+    let option_error = try {
+        process.process_backend("ballistics", nil, bad_option)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(option_error.contains("unknown option 'future'"))
+
+    let argv_error = try {
+        process.process_backend_with_argv("ballistics", [], nil, limits())
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(argv_error.contains("argv: must not be empty"))
+}
+
+fn main() {
+    let arguments = args()
+    if len(arguments) >= 2 {
+        let scenario = arguments[1]
+        let result = fake_solve(scenario)
+        if backends.solve_failed(result) {
+            assert(false, scenario + " failed: " + result.message)
+        }
+        print(scenario + ": " + to_string(len(result.observations)) + " samples passed")
+        return
+    }
+    test_golden_request()
+    test_success_mapping()
+    test_engine_errors_preserve_provenance()
+    test_fail_closed_responses()
+    test_hostile_json_parser_integration()
+    test_optional_notice_paths()
+    test_sample_limit_boundary()
+    test_process_and_backend_failures()
+    test_configuration_validation()
+    print("ballistics_lab process backend: all tests passed")
+}

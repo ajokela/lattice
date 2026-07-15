@@ -1,4 +1,6 @@
 #include "json.h"
+#include <errno.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -15,6 +17,65 @@ typedef struct {
     char *err;
     int depth; /* current container nesting depth */
 } JsonParser;
+
+static void json_input_error(char **err, size_t pos, const char *message) {
+    size_t len = strlen(message) + 64;
+    *err = malloc(len);
+    if (!*err) {
+        *err = strdup("json_parse error: out of memory");
+        return;
+    }
+    snprintf(*err, len, "json_parse error at position %zu: %s", pos, message);
+}
+
+static bool utf8_continuation(unsigned char byte) { return byte >= 0x80 && byte <= 0xBF; }
+
+/* Validate the shortest-form UTF-8 scalar encoding. This rejects lone
+ * continuations, overlong sequences, UTF-16 surrogate encodings, truncation,
+ * and values above U+10FFFF. */
+static bool json_valid_utf8(const unsigned char *bytes, size_t len, size_t *bad_pos) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char first = bytes[i];
+        if (first <= 0x7F) {
+            i++;
+            continue;
+        }
+
+        if (first >= 0xC2 && first <= 0xDF) {
+            if (len - i < 2 || !utf8_continuation(bytes[i + 1])) goto invalid;
+            i += 2;
+            continue;
+        }
+
+        if (first >= 0xE0 && first <= 0xEF) {
+            if (len - i < 3 || !utf8_continuation(bytes[i + 2])) goto invalid;
+            unsigned char second = bytes[i + 1];
+            if ((first == 0xE0 && (second < 0xA0 || second > 0xBF)) ||
+                (first == 0xED && (second < 0x80 || second > 0x9F)) ||
+                ((first != 0xE0 && first != 0xED) && !utf8_continuation(second)))
+                goto invalid;
+            i += 3;
+            continue;
+        }
+
+        if (first >= 0xF0 && first <= 0xF4) {
+            if (len - i < 4 || !utf8_continuation(bytes[i + 2]) || !utf8_continuation(bytes[i + 3])) goto invalid;
+            unsigned char second = bytes[i + 1];
+            if ((first == 0xF0 && (second < 0x90 || second > 0xBF)) ||
+                (first == 0xF4 && (second < 0x80 || second > 0x8F)) ||
+                ((first != 0xF0 && first != 0xF4) && !utf8_continuation(second)))
+                goto invalid;
+            i += 4;
+            continue;
+        }
+
+    invalid:
+        *bad_pos = i;
+        return false;
+    }
+    return true;
+}
 
 /* Bound recursion so deeply nested input cannot overflow the C stack. */
 #define JSON_MAX_DEPTH 1000
@@ -79,6 +140,11 @@ static LatValue jp_parse_string(JsonParser *p) {
 
     while (p->src[p->pos] != '\0') {
         char c = p->src[p->pos];
+        if ((unsigned char)c < 0x20) {
+            jp_error(p, "unescaped control character in string");
+            free(buf);
+            return value_unit();
+        }
         if (c == '"') {
             p->pos++; /* consume closing quote */
             buf[len] = '\0';
@@ -279,8 +345,15 @@ static LatValue jp_parse_number(JsonParser *p) {
         double d = strtod(numstr, NULL);
         result = value_float(d);
     } else {
-        int64_t i = strtoll(numstr, NULL, 10);
-        result = value_int(i);
+        char *end = NULL;
+        errno = 0;
+        intmax_t i = strtoimax(numstr, &end, 10);
+        if (errno == ERANGE || end == numstr || *end != '\0' || i < INT64_MIN || i > INT64_MAX) {
+            jp_error(p, "integer out of signed 64-bit range");
+            free(numstr);
+            return value_unit();
+        }
+        result = value_int((int64_t)i);
     }
     free(numstr);
     return result;
@@ -389,8 +462,32 @@ static LatValue jp_parse_object(JsonParser *p) {
             value_free(&map);
             return value_unit();
         }
+
+        /* LatMap keys are NUL-terminated C strings.  Reject an embedded NUL
+         * rather than silently truncating the decoded JSON member name. */
+        if (memchr(key_val.as.str_val, '\0', key_val.as.str_len) != NULL) {
+            jp_error(p, "object key contains an embedded NUL");
+            value_free(&key_val);
+            value_free(&map);
+            return value_unit();
+        }
         char *key = strdup(key_val.as.str_val);
         value_free(&key_val);
+        if (!key) {
+            jp_error(p, "out of memory");
+            value_free(&map);
+            return value_unit();
+        }
+
+        /* JSON member names are compared after escape decoding.  Accepting a
+         * duplicate and overwriting its earlier value makes signed or strict
+         * protocol documents ambiguous, so reject it at every nesting level. */
+        if (lat_map_get(map.as.map.map, key) != NULL) {
+            jp_error(p, "duplicate object key");
+            free(key);
+            value_free(&map);
+            return value_unit();
+        }
 
         jp_skip_ws(p);
         if (jp_peek(p) != ':') {
@@ -409,11 +506,6 @@ static LatValue jp_parse_object(JsonParser *p) {
             return value_unit();
         }
 
-        /* Duplicate keys: lat_map_set overwrites the inline LatValue in place
-         * without freeing the previous one, so free any existing value first to
-         * avoid leaking its heap data. */
-        LatValue *old = (LatValue *)lat_map_get(map.as.map.map, key);
-        if (old) value_free(old);
         lat_map_set(map.as.map.map, key, &val);
         free(key);
 
@@ -485,7 +577,7 @@ static LatValue jp_parse_value(JsonParser *p) {
 
 /* ── Public API: json_parse ── */
 
-LatValue json_parse(const char *json, char **err) {
+static LatValue json_parse_cstr(const char *json, char **err) {
     *err = NULL;
     JsonParser p = {.src = json, .pos = 0, .err = NULL};
 
@@ -506,6 +598,49 @@ LatValue json_parse(const char *json, char **err) {
     }
 
     return result;
+}
+
+LatValue json_parse_len(const char *json, size_t len, char **err) {
+    *err = NULL;
+    if (!json) {
+        *err = strdup("json_parse error: input is NULL");
+        return value_unit();
+    }
+    if (len == SIZE_MAX) {
+        *err = strdup("json_parse error: input is too large");
+        return value_unit();
+    }
+
+    const char *nul = memchr(json, '\0', len);
+    if (nul) {
+        json_input_error(err, (size_t)(nul - json), "input contains an embedded NUL byte");
+        return value_unit();
+    }
+
+    size_t bad_pos = 0;
+    if (!json_valid_utf8((const unsigned char *)json, len, &bad_pos)) {
+        json_input_error(err, bad_pos, "input contains malformed UTF-8");
+        return value_unit();
+    }
+
+    char *terminated = malloc(len + 1);
+    if (!terminated) {
+        *err = strdup("json_parse error: out of memory");
+        return value_unit();
+    }
+    memcpy(terminated, json, len);
+    terminated[len] = '\0';
+    LatValue result = json_parse_cstr(terminated, err);
+    free(terminated);
+    return result;
+}
+
+LatValue json_parse(const char *json, char **err) {
+    if (!json) {
+        *err = strdup("json_parse error: input is NULL");
+        return value_unit();
+    }
+    return json_parse_len(json, strlen(json), err);
 }
 
 /* ========================================================================
@@ -547,11 +682,11 @@ static void jb_append_char(JsonBuf *b, char c) {
     b->buf[b->len++] = c;
 }
 
-/* Append a JSON-escaped string (with surrounding quotes) */
-static void jb_append_escaped_string(JsonBuf *b, const char *s) {
+/* Append exactly len bytes as a JSON-escaped string (with surrounding quotes). */
+static void jb_append_escaped_string(JsonBuf *b, const char *s, size_t len) {
     jb_append_char(b, '"');
-    for (const char *p = s; *p; p++) {
-        unsigned char c = (unsigned char)*p;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
         switch (c) {
             case '"': jb_append_str(b, "\\\""); break;
             case '\\': jb_append_str(b, "\\\\"); break;
@@ -598,7 +733,11 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
             return true;
         }
         case VAL_BOOL: jb_append_str(b, val->as.bool_val ? "true" : "false"); return true;
-        case VAL_STR: jb_append_escaped_string(b, val->as.str_val); return true;
+        case VAL_STR: {
+            size_t len = val->as.str_len ? val->as.str_len : strlen(val->as.str_val);
+            jb_append_escaped_string(b, val->as.str_val, len);
+            return true;
+        }
         case VAL_UNIT:
         case VAL_NIL: jb_append_str(b, "null"); return true;
         case VAL_ARRAY: {
@@ -618,7 +757,7 @@ static bool jb_serialize(JsonBuf *b, const LatValue *val, char **err) {
                 if (m->entries[i].state != MAP_OCCUPIED) continue;
                 if (!first) jb_append_char(b, ',');
                 first = false;
-                jb_append_escaped_string(b, m->entries[i].key);
+                jb_append_escaped_string(b, m->entries[i].key, strlen(m->entries[i].key));
                 jb_append_char(b, ':');
                 LatValue *mv = (LatValue *)m->entries[i].value;
                 if (!jb_serialize(b, mv, err)) return false;

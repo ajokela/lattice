@@ -442,7 +442,7 @@ for i in 0..5 {
 ```lattice
 loop {
     let line = input("> ")
-    if typeof(line) == "Unit" { break }
+    if line == nil { break }
     print(line)
 }
 ```
@@ -944,7 +944,7 @@ import { parse } from "json"
 | `crypto` | `sha256`, `md5`, `base64_encode`, `base64_decode`, `url_encode`, `url_decode` |
 | `http` | `get`, `post`, `request` |
 | `net` | `tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_read`, `tcp_read_bytes`, `tcp_write`, `tcp_close`, `tcp_peer_addr`, `tcp_set_timeout`, `tls_connect`, `tls_read`, `tls_read_bytes`, `tls_write`, `tls_close`, `tls_available` |
-| `os` | `exec`, `shell`, `env`, `env_set`, `env_keys`, `cwd`, `platform`, `hostname`, `pid`, `args` |
+| `os` | `exec`, `exec_argv`, `shell`, `env`, `env_set`, `env_keys`, `cwd`, `platform`, `hostname`, `pid`, `args` |
 | `time` | `now`, `sleep`, `format`, `parse` |
 | `regex` | `match`, `find_all`, `replace` |
 
@@ -1200,7 +1200,7 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `print(args...)` | Print values to stdout with newline |
 | `eprint(args...)` | Print to stderr with newline |
 | `print_raw(args...)` | Print to stdout without newline |
-| `input(prompt?)` | Read a line from stdin (Unit on EOF) |
+| `input(prompt?)` | Read a line from stdin (`nil` on EOF) |
 | `typeof(val)` | Type name of a value (`"Int"`, `"String"`, etc.) |
 | `phase_of(val)` | Phase of a value (`"fluid"`, `"crystal"`, `"sublimated"`, `"unphased"`) |
 | `to_string(val)` | Convert any value to its string representation |
@@ -1397,11 +1397,50 @@ Lattice ships with 120+ builtin functions and 70+ type methods covering I/O, mat
 | `env_keys()` | Array of all environment variable names |
 | `cwd()` | Current working directory |
 | `args()` | Command-line arguments as array |
-| `exec(cmd)` | Run shell command, return stdout (error on non-zero exit) |
-| `shell(cmd)` | Run shell command, return Map with `stdout`, `stderr`, `exit_code` |
+| `exec(cmd)` | Run a command through the platform shell; return stdout (error on non-zero exit) |
+| `exec_argv(program, args, stdin, options = nil)` | Run a program directly, optionally with timeout/output bounds; return a Map with `stdout`, `stderr`, `exit_code` |
+| `shell(cmd)` | Run a command through the platform shell; return a Map with `stdout`, `stderr`, `exit_code` |
 | `platform()` | OS name (`"macos"`, `"linux"`, `"windows"`, `"wasm"`) |
 | `hostname()` | System hostname |
 | `pid()` | Current process ID |
+
+`exec_argv` takes the executable name, an array of argument strings that excludes
+`argv[0]`, and either a String to write to standard input or `nil` to close it
+immediately. An optional Map accepts positive integer `timeout_ms`,
+`max_stdout_bytes`, and `max_stderr_bytes` values. A non-zero child exit is
+returned as `exit_code` data; failures to start or communicate with the process,
+timeouts, and exceeded output limits raise catchable errors.
+
+POSIX example:
+
+```lattice
+let result = exec_argv("printf", ["%s", "hello; not shell syntax"], nil)
+print(result.get("stdout"))
+```
+
+Bounded example:
+
+```lattice
+let limits = Map::new()
+limits.set("timeout_ms", 5000)
+limits.set("max_stdout_bytes", 1048576)
+limits.set("max_stderr_bytes", 262144)
+let result = exec_argv("solver", ["--json"], "{}", limits)
+```
+
+Omitting options, passing `nil`, or passing an empty Map keeps the original
+unbounded behavior. When any limit is present, the child is a managed invocation:
+timeouts and output overruns terminate its contained descendants as well as the
+primary process. Captured strings never grow past their configured ceiling (plus
+the terminating NUL byte); each reader uses a fixed 8 KiB stack buffer while
+draining its pipe.
+
+Because it never parses a shell command, `exec_argv` avoids shell-injection and
+quoting hazards in argument data. It is not a sandbox: the child still runs with
+the Lattice process's operating-system permissions, environment, and working
+directory. The compatibility APIs `exec` and `shell` do invoke a platform shell,
+so do not interpolate untrusted values into their command strings. Browser/WASM
+builds report `exec_argv: not available in browser` as a catchable error.
 
 ### Date & Time
 

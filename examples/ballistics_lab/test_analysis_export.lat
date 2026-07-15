@@ -1,0 +1,399 @@
+// MBA-1307 deterministic AnalysisTable presentation/export tests.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/analysis" as calculations
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/fixture_experiment" as fixture
+import "examples/ballistics_lab/analysis_export" as presentation
+
+// Malformed inputs use the public structural shape without thawing real
+// frozen analysis graphs. Valid and snapshot coverage below exclusively uses
+// AnalysisTable values returned by analysis.lat.
+struct AnalysisTable {
+    kind: fix String,
+    title: fix String,
+    columns: fix Array,
+    rows: fix Array,
+    provenance: fix Array
+}
+
+struct TrajectoryProvenance {
+    series_name: fix String,
+    schema_version: fix Int,
+    engine_version: fix String,
+    solver_method: fix any,
+    verified: fix Bool,
+    assumptions: fix Array,
+    warnings: fix Array,
+    termination: fix String,
+    actual_range: fix any
+}
+
+fn assert_message_contains(message: String, expected: String, label: String) {
+    assert(message != "NO_ERROR", label + ": expected an error")
+    assert(message.contains(expected), label + ": unexpected error: " + message)
+}
+
+fn fixture_trajectory(name: String = "solve-json v1 representative fixture") -> any {
+    let base = fixture.representative_fixture_experiment()
+    let experiment = domain.experiment(
+    name,
+    base.projectile,
+    base.rifle,
+    base.atmosphere,
+    base.winds,
+    base.shot,
+    base.solver
+    )
+    let result = Map::new()
+    result.set("stdout", read_file("examples/ballistics_lab/fixtures/representative.success.json"))
+    result.set("stderr", "")
+    result.set("exit_code", 0)
+    return process.decode_v1_process_result(experiment, result, "0.24.1")
+}
+
+fn representative_table() -> any {
+    return calculations.dope(
+    fixture_trajectory("Series, \"one\" |\n\\ tail"),
+    [units.yd(10)],
+    "in",
+    "moa",
+    "ft/s",
+    "ft-lb"
+    )
+}
+
+fn test_map_and_json_are_programmable_and_complete() {
+    let source = representative_table()
+    let mapped = presentation.table_to_map(source)
+    assert(mapped.get("kind") == "dope")
+    assert(mapped.get("title") == "DOPE: Series, \"one\" |\n\\ tail")
+    assert(mapped.get("columns")[0].get("key") == "distance")
+    assert(mapped.get("columns")[0].get("unit") == "yd")
+    assert(mapped.get("columns")[1].get("key") == "drop")
+    assert(mapped.get("rows")[0].get("distance") == 10)
+
+    let provenance = mapped.get("provenance")[0]
+    assert(provenance.get("series_name") == "Series, \"one\" |\n\\ tail")
+    assert(provenance.get("schema_version") == 1)
+    assert(provenance.get("engine_version") == "0.24.1")
+    assert(provenance.get("solver_method") == "rk45")
+    assert(provenance.get("verified") == false)
+    assert(provenance.get("termination") == "max_range")
+    assert(provenance.get("assumptions")[0].get("code") == "default_applied")
+    assert(provenance.get("warnings")[0].get("code") == "rk45_time_step_ignored")
+    assert(provenance.get("actual_range").get("si_value_m") == 50)
+    assert(provenance.get("actual_range").get("display_value") == 50)
+    assert(provenance.get("actual_range").get("display_unit") == "m")
+
+    // Returned row Maps are independent presentation values, not source aliases.
+    let mapped_row = mapped.get("rows")[0]
+    mapped_row.set("distance", 999)
+    assert(source.rows[0].get("distance") == 10)
+
+    let actual = presentation.table_to_json(source)
+    let expected =
+    "{\"kind\":\"dope\",\"title\":\"DOPE: Series, \\\"one\\\" |\\n\\\\ tail\"," +
+    "\"columns\":[" +
+    "{\"key\":\"distance\",\"label\":\"Distance\",\"unit\":\"yd\"}," +
+    "{\"key\":\"drop\",\"label\":\"Drop\",\"unit\":\"in\"}," +
+    "{\"key\":\"come_up\",\"label\":\"Come-up\",\"unit\":\"moa\"}," +
+    "{\"key\":\"velocity\",\"label\":\"Velocity\",\"unit\":\"ft/s\"}," +
+    "{\"key\":\"energy\",\"label\":\"Energy\",\"unit\":\"ft-lb\"}," +
+    "{\"key\":\"time_s\",\"label\":\"Time\",\"unit\":\"s\"}," +
+    "{\"key\":\"mach\",\"label\":\"Mach\",\"unit\":null}]," +
+    "\"rows\":[{" +
+    "\"distance\":10,\"drop\":1.6352505232707459," +
+    "\"come_up\":-15.615384841207787," +
+    "\"velocity\":2681.6489324705349," +
+    "\"energy\":2793.9419593998323," +
+    "\"time_s\":0.011153282265516186," +
+    "\"mach\":2.3778452818095759}]," +
+    "\"provenance\":[{" +
+    "\"series_name\":\"Series, \\\"one\\\" |\\n\\\\ tail\"," +
+    "\"schema_version\":1,\"engine_version\":\"0.24.1\"," +
+    "\"solver_method\":\"rk45\",\"verified\":false," +
+    "\"assumptions\":[{" +
+    "\"code\":\"default_applied\"," +
+    "\"message\":\"Constant vertical wind speed defaulted to 0 m/s.\"," +
+    "\"path\":\"$.wind.vertical_speed_mps\"}]," +
+    "\"warnings\":[{" +
+    "\"code\":\"rk45_time_step_ignored\"," +
+    "\"message\":\"Adaptive RK45 owns its time step; the explicitly supplied fixed time step " +
+    "is retained in resolved_request but ignored by integration.\"," +
+    "\"path\":\"$.solver.time_step_s\"}]," +
+    "\"termination\":\"max_range\"," +
+    "\"actual_range\":{\"si_value_m\":50,\"display_value\":50," +
+    "\"display_unit\":\"m\"}}]}"
+    assert(actual == expected, "canonical JSON snapshot mismatch:\n" + actual)
+
+    let decoded = json_parse(actual)
+    assert(decoded.get("rows")[0].get("distance") == 10)
+    assert(decoded.get("provenance")[0].get("engine_version") == "0.24.1")
+    assert(decoded.get("provenance")[0].get("assumptions")[0].get("path") == "$.wind.vertical_speed_mps")
+}
+
+fn test_csv_snapshot_and_escaping() {
+    let actual = presentation.table_to_csv(representative_table())
+    let expected =
+    "Distance (yd),Drop (in),Come-up (moa),Velocity (ft/s),Energy (ft-lb)," +
+    "Time (s),Mach,Table kind,Table title,Provenance index,Series name," +
+    "Schema version,Engine version,Solver method,Verified,Termination," +
+    "Actual range (m),Actual range value,Actual range unit,Assumptions,Warnings\n" +
+    "10,1.6352505232707459,-15.615384841207787,2681.6489324705349," +
+    "2793.9419593998323,0.011153282265516186,2.3778452818095759,dope," +
+    "\"DOPE: Series, \"\"one\"\" |\n\\ tail\",0," +
+    "\"Series, \"\"one\"\" |\n\\ tail\",1,0.24.1,rk45,false,max_range,50,50,m," +
+    "\"[{\"\"code\"\":\"\"default_applied\"\"," +
+    "\"\"message\"\":\"\"Constant vertical wind speed defaulted to 0 m/s.\"\"," +
+    "\"\"path\"\":\"\"$.wind.vertical_speed_mps\"\"}]\"," +
+    "\"[{\"\"code\"\":\"\"rk45_time_step_ignored\"\"," +
+    "\"\"message\"\":\"\"Adaptive RK45 owns its time step; the explicitly supplied " +
+    "fixed time step is retained in resolved_request but ignored by integration.\"\"," +
+    "\"\"path\"\":\"\"$.solver.time_step_s\"\"}]\""
+    assert(actual == expected, "CSV snapshot mismatch:\n" + actual)
+}
+
+fn test_plain_text_snapshot() {
+    let actual = presentation.render_table(representative_table())
+    let expected =
+    "title: DOPE: Series, \"one\" \\|\\n\\\\ tail\n" +
+    "kind: dope\n" +
+    "rows:\n" +
+    "  Distance (yd) | Drop (in) | Come-up (moa) | Velocity (ft/s) | " +
+    "Energy (ft-lb) | Time (s) | Mach\n" +
+    "  10 | 1.6352505232707459 | -15.615384841207787 | " +
+    "2681.6489324705349 | 2793.9419593998323 | 0.011153282265516186 | " +
+    "2.3778452818095759\n" +
+    "provenance:\n" +
+    "  [0] Series, \"one\" \\|\\n\\\\ tail\n" +
+    "    schema_version: 1\n" +
+    "    engine_version: 0.24.1\n" +
+    "    solver_method: rk45\n" +
+    "    verified: false\n" +
+    "    termination: max_range\n" +
+    "    actual_range: 50 m (50 m SI)\n" +
+    "    assumptions:\n" +
+    "      - default_applied: Constant vertical wind speed defaulted to 0 m/s. " +
+    "[$.wind.vertical_speed_mps]\n" +
+    "    warnings:\n" +
+    "      - rk45_time_step_ignored: Adaptive RK45 owns its time step; the explicitly " +
+    "supplied fixed time step is retained in resolved_request but ignored by integration. " +
+    "[$.solver.time_step_s]"
+    assert(actual == expected, "plain-text snapshot mismatch:\n" + actual)
+}
+
+fn comparison_table() -> any {
+    return calculations.compare_trajectories([
+        fixture_trajectory("first"),
+        fixture_trajectory("second")
+    ])
+}
+
+fn test_multi_series_csv_uses_row_provenance() {
+    let csv = presentation.table_to_csv(comparison_table())
+    assert(csv.contains(",comparison,Trajectory comparison,0,first,1,0.24.1,rk45,false"))
+    assert(csv.contains(",comparison,Trajectory comparison,1,second,1,0.24.1,rk45,false"))
+}
+
+fn test_invalid_tables_are_rejected() {
+    let top_level_error = try {
+        presentation.table_to_map(42)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    top_level_error,
+    "expected AnalysisTable",
+    "top-level type"
+    )
+
+    let valid = representative_table()
+    let duplicate_columns = AnalysisTable {
+        kind: valid.kind,
+        title: valid.title,
+        columns: [valid.columns[0], valid.columns[0]],
+        rows: [Map::new()],
+        provenance: valid.provenance
+    }
+    let duplicate_error = try {
+        presentation.table_to_json(duplicate_columns)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    duplicate_error,
+    "duplicate column key 'distance'",
+    "duplicate columns"
+    )
+
+    let missing_map = presentation.table_to_map(valid)
+    let missing_row = missing_map.get("rows")[0]
+    missing_row.remove("distance")
+    let missing = AnalysisTable {
+        kind: valid.kind,
+        title: valid.title,
+        columns: valid.columns,
+        rows: [missing_row],
+        provenance: valid.provenance
+    }
+    let missing_error = try {
+        presentation.table_to_csv(missing)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    missing_error,
+    "exactly the declared column keys",
+    "missing row field"
+    )
+
+    let nested_map = presentation.table_to_map(valid)
+    let nested_row = nested_map.get("rows")[0]
+    nested_row.set("distance", Map::new())
+    let nested = AnalysisTable {
+        kind: valid.kind,
+        title: valid.title,
+        columns: valid.columns,
+        rows: [nested_row],
+        provenance: valid.provenance
+    }
+    let nested_error = try {
+        presentation.render_table(nested)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    nested_error,
+    "expected a JSON/CSV scalar",
+    "nested row value"
+    )
+
+    let nonfinite_map = presentation.table_to_map(valid)
+    let nonfinite_row = nonfinite_map.get("rows")[0]
+    nonfinite_row.set("distance", 0.0 / 0.0)
+    let nonfinite = AnalysisTable {
+        kind: valid.kind,
+        title: valid.title,
+        columns: valid.columns,
+        rows: [nonfinite_row],
+        provenance: valid.provenance
+    }
+    let nonfinite_error = try {
+        presentation.table_to_json(nonfinite)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    nonfinite_error,
+    "must be finite",
+    "non-finite row value"
+    )
+
+    let no_rows = AnalysisTable {
+        kind: valid.kind,
+        title: valid.title,
+        columns: valid.columns,
+        rows: [],
+        provenance: valid.provenance
+    }
+    let no_rows_error = try {
+        presentation.table_to_map(no_rows)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    no_rows_error,
+    "rows: must not be empty",
+    "empty rows"
+    )
+
+    let comparison = comparison_table()
+    let comparison_map = presentation.table_to_map(comparison)
+    let bad_series_row = comparison_map.get("rows")[0]
+    bad_series_row.set("series_index", 2)
+    let bad_series = AnalysisTable {
+        kind: comparison.kind,
+        title: comparison.title,
+        columns: comparison.columns,
+        rows: [bad_series_row],
+        provenance: comparison.provenance
+    }
+    let bad_series_error = try {
+        presentation.table_to_csv(bad_series)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    bad_series_error,
+    "must select an existing provenance entry",
+    "provenance index"
+    )
+
+    let bad_provenance = AnalysisTable {
+        kind: valid.kind,
+        title: valid.title,
+        columns: valid.columns,
+        rows: valid.rows,
+        provenance: [50]
+    }
+    let bad_provenance_error = try {
+        presentation.table_to_json(bad_provenance)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    bad_provenance_error,
+    "expected TrajectoryProvenance",
+    "invalid provenance"
+    )
+
+    let source_provenance = valid.provenance[0]
+    let invalid_range = TrajectoryProvenance {
+        series_name: source_provenance.series_name,
+        schema_version: source_provenance.schema_version,
+        engine_version: source_provenance.engine_version,
+        solver_method: source_provenance.solver_method,
+        verified: source_provenance.verified,
+        assumptions: source_provenance.assumptions,
+        warnings: source_provenance.warnings,
+        termination: source_provenance.termination,
+        actual_range: 50
+    }
+    let invalid_range_table = AnalysisTable {
+        kind: valid.kind,
+        title: valid.title,
+        columns: valid.columns,
+        rows: valid.rows,
+        provenance: [invalid_range]
+    }
+    let invalid_range_error = try {
+        presentation.table_to_json(invalid_range_table)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_message_contains(
+    invalid_range_error,
+    "actual_range: expected Distance",
+    "invalid actual range"
+    )
+}
+
+fn main() {
+    test_map_and_json_are_programmable_and_complete()
+    test_csv_snapshot_and_escaping()
+    test_plain_text_snapshot()
+    test_multi_series_csv_uses_row_provenance()
+    test_invalid_tables_are_rejected()
+    print("ballistics_lab analysis export: all tests passed")
+}

@@ -1,0 +1,256 @@
+// MBA-1311 pure colon-command parser tests. Run unchanged on every backend.
+
+import "examples/ballistics_lab/command_parser" as parser
+
+fn parsed(line: String) -> any {
+    let result = parser.parse_command(line)
+    assert(parser.parse_succeeded(result), "expected success for " + repr(line))
+    assert(!parser.parse_failed(result), "success was classified as failure")
+    assert(struct_name(result) == "ColonCommand")
+    assert(phase_of(result) == "crystal", "parsed command must be frozen")
+    assert(phase_of(result.args) == "crystal", "parsed arguments must be frozen")
+    return result
+}
+
+fn failed(line: any, code: String, path: any) -> any {
+    let result = parser.parse_command(line)
+    assert(parser.parse_failed(result), "expected failure for " + repr(line))
+    assert(!parser.parse_succeeded(result), "failure was classified as success")
+    assert(phase_of(result) == "crystal", "parse errors must be frozen")
+    assert(result.code == code, "unexpected error code for " + repr(line) + ": " + result.code)
+    assert(result.path == path, "unexpected error path for " + repr(line))
+    if path != nil {
+        assert(result.line == nil && result.column == nil, "path errors must not carry source locations")
+    }
+    return result
+}
+
+fn syntax_error(line: String, column: Int) -> any {
+    let result = failed(line, "command_syntax", nil)
+    assert(result.line == 1, "syntax errors must identify line 1")
+    assert(
+    result.column == column,
+    "unexpected syntax column for " + repr(line) +
+    ": expected " + to_string(column) + ", got " + to_string(result.column)
+    )
+    return result
+}
+
+fn test_zero_arity_command_table() {
+    let names = ["help", "show", "solve", "compare", "reset", "quit"]
+    for name in names {
+        let command = parsed(":" + name)
+        assert(command.name == name)
+        assert(len(command.args.keys()) == 0)
+
+        let spaced = parsed(" \t : " + name + " \t ")
+        assert(spaced.name == name)
+        assert(len(spaced.args.keys()) == 0)
+
+        let arity = failed(":" + name + " extra", "command_arity", "arguments")
+        assert(arity.message.contains("expects 0"))
+    }
+}
+
+fn test_at_command_table() {
+    let units = ["m", "km", "yd", "ft", "in"]
+    for unit in units {
+        let command = parsed(":at 125.5 " + unit)
+        assert(command.name == "at")
+        assert(len(command.args.keys()) == 2)
+        assert(command.args.get("distance") == 125.5)
+        assert(typeof(command.args.get("distance")) == "Float")
+        assert(command.args.get("unit") == unit)
+    }
+
+    assert(parsed(":at 0 m").args.get("distance") == 0.0)
+    assert(parsed(":at +1.25e3 yd").args.get("distance") == 1250.0)
+    failed(":at", "command_arity", "arguments")
+    failed(":at 100", "command_arity", "arguments")
+    failed(":at 100 yd extra", "command_arity", "arguments")
+    failed(":at nope yd", "command_argument", "arguments[0]")
+    failed(":at 1yard yd", "command_argument", "arguments[0]")
+    failed(":at NaN yd", "command_argument", "arguments[0]")
+    failed(":at inf yd", "command_argument", "arguments[0]")
+    failed(":at 1e309 yd", "command_argument", "arguments[0]")
+    failed(":at -0.01 yd", "command_argument", "arguments[0]")
+    failed(":at 100 meter", "command_argument", "arguments[1]")
+    failed(":at 100 YD", "command_argument", "arguments[1]")
+}
+
+fn test_table_command_table() {
+    for name in ["dope", "wind-card"] {
+        let command = parsed(":" + name + " 100 1000 25 yd")
+        assert(command.name == name)
+        assert(len(command.args.keys()) == 4)
+        assert(command.args.get("start") == 100.0)
+        assert(command.args.get("stop") == 1000.0)
+        assert(command.args.get("interval") == 25.0)
+        assert(command.args.get("unit") == "yd")
+
+        failed(":" + name, "command_arity", "arguments")
+        failed(":" + name + " 100 1000 25", "command_arity", "arguments")
+        failed(":" + name + " 100 1000 25 yd extra", "command_arity", "arguments")
+        failed(":" + name + " nope 1000 25 yd", "command_argument", "arguments[0]")
+        failed(":" + name + " 100 nope 25 yd", "command_argument", "arguments[1]")
+        failed(":" + name + " 100 1000 nope yd", "command_argument", "arguments[2]")
+        failed(":" + name + " 100 1000 25 meter", "command_argument", "arguments[3]")
+        failed(":" + name + " 0 1000 25 yd", "command_argument", "arguments[0]")
+        failed(":" + name + " -1 1000 25 yd", "command_argument", "arguments[0]")
+        failed(":" + name + " 100 100 25 yd", "command_argument", "arguments[1]")
+        failed(":" + name + " 100 50 25 yd", "command_argument", "arguments[1]")
+        failed(":" + name + " 100 1000 0 yd", "command_argument", "arguments[2]")
+        failed(":" + name + " 100 1000 -25 yd", "command_argument", "arguments[2]")
+    }
+}
+
+fn test_paths_quotes_and_backslashes() {
+    let simple = parsed(":save experiment.lat")
+    assert(simple.name == "save")
+    assert(simple.args.get("path") == "experiment.lat")
+
+    let spaces = parsed(":load \"reports/run 1.lat\"")
+    assert(spaces.name == "load")
+    assert(spaces.args.get("path") == "reports/run 1.lat")
+
+    let single = parsed(":save 'reports/reviewed run.lat'")
+    assert(single.args.get("path") == "reports/reviewed run.lat")
+
+    let windows_unquoted = parsed(":load C:\\Users\\alex\\experiment.lat")
+    assert(windows_unquoted.args.get("path") == "C:\\Users\\alex\\experiment.lat")
+
+    // Backslashes before ordinary characters remain literal inside quotes.
+    let windows_quoted = parsed(":load \"C:\\Users\\alex\\experiment.lat\"")
+    assert(windows_quoted.args.get("path") == "C:\\Users\\alex\\experiment.lat")
+
+    let escaped_double = parsed(":save \"say \\\"hello\\\".lat\"")
+    assert(escaped_double.args.get("path") == "say \"hello\".lat")
+
+    let escaped_single = parsed(":save 'pilot\\'s run.lat'")
+    assert(escaped_single.args.get("path") == "pilot's run.lat")
+
+    let doubled_slash = parsed(":save \"C:\\\\range\\\\run.lat\"")
+    assert(doubled_slash.args.get("path") == "C:\\range\\run.lat")
+
+    let nonmatching_escape = parsed(":save 'say \\\"hello\\\".lat'")
+    assert(nonmatching_escape.args.get("path") == "say \\\"hello\\\".lat")
+
+    let trailing_slash = parsed(":save \"C:\\tmp\\\\\"")
+    assert(trailing_slash.args.get("path") == "C:\\tmp\\")
+
+    let quoted_tab = parsed(":save \"reports/run\t1.lat\"")
+    assert(quoted_tab.args.get("path") == "reports/run\t1.lat")
+
+    let unicode = parsed(":save \"résultats/été.lat\"")
+    assert(unicode.args.get("path") == "résultats/été.lat")
+
+    failed(":save", "command_arity", "arguments")
+    failed(":load one two", "command_arity", "arguments")
+    failed(":save \"\"", "command_argument", "arguments[0]")
+}
+
+fn test_lexer_rejections_and_locations() {
+    syntax_error("", 1)
+    syntax_error("   \t", 5)
+    syntax_error("help", 1)
+    syntax_error("  help", 3)
+    syntax_error(":", 2)
+    syntax_error(":   ", 5)
+    syntax_error(":\"help\"", 2)
+
+    syntax_error(":save \"unterminated", 7)
+    syntax_error(":save 'unterminated", 7)
+    syntax_error(":save \"foo\"bar", 12)
+    syntax_error(":save foo\"bar\"", 10)
+    syntax_error(":save 'foo'\"bar\"", 12)
+
+    let dangling = ":save \"foo" + "\\"
+    syntax_error(dangling, 11)
+
+    syntax_error(":help\n", 6)
+    syntax_error(":help\r", 6)
+    syntax_error(":he" + chr(27) + "lp", 4)
+    syntax_error(":he" + chr(11) + "lp", 4)
+    syntax_error(":he" + chr(127) + "lp", 4)
+
+    let unknown = failed(":launch", "unknown_command", "command")
+    assert(unknown.line == nil && unknown.column == nil)
+    failed(42, "command_argument", "command")
+}
+
+fn test_resource_bounds() {
+    let exactly_4096 = ":save " + "x".repeat(4090)
+    assert(len(exactly_4096) == 4096)
+    assert(len(parsed(exactly_4096).args.get("path")) == 4090)
+
+    let too_long = exactly_4096 + "x"
+    let length_error = failed(too_long, "resource_limit", "command")
+    assert(length_error.message.contains("4096-byte"))
+
+    let quoted_4096 = ":save \"" + "x".repeat(4088) + "\""
+    assert(len(quoted_4096) == 4096)
+    assert(len(parsed(quoted_4096).args.get("path")) == 4088)
+
+    flux sixteen = ":unknown"
+    flux index = 0
+    while index < 16 {
+        sixteen = sixteen + " a"
+        index = index + 1
+    }
+    failed(sixteen, "unknown_command", "command")
+
+    let seventeen = sixteen + " a"
+    let argument_error = failed(seventeen, "resource_limit", "arguments")
+    assert(argument_error.message.contains("16-argument"))
+}
+
+fn test_injection_text_is_inert() {
+    failed(":solve;quit", "unknown_command", "command")
+    failed(":solve :quit", "command_arity", "arguments")
+    failed("solve_session(lab)", "command_syntax", nil)
+    syntax_error(":save \"safe.lat\";:quit", 17)
+
+    let marker = tempfile()
+    delete_file(marker)
+    let shell_text = "$(touch " + marker + ")"
+    let shell_command = parsed(":save \"" + shell_text + "\"")
+    assert(shell_command.args.get("path") == shell_text)
+    assert(!is_file(marker), "parser executed shell-shaped path text")
+
+    let source_text = "assert(false, 'executed')"
+    let source_command = parsed(":load \"" + source_text + "\"")
+    assert(source_command.args.get("path") == source_text)
+}
+
+fn test_command_immutability() {
+    assert(!parser.parse_succeeded(42))
+    assert(!parser.parse_failed(42))
+    let command = parsed(":at 100 yd")
+    let field_error = try {
+        command.name = "quit"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(field_error.contains("frozen"))
+
+    let map_error = try {
+        command.args.set("distance", 0)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(map_error.contains("frozen"))
+}
+
+fn main() {
+    test_zero_arity_command_table()
+    test_at_command_table()
+    test_table_command_table()
+    test_paths_quotes_and_backslashes()
+    test_lexer_rejections_and_locations()
+    test_resource_bounds()
+    test_injection_text_is_inert()
+    test_command_immutability()
+    print("ballistics_lab command parser: all tests passed")
+}

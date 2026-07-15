@@ -1,0 +1,630 @@
+// Mutable experimentation sessions over the transport-independent ballistics backend.
+//
+// A LabSession owns only Lattice values and backend configuration. In particular, it
+// never retains a child-process handle: process_backend's closure remains process-per-solve.
+// Experiments, trajectories, and protocol Maps are immutable snapshots. A session keeps
+// its complete mutable state behind one Ref and replaces that state transactionally.
+
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+
+export struct DisplayPreferences {
+    distance_unit: fix String,
+    velocity_unit: fix String,
+    energy_unit: fix String,
+    angle_unit: fix String,
+    precision: fix Int
+}
+
+// RunRecord is an immutable alloy wrapper. Its fields are `fix`, and every composite
+// payload placed in it is already frozen by the domain/backend boundary. Avoid freezing
+// the outer wrapper again: a trajectory may contain 10,000 samples, and alloy fields give
+// us immutability without copying that already-frozen graph into another crystal region.
+export struct RunRecord {
+    backend_name: fix String,
+    experiment: fix any,
+    result: fix any,
+    resolved_request: fix Map,
+    schema_version: fix Int,
+    engine_version: fix String,
+    assumptions: fix Array,
+    warnings: fix Array,
+    termination: fix String
+}
+
+// Lattice values are passed by value. Keep the complete mutable state behind one Ref so
+// module operations update every alias and can publish a prepared transition with one set().
+// The state struct is private; exported accessors return its current values. The public
+// wrapper field must remain `flux`: a `fix` field freezes the Ref and disables Ref.set().
+// Callers should treat the field as an implementation detail and use the operations below.
+struct LabSessionState {
+    experiment: any,
+    backend: any,
+    display: any,
+    history_limit: Int,
+    history: Array,
+    current_run: any,
+    previous_run: any
+}
+
+export struct LabSession {
+    state: flux any
+}
+
+fn _is_struct(value: any, expected: String) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == expected
+}
+
+fn _require_struct(value: any, expected: String, field: String) {
+    if !_is_struct(value, expected) {
+        assert(false, field + ": expected " + expected + ", got " + typeof(value))
+    }
+}
+
+fn _choice(value: any, choices: Array, field: String) -> String {
+    if typeof(value) != "String" {
+        assert(false, field + ": expected String, got " + typeof(value))
+    }
+    if !choices.contains(value) {
+        assert(false, field + ": unsupported value '" + value + "'; expected one of " + repr(choices))
+    }
+    return value
+}
+
+fn _history_limit(value: any) -> Int {
+    if typeof(value) != "Int" {
+        assert(false, "session.history_limit: expected Int, got " + typeof(value))
+    }
+    if value < 0 {
+        assert(false, "session.history_limit: must be non-negative")
+    }
+    return value
+}
+
+fn _checked_backend(value: any) -> any {
+    _require_struct(value, "EngineBackend", "session.backend")
+    return backends.engine_backend(value.name, value.solve_fn)
+}
+
+fn _checked_display(value: any) -> any {
+    _require_struct(value, "DisplayPreferences", "session.display")
+    return display_preferences(
+    value.distance_unit,
+    value.velocity_unit,
+    value.energy_unit,
+    value.angle_unit,
+    value.precision
+    )
+}
+
+fn _session_state(session: any) -> any {
+    _require_struct(session, "LabSession", "session")
+    if typeof(session.state) != "Ref" {
+        assert(false, "session.state: expected Ref, got " + typeof(session.state))
+    }
+    let state = session.state.get()
+    _require_struct(state, "LabSessionState", "session.state")
+    return state
+}
+
+fn _state(
+experiment: any,
+backend: any,
+display: any,
+history_limit: Int,
+history: Array,
+current_run: any,
+previous_run: any
+) -> any {
+    return LabSessionState {
+        experiment: experiment,
+        backend: backend,
+        display: display,
+        history_limit: history_limit,
+        history: history,
+        current_run: current_run,
+        previous_run: previous_run
+    }
+}
+
+fn _commit(session: any, state: any) {
+    session.state.set(state)
+}
+
+export fn experiment_of(session: any) -> any {
+    return _session_state(session).experiment
+}
+
+export fn backend_of(session: any) -> any {
+    return _session_state(session).backend
+}
+
+export fn display_of(session: any) -> any {
+    return _session_state(session).display
+}
+
+export fn history_limit_of(session: any) -> Int {
+    return _session_state(session).history_limit
+}
+
+export fn history(session: any) -> Array {
+    return _session_state(session).history
+}
+
+export fn current_run(session: any) -> any {
+    return _session_state(session).current_run
+}
+
+export fn previous_run(session: any) -> any {
+    return _session_state(session).previous_run
+}
+
+export fn display_preferences(
+distance_unit: any = "yd",
+velocity_unit: any = "ft/s",
+energy_unit: any = "ft-lb",
+angle_unit: any = "mil",
+precision: any = 2
+) -> DisplayPreferences {
+    let checked_distance = _choice(distance_unit, ["m", "km", "yd", "ft", "in"], "display.distance_unit")
+    let checked_velocity = _choice(velocity_unit, ["m/s", "ft/s"], "display.velocity_unit")
+    let checked_energy = _choice(energy_unit, ["J", "ft-lb"], "display.energy_unit")
+    let checked_angle = _choice(angle_unit, ["rad", "deg", "mil", "moa"], "display.angle_unit")
+    if typeof(precision) != "Int" {
+        assert(false, "display.precision: expected Int, got " + typeof(precision))
+    }
+    if precision < 0 || precision > 12 {
+        assert(false, "display.precision: must be between 0 and 12")
+    }
+    return freeze(DisplayPreferences {
+        distance_unit: checked_distance,
+        velocity_unit: checked_velocity,
+        energy_unit: checked_energy,
+        angle_unit: checked_angle,
+        precision: precision
+    }
+    )
+}
+
+export fn metric_display_preferences(precision: any = 2) -> DisplayPreferences {
+    return display_preferences("m", "m/s", "J", "mil", precision)
+}
+
+fn _checked_projectile(value: any) -> any {
+    _require_struct(value, "Projectile", "session.experiment.projectile")
+    return domain.projectile(
+    value.name,
+    value.mass,
+    value.diameter,
+    value.ballistic_coefficient,
+    value.drag_model,
+    value.length
+    )
+}
+
+fn _checked_rifle(value: any) -> any {
+    _require_struct(value, "Rifle", "session.experiment.rifle")
+    return domain.rifle(
+    value.name,
+    value.sight_height,
+    value.muzzle_height,
+    value.twist_rate,
+    value.twist_direction
+    )
+}
+
+fn _checked_atmosphere(value: any) -> any {
+    _require_struct(value, "Atmosphere", "session.experiment.atmosphere")
+    return domain.atmosphere(
+    value.altitude,
+    value.temperature,
+    value.pressure,
+    value.relative_humidity,
+    value.latitude
+    )
+}
+
+fn _checked_winds(value: any) -> Array {
+    if typeof(value) != "Array" {
+        assert(false, "session.experiment.winds: expected Array, got " + typeof(value))
+    }
+    flux checked = []
+    for item in value {
+        _require_struct(item, "Wind", "session.experiment.winds[]")
+        checked.push(domain.wind(
+        item.speed,
+        item.direction_from,
+        item.vertical_velocity,
+        item.until_distance
+        ))
+    }
+    return checked
+}
+
+fn _checked_shot(value: any) -> any {
+    _require_struct(value, "Shot", "session.experiment.shot")
+    return domain.shot(
+    value.muzzle_velocity,
+    value.max_range,
+    value.zero_distance,
+    value.muzzle_angle,
+    value.aim_azimuth,
+    value.shot_azimuth,
+    value.shooting_angle,
+    value.cant_angle,
+    value.target_height,
+    value.ground_threshold
+    )
+}
+
+fn _checked_solver(value: any) -> any {
+    _require_struct(value, "SolverConfig", "session.experiment.solver")
+    return domain.solver_config(
+    value.method,
+    value.time_step_s,
+    value.sampling_interval,
+    value.magnus,
+    value.coriolis,
+    value.enhanced_spin_drift
+    )
+}
+
+fn _checked_experiment(value: any) -> any {
+    _require_struct(value, "Experiment", "session.experiment")
+    return domain.experiment(
+    value.name,
+    _checked_projectile(value.projectile),
+    _checked_rifle(value.rifle),
+    _checked_atmosphere(value.atmosphere),
+    _checked_winds(value.winds),
+    _checked_shot(value.shot),
+    _checked_solver(value.solver)
+    )
+}
+
+fn _experiment_with(
+current: any,
+projectile: any,
+rifle: any,
+atmosphere: any,
+winds: any,
+shot: any,
+solver: any
+) -> any {
+    return domain.experiment(
+    current.name,
+    projectile,
+    rifle,
+    atmosphere,
+    winds,
+    shot,
+    solver
+    )
+}
+
+export fn new_session(
+experiment: any,
+backend: any,
+display: any = nil,
+history_limit: any = 50
+) -> LabSession {
+    let checked_experiment = _checked_experiment(experiment)
+    let checked_backend = _checked_backend(backend)
+    flux checked_display = display
+    if checked_display == nil {
+        checked_display = display_preferences()
+    } else {
+        checked_display = _checked_display(checked_display)
+    }
+    let checked_limit = _history_limit(history_limit)
+    return LabSession {
+        state: Ref::new(_state(
+        checked_experiment,
+        checked_backend,
+        checked_display,
+        checked_limit,
+        [],
+        nil,
+        nil
+        ))
+    }
+}
+
+export fn replace_experiment(session: any, value: any) {
+    let checked = _checked_experiment(value)
+    let state = _session_state(session)
+    _commit(session, _state(
+    checked,
+    state.backend,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn replace_projectile(session: any, value: any) {
+    let checked = _checked_projectile(value)
+    let state = _session_state(session)
+    let current = state.experiment
+    let next = _experiment_with(
+    current,
+    checked,
+    current.rifle,
+    current.atmosphere,
+    current.winds,
+    current.shot,
+    current.solver
+    )
+    _commit(session, _state(
+    next,
+    state.backend,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn replace_rifle(session: any, value: any) {
+    let checked = _checked_rifle(value)
+    let state = _session_state(session)
+    let current = state.experiment
+    let next = _experiment_with(
+    current,
+    current.projectile,
+    checked,
+    current.atmosphere,
+    current.winds,
+    current.shot,
+    current.solver
+    )
+    _commit(session, _state(
+    next,
+    state.backend,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn replace_atmosphere(session: any, value: any) {
+    let checked = _checked_atmosphere(value)
+    let state = _session_state(session)
+    let current = state.experiment
+    let next = _experiment_with(
+    current,
+    current.projectile,
+    current.rifle,
+    checked,
+    current.winds,
+    current.shot,
+    current.solver
+    )
+    _commit(session, _state(
+    next,
+    state.backend,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn replace_winds(session: any, value: any) {
+    let checked = _checked_winds(value)
+    let state = _session_state(session)
+    let current = state.experiment
+    let next = _experiment_with(
+    current,
+    current.projectile,
+    current.rifle,
+    current.atmosphere,
+    checked,
+    current.shot,
+    current.solver
+    )
+    _commit(session, _state(
+    next,
+    state.backend,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn replace_shot(session: any, value: any) {
+    let checked = _checked_shot(value)
+    let state = _session_state(session)
+    let current = state.experiment
+    let next = _experiment_with(
+    current,
+    current.projectile,
+    current.rifle,
+    current.atmosphere,
+    current.winds,
+    checked,
+    current.solver
+    )
+    _commit(session, _state(
+    next,
+    state.backend,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn replace_solver(session: any, value: any) {
+    let checked = _checked_solver(value)
+    let state = _session_state(session)
+    let current = state.experiment
+    let next = _experiment_with(
+    current,
+    current.projectile,
+    current.rifle,
+    current.atmosphere,
+    current.winds,
+    current.shot,
+    checked
+    )
+    _commit(session, _state(
+    next,
+    state.backend,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn set_backend(session: any, value: any) {
+    let checked = _checked_backend(value)
+    let state = _session_state(session)
+    _commit(session, _state(
+    state.experiment,
+    checked,
+    state.display,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+export fn set_display_preferences(session: any, value: any) {
+    let checked = _checked_display(value)
+    let state = _session_state(session)
+    _commit(session, _state(
+    state.experiment,
+    state.backend,
+    checked,
+    state.history_limit,
+    state.history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+fn _trim_history(history: Array, limit: Int) -> Array {
+    flux next = clone(history)
+    while len(next) > limit {
+        next.remove_at(0)
+    }
+    return next
+}
+
+export fn set_history_limit(session: any, value: any) {
+    let checked = _history_limit(value)
+    let state = _session_state(session)
+    let next_history = _trim_history(state.history, checked)
+    _commit(session, _state(
+    state.experiment,
+    state.backend,
+    state.display,
+    checked,
+    next_history,
+    state.current_run,
+    state.previous_run
+    ))
+}
+
+fn _record_or_error(backend: any, snapshot: any, result: any) -> any {
+    if !_is_struct(result, "Trajectory") {
+        return domain.laboratory_error(
+        "backend_contract_error",
+        "session solve expected Trajectory, got " + typeof(result)
+        )
+    }
+    if result.experiment != snapshot {
+        return domain.laboratory_error(
+        "backend_contract_error",
+        "backend trajectory does not retain the submitted experiment snapshot"
+        )
+    }
+    if typeof(result.resolved_request) != "Map" {
+        return domain.laboratory_error(
+        "backend_contract_error",
+        "backend trajectory must contain a resolved-request Map"
+        )
+    }
+    return RunRecord {
+        backend_name: backend.name,
+        experiment: snapshot,
+        result: result,
+        resolved_request: result.resolved_request,
+        schema_version: result.schema_version,
+        engine_version: result.engine_version,
+        assumptions: result.assumptions,
+        warnings: result.warnings,
+        termination: result.summary.termination
+    }
+}
+
+export fn solve_session(session: any) -> any {
+    let state = _session_state(session)
+    // Experiment is already a frozen domain value, so this is an immutable O(1)
+    // snapshot on shared-crystal runtimes and an independent immutable value on all VMs.
+    let snapshot = state.experiment
+
+    // Exactly one backend invocation. solve_with converts thrown/wrong-shape backends into
+    // LaboratoryError values; every error path below returns before touching session state.
+    let result = backends.solve_with(state.backend, snapshot)
+    if backends.solve_failed(result) {
+        return result
+    }
+
+    let record = _record_or_error(state.backend, snapshot, result)
+    if _is_struct(record, "LaboratoryError") {
+        return record
+    }
+
+    flux next_history = clone(state.history)
+    if state.history_limit > 0 {
+        next_history.push(record)
+        while len(next_history) > state.history_limit {
+            next_history.remove_at(0)
+        }
+    } else {
+        next_history = []
+    }
+    let next_previous = state.current_run
+
+    // Commit the complete next state once, after solve, provenance validation, record
+    // construction, and history trimming have succeeded.
+    _commit(session, _state(
+    state.experiment,
+    state.backend,
+    state.display,
+    state.history_limit,
+    next_history,
+    record,
+    next_previous
+    ))
+    return record
+}
+
+// Reset run state while retaining the current experiment, backend configuration, display
+// preferences, and configured history bound. The external engine remains stateless.
+export fn reset_session(session: any) {
+    let state = _session_state(session)
+    _commit(session, _state(
+    state.experiment,
+    state.backend,
+    state.display,
+    state.history_limit,
+    [],
+    nil,
+    nil
+    ))
+}

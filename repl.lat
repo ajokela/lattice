@@ -10,8 +10,9 @@ fn main() {
         let prompt = if buf == "" { "lattice> " } else { "    ...> " }
         let line = input(prompt)
 
-        // EOF
-        if typeof(line) == "Unit" {
+        // EOF. Unit is accepted for compatibility with older runtimes.
+        let line_type = typeof(line)
+        if line_type == "Nil" || line_type == "Unit" {
             print("")
             break
         }
@@ -31,15 +32,15 @@ fn main() {
         if !is_complete(buf) { continue }
 
         // Evaluate
-        let result = try {
-            lat_eval(buf)
-        } catch e {
-            print("error: " + e)
-        }
+        try {
+            let result = lat_eval(buf)
 
-        // Print non-unit results
-        if typeof(result) != "Unit" {
-            print(result)
+            // Print non-unit results
+            if typeof(result) != "Unit" {
+                print(result)
+            }
+        } catch e {
+            print("error: " + e.message)
         }
 
         buf = ""

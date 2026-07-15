@@ -1,0 +1,6 @@
+// Pure compatibility helpers shared by the self-hosted REPL and transcripts.
+
+export fn is_eof_value(value: any) -> Bool {
+    let kind = typeof(value)
+    return kind == "Nil" || kind == "Unit"
+}

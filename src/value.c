@@ -100,6 +100,17 @@ LatValue value_detach(const LatValue *v) {
     return out;
 }
 
+LatValue value_detach_copy(const LatValue *v) {
+    DualHeap *saved_heap = g_heap;
+    CrystalRegion *saved_arena = g_arena;
+    g_heap = NULL;
+    g_arena = NULL;
+    LatValue out = value_copy_out(v);
+    g_heap = saved_heap;
+    g_arena = saved_arena;
+    return out;
+}
+
 /* LAT-442: kinds that value_detach SHARES rather than copies (non-atomic
  * refcount on the same LatRef cell, shared captured_env, shared iterator
  * state) must never cross a channel. Walk the graph looking for them. */
@@ -524,7 +535,11 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
                 out.as.str_val = v->as.str_val;
                 out.region_id = REGION_INTERNED;
             } else {
-                out.as.str_val = lat_strdup(v->as.str_val);
+                size_t len = v->as.str_len ? v->as.str_len : strlen(v->as.str_val);
+                out.as.str_val = lat_alloc(len + 1);
+                memcpy(out.as.str_val, v->as.str_val, len);
+                out.as.str_val[len] = '\0';
+                out.as.str_len = len;
             }
             break;
         case VAL_ARRAY: {
@@ -644,7 +659,7 @@ LatValue value_clone_impl(const LatValue *v, bool allow_share) {
                         dst->entries = dense;
                         for (uint64_t i = 0; i < blk->n; i++) {
                             LatValue tmp = *(LatValue *)dense[i].value;
-                            *(LatValue *)dense[i].value = value_deep_clone(&tmp);
+                            *(LatValue *)dense[i].value = value_clone_impl(&tmp, allow_share);
                         }
                         out.as.map.map = dst;
                         out.as.map.key_phases = NULL;

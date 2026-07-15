@@ -28,7 +28,15 @@
 #include <arpa/inet.h>
 #endif
 #include "runtime.h"
+#include "builtin_methods.h"
+#include "memory.h"
 #include "test_backend.h"
+
+#ifdef _WIN32
+#define PROCESS_FIXTURE_PATH "./build/process_fixture.exe"
+#else
+#define PROCESS_FIXTURE_PATH "./build/process_fixture"
+#endif
 
 /* Stage 5 (LAT-457): fork() from a TSan-instrumented process that has
  * already run multi-threaded tests is unsupported (the child inherits TSan
@@ -1250,12 +1258,138 @@ static void test_lat_eval_mutable_var(void) {
                   "2");
 }
 
+/* Persistent tree-walk REPL cells must not retain region handles owned by a
+ * transient lat_eval call graph. Exercise both root binding paths plus Ref
+ * get/set, then prove evaluator teardown releases every region it created. */
+static void test_lat_eval_persistent_region_ownership(void) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+
+    const char *share_crystals = getenv("LATTICE_SHARE_CRYSTALS");
+    if (value_clone_force_copy_active() || (share_crystals && share_crystals[0] == '0' && share_crystals[1] == '\0')) {
+        return;
+    }
+
+    size_t live_regions = crystal_region_live_count();
+    size_t created_regions = crystal_region_created_total();
+    ASSERT_OUTPUT("fn frozen_pair(seed: Int) {\n"
+                  "    return freeze([[seed, seed + 1], [seed + 2, seed + 3]])\n"
+                  "}\n"
+                  "let holder = Ref::new(frozen_pair(0))\n"
+                  "let map_holder = Ref::new(Map::new())\n"
+                  "let array_holder = Ref::new([])\n"
+                  "fn main() {\n"
+                  "    lat_eval(\"flux persisted = frozen_pair(10)\")\n"
+                  "    print(lat_eval(\"persisted[0][1]\"))\n"
+                  "    lat_eval(\"persisted = frozen_pair(20)\")\n"
+                  "    print(lat_eval(\"persisted[1][0]\"))\n"
+                  "    lat_eval(\"let [left, right] = persisted[0]\")\n"
+                  "    print(lat_eval(\"left + right\"))\n"
+                  "    lat_eval(\"holder.set(frozen_pair(30))\")\n"
+                  "    lat_eval(\"let from_ref = holder.get()\")\n"
+                  "    print(lat_eval(\"from_ref[1][1]\"))\n"
+                  "    lat_eval(\"map_holder.set(\\\"pair\\\", frozen_pair(40))\")\n"
+                  "    print(lat_eval(\"map_holder.get(\\\"pair\\\")[0][0]\"))\n"
+                  "    lat_eval(\"array_holder.push(frozen_pair(50))\")\n"
+                  "    print(lat_eval(\"array_holder.get()[0][1][1]\"))\n"
+                  "}\n",
+                  "11\n22\n41\n33\n40\n53");
+    ASSERT(crystal_region_created_total() > created_regions);
+    ASSERT(crystal_region_live_count() == live_regions);
+}
+
+static void test_lat_eval_error_recovery(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"1 / 0\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "    print(lat_eval(\"try { 1 / 0 } catch e { 7 }\"))\n"
+                  "    print(lat_eval(\"2 + 3\"))\n"
+                  "}\n",
+                  "division by zero\n7\n5");
+}
+
+static void test_lat_eval_preserves_outer_defer(void) {
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn evaluate() {\n"
+                  "    defer { events += \"outer\" }\n"
+                  "    let message = try { lat_eval(\"1 / 0\") } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "    print(if events == \"\" { \"pending\" } else { \"ran early\" })\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    evaluate()\n"
+                  "    print(events)\n"
+                  "}\n",
+                  "division by zero\npending\nouter");
+}
+
+static void test_lat_eval_runs_inner_defer_on_error(void) {
+    /* The tree-walk evaluator's lat_eval defer unwinding is independent of
+     * the isolated bytecode-VM execution fixed here. */
+    if (test_backend == BACKEND_TREE_WALK) return;
+
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"defer { events += \\\"inner\\\" }\\n"
+                  "        let a = freeze([1])\\n"
+                  "        a.insert(0, 2)\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.len() > 0)\n"
+                  "    print(events)\n"
+                  "}\n",
+                  "true\ninner");
+}
+
+static void test_lat_eval_inner_defer_can_catch(void) {
+    /* This specifically exercises nested VM handler floors.  The tree-walk
+     * evaluator has a separate, pre-existing cleanup-catch limitation. */
+    if (test_backend == BACKEND_TREE_WALK) return;
+
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"defer {\\n"
+                  "            let caught = try { 1 / 0 } catch e { \\\"caught\\\" }\\n"
+                  "            events += caught\\n"
+                  "        }\\n"
+                  "        let a = freeze([1])\\n"
+                  "        a.insert(0, 2)\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.len() > 0)\n"
+                  "    print(events)\n"
+                  "}\n",
+                  "true\ncaught");
+}
+
+static void test_lat_eval_frame_overflow_runs_inner_defer(void) {
+    if (test_backend == BACKEND_TREE_WALK) return;
+
+    ASSERT_OUTPUT("flux events = \"\"\n"
+                  "fn main() {\n"
+                  "    let message = try {\n"
+                  "        lat_eval(\"defer { events += \\\"overflow-cleanup\\\" }\\n"
+                  "        fn dive(n: Int) { if n > 0 { dive(n - 1) } }\\n"
+                  "        dive(600)\")\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.contains(\"overflow\"))\n"
+                  "    print(events)\n"
+                  "    print(lat_eval(\"2 + 3\"))\n"
+                  "}\n",
+                  "true\noverflow-cleanup\n5");
+}
+
 /* 79. test_lat_eval_version - version() returns a string */
 static void test_lat_eval_version(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    print(version())\n"
                   "}\n",
-                  "0.6.3");
+                  "0.6.4");
 }
 
 /* ======================================================================
@@ -1702,6 +1836,148 @@ static void test_json_parse_error(void) {
                               "    json_parse(\"{bad json}\")\n"
                               "}\n",
                               "EVAL_ERROR:");
+}
+
+static bool json_parse_fails_with(const char *json, const char *message) {
+    char *err = NULL;
+    LatValue value = json_parse(json, &err);
+    bool matches = err != NULL && strstr(err, message) != NULL;
+    value_free(&value);
+    free(err);
+    return matches;
+}
+
+static bool json_parse_len_fails_with(const char *json, size_t len, const char *message) {
+    char *err = NULL;
+    LatValue value = json_parse_len(json, len, &err);
+    bool matches = err != NULL && strstr(err, message) != NULL;
+    value_free(&value);
+    free(err);
+    return matches;
+}
+
+static void test_json_parse_rejects_duplicate_keys(void) {
+    ASSERT(json_parse_fails_with("{\"a\":1,\"a\":2}", "duplicate object key"));
+    ASSERT(json_parse_fails_with("{\"a\":1,\"\\u0061\":2}", "duplicate object key"));
+    ASSERT(json_parse_fails_with("{\"outer\":{\"x\":1,\"x\":2}}", "duplicate object key"));
+    ASSERT(json_parse_fails_with("{\"a\":{\"nested\":[\"heap\"]},\"a\":2}", "duplicate object key"));
+
+    /* Member names in separate objects are not duplicates. */
+    char *err = NULL;
+    LatValue value = json_parse("{\"a\":1,\"nested\":{\"a\":2}}", &err);
+    bool parsed = err == NULL && value.type == VAL_MAP;
+    value_free(&value);
+    free(err);
+    ASSERT(parsed);
+}
+
+static void test_json_parse_rejects_nul_object_keys(void) {
+    ASSERT(json_parse_fails_with("{\"a\\u0000b\":1}", "object key contains an embedded NUL"));
+}
+
+static void test_json_parse_rejects_embedded_nul_input(void) {
+    const char contaminated[] = {'1', '\0', '2'};
+    ASSERT(json_parse_len_fails_with(contaminated, sizeof(contaminated), "embedded NUL byte"));
+    ASSERT(json_parse_len_fails_with("x", SIZE_MAX, "input is too large"));
+
+    /* Pin all native dispatch paths: the first parse constructs a legitimate
+     * length-aware NUL String, and the second must inspect its full length. */
+    ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
+                              "    let nul = json_parse(\"\\\"\\\\u0000\\\"\")\n"
+                              "    json_parse(nul)\n"
+                              "}\n",
+                              "EVAL_ERROR:");
+}
+
+static void test_json_parse_rejects_unescaped_controls(void) {
+    const char newline[] = {'"', 'a', '\n', 'b', '"'};
+    const char unit_separator[] = {'"', 'a', 0x1F, 'b', '"'};
+    ASSERT(json_parse_len_fails_with(newline, sizeof(newline), "unescaped control character"));
+    ASSERT(json_parse_len_fails_with(unit_separator, sizeof(unit_separator), "unescaped control character"));
+
+    char *err = NULL;
+    LatValue escaped = json_parse("\"line\\n\\t\\u0000\"", &err);
+    bool escaped_ok = err == NULL && escaped.type == VAL_STR && escaped.as.str_len == 7;
+    value_free(&escaped);
+    free(err);
+    ASSERT(escaped_ok);
+}
+
+static void test_json_roundtrips_embedded_nul_string(void) {
+    char *parse_err = NULL;
+    LatValue parsed = json_parse("\"a\\u0000b\"", &parse_err);
+    bool parsed_ok = parse_err == NULL && parsed.type == VAL_STR && parsed.as.str_len == 3 &&
+                     memcmp(parsed.as.str_val, "a\0b", 3) == 0;
+
+    char *stringify_err = NULL;
+    char *serialized = parsed_ok ? json_stringify(&parsed, &stringify_err) : NULL;
+    bool serialized_ok = stringify_err == NULL && serialized != NULL && strcmp(serialized, "\"a\\u0000b\"") == 0;
+
+    char *roundtrip_err = NULL;
+    LatValue roundtrip = serialized_ok ? json_parse(serialized, &roundtrip_err) : value_unit();
+    bool roundtrip_ok = roundtrip_err == NULL && roundtrip.type == VAL_STR && roundtrip.as.str_len == 3 &&
+                        memcmp(roundtrip.as.str_val, "a\0b", 3) == 0;
+
+    value_free(&parsed);
+    value_free(&roundtrip);
+    free(parse_err);
+    free(stringify_err);
+    free(roundtrip_err);
+    free(serialized);
+    ASSERT(parsed_ok);
+    ASSERT(serialized_ok);
+    ASSERT(roundtrip_ok);
+}
+
+static void test_json_parse_validates_utf8(void) {
+    const char lone_continuation[] = {'"', (char)0x80, '"'};
+    const char overlong[] = {'"', (char)0xC0, (char)0xAF, '"'};
+    const char truncated[] = {'"', (char)0xE2, (char)0x82};
+    const char bad_continuation[] = {'"', (char)0xE2, '(', (char)0xA1, '"'};
+    const char surrogate[] = {'"', (char)0xED, (char)0xA0, (char)0x80, '"'};
+    const char above_unicode[] = {'"', (char)0xF4, (char)0x90, (char)0x80, (char)0x80, '"'};
+    ASSERT(json_parse_len_fails_with(lone_continuation, sizeof(lone_continuation), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(overlong, sizeof(overlong), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(truncated, sizeof(truncated), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(bad_continuation, sizeof(bad_continuation), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(surrogate, sizeof(surrogate), "malformed UTF-8"));
+    ASSERT(json_parse_len_fails_with(above_unicode, sizeof(above_unicode), "malformed UTF-8"));
+
+    const char emoji[] = {'"', (char)0xF0, (char)0x9F, (char)0x98, (char)0x80, '"'};
+    char *err = NULL;
+    LatValue value = json_parse_len(emoji, sizeof(emoji), &err);
+    bool valid = err == NULL && value.type == VAL_STR && value.as.str_len == 4;
+    value_free(&value);
+    free(err);
+    ASSERT(valid);
+}
+
+static void test_json_parse_checks_integer_range(void) {
+    char *err = NULL;
+    LatValue max = json_parse("9223372036854775807", &err);
+    bool max_ok = err == NULL && max.type == VAL_INT && max.as.int_val == INT64_MAX;
+    value_free(&max);
+    free(err);
+    ASSERT(max_ok);
+
+    err = NULL;
+    LatValue min = json_parse("-9223372036854775808", &err);
+    bool min_ok = err == NULL && min.type == VAL_INT && min.as.int_val == INT64_MIN;
+    value_free(&min);
+    free(err);
+    ASSERT(min_ok);
+
+    ASSERT(json_parse_fails_with("9223372036854775808", "integer out of signed 64-bit range"));
+    ASSERT(json_parse_fails_with("-9223372036854775809", "integer out of signed 64-bit range"));
+    ASSERT(json_parse_fails_with("999999999999999999999999999999999999999", "integer out of signed 64-bit range"));
+
+    /* Fractional and exponent forms continue through the floating-point path. */
+    err = NULL;
+    LatValue exponent = json_parse("1e2", &err);
+    bool exponent_ok = err == NULL && exponent.type == VAL_FLOAT && exponent.as.float_val == 100.0;
+    value_free(&exponent);
+    free(err);
+    ASSERT(exponent_ok);
 }
 
 static void test_json_stringify_error(void) {
@@ -3205,6 +3481,258 @@ static void test_exec_failure(void) {
                   "    print(r.get(\"exit_code\"))\n"
                   "}\n",
                   "42");
+}
+
+static void test_exec_argv_preserves_arguments(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", ['argv', 'plain', 'two words', '\"quoted\"', ';touch nope', '$HOME', 'a&b', '*', '', "
+                  "'trail\\\\', 'space tail\\\\', 'slash\\\\\"quote'], nil)\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stderr\").len())\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "}\n",
+                  "0\n0\n"
+                  "0:5:706c61696e\n"
+                  "1:9:74776f20776f726473\n"
+                  "2:8:2271756f74656422\n"
+                  "3:11:3b746f756368206e6f7065\n"
+                  "4:5:24484f4d45\n"
+                  "5:3:612662\n"
+                  "6:1:2a\n"
+                  "7:0:\n"
+                  "8:6:747261696c5c\n"
+                  "9:11:7370616365207461696c5c\n"
+                  "10:12:736c6173685c2271756f7465");
+}
+
+static void test_exec_argv_stdin_and_eof(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let input = \"line one\\n$;*&\"\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], input)\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "    let eof = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], nil)\n"
+                  "    print(eof.get(\"stdout\").trim())\n"
+                  "    let binary = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"binary\"], nil)\n"
+                  "    let binary_echo = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], binary.get(\"stdout\"))\n"
+                  "    print(binary_echo.get(\"stdout\").trim())\n"
+                  "}\n",
+                  "13:6c696e65206f6e650a243b2a26\n0:\n3:410042");
+}
+
+static void test_exec_argv_nonzero_is_data(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"streams\", \"23\"], nil)\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "    print(r.get(\"stderr\").trim())\n"
+                  "}\n",
+                  "23\nstdout\nstderr");
+}
+
+static void test_exec_argv_missing_program_is_catchable(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let message = try {\n"
+                  "        exec_argv(\"lattice-mba-1297-program-that-does-not-exist\", [], nil)\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message.starts_with(\"exec_argv: failed to spawn\"))\n"
+                  "}\n",
+                  "true");
+}
+
+static void test_exec_argv_validation_errors(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(try { exec_argv(\"only\", []) } catch e { e.message })\n"
+                  "    print(try { exec_argv(1, [], nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", 1, nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", [\"ok\", 1], nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", [], 1) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"\", [], nil) } catch e { e.message })\n"
+                  "}\n",
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv: args[1] must be a String\n"
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv: program must not be empty");
+}
+
+static void test_exec_argv_option_validation(void) {
+    ASSERT_OUTPUT("fn call(options: Map) {\n"
+                  "    return try { exec_argv(\"program\", [], nil, options) } catch e { e.message }\n"
+                  "}\n"
+                  "fn option(name: String, value: any) {\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(name, value)\n"
+                  "    return options\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    print(try { exec_argv(\"program\", [], nil, 1) } catch e { e.message })\n"
+                  "    print(call(option(\"unknown\", 1)))\n"
+                  "    print(call(option(\"timeout_ms\", \"fast\")))\n"
+                  "    print(call(option(\"timeout_ms\", 0)))\n"
+                  "    print(call(option(\"max_stdout_bytes\", -1)))\n"
+                  "    print(call(option(\"max_stderr_bytes\", 1.5)))\n"
+                  "    print(call(option(\"timeout_ms\", 0.0 / 0.0)))\n"
+                  "    print(call(option(\"max_stdout_bytes\", 100000000000000000000.0)))\n"
+                  "}\n",
+                  "exec_argv() expects (program: String, args: [String], stdin: String|Nil, options: Map|Nil = nil)\n"
+                  "exec_argv: unknown option 'unknown'\n"
+                  "exec_argv: options.timeout_ms must be a positive finite integer\n"
+                  "exec_argv: options.timeout_ms must be a positive finite integer\n"
+                  "exec_argv: options.max_stdout_bytes must be a positive finite integer\n"
+                  "exec_argv: options.max_stderr_bytes must be a positive finite integer\n"
+                  "exec_argv: options.timeout_ms must be a positive finite integer\n"
+                  "exec_argv: options.max_stdout_bytes is too large");
+}
+
+static void test_exec_argv_rejects_nul_in_program_and_args(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let binary = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"binary\"], nil).get(\"stdout\")\n"
+                  "    print(binary.len())\n"
+                  "    print(try { exec_argv(binary, [], nil) } catch e { e.message })\n"
+                  "    print(try { exec_argv(\"program\", [binary], nil) } catch e { e.message })\n"
+                  "}\n",
+                  "3\nexec_argv: program must not contain NUL bytes\n"
+                  "exec_argv: args[0] must not contain NUL bytes");
+}
+
+static void test_exec_argv_os_module(void) {
+    ASSERT_OUTPUT("import \"os\" as os\n"
+                  "fn main() {\n"
+                  "    let run = os.get(\"exec_argv\")\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"max_stdout_bytes\", 100)\n"
+                  "    let r = run(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"os module\", options)\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stdout\").trim())\n"
+                  "}\n",
+                  "0\n9:6f73206d6f64756c65");
+}
+
+static void test_exec_argv_three_pipe_pressure(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let input = \"I\".repeat(262144)\n"
+                  "    let r = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"pressure\"], input)\n"
+                  "    print(r.get(\"exit_code\"))\n"
+                  "    print(r.get(\"stdout\").len())\n"
+                  "    print(r.get(\"stderr\").len())\n"
+                  "    print(r.get(\"stdout\").ends_with(\"stdin=262144\\n\"))\n"
+                  "}\n",
+                  "0\n262157\n262144\ntrue");
+}
+
+static void test_exec_argv_omitted_options_are_compatible(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let direct = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"same\")\n"
+                  "    let explicit_nil = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"stdin\"], \"same\", nil)\n"
+                  "    let empty_options = Map::new()\n"
+                  "    let explicit_empty = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"stdin\"], \"same\", empty_options)\n"
+                  "    print(direct.get(\"stdout\") == explicit_nil.get(\"stdout\") && "
+                  "direct.get(\"stderr\") == explicit_nil.get(\"stderr\") && "
+                  "direct.get(\"exit_code\") == explicit_nil.get(\"exit_code\"))\n"
+                  "    print(direct.get(\"stdout\") == explicit_empty.get(\"stdout\") && "
+                  "direct.get(\"stderr\") == explicit_empty.get(\"stderr\") && "
+                  "direct.get(\"exit_code\") == explicit_empty.get(\"exit_code\"))\n"
+                  "    let marker = tempfile()\n"
+                  "    delete_file(marker)\n"
+                  "    let detached = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"detached-marker\", marker], nil)\n"
+                  "    sleep(1000)\n"
+                  "    print(detached.get(\"exit_code\"))\n"
+                  "    print(file_exists(marker))\n"
+                  "    delete_file(marker)\n"
+                  "}\n",
+                  "true\ntrue\n0\ntrue");
+}
+
+static void test_exec_argv_timeout(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"timeout_ms\", 25)\n"
+                  "    let message = try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"sleep\", \"2000\"], nil, options)\n"
+                  "        \"NO_ERROR\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "}\n",
+                  "exec_argv: timed out after 25 ms");
+}
+
+static void test_exec_argv_output_limits(void) {
+    ASSERT_OUTPUT("fn option(name: String, value: any) {\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(name, value)\n"
+                  "    return options\n"
+                  "}\n"
+                  "fn main() {\n"
+                  "    let exact = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"flood\", \"stdout\", \"4096\"], nil, option(\"max_stdout_bytes\", 4096))\n"
+                  "    print(exact.get(\"stdout\").len())\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"flood\", \"stdout\", \"4096\"], nil, option(\"max_stdout_bytes\", 4095))\n"
+                  "    } catch e { e.message })\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"flood\", \"stderr\", \"4096\"], nil, option(\"max_stderr_bytes\", 4095))\n"
+                  "    } catch e { e.message })\n"
+                  "    let input = \"I\".repeat(262144)\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"pressure\"], input, option(\"max_stdout_bytes\", 8192))\n"
+                  "    } catch e { e.message })\n"
+                  "    print(try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"pressure-interleaved\"], input, option(\"max_stderr_bytes\", 8192))\n"
+                  "    } catch e { e.message })\n"
+                  "}\n",
+                  "4096\n"
+                  "exec_argv: stdout exceeded max_stdout_bytes (4095 bytes)\n"
+                  "exec_argv: stderr exceeded max_stderr_bytes (4095 bytes)\n"
+                  "exec_argv: stdout exceeded max_stdout_bytes (8192 bytes)\n"
+                  "exec_argv: stderr exceeded max_stderr_bytes (8192 bytes)");
+}
+
+static void test_exec_argv_timeout_kills_descendant(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let pidfile = tempfile()\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"timeout_ms\", 1000)\n"
+                  "    let message = try {\n"
+                  "        exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"descendant\", pidfile], nil, options)\n"
+                  "        \"NO_ERROR\"\n"
+                  "    } catch e { e.message }\n"
+                  "    sleep(200)\n"
+                  "    let child_pid = read_file(pidfile).trim()\n"
+                  "    let probe = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"pid-alive\", child_pid], nil)\n"
+                  "    delete_file(pidfile)\n"
+                  "    print(message)\n"
+                  "    print(probe.get(\"exit_code\"))\n"
+                  "}\n",
+                  "exec_argv: timed out after 1000 ms\n1");
+}
+
+static void test_exec_argv_managed_primary_exit_kills_descendant(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let pidfile = tempfile()\n"
+                  "    let marker = tempfile()\n"
+                  "    delete_file(marker)\n"
+                  "    let options = Map::new()\n"
+                  "    options.set(\"max_stdout_bytes\", 100)\n"
+                  "    let result = exec_argv(\"" PROCESS_FIXTURE_PATH
+                  "\", [\"descendant-exit\", pidfile, marker], nil, options)\n"
+                  "    sleep(400)\n"
+                  "    let child_pid = read_file(pidfile).trim()\n"
+                  "    let probe = exec_argv(\"" PROCESS_FIXTURE_PATH "\", [\"pid-alive\", child_pid], nil)\n"
+                  "    delete_file(pidfile)\n"
+                  "    print(result.get(\"exit_code\"))\n"
+                  "    print(probe.get(\"exit_code\"))\n"
+                  "    print(file_exists(marker))\n"
+                  "    if file_exists(marker) { delete_file(marker) }\n"
+                  "}\n",
+                  "0\n1\nfalse");
 }
 
 /* ======================================================================
@@ -5159,7 +5687,7 @@ static void test_triple_multiline_interpolation(void) {
                   "    \"\"\"\n"
                   "    print(s)\n"
                   "}\n",
-                  "Hello, Lattice!\nVersion 0.6.3");
+                  "Hello, Lattice!\nVersion 0.6.4");
 }
 
 static void test_triple_embedded_quotes(void) {
@@ -9968,6 +10496,148 @@ static void test_parity_array_map_strings(void) {
                   "[HELLO, WORLD]");
 }
 
+typedef struct {
+    int calls;
+    int fail_at;
+} Mba1330MapCallbackState;
+
+static bool mba1330_fallible_map_callback(void *closure, LatValue *args, int arg_count, void *ctx, LatValue *result) {
+    (void)closure;
+    (void)args;
+    (void)arg_count;
+    Mba1330MapCallbackState *state = ctx;
+    state->calls++;
+    *result = value_string(state->calls == state->fail_at ? "failed result" : "partial result");
+    return state->calls != state->fail_at;
+}
+
+static void test_mba1330_array_map_callback_error(void) {
+    /* Exercise the shared eager loop directly: the failed return value and
+     * every preceding partial result are owned by map and must be released,
+     * and the fourth input must never reach the callback. */
+    LatValue input_elems[] = {value_int(2), value_int(1), value_int(0), value_int(4)};
+    LatValue input = value_array(input_elems, 4);
+    Mba1330MapCallbackState state = {.calls = 0, .fail_at = 3};
+    char *error = NULL;
+    LatValue result = builtin_array_map(&input, NULL, mba1330_fallible_map_callback, &state, &error);
+    ASSERT(state.calls == 3);
+    ASSERT(result.type == VAL_NIL);
+    ASSERT(error == NULL);
+    value_free(&result);
+    value_free(&input);
+
+    /* Backend parity: preserve the original callback error, stop before 4,
+     * clean shared partial results, and leave try/catch state usable for a
+     * subsequent map. */
+    size_t live_regions = crystal_region_live_count();
+    ASSERT_OUTPUT("flux visited = []\n"
+                  "flux aliases = []\n"
+                  "fn main() {\n"
+                  "    let source = [[2], [1], [0], [4]]\n"
+                  "    let message = try {\n"
+                  "        source.map(|item| {\n"
+                  "            let x = item[0]\n"
+                  "            visited.push(x)\n"
+                  "            let partial = freeze([x, x + 1])\n"
+                  "            aliases.push(partial)\n"
+                  "            12 / x\n"
+                  "            partial\n"
+                  "        })\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "    print(visited)\n"
+                  "    print(source)\n"
+                  "    print([1, 2].map(|x| x + 1))\n"
+                  "}\n",
+                  "division by zero\n[2, 1, 0]\n[[2], [1], [0], [4]]\n[2, 3]");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { [2, 1, 0, 4].map(|x| { 12 / x }) }\n", "EVAL_ERROR:division by zero");
+
+    /* RegVM has distinct invoke opcodes for global and captured receivers.
+     * Both must return to the suspended builtin before entering the caller's
+     * catch, just like the local/rvalue paths above. */
+    ASSERT_OUTPUT("flux global_source = [[2], [1], [0], [4]]\n"
+                  "flux receiver_visits = []\n"
+                  "fn main() {\n"
+                  "    let global_message = try {\n"
+                  "        global_source.map(|item| {\n"
+                  "            let x = item[0]\n"
+                  "            receiver_visits.push(x)\n"
+                  "            12 / x\n"
+                  "        })\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(global_message)\n"
+                  "    print(receiver_visits)\n"
+                  "    let captured = [[2], [1], [0], [4]]\n"
+                  "    receiver_visits = []\n"
+                  "    let run = | | {\n"
+                  "        try {\n"
+                  "            captured.map(|item| {\n"
+                  "                let x = item[0]\n"
+                  "                receiver_visits.push(x)\n"
+                  "                12 / x\n"
+                  "            })\n"
+                  "            \"not caught\"\n"
+                  "        } catch e { e.message }\n"
+                  "    }\n"
+                  "    print(run())\n"
+                  "    print(receiver_visits)\n"
+                  "    print(captured)\n"
+                  "}\n",
+                  "division by zero\n[2, 1, 0]\ndivision by zero\n[2, 1, 0]\n[[2], [1], [0], [4]]");
+
+    /* Fill the StackVM value stack to the exact point where Array.map has
+     * room for its result but not for the isolated wrapper's closure+argument
+     * operands. The capacity preflight must turn that into a catchable error
+     * before the callback runs, rather than longjmp past map's cleanup. */
+    if (test_backend == BACKEND_STACK_VM) {
+        const size_t source_cap = 32768;
+        char *source = malloc(source_cap);
+        ASSERT(source != NULL);
+        size_t source_len = 0;
+#define MBA1330_APPEND_SOURCE(...)                                             \
+    do {                                                                       \
+        size_t _remaining = source_cap - source_len;                           \
+        int _written = snprintf(source + source_len, _remaining, __VA_ARGS__); \
+        if (_written < 0 || (size_t)_written >= _remaining) {                  \
+            free(source);                                                      \
+            ASSERT(0 && "MBA-1330 generated source exceeded capacity");        \
+        }                                                                      \
+        source_len += (size_t)_written;                                        \
+    } while (0)
+
+        MBA1330_APPEND_SOURCE("flux events = []\nfn fill(n: Int) {\n");
+        for (int i = 0; i < 253; i++) MBA1330_APPEND_SOURCE("    let v%d = %d\n", i, i);
+        MBA1330_APPEND_SOURCE("    if n > 0 { return fill(n - 1) }\n    return [");
+        for (int i = 0; i < 13; i++) MBA1330_APPEND_SOURCE("0, ");
+        MBA1330_APPEND_SOURCE("[1].map(|x| { events.push(x); x })]\n}\n"
+                              "fn main() {\n"
+                              "    let message = try {\n"
+                              "        fill(15)\n"
+                              "        \"not caught\"\n"
+                              "    } catch e { e.message }\n"
+                              "    print(message)\n"
+                              "    print(events)\n"
+                              "}\n");
+#undef MBA1330_APPEND_SOURCE
+
+        char *overflow_output = run_capture(source);
+        if (strcmp(overflow_output, "stack overflow\n[]") != 0) {
+            fprintf(stderr,
+                    "  MBA-1330 STACK PREFLIGHT FAILED:\n    expected: stack overflow\\n[]\n    actual:   %s\n    at "
+                    "%s:%d\n",
+                    overflow_output, __FILE__, __LINE__);
+            test_current_failed = 1;
+        }
+        free(overflow_output);
+        free(source);
+        if (test_current_failed) return;
+    }
+
+    ASSERT(crystal_region_live_count() == live_regions);
+}
+
 static void test_parity_array_filter_basic(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    let a = [1, 2, 3, 4, 5, 6]\n"
@@ -13715,6 +14385,12 @@ void register_stdlib_tests(void) {
     register_test("test_lat_eval_fn_persistence", test_lat_eval_fn_persistence);
     register_test("test_lat_eval_struct_persistence", test_lat_eval_struct_persistence);
     register_test("test_lat_eval_mutable_var", test_lat_eval_mutable_var);
+    register_test("test_lat_eval_persistent_region_ownership", test_lat_eval_persistent_region_ownership);
+    register_test("test_lat_eval_error_recovery", test_lat_eval_error_recovery);
+    register_test("test_lat_eval_preserves_outer_defer", test_lat_eval_preserves_outer_defer);
+    register_test("test_lat_eval_runs_inner_defer_on_error", test_lat_eval_runs_inner_defer_on_error);
+    register_test("test_lat_eval_inner_defer_can_catch", test_lat_eval_inner_defer_can_catch);
+    register_test("test_lat_eval_frame_overflow_runs_inner_defer", test_lat_eval_frame_overflow_runs_inner_defer);
     register_test("test_lat_eval_version", test_lat_eval_version);
 
     /* require() */
@@ -13754,6 +14430,13 @@ void register_stdlib_tests(void) {
     register_test("test_json_stringify_array", test_json_stringify_array);
     register_test("test_json_roundtrip", test_json_roundtrip);
     register_test("test_json_parse_error", test_json_parse_error);
+    register_test("test_json_parse_rejects_duplicate_keys", test_json_parse_rejects_duplicate_keys);
+    register_test("test_json_parse_rejects_nul_object_keys", test_json_parse_rejects_nul_object_keys);
+    register_test("test_json_parse_rejects_embedded_nul_input", test_json_parse_rejects_embedded_nul_input);
+    register_test("test_json_parse_rejects_unescaped_controls", test_json_parse_rejects_unescaped_controls);
+    register_test("test_json_roundtrips_embedded_nul_string", test_json_roundtrips_embedded_nul_string);
+    register_test("test_json_parse_validates_utf8", test_json_parse_validates_utf8);
+    register_test("test_json_parse_checks_integer_range", test_json_parse_checks_integer_range);
     register_test("test_json_stringify_error", test_json_stringify_error);
 
     /* Math */
@@ -13951,6 +14634,21 @@ void register_stdlib_tests(void) {
     register_test("test_shell_builtin", test_shell_builtin);
     register_test("test_shell_stderr", test_shell_stderr);
     register_test("test_exec_failure", test_exec_failure);
+    register_test("test_exec_argv_preserves_arguments", test_exec_argv_preserves_arguments);
+    register_test("test_exec_argv_stdin_and_eof", test_exec_argv_stdin_and_eof);
+    register_test("test_exec_argv_nonzero_is_data", test_exec_argv_nonzero_is_data);
+    register_test("test_exec_argv_missing_program_is_catchable", test_exec_argv_missing_program_is_catchable);
+    register_test("test_exec_argv_validation_errors", test_exec_argv_validation_errors);
+    register_test("test_exec_argv_option_validation", test_exec_argv_option_validation);
+    register_test("test_exec_argv_rejects_nul_in_program_and_args", test_exec_argv_rejects_nul_in_program_and_args);
+    register_test("test_exec_argv_os_module", test_exec_argv_os_module);
+    register_test("test_exec_argv_three_pipe_pressure", test_exec_argv_three_pipe_pressure);
+    register_test("test_exec_argv_omitted_options_are_compatible", test_exec_argv_omitted_options_are_compatible);
+    register_test("test_exec_argv_timeout", test_exec_argv_timeout);
+    register_test("test_exec_argv_output_limits", test_exec_argv_output_limits);
+    register_test("test_exec_argv_timeout_kills_descendant", test_exec_argv_timeout_kills_descendant);
+    register_test("test_exec_argv_managed_primary_exit_kills_descendant",
+                  test_exec_argv_managed_primary_exit_kills_descendant);
 
     /* Array: flat_map, chunk, group_by, sum, min, max, first, last */
     register_test("test_array_flat_map", test_array_flat_map);
@@ -14689,6 +15387,7 @@ void register_stdlib_tests(void) {
     register_test("test_parity_array_map_basic", test_parity_array_map_basic);
     register_test("test_parity_array_map_empty", test_parity_array_map_empty);
     register_test("test_parity_array_map_strings", test_parity_array_map_strings);
+    register_test("test_mba1330_array_map_callback_error", test_mba1330_array_map_callback_error);
     register_test("test_parity_array_filter_basic", test_parity_array_filter_basic);
     register_test("test_parity_array_filter_none", test_parity_array_filter_none);
     register_test("test_parity_array_filter_all", test_parity_array_filter_all);

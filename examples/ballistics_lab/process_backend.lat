@@ -1,0 +1,860 @@
+// Bounded process/JSON implementation of the ballistics EngineBackend.
+//
+// One solve serializes an Experiment to solve-json schema v1, invokes an
+// explicitly configured executable with exec_argv(), and validates the complete
+// response before constructing immutable domain values. No shell command string
+// is assembled and no process is retained between solves.
+
+import {
+    m, mps, joules
+}
+from "examples/ballistics_lab/units"
+import {
+    assumption, warning, observation, trajectory_summary, trajectory, laboratory_error
+}
+from "examples/ballistics_lab/domain"
+import {
+    engine_backend
+}
+from "examples/ballistics_lab/backend"
+import {
+    v1_request_json
+}
+from "examples/ballistics_lab/protocol_v1"
+
+let SCHEMA_VERSION = 1
+let MAX_REQUEST_BYTES = 1048576
+let MAX_SAMPLES = 10000
+let DEFAULT_TIMEOUT_MS = 30000
+let DEFAULT_MAX_STDOUT_BYTES = 8388608
+let DEFAULT_MAX_STDERR_BYTES = 262144
+// Match the solve-json fixture comparison convention: a small absolute floor
+// plus a tight relative allowance for differently rounded finite JSON numbers.
+let SUMMARY_ABSOLUTE_TOLERANCE = 0.0000000001
+let SUMMARY_RELATIVE_TOLERANCE = 0.000000001
+
+fn _fail(message: String) {
+    assert(false, "solve-json v1 response: " + message)
+}
+
+fn _nonempty_string(value: any, path: String) -> String {
+    if typeof(value) != "String" {
+        _fail(path + ": expected String, got " + typeof(value))
+    }
+    if len(value.trim()) == 0 {
+        _fail(path + ": must not be empty")
+    }
+    return value
+}
+
+fn _integer(value: any, path: String) -> Int {
+    if typeof(value) != "Int" {
+        _fail(path + ": expected Int, got " + typeof(value))
+    }
+    return value
+}
+
+fn _positive_integer(value: any, path: String) -> Int {
+    let checked = _integer(value, path)
+    if checked <= 0 {
+        _fail(path + ": must be greater than zero")
+    }
+    return checked
+}
+
+fn _number(value: any, path: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        _fail(path + ": expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        _fail(path + ": must be finite")
+    }
+    return value
+}
+
+fn _positive_number(value: any, path: String) -> Number {
+    let checked = _number(value, path)
+    if checked <= 0 {
+        _fail(path + ": must be greater than zero")
+    }
+    return checked
+}
+
+fn _nonnegative_number(value: any, path: String) -> Number {
+    let checked = _number(value, path)
+    if checked < 0 {
+        _fail(path + ": must be non-negative")
+    }
+    return checked
+}
+
+fn _boolean(value: any, path: String) -> Bool {
+    if typeof(value) != "Bool" {
+        _fail(path + ": expected Bool, got " + typeof(value))
+    }
+    return value
+}
+
+fn _map(value: any, path: String) -> Map {
+    if typeof(value) != "Map" {
+        _fail(path + ": expected Map, got " + typeof(value))
+    }
+    return value
+}
+
+fn _array(value: any, path: String) -> Array {
+    if typeof(value) != "Array" {
+        _fail(path + ": expected Array, got " + typeof(value))
+    }
+    return value
+}
+
+fn _required(object: Map, key: String, path: String) -> any {
+    if !object.has(key) {
+        _fail(path + ": missing required field '" + key + "'")
+    }
+    return object.get(key)
+}
+
+fn _require_exact_keys(object: Map, required: Array, optional: Array, path: String) {
+    for key in required {
+        if !object.has(key) {
+            _fail(path + ": missing required field '" + key + "'")
+        }
+    }
+    for key in object.keys() {
+        if !required.contains(key) && !optional.contains(key) {
+            _fail(path + ": unknown field '" + key + "'")
+        }
+    }
+}
+
+fn _require_choice(value: any, choices: Array, path: String) -> String {
+    let checked = _nonempty_string(value, path)
+    if !choices.contains(checked) {
+        _fail(path + ": unsupported value '" + checked + "'")
+    }
+    return checked
+}
+
+fn _validate_projectile(object: Map) {
+    _require_exact_keys(
+    object,
+    ["mass_kg", "diameter_m", "drag_model", "ballistic_coefficient"],
+    ["length_m"],
+    "$.resolved_request.projectile"
+    )
+    _positive_number(object.get("mass_kg"), "$.resolved_request.projectile.mass_kg")
+    _positive_number(object.get("diameter_m"), "$.resolved_request.projectile.diameter_m")
+    if object.has("length_m") {
+        _positive_number(object.get("length_m"), "$.resolved_request.projectile.length_m")
+    }
+    _require_choice(object.get("drag_model"), ["G1", "G6", "G7", "G8"], "$.resolved_request.projectile.drag_model")
+    _positive_number(object.get("ballistic_coefficient"), "$.resolved_request.projectile.ballistic_coefficient")
+}
+
+fn _validate_rifle(object: Map) {
+    _require_exact_keys(
+    object,
+    ["muzzle_velocity_mps", "sight_height_m", "muzzle_height_m", "twist_rate_m_per_turn", "twist_direction"],
+    [],
+    "$.resolved_request.rifle"
+    )
+    _positive_number(object.get("muzzle_velocity_mps"), "$.resolved_request.rifle.muzzle_velocity_mps")
+    _nonnegative_number(object.get("sight_height_m"), "$.resolved_request.rifle.sight_height_m")
+    _number(object.get("muzzle_height_m"), "$.resolved_request.rifle.muzzle_height_m")
+    _positive_number(object.get("twist_rate_m_per_turn"), "$.resolved_request.rifle.twist_rate_m_per_turn")
+    _require_choice(object.get("twist_direction"), ["left", "right"], "$.resolved_request.rifle.twist_direction")
+}
+
+fn _validate_shot(object: Map) {
+    _require_exact_keys(
+    object,
+    [
+        "max_range_m", "muzzle_angle_rad", "aim_azimuth_rad", "shot_azimuth_rad",
+        "shooting_angle_rad", "cant_angle_rad", "target_height_m", "ground_threshold_m"
+    ],
+    ["zero_distance_m"],
+    "$.resolved_request.shot"
+    )
+    _positive_number(object.get("max_range_m"), "$.resolved_request.shot.max_range_m")
+    if object.has("zero_distance_m") {
+        let zero_distance = _positive_number(
+        object.get("zero_distance_m"),
+        "$.resolved_request.shot.zero_distance_m"
+        )
+        if is_inf(zero_distance * 2.0) {
+            _fail("$.resolved_request.shot.zero_distance_m: too large for a finite zeroing range")
+        }
+    }
+    for key in [
+        "muzzle_angle_rad", "aim_azimuth_rad", "shot_azimuth_rad", "shooting_angle_rad",
+        "cant_angle_rad", "target_height_m", "ground_threshold_m"
+    ] {
+        _number(object.get(key), "$.resolved_request.shot." + key)
+    }
+}
+
+fn _validate_atmosphere(object: Map) {
+    _require_exact_keys(
+    object,
+    ["altitude_m", "temperature_k", "pressure_pa", "relative_humidity"],
+    ["latitude_rad"],
+    "$.resolved_request.atmosphere"
+    )
+    let altitude = _number(object.get("altitude_m"), "$.resolved_request.atmosphere.altitude_m")
+    if altitude < -5000 || altitude > 84000 {
+        _fail("$.resolved_request.atmosphere.altitude_m: must be between -5000 and 84000")
+    }
+    _positive_number(object.get("temperature_k"), "$.resolved_request.atmosphere.temperature_k")
+    _positive_number(object.get("pressure_pa"), "$.resolved_request.atmosphere.pressure_pa")
+    let humidity = _number(object.get("relative_humidity"), "$.resolved_request.atmosphere.relative_humidity")
+    if humidity < 0 || humidity > 1 {
+        _fail("$.resolved_request.atmosphere.relative_humidity: must be between 0 and 1")
+    }
+    if object.has("latitude_rad") {
+        let latitude = _number(object.get("latitude_rad"), "$.resolved_request.atmosphere.latitude_rad")
+        let half_pi = 3.141592653589793 / 2.0
+        if latitude < 0.0 - half_pi || latitude > half_pi {
+            _fail("$.resolved_request.atmosphere.latitude_rad: must be between -pi/2 and pi/2")
+        }
+    }
+}
+
+fn _validate_wind_segment(object: Map, index: Int, last_boundary: Number) -> Number {
+    let path = "$.resolved_request.wind.segments[" + to_string(index) + "]"
+    _require_exact_keys(
+    object,
+    ["until_distance_m", "speed_mps", "direction_from_rad", "vertical_speed_mps"],
+    [],
+    path
+    )
+    let boundary = _positive_number(object.get("until_distance_m"), path + ".until_distance_m")
+    if boundary <= last_boundary {
+        _fail("$.resolved_request.wind.segments: boundaries must increase strictly")
+    }
+    _nonnegative_number(object.get("speed_mps"), path + ".speed_mps")
+    _number(object.get("direction_from_rad"), path + ".direction_from_rad")
+    _number(object.get("vertical_speed_mps"), path + ".vertical_speed_mps")
+    return boundary
+}
+
+fn _validate_wind(object: Map) {
+    if object.has("segments") {
+        _require_exact_keys(object, ["segments"], [], "$.resolved_request.wind")
+        let segments = _array(object.get("segments"), "$.resolved_request.wind.segments")
+        if len(segments) == 0 {
+            _fail("$.resolved_request.wind.segments: must not be empty")
+        }
+        flux index = 0
+        flux boundary = 0.0
+        for segment in segments {
+            boundary = _validate_wind_segment(_map(segment, "$.resolved_request.wind.segments[]"), index, boundary)
+            index = index + 1
+        }
+        return
+    }
+    _require_exact_keys(
+    object,
+    ["speed_mps", "direction_from_rad", "vertical_speed_mps"],
+    [],
+    "$.resolved_request.wind"
+    )
+    _nonnegative_number(object.get("speed_mps"), "$.resolved_request.wind.speed_mps")
+    _number(object.get("direction_from_rad"), "$.resolved_request.wind.direction_from_rad")
+    _number(object.get("vertical_speed_mps"), "$.resolved_request.wind.vertical_speed_mps")
+}
+
+fn _validate_solver(object: Map) {
+    _require_exact_keys(object, ["method", "time_step_s"], [], "$.resolved_request.solver")
+    _require_choice(object.get("method"), ["rk45", "rk4", "euler"], "$.resolved_request.solver.method")
+    _positive_number(object.get("time_step_s"), "$.resolved_request.solver.time_step_s")
+}
+
+fn _validate_effects(object: Map) {
+    _require_exact_keys(
+    object,
+    ["magnus", "coriolis", "enhanced_spin_drift"],
+    [],
+    "$.resolved_request.effects"
+    )
+    let magnus = _boolean(object.get("magnus"), "$.resolved_request.effects.magnus")
+    _boolean(object.get("coriolis"), "$.resolved_request.effects.coriolis")
+    let enhanced = _boolean(
+    object.get("enhanced_spin_drift"),
+    "$.resolved_request.effects.enhanced_spin_drift"
+    )
+    if magnus && enhanced {
+        _fail("$.resolved_request.effects: magnus and enhanced_spin_drift cannot both be enabled")
+    }
+}
+
+fn _validate_sampling(object: Map) {
+    _require_exact_keys(object, ["interval_m"], [], "$.resolved_request.sampling")
+    _positive_number(object.get("interval_m"), "$.resolved_request.sampling.interval_m")
+}
+
+fn _validate_resolved_request(value: any) -> Map {
+    let object = _map(value, "$.resolved_request")
+    _require_exact_keys(
+    object,
+    ["schema_version", "projectile", "rifle", "shot", "atmosphere", "wind", "solver", "effects", "sampling"],
+    [],
+    "$.resolved_request"
+    )
+    if _integer(object.get("schema_version"), "$.resolved_request.schema_version") != SCHEMA_VERSION {
+        _fail("$.resolved_request.schema_version: unsupported schema version")
+    }
+    let projectile = _map(object.get("projectile"), "$.resolved_request.projectile")
+    let rifle = _map(object.get("rifle"), "$.resolved_request.rifle")
+    let shot = _map(object.get("shot"), "$.resolved_request.shot")
+    let atmosphere = _map(object.get("atmosphere"), "$.resolved_request.atmosphere")
+    let effects = _map(object.get("effects"), "$.resolved_request.effects")
+    _validate_projectile(projectile)
+    _validate_rifle(rifle)
+    _validate_shot(shot)
+    _validate_atmosphere(atmosphere)
+    _validate_wind(_map(object.get("wind"), "$.resolved_request.wind"))
+    _validate_solver(_map(object.get("solver"), "$.resolved_request.solver"))
+    _validate_effects(effects)
+    _validate_sampling(_map(object.get("sampling"), "$.resolved_request.sampling"))
+    if shot.get("ground_threshold_m") >= rifle.get("muzzle_height_m") {
+        _fail("$.resolved_request.shot.ground_threshold_m: must be below the resolved muzzle height")
+    }
+    if effects.get("coriolis") && !atmosphere.has("latitude_rad") {
+        _fail("$.resolved_request.atmosphere.latitude_rad: required when coriolis is enabled")
+    }
+    return freeze(object)
+}
+
+fn _decode_notice(value: any, kind: String, index: Int) -> any {
+    let path = "$." + kind + "[" + to_string(index) + "]"
+    let object = _map(value, path)
+    _require_exact_keys(object, ["code", "message"], ["path"], path)
+    let code = _nonempty_string(object.get("code"), path + ".code")
+    let message = _nonempty_string(object.get("message"), path + ".message")
+    flux field_path = nil
+    if object.has("path") && object.get("path") != nil {
+        field_path = _nonempty_string(object.get("path"), path + ".path")
+    }
+    if kind == "assumptions" {
+        if ![
+            "default_applied", "icao_standard_temperature", "icao_standard_pressure",
+            "estimated_projectile_length"
+        ].contains(code) {
+            _fail(path + ".code: unsupported assumption code '" + code + "'")
+        }
+        return assumption(code, message, field_path)
+    }
+    if !["partial_wind_coverage", "experimental_effect", "rk45_time_step_ignored"].contains(code) {
+        _fail(path + ".code: unsupported warning code '" + code + "'")
+    }
+    return warning(code, message, field_path)
+}
+
+fn _decode_notices(value: any, kind: String) -> Array {
+    let input = _array(value, "$." + kind)
+    flux output = []
+    flux index = 0
+    for item in input {
+        output.push(_decode_notice(item, kind, index))
+        index = index + 1
+    }
+    return freeze(output)
+}
+
+fn _validate_sample(value: any, index: Int) {
+    let path = "$.samples[" + to_string(index) + "]"
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["distance_m", "time_s", "speed_mps", "energy_j", "drop_m", "windage_m", "mach", "flags"],
+    [],
+    path
+    )
+    let flags = _array(object.get("flags"), path + ".flags")
+    for flag in flags {
+        _require_choice(
+        flag,
+        ["transonic", "subsonic", "terminal", "ground_threshold"],
+        path + ".flags[]"
+        )
+    }
+    _nonnegative_number(object.get("distance_m"), path + ".distance_m")
+    _nonnegative_number(object.get("time_s"), path + ".time_s")
+    _nonnegative_number(object.get("speed_mps"), path + ".speed_mps")
+    _nonnegative_number(object.get("energy_j"), path + ".energy_j")
+    _number(object.get("drop_m"), path + ".drop_m")
+    _number(object.get("windage_m"), path + ".windage_m")
+    _nonnegative_number(object.get("mach"), path + ".mach")
+}
+
+fn _decode_checked_sample(value: any) -> any {
+    // _decode_samples validates every element before Array.map invokes this
+    // construction-only path, so backend callback errors cannot leave a
+    // partially built native map result.
+    let object = value
+    return observation(
+    m(object.get("distance_m")),
+    object.get("time_s"),
+    mps(object.get("speed_mps")),
+    joules(object.get("energy_j")),
+    m(object.get("drop_m")),
+    m(object.get("windage_m")),
+    object.get("mach"),
+    clone(object.get("flags"))
+    )
+}
+
+fn _decode_samples(value: any) -> Array {
+    let input = _array(value, "$.samples")
+    if len(input) == 0 {
+        _fail("$.samples: must contain a terminal observation")
+    }
+    if len(input) > MAX_SAMPLES {
+        _fail("$.samples: exceeds the 10000-sample v1 limit")
+    }
+    flux index = 0
+    for item in input {
+        _validate_sample(item, index)
+        index = index + 1
+    }
+    let output = freeze(input.enumerate().map( |pair| {
+        return _decode_checked_sample(pair[1])
+    }
+    ))
+    return output
+}
+
+fn _decode_summary(value: any) -> any {
+    let object = _map(value, "$.summary")
+    _require_exact_keys(
+    object,
+    [
+        "actual_range_m", "maximum_height_m", "time_of_flight_s", "terminal_speed_mps",
+        "terminal_energy_j", "termination"
+    ],
+    ["stability_factor", "spin_drift_m"],
+    "$.summary"
+    )
+    flux stability = nil
+    if object.has("stability_factor") {
+        stability = _nonnegative_number(object.get("stability_factor"), "$.summary.stability_factor")
+    }
+    flux spin_drift = nil
+    if object.has("spin_drift_m") {
+        spin_drift = m(_number(object.get("spin_drift_m"), "$.summary.spin_drift_m"))
+    }
+    return trajectory_summary(
+    m(_nonnegative_number(object.get("actual_range_m"), "$.summary.actual_range_m")),
+    m(_number(object.get("maximum_height_m"), "$.summary.maximum_height_m")),
+    _nonnegative_number(object.get("time_of_flight_s"), "$.summary.time_of_flight_s"),
+    mps(_nonnegative_number(object.get("terminal_speed_mps"), "$.summary.terminal_speed_mps")),
+    joules(_nonnegative_number(object.get("terminal_energy_j"), "$.summary.terminal_energy_j")),
+    _require_choice(
+    object.get("termination"),
+    ["max_range", "ground_threshold", "time_limit", "velocity_floor"],
+    "$.summary.termination"
+    ),
+    stability,
+    spin_drift
+    )
+}
+
+fn _numbers_match(left: Number, right: Number) -> Bool {
+    flux scale = abs(left)
+    if abs(right) > scale {
+        scale = abs(right)
+    }
+    return abs(left - right) <= SUMMARY_ABSOLUTE_TOLERANCE + SUMMARY_RELATIVE_TOLERANCE * scale
+}
+
+fn _require_summary_match(sample_value: Number, summary_value: Number, field: String) {
+    if !_numbers_match(sample_value, summary_value) {
+        _fail("$.samples: terminal " + field + " does not match $.summary")
+    }
+}
+
+fn _validate_terminal_sample(samples: Array, summary: any) {
+    flux terminal_count = 0
+    flux terminal_index = -1
+    flux index = 0
+    for sample in samples {
+        for flag in sample.flags {
+            if flag == "terminal" {
+                terminal_count = terminal_count + 1
+                terminal_index = index
+            }
+        }
+        index = index + 1
+    }
+    if terminal_count != 1 {
+        _fail("$.samples: expected exactly one terminal flag, got " + to_string(terminal_count))
+    }
+    if terminal_index != len(samples) - 1 {
+        _fail("$.samples: the terminal observation must be last")
+    }
+
+    let terminal = samples[len(samples) - 1]
+    _require_summary_match(terminal.distance.si_value, summary.actual_range.si_value, "distance_m")
+    _require_summary_match(terminal.time_s, summary.time_of_flight_s, "time_s")
+    _require_summary_match(terminal.velocity.si_value, summary.terminal_velocity.si_value, "speed_mps")
+    _require_summary_match(terminal.energy.si_value, summary.terminal_energy.si_value, "energy_j")
+}
+
+fn _diagnostic(stderr: any) -> any {
+    if typeof(stderr) != "String" || len(stderr.trim()) == 0 {
+        return nil
+    }
+    return stderr
+}
+
+fn _typed_exit_code(exit_code: any) -> any {
+    if typeof(exit_code) != "Int" {
+        return nil
+    }
+    return exit_code
+}
+
+fn _invalid_response(message: String, stderr: any = nil, exit_code: any = nil) -> any {
+    return laboratory_error(
+    "invalid_engine_response",
+    message,
+    nil,
+    _diagnostic(stderr),
+    _typed_exit_code(exit_code)
+    )
+}
+
+fn _expected_error_exit(code: String) -> Int {
+    if [
+        "invalid_json", "unsupported_schema_version", "unknown_field", "missing_field",
+        "invalid_value", "conflicting_fields"
+    ].contains(code) {
+        return 2
+    }
+    if ["resource_limit", "solve_failed"].contains(code) {
+        return 3
+    }
+    if ["io_error", "internal_error"].contains(code) {
+        return 1
+    }
+    _fail("$.error.code: unsupported value '" + code + "'")
+}
+
+fn _decode_error(envelope: Map, stderr: String, exit_code: Int) -> any {
+    _require_exact_keys(envelope, ["schema_version", "status", "error"], [], "$")
+    let object = _map(envelope.get("error"), "$.error")
+    _require_exact_keys(object, ["code", "message", "path", "line", "column"], [], "$.error")
+    let code = _nonempty_string(object.get("code"), "$.error.code")
+    let message = _nonempty_string(object.get("message"), "$.error.message")
+    let expected_exit = _expected_error_exit(code)
+    if exit_code != expected_exit {
+        _fail(
+        "$.error.code '" + code + "' requires exit " + to_string(expected_exit) +
+        ", got " + to_string(exit_code)
+        )
+    }
+
+    let raw_path = object.get("path")
+    let raw_line = object.get("line")
+    let raw_column = object.get("column")
+    flux field_path = nil
+    flux line = nil
+    flux column = nil
+    if raw_path != nil {
+        field_path = _nonempty_string(raw_path, "$.error.path")
+        if raw_line != nil || raw_column != nil {
+            _fail("$.error: path conflicts with line and column")
+        }
+    } else if raw_line == nil && raw_column == nil {
+        // Errors not tied to a request location intentionally leave all three nil.
+    } else {
+        if raw_line == nil || raw_column == nil {
+            _fail("$.error: line and column must be supplied together")
+        }
+        line = _positive_integer(raw_line, "$.error.line")
+        column = _positive_integer(raw_column, "$.error.column")
+    }
+    return laboratory_error(
+    code,
+    message,
+    field_path,
+    _diagnostic(stderr),
+    exit_code,
+    line,
+    column
+    )
+}
+
+fn _decode_success(
+envelope: Map,
+experiment: any,
+expected_engine_version: any,
+stderr: String,
+exit_code: Int
+) -> any {
+    _require_exact_keys(
+    envelope,
+    [
+        "schema_version", "engine_version", "status", "resolved_request",
+        "assumptions", "warnings", "summary", "samples"
+    ],
+    [],
+    "$"
+    )
+    if exit_code != 0 {
+        _fail("status 'ok' requires exit 0, got " + to_string(exit_code))
+    }
+    if len(stderr) != 0 {
+        _fail("status 'ok' must not write diagnostics to stderr")
+    }
+    let engine_version = _nonempty_string(envelope.get("engine_version"), "$.engine_version")
+    if expected_engine_version != nil && engine_version != expected_engine_version {
+        return laboratory_error(
+        "incompatible_engine_version",
+        "expected engine version '" + expected_engine_version + "', got '" + engine_version + "'",
+        nil,
+        _diagnostic(stderr),
+        exit_code
+        )
+    }
+    let resolved = _validate_resolved_request(envelope.get("resolved_request"))
+    let assumptions = _decode_notices(envelope.get("assumptions"), "assumptions")
+    let warnings = _decode_notices(envelope.get("warnings"), "warnings")
+    let summary = _decode_summary(envelope.get("summary"))
+    let samples = _decode_samples(envelope.get("samples"))
+    _validate_terminal_sample(samples, summary)
+    return trajectory(
+    engine_version,
+    experiment,
+    samples,
+    assumptions,
+    warnings,
+    summary,
+    false,
+    resolved,
+    SCHEMA_VERSION
+    )
+}
+
+fn _decode_envelope(
+envelope_value: any,
+experiment: any,
+expected_engine_version: any,
+stderr: String,
+exit_code: Int
+) -> any {
+    let envelope = _map(envelope_value, "$")
+    if !envelope.has("schema_version") {
+        _fail("$: missing required field 'schema_version'")
+    }
+    let schema_version = _integer(envelope.get("schema_version"), "$.schema_version")
+    if schema_version != SCHEMA_VERSION {
+        return laboratory_error(
+        "unsupported_schema_version",
+        "unsupported response schema_version " + to_string(schema_version) + "; expected 1",
+        "$.schema_version",
+        _diagnostic(stderr),
+        exit_code
+        )
+    }
+    let status = _nonempty_string(_required(envelope, "status", "$"), "$.status")
+    if status == "ok" {
+        return _decode_success(envelope, experiment, expected_engine_version, stderr, exit_code)
+    }
+    if status == "error" {
+        return _decode_error(envelope, stderr, exit_code)
+    }
+    _fail("$.status: unsupported value '" + status + "'")
+}
+
+export fn decode_v1_process_result(
+experiment: any,
+process_result: any,
+expected_engine_version: any = nil
+) -> any {
+    if typeof(experiment) != "Struct" || struct_name(experiment) != "Experiment" {
+        return laboratory_error(
+        "backend_contract_error",
+        "decode_v1_process_result: expected Experiment"
+        )
+    }
+    if expected_engine_version != nil {
+        if typeof(expected_engine_version) != "String" || len(expected_engine_version.trim()) == 0 {
+            return laboratory_error(
+            "backend_contract_error",
+            "expected_engine_version must be a non-empty String or nil"
+            )
+        }
+    }
+    if typeof(process_result) != "Map" {
+        return _invalid_response("exec_argv returned " + typeof(process_result) + "; expected Map")
+    }
+    flux available_stderr = nil
+    flux available_exit_code = nil
+    if process_result.has("stderr") {
+        available_stderr = process_result.get("stderr")
+    }
+    if process_result.has("exit_code") {
+        available_exit_code = process_result.get("exit_code")
+    }
+    for key in ["stdout", "stderr", "exit_code"] {
+        if !process_result.has(key) {
+            return _invalid_response(
+            "exec_argv result is missing '" + key + "'",
+            available_stderr,
+            available_exit_code
+            )
+        }
+    }
+    let stdout = process_result.get("stdout")
+    let stderr = process_result.get("stderr")
+    let exit_code = process_result.get("exit_code")
+    if typeof(stdout) != "String" || typeof(stderr) != "String" || typeof(exit_code) != "Int" {
+        return _invalid_response(
+        "exec_argv result fields have invalid types",
+        available_stderr,
+        available_exit_code
+        )
+    }
+    for key in process_result.keys() {
+        if !["stdout", "stderr", "exit_code"].contains(key) {
+            return _invalid_response("exec_argv result contains unknown field '" + key + "'", stderr, exit_code)
+        }
+    }
+    let envelope = try {
+        json_parse(stdout)
+    } catch error {
+        return _invalid_response(
+        "engine stdout is not exactly one JSON envelope: " + error.message,
+        stderr,
+        exit_code
+        )
+    }
+    return try {
+        _decode_envelope(envelope, experiment, expected_engine_version, stderr, exit_code)
+    } catch error {
+        _invalid_response(error.message, stderr, exit_code)
+    }
+}
+
+fn _copy_argv(argv: any) -> Array {
+    if typeof(argv) != "Array" {
+        assert(false, "process_backend.argv: expected Array, got " + typeof(argv))
+    }
+    if len(argv) == 0 {
+        assert(false, "process_backend.argv: must not be empty")
+    }
+    flux copied = []
+    flux index = 0
+    for item in argv {
+        if typeof(item) != "String" {
+            assert(false, "process_backend.argv[" + to_string(index) + "]: expected String")
+        }
+        copied.push(item)
+        index = index + 1
+    }
+    // This is a private defensive copy captured by the backend closure. Keeping
+    // it fluid avoids nesting a shared crystal region inside a closure while no
+    // caller retains an alias capable of mutation.
+    return copied
+}
+
+fn _limits(options: any) -> Map {
+    flux limits = Map::new()
+    limits.set("timeout_ms", DEFAULT_TIMEOUT_MS)
+    limits.set("max_stdout_bytes", DEFAULT_MAX_STDOUT_BYTES)
+    limits.set("max_stderr_bytes", DEFAULT_MAX_STDERR_BYTES)
+    if options == nil {
+        return limits
+    }
+    if typeof(options) != "Map" {
+        assert(false, "process_backend.options: expected Map or nil, got " + typeof(options))
+    }
+    for key in options.keys() {
+        if !["timeout_ms", "max_stdout_bytes", "max_stderr_bytes"].contains(key) {
+            assert(false, "process_backend.options: unknown option '" + key + "'")
+        }
+        let value = options.get(key)
+        if typeof(value) != "Int" || value <= 0 {
+            assert(false, "process_backend.options." + key + ": expected a positive Int")
+        }
+        limits.set(key, value)
+    }
+    return limits
+}
+
+fn _solve_process(
+executable: String,
+argv: Array,
+limits: Map,
+expected_engine_version: any,
+experiment: any
+) -> any {
+    let request = try {
+        v1_request_json(experiment)
+    } catch error {
+        return laboratory_error(
+        "request_serialization_error",
+        "failed to encode solve-json v1 request: " + error.message
+        )
+    }
+    if len(request) > MAX_REQUEST_BYTES {
+        return laboratory_error(
+        "resource_limit",
+        "solve-json request exceeds the 1048576-byte v1 input limit"
+        )
+    }
+    let result = try {
+        exec_argv(executable, argv, request, limits)
+    } catch error {
+        return laboratory_error(
+        "process_error",
+        error.message
+        )
+    }
+    return decode_v1_process_result(experiment, result, expected_engine_version)
+}
+
+export fn process_backend_with_argv(
+executable: any,
+argv: any,
+expected_engine_version: any = nil,
+options: any = nil
+) -> any {
+    if typeof(executable) != "String" || len(executable.trim()) == 0 {
+        assert(false, "process_backend.executable: expected a non-empty String")
+    }
+    if expected_engine_version != nil {
+        if typeof(expected_engine_version) != "String" || len(expected_engine_version.trim()) == 0 {
+            assert(false, "process_backend.expected_engine_version: expected a non-empty String or nil")
+        }
+    }
+    let checked_argv = _copy_argv(argv)
+    let checked_limits = _limits(options)
+    return engine_backend("process-json-v1", |experiment| {
+        return _solve_process(
+        executable,
+        checked_argv,
+        checked_limits,
+        expected_engine_version,
+        experiment
+        )
+    }
+    )
+}
+
+export fn process_backend(
+executable: any,
+expected_engine_version: any = nil,
+options: any = nil
+) -> any {
+    return process_backend_with_argv(
+    executable,
+    ["solve-json"],
+    expected_engine_version,
+    options
+    )
+}

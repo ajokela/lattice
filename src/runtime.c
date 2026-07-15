@@ -244,7 +244,7 @@ static LatValue native_len(LatValue *args, int arg_count) {
     LatValue *v = &args[0];
     if (v->type == VAL_REF) v = &v->as.ref.ref->value;
     if (v->type == VAL_ARRAY) return value_int((int64_t)v->as.array.len);
-    if (v->type == VAL_STR) return value_int((int64_t)strlen(v->as.str_val));
+    if (v->type == VAL_STR) return value_int((int64_t)(v->as.str_len ? v->as.str_len : strlen(v->as.str_val)));
     if (v->type == VAL_MAP) return value_int((int64_t)lat_map_len(v->as.map.map));
     if (v->type == VAL_BUFFER) return value_int((int64_t)v->as.buffer.len);
     return value_int(0);
@@ -1303,7 +1303,8 @@ static LatValue native_json_parse(LatValue *args, int ac) {
         return value_nil();
     }
     char *err = NULL;
-    LatValue r = json_parse(args[0].as.str_val, &err);
+    size_t len = args[0].as.str_len ? args[0].as.str_len : strlen(args[0].as.str_val);
+    LatValue r = json_parse_len(args[0].as.str_val, len, &err);
     if (err) {
         current_rt->error = err;
         return value_nil();
@@ -2248,6 +2249,15 @@ static LatValue native_exec_cmd(LatValue *args, int ac) {
     if (ac != 1 || args[0].type != VAL_STR) return value_nil();
     char *err = NULL;
     LatValue r = process_exec(args[0].as.str_val, &err);
+    if (err) {
+        current_rt->error = err;
+        return value_nil();
+    }
+    return r;
+}
+static LatValue native_exec_argv(LatValue *args, int ac) {
+    char *err = NULL;
+    LatValue r = process_exec_argv(args, ac, &err);
     if (err) {
         current_rt->error = err;
         return value_nil();
@@ -3455,6 +3465,17 @@ static LatValue native_tokenize(LatValue *args, int arg_count) {
     return arr;
 }
 
+static void native_lat_eval_propagate_error(char **vm_error) {
+    if (*vm_error) {
+        char *error = *vm_error;
+        *vm_error = NULL;
+        if (current_rt->error != error) free(current_rt->error);
+        current_rt->error = error;
+    } else if (!current_rt->error) {
+        current_rt->error = strdup("lat_eval: runtime error");
+    }
+}
+
 static LatValue native_lat_eval(LatValue *args, int arg_count) {
     if (arg_count < 1 || args[0].type != VAL_STR) return value_nil();
     const char *source = args[0].as.str_val;
@@ -3493,8 +3514,11 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
         RegVM *rvm = (RegVM *)current_rt->active_vm;
         regvm_track_chunk(rvm, rchunk);
         LatValue result;
-        RegVMResult rr = regvm_run(rvm, rchunk, &result);
-        if (rr != REGVM_OK) return value_nil();
+        RegVMResult rr = regvm_run_isolated(rvm, rchunk, &result);
+        if (rr != REGVM_OK) {
+            native_lat_eval_propagate_error(&rvm->error);
+            return value_nil();
+        }
         return result;
     }
 
@@ -3515,8 +3539,11 @@ static LatValue native_lat_eval(LatValue *args, int arg_count) {
     }
     vm->fn_chunks[vm->fn_chunk_count++] = chunk;
     LatValue result;
-    StackVMResult r = stackvm_run(vm, chunk, &result);
-    if (r != STACKVM_OK) return value_nil();
+    StackVMResult r = stackvm_run_isolated(vm, chunk, &result);
+    if (r != STACKVM_OK) {
+        native_lat_eval_propagate_error(&vm->error);
+        return value_nil();
+    }
     return result;
 }
 
@@ -4120,6 +4147,7 @@ static LatValue build_net_module(void) {
 static LatValue build_os_module(void) {
     LatValue m = value_map_new();
     mod_set_native(&m, "exec", native_exec_cmd);
+    mod_set_native(&m, "exec_argv", native_exec_argv);
     mod_set_native(&m, "shell", native_shell);
     mod_set_native(&m, "env", native_env);
     mod_set_native(&m, "env_set", native_env_set);
@@ -4511,6 +4539,7 @@ void lat_runtime_init(LatRuntime *rt) {
     /* Process */
     rt_register_native(rt, "cwd", native_cwd, 0);
     rt_register_native(rt, "exec", native_exec_cmd, 1);
+    rt_register_native(rt, "exec_argv", native_exec_argv, -1);
     rt_register_native(rt, "shell", native_shell, 1);
     rt_register_native(rt, "platform", native_platform, 0);
     rt_register_native(rt, "hostname", native_hostname, 0);

@@ -1,0 +1,1031 @@
+// Deterministic, terminal-oriented rendering for the ballistics laboratory.
+//
+// Every public operation is pure and returns a String. This module deliberately
+// performs no printing, file/process I/O, JSON/CSV serialization, source
+// evaluation, or Map iteration. Analysis rows are read only through their
+// declared column sequence.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/session" as sessions
+
+fn _fail(path: String, message: String) {
+    assert(false, path + ": " + message)
+}
+
+fn _is_struct(value: any, expected: String) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == expected
+}
+
+fn _require_struct(value: any, expected: String, path: String) {
+    if !_is_struct(value, expected) {
+        flux actual = typeof(value)
+        if actual == "Struct" {
+            actual = struct_name(value)
+        }
+        _fail(path, "expected " + expected + ", got " + actual)
+    }
+}
+
+fn _require_array(value: any, path: String) {
+    if typeof(value) != "Array" {
+        _fail(path, "expected Array, got " + typeof(value))
+    }
+}
+
+fn _require_map(value: any, path: String) {
+    if typeof(value) != "Map" {
+        _fail(path, "expected Map, got " + typeof(value))
+    }
+}
+
+fn _require_string(value: any, path: String, allow_empty: Bool = false) -> String {
+    if typeof(value) != "String" {
+        _fail(path, "expected String, got " + typeof(value))
+    }
+    if !allow_empty && len(value.trim()) == 0 {
+        _fail(path, "must not be empty")
+    }
+    return value
+}
+
+fn _require_optional_string(value: any, path: String) {
+    if value != nil {
+        _require_string(value, path)
+    }
+}
+
+fn _require_bool(value: any, path: String) -> Bool {
+    if typeof(value) != "Bool" {
+        _fail(path, "expected Bool, got " + typeof(value))
+    }
+    return value
+}
+
+fn _require_optional_bool(value: any, path: String) {
+    if value != nil {
+        _require_bool(value, path)
+    }
+}
+
+fn _require_int(value: any, path: String) -> Int {
+    if typeof(value) != "Int" {
+        _fail(path, "expected Int, got " + typeof(value))
+    }
+    return value
+}
+
+fn _require_finite(value: any, path: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        _fail(path, "expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        _fail(path, "must be finite")
+    }
+    return value
+}
+
+fn _require_optional_finite(value: any, path: String) {
+    if value != nil {
+        _require_finite(value, path)
+    }
+}
+
+fn _require_quantity(value: any, expected: String, path: String) {
+    _require_struct(value, expected, path)
+    _require_finite(value.si_value, path + ".si_value")
+    _require_finite(value.display_value, path + ".display_value")
+    _require_string(value.display_unit, path + ".display_unit")
+}
+
+fn _require_optional_quantity(value: any, expected: String, path: String) {
+    if value != nil {
+        _require_quantity(value, expected, path)
+    }
+}
+
+fn _plain(value: String) -> String {
+    return value
+    .replace("\\", "\\\\")
+    .replace("\r", "\\r")
+    .replace("\n", "\\n")
+    .replace("\t", "\\t")
+    .replace("|", "\\|")
+}
+
+fn _pad_left(value: String, width: Int) -> String {
+    if len(value) >= width {
+        return value
+    }
+    return " ".repeat(width - len(value)) + value
+}
+
+fn _pad_right(value: String, width: Int) -> String {
+    if len(value) >= width {
+        return value
+    }
+    return value + " ".repeat(width - len(value))
+}
+
+fn _fixed(value: any, precision: Int, explicit_sign: Bool = false) -> String {
+    let checked = _require_finite(value, "render.number")
+    if precision < 0 || precision > 12 {
+        _fail("render.precision", "must be between 0 and 12")
+    }
+    let scale = pow(10, precision)
+    let magnitude = abs(checked)
+    let safe_magnitude = 9000000000000000000 / scale
+    if magnitude > safe_magnitude {
+        // Fixed scaling cannot represent this magnitude in an Int. The JSON
+        // scalar spelling is deterministic and round-trip-safe on every
+        // backend, and avoids making presentation fail for an otherwise valid
+        // finite domain value.
+        let fallback = json_stringify(checked)
+        if explicit_sign && checked >= 0 {
+            return "+" + fallback
+        }
+        return fallback
+    }
+    // Force floating multiplication before round(), avoiding Int wraparound
+    // when a caller supplies an Int scalar.
+    let scaled = round(magnitude * 1.0 * scale)
+    let whole = scaled / scale
+    let remainder = scaled % scale
+    flux sign = ""
+    // A value that rounds to zero is normalized before applying an explicit
+    // sign, so negative zero is always rendered as +0.00 in signed fields.
+    if scaled != 0 && checked < 0 {
+        sign = "-"
+    } else if explicit_sign {
+        sign = "+"
+    }
+    if precision == 0 {
+        return sign + to_string(whole)
+    }
+    let fraction = to_string(remainder)
+    return sign + to_string(whole) + "." + "0".repeat(precision - len(fraction)) + fraction
+}
+
+fn _yes_no(value: Bool) -> String {
+    if value {
+        return "yes"
+    }
+    return "no"
+}
+
+fn _on_off_default(value: any) -> String {
+    if value == nil {
+        return "default"
+    }
+    if _require_bool(value, "render.boolean") {
+        return "on"
+    }
+    return "off"
+}
+
+fn _optional_text(value: any, default_value: String = "default") -> String {
+    if value == nil {
+        return default_value
+    }
+    return _plain(_require_string(value, "render.text"))
+}
+
+fn _profile(value: any) -> any {
+    _require_struct(value, "DisplayPreferences", "render.profile")
+    return sessions.display_preferences(
+    value.distance_unit,
+    value.velocity_unit,
+    value.energy_unit,
+    value.angle_unit,
+    value.precision
+    )
+}
+
+// Revalidate and copy arbitrary session display preferences for callers that
+// retain a long-lived profile independently of a LabSession.
+export fn render_profile_from_display(value: any) -> any {
+    return _profile(value)
+}
+
+export fn metric_render_profile(precision: any = 2) -> any {
+    return sessions.metric_display_preferences(precision)
+}
+
+export fn imperial_render_profile(precision: any = 2) -> any {
+    return sessions.display_preferences("yd", "ft/s", "ft-lb", "mil", precision)
+}
+
+fn _metric_distance_family(profile: any) -> Bool {
+    return profile.distance_unit == "m" || profile.distance_unit == "km"
+}
+
+// Small unit-policy helpers are public so command dispatch can ask analysis.lat
+// to calculate in exactly the units these renderers require.
+export fn offset_unit_for(display: any) -> String {
+    let profile = _profile(display)
+    if _metric_distance_family(profile) {
+        return "m"
+    }
+    return "in"
+}
+
+export fn wind_speed_unit_for(display: any) -> String {
+    let profile = _profile(display)
+    if profile.velocity_unit == "m/s" {
+        return "m/s"
+    }
+    return "mph"
+}
+
+export fn direction_unit_for(display: any) -> String {
+    _profile(display)
+    return "deg"
+}
+
+fn _mass_unit(profile: any) -> String {
+    if _metric_distance_family(profile) {
+        return "g"
+    }
+    return "gr"
+}
+
+fn _temperature_unit(profile: any) -> String {
+    if _metric_distance_family(profile) {
+        return "C"
+    }
+    return "F"
+}
+
+fn _pressure_unit(profile: any) -> String {
+    if _metric_distance_family(profile) {
+        return "hPa"
+    }
+    return "inHg"
+}
+
+fn _quantity_text(value: Number, unit: String, profile: any, signed: Bool = false) -> String {
+    return _fixed(value, profile.precision, signed) + " " + unit
+}
+
+fn _distance_text(value: any, unit: String, profile: any, signed: Bool = false) -> String {
+    _require_quantity(value, "Distance", "render.distance")
+    return _quantity_text(units.distance_as(value, unit), unit, profile, signed)
+}
+
+fn _velocity_text(value: any, unit: String, profile: any) -> String {
+    _require_quantity(value, "Velocity", "render.velocity")
+    return _quantity_text(units.velocity_as(value, unit), unit, profile)
+}
+
+fn _energy_text(value: any, unit: String, profile: any) -> String {
+    _require_quantity(value, "Energy", "render.energy")
+    return _quantity_text(units.energy_as(value, unit), unit, profile)
+}
+
+fn _mass_text(value: any, unit: String, profile: any) -> String {
+    _require_quantity(value, "Mass", "render.mass")
+    return _quantity_text(units.mass_as(value, unit), unit, profile)
+}
+
+fn _angle_text(value: any, unit: String, profile: any, signed: Bool = false) -> String {
+    _require_quantity(value, "Angle", "render.angle")
+    return _quantity_text(units.angle_as(value, unit), unit, profile, signed)
+}
+
+fn _temperature_text(value: any, unit: String, profile: any) -> String {
+    _require_quantity(value, "Temperature", "render.temperature")
+    return _quantity_text(units.temperature_as(value, unit), unit, profile)
+}
+
+fn _pressure_text(value: any, unit: String, profile: any) -> String {
+    _require_quantity(value, "Pressure", "render.pressure")
+    return _quantity_text(units.pressure_as(value, unit), unit, profile)
+}
+
+fn _wind_text(value: any, unit: String, profile: any) -> String {
+    _require_quantity(value, "WindSpeed", "render.wind_speed")
+    return _quantity_text(units.wind_speed_as(value, unit), unit, profile)
+}
+
+fn _optional_distance(value: any, unit: String, profile: any, default_value: String = "default") -> String {
+    if value == nil {
+        return default_value
+    }
+    return _distance_text(value, unit, profile)
+}
+
+fn _optional_angle(value: any, unit: String, profile: any, default_value: String = "default") -> String {
+    if value == nil {
+        return default_value
+    }
+    return _angle_text(value, unit, profile, true)
+}
+
+fn _fields(title: String, fields: Array) -> String {
+    flux width = 0
+    for field in fields {
+        if typeof(field) != "Array" || len(field) != 2 {
+            _fail("render.fields", "expected [label, value] pairs")
+        }
+        let label = _require_string(field[0], "render.fields[].label")
+        _require_string(field[1], "render.fields[].value", true)
+        if len(label) > width {
+            width = len(label)
+        }
+    }
+    flux lines = [_plain(title)]
+    for field in fields {
+        lines.push("  " + _pad_right(_plain(field[0]), width) + ": " + field[1])
+    }
+    return lines.join("\n")
+}
+
+fn _validate_experiment(value: any, path: String) -> any {
+    _require_struct(value, "Experiment", path)
+    _require_string(value.name, path + ".name")
+
+    _require_struct(value.projectile, "Projectile", path + ".projectile")
+    _require_string(value.projectile.name, path + ".projectile.name")
+    _require_quantity(value.projectile.mass, "Mass", path + ".projectile.mass")
+    _require_quantity(value.projectile.diameter, "Distance", path + ".projectile.diameter")
+    _require_optional_quantity(value.projectile.length, "Distance", path + ".projectile.length")
+    _require_string(value.projectile.drag_model, path + ".projectile.drag_model")
+    _require_finite(value.projectile.ballistic_coefficient, path + ".projectile.ballistic_coefficient")
+
+    _require_struct(value.rifle, "Rifle", path + ".rifle")
+    _require_string(value.rifle.name, path + ".rifle.name")
+    _require_optional_quantity(value.rifle.sight_height, "Distance", path + ".rifle.sight_height")
+    _require_optional_quantity(value.rifle.muzzle_height, "Distance", path + ".rifle.muzzle_height")
+    _require_optional_quantity(value.rifle.twist_rate, "Distance", path + ".rifle.twist_rate")
+    _require_optional_string(value.rifle.twist_direction, path + ".rifle.twist_direction")
+
+    _require_struct(value.atmosphere, "Atmosphere", path + ".atmosphere")
+    _require_optional_quantity(value.atmosphere.altitude, "Distance", path + ".atmosphere.altitude")
+    _require_optional_quantity(value.atmosphere.temperature, "Temperature", path + ".atmosphere.temperature")
+    _require_optional_quantity(value.atmosphere.pressure, "Pressure", path + ".atmosphere.pressure")
+    _require_optional_finite(value.atmosphere.relative_humidity, path + ".atmosphere.relative_humidity")
+    _require_optional_quantity(value.atmosphere.latitude, "Angle", path + ".atmosphere.latitude")
+
+    _require_array(value.winds, path + ".winds")
+    flux wind_index = 0
+    for wind in value.winds {
+        let wind_path = path + ".winds[" + to_string(wind_index) + "]"
+        _require_struct(wind, "Wind", wind_path)
+        _require_quantity(wind.speed, "WindSpeed", wind_path + ".speed")
+        _require_quantity(wind.direction_from, "Angle", wind_path + ".direction_from")
+        _require_optional_quantity(wind.vertical_velocity, "Velocity", wind_path + ".vertical_velocity")
+        _require_optional_quantity(wind.until_distance, "Distance", wind_path + ".until_distance")
+        wind_index = wind_index + 1
+    }
+
+    _require_struct(value.shot, "Shot", path + ".shot")
+    _require_quantity(value.shot.muzzle_velocity, "Velocity", path + ".shot.muzzle_velocity")
+    _require_quantity(value.shot.max_range, "Distance", path + ".shot.max_range")
+    _require_optional_quantity(value.shot.zero_distance, "Distance", path + ".shot.zero_distance")
+    for pair in [
+        [value.shot.muzzle_angle, "muzzle_angle"],
+        [value.shot.aim_azimuth, "aim_azimuth"],
+        [value.shot.shot_azimuth, "shot_azimuth"],
+        [value.shot.shooting_angle, "shooting_angle"],
+        [value.shot.cant_angle, "cant_angle"]
+    ] {
+        _require_optional_quantity(pair[0], "Angle", path + ".shot." + pair[1])
+    }
+    _require_optional_quantity(value.shot.target_height, "Distance", path + ".shot.target_height")
+    _require_optional_quantity(value.shot.ground_threshold, "Distance", path + ".shot.ground_threshold")
+
+    _require_struct(value.solver, "SolverConfig", path + ".solver")
+    _require_optional_string(value.solver.method, path + ".solver.method")
+    _require_optional_finite(value.solver.time_step_s, path + ".solver.time_step_s")
+    _require_optional_quantity(value.solver.sampling_interval, "Distance", path + ".solver.sampling_interval")
+    _require_optional_bool(value.solver.magnus, path + ".solver.magnus")
+    _require_optional_bool(value.solver.coriolis, path + ".solver.coriolis")
+    _require_optional_bool(value.solver.enhanced_spin_drift, path + ".solver.enhanced_spin_drift")
+    return value
+}
+
+export fn render_experiment_summary(experiment: any, display: any) -> String {
+    let value = _validate_experiment(experiment, "render.experiment")
+    let profile = _profile(display)
+    let offset_unit = offset_unit_for(profile)
+    let mass_unit = _mass_unit(profile)
+    let temperature_unit = _temperature_unit(profile)
+    let pressure_unit = _pressure_unit(profile)
+    let wind_unit = wind_speed_unit_for(profile)
+
+    flux fields = [
+        ["projectile", _plain(value.projectile.name)],
+        ["mass", _mass_text(value.projectile.mass, mass_unit, profile)],
+        ["diameter", _distance_text(value.projectile.diameter, offset_unit, profile)],
+        ["length", _optional_distance(value.projectile.length, offset_unit, profile)],
+        ["drag model", _plain(value.projectile.drag_model)],
+        ["ballistic coefficient", _fixed(value.projectile.ballistic_coefficient, profile.precision)],
+        ["rifle", _plain(value.rifle.name)],
+        ["sight height", _optional_distance(value.rifle.sight_height, offset_unit, profile)],
+        ["muzzle height", _optional_distance(value.rifle.muzzle_height, offset_unit, profile)],
+        ["twist rate", _optional_distance(value.rifle.twist_rate, offset_unit, profile)],
+        ["twist direction", _optional_text(value.rifle.twist_direction)],
+        ["altitude", _optional_distance(value.atmosphere.altitude, profile.distance_unit, profile)],
+        ["temperature", if value.atmosphere.temperature == nil {
+                "standard"
+            } else {
+                _temperature_text(value.atmosphere.temperature, temperature_unit, profile)
+            }
+        ],
+        ["pressure", if value.atmosphere.pressure == nil {
+                "standard"
+            } else {
+                _pressure_text(value.atmosphere.pressure, pressure_unit, profile)
+            }
+        ],
+        ["humidity", if value.atmosphere.relative_humidity == nil {
+                "standard"
+            } else {
+                _fixed(value.atmosphere.relative_humidity * 100.0, profile.precision) + " %"
+            }
+        ],
+        ["latitude", _optional_angle(value.atmosphere.latitude, "deg", profile)],
+        ["muzzle velocity", _velocity_text(value.shot.muzzle_velocity, profile.velocity_unit, profile)],
+        ["maximum range", _distance_text(value.shot.max_range, profile.distance_unit, profile)],
+        ["zero distance", _optional_distance(value.shot.zero_distance, profile.distance_unit, profile)],
+        ["muzzle angle", _optional_angle(value.shot.muzzle_angle, profile.angle_unit, profile)],
+        ["aim azimuth", _optional_angle(value.shot.aim_azimuth, "deg", profile)],
+        ["shot azimuth", _optional_angle(value.shot.shot_azimuth, "deg", profile)],
+        ["shooting angle", _optional_angle(value.shot.shooting_angle, profile.angle_unit, profile)],
+        ["cant angle", _optional_angle(value.shot.cant_angle, profile.angle_unit, profile)],
+        ["target height", _optional_distance(value.shot.target_height, offset_unit, profile)],
+        ["ground threshold", _optional_distance(value.shot.ground_threshold, offset_unit, profile)],
+        ["solver", _optional_text(value.solver.method)],
+        ["time step", if value.solver.time_step_s == nil {
+                "default"
+            } else {
+                _quantity_text(value.solver.time_step_s, "s", profile)
+            }
+        ],
+        ["sampling interval", _optional_distance(value.solver.sampling_interval, profile.distance_unit, profile)],
+        ["Magnus", _on_off_default(value.solver.magnus)],
+        ["Coriolis", _on_off_default(value.solver.coriolis)],
+        ["enhanced spin drift", _on_off_default(value.solver.enhanced_spin_drift)]
+    ]
+
+    if len(value.winds) == 0 {
+        fields.push(["wind", "calm"])
+    } else {
+        flux index = 0
+        for wind in value.winds {
+            flux description = _wind_text(wind.speed, wind_unit, profile) +
+            " from " + _angle_text(wind.direction_from, "deg", profile)
+            if wind.vertical_velocity != nil {
+                description = description +
+                ", vertical " + _velocity_text(wind.vertical_velocity, profile.velocity_unit, profile)
+            }
+            if wind.until_distance != nil {
+                description = description +
+                ", through " + _distance_text(wind.until_distance, profile.distance_unit, profile)
+            }
+            fields.push(["wind[" + to_string(index) + "]", description])
+            index = index + 1
+        }
+    }
+    return _fields("Experiment: " + value.name, fields)
+}
+
+fn _validate_notice(value: any, expected: String, path: String) {
+    if !_is_struct(value, expected) && !_is_struct(value, "NoticeSnapshot") {
+        _fail(path, "expected " + expected + " or NoticeSnapshot, got " + typeof(value))
+    }
+    _require_string(value.code, path + ".code")
+    _require_string(value.message, path + ".message")
+    _require_optional_string(value.path, path + ".path")
+}
+
+fn _render_notices(values: any, expected: String, title: String) -> String {
+    _require_array(values, "render." + title.to_lower())
+    flux lines = [title]
+    if len(values) == 0 {
+        lines.push("  none")
+        return lines.join("\n")
+    }
+    flux index = 0
+    for value in values {
+        _validate_notice(value, expected, "render." + title.to_lower() + "[" + to_string(index) + "]")
+        flux line = "  - " + _plain(value.code) + ": " + _plain(value.message)
+        if value.path != nil {
+            line = line + " [" + _plain(value.path) + "]"
+        }
+        lines.push(line)
+        index = index + 1
+    }
+    return lines.join("\n")
+}
+
+export fn render_assumptions(values: any) -> String {
+    return _render_notices(values, "Assumption", "Assumptions")
+}
+
+export fn render_warnings(values: any) -> String {
+    return _render_notices(values, "Warning", "Warnings")
+}
+
+fn _indent(value: String, spaces: Int) -> String {
+    let prefix = " ".repeat(spaces)
+    return prefix + value.replace("\n", "\n" + prefix)
+}
+
+fn _plain_strings(values: Array) -> String {
+    flux output = []
+    for value in values {
+        output.push(_plain(_require_string(value, "render.strings[]")))
+    }
+    return output.join(", ")
+}
+
+fn _validate_observation(value: any, path: String) -> any {
+    _require_struct(value, "Observation", path)
+    _require_quantity(value.distance, "Distance", path + ".distance")
+    _require_finite(value.time_s, path + ".time_s")
+    _require_quantity(value.velocity, "Velocity", path + ".velocity")
+    _require_quantity(value.energy, "Energy", path + ".energy")
+    _require_quantity(value.drop, "Distance", path + ".drop")
+    _require_quantity(value.windage, "Distance", path + ".windage")
+    _require_finite(value.mach, path + ".mach")
+    _require_array(value.flags, path + ".flags")
+    for flag in value.flags {
+        _require_string(flag, path + ".flags[]")
+    }
+    return value
+}
+
+export fn render_observation(observation: any, display: any) -> String {
+    let value = _validate_observation(observation, "render.observation")
+    let profile = _profile(display)
+    let offset_unit = offset_unit_for(profile)
+    return _fields("Observation", [
+        ["distance", _distance_text(value.distance, profile.distance_unit, profile)],
+        ["time", _quantity_text(value.time_s, "s", profile)],
+        ["velocity", _velocity_text(value.velocity, profile.velocity_unit, profile)],
+        ["energy", _energy_text(value.energy, profile.energy_unit, profile)],
+        ["drop", _distance_text(value.drop, offset_unit, profile, true)],
+        ["windage", _distance_text(value.windage, offset_unit, profile, true)],
+        ["Mach", _fixed(value.mach, profile.precision)],
+        ["flags", if len(value.flags) == 0 {
+                "none"
+            } else {
+                _plain_strings(value.flags)
+            }
+        ]
+    ]) + "\nSigns: drop/windage + above/right, - below/left"
+}
+
+fn _validate_run(value: any, path: String) -> any {
+    _require_struct(value, "RunRecord", path)
+    _require_string(value.backend_name, path + ".backend_name")
+    _validate_experiment(value.experiment, path + ".experiment")
+    _require_struct(value.result, "Trajectory", path + ".result")
+    _validate_experiment(value.result.experiment, path + ".result.experiment")
+    _require_int(value.schema_version, path + ".schema_version")
+    _require_string(value.engine_version, path + ".engine_version")
+    _require_array(value.assumptions, path + ".assumptions")
+    _require_array(value.warnings, path + ".warnings")
+    _require_string(value.termination, path + ".termination")
+    _require_bool(value.result.verified, path + ".result.verified")
+    _require_struct(value.result.summary, "TrajectorySummary", path + ".result.summary")
+    let summary = value.result.summary
+    _require_quantity(summary.actual_range, "Distance", path + ".result.summary.actual_range")
+    _require_quantity(summary.maximum_height, "Distance", path + ".result.summary.maximum_height")
+    _require_finite(summary.time_of_flight_s, path + ".result.summary.time_of_flight_s")
+    _require_quantity(summary.terminal_velocity, "Velocity", path + ".result.summary.terminal_velocity")
+    _require_quantity(summary.terminal_energy, "Energy", path + ".result.summary.terminal_energy")
+    _require_optional_finite(summary.stability_factor, path + ".result.summary.stability_factor")
+    _require_optional_quantity(summary.spin_drift, "Distance", path + ".result.summary.spin_drift")
+    _require_string(summary.termination, path + ".result.summary.termination")
+    flux index = 0
+    for assumption in value.assumptions {
+        _validate_notice(assumption, "Assumption", path + ".assumptions[" + to_string(index) + "]")
+        index = index + 1
+    }
+    index = 0
+    for warning in value.warnings {
+        _validate_notice(warning, "Warning", path + ".warnings[" + to_string(index) + "]")
+        index = index + 1
+    }
+    return value
+}
+
+export fn render_run_summary(run: any, display: any) -> String {
+    let value = _validate_run(run, "render.run")
+    let profile = _profile(display)
+    let offset_unit = offset_unit_for(profile)
+    let summary = value.result.summary
+    let body = _fields("Run: " + value.experiment.name, [
+        ["backend", _plain(value.backend_name)],
+        ["engine", _plain(value.engine_version)],
+        ["schema", to_string(value.schema_version)],
+        ["verified", _yes_no(value.result.verified)],
+        ["termination", _plain(value.termination)],
+        ["actual range", _distance_text(summary.actual_range, profile.distance_unit, profile)],
+        ["maximum height", _distance_text(summary.maximum_height, offset_unit, profile, true)],
+        ["time of flight", _quantity_text(summary.time_of_flight_s, "s", profile)],
+        ["terminal velocity", _velocity_text(summary.terminal_velocity, profile.velocity_unit, profile)],
+        ["terminal energy", _energy_text(summary.terminal_energy, profile.energy_unit, profile)],
+        ["stability factor", if summary.stability_factor == nil {
+                "not reported"
+            } else {
+                _fixed(summary.stability_factor, profile.precision)
+            }
+        ],
+        ["spin drift", if summary.spin_drift == nil {
+                "not reported"
+            } else {
+                _distance_text(summary.spin_drift, offset_unit, profile, true)
+            }
+        ]
+    ])
+    return body + "\n" + render_assumptions(value.assumptions) + "\n" + render_warnings(value.warnings)
+}
+
+fn _run_label(value: any) -> String {
+    if value == nil {
+        return "none"
+    }
+    _validate_run(value, "render.session.run")
+    return _plain(value.experiment.name) + " (" + _plain(value.engine_version) +
+    ", " + _plain(value.termination) + ")"
+}
+
+export fn render_session_summary(lab: any) -> String {
+    _require_struct(lab, "LabSession", "render.session")
+    let experiment = sessions.experiment_of(lab)
+    let backend = sessions.backend_of(lab)
+    let profile = _profile(sessions.display_of(lab))
+    let run_history = sessions.history(lab)
+    _require_struct(backend, "EngineBackend", "render.session.backend")
+    _require_string(backend.name, "render.session.backend.name")
+    _require_array(run_history, "render.session.history")
+    let summary = _fields("Ballistics laboratory session", [
+        ["active experiment", _plain(experiment.name)],
+        ["backend", _plain(backend.name)],
+        ["display", profile.distance_unit + ", " + profile.velocity_unit + ", " +
+            profile.energy_unit + ", " + profile.angle_unit +
+            " (" + to_string(profile.precision) + " decimals)"],
+            ["history", to_string(len(run_history)) + "/" + to_string(sessions.history_limit_of(lab))],
+            ["current run", _run_label(sessions.current_run(lab))],
+            ["previous run", _run_label(sessions.previous_run(lab))]
+        ])
+        return summary + "\n\n" + render_experiment_summary(experiment, profile)
+    }
+
+    fn _validate_scalar(value: any, path: String) {
+        let kind = typeof(value)
+        if kind == "Int" || kind == "Float" {
+            _require_finite(value, path)
+            return
+        }
+        if kind != "String" && kind != "Bool" && kind != "Nil" {
+            _fail(path, "expected scalar, got " + kind)
+        }
+    }
+
+    fn _validate_provenance(value: any, path: String) {
+        _require_struct(value, "TrajectoryProvenance", path)
+        _require_string(value.series_name, path + ".series_name")
+        _require_int(value.schema_version, path + ".schema_version")
+        _require_string(value.engine_version, path + ".engine_version")
+        _require_optional_string(value.solver_method, path + ".solver_method")
+        _require_bool(value.verified, path + ".verified")
+        _require_array(value.assumptions, path + ".assumptions")
+        _require_array(value.warnings, path + ".warnings")
+        _require_string(value.termination, path + ".termination")
+        _require_quantity(value.actual_range, "Distance", path + ".actual_range")
+        flux index = 0
+        for assumption in value.assumptions {
+            _validate_notice(assumption, "Assumption", path + ".assumptions[" + to_string(index) + "]")
+            index = index + 1
+        }
+        index = 0
+        for warning in value.warnings {
+            _validate_notice(warning, "Warning", path + ".warnings[" + to_string(index) + "]")
+            index = index + 1
+        }
+    }
+
+    fn _validate_table(value: any, expected_kind: String) -> any {
+        _require_struct(value, "AnalysisTable", "render.table")
+        if _require_string(value.kind, "render.table.kind") != expected_kind {
+            _fail("render.table.kind", "expected '" + expected_kind + "', got '" + value.kind + "'")
+        }
+        _require_string(value.title, "render.table.title")
+        _require_array(value.columns, "render.table.columns")
+        _require_array(value.rows, "render.table.rows")
+        _require_array(value.provenance, "render.table.provenance")
+        if len(value.columns) == 0 {
+            _fail("render.table.columns", "must not be empty")
+        }
+        if len(value.rows) == 0 {
+            _fail("render.table.rows", "must not be empty")
+        }
+        if len(value.rows) > 10000 {
+            _fail("render.table.rows", "exceeds the 10000-row render limit")
+        }
+        if len(value.provenance) == 0 {
+            _fail("render.table.provenance", "must not be empty")
+        }
+
+        flux keys = []
+        flux column_index = 0
+        for column in value.columns {
+            let path = "render.table.columns[" + to_string(column_index) + "]"
+            _require_struct(column, "TableColumn", path)
+            let key = _require_string(column.key, path + ".key")
+            _require_string(column.label, path + ".label")
+            _require_optional_string(column.unit, path + ".unit")
+            if keys.contains(key) {
+                _fail(path + ".key", "duplicate column '" + key + "'")
+            }
+            keys.push(key)
+            column_index = column_index + 1
+        }
+
+        flux provenance_index = 0
+        for provenance in value.provenance {
+            _validate_provenance(
+            provenance,
+            "render.table.provenance[" + to_string(provenance_index) + "]"
+            )
+            provenance_index = provenance_index + 1
+        }
+
+        flux row_index = 0
+        for row in value.rows {
+            let row_path = "render.table.rows[" + to_string(row_index) + "]"
+            _require_map(row, row_path)
+            if len(row.keys()) != len(value.columns) {
+                _fail(row_path, "must contain exactly the declared columns")
+            }
+            for column in value.columns {
+                if !row.has(column.key) {
+                    _fail(row_path, "missing column '" + column.key + "'")
+                }
+                _validate_scalar(row.get(column.key), row_path + "." + column.key)
+            }
+            if len(value.provenance) > 1 {
+                if !row.has("series_index") {
+                    _fail(row_path, "multi-series row requires series_index")
+                }
+                let selected = row.get("series_index")
+                if typeof(selected) != "Int" || selected < 0 || selected >= len(value.provenance) {
+                    _fail(row_path + ".series_index", "must select an existing provenance entry")
+                }
+            }
+            row_index = row_index + 1
+        }
+        return value
+    }
+
+    fn _expect_columns(table: any, keys: Array, units_expected: Array) {
+        if len(table.columns) != len(keys) || len(keys) != len(units_expected) {
+            _fail("render.table.columns", "unexpected column count for " + table.kind)
+        }
+        flux index = 0
+        while index < len(keys) {
+            let column = table.columns[index]
+            if column.key != keys[index] {
+                _fail(
+                "render.table.columns[" + to_string(index) + "].key",
+                "expected '" + keys[index] + "', got '" + column.key + "'"
+                )
+            }
+            if column.unit != units_expected[index] {
+                flux expected = "none"
+                if units_expected[index] != nil {
+                    expected = units_expected[index]
+                }
+                flux actual = "none"
+                if column.unit != nil {
+                    actual = column.unit
+                }
+                _fail(
+                "render.table.columns[" + to_string(index) + "].unit",
+                "expected '" + expected + "', got '" + actual + "'"
+                )
+            }
+            index = index + 1
+        }
+    }
+
+    fn _heading(column: any) -> String {
+        if column.unit == nil {
+            return _plain(column.label)
+        }
+        return _plain(column.label) + " (" + _plain(column.unit) + ")"
+    }
+
+    fn _signed_column(kind: String, key: String) -> Bool {
+        if kind == "dope" {
+            return key == "drop" || key == "come_up"
+        }
+        if kind == "wind_card" {
+            return key == "windage" || key == "wind_hold"
+        }
+        if kind == "comparison" {
+            return key == "drop" || key == "windage" || key.starts_with("delta_")
+        }
+        return false
+    }
+
+    fn _scalar_text(value: any, profile: any, explicit_sign: Bool) -> String {
+        let kind = typeof(value)
+        if kind == "Int" || kind == "Float" {
+            return _fixed(value, profile.precision, explicit_sign)
+        }
+        if kind == "String" {
+            return _plain(value)
+        }
+        if kind == "Bool" {
+            return _yes_no(value)
+        }
+        return "-"
+    }
+
+    fn _column_numeric(table: any, column: any) -> Bool {
+        flux numeric = nil
+        for row in table.rows {
+            let value = row.get(column.key)
+            if value != nil {
+                let kind = typeof(value)
+                let current = kind == "Int" || kind == "Float"
+                if numeric == nil {
+                    numeric = current
+                } else if numeric != current {
+                    _fail("render.table." + column.key, "column mixes numeric and text values")
+                }
+            }
+        }
+        return numeric == true
+    }
+
+    fn _render_provenance(table: any, profile: any) -> String {
+        flux lines = ["Provenance"]
+        flux index = 0
+        for provenance in table.provenance {
+            lines.push("  [" + to_string(index) + "] " + _plain(provenance.series_name))
+            lines.push("    engine: " + _plain(provenance.engine_version) +
+            " (schema " + to_string(provenance.schema_version) + ")")
+            lines.push("    solver: " + _optional_text(provenance.solver_method, "not reported"))
+            lines.push("    verified: " + _yes_no(provenance.verified))
+            lines.push("    termination: " + _plain(provenance.termination))
+            lines.push("    actual range: " +
+            _distance_text(provenance.actual_range, profile.distance_unit, profile))
+            lines.push(_indent(render_assumptions(provenance.assumptions), 4))
+            lines.push(_indent(render_warnings(provenance.warnings), 4))
+            index = index + 1
+        }
+        return lines.join("\n")
+    }
+
+    fn _render_table(table: any, profile: any, sign_legend: String) -> String {
+        flux headings = []
+        flux widths = []
+        flux numeric = []
+        for column in table.columns {
+            let heading = _heading(column)
+            headings.push(heading)
+            widths.push(len(heading))
+            numeric.push(_column_numeric(table, column))
+        }
+
+        flux rendered_rows = []
+        for row in table.rows {
+            flux fields = []
+            flux index = 0
+            for column in table.columns {
+                let field = _scalar_text(
+                row.get(column.key),
+                profile,
+                _signed_column(table.kind, column.key)
+                )
+                fields.push(field)
+                if len(field) > widths[index] {
+                    widths[index] = len(field)
+                }
+                index = index + 1
+            }
+            rendered_rows.push(fields)
+        }
+
+        flux header_fields = []
+        flux rule_fields = []
+        flux index = 0
+        while index < len(headings) {
+            header_fields.push(_pad_right(headings[index], widths[index]))
+            rule_fields.push("-".repeat(widths[index]))
+            index = index + 1
+        }
+        flux lines = [_plain(table.title), header_fields.join(" | "), rule_fields.join("-+-")]
+        for row in rendered_rows {
+            flux output = []
+            index = 0
+            while index < len(row) {
+                if numeric[index] {
+                    output.push(_pad_left(row[index], widths[index]))
+                } else {
+                    output.push(_pad_right(row[index], widths[index]))
+                }
+                index = index + 1
+            }
+            lines.push(output.join(" | "))
+        }
+        lines.push(sign_legend)
+        lines.push(_render_provenance(table, profile))
+        return lines.join("\n")
+    }
+
+    export fn render_dope(value: any, display: any) -> String {
+        let table = _validate_table(value, "dope")
+        let profile = _profile(display)
+        _expect_columns(table,
+        ["distance", "drop", "come_up", "velocity", "energy", "time_s", "mach"],
+        [profile.distance_unit, offset_unit_for(profile), profile.angle_unit,
+            profile.velocity_unit, profile.energy_unit, "s", nil]
+            )
+            return _render_table(
+            table,
+            profile,
+            "Signs: drop + above/- below; come-up + correction up/- correction down"
+            )
+        }
+
+        export fn render_wind_card(value: any, display: any) -> String {
+            let table = _validate_table(value, "wind_card")
+            let profile = _profile(display)
+            _expect_columns(table,
+            ["series_index", "trajectory", "wind_speed", "direction_from", "distance", "windage", "wind_hold"],
+            [nil, nil, wind_speed_unit_for(profile), direction_unit_for(profile),
+                profile.distance_unit, offset_unit_for(profile), profile.angle_unit]
+                )
+                return _render_table(
+                table,
+                profile,
+                "Signs: windage + right/- left; wind hold + correction right/- correction left"
+                )
+            }
+
+            export fn render_comparison(value: any, display: any) -> String {
+                let table = _validate_table(value, "comparison")
+                let profile = _profile(display)
+                if len(table.provenance) != 2 {
+                    _fail("render.comparison.provenance", "exactly two runs are required")
+                }
+                _expect_columns(table,
+                [
+                    "series_index", "trajectory", "distance", "time_s", "velocity", "energy",
+                    "drop", "windage", "mach", "delta_time_s", "delta_velocity", "delta_energy",
+                    "delta_drop", "delta_windage", "delta_mach"
+                ],
+                [
+                    nil, nil, profile.distance_unit, "s", profile.velocity_unit, profile.energy_unit,
+                    offset_unit_for(profile), offset_unit_for(profile), nil, "s", profile.velocity_unit,
+                    profile.energy_unit, offset_unit_for(profile), offset_unit_for(profile), nil
+                ]
+                )
+                return _render_table(
+                table,
+                profile,
+                "Signs: impact + above/right; deltas are series minus baseline [0]"
+                )
+            }
+
+            export fn render_error(value: any) -> String {
+                _require_struct(value, "LaboratoryError", "render.error")
+                let code = _require_string(value.code, "render.error.code")
+                let message = _require_string(value.message, "render.error.message")
+                _require_optional_string(value.path, "render.error.path")
+                _require_optional_string(value.stderr, "render.error.stderr")
+                if value.exit_code != nil {
+                    _require_int(value.exit_code, "render.error.exit_code")
+                }
+                if (value.line == nil) !=(value.column == nil) {
+                    _fail("render.error.location", "line and column must be supplied together")
+                }
+                if value.line != nil {
+                    if _require_int(value.line, "render.error.line") < 1 ||
+                    _require_int(value.column, "render.error.column") < 1 {
+                        _fail("render.error.location", "line and column must be positive")
+                    }
+                }
+
+                flux lines = ["Error", "  code: " + _plain(code), "  message: " + _plain(message)]
+                if value.path != nil {
+                    lines.push("  path: " + _plain(value.path))
+                }
+                if value.line != nil {
+                    lines.push("  location: " + to_string(value.line) + ":" + to_string(value.column))
+                }
+                if value.stderr != nil {
+                    lines.push("  stderr: " + _plain(value.stderr))
+                }
+                if value.exit_code != nil {
+                    lines.push("  exit code: " + to_string(value.exit_code))
+                }
+                return lines.join("\n")
+            }

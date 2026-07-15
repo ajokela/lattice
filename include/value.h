@@ -272,6 +272,10 @@ bool value_is_shareable(const LatValue *v);
 bool value_freeze_to_region(LatValue *v);
 /* Deep-clone into thread-independent (malloc-backed) storage; see value.c. */
 LatValue value_detach(const LatValue *v);
+/* As above, but recursively force-copy shared-region handles instead of
+ * retaining them. Use when a long-lived cell would otherwise adopt aliases
+ * owned by a re-entrant evaluator. */
+LatValue value_detach_copy(const LatValue *v);
 /* Returns NULL if v may be sent over a channel, else a static error message
  * (harmonized send-eligibility rule shared by all three backends). */
 const char *value_send_ineligible(const LatValue *v);

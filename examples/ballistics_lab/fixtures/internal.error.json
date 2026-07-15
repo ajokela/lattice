@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "status": "error",
+  "error": {
+    "code": "internal_error",
+    "message": "solve-json command failed unexpectedly",
+    "path": null,
+    "line": null,
+    "column": null
+  }
+}

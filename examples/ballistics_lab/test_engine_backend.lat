@@ -1,0 +1,41 @@
+// Optional smoke against a real ballistics solve-json executable.
+// The executable path is supplied as argv and is never interpolated into a shell.
+
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/fixture_experiment" as fixture
+
+fn assert_near(actual: Number, expected: Number, tolerance: Number, label: String) {
+    let difference = abs(actual - expected)
+    assert(
+    difference <= tolerance,
+    label + ": expected " + to_string(expected) + ", got " + to_string(actual)
+    )
+}
+
+fn main() {
+    let arguments = args()
+    assert(len(arguments) >= 2, "usage: test_engine_backend.lat /path/to/ballistics [expected-version]")
+    let executable = arguments[1]
+    flux expected_version = nil
+    if len(arguments) >= 3 && len(arguments[2]) > 0 {
+        expected_version = arguments[2]
+    }
+
+    let result = backends.solve_with(
+    process.process_backend(executable, expected_version),
+    fixture.representative_fixture_experiment()
+    )
+    if backends.solve_failed(result) {
+        assert(false, "real solve-json failed: " + result.code + ": " + result.message)
+    }
+    assert(result.schema_version == 1)
+    assert(result.engine_version.len() > 0)
+    assert(len(result.observations) == 6)
+    assert(result.summary.termination == "max_range")
+    assert_near(result.summary.actual_range.si_value, 50.0, 0.000000001, "actual range")
+    assert_near(result.summary.terminal_velocity.si_value, 792.4430484357767, 0.000001, "terminal speed")
+    assert(result.observations[5].flags.contains("terminal"))
+    assert(result.resolved_request.get("schema_version") == 1)
+    print("ballistics_lab real engine: " + result.engine_version + " passed")
+}

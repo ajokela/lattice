@@ -1,0 +1,92 @@
+// End-to-end coverage for the self-hosted REPL. Each case drives a real clat
+// child through stdin, with bounds so an EOF regression fails quickly.
+
+fn executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn repl_args(backend: String) -> [String] {
+    if backend == "" {
+        return ["repl.lat"]
+    }
+    return [backend, "repl.lat"]
+}
+
+fn limits() -> Map {
+    let options = Map::new()
+    options.set("timeout_ms", 3000)
+    options.set("max_stdout_bytes", 16384)
+    options.set("max_stderr_bytes", 16384)
+    return options
+}
+
+fn run_repl(backend: String, input_text: any) -> Map {
+    return exec_argv(executable(), repl_args(backend), input_text, limits())
+}
+
+fn assert_clean_exit(label: String, result: Map) {
+    assert(result.get("exit_code") == 0,
+        label + " exited with " + to_string(result.get("exit_code")))
+    assert(result.get("stderr") == "",
+        label + " wrote stderr: " + result.get("stderr"))
+}
+
+fn normalize_output(output: String) -> String {
+    return output.replace("\r", "")
+}
+
+fn has_result_line(output: String, value: String) -> Bool {
+    let normalized = normalize_output(output)
+    return normalized.contains("\n" + value + "\n") ||
+        normalized.contains("lattice> " + value + "\n") ||
+        normalized.contains("...> " + value + "\n")
+}
+
+fn check_backend(label: String, backend: String) {
+    let eof = run_repl(backend, nil)
+    assert_clean_exit(label + " immediate EOF", eof)
+    let eof_output = normalize_output(eof.get("stdout"))
+    assert(eof_output.len() < 1024,
+        label + " immediate EOF produced excessive output")
+    assert(eof_output.count("Lattice v") == 1,
+        label + " immediate EOF did not execute exactly one REPL session")
+    assert(!eof_output.contains("\nnil\n"),
+        label + " printed nil at EOF")
+
+    let error_eof = run_repl(backend, "1 / 0\n")
+    assert_clean_exit(label + " EOF after error", error_eof)
+    assert(error_eof.get("stdout").count("error:") == 1,
+        label + " EOF after error did not print exactly one error")
+    assert(error_eof.get("stdout").contains("division by zero"),
+        label + " EOF after error lost the useful message")
+
+    let recovery = run_repl(backend, "1 / 0\n2 + 3\n")
+    assert_clean_exit(label + " error recovery", recovery)
+    let recovery_output = recovery.get("stdout")
+    assert(recovery_output.count("error:") == 1,
+        label + " did not print exactly one error: " + recovery_output)
+    assert(recovery_output.contains("division by zero"),
+        label + " did not preserve the useful error message: " + recovery_output)
+    assert(has_result_line(recovery_output, "5"),
+        label + " did not evaluate the expression after the error: " + recovery_output)
+
+    let multiline = run_repl(backend, "\n[1,\n2].len()\n")
+    assert_clean_exit(label + " multiline input", multiline)
+    assert(has_result_line(multiline.get("stdout"), "2"),
+        label + " lost empty-line or multiline behavior: " + multiline.get("stdout"))
+
+    print(label + ": self-hosted REPL integration passed")
+}
+
+fn main() {
+    assert(has_result_line("lattice> 5\r\n", "5"),
+        "result-line matching must accept Windows CRLF output")
+    assert(has_result_line("lattice>     ...> 2\r\r\n", "2"),
+        "result-line matching must accept Windows continuation output")
+    check_backend("stack-vm", "")
+    check_backend("tree-walk", "--tree-walk")
+    check_backend("regvm", "--regvm")
+}

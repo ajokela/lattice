@@ -47,6 +47,14 @@ typedef LatValue (*VMNativeFn)(LatValue *args, int arg_count);
  * concatenation or when loaded from the constant pool. */
 #define INTERN_THRESHOLD 64
 
+typedef struct StackOverflowContext {
+    jmp_buf jump;
+} StackOverflowContext;
+
+static inline size_t stackvm_frame_limit(const StackVM *vm) {
+    return vm->unwinding_defers ? STACKVM_FRAMES_MAX : STACKVM_USER_FRAMES_MAX;
+}
+
 /* Try to intern a string value.  If the string is short enough (<= INTERN_THRESHOLD),
  * intern it and return a value with REGION_INTERNED.  Otherwise return the value
  * unchanged.  The original buffer is freed if interning succeeds. */
@@ -67,10 +75,7 @@ static inline LatValue stackvm_try_intern(LatValue v) {
 static void push(StackVM *vm, LatValue val) {
     if (vm->stack_top - vm->stack >= STACKVM_STACK_MAX) {
         if (!vm->error) vm->error = strdup("stack overflow");
-        if (vm->overflow_jmp_set) {
-            vm->overflow_jmp_set = false;
-            longjmp(vm->overflow_jmp, 1);
-        }
+        if (vm->overflow_context) longjmp(vm->overflow_context->jump, 1);
         return;
     }
     *vm->stack_top = val;
@@ -235,7 +240,8 @@ static void stackvm_unwind_release(StackVM *vm, LatValue *new_top) {
  * nonlocal return can bypass the compiler-emitted POP_HANDLER instructions,
  * so discard every handler belonging to the frame before removing it. */
 static void stackvm_discard_handlers_from_frame(StackVM *vm, size_t frame_index) {
-    while (vm->handler_count > 0 && vm->handlers[vm->handler_count - 1].frame_index >= frame_index) vm->handler_count--;
+    while (vm->handler_count > vm->handler_floor && vm->handlers[vm->handler_count - 1].frame_index >= frame_index)
+        vm->handler_count--;
 }
 
 /* Try to route a runtime error through exception handlers.
@@ -249,7 +255,7 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
     lat_vasprintf(&inner, fmt, args);
     va_end(args);
 
-    if (vm->handler_count > 0) {
+    if (vm->handler_count > vm->handler_floor) {
         /* Caught by try/catch — build structured error Map before unwinding */
         LatValue err_map = stackvm_build_error_map(vm, inner);
         StackExceptionHandler h = vm->handlers[--vm->handler_count];
@@ -261,8 +267,8 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
     /* Uncaught — all active frames are leaving, so run every remaining defer
      * before exposing the error to the host. A cleanup error takes precedence
      * but retains the triggering error as context. */
-    if (!vm->unwinding_defers && vm->defer_count > 0) {
-        char *cleanup_error = stackvm_unwind_defers_to(vm, 0);
+    if (!vm->unwinding_defers && vm->defer_count > vm->defer_floor) {
+        char *cleanup_error = stackvm_unwind_defers_to(vm, vm->defer_floor);
         if (cleanup_error) {
             char *combined = NULL;
             lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error, inner);
@@ -279,7 +285,7 @@ static StackVMResult stackvm_handle_error(StackVM *vm, StackCallFrame **frame_pt
  * a message in vm->error.  Does NOT prepend [line N] to match tree-walker
  * behaviour (native errors carry their own descriptive messages). */
 static StackVMResult stackvm_handle_native_error(StackVM *vm, StackCallFrame **frame_ptr) {
-    if (vm->handler_count > 0) {
+    if (vm->handler_count > vm->handler_floor) {
         /* Build structured error Map before unwinding */
         char *original = vm->error;
         LatValue err_map = stackvm_build_error_map(vm, original);
@@ -291,10 +297,10 @@ static StackVMResult stackvm_handle_native_error(StackVM *vm, StackCallFrame **f
     }
     /* Uncaught native error: clear it while cleanup executes so a successful
      * defer is not mistaken for the original failure. */
-    if (!vm->unwinding_defers && vm->defer_count > 0) {
+    if (!vm->unwinding_defers && vm->defer_count > vm->defer_floor) {
         char *original = vm->error;
         vm->error = NULL;
-        char *cleanup_error = stackvm_unwind_defers_to(vm, 0);
+        char *cleanup_error = stackvm_unwind_defers_to(vm, vm->defer_floor);
         if (cleanup_error) {
             lat_asprintf(&vm->error, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
                          original ? original : "runtime error");
@@ -396,9 +402,13 @@ static LatValue value_clone_fast_inner(const LatValue *src) {
             size_t slen = src->as.str_len ? src->as.str_len : strlen(src->as.str_val);
             /* Intern short strings on clone to avoid strdup and enable
              * pointer-equality comparisons. */
-            if (slen <= INTERN_THRESHOLD) return value_string_interned(src->as.str_val);
+            if (slen <= INTERN_THRESHOLD && memchr(src->as.str_val, '\0', slen) == NULL)
+                return value_string_interned(src->as.str_val);
             LatValue v = *src;
-            v.as.str_val = strdup(src->as.str_val);
+            v.as.str_val = malloc(slen + 1);
+            if (!v.as.str_val) return value_unit();
+            memcpy(v.as.str_val, src->as.str_val, slen);
+            v.as.str_val[slen] = '\0';
             v.as.str_len = slen; /* preserve cached length */
             v.region_id = REGION_NONE;
             return v;
@@ -666,10 +676,23 @@ static const char *phase_check_index_write(const LatValue *obj, const LatValue *
 /* ── Closure invocation helper for builtins ──
  * Calls a compiled closure from within the StackVM using a temporary wrapper chunk.
  * Returns the closure's return value. */
-static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *args, int arg_count) {
+static LatValue stackvm_call_closure_impl(StackVM *vm, LatValue *closure, LatValue *args, int arg_count,
+                                          bool isolate_caller) {
     if (closure->type != VAL_CLOSURE || closure->as.closure.native_fn == NULL ||
         closure->as.closure.default_values == VM_NATIVE_MARKER) {
         return value_nil();
+    }
+
+    /* The isolated map boundary is entered only after its wrapper operands
+     * are pushed. Preflight them so push() cannot longjmp to the suspended
+     * outer dispatch and bypass map's partial-result cleanup. */
+    if (isolate_caller) {
+        size_t used = (size_t)(vm->stack_top - vm->stack);
+        size_t needed = (size_t)arg_count + 1; /* closure + callback arguments */
+        if (needed > STACKVM_STACK_MAX - used) {
+            if (!vm->error) vm->error = strdup("stack overflow");
+            return value_nil();
+        }
     }
 
     /* Reuse the pre-built wrapper chunk, patching the arg count */
@@ -684,21 +707,20 @@ static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *a
      * OP_RETURN; on a runtime error (e.g. a panicking callback) the caller
      * still value_frees the returned value. */
     LatValue result = value_nil();
-    StackVMResult res = stackvm_run(vm, &vm->call_wrapper, &result);
+    StackVMResult res = isolate_caller ? stackvm_run_isolated(vm, &vm->call_wrapper, &result)
+                                       : stackvm_run(vm, &vm->call_wrapper, &result);
     if (res != STACKVM_OK) {
-        /* The nested run errored before the wrapper's OP_RETURN cleanup: the
-         * closure + arg clones we pushed (plus any callee temporaries) are
-         * still on the stack and would be abandoned when the error
-         * propagates — release them down to our entry point (LAT-452).
-         * Disjoint from the handler-unwind walks: a handler that catches
-         * this error sits at or below entry_top, so the ranges never
-         * overlap (exactly-once). On success OP_RETURN already restored
-         * vm->stack_top to entry_top and this is a no-op. The > guard keeps
-         * us from RAISING the pointer if a cross-run handler unwind already
-         * dropped the stack below our entry point. */
+        /* The isolated path releases its nested frame window but deliberately
+         * leaves the wrapper's closure + argument clones below that boundary;
+         * the ordinary path can leave the whole failed window. Release either
+         * shape down to our entry point exactly once. */
         if (vm->stack_top > entry_top) stackvm_unwind_release(vm, entry_top);
     }
     return result;
+}
+
+static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *args, int arg_count) {
+    return stackvm_call_closure_impl(vm, closure, args, arg_count, false);
 }
 
 /* Execute and remove every defer registered after target_count. Handler state
@@ -715,7 +737,9 @@ static char *stackvm_unwind_defers_to(StackVM *vm, size_t target_count) {
         size_t saved_handler_count = vm->handler_count;
         if (saved_handler_count > 0)
             memcpy(saved_handlers, vm->handlers, saved_handler_count * sizeof(StackExceptionHandler));
-        vm->handler_count = 0;
+        /* Keep isolated-caller handlers in place but inactive. Cleanup-local
+         * handlers append above the floor and remain catchable. */
+        vm->handler_count = vm->handler_floor;
 
         size_t saved_frame_count = vm->frame_count;
         LatValue defer_result = stackvm_call_closure(vm, &d.closure, NULL, 0);
@@ -784,6 +808,17 @@ static StackVMResult stackvm_transfer_to_handler(StackVM *vm, StackCallFrame **f
 /* BuiltinCallback adapter for stackvm: closure is a LatValue*, ctx is a StackVM* */
 static LatValue stackvm_builtin_callback(void *closure, LatValue *args, int arg_count, void *ctx) {
     return stackvm_call_closure((StackVM *)ctx, (LatValue *)closure, args, arg_count);
+}
+
+/* Array.map must distinguish a legitimate nil result from a failed nested
+ * run.  Keep the original error on the VM so the surrounding invoke path can
+ * route it through try/catch, while giving the shared eager loop an explicit
+ * stop signal. */
+static bool stackvm_builtin_fallible_callback(void *closure, LatValue *args, int arg_count, void *ctx,
+                                              LatValue *result) {
+    StackVM *vm = (StackVM *)ctx;
+    *result = stackvm_call_closure_impl(vm, (LatValue *)closure, args, arg_count, true);
+    return vm->error == NULL;
 }
 
 /* Iterator callback adapter: ctx is StackVM*, closure is LatValue*, args and argc */
@@ -1669,7 +1704,7 @@ freeze_except_exempt:
             if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
                 LatValue closure = pop(vm);
                 char *err = NULL;
-                LatValue result = builtin_array_map(obj, &closure, stackvm_builtin_callback, vm, &err);
+                LatValue result = builtin_array_map(obj, &closure, stackvm_builtin_fallible_callback, vm, &err);
                 value_free(&closure);
                 push(vm, result);
                 return true;
@@ -2010,7 +2045,7 @@ freeze_except_exempt:
             if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                  (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                 arg_count == 0) {
-                push(vm, value_int((int64_t)strlen(obj->as.str_val)));
+                push(vm, value_int((int64_t)(obj->as.str_len ? obj->as.str_len : strlen(obj->as.str_val))));
                 return true;
             }
             if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
@@ -3134,12 +3169,12 @@ freeze_except_exempt:
             }
 
             /* String proxy (LAT-540): len/length under the per-cell lock.
-             * Mirrors eval_ref_method_locked — strlen, matches tree-walker. */
+             * Mirrors eval_ref_method_locked, including cached binary length. */
             if (inner->type == VAL_STR) {
                 if (((mhash == MHASH_len && strcmp(method, "len") == 0) ||
                      (mhash == MHASH_length && strcmp(method, "length") == 0)) &&
                     arg_count == 0) {
-                    push(vm, value_int((int64_t)strlen(inner->as.str_val)));
+                    push(vm, value_int((int64_t)(inner->as.str_len ? inner->as.str_len : strlen(inner->as.str_val))));
                     ref_unlock(ref);
                     return true;
                 }
@@ -3572,7 +3607,7 @@ static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame
             (void)adjusted;
             ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
             size_t uv_count = field->as.closure.upvalue_count;
-            if (vm->frame_count >= STACKVM_FRAMES_MAX)
+            if (vm->frame_count >= stackvm_frame_limit(vm))
                 return stackvm_handle_error(vm, frame_ref, "stack overflow (too many nested calls)");
             stackvm_promote_frame_ephemerals(vm, *frame_ref);
             /* CbR Stage 3 (S3-R4): unreachable for shared containers BY
@@ -3629,7 +3664,7 @@ static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame
                 }
                 ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                 size_t uv_count = field->as.closure.upvalue_count;
-                if (vm->frame_count >= STACKVM_FRAMES_MAX)
+                if (vm->frame_count >= stackvm_frame_limit(vm))
                     return stackvm_handle_error(vm, frame_ref, "stack overflow (too many nested calls)");
                 stackvm_promote_frame_ephemerals(vm, *frame_ref);
                 /* CbR Stage 3 (S3-R4): see map prong above. */
@@ -3693,7 +3728,7 @@ static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame
             return r;
         }
         (void)m_argc;
-        if (vm->frame_count >= STACKVM_FRAMES_MAX)
+        if (vm->frame_count >= stackvm_frame_limit(vm))
             return stackvm_handle_error(vm, frame_ref, "stack overflow (too many nested calls)");
         stackvm_promote_frame_ephemerals(vm, *frame_ref);
         StackCallFrame *new_frame = &vm->frames[vm->frame_count++];
@@ -3722,20 +3757,31 @@ static StackVMResult stackvm_dispatch_invoke(StackVM *vm, StackCallFrame **frame
     return stackvm_handle_error(vm, frame_ref, "type '%s' has no method '%s'", tname, method_name);
 }
 
+static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *result);
+
 StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
+    StackOverflowContext *previous_context = vm->overflow_context;
+    StackOverflowContext context;
+    vm->overflow_context = &context;
+    *result = value_nil();
+    if (setjmp(context.jump) != 0) {
+        vm->overflow_context = previous_context;
+        return STACKVM_RUNTIME_ERROR;
+    }
+
+    StackVMResult run_result = stackvm_run_dispatch(vm, chunk, result);
+    vm->overflow_context = previous_context;
+    return run_result;
+}
+
+static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *result) {
     /* Always initialize *result: error paths return without writing it, and
      * several callers value_free it unconditionally. An uninitialized
      * LatValue whose garbage region_id happens to satisfy REGION_IS_SHARED_ID
      * would be "released" as a shared-region handle (CbR Stage 3 turned this
      * latent bug into a crash: BUS in crystal_region_release). */
     *result = value_nil();
-    /* Set up stack overflow recovery */
-    if (setjmp(vm->overflow_jmp) != 0) {
-        /* Returned here via longjmp from push() on stack overflow */
-        return STACKVM_RUNTIME_ERROR;
-    }
-    vm->overflow_jmp_set = true;
-
+    if (vm->frame_count >= stackvm_frame_limit(vm)) return runtime_error(vm, "stack overflow (too many nested calls)");
     /* Set up runtime dispatch pointers so native functions can call back */
     vm->rt->backend = RT_BACKEND_STACK_VM;
     vm->rt->active_vm = vm;
@@ -4823,7 +4869,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                 }
                 (void)adjusted;
 
-                if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                if (vm->frame_count >= stackvm_frame_limit(vm)) {
                     VM_ERROR("stack overflow (too many nested calls)");
                     break;
                 }
@@ -5942,7 +5988,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     arg_count = (uint8_t)adjusted;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                     size_t uv_count = field->as.closure.upvalue_count;
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -6010,7 +6056,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
-                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                        if (vm->frame_count >= stackvm_frame_limit(vm)) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
                         }
@@ -6074,7 +6120,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         free(err);
                         break;
                     }
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -6248,7 +6294,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     obj = vm->stack_top - arg_count - 1;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                     size_t uv_count = field->as.closure.upvalue_count;
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -6304,7 +6350,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
-                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                        if (vm->frame_count >= stackvm_frame_limit(vm)) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
                         }
@@ -6369,7 +6415,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         break;
                     }
                     (void)m_argc;
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -6465,7 +6511,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     arg_count = (uint8_t)adjusted;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                     size_t uv_count = field->as.closure.upvalue_count;
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -6528,7 +6574,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
-                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                        if (vm->frame_count >= stackvm_frame_limit(vm)) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
                         }
@@ -6590,7 +6636,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         free(err);
                         break;
                     }
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -6753,7 +6799,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     obj = vm->stack_top - arg_count - 1;
                     ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                     size_t uv_count = field->as.closure.upvalue_count;
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -6808,7 +6854,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         }
                         ObjUpvalue **upvals = (ObjUpvalue **)field->as.closure.captured_env;
                         size_t uv_count = field->as.closure.upvalue_count;
-                        if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                        if (vm->frame_count >= stackvm_frame_limit(vm)) {
                             VM_ERROR("stack overflow (too many nested calls)");
                             break;
                         }
@@ -6873,7 +6919,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                         break;
                     }
                     (void)m_argc;
-                    if (vm->frame_count >= STACKVM_FRAMES_MAX) {
+                    if (vm->frame_count >= stackvm_frame_limit(vm)) {
                         VM_ERROR("stack overflow (too many nested calls)");
                         break;
                     }
@@ -7668,7 +7714,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
         lbl_OP_POP_EXCEPTION_HANDLER:
 #endif
         case OP_POP_EXCEPTION_HANDLER: {
-            if (vm->handler_count > 0) vm->handler_count--;
+            if (vm->handler_count > vm->handler_floor) vm->handler_count--;
             break;
         }
 
@@ -7677,7 +7723,7 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 #endif
         case OP_THROW: {
             LatValue err = pop(vm);
-            if (vm->handler_count > 0) {
+            if (vm->handler_count > vm->handler_floor) {
                 /* Build structured error map before unwinding */
                 const char *msg = (err.type == VAL_STR) ? err.as.str_val : NULL;
                 char *repr = msg ? NULL : value_repr(&err);
@@ -7698,8 +7744,8 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
                     free(repr);
                 }
                 value_free(&err);
-                if (!vm->unwinding_defers && vm->defer_count > 0) {
-                    char *cleanup_error = stackvm_unwind_defers_to(vm, 0);
+                if (!vm->unwinding_defers && vm->defer_count > vm->defer_floor) {
+                    char *cleanup_error = stackvm_unwind_defers_to(vm, vm->defer_floor);
                     if (cleanup_error) {
                         char *combined = NULL;
                         lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
@@ -9549,3 +9595,82 @@ StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result) {
 
 #undef READ_BYTE
 #undef READ_U16
+
+StackVMResult stackvm_run_isolated(StackVM *vm, Chunk *chunk, LatValue *result) {
+    size_t entry_handler_count = vm->handler_count;
+    size_t entry_defer_count = vm->defer_count;
+    size_t saved_handler_floor = vm->handler_floor;
+    size_t saved_defer_floor = vm->defer_floor;
+    bool saved_unwinding_defers = vm->unwinding_defers;
+
+    /* The nested program may catch its own failures, but an escaping failure
+     * must return to the native-call boundary before the caller's catch runs.
+     * Floors preserve the caller's live handler/defer entries in-place (and
+     * GC-visible) while preventing nested error paths from consuming them. */
+    vm->handler_floor = entry_handler_count;
+    vm->defer_floor = entry_defer_count;
+    vm->unwinding_defers = false;
+
+    size_t entry_frame_count = vm->frame_count;
+    LatValue *entry_stack_top = vm->stack_top;
+    StackVMResult run_result = stackvm_run(vm, chunk, result);
+
+    /* A value-stack overflow leaves no room for stackvm_call_closure's
+     * defer wrapper. Close nested upvalues and release the failed stack
+     * window first; deferred captures remain live through the closed
+     * upvalues, and the ordinary cleanup below then has room to run. */
+    if (run_result != STACKVM_OK && vm->stack_top - vm->stack >= STACKVM_STACK_MAX && vm->stack_top > entry_stack_top) {
+        stackvm_unwind_release(vm, entry_stack_top);
+    }
+
+    /* Direct VM error returns and stack-overflow longjmps can bypass the
+     * compiler-emitted defer epilogue. Run only the nested program's defers
+     * while its frames and captures are still live, with the original error
+     * temporarily detached so a successful cleanup is not mistaken for it. */
+    if (vm->defer_count > entry_defer_count) {
+        char *original_error = vm->error;
+        vm->error = NULL;
+        if (vm->rt->error) {
+            char *runtime_error = vm->rt->error;
+            vm->rt->error = NULL;
+            if (!original_error) original_error = runtime_error;
+            else if (runtime_error != original_error) free(runtime_error);
+        }
+
+        char *cleanup_error = stackvm_unwind_defers_to(vm, entry_defer_count);
+        if (cleanup_error) {
+            char *combined = NULL;
+            if (original_error) {
+                lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error, original_error);
+                free(cleanup_error);
+                free(original_error);
+            } else {
+                combined = cleanup_error;
+            }
+            vm->error = combined;
+            if (run_result == STACKVM_OK) {
+                value_free(result);
+                *result = value_nil();
+                run_result = STACKVM_RUNTIME_ERROR;
+            }
+        } else {
+            vm->error = original_error;
+        }
+    }
+
+    if (run_result != STACKVM_OK) {
+        /* stackvm_run leaves failed nested frames in place. Close their
+         * upvalues and release their owned stack window before returning to
+         * the still-running caller. */
+        if (vm->stack_top > entry_stack_top) stackvm_unwind_release(vm, entry_stack_top);
+        if (vm->frame_count > entry_frame_count) vm->frame_count = entry_frame_count;
+    }
+
+    vm->handler_count = entry_handler_count;
+    vm->defer_count = entry_defer_count;
+    vm->handler_floor = saved_handler_floor;
+    vm->defer_floor = saved_defer_floor;
+    vm->unwinding_defers = saved_unwinding_defers;
+
+    return run_result;
+}

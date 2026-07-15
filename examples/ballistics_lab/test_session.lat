@@ -1,0 +1,532 @@
+// MBA-1308 source-level session tests. Run directly on StackVM and RegVM.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/protocol_v1" as protocol
+import "examples/ballistics_lab/reference_experiment" as reference
+import "examples/ballistics_lab/session" as sessions
+
+fn caught(thunk: Fn) -> String {
+    return try {
+        thunk(nil)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+}
+
+fn assert_error_contains(thunk: Fn, expected: String, label: String) {
+    let message = caught(thunk)
+    assert_error_message(message, expected, label)
+}
+
+fn assert_error_message(message: String, expected: String, label: String) {
+    assert(message != "NO_ERROR", label + ": expected an error")
+    assert(message.contains(expected), label + ": unexpected error: " + message)
+}
+
+fn trajectory_for(experiment: any, engine_version: String) -> any {
+    let terminal = domain.observation(
+    units.m(100),
+    0.125,
+    units.mps(700),
+    units.joules(2500),
+    units.m(-0.05),
+    units.m(0.01),
+    2.05,
+    ["terminal"]
+    )
+    let summary = domain.trajectory_summary(
+    units.m(100),
+    units.m(2),
+    0.125,
+    units.mps(700),
+    units.joules(2500),
+    "max_range"
+    )
+    return domain.trajectory(
+    engine_version,
+    experiment,
+    [terminal],
+    [domain.assumption("default_applied", "Injected backend default.", "$.solver")],
+    [domain.warning("rk45_time_step_ignored", "Injected backend warning.", "$.solver.time_step_s")],
+    summary,
+    false,
+    protocol.experiment_to_v1_request(experiment),
+    1
+    )
+}
+
+fn successful_backend(calls: any, name: String = "injected-success") -> any {
+    return backends.engine_backend(name, |experiment| {
+        let next = calls.get() + 1
+        calls.set(next)
+        return trajectory_for(experiment, "test-engine-" + to_string(next))
+    }
+    )
+}
+
+fn failure_backend(calls: any) -> any {
+    return backends.engine_backend("injected-failure", |experiment| {
+        calls.set(calls.get() + 1)
+        return domain.laboratory_error("injected_failure", "failed " + experiment.name)
+    }
+    )
+}
+
+fn throwing_backend(calls: any) -> any {
+    return backends.engine_backend("injected-throw", |_| {
+        calls.set(calls.get() + 1)
+        assert(false, "injected backend throw")
+    }
+    )
+}
+
+fn mismatched_backend(calls: any, expected_submitted_name: String) -> any {
+    return backends.engine_backend("injected-mismatch", |submitted| {
+        calls.set(calls.get() + 1)
+        assert(
+        submitted.name == expected_submitted_name,
+        "mismatch backend received wrong submitted snapshot"
+        )
+        let other_projectile = projectile_named(submitted.projectile, "wrong snapshot", 0.299)
+        let other_experiment = experiment_with_projectile(submitted, other_projectile, "wrong experiment")
+        return trajectory_for(other_experiment, "wrong-engine")
+    }
+    )
+}
+
+fn projectile_named(base: any, name: String, bc: Number) -> any {
+    return domain.projectile(
+    name,
+    base.mass,
+    base.diameter,
+    bc,
+    base.drag_model,
+    base.length
+    )
+}
+
+fn experiment_with_projectile(base: any, projectile: any, name: String) -> any {
+    return domain.experiment(
+    name,
+    projectile,
+    base.rifle,
+    base.atmosphere,
+    base.winds,
+    base.shot,
+    base.solver
+    )
+}
+
+fn assert_run_state_unchanged(
+lab: any,
+experiment: any,
+history: Array,
+current: any,
+previous: any,
+label: String
+) {
+    assert(sessions.experiment_of(lab) == experiment, label + ": experiment changed")
+    assert(sessions.history(lab) == history, label + ": history changed")
+    assert(sessions.current_run(lab) == current, label + ": current run changed")
+    assert(sessions.previous_run(lab) == previous, label + ": previous run changed")
+}
+
+fn test_new_session_and_display_preferences() {
+    let experiment = reference.representative_experiment()
+    let calls = Ref::new(0)
+    let backend = successful_backend(calls)
+    let display = sessions.metric_display_preferences(3)
+    let lab = sessions.new_session(experiment, backend, display, 4)
+
+    assert(struct_name(lab) == "LabSession")
+    assert(struct_name(sessions.experiment_of(lab)) == "Experiment")
+    assert(phase_of(sessions.experiment_of(lab)) == "crystal")
+    assert(sessions.backend_of(lab).name == "injected-success")
+    assert(struct_name(sessions.display_of(lab)) == "DisplayPreferences")
+    assert(sessions.display_of(lab).distance_unit == "m")
+    assert(sessions.display_of(lab).precision == 3)
+    assert(sessions.history_limit_of(lab) == 4)
+    assert(len(sessions.history(lab)) == 0)
+    assert(sessions.current_run(lab) == nil)
+    assert(sessions.previous_run(lab) == nil)
+    assert(calls.get() == 0, "constructing a session must not invoke its backend")
+    let display_snapshot = sessions.display_of(lab)
+    let display_mutation_error = try {
+        display_snapshot.distance_unit = "yd"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    display_mutation_error,
+    "frozen",
+    "display preference immutability"
+    )
+
+    assert_error_contains(
+    |_ | {
+        sessions.display_preferences("parsecs")
+    },
+    "display.distance_unit",
+    "invalid display distance"
+    )
+    assert_error_contains(
+    |_ | {
+        sessions.display_preferences("yd", "ft/s", "ft-lb", "mil", 13)
+    },
+    "display.precision",
+    "invalid display precision"
+    )
+    let history_limit_error = try {
+        sessions.new_session(experiment, backend, display, -1)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    history_limit_error,
+    "history_limit",
+    "negative history limit"
+    )
+}
+
+fn test_validated_replacement_operations_are_atomic() {
+    let base = reference.representative_experiment()
+    let lab = sessions.new_session(base, successful_backend(Ref::new(0)))
+
+    let projectile = projectile_named(base.projectile, "replacement projectile", 0.251)
+    sessions.replace_projectile(lab, projectile)
+    assert(sessions.experiment_of(lab).projectile.name == "replacement projectile")
+
+    let rifle = domain.rifle(
+    "replacement rifle",
+    units.inches(1.7),
+    units.ft(4.5),
+    units.inches(7.5),
+    "left"
+    )
+    sessions.replace_rifle(lab, rifle)
+    assert(sessions.experiment_of(lab).rifle.name == "replacement rifle")
+
+    let atmosphere = domain.atmosphere(
+    units.m(500),
+    units.celsius(20),
+    units.hpa(1000),
+    0.4,
+    units.deg(40)
+    )
+    sessions.replace_atmosphere(lab, atmosphere)
+    assert(sessions.experiment_of(lab).atmosphere.altitude.si_value == 500.0)
+
+    let winds = [
+        domain.wind(units.mph(4), units.deg(45), nil, units.yd(300)),
+        domain.wind(units.mph(8), units.deg(90), units.mps(0.2), units.yd(900))
+    ]
+    sessions.replace_winds(lab, winds)
+    assert(len(sessions.experiment_of(lab).winds) == 2)
+
+    let shot = domain.shot(
+    units.fps(2650),
+    units.yd(900),
+    units.yd(100),
+    nil,
+    units.deg(5),
+    units.deg(10),
+    units.deg(2),
+    units.deg(1),
+    units.m(0),
+    units.m(-1)
+    )
+    sessions.replace_shot(lab, shot)
+    assert(sessions.experiment_of(lab).shot.max_range.si_value == units.yd(900).si_value)
+
+    let solver = domain.solver_config("rk4", 0.001, units.yd(25), false, true, false)
+    sessions.replace_solver(lab, solver)
+    assert(sessions.experiment_of(lab).solver.method == "rk4")
+
+    let new_display = sessions.display_preferences("ft", "ft/s", "ft-lb", "moa", 1)
+    sessions.set_display_preferences(lab, new_display)
+    assert(sessions.display_of(lab).angle_unit == "moa")
+
+    let before_invalid_atmosphere = sessions.experiment_of(lab)
+    let atmosphere_error = try {
+        sessions.replace_atmosphere(lab, domain.standard_atmosphere())
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    atmosphere_error,
+    "latitude: required",
+    "Coriolis atmosphere relationship"
+    )
+    assert(
+    sessions.experiment_of(lab) == before_invalid_atmosphere,
+    "failed atmosphere replacement mutated experiment"
+    )
+
+    let before_invalid_winds = sessions.experiment_of(lab)
+    let invalid_winds = [
+        domain.wind(units.mph(5), units.deg(90), nil, units.yd(500)),
+        domain.wind(units.mph(5), units.deg(90), nil, units.yd(300))
+    ]
+    let winds_error = try {
+        sessions.replace_winds(lab, invalid_winds)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    winds_error,
+    "boundaries must increase",
+    "wind relationship"
+    )
+    assert(sessions.experiment_of(lab) == before_invalid_winds, "failed wind replacement mutated experiment")
+
+    let replacement_experiment = experiment_with_projectile(
+    base,
+    projectile_named(base.projectile, "whole replacement", 0.26),
+    "whole experiment"
+    )
+    sessions.replace_experiment(lab, replacement_experiment)
+    assert(sessions.experiment_of(lab).name == "whole experiment")
+    assert(sessions.experiment_of(lab).projectile.name == "whole replacement")
+
+    let backend_before = sessions.backend_of(lab).name
+    let backend_error = try {
+        sessions.set_backend(lab, 42)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    backend_error,
+    "EngineBackend",
+    "invalid backend replacement"
+    )
+    assert(sessions.backend_of(lab).name == backend_before, "failed backend replacement mutated backend")
+
+}
+
+fn test_two_successful_runs_snapshot_and_provenance() {
+    let base = reference.representative_experiment()
+    let calls = Ref::new(0)
+    let lab = sessions.new_session(base, successful_backend(calls), nil, 5)
+
+    let first = sessions.solve_session(lab)
+    assert(calls.get() == 1, "first solve must invoke backend exactly once")
+    assert(struct_name(first) == "RunRecord")
+    assert(first.backend_name == "injected-success")
+    assert(first.experiment == base)
+    assert(first.result.experiment == first.experiment)
+    assert(first.resolved_request == first.result.resolved_request)
+    assert(first.schema_version == 1)
+    assert(first.engine_version == "test-engine-1")
+    assert(len(first.assumptions) == 1)
+    assert(len(first.warnings) == 1)
+    assert(first.termination == "max_range")
+    assert(sessions.current_run(lab) == first)
+    assert(sessions.previous_run(lab) == nil)
+    assert(len(sessions.history(lab)) == 1)
+
+    let next_projectile = projectile_named(base.projectile, "second projectile", 0.255)
+    sessions.replace_projectile(lab, next_projectile)
+    assert(first.experiment.projectile.name != sessions.experiment_of(lab).projectile.name)
+    assert(first.result.experiment.projectile.name == base.projectile.name)
+
+    let second = sessions.solve_session(lab)
+    assert(calls.get() == 2, "second solve must invoke backend exactly once")
+    assert(second.engine_version == "test-engine-2")
+    assert(second.experiment.projectile.name == "second projectile")
+    assert(sessions.current_run(lab) == second)
+    assert(sessions.previous_run(lab) == first)
+    assert(len(sessions.history(lab)) == 2)
+    assert(sessions.history(lab)[0] == first)
+    assert(sessions.history(lab)[1] == second)
+
+    // Accessors return value snapshots; mutating a caller-owned Array cannot
+    // rewrite the session's bounded history behind the transactional Ref.
+    flux detached_history = sessions.history(lab)
+    detached_history.remove_at(0)
+    assert(len(detached_history) == 1)
+    assert(len(sessions.history(lab)) == 2)
+    assert(sessions.history(lab)[0] == first)
+
+    let record_mutation_error = try {
+        first.engine_version = "mutated"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    record_mutation_error,
+    "frozen",
+    "RunRecord field immutability"
+    )
+    let result_mutation_error = try {
+        first.result.engine_version = "mutated"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    result_mutation_error,
+    "frozen",
+    "Trajectory immutability"
+    )
+    let experiment_mutation_error = try {
+        first.experiment.projectile.name = "mutated"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    experiment_mutation_error,
+    "frozen",
+    "Experiment snapshot immutability"
+    )
+}
+
+fn test_failed_and_invalid_solves_are_transactional() {
+    let base = reference.representative_experiment()
+    let seed_calls = Ref::new(0)
+    let failed_calls = Ref::new(0)
+    let failed_backend_value = failure_backend(failed_calls)
+    let thrown_calls = Ref::new(0)
+    let thrown_backend_value = throwing_backend(thrown_calls)
+    let mismatch_calls = Ref::new(0)
+    let mismatch_backend_value = mismatched_backend(mismatch_calls, base.name)
+    let lab = sessions.new_session(base, successful_backend(seed_calls), nil, 3)
+    sessions.solve_session(lab)
+
+    let before_experiment = sessions.experiment_of(lab)
+    let before_history = clone(sessions.history(lab))
+    let before_current = sessions.current_run(lab)
+    let before_previous = sessions.previous_run(lab)
+
+    sessions.set_backend(lab, failed_backend_value)
+    let failed = sessions.solve_session(lab)
+    assert(backends.solve_failed(failed))
+    assert(failed.code == "injected_failure")
+    assert(failed_calls.get() == 1, "declared failure backend must be called exactly once")
+    assert_run_state_unchanged(
+    lab,
+    before_experiment,
+    before_history,
+    before_current,
+    before_previous,
+    "declared failure"
+    )
+
+    sessions.set_backend(lab, thrown_backend_value)
+    let thrown = sessions.solve_session(lab)
+    assert(backends.solve_failed(thrown))
+    assert(thrown.code == "backend_contract_error")
+    assert(thrown_calls.get() == 1, "throwing backend must be called exactly once")
+    assert_run_state_unchanged(
+    lab,
+    before_experiment,
+    before_history,
+    before_current,
+    before_previous,
+    "throwing failure"
+    )
+
+    sessions.set_backend(lab, mismatch_backend_value)
+    let mismatch = sessions.solve_session(lab)
+    assert(backends.solve_failed(mismatch))
+    assert(mismatch.code == "backend_contract_error")
+    assert(mismatch.message.contains("snapshot"))
+    assert(mismatch_calls.get() == 1, "mismatched backend must be called exactly once")
+    assert_run_state_unchanged(
+    lab,
+    before_experiment,
+    before_history,
+    before_current,
+    before_previous,
+    "mismatched provenance"
+    )
+}
+
+fn test_history_cap_shrink_zero_and_reset() {
+    let base = reference.representative_experiment()
+    let calls = Ref::new(0)
+    let backend = successful_backend(calls, "history-backend")
+    let lab = sessions.new_session(base, backend, nil, 2)
+
+    let first = sessions.solve_session(lab)
+    let second = sessions.solve_session(lab)
+    let third = sessions.solve_session(lab)
+    assert(calls.get() == 3)
+    assert(len(sessions.history(lab)) == 2)
+    assert(sessions.history(lab)[0] == second, "history must evict oldest run")
+    assert(sessions.history(lab)[1] == third)
+    assert(sessions.current_run(lab) == third)
+    assert(sessions.previous_run(lab) == second)
+    assert(sessions.history(lab)[0] != first)
+
+    sessions.set_history_limit(lab, 1)
+    assert(sessions.history_limit_of(lab) == 1)
+    assert(len(sessions.history(lab)) == 1)
+    assert(sessions.history(lab)[0] == third, "shrinking must retain newest run")
+    assert(sessions.current_run(lab) == third)
+    assert(sessions.previous_run(lab) == second)
+
+    let before_invalid_history = clone(sessions.history(lab))
+    let history_limit_error = try {
+        sessions.set_history_limit(lab, -1)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(
+    history_limit_error,
+    "non-negative",
+    "negative cap"
+    )
+    assert(sessions.history_limit_of(lab) == 1)
+    assert(sessions.history(lab) == before_invalid_history)
+
+    sessions.set_history_limit(lab, 0)
+    assert(sessions.history_limit_of(lab) == 0)
+    assert(len(sessions.history(lab)) == 0)
+    let fourth = sessions.solve_session(lab)
+    assert(calls.get() == 4)
+    assert(len(sessions.history(lab)) == 0, "cap zero must keep history disabled")
+    assert(sessions.current_run(lab) == fourth)
+    assert(sessions.previous_run(lab) == third)
+
+    sessions.set_history_limit(lab, 2)
+    let fifth = sessions.solve_session(lab)
+    assert(calls.get() == 5)
+    assert(len(sessions.history(lab)) == 1, "growing a cap must not backfill evicted history")
+    assert(sessions.history(lab)[0] == fifth)
+    assert(sessions.current_run(lab) == fifth)
+    assert(sessions.previous_run(lab) == fourth)
+
+    let retained_experiment = sessions.experiment_of(lab)
+    let retained_backend_name = sessions.backend_of(lab).name
+    let retained_display = sessions.display_of(lab)
+    let retained_limit = sessions.history_limit_of(lab)
+    sessions.reset_session(lab)
+    assert(sessions.experiment_of(lab) == retained_experiment)
+    assert(sessions.backend_of(lab).name == retained_backend_name)
+    assert(sessions.display_of(lab) == retained_display)
+    assert(sessions.history_limit_of(lab) == retained_limit)
+    assert(len(sessions.history(lab)) == 0)
+    assert(sessions.current_run(lab) == nil)
+    assert(sessions.previous_run(lab) == nil)
+    assert(calls.get() == 5, "reset must not invoke the backend")
+}
+
+fn main() {
+    test_new_session_and_display_preferences()
+    test_validated_replacement_operations_are_atomic()
+    test_two_successful_runs_snapshot_and_provenance()
+    test_failed_and_invalid_solves_are_transactional()
+    test_history_cap_shrink_zero_and_reset()
+    print("ballistics_lab session: all tests passed")
+}

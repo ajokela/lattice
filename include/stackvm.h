@@ -10,11 +10,15 @@
 
 struct BumpArena; /* forward declaration */
 struct Debugger;  /* forward declaration */
+struct StackOverflowContext;
 
-#define STACKVM_STACK_MAX   4096
-#define STACKVM_FRAMES_MAX  512
-#define STACKVM_HANDLER_MAX 64
-#define STACKVM_DEFER_MAX   256
+#define STACKVM_STACK_MAX  4096
+#define STACKVM_FRAMES_MAX 512
+/* stackvm_call_closure uses a wrapper frame plus the closure frame. Keep both
+ * available for running a pending defer while unwinding a user-frame overflow. */
+#define STACKVM_USER_FRAMES_MAX (STACKVM_FRAMES_MAX - 2)
+#define STACKVM_HANDLER_MAX     64
+#define STACKVM_DEFER_MAX       256
 /* OP_*_LOCAL slot operands are a single byte (0..255). push() bounds stack_top
  * to STACKVM_STACK_MAX, so a frame base is always <= stack + STACKVM_STACK_MAX;
  * a 256-slot redzone after the value stack therefore makes frame->slots[slot]
@@ -72,9 +76,11 @@ typedef struct {
     /* Exception handling */
     StackExceptionHandler handlers[STACKVM_HANDLER_MAX];
     size_t handler_count;
+    size_t handler_floor; /* Handlers below this belong to an isolated caller. */
     /* Defer stack */
     StackDeferEntry defers[STACKVM_DEFER_MAX];
     size_t defer_count;
+    size_t defer_floor; /* Defers below this belong to an isolated caller. */
     bool unwinding_defers;
     /* Struct metadata (name -> field names array) for OP_BUILD_STRUCT */
     Env *struct_meta;
@@ -100,9 +106,8 @@ typedef struct {
     struct Debugger *debugger;
     /* Mark-and-sweep garbage collector (opt-in via --gc flag) */
     GC gc;
-    /* Recovery point for stack overflow (avoids exit(1) in push()) */
-    jmp_buf overflow_jmp;
-    bool overflow_jmp_set;
+    /* Innermost live stackvm_run recovery context (avoids exit(1) in push()). */
+    struct StackOverflowContext *overflow_context;
 } StackVM;
 
 void stackvm_init(StackVM *vm, LatRuntime *rt);
@@ -114,6 +119,10 @@ void stackvm_print_stack_trace(StackVM *vm);
 /* Run a compiled chunk. On success, returns STACKVM_OK and sets *result.
  * On error, returns STACKVM_RUNTIME_ERROR and vm->error is set. */
 StackVMResult stackvm_run(StackVM *vm, Chunk *chunk, LatValue *result);
+
+/* Run a dynamically compiled chunk without allowing its handlers or defers to
+ * consume those of the caller. Used by lat_eval()'s re-entrant VM boundary. */
+StackVMResult stackvm_run_isolated(StackVM *vm, Chunk *chunk, LatValue *result);
 
 /* Clone a StackVM for running in a spawn thread. Clones env, shares struct_meta. */
 StackVM *stackvm_clone_for_thread(StackVM *parent);

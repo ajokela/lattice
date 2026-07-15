@@ -1,0 +1,704 @@
+// Deterministic, source-level trajectory analysis for the ballistics laboratory.
+//
+// This module contains calculation values and workflows only. Rendering and
+// serialization consume AnalysisTable without changing its rows.
+
+import "examples/ballistics_lab/units" as units
+import {
+    observation
+}
+from "examples/ballistics_lab/domain"
+
+let MAX_ANALYSIS_ROWS = 10000
+let DISTANCE_EPSILON = 0.000000000001
+
+export struct TableColumn {
+    key: fix String,
+    label: fix String,
+    unit: fix any
+}
+
+export struct NoticeSnapshot {
+    code: fix String,
+    message: fix String,
+    path: fix any
+}
+
+export struct TrajectoryProvenance {
+    series_name: fix String,
+    schema_version: fix Int,
+    engine_version: fix String,
+    solver_method: fix any,
+    verified: fix Bool,
+    assumptions: fix Array,
+    warnings: fix Array,
+    termination: fix String,
+    actual_range: fix any
+}
+
+export struct AnalysisTable {
+    kind: fix String,
+    title: fix String,
+    columns: fix Array,
+    rows: fix Array,
+    provenance: fix Array
+}
+
+fn _require_struct(value: any, expected: String, field: String) {
+    if typeof(value) != "Struct" || struct_name(value) != expected {
+        assert(false, field + ": expected " + expected + ", got " + typeof(value))
+    }
+}
+
+fn _require_distance(value: any, field: String) {
+    _require_struct(value, "Distance", field)
+    if is_nan(value.si_value) || is_inf(value.si_value) {
+        assert(false, field + ": must be finite")
+    }
+}
+
+fn _require_array(value: any, field: String) {
+    if typeof(value) != "Array" {
+        assert(false, field + ": expected Array, got " + typeof(value))
+    }
+}
+
+fn _near(left: Number, right: Number) -> Bool {
+    flux scale = abs(left)
+    if abs(right) > scale {
+        scale = abs(right)
+    }
+    if scale < 1.0 {
+        scale = 1.0
+    }
+    return abs(left - right) <= DISTANCE_EPSILON * scale
+}
+
+fn _has_flag(observation: any, expected: String) -> Bool {
+    for flag in observation.flags {
+        if flag == expected {
+            return true
+        }
+    }
+    return false
+}
+
+fn _validate_trajectory(value: any, field: String) {
+    _require_struct(value, "Trajectory", field)
+    if len(value.observations) == 0 {
+        assert(false, field + ".observations: must not be empty")
+    }
+    flux previous = -1.0
+    flux index = 0
+    flux terminal_count = 0
+    for item in value.observations {
+        _require_struct(item, "Observation", field + ".observations[" + to_string(index) + "]")
+        let distance = item.distance.si_value
+        if index > 0 && distance <= previous {
+            assert(false, field + ".observations: distances must increase strictly")
+        }
+        if _has_flag(item, "terminal") {
+            terminal_count = terminal_count + 1
+            if index != len(value.observations) - 1 {
+                assert(false, field + ".observations: terminal observation must be last")
+            }
+        }
+        previous = distance
+        index = index + 1
+    }
+    if terminal_count != 1 {
+        assert(false, field + ".observations: expected exactly one terminal observation")
+    }
+    if !_near(previous, value.summary.actual_range.si_value) {
+        assert(false, field + ".observations: terminal distance must match summary.actual_range")
+    }
+}
+
+fn _column(key: String, label: String, unit: any = nil) -> TableColumn {
+    // Remain alloy until the containing AnalysisTable is frozen. Freezing each
+    // child separately would create a graph of shared regions for a short-lived
+    // calculation result.
+    return TableColumn {
+        key: key, label: label, unit: unit
+    }
+}
+
+fn _copy_string(value: String) -> String {
+    // Materialize a source-independent string rather than retaining a handle
+    // into a large solved-trajectory crystal region.
+    return value.substring(0, len(value))
+}
+
+fn _notice_snapshots(values: Array) -> Array {
+    flux output = []
+    for item in values {
+        flux path = nil
+        if item.path != nil {
+            path = _copy_string(item.path)
+        }
+        output.push(NoticeSnapshot {
+            code: _copy_string(item.code),
+            message: _copy_string(item.message),
+            path: path
+        }
+        )
+    }
+    return output
+}
+
+fn _provenance(trajectory_value: any) -> TrajectoryProvenance {
+    flux solver_method = trajectory_value.experiment.solver.method
+    if trajectory_value.resolved_request != nil &&
+    trajectory_value.resolved_request.has("solver") &&
+    trajectory_value.resolved_request.get("solver").has("method") {
+        solver_method = trajectory_value.resolved_request.get("solver").get("method")
+    }
+    flux copied_solver_method = nil
+    if solver_method != nil {
+        copied_solver_method = _copy_string(solver_method)
+    }
+    return TrajectoryProvenance {
+        series_name: _copy_string(trajectory_value.experiment.name),
+        schema_version: trajectory_value.schema_version,
+        engine_version: _copy_string(trajectory_value.engine_version),
+        solver_method: copied_solver_method,
+        verified: trajectory_value.verified,
+        assumptions: _notice_snapshots(trajectory_value.assumptions),
+        warnings: _notice_snapshots(trajectory_value.warnings),
+        termination: _copy_string(trajectory_value.summary.termination),
+        actual_range: _distance_from_si(
+        trajectory_value.summary.actual_range.si_value,
+        trajectory_value.summary.actual_range.display_unit
+        )
+    }
+}
+
+fn _table(
+kind: String,
+title: String,
+columns: Array,
+rows: Array,
+provenance: Array
+) -> AnalysisTable {
+    if len(rows) > MAX_ANALYSIS_ROWS {
+        assert(false, kind + ": result exceeds the 10000-row analysis limit")
+    }
+    // One freeze owns the complete calculation graph. Child columns, rows,
+    // notices, and provenance deliberately remain alloy/fluid until here.
+    return freeze(AnalysisTable {
+        kind: kind,
+        title: title,
+        columns: columns,
+        rows: rows,
+        provenance: provenance
+    }
+    )
+}
+
+fn _distance_from_si(value: Number, unit: String) -> any {
+    let si = units.m(value)
+    if unit == "m" {
+        return si
+    }
+    if unit == "km" {
+        return units.km(units.distance_as(si, unit))
+    }
+    if unit == "yd" {
+        return units.yd(units.distance_as(si, unit))
+    }
+    if unit == "ft" {
+        return units.ft(units.distance_as(si, unit))
+    }
+    if unit == "in" {
+        return units.inches(units.distance_as(si, unit))
+    }
+    // Reuse units' canonical supported-unit diagnostic.
+    units.distance_as(si, unit)
+    return si
+}
+
+fn _velocity_from_si(value: Number, unit: String) -> any {
+    let si = units.mps(value)
+    if unit == "m/s" {
+        return si
+    }
+    if unit == "ft/s" {
+        return units.fps(units.velocity_as(si, unit))
+    }
+    units.velocity_as(si, unit)
+    return si
+}
+
+fn _energy_from_si(value: Number, unit: String) -> any {
+    let si = units.joules(value)
+    if unit == "J" {
+        return si
+    }
+    if unit == "ft-lb" {
+        return units.foot_pounds(units.energy_as(si, unit))
+    }
+    units.energy_as(si, unit)
+    return si
+}
+
+fn _interpolate(left: Number, right: Number, fraction: Number) -> Number {
+    return left +(right - left) * fraction
+}
+
+fn _copy_flags(flags: Array) -> Array {
+    flux output = []
+    for flag in flags {
+        output.push(_copy_string(flag))
+    }
+    return output
+}
+
+// Return the exact source observation at an endpoint, or a linearly
+// interpolated immutable Observation between adjacent samples.
+export fn trajectory_at(trajectory_value: any, distance: any) -> any {
+    _validate_trajectory(trajectory_value, "trajectory_at.trajectory")
+    _require_distance(distance, "trajectory_at.distance")
+    let observations = trajectory_value.observations
+    let first = observations[0]
+    let terminal = observations[len(observations) - 1]
+    let query = distance.si_value
+    if (query < first.distance.si_value && !_near(query, first.distance.si_value)) ||
+    (query > terminal.distance.si_value && !_near(query, terminal.distance.si_value)) {
+        assert(
+        false,
+        "trajectory_at.distance: " + to_string(query) +
+        " m is outside computed trajectory [" + to_string(first.distance.si_value) +
+        ", " + to_string(terminal.distance.si_value) + "] m"
+        )
+    }
+
+    for item in observations {
+        if _near(query, item.distance.si_value) {
+            // Preserve the caller's requested distance display unit even at an
+            // exact engine sample; all calculated fields and flags remain exact.
+            return observation(
+            distance,
+            item.time_s,
+            _velocity_from_si(item.velocity.si_value, item.velocity.display_unit),
+            _energy_from_si(item.energy.si_value, item.energy.display_unit),
+            _distance_from_si(item.drop.si_value, item.drop.display_unit),
+            _distance_from_si(item.windage.si_value, item.windage.display_unit),
+            item.mach,
+            _copy_flags(item.flags)
+            )
+        }
+    }
+
+    flux index = 1
+    while index < len(observations) {
+        let left = observations[index - 1]
+        let right = observations[index]
+        if query < right.distance.si_value {
+            let span = right.distance.si_value - left.distance.si_value
+            let fraction =(query - left.distance.si_value) / span
+            return observation(
+            distance,
+            _interpolate(left.time_s, right.time_s, fraction),
+            _velocity_from_si(
+            _interpolate(left.velocity.si_value, right.velocity.si_value, fraction),
+            left.velocity.display_unit
+            ),
+            _energy_from_si(
+            _interpolate(left.energy.si_value, right.energy.si_value, fraction),
+            left.energy.display_unit
+            ),
+            _distance_from_si(
+            _interpolate(left.drop.si_value, right.drop.si_value, fraction),
+            left.drop.display_unit
+            ),
+            _distance_from_si(
+            _interpolate(left.windage.si_value, right.windage.si_value, fraction),
+            left.windage.display_unit
+            ),
+            _interpolate(left.mach, right.mach, fraction),
+            []
+            )
+        }
+        index = index + 1
+    }
+    assert(false, "trajectory_at: no interpolation bracket found")
+    return nil
+}
+
+// Resample a computed trajectory on a bounded grid. A requested stop beyond an
+// early engine termination is clipped to the real terminal observation, which
+// is retained exactly once even when it falls between grid points.
+export fn sample(
+trajectory_value: any,
+start: any,
+stop: any,
+interval: any
+) -> Array {
+    _validate_trajectory(trajectory_value, "sample.trajectory")
+    _require_distance(start, "sample.start")
+    _require_distance(stop, "sample.stop")
+    _require_distance(interval, "sample.interval")
+    if interval.si_value <= 0 {
+        assert(false, "sample.interval: must be greater than zero")
+    }
+    if stop.si_value < start.si_value && !_near(stop.si_value, start.si_value) {
+        assert(false, "sample: stop must be greater than or equal to start")
+    }
+
+    let observations = trajectory_value.observations
+    let first_distance = observations[0].distance.si_value
+    let terminal = observations[len(observations) - 1]
+    let terminal_distance = terminal.distance.si_value
+    if (start.si_value < first_distance && !_near(start.si_value, first_distance)) ||
+    (start.si_value > terminal_distance && !_near(start.si_value, terminal_distance)) {
+        assert(false, "sample.start: must be inside the computed trajectory")
+    }
+    flux effective_stop = stop.si_value
+    if effective_stop > terminal_distance || _near(effective_stop, terminal_distance) {
+        effective_stop = terminal_distance
+    }
+    let span = effective_stop - start.si_value
+    let intervals = span / interval.si_value
+    if is_nan(intervals) || is_inf(intervals) || intervals > MAX_ANALYSIS_ROWS - 1 {
+        assert(false, "sample: grid exceeds the 10000-observation analysis limit")
+    }
+    let projected_count = ceil(intervals) + 1
+    if projected_count > MAX_ANALYSIS_ROWS {
+        assert(false, "sample: grid exceeds the 10000-observation analysis limit")
+    }
+
+    flux output = []
+    output.push(trajectory_at(trajectory_value, start))
+    flux grid_index = 1
+    loop {
+        let next_si = start.si_value + grid_index * interval.si_value
+        if next_si > effective_stop || _near(next_si, effective_stop) {
+            break
+        }
+        output.push(trajectory_at(
+        trajectory_value,
+        _distance_from_si(next_si, start.display_unit)
+        ))
+        grid_index = grid_index + 1
+    }
+
+    if !_near(start.si_value, effective_stop) {
+        if _near(effective_stop, terminal_distance) {
+            output.push(trajectory_at(
+            trajectory_value,
+            _distance_from_si(terminal_distance, stop.display_unit)
+            ))
+        } else {
+            output.push(trajectory_at(
+            trajectory_value,
+            _distance_from_si(effective_stop, stop.display_unit)
+            ))
+        }
+    }
+    return freeze(output)
+}
+
+fn _distance_queries(value: any, field: String, positive: Bool) -> Array {
+    _require_array(value, field)
+    if len(value) == 0 {
+        assert(false, field + ": must not be empty")
+    }
+    flux previous = -1.0
+    flux index = 0
+    for distance in value {
+        _require_distance(distance, field + "[" + to_string(index) + "]")
+        if positive && distance.si_value <= 0 {
+            assert(false, field + "[" + to_string(index) + "]: must be greater than zero")
+        }
+        if index > 0 && distance.si_value <= previous {
+            assert(false, field + ": distances must increase strictly")
+        }
+        previous = distance.si_value
+        index = index + 1
+    }
+    return value
+}
+
+fn _angle_value(radians: Number, unit: String) -> Number {
+    return units.angle_as(units.rad(radians), unit)
+}
+
+fn _row() -> Map {
+    return Map::new()
+}
+
+// Build a conventional come-up table. Positive come_up means the sight must be
+// held above the point of impact; it is the negative angular displacement of
+// the reported drop.
+export fn dope(
+trajectory_value: any,
+distances: any,
+drop_unit: String = "in",
+correction_unit: String = "moa",
+velocity_unit: String = "ft/s",
+energy_unit: String = "ft-lb"
+) -> AnalysisTable {
+    _validate_trajectory(trajectory_value, "dope.trajectory")
+    let queries = _distance_queries(distances, "dope.distances", true)
+    units.distance_as(units.m(0), drop_unit)
+    units.angle_as(units.rad(0), correction_unit)
+    units.velocity_as(units.mps(0), velocity_unit)
+    units.energy_as(units.joules(0), energy_unit)
+    let distance_unit = queries[0].display_unit
+
+    flux rows = []
+    for query in queries {
+        let item = trajectory_at(trajectory_value, query)
+        let row = _row()
+        row.set("distance", units.distance_as(item.distance, distance_unit))
+        row.set("drop", units.distance_as(item.drop, drop_unit))
+        row.set(
+        "come_up",
+        _angle_value(atan2(0.0 - item.drop.si_value, item.distance.si_value), correction_unit)
+        )
+        row.set("velocity", units.velocity_as(item.velocity, velocity_unit))
+        row.set("energy", units.energy_as(item.energy, energy_unit))
+        row.set("time_s", item.time_s)
+        row.set("mach", item.mach)
+        rows.push(row)
+    }
+
+    return _table(
+    "dope",
+    "DOPE: " + trajectory_value.experiment.name,
+    [
+        _column("distance", "Distance", distance_unit),
+        _column("drop", "Drop", drop_unit),
+        _column("come_up", "Come-up", correction_unit),
+        _column("velocity", "Velocity", velocity_unit),
+        _column("energy", "Energy", energy_unit),
+        _column("time_s", "Time", "s"),
+        _column("mach", "Mach")
+    ],
+    rows,
+    [_provenance(trajectory_value)]
+    )
+}
+
+fn _constant_wind(trajectory_value: any, field: String) -> Array {
+    let winds = trajectory_value.experiment.winds
+    if len(winds) == 0 {
+        return [units.wind_mps(0), units.rad(0)]
+    }
+    if len(winds) != 1 || winds[0].until_distance != nil {
+        assert(false, field + ": wind cards require calm or one constant wind per trajectory")
+    }
+    return [winds[0].speed, winds[0].direction_from]
+}
+
+// Build a long-form wind card from one or more constant-wind trajectories.
+// Windage follows engine coordinates (positive = impact right). Wind hold is
+// the opposite correction, so a left impact produces a positive/right hold.
+export fn wind_card(
+trajectories: any,
+distances: any,
+windage_unit: String = "in",
+correction_unit: String = "moa",
+wind_speed_unit: String = "mph",
+direction_unit: String = "deg"
+) -> AnalysisTable {
+    _require_array(trajectories, "wind_card.trajectories")
+    if len(trajectories) == 0 {
+        assert(false, "wind_card.trajectories: must not be empty")
+    }
+    let queries = _distance_queries(distances, "wind_card.distances", true)
+    units.distance_as(units.m(0), windage_unit)
+    units.angle_as(units.rad(0), correction_unit)
+    units.wind_speed_as(units.wind_mps(0), wind_speed_unit)
+    units.angle_as(units.rad(0), direction_unit)
+    let distance_unit = queries[0].display_unit
+
+    flux sources = []
+    flux source_index = 0
+    for trajectory_value in trajectories {
+        _validate_trajectory(
+        trajectory_value,
+        "wind_card.trajectories[" + to_string(source_index) + "]"
+        )
+        _constant_wind(trajectory_value, "wind_card.trajectories[" + to_string(source_index) + "]")
+        sources.push(_provenance(trajectory_value))
+        source_index = source_index + 1
+    }
+    if len(queries) * len(trajectories) > MAX_ANALYSIS_ROWS {
+        assert(false, "wind_card: result exceeds the 10000-row analysis limit")
+    }
+
+    flux rows = []
+    for query in queries {
+        flux index = 0
+        for trajectory_value in trajectories {
+            let item = trajectory_at(trajectory_value, query)
+            let wind = _constant_wind(
+            trajectory_value,
+            "wind_card.trajectories[" + to_string(index) + "]"
+            )
+            let row = _row()
+            row.set("series_index", index)
+            row.set("trajectory", _copy_string(trajectory_value.experiment.name))
+            row.set("wind_speed", units.wind_speed_as(wind[0], wind_speed_unit))
+            row.set("direction_from", units.angle_as(wind[1], direction_unit))
+            row.set("distance", units.distance_as(item.distance, distance_unit))
+            row.set("windage", units.distance_as(item.windage, windage_unit))
+            row.set(
+            "wind_hold",
+            _angle_value(
+            atan2(0.0 - item.windage.si_value, item.distance.si_value),
+            correction_unit
+            )
+            )
+            rows.push(row)
+            index = index + 1
+        }
+    }
+
+    return _table(
+    "wind_card",
+    "Wind card",
+    [
+        _column("series_index", "Series"),
+        _column("trajectory", "Trajectory"),
+        _column("wind_speed", "Wind", wind_speed_unit),
+        _column("direction_from", "From", direction_unit),
+        _column("distance", "Distance", distance_unit),
+        _column("windage", "Windage", windage_unit),
+        _column("wind_hold", "Wind hold", correction_unit)
+    ],
+    rows,
+    sources
+    )
+}
+
+// Compare two or more trajectories on the sorted union of their sample grids
+// inside the shared computed range. Each source is interpolated independently,
+// so callers need not force engine sampling grids to match. Delta columns are
+// relative to series zero.
+export fn compare_trajectories(
+trajectories: any,
+distance_unit: String = "m",
+drop_unit: String = "m",
+windage_unit: String = "m",
+velocity_unit: String = "m/s",
+energy_unit: String = "J"
+) -> AnalysisTable {
+    _require_array(trajectories, "compare.trajectories")
+    if len(trajectories) < 2 {
+        assert(false, "compare.trajectories: at least two trajectories are required")
+    }
+    units.distance_as(units.m(0), distance_unit)
+    units.distance_as(units.m(0), drop_unit)
+    units.distance_as(units.m(0), windage_unit)
+    units.velocity_as(units.mps(0), velocity_unit)
+    units.energy_as(units.joules(0), energy_unit)
+
+    flux common_start = 0.0
+    flux common_stop = 0.0
+    flux sources = []
+    flux source_index = 0
+    for trajectory_value in trajectories {
+        _validate_trajectory(
+        trajectory_value,
+        "compare.trajectories[" + to_string(source_index) + "]"
+        )
+        let observations = trajectory_value.observations
+        let first = observations[0].distance.si_value
+        let last = observations[len(observations) - 1].distance.si_value
+        if source_index == 0 || first > common_start {
+            common_start = first
+        }
+        if source_index == 0 || last < common_stop {
+            common_stop = last
+        }
+        sources.push(_provenance(trajectory_value))
+        source_index = source_index + 1
+    }
+    if common_stop < common_start {
+        assert(false, "compare.trajectories: trajectories have no shared computed range")
+    }
+
+    flux raw_grid = []
+    for trajectory_value in trajectories {
+        for item in trajectory_value.observations {
+            if item.distance.si_value >= common_start && item.distance.si_value <= common_stop {
+                raw_grid.push(item.distance.si_value)
+            }
+        }
+    }
+    let sorted_grid = raw_grid.sort()
+    flux grid = []
+    for distance in sorted_grid {
+        if len(grid) == 0 || !_near(grid[len(grid) - 1], distance) {
+            grid.push(distance)
+        }
+    }
+    if len(grid) * len(trajectories) > MAX_ANALYSIS_ROWS {
+        assert(false, "compare: result exceeds the 10000-row analysis limit")
+    }
+
+    flux rows = []
+    for distance_si in grid {
+        let query = _distance_from_si(distance_si, distance_unit)
+        let baseline = trajectory_at(trajectories[0], query)
+        flux index = 0
+        for trajectory_value in trajectories {
+            let item = trajectory_at(trajectory_value, query)
+            let velocity = units.velocity_as(item.velocity, velocity_unit)
+            let baseline_velocity = units.velocity_as(baseline.velocity, velocity_unit)
+            let energy = units.energy_as(item.energy, energy_unit)
+            let baseline_energy = units.energy_as(baseline.energy, energy_unit)
+            let row = _row()
+            row.set("series_index", index)
+            row.set("trajectory", _copy_string(trajectory_value.experiment.name))
+            row.set("distance", units.distance_as(item.distance, distance_unit))
+            row.set("time_s", item.time_s)
+            row.set("velocity", velocity)
+            row.set("energy", energy)
+            row.set("drop", units.distance_as(item.drop, drop_unit))
+            row.set("windage", units.distance_as(item.windage, windage_unit))
+            row.set("mach", item.mach)
+            row.set("delta_time_s", item.time_s - baseline.time_s)
+            row.set("delta_velocity", velocity - baseline_velocity)
+            row.set("delta_energy", energy - baseline_energy)
+            row.set(
+            "delta_drop",
+            units.distance_as(item.drop, drop_unit) - units.distance_as(baseline.drop, drop_unit)
+            )
+            row.set(
+            "delta_windage",
+            units.distance_as(item.windage, windage_unit) -
+            units.distance_as(baseline.windage, windage_unit)
+            )
+            row.set("delta_mach", item.mach - baseline.mach)
+            rows.push(row)
+            index = index + 1
+        }
+    }
+
+    return _table(
+    "comparison",
+    "Trajectory comparison",
+    [
+        _column("series_index", "Series"),
+        _column("trajectory", "Trajectory"),
+        _column("distance", "Distance", distance_unit),
+        _column("time_s", "Time", "s"),
+        _column("velocity", "Velocity", velocity_unit),
+        _column("energy", "Energy", energy_unit),
+        _column("drop", "Drop", drop_unit),
+        _column("windage", "Windage", windage_unit),
+        _column("mach", "Mach"),
+        _column("delta_time_s", "Delta time", "s"),
+        _column("delta_velocity", "Delta velocity", velocity_unit),
+        _column("delta_energy", "Delta energy", energy_unit),
+        _column("delta_drop", "Delta drop", drop_unit),
+        _column("delta_windage", "Delta windage", windage_unit),
+        _column("delta_mach", "Delta Mach")
+    ],
+    rows,
+    sources
+    )
+}

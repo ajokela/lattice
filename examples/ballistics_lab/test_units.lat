@@ -1,0 +1,285 @@
+// Source-level tests for ballistics_lab/units.lat.
+// Run from the repository root:
+//   ./clat examples/ballistics_lab/test_units.lat
+//   ./clat --regvm examples/ballistics_lab/test_units.lat
+
+import "examples/ballistics_lab/units" as u
+
+fn assert_close(actual: Number, expected: Number, tolerance: Number) {
+    let delta = abs(actual - expected)
+    assert(
+    delta <= tolerance,
+    "expected " + to_string(actual) + " to be within " +
+    to_string(tolerance) + " of " + to_string(expected)
+    )
+}
+
+fn capture_error(action: Fn) -> String {
+    return try {
+        action(nil)
+        // Deliberately after the action: a validation path that falls through
+        // returns this sentinel and fails the caller's expected-message check.
+        "__NO_ERROR__"
+    } catch e {
+        e.message
+    }
+}
+
+fn test_quantities_preserve_si_and_display_metadata() {
+    let distance = u.yd(300)
+    assert_type(distance, "Distance")
+    assert_close(distance.si_value, 274.32, 0.000000001)
+    assert_eq(distance.display_value, 300)
+    assert_eq(distance.display_unit, "yd")
+
+    assert_type(u.fps(2700), "Velocity")
+    assert_type(u.gr(175), "Mass")
+    assert_type(u.mil(1), "Angle")
+    assert_type(u.fahrenheit(59), "Temperature")
+    assert_type(u.inhg(29.92), "Pressure")
+    assert_type(u.foot_pounds(1000), "Energy")
+    assert_type(u.mph(10), "WindSpeed")
+}
+
+fn test_known_distance_conversions() {
+    assert_close(u.distance_as(u.m(1), "m"), 1.0, 0.000000001)
+    assert_close(u.distance_as(u.km(1), "m"), 1000.0, 0.000000001)
+    assert_close(u.distance_as(u.yd(1), "m"), 0.9144, 0.000000001)
+    assert_close(u.distance_as(u.ft(1), "m"), 0.3048, 0.000000001)
+    assert_close(u.distance_as(u.inches(1), "m"), 0.0254, 0.000000001)
+}
+
+fn test_known_velocity_and_mass_conversions() {
+    assert_close(u.velocity_as(u.fps(1), "m/s"), 0.3048, 0.000000001)
+    assert_close(u.velocity_as(u.mps(1), "ft/s"), 3.280839895013123, 0.000000001)
+
+    assert_close(u.mass_as(u.grams(1000), "kg"), 1.0, 0.000000001)
+    assert_close(u.mass_as(u.gr(1), "kg"), 0.00006479891, 0.000000000001)
+    assert_close(u.mass_as(u.kg(1), "gr"), 15432.35835294143, 0.00000001)
+}
+
+fn test_known_angle_conversions_and_ballistic_mil() {
+    assert_close(u.angle_as(u.deg(180), "rad"), 3.141592653589793, 0.000000000001)
+    assert_close(u.angle_as(u.moa(60), "deg"), 1.0, 0.000000001)
+
+    // The ballistics convention is exact: one mil is one milliradian.
+    assert_close(u.angle_as(u.mil(1), "rad"), 0.001, 0.000000000001)
+    assert_close(u.angle_as(u.rad(0.001), "mil"), 1.0, 0.000000001)
+}
+
+fn test_known_temperature_and_pressure_conversions() {
+    assert_close(u.temperature_as(u.celsius(0), "K"), 273.15, 0.000000001)
+    assert_close(u.temperature_as(u.fahrenheit(32), "K"), 273.15, 0.000000001)
+    assert_close(u.temperature_as(u.kelvin(273.15), "F"), 32.0, 0.000000001)
+
+    assert_close(u.pressure_as(u.hpa(1013.25), "Pa"), 101325.0, 0.000000001)
+    assert_close(u.pressure_as(u.inhg(1), "Pa"), 3386.389, 0.000000001)
+}
+
+fn test_known_energy_and_wind_conversions() {
+    assert_close(u.energy_as(u.foot_pounds(1), "J"), 1.3558179483314004, 0.000000000001)
+    assert_close(u.energy_as(u.joules(1), "ft-lb"), 0.7375621492772656, 0.000000001)
+
+    assert_close(u.wind_speed_as(u.mph(1), "m/s"), 0.44704, 0.000000001)
+    assert_close(u.wind_speed_as(u.kph(3.6), "m/s"), 1.0, 0.000000001)
+}
+
+fn test_distance_round_trip() {
+    let original = u.yd(731.25)
+    let canonical = u.m(u.distance_as(original, "m"))
+    assert_close(u.distance_as(canonical, "yd"), 731.25, 0.000000001)
+}
+
+fn test_velocity_round_trip() {
+    let original = u.fps(2700.5)
+    let canonical = u.mps(u.velocity_as(original, "m/s"))
+    assert_close(u.velocity_as(canonical, "ft/s"), 2700.5, 0.000000001)
+}
+
+fn test_mass_round_trip() {
+    let original = u.gr(175.25)
+    let canonical = u.kg(u.mass_as(original, "kg"))
+    assert_close(u.mass_as(canonical, "gr"), 175.25, 0.000000001)
+}
+
+fn test_angle_round_trip() {
+    let original = u.moa(-12.75)
+    let canonical = u.rad(u.angle_as(original, "rad"))
+    assert_close(u.angle_as(canonical, "moa"), -12.75, 0.000000001)
+}
+
+fn test_temperature_round_trip() {
+    let original = u.fahrenheit(59.5)
+    let canonical = u.kelvin(u.temperature_as(original, "K"))
+    assert_close(u.temperature_as(canonical, "F"), 59.5, 0.000000001)
+}
+
+fn test_pressure_round_trip() {
+    let original = u.inhg(29.92)
+    let canonical = u.pa(u.pressure_as(original, "Pa"))
+    assert_close(u.pressure_as(canonical, "inHg"), 29.92, 0.000000001)
+}
+
+fn test_energy_round_trip() {
+    let original = u.foot_pounds(2271.5)
+    let canonical = u.joules(u.energy_as(original, "J"))
+    assert_close(u.energy_as(canonical, "ft-lb"), 2271.5, 0.000000001)
+}
+
+fn test_wind_speed_round_trip() {
+    let original = u.mph(17.25)
+    let canonical = u.wind_mps(u.wind_speed_as(original, "m/s"))
+    assert_close(u.wind_speed_as(canonical, "mph"), 17.25, 0.000000001)
+}
+
+fn test_constructors_reject_non_numeric_and_non_finite_values() {
+    let type_error = capture_error( |_| {
+        u.kg("heavy")
+    }
+    )
+    assert_contains(type_error, "kg: value must be a Number")
+
+    let nan_error = capture_error( |_| {
+        u.m(0.0 / 0.0)
+    }
+    )
+    assert_contains(nan_error, "m: value must be finite")
+
+    let inf_error = capture_error( |_| {
+        u.fps(1.0 / 0.0)
+    }
+    )
+    assert_contains(inf_error, "fps: value must be finite")
+
+    let negative_inf_error = capture_error( |_| {
+        u.mil(-1.0 / 0.0)
+    }
+    )
+    assert_contains(negative_inf_error, "mil: value must be finite")
+}
+
+fn test_constructors_enforce_physical_ranges() {
+    assert_contains(capture_error( |_| {
+        u.gr(-1)
+    }
+    ), "non-negative")
+    assert_contains(capture_error( |_| {
+        u.kelvin(-0.01)
+    }
+    ), "absolute zero")
+    assert_contains(capture_error( |_| {
+        u.celsius(-273.16)
+    }
+    ), "absolute zero")
+    assert_contains(capture_error( |_| {
+        u.fahrenheit(-459.68)
+    }
+    ), "absolute zero")
+    assert_contains(capture_error( |_| {
+        u.pa(-1)
+    }
+    ), "non-negative")
+    assert_contains(capture_error( |_| {
+        u.joules(-1)
+    }
+    ), "non-negative")
+    assert_contains(capture_error( |_| {
+        u.mph(-1)
+    }
+    ), "non-negative")
+
+    // Generic components are signed. Domain constructors enforce positive
+    // range and muzzle speed where those relationships require it.
+    assert_close(u.distance_as(u.inches(-7.5), "in"), -7.5, 0.000000001)
+    assert_close(u.velocity_as(u.mps(-3.25), "m/s"), -3.25, 0.000000001)
+    assert_close(u.angle_as(u.deg(-2), "deg"), -2.0, 0.000000001)
+}
+
+fn test_conversion_unit_identifiers_are_strict() {
+    assert_contains(capture_error( |_| {
+        u.distance_as(u.m(1), "meters")
+    }
+    ), "unsupported unit")
+    assert_contains(capture_error( |_| {
+        u.velocity_as(u.mps(1), "mps")
+    }
+    ), "unsupported unit")
+    assert_contains(capture_error( |_| {
+        u.mass_as(u.kg(1), "kilograms")
+    }
+    ), "unsupported unit")
+    assert_contains(capture_error( |_| {
+        u.angle_as(u.rad(1), "radians")
+    }
+    ), "unsupported unit")
+    assert_contains(capture_error( |_| {
+        u.temperature_as(u.kelvin(1), "kelvin")
+    }
+    ), "unsupported unit")
+    assert_contains(capture_error( |_| {
+        u.pressure_as(u.pa(1), "pa")
+    }
+    ), "unsupported unit")
+    assert_contains(capture_error( |_| {
+        u.energy_as(u.joules(1), "joules")
+    }
+    ), "unsupported unit")
+    assert_contains(capture_error( |_| {
+        u.wind_speed_as(u.wind_mps(1), "kph")
+    }
+    ), "unsupported unit")
+}
+
+fn test_quantity_fields_are_immutable() {
+    let distance = u.yd(100)
+    let canonical_error = capture_error( |_| {
+        distance.si_value = 0
+    }
+    )
+    assert_contains(canonical_error, "frozen")
+
+    let display_error = capture_error( |_| {
+        distance.display_unit = "m"
+    }
+    )
+    assert_contains(display_error, "frozen")
+}
+
+fn test_dimension_annotations_reject_mismatched_quantities() {
+    let velocity_error = capture_error( |_| {
+        u.distance_as(u.mps(300), "m")
+    }
+    )
+    assert_contains(velocity_error, "Distance")
+    assert_contains(velocity_error, "Velocity")
+
+    let wind_error = capture_error( |_| {
+        u.wind_speed_as(u.mps(10), "m/s")
+    }
+    )
+    assert_contains(wind_error, "WindSpeed")
+    assert_contains(wind_error, "Velocity")
+}
+
+fn main() {
+    test_quantities_preserve_si_and_display_metadata()
+    test_known_distance_conversions()
+    test_known_velocity_and_mass_conversions()
+    test_known_angle_conversions_and_ballistic_mil()
+    test_known_temperature_and_pressure_conversions()
+    test_known_energy_and_wind_conversions()
+    test_distance_round_trip()
+    test_velocity_round_trip()
+    test_mass_round_trip()
+    test_angle_round_trip()
+    test_temperature_round_trip()
+    test_pressure_round_trip()
+    test_energy_round_trip()
+    test_wind_speed_round_trip()
+    test_constructors_reject_non_numeric_and_non_finite_values()
+    test_constructors_enforce_physical_ranges()
+    test_conversion_unit_identifiers_are_strict()
+    test_quantity_fields_are_immutable()
+    test_dimension_annotations_reject_mismatched_quantities()
+    print("units: 19 tests passed")
+}

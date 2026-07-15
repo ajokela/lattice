@@ -11,11 +11,14 @@
 
 /* ── Register VM structures ── */
 
-#define REGVM_REG_MAX     256
-#define REGVM_FRAMES_MAX  64
-#define REGVM_CONST_MAX   65536
-#define REGVM_HANDLER_MAX 64
-#define REGVM_DEFER_MAX   256
+#define REGVM_REG_MAX    256
+#define REGVM_FRAMES_MAX 64
+/* Keep the final physical frame available for running a pending defer while
+ * unwinding a user-frame overflow. */
+#define REGVM_USER_FRAMES_MAX (REGVM_FRAMES_MAX - 1)
+#define REGVM_CONST_MAX       65536
+#define REGVM_HANDLER_MAX     64
+#define REGVM_DEFER_MAX       256
 
 /* Forward declarations */
 struct ObjUpvalue;
@@ -111,9 +114,11 @@ typedef struct RegVM {
     /* Exception handlers */
     RegHandler handlers[REGVM_HANDLER_MAX];
     size_t handler_count;
+    size_t handler_floor; /* Handlers below this belong to an isolated caller. */
     /* Defer stack */
     RegDefer defers[REGVM_DEFER_MAX];
     size_t defer_count;
+    size_t defer_floor; /* Defers below this belong to an isolated caller. */
     bool unwinding_defers;
     /* Per-VM module cache (for OP_IMPORT in dispatch loop) */
     LatMap *module_cache;
@@ -126,6 +131,9 @@ typedef struct RegVM {
 void regvm_init(RegVM *vm, LatRuntime *rt);
 void regvm_free(RegVM *vm);
 RegVMResult regvm_run(RegVM *vm, RegChunk *chunk, LatValue *result);
+/* Re-entrant run boundary used by lat_eval(); outer handlers and defers are
+ * restored after the dynamically compiled chunk completes or fails. */
+RegVMResult regvm_run_isolated(RegVM *vm, RegChunk *chunk, LatValue *result);
 RegVMResult regvm_run_repl(RegVM *vm, RegChunk *chunk, LatValue *result);
 void regvm_track_chunk(RegVM *vm, RegChunk *ch);
 

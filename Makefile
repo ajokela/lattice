@@ -277,6 +277,11 @@ TEST_SRCS = $(TEST_DIR)/test_main.c \
 
 TEST_OBJS   = $(TEST_SRCS:$(TEST_DIR)/%.c=$(BUILD_DIR)/tests/%.o)
 TEST_TARGET = $(BUILD_DIR)/test_runner
+ifdef WINDOWS
+PROCESS_FIXTURE = $(BUILD_DIR)/process_fixture.exe
+else
+PROCESS_FIXTURE = $(BUILD_DIR)/process_fixture
+endif
 
 # WASM build — exclude tree-walk evaluator and CLI-only modules to reduce binary size
 WASM_EXCLUDE = $(SRC_DIR)/eval.c $(SRC_DIR)/phase_check.c $(SRC_DIR)/match_check.c \
@@ -359,7 +364,7 @@ FUZZ_PARSER_SRC    = $(FUZZ_DIR)/fuzz_parser.c
 FUZZ_PARSER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_parser.o
 FUZZ_PARSER_TARGET = $(BUILD_DIR)/fuzz_parser
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-ballistics-lab test-ballistics-lab-launcher test-ballistics-lab-engine test-repl test-process test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -390,18 +395,22 @@ $(BUILD_DIR)/tests/%.o: $(TEST_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
+$(PROCESS_FIXTURE): $(TEST_DIR)/process_fixture.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $<
+
 # Auto-generated header dependencies: without these, header edits (e.g. a
 # LATC_FORMAT bump) leave stale objects behind and incremental builds lie
 -include $(wildcard $(BUILD_DIR)/*.d $(BUILD_DIR)/ds/*.d $(BUILD_DIR)/vendor/*.d $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/fuzz/*.d)
 
-$(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS)
+$(TEST_TARGET): $(LIB_OBJS) $(LSP_LIB_OBJS) $(TEST_OBJS) | $(PROCESS_FIXTURE)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # LAT-520: require_ext() no longer searches the CWD-relative ./extensions/ by
 # default (library-planting hardening). The in-tree test extensions live in
 # ./extensions/<name>/; the test runner executes from the trusted repo root, so
 # it opts in explicitly via LATTICE_EXT_ALLOW_CWD=1.
-test: $(TEST_TARGET) $(LSP_TARGET)
+test: $(TEST_TARGET) $(LSP_TARGET) test-repl test-process
 	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner
 
 test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
@@ -410,7 +419,50 @@ test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
 test-regvm: $(TEST_TARGET) $(LSP_TARGET)
 	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
-test-all-backends: $(TEST_TARGET) $(LSP_TARGET)
+BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat test_analysis.lat test_analysis_export.lat test_session.lat test_persistence.lat test_resolved_request_v1.lat test_verified_artifacts.lat test_render.lat test_command_parser.lat test_commands.lat test_repl_support.lat reference_experiment.lat
+
+test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE) test-ballistics-lab-launcher
+	@for backend in "" "--regvm"; do \
+		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
+		echo "=== ballistics_lab backend $$label ==="; \
+		for test_file in $(BALLISTICS_LAB_TESTS); do \
+			./$(TARGET) $$backend examples/ballistics_lab/$$test_file || exit 1; \
+		done; \
+	done
+	@echo "=== ballistics_lab REPL transcripts ==="
+	./$(TARGET) examples/ballistics_lab/test_ballistics_repl.lat
+
+test-ballistics-lab-launcher:
+	sh tests/test_ballistics_lab_launcher.sh
+
+# Cross-repository smoke. The ordinary target remains hermetic through its
+# checked fake child; callers opt into a real engine with an explicit path.
+test-ballistics-lab-engine: $(TARGET)
+	@if [ -z "$${BALLISTICS_ENGINE:-}" ]; then \
+		echo "BALLISTICS_ENGINE=/absolute/path/to/ballistics is required" >&2; \
+		exit 2; \
+	fi
+	@for backend in "" "--regvm"; do \
+		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
+		echo "=== ballistics_lab real engine $$label ==="; \
+		./$(TARGET) $$backend examples/ballistics_lab/test_engine_backend.lat \
+			"$${BALLISTICS_ENGINE}" "$${BALLISTICS_ENGINE_VERSION:-}" || exit 1; \
+	done
+	@echo "=== ballistics_lab real-engine REPL transcripts ==="
+	./$(TARGET) examples/ballistics_lab/test_ballistics_repl_engine.lat \
+		"$${BALLISTICS_ENGINE}" "$${BALLISTICS_ENGINE_VERSION:-}"
+
+test-repl: $(TARGET)
+	./$(TARGET) tests/repl_integration.lat
+
+test-process: $(TARGET) $(PROCESS_FIXTURE)
+	@for backend in "" "--tree-walk" "--regvm"; do \
+		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
+		echo "=== process integration backend $$label ==="; \
+		./$(TARGET) $$backend tests/process_integration.lat || exit 1; \
+	done
+
+test-all-backends: $(TEST_TARGET) $(LSP_TARGET) test-ballistics-lab test-repl
 	@echo "=== stack-vm ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend stack-vm
 	@echo "=== tree-walk ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend tree-walk
 	@echo "=== regvm ===" && LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm

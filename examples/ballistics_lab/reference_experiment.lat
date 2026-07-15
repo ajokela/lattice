@@ -1,0 +1,79 @@
+// Executable reference experiment for the source-level laboratory.
+//
+// Run from the Lattice repository root:
+//   ./clat examples/ballistics_lab/reference_experiment.lat
+
+import {
+    gr, inches, m, celsius, hpa, deg, mph, fps, yd
+}
+from "examples/ballistics_lab/units"
+import {
+    projectile, rifle, atmosphere, wind, shot, solver_config, experiment
+}
+from "examples/ballistics_lab/domain"
+import {
+    v1_request_json, experiment_to_v1_request
+}
+from "examples/ballistics_lab/protocol_v1"
+
+export fn representative_experiment() -> any {
+    let projectile_value = projectile(
+    "175 gr match",
+    gr(175),
+    inches(0.308),
+    0.243,
+    "G7",
+    inches(1.24)
+    )
+    let rifle_value = rifle(
+    "24-inch match rifle",
+    inches(1.5),
+    m(0),
+    inches(8),
+    "right"
+    )
+    let atmosphere_value = atmosphere(
+    m(250),
+    celsius(15),
+    hpa(1013.25),
+    0.5,
+    deg(45)
+    )
+    let winds = [wind(mph(10), deg(90))]
+    let shot_value = shot(
+    fps(2700),
+    yd(1000),
+    yd(100)
+    )
+    let solver = solver_config(
+    "rk45",
+    nil,
+    yd(10),
+    nil,
+    true,
+    nil
+    )
+    return experiment(
+    "175 gr match at 1,000 yards",
+    projectile_value,
+    rifle_value,
+    atmosphere_value,
+    winds,
+    shot_value,
+    solver
+    )
+}
+
+fn main() {
+    let experiment = representative_experiment()
+    if args().contains("--json") {
+        print(v1_request_json(experiment))
+        return
+    }
+    let request = experiment_to_v1_request(experiment)
+    print("experiment=" + experiment.name)
+    print("schema_version=" + to_string(request.get("schema_version")))
+    print("mass_kg=" + to_string(request.get("projectile").get("mass_kg")))
+    print("muzzle_velocity_mps=" + to_string(request.get("rifle").get("muzzle_velocity_mps")))
+    print("max_range_m=" + to_string(request.get("shot").get("max_range_m")))
+}
