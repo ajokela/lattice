@@ -1,4 +1,6 @@
 #include "json.h"
+#include <errno.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -279,8 +281,15 @@ static LatValue jp_parse_number(JsonParser *p) {
         double d = strtod(numstr, NULL);
         result = value_float(d);
     } else {
-        int64_t i = strtoll(numstr, NULL, 10);
-        result = value_int(i);
+        char *end = NULL;
+        errno = 0;
+        intmax_t i = strtoimax(numstr, &end, 10);
+        if (errno == ERANGE || end == numstr || *end != '\0' || i < INT64_MIN || i > INT64_MAX) {
+            jp_error(p, "integer out of signed 64-bit range");
+            free(numstr);
+            return value_unit();
+        }
+        result = value_int((int64_t)i);
     }
     free(numstr);
     return result;
@@ -389,8 +398,32 @@ static LatValue jp_parse_object(JsonParser *p) {
             value_free(&map);
             return value_unit();
         }
+
+        /* LatMap keys are NUL-terminated C strings.  Reject an embedded NUL
+         * rather than silently truncating the decoded JSON member name. */
+        if (memchr(key_val.as.str_val, '\0', key_val.as.str_len) != NULL) {
+            jp_error(p, "object key contains an embedded NUL");
+            value_free(&key_val);
+            value_free(&map);
+            return value_unit();
+        }
         char *key = strdup(key_val.as.str_val);
         value_free(&key_val);
+        if (!key) {
+            jp_error(p, "out of memory");
+            value_free(&map);
+            return value_unit();
+        }
+
+        /* JSON member names are compared after escape decoding.  Accepting a
+         * duplicate and overwriting its earlier value makes signed or strict
+         * protocol documents ambiguous, so reject it at every nesting level. */
+        if (lat_map_get(map.as.map.map, key) != NULL) {
+            jp_error(p, "duplicate object key");
+            free(key);
+            value_free(&map);
+            return value_unit();
+        }
 
         jp_skip_ws(p);
         if (jp_peek(p) != ':') {
@@ -409,11 +442,6 @@ static LatValue jp_parse_object(JsonParser *p) {
             return value_unit();
         }
 
-        /* Duplicate keys: lat_map_set overwrites the inline LatValue in place
-         * without freeing the previous one, so free any existing value first to
-         * avoid leaking its heap data. */
-        LatValue *old = (LatValue *)lat_map_get(map.as.map.map, key);
-        if (old) value_free(old);
         lat_map_set(map.as.map.map, key, &val);
         free(key);
 

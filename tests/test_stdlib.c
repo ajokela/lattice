@@ -1797,6 +1797,62 @@ static void test_json_parse_error(void) {
                               "EVAL_ERROR:");
 }
 
+static bool json_parse_fails_with(const char *json, const char *message) {
+    char *err = NULL;
+    LatValue value = json_parse(json, &err);
+    bool matches = err != NULL && strstr(err, message) != NULL;
+    value_free(&value);
+    free(err);
+    return matches;
+}
+
+static void test_json_parse_rejects_duplicate_keys(void) {
+    ASSERT(json_parse_fails_with("{\"a\":1,\"a\":2}", "duplicate object key"));
+    ASSERT(json_parse_fails_with("{\"a\":1,\"\\u0061\":2}", "duplicate object key"));
+    ASSERT(json_parse_fails_with("{\"outer\":{\"x\":1,\"x\":2}}", "duplicate object key"));
+    ASSERT(json_parse_fails_with("{\"a\":{\"nested\":[\"heap\"]},\"a\":2}", "duplicate object key"));
+
+    /* Member names in separate objects are not duplicates. */
+    char *err = NULL;
+    LatValue value = json_parse("{\"a\":1,\"nested\":{\"a\":2}}", &err);
+    bool parsed = err == NULL && value.type == VAL_MAP;
+    value_free(&value);
+    free(err);
+    ASSERT(parsed);
+}
+
+static void test_json_parse_rejects_nul_object_keys(void) {
+    ASSERT(json_parse_fails_with("{\"a\\u0000b\":1}", "object key contains an embedded NUL"));
+}
+
+static void test_json_parse_checks_integer_range(void) {
+    char *err = NULL;
+    LatValue max = json_parse("9223372036854775807", &err);
+    bool max_ok = err == NULL && max.type == VAL_INT && max.as.int_val == INT64_MAX;
+    value_free(&max);
+    free(err);
+    ASSERT(max_ok);
+
+    err = NULL;
+    LatValue min = json_parse("-9223372036854775808", &err);
+    bool min_ok = err == NULL && min.type == VAL_INT && min.as.int_val == INT64_MIN;
+    value_free(&min);
+    free(err);
+    ASSERT(min_ok);
+
+    ASSERT(json_parse_fails_with("9223372036854775808", "integer out of signed 64-bit range"));
+    ASSERT(json_parse_fails_with("-9223372036854775809", "integer out of signed 64-bit range"));
+    ASSERT(json_parse_fails_with("999999999999999999999999999999999999999", "integer out of signed 64-bit range"));
+
+    /* Fractional and exponent forms continue through the floating-point path. */
+    err = NULL;
+    LatValue exponent = json_parse("1e2", &err);
+    bool exponent_ok = err == NULL && exponent.type == VAL_FLOAT && exponent.as.float_val == 100.0;
+    value_free(&exponent);
+    free(err);
+    ASSERT(exponent_ok);
+}
+
 static void test_json_stringify_error(void) {
     ASSERT_OUTPUT_STARTS_WITH("fn main() {\n"
                               "    json_stringify(123, 456)\n"
@@ -14104,6 +14160,9 @@ void register_stdlib_tests(void) {
     register_test("test_json_stringify_array", test_json_stringify_array);
     register_test("test_json_roundtrip", test_json_roundtrip);
     register_test("test_json_parse_error", test_json_parse_error);
+    register_test("test_json_parse_rejects_duplicate_keys", test_json_parse_rejects_duplicate_keys);
+    register_test("test_json_parse_rejects_nul_object_keys", test_json_parse_rejects_nul_object_keys);
+    register_test("test_json_parse_checks_integer_range", test_json_parse_checks_integer_range);
     register_test("test_json_stringify_error", test_json_stringify_error);
 
     /* Math */
