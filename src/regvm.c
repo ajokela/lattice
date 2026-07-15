@@ -749,6 +749,38 @@ static RegVMResult rvm_handle_error(RegVM *vm, RegCallFrame **frame_ptr, LatValu
     return REGVM_RUNTIME_ERROR;
 }
 
+/* Route an already-owned backend error through the caller's exception
+ * boundary.  Re-entrant builtin callbacks set vm->error before returning to
+ * the suspended dispatch loop; consuming a caller handler inside the nested
+ * dispatch would resume bytecode while the C builtin still owns partial
+ * results. */
+static RegVMResult rvm_handle_native_error(RegVM *vm, RegCallFrame **frame_ptr, LatValue **R_ptr) {
+    if (vm->handler_count > vm->handler_floor) {
+        char *original = vm->error;
+        LatValue err_map = regvm_build_error_map(vm, original);
+        vm->error = NULL;
+        RegHandler h = vm->handlers[--vm->handler_count];
+        RegVMResult result = rvm_transfer_to_handler(vm, frame_ptr, R_ptr, h, err_map, original);
+        free(original);
+        return result;
+    }
+
+    if (!vm->unwinding_defers && vm->defer_count > vm->defer_floor) {
+        char *original = vm->error;
+        vm->error = NULL;
+        char *cleanup_error = rvm_unwind_defers_to(vm, vm->defer_floor);
+        if (cleanup_error) {
+            lat_asprintf(&vm->error, "defer cleanup failed: %s (while handling: %s)", cleanup_error,
+                         original ? original : "runtime error");
+            free(cleanup_error);
+            free(original);
+        } else {
+            vm->error = original;
+        }
+    }
+    return REGVM_RUNTIME_ERROR;
+}
+
 /* ── Set a register (save old, assign new, free old) ──
  * This order prevents use-after-free when the new value aliases the old
  * register's memory (e.g., via shallow clone or shared struct fields). */
@@ -785,6 +817,7 @@ static bool rvm_global_set(RegVM *vm, const RegCallFrame *frame, const char *nam
 
 /* Forward declarations for recursive closure calls */
 static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result);
+static LatValue regvm_call_closure_impl(RegVM *vm, LatValue *closure, LatValue *args, int argc, bool isolate_caller);
 static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args, int argc);
 
 /* One arity contract for every compiled-closure entry point. `actual` includes
@@ -814,6 +847,15 @@ static const char *rvm_impl_receiver_type(const LatValue *receiver) {
 /* BuiltinCallback adapter for regvm: closure is a LatValue*, ctx is a RegVM* */
 static LatValue regvm_builtin_callback(void *closure, LatValue *args, int arg_count, void *ctx) {
     return regvm_call_closure((RegVM *)ctx, (LatValue *)closure, args, arg_count);
+}
+
+/* Preserve nil as a valid callback result while exposing nested VM failure to
+ * Array.map's shared eager loop.  The error remains owned by RegVM and is
+ * propagated by the surrounding invoke opcode. */
+static bool regvm_builtin_fallible_callback(void *closure, LatValue *args, int arg_count, void *ctx, LatValue *result) {
+    RegVM *vm = (RegVM *)ctx;
+    *result = regvm_call_closure_impl(vm, (LatValue *)closure, args, arg_count, true);
+    return vm->error == NULL;
 }
 
 /* Iterator callback adapter: ctx is RegVM*, closure is LatValue* */
@@ -1268,7 +1310,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         }
         if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
             char *err = NULL;
-            *result = builtin_array_map(obj, &args[0], regvm_builtin_callback, vm, &err);
+            *result = builtin_array_map(obj, &args[0], regvm_builtin_fallible_callback, vm, &err);
             return true;
         }
         if (mhash == MHASH_filter && strcmp(method, "filter") == 0 && arg_count == 1) {
@@ -2946,7 +2988,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
 typedef LatValue (*VMNativeFn)(LatValue *args, int arg_count);
 
 /* Call a closure from within a builtin handler (map, filter, etc.). */
-static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args, int argc) {
+static LatValue regvm_call_closure_impl(RegVM *vm, LatValue *closure, LatValue *args, int argc, bool isolate_caller) {
     if (vm->error) return value_nil();
     if (closure->type != VAL_CLOSURE) return value_nil();
 
@@ -3011,6 +3053,21 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
     ObjUpvalue **upvals = (ObjUpvalue **)closure->as.closure.captured_env;
     size_t uv_count = closure->as.closure.upvalue_count;
 
+    size_t entry_handler_count = vm->handler_count;
+    size_t entry_defer_count = vm->defer_count;
+    size_t saved_handler_floor = vm->handler_floor;
+    size_t saved_defer_floor = vm->defer_floor;
+    bool saved_unwinding_defers = vm->unwinding_defers;
+
+    /* A callback is a native dispatch boundary.  Its own try/defer entries
+     * remain active, but an escaping failure must return to the eager
+     * builtin before a handler in the suspended caller can run. */
+    if (isolate_caller) {
+        vm->handler_floor = entry_handler_count;
+        vm->defer_floor = entry_defer_count;
+        vm->unwinding_defers = false;
+    }
+
     int saved_base = vm->frame_count;
     RegCallFrame *new_frame = &vm->frames[vm->frame_count++];
     new_frame->chunk = fn_chunk;
@@ -3023,13 +3080,60 @@ static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args,
 
     LatValue ret;
     RegVMResult res = regvm_dispatch(vm, saved_base, &ret);
+
+    /* Direct error paths can bypass the callback's normal defer epilogue.
+     * Mirror regvm_run_isolated so only callback-owned defers run here. */
+    if (isolate_caller && vm->defer_count > entry_defer_count) {
+        char *original_error = vm->error;
+        vm->error = NULL;
+        if (vm->rt && vm->rt->error) {
+            char *runtime_error = vm->rt->error;
+            vm->rt->error = NULL;
+            if (!original_error) original_error = runtime_error;
+            else if (runtime_error != original_error) free(runtime_error);
+        }
+
+        char *cleanup_error = rvm_unwind_defers_to(vm, entry_defer_count);
+        if (cleanup_error) {
+            char *combined = NULL;
+            if (original_error) {
+                lat_asprintf(&combined, "defer cleanup failed: %s (while handling: %s)", cleanup_error, original_error);
+                free(cleanup_error);
+                free(original_error);
+            } else {
+                combined = cleanup_error;
+            }
+            vm->error = combined;
+            if (res == REGVM_OK) {
+                value_free(&ret);
+                ret = value_nil();
+                res = REGVM_RUNTIME_ERROR;
+            }
+        } else {
+            vm->error = original_error;
+        }
+    }
+
     if (res != REGVM_OK) {
         /* Unwind any frames left by the failed dispatch back to saved_base
          * (closes upvalues + releases abandoned registers, LAT-456) */
         rvm_unwind_frames(vm, saved_base);
-        return value_nil();
+        value_free(&ret);
+        ret = value_nil();
+    }
+
+    if (isolate_caller) {
+        vm->handler_count = entry_handler_count;
+        vm->defer_count = entry_defer_count;
+        vm->handler_floor = saved_handler_floor;
+        vm->defer_floor = saved_defer_floor;
+        vm->unwinding_defers = saved_unwinding_defers;
     }
     return ret;
+}
+
+static LatValue regvm_call_closure(RegVM *vm, LatValue *closure, LatValue *args, int argc) {
+    return regvm_call_closure_impl(vm, closure, args, argc, false);
 }
 
 /* Execute and remove defers above a saved handler/frame boundary. Outer
@@ -4841,11 +4945,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         const char *method_name = frame->chunk->constants[method_ki].as.str_val;
 
         /* Try builtin */
-        LatValue invoke_result;
+        LatValue invoke_result = value_nil();
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
         if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL,
                                /*cell_receiver=*/false)) {
-            if (vm->error) return REGVM_RUNTIME_ERROR;
+            if (vm->error) {
+                value_free(&invoke_result);
+                RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                if (handled != REGVM_OK) return handled;
+                DISPATCH();
+            }
             /* Object was mutated in-place at R[obj_reg]; result goes to R[dst] */
             reg_set(&R[dst], invoke_result);
             DISPATCH();
@@ -5070,11 +5179,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         bool want_wb = builtin_method_mutates(R[obj_reg].type, method_name);
 
         /* Try builtin */
-        LatValue invoke_result;
+        LatValue invoke_result = value_nil();
         LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
         if (rvm_invoke_builtin(vm, &R[obj_reg], method_name, invoke_args, argc, &invoke_result, NULL,
                                /*cell_receiver=*/true)) {
-            if (vm->error) return REGVM_RUNTIME_ERROR; /* frozen/sublimated/arity guard fired */
+            if (vm->error) {
+                value_free(&invoke_result);
+                RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                if (handled != REGVM_OK) return handled;
+                DISPATCH();
+            }
             reg_set(&R[dst], invoke_result);
             /* CHOKE POINT (a): a real in-place mutation falls through to run the
              * write-back chain; a non-mutating builtin (sort/reverse copies, a
@@ -7216,11 +7330,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Try builtin — mutates obj_ref in-place */
         {
-            LatValue invoke_result;
+            LatValue invoke_result = value_nil();
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, global_name,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&invoke_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Cache builtin hit */
                 if (!_rgpic) {
                     pic_table_ensure(&frame->chunk->pic);
@@ -7431,10 +7550,17 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Fallback: copy global into temp, do regular invoke */
         {
             LatValue obj_copy = rvm_clone(obj_ref);
-            LatValue fb_result;
+            LatValue fb_result = value_nil();
             LatValue *fb_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, &obj_copy, method_name, fb_args, argc, &fb_result, global_name,
                                    /*cell_receiver=*/true)) {
+                if (vm->error) {
+                    value_free(&fb_result);
+                    value_free(&obj_copy);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Write back the mutated copy to the global */
                 value_free(obj_ref);
                 *obj_ref = obj_copy;
@@ -7479,11 +7605,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             const char *local_var_name = (frame->chunk->local_names && loc_reg < frame->chunk->local_name_cap)
                                              ? frame->chunk->local_names[loc_reg]
                                              : NULL;
-            LatValue invoke_result;
+            LatValue invoke_result = value_nil();
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, &R[loc_reg], method_name, invoke_args, argc, &invoke_result, local_var_name,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&invoke_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Cache builtin hit */
                 if (!_rpic) {
                     pic_table_ensure(&frame->chunk->pic);
@@ -7725,11 +7856,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
 
         /* Try builtin — mutates the cell in-place */
         {
-            LatValue invoke_result;
+            LatValue invoke_result = value_nil();
             LatValue *invoke_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, obj_ref, method_name, invoke_args, argc, &invoke_result, NULL,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&invoke_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 /* Cache builtin hit */
                 if (!_rupic) {
                     pic_table_ensure(&frame->chunk->pic);
@@ -7942,11 +8078,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         /* Fallback: builtin probe directly on the cell (reached when the PIC
          * mispredicted NOT_BUILTIN for this receiver type), else no-method. */
         {
-            LatValue fb_result;
+            LatValue fb_result = value_nil();
             LatValue *fb_args = (argc > 0) ? &R[args_base] : NULL;
             if (rvm_invoke_builtin(vm, obj_ref, method_name, fb_args, argc, &fb_result, NULL,
                                    /*cell_receiver=*/true)) {
-                if (vm->error) return REGVM_RUNTIME_ERROR;
+                if (vm->error) {
+                    value_free(&fb_result);
+                    RegVMResult handled = rvm_handle_native_error(vm, &frame, &R);
+                    if (handled != REGVM_OK) return handled;
+                    DISPATCH();
+                }
                 reg_set(&R[dst], fb_result);
             } else {
                 const char *msug = builtin_find_similar_method(obj_ref->type, method_name);

@@ -676,10 +676,23 @@ static const char *phase_check_index_write(const LatValue *obj, const LatValue *
 /* ── Closure invocation helper for builtins ──
  * Calls a compiled closure from within the StackVM using a temporary wrapper chunk.
  * Returns the closure's return value. */
-static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *args, int arg_count) {
+static LatValue stackvm_call_closure_impl(StackVM *vm, LatValue *closure, LatValue *args, int arg_count,
+                                          bool isolate_caller) {
     if (closure->type != VAL_CLOSURE || closure->as.closure.native_fn == NULL ||
         closure->as.closure.default_values == VM_NATIVE_MARKER) {
         return value_nil();
+    }
+
+    /* The isolated map boundary is entered only after its wrapper operands
+     * are pushed. Preflight them so push() cannot longjmp to the suspended
+     * outer dispatch and bypass map's partial-result cleanup. */
+    if (isolate_caller) {
+        size_t used = (size_t)(vm->stack_top - vm->stack);
+        size_t needed = (size_t)arg_count + 1; /* closure + callback arguments */
+        if (needed > STACKVM_STACK_MAX - used) {
+            if (!vm->error) vm->error = strdup("stack overflow");
+            return value_nil();
+        }
     }
 
     /* Reuse the pre-built wrapper chunk, patching the arg count */
@@ -694,21 +707,20 @@ static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *a
      * OP_RETURN; on a runtime error (e.g. a panicking callback) the caller
      * still value_frees the returned value. */
     LatValue result = value_nil();
-    StackVMResult res = stackvm_run(vm, &vm->call_wrapper, &result);
+    StackVMResult res = isolate_caller ? stackvm_run_isolated(vm, &vm->call_wrapper, &result)
+                                       : stackvm_run(vm, &vm->call_wrapper, &result);
     if (res != STACKVM_OK) {
-        /* The nested run errored before the wrapper's OP_RETURN cleanup: the
-         * closure + arg clones we pushed (plus any callee temporaries) are
-         * still on the stack and would be abandoned when the error
-         * propagates — release them down to our entry point (LAT-452).
-         * Disjoint from the handler-unwind walks: a handler that catches
-         * this error sits at or below entry_top, so the ranges never
-         * overlap (exactly-once). On success OP_RETURN already restored
-         * vm->stack_top to entry_top and this is a no-op. The > guard keeps
-         * us from RAISING the pointer if a cross-run handler unwind already
-         * dropped the stack below our entry point. */
+        /* The isolated path releases its nested frame window but deliberately
+         * leaves the wrapper's closure + argument clones below that boundary;
+         * the ordinary path can leave the whole failed window. Release either
+         * shape down to our entry point exactly once. */
         if (vm->stack_top > entry_top) stackvm_unwind_release(vm, entry_top);
     }
     return result;
+}
+
+static LatValue stackvm_call_closure(StackVM *vm, LatValue *closure, LatValue *args, int arg_count) {
+    return stackvm_call_closure_impl(vm, closure, args, arg_count, false);
 }
 
 /* Execute and remove every defer registered after target_count. Handler state
@@ -796,6 +808,17 @@ static StackVMResult stackvm_transfer_to_handler(StackVM *vm, StackCallFrame **f
 /* BuiltinCallback adapter for stackvm: closure is a LatValue*, ctx is a StackVM* */
 static LatValue stackvm_builtin_callback(void *closure, LatValue *args, int arg_count, void *ctx) {
     return stackvm_call_closure((StackVM *)ctx, (LatValue *)closure, args, arg_count);
+}
+
+/* Array.map must distinguish a legitimate nil result from a failed nested
+ * run.  Keep the original error on the VM so the surrounding invoke path can
+ * route it through try/catch, while giving the shared eager loop an explicit
+ * stop signal. */
+static bool stackvm_builtin_fallible_callback(void *closure, LatValue *args, int arg_count, void *ctx,
+                                              LatValue *result) {
+    StackVM *vm = (StackVM *)ctx;
+    *result = stackvm_call_closure_impl(vm, (LatValue *)closure, args, arg_count, true);
+    return vm->error == NULL;
 }
 
 /* Iterator callback adapter: ctx is StackVM*, closure is LatValue*, args and argc */
@@ -1681,7 +1704,7 @@ freeze_except_exempt:
             if (mhash == MHASH_map && strcmp(method, "map") == 0 && arg_count == 1) {
                 LatValue closure = pop(vm);
                 char *err = NULL;
-                LatValue result = builtin_array_map(obj, &closure, stackvm_builtin_callback, vm, &err);
+                LatValue result = builtin_array_map(obj, &closure, stackvm_builtin_fallible_callback, vm, &err);
                 value_free(&closure);
                 push(vm, result);
                 return true;

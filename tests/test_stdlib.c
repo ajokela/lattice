@@ -28,6 +28,8 @@
 #include <arpa/inet.h>
 #endif
 #include "runtime.h"
+#include "builtin_methods.h"
+#include "memory.h"
 #include "test_backend.h"
 
 #ifdef _WIN32
@@ -10455,6 +10457,148 @@ static void test_parity_array_map_strings(void) {
                   "[HELLO, WORLD]");
 }
 
+typedef struct {
+    int calls;
+    int fail_at;
+} Mba1330MapCallbackState;
+
+static bool mba1330_fallible_map_callback(void *closure, LatValue *args, int arg_count, void *ctx, LatValue *result) {
+    (void)closure;
+    (void)args;
+    (void)arg_count;
+    Mba1330MapCallbackState *state = ctx;
+    state->calls++;
+    *result = value_string(state->calls == state->fail_at ? "failed result" : "partial result");
+    return state->calls != state->fail_at;
+}
+
+static void test_mba1330_array_map_callback_error(void) {
+    /* Exercise the shared eager loop directly: the failed return value and
+     * every preceding partial result are owned by map and must be released,
+     * and the fourth input must never reach the callback. */
+    LatValue input_elems[] = {value_int(2), value_int(1), value_int(0), value_int(4)};
+    LatValue input = value_array(input_elems, 4);
+    Mba1330MapCallbackState state = {.calls = 0, .fail_at = 3};
+    char *error = NULL;
+    LatValue result = builtin_array_map(&input, NULL, mba1330_fallible_map_callback, &state, &error);
+    ASSERT(state.calls == 3);
+    ASSERT(result.type == VAL_NIL);
+    ASSERT(error == NULL);
+    value_free(&result);
+    value_free(&input);
+
+    /* Backend parity: preserve the original callback error, stop before 4,
+     * clean shared partial results, and leave try/catch state usable for a
+     * subsequent map. */
+    size_t live_regions = crystal_region_live_count();
+    ASSERT_OUTPUT("flux visited = []\n"
+                  "flux aliases = []\n"
+                  "fn main() {\n"
+                  "    let source = [[2], [1], [0], [4]]\n"
+                  "    let message = try {\n"
+                  "        source.map(|item| {\n"
+                  "            let x = item[0]\n"
+                  "            visited.push(x)\n"
+                  "            let partial = freeze([x, x + 1])\n"
+                  "            aliases.push(partial)\n"
+                  "            12 / x\n"
+                  "            partial\n"
+                  "        })\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(message)\n"
+                  "    print(visited)\n"
+                  "    print(source)\n"
+                  "    print([1, 2].map(|x| x + 1))\n"
+                  "}\n",
+                  "division by zero\n[2, 1, 0]\n[[2], [1], [0], [4]]\n[2, 3]");
+    ASSERT_OUTPUT_STARTS_WITH("fn main() { [2, 1, 0, 4].map(|x| { 12 / x }) }\n", "EVAL_ERROR:division by zero");
+
+    /* RegVM has distinct invoke opcodes for global and captured receivers.
+     * Both must return to the suspended builtin before entering the caller's
+     * catch, just like the local/rvalue paths above. */
+    ASSERT_OUTPUT("flux global_source = [[2], [1], [0], [4]]\n"
+                  "flux receiver_visits = []\n"
+                  "fn main() {\n"
+                  "    let global_message = try {\n"
+                  "        global_source.map(|item| {\n"
+                  "            let x = item[0]\n"
+                  "            receiver_visits.push(x)\n"
+                  "            12 / x\n"
+                  "        })\n"
+                  "        \"not caught\"\n"
+                  "    } catch e { e.message }\n"
+                  "    print(global_message)\n"
+                  "    print(receiver_visits)\n"
+                  "    let captured = [[2], [1], [0], [4]]\n"
+                  "    receiver_visits = []\n"
+                  "    let run = | | {\n"
+                  "        try {\n"
+                  "            captured.map(|item| {\n"
+                  "                let x = item[0]\n"
+                  "                receiver_visits.push(x)\n"
+                  "                12 / x\n"
+                  "            })\n"
+                  "            \"not caught\"\n"
+                  "        } catch e { e.message }\n"
+                  "    }\n"
+                  "    print(run())\n"
+                  "    print(receiver_visits)\n"
+                  "    print(captured)\n"
+                  "}\n",
+                  "division by zero\n[2, 1, 0]\ndivision by zero\n[2, 1, 0]\n[[2], [1], [0], [4]]");
+
+    /* Fill the StackVM value stack to the exact point where Array.map has
+     * room for its result but not for the isolated wrapper's closure+argument
+     * operands. The capacity preflight must turn that into a catchable error
+     * before the callback runs, rather than longjmp past map's cleanup. */
+    if (test_backend == BACKEND_STACK_VM) {
+        const size_t source_cap = 32768;
+        char *source = malloc(source_cap);
+        ASSERT(source != NULL);
+        size_t source_len = 0;
+#define MBA1330_APPEND_SOURCE(...)                                             \
+    do {                                                                       \
+        size_t _remaining = source_cap - source_len;                           \
+        int _written = snprintf(source + source_len, _remaining, __VA_ARGS__); \
+        if (_written < 0 || (size_t)_written >= _remaining) {                  \
+            free(source);                                                      \
+            ASSERT(0 && "MBA-1330 generated source exceeded capacity");        \
+        }                                                                      \
+        source_len += (size_t)_written;                                        \
+    } while (0)
+
+        MBA1330_APPEND_SOURCE("flux events = []\nfn fill(n: Int) {\n");
+        for (int i = 0; i < 253; i++) MBA1330_APPEND_SOURCE("    let v%d = %d\n", i, i);
+        MBA1330_APPEND_SOURCE("    if n > 0 { return fill(n - 1) }\n    return [");
+        for (int i = 0; i < 13; i++) MBA1330_APPEND_SOURCE("0, ");
+        MBA1330_APPEND_SOURCE("[1].map(|x| { events.push(x); x })]\n}\n"
+                              "fn main() {\n"
+                              "    let message = try {\n"
+                              "        fill(15)\n"
+                              "        \"not caught\"\n"
+                              "    } catch e { e.message }\n"
+                              "    print(message)\n"
+                              "    print(events)\n"
+                              "}\n");
+#undef MBA1330_APPEND_SOURCE
+
+        char *overflow_output = run_capture(source);
+        if (strcmp(overflow_output, "stack overflow\n[]") != 0) {
+            fprintf(stderr,
+                    "  MBA-1330 STACK PREFLIGHT FAILED:\n    expected: stack overflow\\n[]\n    actual:   %s\n    at "
+                    "%s:%d\n",
+                    overflow_output, __FILE__, __LINE__);
+            test_current_failed = 1;
+        }
+        free(overflow_output);
+        free(source);
+        if (test_current_failed) return;
+    }
+
+    ASSERT(crystal_region_live_count() == live_regions);
+}
+
 static void test_parity_array_filter_basic(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    let a = [1, 2, 3, 4, 5, 6]\n"
@@ -15203,6 +15347,7 @@ void register_stdlib_tests(void) {
     register_test("test_parity_array_map_basic", test_parity_array_map_basic);
     register_test("test_parity_array_map_empty", test_parity_array_map_empty);
     register_test("test_parity_array_map_strings", test_parity_array_map_strings);
+    register_test("test_mba1330_array_map_callback_error", test_mba1330_array_map_callback_error);
     register_test("test_parity_array_filter_basic", test_parity_array_filter_basic);
     register_test("test_parity_array_filter_none", test_parity_array_filter_none);
     register_test("test_parity_array_filter_all", test_parity_array_filter_all);

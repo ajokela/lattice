@@ -34,6 +34,13 @@
  */
 typedef LatValue (*BuiltinCallback)(void *closure, LatValue *args, int arg_count, void *ctx);
 
+/* Fallible callback used by eager transforms that must stop at the exact
+ * failing element.  On success, writes an owned return value to `result` and
+ * returns true.  On failure, still initializes `result`, returns false, and
+ * leaves the backend's original error in its VM context for normal
+ * propagation. */
+typedef bool (*BuiltinFallibleCallback)(void *closure, LatValue *args, int arg_count, void *ctx, LatValue *result);
+
 /* ── Array methods (no closures) ── */
 
 LatValue builtin_array_contains(LatValue *obj, LatValue *args, int arg_count, char **error);
@@ -55,7 +62,7 @@ LatValue builtin_array_flatten(LatValue *obj, LatValue *args, int arg_count, cha
 
 /* ── Array methods (with closures) ── */
 
-LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
+LatValue builtin_array_map(LatValue *obj, void *closure, BuiltinFallibleCallback cb, void *ctx, char **error);
 LatValue builtin_array_filter(LatValue *obj, void *closure, BuiltinCallback cb, void *ctx, char **error);
 LatValue builtin_array_reduce(LatValue *obj, LatValue *init, bool has_init, void *closure, BuiltinCallback cb,
                               void *ctx, char **error);
