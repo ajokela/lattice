@@ -419,7 +419,7 @@ test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
 test-regvm: $(TEST_TARGET) $(LSP_TARGET)
 	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
-BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat test_analysis.lat test_analysis_export.lat reference_experiment.lat
+BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat test_analysis.lat test_analysis_export.lat test_session.lat reference_experiment.lat
 
 test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE)
 	@for backend in "" "--tree-walk" "--regvm"; do \

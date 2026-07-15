@@ -19,6 +19,8 @@ The modules are deliberately split at stable boundaries:
   programmable DOPE, wind-card, and multi-trajectory comparison tables.
 - analysis_export.lat converts those tables to explicit Maps, canonical JSON,
   rectangular CSV, or deterministic plain text without performing I/O.
+- session.lat owns mutable experiment state, display preferences, transactional
+  solving, and bounded immutable run history independently of terminal input.
 - reference_experiment.lat is an executable construction example.
 
 The process backend is process-per-solve. It retains no engine handle, performs
@@ -151,6 +153,43 @@ Maps, and per-trajectory provenance: solve schema and engine version, resolved
 solver method, assumptions, warnings, verification state, termination reason,
 and actual computed range. Calculation does not print or write. Export and
 render functions return values or strings so callers retain control of I/O.
+
+## Stateful laboratory sessions
+
+`LabSession` keeps the current immutable experiment, backend configuration,
+display preferences, history limit, and successful run records behind one
+Lattice `Ref`. Session operations validate and construct a complete next state
+before publishing it with one `Ref.set`, so a failed mutation or solve leaves
+the prior state unchanged:
+
+    import "examples/ballistics_lab/session" as session
+
+    let lab = session.new_session(experiment, engine)
+    let run = session.solve_session(lab)
+
+    if struct_name(run) == "RunRecord" {
+        print(run.engine_version)
+        print(session.current_run(lab).termination)
+    } else {
+        print(run.code + ": " + run.message)
+    }
+
+Use `replace_projectile`, `replace_rifle`, `replace_atmosphere`,
+`replace_winds`, `replace_shot`, `replace_solver`, or `replace_experiment` for
+validated experiment changes. Each operation reconstructs the whole immutable
+`Experiment`, preserving relational checks. `set_backend`,
+`set_display_preferences`, and `set_history_limit` update other session state;
+shrinking a history limit retains the newest records, and a limit of zero
+disables history without disabling current/previous run tracking.
+
+`solve_session` snapshots the submitted experiment and invokes the backend
+exactly once. Success returns an immutable `RunRecord` and atomically advances
+`previous_run`, `current_run`, and bounded history. A declared, thrown, or
+contract-invalid backend failure returns `LaboratoryError` without changing
+experiment or run state. `reset_session` clears current, previous, and history
+while retaining experiment, backend, display preferences, and history limit.
+The session stores backend configuration but no child-process handle; the
+process backend remains process-per-solve and stateless between calls.
 
 ### Resource bounds
 
