@@ -1,0 +1,455 @@
+// Typed quantities for the source-level ballistics laboratory.
+//
+// Each value stores a canonical SI value and the exact value/unit requested
+// for display.  Every struct field is an alloy `fix` field, so callers can
+// inspect quantities but cannot silently change either their dimension or
+// their display metadata.
+
+export struct Distance {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+export struct Velocity {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+export struct Mass {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+export struct Angle {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+export struct Temperature {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+export struct Pressure {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+export struct Energy {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+export struct WindSpeed {
+    si_value: fix Number,
+    display_value: fix Number,
+    display_unit: fix String
+}
+
+let PI = 3.141592653589793
+let METERS_PER_KILOMETER = 1000.0
+let METERS_PER_YARD = 0.9144
+let METERS_PER_FOOT = 0.3048
+let METERS_PER_INCH = 0.0254
+let KILOGRAMS_PER_GRAM = 0.001
+let KILOGRAMS_PER_GRAIN = 0.00006479891
+let RADIANS_PER_DEGREE = PI / 180.0
+let RADIANS_PER_MIL = 0.001
+let RADIANS_PER_MOA = PI / 10800.0
+let PASCALS_PER_HECTOPASCAL = 100.0
+let PASCALS_PER_INHG = 3386.389
+let JOULES_PER_FOOT_POUND = 1.3558179483314004
+let METERS_PER_SECOND_PER_MPH = 0.44704
+let METERS_PER_SECOND_PER_KPH = 1.0 / 3.6
+
+fn _finite_number(value: any, context: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        assert(false, context + ": value must be a Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        assert(false, context + ": value must be finite")
+    }
+    return value
+}
+
+fn _nonnegative(value: any, context: String) -> Number {
+    let checked = _finite_number(value, context)
+    if checked < 0 {
+        assert(false, context + ": value must be non-negative")
+    }
+    return checked
+}
+
+fn _scaled_nonnegative(value: any, scale: Number, context: String) -> Number {
+    let checked = _nonnegative(value, context)
+    return _finite_number(checked * scale, context + " canonical SI value")
+}
+
+fn _scaled_finite(value: any, scale: Number, context: String) -> Number {
+    let checked = _finite_number(value, context)
+    return _finite_number(checked * scale, context + " canonical SI value")
+}
+
+fn _unsupported(context: String, unit: String, supported: String) {
+    assert(false, context + ": unsupported unit '" + unit + "'; supported: " + supported)
+}
+
+// Distance: canonical meters. Generic distances may be signed so the same
+// quantity can represent left/right windage and above/below trajectory offsets.
+// Domain constructors enforce positivity for ranges and physical dimensions.
+fn _distance(value: any, scale: Number, unit: String, context: String) -> Distance {
+    let canonical = _scaled_finite(value, scale, context)
+    let display = _finite_number(value, context)
+    return Distance {
+        si_value: canonical,
+        display_value: display,
+        display_unit: unit
+    }
+}
+
+export fn m(value: any) -> Distance {
+    return _distance(value, 1.0, "m", "m")
+}
+
+export fn km(value: any) -> Distance {
+    return _distance(value, METERS_PER_KILOMETER, "km", "km")
+}
+
+export fn yd(value: any) -> Distance {
+    return _distance(value, METERS_PER_YARD, "yd", "yd")
+}
+
+export fn ft(value: any) -> Distance {
+    return _distance(value, METERS_PER_FOOT, "ft", "ft")
+}
+
+export fn inches(value: any) -> Distance {
+    return _distance(value, METERS_PER_INCH, "in", "inches")
+}
+
+fn _distance_si(value: Distance) -> Number {
+    return value.si_value
+}
+
+export fn distance_as(value: Distance, unit: String) -> Number {
+    let si_value = _distance_si(value)
+    if unit == "m" {
+        return si_value
+    }
+    if unit == "km" {
+        return si_value / METERS_PER_KILOMETER
+    }
+    if unit == "yd" {
+        return si_value / METERS_PER_YARD
+    }
+    if unit == "ft" {
+        return si_value / METERS_PER_FOOT
+    }
+    if unit == "in" {
+        return si_value / METERS_PER_INCH
+    }
+    _unsupported("distance_as", unit, "m, km, yd, ft, in")
+}
+
+// Velocity: canonical meters per second. Generic velocity components may be
+// signed; domain constructors enforce positive muzzle speed where required.
+fn _velocity(value: any, scale: Number, unit: String, context: String) -> Velocity {
+    let canonical = _scaled_finite(value, scale, context)
+    let display = _finite_number(value, context)
+    return Velocity {
+        si_value: canonical,
+        display_value: display,
+        display_unit: unit
+    }
+}
+
+export fn mps(value: any) -> Velocity {
+    return _velocity(value, 1.0, "m/s", "mps")
+}
+
+export fn fps(value: any) -> Velocity {
+    return _velocity(value, METERS_PER_FOOT, "ft/s", "fps")
+}
+
+fn _velocity_si(value: Velocity) -> Number {
+    return value.si_value
+}
+
+export fn velocity_as(value: Velocity, unit: String) -> Number {
+    let si_value = _velocity_si(value)
+    if unit == "m/s" {
+        return si_value
+    }
+    if unit == "ft/s" {
+        return si_value / METERS_PER_FOOT
+    }
+    _unsupported("velocity_as", unit, "m/s, ft/s")
+}
+
+// Mass: canonical kilograms.
+fn _mass(value: any, scale: Number, unit: String, context: String) -> Mass {
+    let canonical = _scaled_nonnegative(value, scale, context)
+    let display = _finite_number(value, context)
+    return Mass {
+        si_value: canonical,
+        display_value: display,
+        display_unit: unit
+    }
+}
+
+export fn kg(value: any) -> Mass {
+    return _mass(value, 1.0, "kg", "kg")
+}
+
+export fn grams(value: any) -> Mass {
+    return _mass(value, KILOGRAMS_PER_GRAM, "g", "grams")
+}
+
+export fn gr(value: any) -> Mass {
+    return _mass(value, KILOGRAMS_PER_GRAIN, "gr", "gr")
+}
+
+fn _mass_si(value: Mass) -> Number {
+    return value.si_value
+}
+
+export fn mass_as(value: Mass, unit: String) -> Number {
+    let si_value = _mass_si(value)
+    if unit == "kg" {
+        return si_value
+    }
+    if unit == "g" {
+        return si_value / KILOGRAMS_PER_GRAM
+    }
+    if unit == "gr" {
+        return si_value / KILOGRAMS_PER_GRAIN
+    }
+    _unsupported("mass_as", unit, "kg, g, gr")
+}
+
+// Angle: canonical radians. Signed angles are valid. Ballistic mil is exactly
+// one milliradian, not an artillery mil or an angular approximation.
+fn _angle(value: any, scale: Number, unit: String, context: String) -> Angle {
+    let canonical = _scaled_finite(value, scale, context)
+    let display = _finite_number(value, context)
+    return Angle {
+        si_value: canonical,
+        display_value: display,
+        display_unit: unit
+    }
+}
+
+export fn rad(value: any) -> Angle {
+    return _angle(value, 1.0, "rad", "rad")
+}
+
+export fn deg(value: any) -> Angle {
+    return _angle(value, RADIANS_PER_DEGREE, "deg", "deg")
+}
+
+export fn mil(value: any) -> Angle {
+    return _angle(value, RADIANS_PER_MIL, "mil", "mil")
+}
+
+export fn moa(value: any) -> Angle {
+    return _angle(value, RADIANS_PER_MOA, "moa", "moa")
+}
+
+fn _angle_si(value: Angle) -> Number {
+    return value.si_value
+}
+
+export fn angle_as(value: Angle, unit: String) -> Number {
+    let si_value = _angle_si(value)
+    if unit == "rad" {
+        return si_value
+    }
+    if unit == "deg" {
+        return si_value / RADIANS_PER_DEGREE
+    }
+    if unit == "mil" {
+        return si_value / RADIANS_PER_MIL
+    }
+    if unit == "moa" {
+        return si_value / RADIANS_PER_MOA
+    }
+    _unsupported("angle_as", unit, "rad, deg, mil, moa")
+}
+
+// Temperature: canonical kelvin. Absolute zero is accepted; lower values are
+// rejected after conversion from the requested display scale.
+fn _temperature(
+kelvin_value: Number,
+display_value: Number,
+unit: String,
+context: String
+) -> Temperature {
+    let canonical = _finite_number(kelvin_value, context + " canonical SI value")
+    if canonical < 0 {
+        assert(false, context + ": temperature must not be below absolute zero")
+    }
+    return Temperature {
+        si_value: canonical,
+        display_value: display_value,
+        display_unit: unit
+    }
+}
+
+export fn kelvin(value: any) -> Temperature {
+    let display = _finite_number(value, "kelvin")
+    return _temperature(display, display, "K", "kelvin")
+}
+
+export fn celsius(value: any) -> Temperature {
+    let display = _finite_number(value, "celsius")
+    return _temperature(display + 273.15, display, "C", "celsius")
+}
+
+export fn fahrenheit(value: any) -> Temperature {
+    let display = _finite_number(value, "fahrenheit")
+    let canonical =(display - 32.0) *(5.0 / 9.0) + 273.15
+    return _temperature(canonical, display, "F", "fahrenheit")
+}
+
+fn _temperature_si(value: Temperature) -> Number {
+    return value.si_value
+}
+
+export fn temperature_as(value: Temperature, unit: String) -> Number {
+    let si_value = _temperature_si(value)
+    if unit == "K" {
+        return si_value
+    }
+    if unit == "C" {
+        return si_value - 273.15
+    }
+    if unit == "F" {
+        return(si_value - 273.15) *(9.0 / 5.0) + 32.0
+    }
+    _unsupported("temperature_as", unit, "K, C, F")
+}
+
+// Pressure: canonical pascals, represented as an absolute magnitude.
+fn _pressure(value: any, scale: Number, unit: String, context: String) -> Pressure {
+    let canonical = _scaled_nonnegative(value, scale, context)
+    let display = _finite_number(value, context)
+    return Pressure {
+        si_value: canonical,
+        display_value: display,
+        display_unit: unit
+    }
+}
+
+export fn pa(value: any) -> Pressure {
+    return _pressure(value, 1.0, "Pa", "pa")
+}
+
+export fn hpa(value: any) -> Pressure {
+    return _pressure(value, PASCALS_PER_HECTOPASCAL, "hPa", "hpa")
+}
+
+export fn inhg(value: any) -> Pressure {
+    return _pressure(value, PASCALS_PER_INHG, "inHg", "inhg")
+}
+
+fn _pressure_si(value: Pressure) -> Number {
+    return value.si_value
+}
+
+export fn pressure_as(value: Pressure, unit: String) -> Number {
+    let si_value = _pressure_si(value)
+    if unit == "Pa" {
+        return si_value
+    }
+    if unit == "hPa" {
+        return si_value / PASCALS_PER_HECTOPASCAL
+    }
+    if unit == "inHg" {
+        return si_value / PASCALS_PER_INHG
+    }
+    _unsupported("pressure_as", unit, "Pa, hPa, inHg")
+}
+
+// Energy: canonical joules.
+fn _energy(value: any, scale: Number, unit: String, context: String) -> Energy {
+    let canonical = _scaled_nonnegative(value, scale, context)
+    let display = _finite_number(value, context)
+    return Energy {
+        si_value: canonical,
+        display_value: display,
+        display_unit: unit
+    }
+}
+
+export fn joules(value: any) -> Energy {
+    return _energy(value, 1.0, "J", "joules")
+}
+
+export fn foot_pounds(value: any) -> Energy {
+    return _energy(value, JOULES_PER_FOOT_POUND, "ft-lb", "foot_pounds")
+}
+
+fn _energy_si(value: Energy) -> Number {
+    return value.si_value
+}
+
+export fn energy_as(value: Energy, unit: String) -> Number {
+    let si_value = _energy_si(value)
+    if unit == "J" {
+        return si_value
+    }
+    if unit == "ft-lb" {
+        return si_value / JOULES_PER_FOOT_POUND
+    }
+    _unsupported("energy_as", unit, "J, ft-lb")
+}
+
+// Wind speed remains a distinct type even though it has the same dimension as
+// Velocity. This prevents a muzzle velocity from being accepted as wind.
+fn _wind_speed(value: any, scale: Number, unit: String, context: String) -> WindSpeed {
+    let canonical = _scaled_nonnegative(value, scale, context)
+    let display = _finite_number(value, context)
+    return WindSpeed {
+        si_value: canonical,
+        display_value: display,
+        display_unit: unit
+    }
+}
+
+export fn wind_mps(value: any) -> WindSpeed {
+    return _wind_speed(value, 1.0, "m/s", "wind_mps")
+}
+
+export fn mph(value: any) -> WindSpeed {
+    return _wind_speed(value, METERS_PER_SECOND_PER_MPH, "mph", "mph")
+}
+
+export fn kph(value: any) -> WindSpeed {
+    return _wind_speed(value, METERS_PER_SECOND_PER_KPH, "km/h", "kph")
+}
+
+fn _wind_speed_si(value: WindSpeed) -> Number {
+    return value.si_value
+}
+
+export fn wind_speed_as(value: WindSpeed, unit: String) -> Number {
+    let si_value = _wind_speed_si(value)
+    if unit == "m/s" {
+        return si_value
+    }
+    if unit == "mph" {
+        return si_value / METERS_PER_SECOND_PER_MPH
+    }
+    if unit == "km/h" {
+        return si_value / METERS_PER_SECOND_PER_KPH
+    }
+    _unsupported("wind_speed_as", unit, "m/s, mph, km/h")
+}

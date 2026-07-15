@@ -1,0 +1,213 @@
+// Explicit adapters from the laboratory domain to solve-json schema v1.
+//
+// Every dimensional value is read from a quantity's canonical SI field.
+// Display values and units never enter the wire request. JSON serialization
+// is performed only after the complete domain graph has become plain Maps and
+// Arrays.
+
+fn _require_struct(value: any, expected: String, field: String) {
+    if typeof(value) != "Struct" {
+        assert(false, field + ": expected " + expected + ", got " + typeof(value))
+    }
+    let actual = struct_name(value)
+    if actual != expected {
+        assert(false, field + ": expected " + expected + ", got " + actual)
+    }
+}
+
+export fn projectile_to_v1_map(projectile: any) -> Map {
+    _require_struct(projectile, "Projectile", "experiment.projectile")
+    flux out = Map::new()
+    out.set("mass_kg", projectile.mass.si_value)
+    out.set("diameter_m", projectile.diameter.si_value)
+    if projectile.length != nil {
+        out.set("length_m", projectile.length.si_value)
+    }
+    out.set("drag_model", projectile.drag_model)
+    out.set("ballistic_coefficient", projectile.ballistic_coefficient)
+    return freeze(out)
+}
+
+export fn rifle_to_v1_map(rifle: any, shot: any) -> Map {
+    _require_struct(rifle, "Rifle", "experiment.rifle")
+    _require_struct(shot, "Shot", "experiment.shot")
+    flux out = Map::new()
+    out.set("muzzle_velocity_mps", shot.muzzle_velocity.si_value)
+    if rifle.sight_height != nil {
+        out.set("sight_height_m", rifle.sight_height.si_value)
+    }
+    if rifle.muzzle_height != nil {
+        out.set("muzzle_height_m", rifle.muzzle_height.si_value)
+    }
+    if rifle.twist_rate != nil {
+        out.set("twist_rate_m_per_turn", rifle.twist_rate.si_value)
+    }
+    if rifle.twist_direction != nil {
+        out.set("twist_direction", rifle.twist_direction)
+    }
+    return freeze(out)
+}
+
+export fn shot_to_v1_map(shot: any) -> Map {
+    _require_struct(shot, "Shot", "experiment.shot")
+    flux out = Map::new()
+    out.set("max_range_m", shot.max_range.si_value)
+    if shot.zero_distance != nil {
+        out.set("zero_distance_m", shot.zero_distance.si_value)
+    }
+    if shot.muzzle_angle != nil {
+        out.set("muzzle_angle_rad", shot.muzzle_angle.si_value)
+    }
+    if shot.aim_azimuth != nil {
+        out.set("aim_azimuth_rad", shot.aim_azimuth.si_value)
+    }
+    if shot.shot_azimuth != nil {
+        out.set("shot_azimuth_rad", shot.shot_azimuth.si_value)
+    }
+    if shot.shooting_angle != nil {
+        out.set("shooting_angle_rad", shot.shooting_angle.si_value)
+    }
+    if shot.cant_angle != nil {
+        out.set("cant_angle_rad", shot.cant_angle.si_value)
+    }
+    if shot.target_height != nil {
+        out.set("target_height_m", shot.target_height.si_value)
+    }
+    if shot.ground_threshold != nil {
+        out.set("ground_threshold_m", shot.ground_threshold.si_value)
+    }
+    return freeze(out)
+}
+
+export fn atmosphere_to_v1_map(atmosphere: any) -> Map {
+    _require_struct(atmosphere, "Atmosphere", "experiment.atmosphere")
+    flux out = Map::new()
+    if atmosphere.altitude != nil {
+        out.set("altitude_m", atmosphere.altitude.si_value)
+    }
+    if atmosphere.temperature != nil {
+        out.set("temperature_k", atmosphere.temperature.si_value)
+    }
+    if atmosphere.pressure != nil {
+        out.set("pressure_pa", atmosphere.pressure.si_value)
+    }
+    if atmosphere.relative_humidity != nil {
+        out.set("relative_humidity", atmosphere.relative_humidity)
+    }
+    if atmosphere.latitude != nil {
+        out.set("latitude_rad", atmosphere.latitude.si_value)
+    }
+    return freeze(out)
+}
+
+fn _wind_segment_to_v1_map(wind: any) -> Map {
+    _require_struct(wind, "Wind", "experiment.winds[]")
+    if wind.until_distance == nil {
+        assert(false, "experiment.winds: cannot mix constant and segmented wind")
+    }
+    flux out = Map::new()
+    out.set("until_distance_m", wind.until_distance.si_value)
+    out.set("speed_mps", wind.speed.si_value)
+    out.set("direction_from_rad", wind.direction_from.si_value)
+    if wind.vertical_velocity != nil {
+        out.set("vertical_speed_mps", wind.vertical_velocity.si_value)
+    }
+    return freeze(out)
+}
+
+export fn winds_to_v1_map(winds: any) -> Map {
+    if typeof(winds) != "Array" {
+        assert(false, "experiment.winds: expected Array, got " + typeof(winds))
+    }
+    flux out = Map::new()
+    if len(winds) == 0 {
+        return freeze(out)
+    }
+    let first = winds[0]
+    _require_struct(first, "Wind", "experiment.winds[0]")
+    if first.until_distance == nil {
+        if len(winds) != 1 {
+            assert(false, "experiment.winds: constant wind must contain exactly one Wind")
+        }
+        out.set("speed_mps", first.speed.si_value)
+        out.set("direction_from_rad", first.direction_from.si_value)
+        if first.vertical_velocity != nil {
+            out.set("vertical_speed_mps", first.vertical_velocity.si_value)
+        }
+        return freeze(out)
+    }
+    flux segments = []
+    flux last_boundary = 0.0
+    for wind in winds {
+        _require_struct(wind, "Wind", "experiment.winds[]")
+        if wind.until_distance == nil {
+            assert(false, "experiment.winds: cannot mix constant and segmented wind")
+        }
+        if wind.until_distance.si_value <= last_boundary {
+            assert(false, "experiment.winds: segment boundaries must increase strictly")
+        }
+        last_boundary = wind.until_distance.si_value
+        segments.push(_wind_segment_to_v1_map(wind))
+    }
+    out.set("segments", freeze(segments))
+    return freeze(out)
+}
+
+export fn solver_to_v1_map(solver: any) -> Map {
+    _require_struct(solver, "SolverConfig", "experiment.solver")
+    flux out = Map::new()
+    if solver.method != nil {
+        out.set("method", solver.method)
+    }
+    if solver.time_step_s != nil {
+        out.set("time_step_s", solver.time_step_s)
+    }
+    return freeze(out)
+}
+
+export fn effects_to_v1_map(solver: any) -> Map {
+    _require_struct(solver, "SolverConfig", "experiment.solver")
+    flux out = Map::new()
+    if solver.magnus != nil {
+        out.set("magnus", solver.magnus)
+    }
+    if solver.coriolis != nil {
+        out.set("coriolis", solver.coriolis)
+    }
+    if solver.enhanced_spin_drift != nil {
+        out.set("enhanced_spin_drift", solver.enhanced_spin_drift)
+    }
+    return freeze(out)
+}
+
+export fn sampling_to_v1_map(solver: any) -> Map {
+    _require_struct(solver, "SolverConfig", "experiment.solver")
+    flux out = Map::new()
+    if solver.sampling_interval != nil {
+        out.set("interval_m", solver.sampling_interval.si_value)
+    }
+    return freeze(out)
+}
+
+export fn experiment_to_v1_request(experiment: any) -> Map {
+    _require_struct(experiment, "Experiment", "experiment")
+    flux out = Map::new()
+    out.set("schema_version", 1)
+    out.set("projectile", projectile_to_v1_map(experiment.projectile))
+    out.set("rifle", rifle_to_v1_map(experiment.rifle, experiment.shot))
+    out.set("shot", shot_to_v1_map(experiment.shot))
+    out.set("atmosphere", atmosphere_to_v1_map(experiment.atmosphere))
+    out.set("wind", winds_to_v1_map(experiment.winds))
+    out.set("solver", solver_to_v1_map(experiment.solver))
+    out.set("effects", effects_to_v1_map(experiment.solver))
+    out.set("sampling", sampling_to_v1_map(experiment.solver))
+    return freeze(out)
+}
+
+export fn v1_request_json(experiment: any) -> String {
+    let request = experiment_to_v1_request(experiment)
+    if typeof(request) != "Map" {
+        assert(false, "protocol_v1: internal adapter did not return a Map")
+    }
+    return json_stringify(request)
+}

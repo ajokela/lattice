@@ -1,0 +1,13 @@
+// Import the reference module in isolation. This catches module-environment
+// leaks that a consumer importing the same helper aliases could accidentally
+// mask.
+
+import "examples/ballistics_lab/reference_experiment" as reference
+
+fn main() {
+    let experiment = reference.representative_experiment()
+    assert(experiment.name == "175 gr match at 1,000 yards")
+    assert(experiment.projectile.mass.si_value > 0)
+    assert(experiment.solver.coriolis == true)
+    print("ballistics_lab isolated reference import: passed")
+}

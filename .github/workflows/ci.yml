@@ -55,6 +55,9 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Test source-level ballistics laboratory (all backends)
+        run: make test-ballistics-lab
+
       - name: Test (LATTICE_FORCE_COPY differential oracle, all backends)
         run: make test-force-copy
 

@@ -1,0 +1,677 @@
+// Typed domain values for the source-level ballistics laboratory.
+//
+// Constructors validate relationships at the domain boundary and return
+// immutable values. Quantity values come from units.lat; no native
+// ballistics extension is required.
+
+export struct Projectile {
+    name: fix String,
+    mass: fix any,
+    diameter: fix any,
+    length: fix any,
+    drag_model: fix String,
+    ballistic_coefficient: fix Number
+}
+
+export struct Rifle {
+    name: fix String,
+    sight_height: fix any,
+    muzzle_height: fix any,
+    twist_rate: fix any,
+    twist_direction: fix any
+}
+
+export struct Atmosphere {
+    altitude: fix any,
+    temperature: fix any,
+    pressure: fix any,
+    relative_humidity: fix any,
+    latitude: fix any
+}
+
+export struct Wind {
+    speed: fix any,
+    direction_from: fix any,
+    vertical_velocity: fix any,
+    until_distance: fix any
+}
+
+export struct Shot {
+    muzzle_velocity: fix any,
+    max_range: fix any,
+    zero_distance: fix any,
+    muzzle_angle: fix any,
+    aim_azimuth: fix any,
+    shot_azimuth: fix any,
+    shooting_angle: fix any,
+    cant_angle: fix any,
+    target_height: fix any,
+    ground_threshold: fix any
+}
+
+export struct SolverConfig {
+    method: fix any,
+    time_step_s: fix any,
+    sampling_interval: fix any,
+    magnus: fix any,
+    coriolis: fix any,
+    enhanced_spin_drift: fix any
+}
+
+export struct Experiment {
+    name: fix String,
+    projectile: fix any,
+    rifle: fix any,
+    atmosphere: fix any,
+    winds: fix Array,
+    shot: fix any,
+    solver: fix any
+}
+
+export struct Observation {
+    distance: fix any,
+    time_s: fix Number,
+    velocity: fix any,
+    energy: fix any,
+    drop: fix any,
+    windage: fix any,
+    mach: fix Number,
+    flags: fix Array
+}
+
+export struct Assumption {
+    code: fix String,
+    message: fix String,
+    path: fix any
+}
+
+export struct Warning {
+    code: fix String,
+    message: fix String,
+    path: fix any
+}
+
+export struct TrajectorySummary {
+    actual_range: fix any,
+    maximum_height: fix any,
+    time_of_flight_s: fix Number,
+    terminal_velocity: fix any,
+    terminal_energy: fix any,
+    stability_factor: fix any,
+    spin_drift: fix any,
+    termination: fix String
+}
+
+export struct Trajectory {
+    engine_version: fix String,
+    experiment: fix any,
+    observations: fix Array,
+    assumptions: fix Array,
+    warnings: fix Array,
+    summary: fix any,
+    verified: fix Bool
+}
+
+export struct LaboratoryError {
+    code: fix String,
+    message: fix String,
+    path: fix any,
+    stderr: fix any,
+    exit_code: fix any
+}
+
+fn _require_nonempty(value: any, field: String) -> String {
+    if typeof(value) != "String" {
+        assert(false, field + ": expected String, got " + typeof(value))
+    }
+    if len(value.trim()) == 0 {
+        assert(false, field + ": must not be empty")
+    }
+    return value
+}
+
+fn _require_finite(value: any, field: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        assert(false, field + ": expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        assert(false, field + ": must be finite")
+    }
+    return value
+}
+
+fn _require_positive(value: any, field: String) -> Number {
+    let checked = _require_finite(value, field)
+    if checked <= 0 {
+        assert(false, field + ": must be greater than zero")
+    }
+    return checked
+}
+
+fn _require_nonnegative(value: any, field: String) -> Number {
+    let checked = _require_finite(value, field)
+    if checked < 0 {
+        assert(false, field + ": must be non-negative")
+    }
+    return checked
+}
+
+fn _require_bool(value: any, field: String) -> Bool {
+    if typeof(value) != "Bool" {
+        assert(false, field + ": expected Bool, got " + typeof(value))
+    }
+    return value
+}
+
+fn _require_optional_bool(value: any, field: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _require_bool(value, field)
+}
+
+fn _require_quantity(value: any, expected: String, field: String) {
+    if typeof(value) != "Struct" {
+        assert(false, field + ": expected " + expected + ", got " + typeof(value))
+    }
+    let actual = struct_name(value)
+    if actual != expected {
+        assert(false, field + ": expected " + expected + ", got " + actual)
+    }
+}
+
+fn _require_optional_quantity(value: any, expected: String, field: String) {
+    if value != nil {
+        _require_quantity(value, expected, field)
+    }
+}
+
+fn _require_struct(value: any, expected: String, field: String) {
+    _require_quantity(value, expected, field)
+}
+
+fn _require_choice(value: any, choices: Array, field: String) -> String {
+    let checked = _require_nonempty(value, field)
+    if !choices.contains(checked) {
+        assert(false, field + ": unsupported value '" + checked + "'; expected one of " + repr(choices))
+    }
+    return checked
+}
+
+fn _require_optional_path(value: any, field: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _require_nonempty(value, field)
+}
+
+fn _frozen(value: any) -> any {
+    return freeze(value)
+}
+
+export fn projectile(
+name: any,
+mass: any,
+diameter: any,
+ballistic_coefficient: any,
+drag_model: any,
+length: any = nil
+) -> Projectile {
+    let checked_name = _require_nonempty(name, "projectile.name")
+    _require_quantity(mass, "Mass", "projectile.mass")
+    _require_quantity(diameter, "Distance", "projectile.diameter")
+    _require_optional_quantity(length, "Distance", "projectile.length")
+    _require_positive(mass.si_value, "projectile.mass")
+    _require_positive(diameter.si_value, "projectile.diameter")
+    if length != nil {
+        _require_positive(length.si_value, "projectile.length")
+    }
+    let checked_bc = _require_positive(ballistic_coefficient, "projectile.ballistic_coefficient")
+    let checked_drag = _require_choice(drag_model, ["G1", "G6", "G7", "G8"], "projectile.drag_model")
+    return _frozen(Projectile {
+        name: checked_name,
+        mass: mass,
+        diameter: diameter,
+        length: length,
+        drag_model: checked_drag,
+        ballistic_coefficient: checked_bc
+    }
+    )
+}
+
+export fn rifle(
+name: any,
+sight_height: any = nil,
+muzzle_height: any = nil,
+twist_rate: any = nil,
+twist_direction: any = nil
+) -> Rifle {
+    let checked_name = _require_nonempty(name, "rifle.name")
+    _require_optional_quantity(sight_height, "Distance", "rifle.sight_height")
+    _require_optional_quantity(muzzle_height, "Distance", "rifle.muzzle_height")
+    _require_optional_quantity(twist_rate, "Distance", "rifle.twist_rate")
+    if sight_height != nil {
+        _require_nonnegative(sight_height.si_value, "rifle.sight_height")
+    }
+    if twist_rate != nil {
+        _require_positive(twist_rate.si_value, "rifle.twist_rate")
+    }
+    flux checked_direction = nil
+    if twist_direction != nil {
+        checked_direction = _require_choice(twist_direction, ["left", "right"], "rifle.twist_direction")
+    }
+    return _frozen(Rifle {
+        name: checked_name,
+        sight_height: sight_height,
+        muzzle_height: muzzle_height,
+        twist_rate: twist_rate,
+        twist_direction: checked_direction
+    }
+    )
+}
+
+export fn atmosphere(
+altitude: any = nil,
+temperature: any = nil,
+pressure: any = nil,
+relative_humidity: any = nil,
+latitude: any = nil
+) -> Atmosphere {
+    _require_optional_quantity(altitude, "Distance", "atmosphere.altitude")
+    _require_optional_quantity(temperature, "Temperature", "atmosphere.temperature")
+    _require_optional_quantity(pressure, "Pressure", "atmosphere.pressure")
+    _require_optional_quantity(latitude, "Angle", "atmosphere.latitude")
+    if altitude != nil {
+        if altitude.si_value < -5000 || altitude.si_value > 84000 {
+            assert(false, "atmosphere.altitude: must be between -5000 and 84000 meters")
+        }
+    }
+    if temperature != nil {
+        _require_positive(temperature.si_value, "atmosphere.temperature")
+    }
+    if pressure != nil {
+        _require_positive(pressure.si_value, "atmosphere.pressure")
+    }
+    flux checked_humidity = nil
+    if relative_humidity != nil {
+        checked_humidity = _require_finite(relative_humidity, "atmosphere.relative_humidity")
+        if checked_humidity < 0 || checked_humidity > 1 {
+            assert(false, "atmosphere.relative_humidity: must be between 0 and 1")
+        }
+    }
+    if latitude != nil {
+        let half_pi = 3.141592653589793 / 2.0
+        if latitude.si_value < 0.0 - half_pi || latitude.si_value > half_pi {
+            assert(false, "atmosphere.latitude: must be between -pi/2 and pi/2 radians")
+        }
+    }
+    return _frozen(Atmosphere {
+        altitude: altitude,
+        temperature: temperature,
+        pressure: pressure,
+        relative_humidity: checked_humidity,
+        latitude: latitude
+    }
+    )
+}
+
+export fn standard_atmosphere() -> Atmosphere {
+    return atmosphere()
+}
+
+export fn wind(
+speed: any,
+direction_from: any,
+vertical_velocity: any = nil,
+until_distance: any = nil
+) -> Wind {
+    _require_quantity(speed, "WindSpeed", "wind.speed")
+    _require_quantity(direction_from, "Angle", "wind.direction_from")
+    _require_optional_quantity(vertical_velocity, "Velocity", "wind.vertical_velocity")
+    _require_optional_quantity(until_distance, "Distance", "wind.until_distance")
+    _require_nonnegative(speed.si_value, "wind.speed")
+    if until_distance != nil {
+        _require_positive(until_distance.si_value, "wind.until_distance")
+    }
+    return _frozen(Wind {
+        speed: speed,
+        direction_from: direction_from,
+        vertical_velocity: vertical_velocity,
+        until_distance: until_distance
+    }
+    )
+}
+
+export fn calm_wind() -> Array {
+    return freeze([])
+}
+
+export fn shot(
+muzzle_velocity: any,
+max_range: any,
+zero_distance: any = nil,
+muzzle_angle: any = nil,
+aim_azimuth: any = nil,
+shot_azimuth: any = nil,
+shooting_angle: any = nil,
+cant_angle: any = nil,
+target_height: any = nil,
+ground_threshold: any = nil
+) -> Shot {
+    _require_quantity(muzzle_velocity, "Velocity", "shot.muzzle_velocity")
+    _require_quantity(max_range, "Distance", "shot.max_range")
+    _require_optional_quantity(zero_distance, "Distance", "shot.zero_distance")
+    _require_optional_quantity(muzzle_angle, "Angle", "shot.muzzle_angle")
+    _require_optional_quantity(aim_azimuth, "Angle", "shot.aim_azimuth")
+    _require_optional_quantity(shot_azimuth, "Angle", "shot.shot_azimuth")
+    _require_optional_quantity(shooting_angle, "Angle", "shot.shooting_angle")
+    _require_optional_quantity(cant_angle, "Angle", "shot.cant_angle")
+    _require_optional_quantity(target_height, "Distance", "shot.target_height")
+    _require_optional_quantity(ground_threshold, "Distance", "shot.ground_threshold")
+    _require_positive(muzzle_velocity.si_value, "shot.muzzle_velocity")
+    _require_positive(max_range.si_value, "shot.max_range")
+    if zero_distance != nil {
+        _require_positive(zero_distance.si_value, "shot.zero_distance")
+    }
+    if zero_distance != nil && muzzle_angle != nil {
+        assert(false, "shot: zero_distance and muzzle_angle cannot both be supplied")
+    }
+    return _frozen(Shot {
+        muzzle_velocity: muzzle_velocity,
+        max_range: max_range,
+        zero_distance: zero_distance,
+        muzzle_angle: muzzle_angle,
+        aim_azimuth: aim_azimuth,
+        shot_azimuth: shot_azimuth,
+        shooting_angle: shooting_angle,
+        cant_angle: cant_angle,
+        target_height: target_height,
+        ground_threshold: ground_threshold
+    }
+    )
+}
+
+export fn solver_config(
+method: any = nil,
+time_step_s: any = nil,
+sampling_interval: any = nil,
+magnus: any = nil,
+coriolis: any = nil,
+enhanced_spin_drift: any = nil
+) -> SolverConfig {
+    flux checked_method = nil
+    if method != nil {
+        checked_method = _require_choice(method, ["rk45", "rk4", "euler"], "solver.method")
+    }
+    flux checked_step = nil
+    if time_step_s != nil {
+        checked_step = _require_positive(time_step_s, "solver.time_step_s")
+    }
+    _require_optional_quantity(sampling_interval, "Distance", "sampling.interval")
+    if sampling_interval != nil {
+        _require_positive(sampling_interval.si_value, "sampling.interval")
+    }
+    let checked_magnus = _require_optional_bool(magnus, "effects.magnus")
+    let checked_coriolis = _require_optional_bool(coriolis, "effects.coriolis")
+    let checked_spin = _require_optional_bool(enhanced_spin_drift, "effects.enhanced_spin_drift")
+    if checked_magnus == true && checked_spin == true {
+        assert(false, "effects: magnus and enhanced_spin_drift cannot both be enabled")
+    }
+    return _frozen(SolverConfig {
+        method: checked_method,
+        time_step_s: checked_step,
+        sampling_interval: sampling_interval,
+        magnus: checked_magnus,
+        coriolis: checked_coriolis,
+        enhanced_spin_drift: checked_spin
+    }
+    )
+}
+
+fn _validate_winds(winds: Array) {
+    if len(winds) == 0 {
+        return
+    }
+    flux segmented = false
+    flux last_boundary = 0.0
+    for item in winds {
+        _require_struct(item, "Wind", "experiment.winds[]")
+        if item.until_distance != nil {
+            segmented = true
+            if item.until_distance.si_value <= last_boundary {
+                assert(false, "experiment.winds: segment boundaries must increase strictly")
+            }
+            last_boundary = item.until_distance.si_value
+        }
+    }
+    if segmented {
+        for item in winds {
+            if item.until_distance == nil {
+                assert(false, "experiment.winds: cannot mix constant and segmented wind")
+            }
+        }
+    } else if len(winds) != 1 {
+        assert(false, "experiment.winds: constant wind must contain exactly one Wind")
+    }
+}
+
+export fn experiment(
+name: any,
+projectile_value: any,
+rifle_value: any,
+atmosphere_value: any,
+winds: any,
+shot_value: any,
+solver_value: any
+) -> Experiment {
+    let checked_name = _require_nonempty(name, "experiment.name")
+    _require_struct(projectile_value, "Projectile", "experiment.projectile")
+    _require_struct(rifle_value, "Rifle", "experiment.rifle")
+    _require_struct(atmosphere_value, "Atmosphere", "experiment.atmosphere")
+    _require_struct(shot_value, "Shot", "experiment.shot")
+    _require_struct(solver_value, "SolverConfig", "experiment.solver")
+    if typeof(winds) != "Array" {
+        assert(false, "experiment.winds: expected Array, got " + typeof(winds))
+    }
+    _validate_winds(winds)
+    if solver_value.coriolis == true && atmosphere_value.latitude == nil {
+        assert(false, "experiment.atmosphere.latitude: required when Coriolis is enabled")
+    }
+    if (solver_value.magnus == true || solver_value.enhanced_spin_drift == true) && projectile_value.length == nil {
+        assert(false, "experiment.projectile.length: required for the selected effect")
+    }
+    if shot_value.ground_threshold != nil {
+        flux muzzle_height_si = 0.0
+        if rifle_value.muzzle_height != nil {
+            muzzle_height_si = rifle_value.muzzle_height.si_value
+        }
+        if shot_value.ground_threshold.si_value >= muzzle_height_si {
+            assert(false, "experiment.shot.ground_threshold: must be below the muzzle height")
+        }
+    }
+    return _frozen(Experiment {
+        name: checked_name,
+        projectile: projectile_value,
+        rifle: rifle_value,
+        atmosphere: atmosphere_value,
+        winds: winds,
+        shot: shot_value,
+        solver: solver_value
+    }
+    )
+}
+
+export fn observation(
+distance: any,
+time_s: any,
+velocity: any,
+energy: any,
+drop: any,
+windage: any,
+mach: any,
+flags: any = []
+) -> Observation {
+    _require_quantity(distance, "Distance", "observation.distance")
+    _require_quantity(velocity, "Velocity", "observation.velocity")
+    _require_quantity(energy, "Energy", "observation.energy")
+    _require_quantity(drop, "Distance", "observation.drop")
+    _require_quantity(windage, "Distance", "observation.windage")
+    _require_nonnegative(distance.si_value, "observation.distance")
+    let checked_time = _require_nonnegative(time_s, "observation.time_s")
+    _require_nonnegative(velocity.si_value, "observation.velocity")
+    _require_nonnegative(energy.si_value, "observation.energy")
+    let checked_mach = _require_nonnegative(mach, "observation.mach")
+    if typeof(flags) != "Array" {
+        assert(false, "observation.flags: expected Array, got " + typeof(flags))
+    }
+    flux checked_flags = []
+    for item in flags {
+        checked_flags.push(_require_choice(
+        item,
+        ["transonic", "subsonic", "terminal", "ground_threshold"],
+        "observation.flags[]"
+        ))
+    }
+    return _frozen(Observation {
+        distance: distance,
+        time_s: checked_time,
+        velocity: velocity,
+        energy: energy,
+        drop: drop,
+        windage: windage,
+        mach: checked_mach,
+        flags: freeze(checked_flags)
+    }
+    )
+}
+
+export fn assumption(code: any, message: any, path: any = nil) -> Assumption {
+    return _frozen(Assumption {
+        code: _require_nonempty(code, "assumption.code"),
+        message: _require_nonempty(message, "assumption.message"),
+        path: _require_optional_path(path, "assumption.path")
+    }
+    )
+}
+
+export fn warning(code: any, message: any, path: any = nil) -> Warning {
+    return _frozen(Warning {
+        code: _require_nonempty(code, "warning.code"),
+        message: _require_nonempty(message, "warning.message"),
+        path: _require_optional_path(path, "warning.path")
+    }
+    )
+}
+
+export fn trajectory_summary(
+actual_range: any,
+maximum_height: any,
+time_of_flight_s: any,
+terminal_velocity: any,
+terminal_energy: any,
+termination: any,
+stability_factor: any = nil,
+spin_drift: any = nil
+) -> TrajectorySummary {
+    _require_quantity(actual_range, "Distance", "summary.actual_range")
+    _require_quantity(maximum_height, "Distance", "summary.maximum_height")
+    _require_quantity(terminal_velocity, "Velocity", "summary.terminal_velocity")
+    _require_quantity(terminal_energy, "Energy", "summary.terminal_energy")
+    _require_optional_quantity(spin_drift, "Distance", "summary.spin_drift")
+    _require_nonnegative(actual_range.si_value, "summary.actual_range")
+    let checked_time = _require_nonnegative(time_of_flight_s, "summary.time_of_flight_s")
+    _require_nonnegative(terminal_velocity.si_value, "summary.terminal_velocity")
+    _require_nonnegative(terminal_energy.si_value, "summary.terminal_energy")
+    flux checked_stability = nil
+    if stability_factor != nil {
+        checked_stability = _require_nonnegative(stability_factor, "summary.stability_factor")
+    }
+    let checked_termination = _require_choice(
+    termination,
+    ["max_range", "ground_threshold", "time_limit", "velocity_floor"],
+    "summary.termination"
+    )
+    return _frozen(TrajectorySummary {
+        actual_range: actual_range,
+        maximum_height: maximum_height,
+        time_of_flight_s: checked_time,
+        terminal_velocity: terminal_velocity,
+        terminal_energy: terminal_energy,
+        stability_factor: checked_stability,
+        spin_drift: spin_drift,
+        termination: checked_termination
+    }
+    )
+}
+
+export fn trajectory(
+engine_version: any,
+experiment_value: any,
+observations: any,
+assumptions: any,
+warnings: any,
+summary: any,
+verified: any = false
+) -> Trajectory {
+    let checked_version = _require_nonempty(engine_version, "trajectory.engine_version")
+    _require_struct(experiment_value, "Experiment", "trajectory.experiment")
+    _require_struct(summary, "TrajectorySummary", "trajectory.summary")
+    if typeof(observations) != "Array" {
+        assert(false, "trajectory.observations: expected Array, got " + typeof(observations))
+    }
+    if typeof(assumptions) != "Array" {
+        assert(false, "trajectory.assumptions: expected Array, got " + typeof(assumptions))
+    }
+    if typeof(warnings) != "Array" {
+        assert(false, "trajectory.warnings: expected Array, got " + typeof(warnings))
+    }
+    for item in observations {
+        _require_struct(item, "Observation", "trajectory.observations[]")
+    }
+    for item in assumptions {
+        _require_struct(item, "Assumption", "trajectory.assumptions[]")
+    }
+    for item in warnings {
+        _require_struct(item, "Warning", "trajectory.warnings[]")
+    }
+    let checked_verified = _require_bool(verified, "trajectory.verified")
+    return _frozen(Trajectory {
+        engine_version: checked_version,
+        experiment: experiment_value,
+        observations: observations,
+        assumptions: assumptions,
+        warnings: warnings,
+        summary: summary,
+        verified: checked_verified
+    }
+    )
+}
+
+export fn laboratory_error(
+code: any,
+message: any,
+path: any = nil,
+stderr: any = nil,
+exit_code: any = nil
+) -> LaboratoryError {
+    flux checked_stderr = nil
+    if stderr != nil {
+        checked_stderr = _require_nonempty(stderr, "laboratory_error.stderr")
+    }
+    flux checked_exit = nil
+    if exit_code != nil {
+        if typeof(exit_code) != "Int" {
+            assert(false, "laboratory_error.exit_code: expected Int, got " + typeof(exit_code))
+        }
+        checked_exit = exit_code
+    }
+    return _frozen(LaboratoryError {
+        code: _require_nonempty(code, "laboratory_error.code"),
+        message: _require_nonempty(message, "laboratory_error.message"),
+        path: _require_optional_path(path, "laboratory_error.path"),
+        stderr: checked_stderr,
+        exit_code: checked_exit
+    }
+    )
+}

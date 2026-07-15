@@ -1,0 +1,331 @@
+// Domain and solve-json v1 adapter tests.
+// Run on every backend with make test-ballistics-lab.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/protocol_v1" as protocol
+import "examples/ballistics_lab/reference_experiment" as reference
+
+fn assert_near(actual: Number, expected: Number, tolerance: Number, label: String) {
+    flux difference = actual - expected
+    if difference < 0 {
+        difference = 0 - difference
+    }
+    assert(difference <= tolerance, label + ": expected " + to_string(expected) + ", got " + to_string(actual))
+}
+
+fn caught(thunk: Fn) -> String {
+    return try {
+        thunk(nil)
+        "NO_ERROR"
+    } catch err {
+        err.message
+    }
+}
+
+fn assert_error_contains(thunk: Fn, expected: String, label: String) {
+    let message = caught(thunk)
+    assert(message != "NO_ERROR", label + ": expected an error")
+    assert(message.contains(expected), label + ": unexpected error: " + message)
+}
+
+fn test_reference_experiment() {
+    let experiment = reference.representative_experiment()
+    assert(struct_name(experiment) == "Experiment")
+    assert(phase_of(experiment) == "crystal")
+    assert(experiment.projectile.name == "175 gr match")
+    assert(experiment.rifle.twist_direction == "right")
+    assert(len(experiment.winds) == 1)
+    assert(experiment.solver.coriolis)
+}
+
+fn test_strict_protocol_encoding() {
+    let experiment = reference.representative_experiment()
+    let request = protocol.experiment_to_v1_request(experiment)
+    assert(typeof(request) == "Map")
+    assert(phase_of(request) == "crystal")
+    assert(len(request.keys()) == 9)
+    assert(request.get("schema_version") == 1)
+
+    let projectile = request.get("projectile")
+    assert(len(projectile.keys()) == 5)
+    assert(!projectile.has("name"))
+    assert(!projectile.has("mass"))
+    assert_near(projectile.get("mass_kg"), 0.01133980925, 0.00000000001, "mass SI encoding")
+    assert_near(projectile.get("diameter_m"), 0.0078232, 0.0000000001, "diameter SI encoding")
+    assert_near(projectile.get("length_m"), 0.031496, 0.000000001, "length SI encoding")
+    assert(projectile.get("drag_model") == "G7")
+
+    let rifle = request.get("rifle")
+    assert_near(rifle.get("muzzle_velocity_mps"), 822.96, 0.0000001, "velocity SI encoding")
+    assert_near(rifle.get("sight_height_m"), 0.0381, 0.0000001, "sight SI encoding")
+    assert_near(rifle.get("twist_rate_m_per_turn"), 0.2032, 0.0000001, "twist SI encoding")
+
+    let shot = request.get("shot")
+    assert_near(shot.get("max_range_m"), 914.4, 0.0000001, "range SI encoding")
+    assert_near(shot.get("zero_distance_m"), 91.44, 0.0000001, "zero SI encoding")
+    assert(!shot.has("muzzle_angle_rad"))
+
+    let atmosphere = request.get("atmosphere")
+    assert_near(atmosphere.get("temperature_k"), 288.15, 0.0000001, "temperature SI encoding")
+    assert_near(atmosphere.get("pressure_pa"), 101325.0, 0.000001, "pressure SI encoding")
+    assert_near(atmosphere.get("latitude_rad"), 0.7853981633974483, 0.000000000001, "latitude SI encoding")
+
+    let wind = request.get("wind")
+    assert_near(wind.get("speed_mps"), 4.4704, 0.0000001, "wind SI encoding")
+    assert_near(wind.get("direction_from_rad"), 1.5707963267948966, 0.000000000001, "wind direction encoding")
+
+    let solver = request.get("solver")
+    assert(solver.get("method") == "rk45")
+    assert(!solver.has("time_step_s"))
+    let effects = request.get("effects")
+    assert(len(effects.keys()) == 1)
+    assert(effects.get("coriolis") == true)
+    assert(!effects.has("magnus"))
+    assert(!effects.has("enhanced_spin_drift"))
+
+    let wire = protocol.v1_request_json(experiment)
+    assert(!wire.contains("display_value"))
+    assert(!wire.contains("display_unit"))
+    assert(!wire.contains("\"name\""))
+    let decoded = json_parse(wire)
+    assert(decoded.get("schema_version") == 1)
+    assert(decoded.get("projectile").get("mass_kg") == projectile.get("mass_kg"))
+
+    let defaults = domain.solver_config()
+    assert(len(protocol.solver_to_v1_map(defaults).keys()) == 0)
+    assert(len(protocol.effects_to_v1_map(defaults).keys()) == 0)
+}
+
+fn test_segmented_and_still_wind_encoding() {
+    let still = protocol.winds_to_v1_map(domain.calm_wind())
+    assert(len(still.keys()) == 0)
+
+    let segments = [
+        domain.wind(units.mph(5), units.deg(0), units.mps(-1), units.yd(300)),
+        domain.wind(units.mph(12), units.deg(90), units.mps(0.5), units.yd(1000))
+    ]
+    let encoded = protocol.winds_to_v1_map(segments)
+    assert(len(encoded.get("segments")) == 2)
+    assert_near(encoded.get("segments")[0].get("until_distance_m"), 274.32, 0.0000001, "wind boundary")
+    assert_near(encoded.get("segments")[0].get("vertical_speed_mps"), -1.0, 0.0000001, "vertical wind")
+}
+
+fn test_constructor_validation() {
+    assert_error_contains(
+    |_ | {
+        domain.projectile("bad", units.fps(2700), units.inches(0.308), 0.2, "G7")
+    },
+    "projectile.mass: expected Mass, got Velocity",
+    "projectile dimension"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.projectile("bad", units.gr(175), units.inches(0.308), 0.0 / 0.0, "G7")
+    },
+    "projectile.ballistic_coefficient: must be finite",
+    "projectile finite BC"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.projectile("bad", units.gr(175), units.inches(0.308), 0.2, "G9")
+    },
+    "projectile.drag_model",
+    "drag model enum"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.atmosphere(nil, units.celsius(15), units.hpa(1013.25), 1.1)
+    },
+    "atmosphere.relative_humidity",
+    "humidity range"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.atmosphere(units.m(85000))
+    },
+    "atmosphere.altitude",
+    "altitude range"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.shot(units.fps(2700), units.yd(1000), units.yd(100), units.mil(1))
+    },
+    "zero_distance and muzzle_angle",
+    "zero conflict"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.solver_config("bogus")
+    },
+    "solver.method",
+    "solver method"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.solver_config("rk4", 0)
+    },
+    "solver.time_step_s",
+    "solver step"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.solver_config("rk45", 0.001, nil, true, false, true)
+    },
+    "magnus and enhanced_spin_drift",
+    "effect conflict"
+    )
+    assert_error_contains(
+    |_ | {
+        domain.observation(
+        units.yd(100),
+        0.12,
+        units.fps(2400),
+        units.foot_pounds(1800),
+        units.inches(2.5),
+        units.inches(-0.75),
+        2.1,
+        ["not_a_sample_flag"]
+        )
+    },
+    "observation.flags[]",
+    "observation flag enum"
+    )
+}
+
+fn test_experiment_relationships() {
+    assert_error_contains(
+    |_ | {
+        let base = reference.representative_experiment()
+        domain.experiment(
+        "mixed wind",
+        base.projectile,
+        base.rifle,
+        base.atmosphere,
+        [
+            domain.wind(units.mph(5), units.deg(90)),
+            domain.wind(units.mph(5), units.deg(90), nil, units.yd(500))
+        ],
+        base.shot,
+        base.solver
+        )
+    },
+    "cannot mix constant and segmented wind",
+    "mixed wind"
+    )
+    assert_error_contains(
+    |_ | {
+        let base = reference.representative_experiment()
+        domain.experiment(
+        "wind order",
+        base.projectile,
+        base.rifle,
+        base.atmosphere,
+        [
+            domain.wind(units.mph(5), units.deg(90), nil, units.yd(500)),
+            domain.wind(units.mph(5), units.deg(90), nil, units.yd(300))
+        ],
+        base.shot,
+        base.solver
+        )
+    },
+    "segment boundaries must increase strictly",
+    "wind order"
+    )
+    assert_error_contains(
+    |_ | {
+        let base = reference.representative_experiment()
+        domain.experiment(
+        "coriolis",
+        base.projectile,
+        base.rifle,
+        domain.standard_atmosphere(),
+        [],
+        base.shot,
+        domain.solver_config("rk45", 0.001, nil, false, true, false)
+        )
+    },
+    "latitude: required",
+    "Coriolis latitude"
+    )
+    assert_error_contains(
+    |_ | {
+        let base = reference.representative_experiment()
+        let projectile_without_length = domain.projectile(
+        "test",
+        units.gr(175),
+        units.inches(0.308),
+        0.243,
+        "G7"
+        )
+        domain.experiment(
+        "geometry",
+        projectile_without_length,
+        base.rifle,
+        base.atmosphere,
+        [],
+        base.shot,
+        domain.solver_config("rk45", 0.001, nil, true, false, false)
+        )
+    },
+    "projectile.length: required",
+    "effect geometry"
+    )
+}
+
+fn test_result_values_are_typed_and_immutable() {
+    let experiment = reference.representative_experiment()
+    let observation = domain.observation(
+    units.yd(100),
+    0.12,
+    units.fps(2400),
+    units.foot_pounds(1800),
+    units.inches(2.5),
+    units.inches(-0.75),
+    2.1,
+    ["terminal"]
+    )
+    let assumption = domain.assumption("default_applied", "A default was applied.", "$.solver")
+    let warning = domain.warning("experimental_effect", "An experimental effect was enabled.", "$.effects")
+    let summary = domain.trajectory_summary(
+    units.yd(100),
+    units.ft(6),
+    0.12,
+    units.fps(2400),
+    units.foot_pounds(1800),
+    "max_range",
+    1.5,
+    units.inches(-0.1)
+    )
+    let trajectory = domain.trajectory(
+    "0.24.1",
+    experiment,
+    [observation],
+    [assumption],
+    [warning],
+    summary,
+    true
+    )
+    assert(struct_name(observation) == "Observation")
+    assert(struct_name(trajectory) == "Trajectory")
+    assert(phase_of(observation) == "crystal")
+    assert(phase_of(trajectory) == "crystal")
+    assert(trajectory.verified)
+    assert(trajectory.observations[0].windage.si_value < 0)
+
+    assert(phase_of(trajectory.observations) == "crystal")
+    let failure = domain.laboratory_error("invalid_value", "bad input", "$.shot", "diagnostic", 2)
+    assert(struct_name(failure) == "LaboratoryError")
+    assert(phase_of(failure) == "crystal")
+    assert(failure.exit_code == 2)
+}
+
+fn main() {
+    test_reference_experiment()
+    test_strict_protocol_encoding()
+    test_segmented_and_still_wind_encoding()
+    test_constructor_validation()
+    test_experiment_relationships()
+    test_result_values_are_typed_and_immutable()
+    print("ballistics_lab domain: all tests passed")
+}
