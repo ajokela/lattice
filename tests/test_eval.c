@@ -12,6 +12,7 @@
 #include "stackvm.h"
 #include "regvm.h"
 #include "runtime.h"
+#include "iterator.h"
 #include "package.h"
 #include "doc_gen.h"
 #include "latc.h"
@@ -907,10 +908,10 @@ TEST(eval_gc_stress_seed_grow) {
 /* ── Dual-Heap Invariant Tests ── */
 
 /*
- * Helper: run source with gc_stress, return evaluator for stats inspection.
+ * Helper: run source and return its evaluator for stats inspection.
  * Caller must call cleanup_run().  Returns NULL on failure.
  */
-static Evaluator *run_with_stats(const char *source, LatVec *tokens_out, Program *prog_out) {
+static Evaluator *run_with_stats_mode(const char *source, LatVec *tokens_out, Program *prog_out, bool stress) {
     Lexer lex = lexer_new(source);
     char *lex_err = NULL;
     *tokens_out = lexer_tokenize(&lex, &lex_err);
@@ -932,7 +933,7 @@ static Evaluator *run_with_stats(const char *source, LatVec *tokens_out, Program
     }
 
     Evaluator *ev = evaluator_new();
-    evaluator_set_gc_stress(ev, true);
+    evaluator_set_gc_stress(ev, stress);
     char *eval_err = evaluator_run(ev, prog_out);
     if (eval_err) {
         free(eval_err);
@@ -945,11 +946,181 @@ static Evaluator *run_with_stats(const char *source, LatVec *tokens_out, Program
     return ev;
 }
 
+static Evaluator *run_with_stats(const char *source, LatVec *tokens_out, Program *prog_out) {
+    return run_with_stats_mode(source, tokens_out, prog_out, true);
+}
+
 static void cleanup_run(Evaluator *ev, LatVec *tokens, Program *prog) {
     evaluator_free(ev);
     program_free(prog);
     for (size_t i = 0; i < tokens->len; i++) token_free(lat_vec_get(tokens, i));
     lat_vec_free(tokens);
+}
+
+/* MBA-1329: value_clone allocates a partially frozen struct's field_phases
+ * table in the fluid heap.  It must remain reachable with the struct across
+ * later collections.  Before the fix gc-stress swept it, then field access or
+ * teardown read/freed the dangling pointer. */
+TEST(eval_gc_stress_struct_field_phases) {
+    gc_stress = true;
+    ASSERT_RUNS("struct User { name: String, score: Int }\n"
+                "fn main() {\n"
+                "    flux original = User { name: \"Alice padded for a fluid allocation\", score: 0 }\n"
+                "    freeze(original) except [\"score\"]\n"
+                "    flux copied = clone(original)\n"
+                "    let garbage = [1, 2, 3, 4]\n"
+                "    copied.score = 100\n"
+                "    assert(copied.score == 100, \"field phase metadata was lost\")\n"
+                "    assert(copied.name == original.name, \"struct payload was corrupted\")\n"
+                "}\n");
+    gc_stress = false;
+}
+
+/* MBA-1329: tuples and buffers also own fluid allocations.  Missing switch
+ * arms let later allocations reuse their live backing storage. */
+TEST(eval_gc_stress_tuple_and_buffer_roots) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let tuple_value = (\"EXPECTED_TUPLE_PAYLOAD_0123456789\", 42)\n"
+                "    let tuple_garbage = (\"OVERWRITE_TUPLE_PAYLOAD_111111111\", 99)\n"
+                "    assert(tuple_value.0 == \"EXPECTED_TUPLE_PAYLOAD_0123456789\")\n"
+                "    assert(tuple_value.1 == 42)\n"
+                "    let buffer_value = Buffer::from_string(\"EXPECTED_BUFFER_PAYLOAD_0123456789\")\n"
+                "    let buffer_garbage = [\n"
+                "        Buffer::from_string(\"OVERWRITE_BUFFER_PAYLOAD_111111111\"),\n"
+                "        Buffer::from_string(\"OVERWRITE_BUFFER_PAYLOAD_222222222\"),\n"
+                "    ]\n"
+                "    assert(buffer_value.to_string() == \"EXPECTED_BUFFER_PAYLOAD_0123456789\")\n"
+                "}\n");
+    gc_stress = false;
+}
+
+/* MBA-1329: iterator protocol state is opaque to LatValue but retains values.
+ * These edges must participate in tracing. */
+TEST(eval_gc_stress_array_iterator_roots) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let array_iter = iter([\"EXPECTED_ITERATOR_PAYLOAD_0123456789\"])\n"
+                "    let array_garbage = [\"OVERWRITE_ITERATOR_111111111\", \"OVERWRITE_ITERATOR_222222222\"]\n"
+                "    assert(array_iter.collect()[0] == \"EXPECTED_ITERATOR_PAYLOAD_0123456789\")\n"
+                "    let later_garbage = [\"LATE_OVERWRITE_ITERATOR_111111\", \"LATE_OVERWRITE_ITERATOR_222222\"]\n"
+                "    assert(array_iter.next() == nil)\n"
+                "}\n");
+    gc_stress = false;
+}
+
+TEST(eval_gc_stress_repeat_iterator_roots) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let repeated = repeat_iter(\"EXPECTED_REPEAT_PAYLOAD_0123456789\", 2)\n"
+                "    let repeat_garbage = [\"OVERWRITE_REPEAT_111111111\", \"OVERWRITE_REPEAT_222222222\"]\n"
+                "    assert(repeated.collect() == [\"EXPECTED_REPEAT_PAYLOAD_0123456789\", "
+                "\"EXPECTED_REPEAT_PAYLOAD_0123456789\"])\n"
+                "    let later_garbage = [\"LATE_OVERWRITE_REPEAT_111111\", \"LATE_OVERWRITE_REPEAT_222222\"]\n"
+                "    assert(repeated.next() == nil)\n"
+                "}\n");
+    gc_stress = false;
+}
+
+/* Chained iterator state retains both an inner iterator and a closure with a
+ * captured value; tracing must recurse through both edges. */
+TEST(eval_gc_stress_chained_iterator_roots) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let suffix = \"_EXPECTED_CAPTURE_0123456789\"\n"
+                "    let chained = iter([\"base\"]).map(|value| { value + suffix }).take(1)\n"
+                "    let chain_garbage = [\"OVERWRITE_CHAIN_111111111\", \"OVERWRITE_CHAIN_222222222\"]\n"
+                "    assert(chained.collect()[0] == \"base_EXPECTED_CAPTURE_0123456789\")\n"
+                "}\n");
+    gc_stress = false;
+}
+
+/* A Ref cell is malloc-backed, but an iterator stored inside it can retain
+ * allocations from the active fluid heap.  Trace through the cell while
+ * guarding self-referential Ref graphs. */
+TEST(eval_gc_stress_ref_iterator_roots) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let holder = Ref::new(iter([\"EXPECTED_REF_ITERATOR_PAYLOAD_0123456789\"]))\n"
+                "    let garbage = [\"OVERWRITE_REF_ITERATOR_111111\", \"OVERWRITE_REF_ITERATOR_222222\"]\n"
+                "    assert(holder.get().collect()[0] == \"EXPECTED_REF_ITERATOR_PAYLOAD_0123456789\")\n"
+                "}\n");
+    gc_stress = false;
+}
+
+/* Pin the VM collector's gray-worklist path as well as full gc-stress marks. */
+TEST(eval_gc_incremental_iterator_state_roots) {
+    gc_stress = true;
+    gc_incremental = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    let iterator = iter([\"EXPECTED_INCREMENTAL_ITERATOR_PAYLOAD_0123456789\"])\n"
+                "    flux garbage = []\n"
+                "    for i in 0..400 {\n"
+                "        garbage.push(\"incremental garbage payload \" + to_string(i))\n"
+                "    }\n"
+                "    assert(iterator.collect()[0] == \"EXPECTED_INCREMENTAL_ITERATOR_PAYLOAD_0123456789\")\n"
+                "}\n");
+    gc_incremental = false;
+    gc_stress = false;
+}
+
+/* Shared iterator handles form a DAG.  Mark each protocol state once: tracing
+ * this depth-40 zip graph once per path is exponential. */
+TEST(eval_gc_stress_shared_iterator_dag) {
+    gc_stress = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    flux shared = range_iter(0, 1, 1)\n"
+                "    for i in 0..40 {\n"
+                "        shared = shared.zip(shared)\n"
+                "    }\n"
+                "    let garbage = [\"trigger iterator DAG collection 111111\", "
+                "\"trigger iterator DAG collection 222222\"]\n"
+                "    assert(typeof(shared) == \"Iterator\")\n"
+                "}\n");
+    gc_stress = false;
+}
+
+TEST(eval_gc_incremental_shared_iterator_dag) {
+    gc_stress = true;
+    gc_incremental = true;
+    ASSERT_RUNS("fn main() {\n"
+                "    flux shared = range_iter(0, 1, 1)\n"
+                "    for i in 0..40 {\n"
+                "        shared = shared.zip(shared)\n"
+                "    }\n"
+                "    flux garbage = []\n"
+                "    for i in 0..400 {\n"
+                "        garbage.push(\"incremental DAG garbage \" + to_string(i))\n"
+                "    }\n"
+                "    assert(typeof(shared) == \"Iterator\")\n"
+                "}\n");
+    gc_incremental = false;
+    gc_stress = false;
+}
+
+/* MBA-1329: natural GC must advance its threshold beyond a retained live set.
+ * With the original fixed 1 MiB trigger this loop collected on practically
+ * every allocation after `live` crossed 1 MiB. */
+TEST(eval_gc_threshold_tracks_large_live_set) {
+    LatVec tokens;
+    Program prog;
+    Evaluator *ev = run_with_stats_mode("flux live = range(0, 20000)\n"
+                                        "fn main() {\n"
+                                        "    flux checksum = 0\n"
+                                        "    for i in 0..200 {\n"
+                                        "        checksum = checksum + live[i]\n"
+                                        "    }\n"
+                                        "    assert(checksum == 19900, \"large live set changed\")\n"
+                                        "}\n",
+                                        &tokens, &prog, false);
+    ASSERT(ev != NULL);
+
+    const MemoryStats *stats = evaluator_stats(ev);
+    ASSERT(stats->fluid_peak_bytes > 1024 * 1024);
+    ASSERT(stats->gc_cycles > 0);
+    ASSERT(stats->gc_cycles <= 4);
+
+    cleanup_run(ev, &tokens, &prog);
 }
 
 /* Test: freeze properly untracks from fluid heap (Round B: shared regions
@@ -4270,6 +4441,110 @@ TEST(gc_stress_mode) {
     stackvm_free(&vm);
     lat_runtime_free(&rt);
     gc_free(&gc);
+}
+
+static void capture_iterator_retained_value(LatValue *value, void *ctx) {
+    LatValue **captured = (LatValue **)ctx;
+    *captured = value;
+}
+
+/* MBA-1329: incremental marking must follow values retained only by opaque
+ * iterator state.  Use a separately tracked string so object_count proves the
+ * gray-worklist iterator arm ran, rather than merely asserting no crash. */
+TEST(gc_incremental_marks_iterator_state) {
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    StackVM vm;
+    stackvm_init(&vm, &rt);
+
+    GC gc;
+    gc_init(&gc);
+    gc.enabled = true;
+    gc.incremental = true;
+    gc.stress = true;
+
+    LatValue seed = value_string("ordinary allocation");
+    LatValue iterator = iter_repeat(seed, 1);
+    value_free(&seed);
+
+    LatValue *retained = NULL;
+    iter_trace_values(&iterator, capture_iterator_retained_value, &retained);
+    ASSERT(retained != NULL);
+    ASSERT(retained->type == VAL_STR);
+    value_free(retained);
+    *retained = value_string("placeholder");
+    free(retained->as.str_val);
+    retained->as.str_val = gc_strdup(&gc, "retained through iterator state");
+    ASSERT(retained->as.str_val != NULL);
+    gc_alloc(&gc, 64); /* unreachable control allocation */
+    ASSERT_EQ_INT(gc.object_count, 2);
+
+    *vm.stack_top++ = iterator;
+    iterator = value_nil();
+
+    size_t steps = 0;
+    while ((gc.total_cycles == 0 || gc.phase != GC_PHASE_IDLE) && steps < 32) {
+        gc_incremental_step(&gc, &vm);
+        steps++;
+    }
+    ASSERT_EQ_INT(gc.total_cycles, 1);
+    ASSERT_EQ_INT(gc.phase, GC_PHASE_IDLE);
+    ASSERT_EQ_INT(gc.object_count, 1);
+    ASSERT_EQ_STR(retained->as.str_val, "retained through iterator state");
+
+    /* Restore ordinary ownership before freeing the iterator; gc_free owns the
+     * tracked allocation and value_free must not free its interior pointer. */
+    retained->as.str_val = strdup("retained through iterator state");
+    ASSERT(retained->as.str_val != NULL);
+    vm.stack_top--;
+    value_free(vm.stack_top);
+
+    gc_free(&gc);
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
+}
+
+/* A depth-40 iterator DAG has over a trillion root-to-leaf paths but only 41
+ * distinct protocol states.  The incremental marker must drain within a small
+ * bounded number of steps by visiting each state once. */
+TEST(gc_incremental_shared_iterator_dag_drains) {
+    LatRuntime rt;
+    lat_runtime_init(&rt);
+    StackVM vm;
+    stackvm_init(&vm, &rt);
+
+    GC gc;
+    gc_init(&gc);
+    gc.enabled = true;
+    gc.incremental = true;
+    gc.stress = true;
+    gc_alloc(&gc, 64);
+
+    LatValue shared = iter_range(0, 1, 1);
+    for (size_t depth = 0; depth < 40; depth++) {
+        LatValue left = value_deep_clone(&shared);
+        LatValue right = value_deep_clone(&shared);
+        LatValue next = iter_zip(left, right);
+        value_free(&shared);
+        shared = next;
+    }
+    *vm.stack_top++ = shared;
+    shared = value_nil();
+
+    size_t steps = 0;
+    while ((gc.total_cycles == 0 || gc.phase != GC_PHASE_IDLE) && steps < 32) {
+        gc_incremental_step(&gc, &vm);
+        steps++;
+    }
+    ASSERT_EQ_INT(gc.total_cycles, 1);
+    ASSERT_EQ_INT(gc.phase, GC_PHASE_IDLE);
+    ASSERT_EQ_INT(gc.object_count, 0);
+
+    vm.stack_top--;
+    value_free(vm.stack_top);
+    gc_free(&gc);
+    stackvm_free(&vm);
+    lat_runtime_free(&rt);
 }
 
 /* Test: GC disabled does nothing */

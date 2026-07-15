@@ -246,8 +246,14 @@ static void gc_mark_env_value(LatValue *v, void *ctx) {
 static _Thread_local void **g_mark_visited_envs = NULL;
 static _Thread_local size_t g_mark_visited_env_count = 0;
 static _Thread_local size_t g_mark_visited_env_cap = 0;
+static _Thread_local void **g_mark_visited_edges = NULL;
+static _Thread_local size_t g_mark_visited_edge_count = 0;
+static _Thread_local size_t g_mark_visited_edge_cap = 0;
 
-static void gc_mark_visited_reset(void) { g_mark_visited_env_count = 0; }
+static void gc_mark_visited_reset(void) {
+    g_mark_visited_env_count = 0;
+    g_mark_visited_edge_count = 0;
+}
 
 /* Returns true if 'env' was already traversed this cycle (skip re-descent). */
 static bool gc_mark_env_seen(void *env) {
@@ -258,6 +264,20 @@ static bool gc_mark_env_seen(void *env) {
         g_mark_visited_envs = realloc(g_mark_visited_envs, g_mark_visited_env_cap * sizeof(void *));
     }
     g_mark_visited_envs[g_mark_visited_env_count++] = env;
+    return false;
+}
+
+/* Refs and iterator protocol states are malloc-backed graph nodes.  Visit
+ * each identity once so self-referential Refs terminate and shared iterator
+ * DAGs are traced linearly rather than once per path. */
+static bool gc_mark_edge_seen(void *edge) {
+    for (size_t i = 0; i < g_mark_visited_edge_count; i++)
+        if (g_mark_visited_edges[i] == edge) return true;
+    if (g_mark_visited_edge_count >= g_mark_visited_edge_cap) {
+        g_mark_visited_edge_cap = g_mark_visited_edge_cap ? g_mark_visited_edge_cap * 2 : 16;
+        g_mark_visited_edges = realloc(g_mark_visited_edges, g_mark_visited_edge_cap * sizeof(void *));
+    }
+    g_mark_visited_edges[g_mark_visited_edge_count++] = edge;
     return false;
 }
 
@@ -297,6 +317,11 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
                 fluid_mark(fh, v->as.strct.field_names);
                 /* field_names[i] are interned — not in fluid heap, skip marking */
             }
+            /* A clone of a partially frozen struct owns fluid-allocated
+             * per-field phase metadata.  The metadata is part of the live
+             * value just like field_values; omitting it here lets a collection
+             * sweep the table while the struct still points at it. */
+            if (v->as.strct.field_phases) fluid_mark(fh, v->as.strct.field_phases);
             if (v->as.strct.field_values) {
                 fluid_mark(fh, v->as.strct.field_values);
                 for (size_t i = 0; i < v->as.strct.field_count; i++)
@@ -357,6 +382,27 @@ static void gc_mark_value(FluidHeap *fh, LatValue *v, LatVec *reachable_regions)
                     }
                 }
             }
+            break;
+        case VAL_TUPLE:
+            if (v->as.tuple.elems) {
+                fluid_mark(fh, v->as.tuple.elems);
+                for (size_t i = 0; i < v->as.tuple.len; i++)
+                    gc_mark_value(fh, &v->as.tuple.elems[i], reachable_regions);
+            }
+            break;
+        case VAL_BUFFER:
+            if (v->as.buffer.data) fluid_mark(fh, v->as.buffer.data);
+            break;
+        case VAL_ITERATOR: {
+            if (v->as.iterator.state && !gc_mark_edge_seen(v->as.iterator.state)) {
+                GcMarkCtx ctx = {fh, reachable_regions};
+                iter_trace_values(v, gc_mark_env_value, &ctx);
+            }
+            break;
+        }
+        case VAL_REF:
+            if (v->as.ref.ref && !gc_mark_edge_seen(v->as.ref.ref))
+                gc_mark_value(fh, &v->as.ref.ref->value, reachable_regions);
             break;
         default: break;
     }
@@ -436,7 +482,7 @@ static void gc_cycle(Evaluator *ev) {
 
     /* 1. Clear all marks */
     fluid_unmark_all(fh);
-    gc_mark_visited_reset(); /* fresh closure-env cycle guard for this cycle */
+    gc_mark_visited_reset(); /* fresh graph-node guards for this cycle */
 
     /* 2. Mark roots from environment */
     GcMarkCtx ctx = {fh, &reachable_regions};
@@ -484,6 +530,14 @@ static void gc_cycle(Evaluator *ev) {
     size_t fluid_before = fh->total_bytes;
     size_t swept_fluid = fluid_sweep(fh);
     ev->stats.gc_bytes_swept += fluid_before - fh->total_bytes;
+
+    /* Keep the trigger ahead of the current live set.  Leaving it at the
+     * initial 1 MiB means that once a program retains more than 1 MiB, every
+     * subsequent allocation runs a full collection even when nothing can be
+     * reclaimed.  Saturate before doubling so size_t cannot wrap. */
+    size_t next_threshold = fh->total_bytes > SIZE_MAX / 2 ? SIZE_MAX : fh->total_bytes * 2;
+    if (next_threshold < 1024 * 1024) next_threshold = 1024 * 1024;
+    fh->gc_threshold = next_threshold;
 
     /* 6. Shared crystal regions are reclaimed by refcount alone (R28) —
      * the GC frees nothing region-side. In debug builds it can REPORT

@@ -2,6 +2,7 @@
 #include "stackvm.h"
 #include "env.h"
 #include "channel.h"
+#include "iterator.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -128,27 +129,28 @@ void gc_mark_ptr(GC *gc, void *ptr) {
 
 /* ── Cycle guard (LAT-487) ──
  *
- * Reset the visited-Ref set at the start of every mark phase. */
+ * Reset the visited-edge set at the start of every mark phase. */
 static void gc_visited_reset(GC *gc) { gc->mark_visited_count = 0; }
 
-/* Record that LatRef cell 'ref' has been entered this mark phase.  Returns
- * true if it is newly seen (the caller should descend into its child) and
- * false if it was already visited (a cycle/shared edge — skip to avoid
- * infinite recursion/livelock, e.g. `let r = Ref::new(nil); r.set(r)`).
+/* Record that a shared graph edge (Ref, upvalue, or iterator protocol state)
+ * has been entered this mark phase.  Returns true if it is newly seen (the
+ * caller should descend) and false for an already visited cycle/shared edge.
  *
- * LatRefs are malloc'd, not GC-managed, so they carry no mark bit; we track
- * visited cells in a per-phase pointer set.  Linear membership is consistent
- * with the collector's existing O(n) gc_mark_ptr object-list scan. */
-static bool gc_visit_ref(GC *gc, void *ref) {
+ * These nodes are malloc'd, not GC-managed, so they carry no mark bit; use a
+ * per-phase pointer set.  Linear membership is consistent with the collector's
+ * existing O(n) gc_mark_ptr object-list scan. */
+static bool gc_visit_edge(GC *gc, void *edge) {
     for (size_t i = 0; i < gc->mark_visited_count; i++)
-        if (gc->mark_visited[i] == ref) return false;
+        if (gc->mark_visited[i] == edge) return false;
     if (gc->mark_visited_count >= gc->mark_visited_cap) {
         gc->mark_visited_cap = gc->mark_visited_cap ? gc->mark_visited_cap * 2 : 16;
         gc->mark_visited = realloc(gc->mark_visited, gc->mark_visited_cap * sizeof(void *));
     }
-    gc->mark_visited[gc->mark_visited_count++] = ref;
+    gc->mark_visited[gc->mark_visited_count++] = edge;
     return true;
 }
+
+static void gc_mark_iterator_value(LatValue *value, void *ctx) { gc_mark_value((GC *)ctx, value); }
 
 /* Recursively mark a LatValue and everything reachable from it. */
 void gc_mark_value(GC *gc, LatValue *val) {
@@ -196,7 +198,7 @@ void gc_mark_value(GC *gc, LatValue *val) {
                 ObjUpvalue **upvals = (ObjUpvalue **)val->as.closure.captured_env;
                 for (uint32_t i = 0; i < val->as.closure.upvalue_count; i++) {
                     ObjUpvalue *uv = upvals[i];
-                    if (!uv || !gc_visit_ref(gc, uv)) continue;
+                    if (!uv || !gc_visit_edge(gc, uv)) continue;
                     gc_mark_value(gc, &uv->closed);
                     if (uv->location && uv->location != &uv->closed) gc_mark_value(gc, uv->location);
                 }
@@ -254,7 +256,12 @@ void gc_mark_value(GC *gc, LatValue *val) {
              * reference cycles: descend only the first time we see a given
              * cell this mark phase (e.g. `let r = Ref::new(nil); r.set(r)`
              * would otherwise recurse forever and overflow the C stack). */
-            if (val->as.ref.ref && gc_visit_ref(gc, val->as.ref.ref)) gc_mark_value(gc, &val->as.ref.ref->value);
+            if (val->as.ref.ref && gc_visit_edge(gc, val->as.ref.ref)) gc_mark_value(gc, &val->as.ref.ref->value);
+            break;
+
+        case VAL_ITERATOR:
+            if (val->as.iterator.state && gc_visit_edge(gc, val->as.iterator.state))
+                iter_trace_values(val, gc_mark_iterator_value, gc);
             break;
 
         default:
@@ -461,7 +468,7 @@ static void gc_trace_one(GC *gc) {
                 ObjUpvalue **upvals = (ObjUpvalue **)val->as.closure.captured_env;
                 for (uint32_t i = 0; i < val->as.closure.upvalue_count; i++) {
                     ObjUpvalue *uv = upvals[i];
-                    if (!uv || !gc_visit_ref(gc, uv)) continue;
+                    if (!uv || !gc_visit_edge(gc, uv)) continue;
                     gc_gray_push_value(gc, &uv->closed);
                     if (uv->location && uv->location != &uv->closed) gc_gray_push_value(gc, uv->location);
                 }
@@ -507,7 +514,12 @@ static void gc_trace_one(GC *gc) {
             /* Same cycle guard as gc_mark_value: a self-referential cell would
              * otherwise re-enqueue itself forever and the mark phase would
              * never drain (livelock). */
-            if (val->as.ref.ref && gc_visit_ref(gc, val->as.ref.ref)) gc_gray_push_value(gc, &val->as.ref.ref->value);
+            if (val->as.ref.ref && gc_visit_edge(gc, val->as.ref.ref)) gc_gray_push_value(gc, &val->as.ref.ref->value);
+            break;
+
+        case VAL_ITERATOR:
+            if (val->as.iterator.state && gc_visit_edge(gc, val->as.iterator.state))
+                iter_trace_values(val, gc_gray_env_value, gc);
             break;
 
         default: break;
@@ -528,7 +540,7 @@ void gc_incremental_step(GC *gc, void *vm_ptr) {
             for (GCObject *obj = gc->all_objects; obj; obj = obj->next) obj->marked = false;
             gc->gray_count = 0;
             gc->roots_rescanned = false;
-            gc_visited_reset(gc); /* fresh Ref cycle guard for this cycle */
+            gc_visited_reset(gc); /* fresh graph-node guard for this cycle */
             gc->phase = GC_PHASE_MARK_ROOTS;
             /* fall through */
 
@@ -548,7 +560,7 @@ void gc_incremental_step(GC *gc, void *vm_ptr) {
                     /* Re-scan roots to catch any mutations during marking.
                      * No write barriers — this conservative re-scan ensures
                      * correctness by re-discovering all live roots.  Clear the
-                     * Ref cycle guard first so the re-scan re-traverses cells
+                     * graph-node guard first so the re-scan re-traverses nodes
                      * whose contents mutated during the first pass. */
                     gc->roots_rescanned = true;
                     gc_visited_reset(gc);
@@ -605,7 +617,7 @@ void gc_collect(GC *gc, void *vm_ptr) {
 
     /* 1. Clear all marks from previous cycle */
     for (GCObject *obj = gc->all_objects; obj; obj = obj->next) obj->marked = false;
-    gc_visited_reset(gc); /* fresh Ref cycle guard for this mark phase */
+    gc_visited_reset(gc); /* fresh graph-node guard for this mark phase */
 
     /* 2. Mark phase: traverse all roots */
     gc_mark_roots(gc, vm);

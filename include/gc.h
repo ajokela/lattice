@@ -56,11 +56,10 @@ typedef struct {
     size_t mark_budget;     /* max gray values to trace per step (default 64) */
     size_t sweep_budget;    /* max objects to sweep per step (default 128) */
     bool roots_rescanned;   /* whether post-mark root re-scan has been done */
-    /* Cycle guard (LAT-487): LatRef cells already entered during the current
-     * mark phase.  Refs are the only shared-mutable cells that can form heap
-     * cycles (e.g. `let r = Ref::new(nil); r.set(r)`) and they are malloc'd
-     * (no mark bit of their own), so without this set the mark traversal
-     * recurses / livelocks forever.  See gc_visit_ref / gc_visited_reset. */
+    /* Malloc-backed graph nodes already entered during the current mark phase.
+     * Refs can form cycles, while shared upvalues and iterator protocol states
+     * can form DAGs.  None carries a GC mark bit, so this identity set prevents
+     * recursive/livelocked or exponential traversal. */
     void **mark_visited;
     size_t mark_visited_count;
     size_t mark_visited_cap;

@@ -125,6 +125,13 @@ LatValue iter_zip(LatValue left, LatValue right);
 /* Create iterator from a channel (blocks on recv, done when channel closed+empty) */
 LatValue iter_from_channel(LatChannel *ch);
 
+/* Visit every LatValue retained by an iterator's opaque state.  Collectors
+ * use this to trace values that are reachable only through the iterator
+ * protocol wrapper (array elements, repeat values, closures, nested
+ * iterators, and the zip pushback slot). */
+typedef void (*IterValueVisitor)(LatValue *value, void *ctx);
+void iter_trace_values(LatValue *iter, IterValueVisitor visit, void *ctx);
+
 /* ── Eager consumers ── */
 
 /* Collect all remaining values into an array */

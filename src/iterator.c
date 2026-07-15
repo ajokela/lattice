@@ -453,6 +453,54 @@ LatValue iter_from_channel(LatChannel *ch) {
     return iter_with_protocol(iter_channel_next, s, iter_channel_free);
 }
 
+/* Iterator state is intentionally opaque to LatValue, but several iterator
+ * implementations retain LatValues allocated through the active runtime heap.
+ * Make those edges explicit to both collectors without growing LatValue or
+ * teaching the collectors about every private state layout. */
+void iter_trace_values(LatValue *iter, IterValueVisitor visit, void *ctx) {
+    if (!iter || iter->type != VAL_ITERATOR || !visit || iter->as.iterator.next_fn != iter_protocol_next ||
+        !iter->as.iterator.state)
+        return;
+
+    IterProtocolState *protocol = (IterProtocolState *)iter->as.iterator.state;
+    if (protocol->has_buffered) visit(&protocol->buffered, ctx);
+
+    if (protocol->next_fn == iter_array_next) {
+        IterArrayState *state = (IterArrayState *)protocol->state;
+        for (size_t i = 0; state && i < state->len; i++) visit(&state->elems[i], ctx);
+    } else if (protocol->next_fn == iter_repeat_next) {
+        IterRepeatState *state = (IterRepeatState *)protocol->state;
+        if (state) visit(&state->value, ctx);
+    } else if (protocol->next_fn == iter_map_transform_next) {
+        IterMapTransformState *state = (IterMapTransformState *)protocol->state;
+        if (state) {
+            visit(&state->inner, ctx);
+            visit(&state->closure, ctx);
+        }
+    } else if (protocol->next_fn == iter_filter_next) {
+        IterFilterState *state = (IterFilterState *)protocol->state;
+        if (state) {
+            visit(&state->inner, ctx);
+            visit(&state->closure, ctx);
+        }
+    } else if (protocol->next_fn == iter_take_next) {
+        IterTakeState *state = (IterTakeState *)protocol->state;
+        if (state) visit(&state->inner, ctx);
+    } else if (protocol->next_fn == iter_skip_next) {
+        IterSkipState *state = (IterSkipState *)protocol->state;
+        if (state) visit(&state->inner, ctx);
+    } else if (protocol->next_fn == iter_enumerate_next) {
+        IterEnumerateState *state = (IterEnumerateState *)protocol->state;
+        if (state) visit(&state->inner, ctx);
+    } else if (protocol->next_fn == iter_zip_next) {
+        IterZipState *state = (IterZipState *)protocol->state;
+        if (state) {
+            visit(&state->left, ctx);
+            visit(&state->right, ctx);
+        }
+    }
+}
+
 /* ── Eager consumers ── */
 
 LatValue iter_collect(LatValue *iter) {
