@@ -34,19 +34,25 @@ fn assert_clean_exit(label: String, result: Map) {
         label + " wrote stderr: " + result.get("stderr"))
 }
 
+fn normalize_output(output: String) -> String {
+    return output.replace("\r\n", "\n")
+}
+
 fn has_result_line(output: String, value: String) -> Bool {
-    return output.contains("\n" + value + "\n") ||
-        output.contains("lattice> " + value + "\n")
+    let normalized = normalize_output(output)
+    return normalized.contains("\n" + value + "\n") ||
+        normalized.contains("lattice> " + value + "\n")
 }
 
 fn check_backend(label: String, backend: String) {
     let eof = run_repl(backend, nil)
     assert_clean_exit(label + " immediate EOF", eof)
-    assert(eof.get("stdout").len() < 1024,
+    let eof_output = normalize_output(eof.get("stdout"))
+    assert(eof_output.len() < 1024,
         label + " immediate EOF produced excessive output")
-    assert(eof.get("stdout").count("Lattice v") == 1,
+    assert(eof_output.count("Lattice v") == 1,
         label + " immediate EOF did not execute exactly one REPL session")
-    assert(!eof.get("stdout").contains("\nnil\n"),
+    assert(!eof_output.contains("\nnil\n"),
         label + " printed nil at EOF")
 
     let error_eof = run_repl(backend, "1 / 0\n")
@@ -75,6 +81,8 @@ fn check_backend(label: String, backend: String) {
 }
 
 fn main() {
+    assert(has_result_line("lattice> 5\r\n", "5"),
+        "result-line matching must accept Windows CRLF output")
     check_backend("stack-vm", "")
     check_backend("tree-walk", "--tree-walk")
     check_backend("regvm", "--regvm")
