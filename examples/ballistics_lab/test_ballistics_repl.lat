@@ -1,0 +1,371 @@
+// MBA-1312 hermetic end-to-end transcripts for the self-hosted laboratory.
+//
+// Every case drives a real clat child over stdin. The child in turn invokes
+// the checked fake solve-json engine for solve coverage, so neither a locally
+// installed ballistics binary nor a shell is part of this test boundary.
+
+import "examples/ballistics_lab/repl_support" as repl_support
+
+let APP = "examples/ballistics_lab/ballistics-repl.lat"
+let FAKE_ENGINE = "examples/ballistics_lab/fixtures/fake_solve_json_engine.lat"
+let MAX_STDOUT_BYTES = 262144
+
+fn unit_value() {
+    let ignored = 1
+}
+
+fn executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn child_limits() -> Map {
+    let options = Map::new()
+    options.set("timeout_ms", 30000)
+    options.set("max_stdout_bytes", MAX_STDOUT_BYTES)
+    options.set("max_stderr_bytes", 65536)
+    return options
+}
+
+fn app_args(backend: String, scenario: String) -> [String] {
+    flux arguments = []
+    if backend != "" {
+        arguments.push(backend)
+    }
+    arguments.push(APP)
+    arguments.push(executable())
+    arguments.push(FAKE_ENGINE)
+    arguments.push(scenario)
+    return arguments
+}
+
+fn run_app(backend: String, scenario: String, input_text: any) -> Map {
+    return exec_argv(
+    executable(),
+    app_args(backend, scenario),
+    input_text,
+    child_limits()
+    )
+}
+
+fn normalize_output(output: String) -> String {
+    return output.replace("\r", "")
+}
+
+fn assert_clean_exit(label: String, result: Map) {
+    let stdout = normalize_output(result.get("stdout"))
+    assert(
+    result.get("exit_code") == 0,
+    label + " exited with " + to_string(result.get("exit_code")) +
+    "; stdout: " + stdout + "; stderr: " + result.get("stderr")
+    )
+    assert(
+    result.get("stderr") == "",
+    label + " wrote stderr: " + result.get("stderr")
+    )
+    assert(
+    len(stdout) < MAX_STDOUT_BYTES,
+    label + " reached the bounded stdout limit"
+    )
+}
+
+fn has_line(output: String, value: String) -> Bool {
+    let normalized = normalize_output(output)
+    return normalized == value ||
+    normalized.starts_with(value + "\n") ||
+    normalized.ends_with("\n" + value) ||
+    normalized.contains("\n" + value + "\n")
+}
+
+fn assert_output_contains(label: String, output: String, expected: String) {
+    assert(
+    output.contains(expected),
+    label + " missing '" + expected + "': " + output
+    )
+}
+
+fn assert_in_order(label: String, output: String, expected: Array) {
+    flux remaining = normalize_output(output)
+    for value in expected {
+        let position = remaining.index_of(value)
+        assert(
+        position >= 0,
+        label + " missing ordered fragment '" + value + "': " + output
+        )
+        remaining = remaining.substring(position + len(value), len(remaining))
+    }
+}
+
+fn quoted_argument(value: String) -> String {
+    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+}
+
+fn success_transcript(saved_path: String, shell_marker: String) -> String {
+    let source_shaped_path = "assert(false, 'executed')"
+    let shell_shaped_path = "$(touch " + shell_marker + ")"
+    return [
+        "",
+        ":help",
+        "struct_name(lab)",
+        "struct_name(gr(175))",
+        "struct_name(standard_atmosphere())",
+        "struct_name(projectile(\"transcript projectile\", gr(175), inches(0.308), 0.243, \"G7\", inches(1.2)))",
+        "sessions.set_history_limit(lab, 3)",
+        "sessions.history_limit_of(lab)",
+        "let base = sessions.experiment_of(lab)",
+        "let alternate_projectile = projectile(\"alternate 175 gr\", gr(175), inches(0.308), 0.245, \"G7\", inches(1.24))",
+        "let alternate = experiment(\"alternate load\", alternate_projectile, base.rifle, base.atmosphere, base.winds, base.shot, base.solver)",
+        "sessions.replace_experiment(lab, alternate)",
+        "sessions.experiment_of(lab).name",
+        "   :show",
+        "sessions.replace_experiment(lab, base)",
+        "sessions.experiment_of(lab).name",
+        "let [destructured_left, destructured_right] = [20, 23]",
+        "destructured_left + destructured_right",
+        "import \"examples/ballistics_lab/units\" as extra_units",
+        "struct_name(extra_units.yd(1))",
+        "let persistent_value = 20",
+        "fn persistent_double(value: Int) -> Int {",
+        "    return value * 2",
+        "}",
+        "persistent_double(persistent_value + 1)",
+        "[1,",
+        "2,",
+        "3].sum()",
+        ":at 10 m",
+        "\"RECOVER_COMMAND_STATE\"",
+        ":at nope m",
+        "\"RECOVER_COMMAND_PARSE\"",
+        "let = 1",
+        "\"RECOVER_SOURCE_PARSE\"",
+        "1 / 0",
+        "\"RECOVER_RUNTIME\"",
+        ":solve",
+        ":at 25 m",
+        ":dope 10 50 10 m",
+        ":wind-card 10 50 10 m",
+        ":compare",
+        "\"RECOVER_COMPARE_STATE\"",
+        ":solve",
+        ":compare",
+        ":save " + quoted_argument(saved_path),
+        ":reset",
+        ":load " + quoted_argument(saved_path),
+        ":show",
+        ":load " + quoted_argument(source_shaped_path),
+        "\"RECOVER_SOURCE_SHAPED_PATH\"",
+        ":load " + quoted_argument(shell_shaped_path),
+        "\"RECOVER_SHELL_SHAPED_PATH\"",
+        ":solve;quit",
+        "\"RECOVER_UNKNOWN_COMMAND\"",
+        "persistent_double(persistent_value + 21)",
+        ":quit"
+    ].join("\n") + "\n"
+}
+
+fn check_immediate_eof(label: String, backend: String) {
+    let result = run_app(backend, "success", nil)
+    assert_clean_exit(label + " immediate EOF", result)
+    let output = normalize_output(result.get("stdout"))
+    assert(
+    len(output) < 4096,
+    label + " immediate EOF produced excessive output: " + output
+    )
+    assert(
+    output.count("Ballistics laboratory — Lattice v") == 1,
+    label + " immediate EOF did not run exactly one session: " + output
+    )
+    assert_output_contains(label + " immediate EOF", output, "Engine: " + executable())
+    assert(!has_line(output, "nil"), label + " printed nil at EOF: " + output)
+    assert(!has_line(output, "()"), label + " printed Unit at EOF: " + output)
+}
+
+fn check_empty_and_incomplete_input(label: String, backend: String) {
+    let empty = run_app(backend, "success", "\n:quit\n")
+    assert_clean_exit(label + " empty input", empty)
+    let empty_output = normalize_output(empty.get("stdout"))
+    assert(empty_output.count("Quit requested.") == 1,
+    label + " empty line disrupted quit: " + empty_output)
+    assert(!empty_output.contains("code: evaluation_error"),
+    label + " evaluated an empty line: " + empty_output)
+
+    let incomplete = run_app(backend, "success", "let unfinished = [\n")
+    assert_clean_exit(label + " incomplete EOF", incomplete)
+    let incomplete_output = normalize_output(incomplete.get("stdout"))
+    assert(incomplete_output.count("Ballistics laboratory — Lattice v") == 1,
+    label + " incomplete EOF did not terminate once: " + incomplete_output)
+    assert(!incomplete_output.contains("code: evaluation_error"),
+    label + " evaluated an incomplete EOF buffer: " + incomplete_output)
+    assert(!has_line(incomplete_output, "nil"),
+    label + " printed nil for incomplete EOF: " + incomplete_output)
+}
+
+fn check_success_workflow(label: String, backend: String) {
+    let saved_seed = tempfile()
+    delete_file(saved_seed)
+    let saved_path = saved_seed + " quoted experiment.json"
+    let shell_marker = tempfile()
+    delete_file(shell_marker)
+
+    let result = run_app(
+    backend,
+    "success",
+    success_transcript(saved_path, shell_marker)
+    )
+
+    // Observe and clean side effects before assertions so a later diagnostic
+    // cannot leave transcript files behind.
+    let saved_exists = file_exists(saved_path)
+    if saved_exists {
+        delete_file(saved_path)
+    }
+    let shell_marker_exists = file_exists(shell_marker)
+    if shell_marker_exists {
+        delete_file(shell_marker)
+    }
+
+    assert_clean_exit(label + " success workflow", result)
+    let output = normalize_output(result.get("stdout"))
+    assert(saved_exists, label + " :save did not create its literal path: " + output)
+    assert(!shell_marker_exists,
+    label + " executed shell-shaped command text: " + output)
+    assert(output.count("Ballistics laboratory — Lattice v") == 1,
+    label + " workflow ran multiple sessions: " + output)
+    assert_output_contains(label, output, "Type :help for commands or enter Lattice. Ctrl-D to exit.")
+    assert_output_contains(label, output, "Commands:")
+    assert_output_contains(label, output, "Ballistics laboratory session")
+    // Ordinary public session mutations and colon commands must observe the
+    // same top-level Ref-backed laboratory.
+    assert_output_contains(label, output, "history          : 0/3")
+    assert_output_contains(label, output, "active experiment: alternate load")
+    assert_output_contains(label, output, "Experiment: alternate load")
+    assert_output_contains(label, output, "projectile           : alternate 175 gr")
+    assert_output_contains(label, output, "Observation")
+    assert_output_contains(label, output, "DOPE:")
+    assert_output_contains(label, output, "Wind card")
+    assert_output_contains(label, output, "Trajectory comparison")
+    assert_output_contains(label, output, "Saved experiment to " + saved_path)
+    assert_output_contains(label, output, "Session run state reset.")
+    assert_output_contains(label, output, "Experiment: 175 gr match at 1,000 yards")
+    assert(output.count("Run: 175 gr match at 1,000 yards") == 2,
+    label + " did not complete exactly two solves: " + output)
+    assert(output.count("code: command_state_error") == 2,
+    label + " lost command-state recovery coverage: " + output)
+    assert(output.count("code: command_argument") == 1,
+    label + " lost command parse recovery coverage: " + output)
+    assert(output.count("code: evaluation_error") == 2,
+    label + " lost source parse/runtime recovery coverage: " + output)
+    assert(output.count("code: command_execution_error") == 2,
+    label + " did not reject both inert load paths: " + output)
+    assert(output.count("code: unknown_command") == 1,
+    label + " did not reject generated command text: " + output)
+    assert(has_line(output, "LabSession"), label + " did not expose top-level lab")
+    assert(has_line(output, "Mass"), label + " did not expose unit constructors")
+    assert(has_line(output, "Atmosphere"), label + " did not expose atmosphere constructor")
+    assert(has_line(output, "Projectile"), label + " did not expose domain constructors")
+    assert(has_line(output, "3"), label + " source session mutation was not visible")
+    assert(has_line(output, "alternate load"),
+    label + " alternate experiment mutation was not visible")
+    assert(has_line(output, "175 gr match at 1,000 yards"),
+    label + " base experiment restoration was not visible")
+    assert(has_line(output, "43"), label + " destructured bindings did not persist")
+    assert(has_line(output, "Distance"), label + " imported module alias did not persist")
+    assert(has_line(output, "42"), label + " persistent function/variable failed")
+    assert(has_line(output, "6"), label + " multiline expression did not display")
+    assert(has_line(output, "82"), label + " declarations did not persist through commands")
+    assert(!has_line(output, "nil"), label + " printed nil: " + output)
+    assert(!has_line(output, "()"), label + " printed Unit: " + output)
+
+    assert_in_order(label, output, [
+        "Commands:",
+        "LabSession\n",
+        "Mass\n",
+        "Atmosphere\n",
+        "Projectile\n",
+        "3\n",
+        "alternate load\n",
+        "Ballistics laboratory session",
+        "active experiment: alternate load",
+        "Experiment: alternate load",
+        "projectile           : alternate 175 gr",
+        "175 gr match at 1,000 yards\n",
+        "43\n",
+        "Distance\n",
+        "42\n",
+        "6\n",
+        "code: command_state_error",
+        "RECOVER_COMMAND_STATE",
+        "code: command_argument",
+        "RECOVER_COMMAND_PARSE",
+        "code: evaluation_error",
+        "RECOVER_SOURCE_PARSE",
+        "code: evaluation_error",
+        "RECOVER_RUNTIME",
+        "Run: 175 gr match at 1,000 yards",
+        "Observation",
+        "DOPE:",
+        "Wind card",
+        "code: command_state_error",
+        "RECOVER_COMPARE_STATE",
+        "Run: 175 gr match at 1,000 yards",
+        "Trajectory comparison",
+        "Saved experiment to " + saved_path,
+        "Session run state reset.",
+        "Experiment: 175 gr match at 1,000 yards",
+        "code: command_execution_error",
+        "RECOVER_SOURCE_SHAPED_PATH",
+        "code: command_execution_error",
+        "RECOVER_SHELL_SHAPED_PATH",
+        "code: unknown_command",
+        "RECOVER_UNKNOWN_COMMAND",
+        "82\n",
+        "Quit requested."
+    ])
+}
+
+fn check_backend_failure_recovery(label: String, backend: String) {
+    let result = run_app(
+    backend,
+    "validation-error",
+    ":solve\n\"RECOVER_BACKEND_FAILURE\"\n6 * 7\n:quit\n"
+    )
+    assert_clean_exit(label + " backend failure", result)
+    let output = normalize_output(result.get("stdout"))
+    assert(output.count("code: invalid_value") == 1,
+    label + " did not render the backend error exactly once: " + output)
+    assert_output_contains(label, output, "path: $.projectile.mass_kg")
+    assert_output_contains(label, output, "exit code: 2")
+    assert(has_line(output, "42"),
+    label + " did not evaluate after backend failure: " + output)
+    assert_in_order(label, output, [
+        "code: invalid_value",
+        "RECOVER_BACKEND_FAILURE",
+        "42\n",
+        "Quit requested."
+    ])
+}
+
+fn check_backend(label: String, backend: String) {
+    check_immediate_eof(label, backend)
+    check_empty_and_incomplete_input(label, backend)
+    check_success_workflow(label, backend)
+    check_backend_failure_recovery(label, backend)
+    print(label + ": ballistics laboratory transcript passed")
+}
+
+fn main() {
+    assert(repl_support.is_eof_value(nil), "Nil must be recognized as EOF")
+    assert(repl_support.is_eof_value(unit_value()), "Unit must be recognized as legacy EOF")
+    assert(!repl_support.is_eof_value(""), "an empty input line is not EOF")
+    assert(!repl_support.is_eof_value(0), "an ordinary value is not EOF")
+
+    // Pin the checked fixture contract rather than inheriting a developer's
+    // ambient real-engine version requirement into nested children.
+    env_set("BALLISTICS_ENGINE_VERSION", "0.24.1")
+
+    check_backend("stack-vm", "")
+    check_backend("tree-walk", "--tree-walk")
+    check_backend("regvm", "--regvm")
+}

@@ -1,0 +1,147 @@
+// Real-engine transcript coverage for the self-hosted ballistics laboratory.
+//
+// Run from the repository root:
+//   ./clat examples/ballistics_lab/test_ballistics_repl_engine.lat \
+//       /absolute/path/to/ballistics [expected-version]
+//
+// Every child is launched with exec_argv(). Engine paths and command input are
+// never interpolated into source or a shell command.
+
+fn clat_executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn transcript_limits() -> Map {
+    let limits = Map::new()
+    // The REPL's process backend has its own 30-second solve bound. Leave
+    // startup, tree-walk interpretation, rendering, and teardown headroom.
+    limits.set("timeout_ms", 60000)
+    limits.set("max_stdout_bytes", 262144)
+    limits.set("max_stderr_bytes", 262144)
+    return limits
+}
+
+fn repl_argv(backend: String, engine: String) -> Array {
+    flux arguments = []
+    if backend != "" {
+        arguments.push(backend)
+    }
+    arguments.push("examples/ballistics_lab/ballistics-repl.lat")
+    arguments.push(engine)
+    return arguments
+}
+
+fn run_transcript(backend: String, engine: String, input_text: String) -> Map {
+    return exec_argv(
+    clat_executable(),
+    repl_argv(backend, engine),
+    input_text,
+    transcript_limits()
+    )
+}
+
+fn normalize_output(output: String) -> String {
+    return output.replace("\r", "")
+}
+
+fn assert_clean_exit(label: String, result: Map) -> String {
+    assert(
+    result.get("exit_code") == 0,
+    label + ": exited with " + to_string(result.get("exit_code"))
+    )
+    assert(
+    result.get("stderr") == "",
+    label + ": wrote stderr: " + result.get("stderr")
+    )
+    return normalize_output(result.get("stdout"))
+}
+
+fn assert_single_session(label: String, output: String, expected_prompts: Int) {
+    assert(
+    output.len() < 65536,
+    label + ": produced excessive transcript output"
+    )
+    assert(
+    output.count("Ballistics laboratory") == 1,
+    label + ": did not execute exactly one laboratory session: " + output
+    )
+    // input() suppresses prompts when stdin is a pipe on some platforms. If
+    // prompts are emitted, however, there must be exactly one per input read.
+    let prompt_count = output.count("ballistics> ")
+    assert(prompt_count == 0 || prompt_count == expected_prompts,
+    label + ": unexpected prompt count: " + output)
+    assert(
+    !output.contains("\nnil\n") && !output.contains("ballistics> nil"),
+    label + ": printed or repeatedly evaluated an EOF value: " + output
+    )
+}
+
+fn check_backend(
+label: String,
+backend: String,
+engine: String,
+expected_version: any
+) {
+    let workflow = run_transcript(
+    backend,
+    engine,
+    ":solve\n:at 300 yd\n:dope 100 300 100 yd\n"
+    )
+    let output = assert_clean_exit(label + " workflow EOF", workflow)
+    assert_single_session(label + " workflow EOF", output, 4)
+    assert(!output.contains("\nError\n"), label + ": command failed: " + output)
+    assert(output.contains("Run: 175 gr match at 1,000 yards"),
+    label + ": missing solve output: " + output)
+    assert(output.contains("Observation"),
+    label + ": missing observation output: " + output)
+    assert(output.contains("distance") && output.contains("300.00 yd"),
+    label + ": missing 300 yd observation: " + output)
+    assert(output.contains("DOPE: 175 gr match at 1,000 yards"),
+    label + ": missing DOPE output: " + output)
+    assert(output.contains("100.00") && output.contains("200.00") && output.contains("300.00"),
+    label + ": missing requested DOPE rows: " + output)
+    if expected_version != nil {
+        assert(output.contains(expected_version),
+        label + ": missing expected engine version " + expected_version + ": " + output)
+    }
+
+    let quit = run_transcript(backend, engine, ":quit\n")
+    let quit_output = assert_clean_exit(label + " quit", quit)
+    assert_single_session(label + " quit", quit_output, 1)
+    assert(quit_output.contains("Quit requested."),
+    label + ": :quit did not request a clean exit: " + quit_output)
+
+    print(label + ": real-engine ballistics REPL transcript passed")
+}
+
+fn main() {
+    let arguments = args()
+    assert(
+    len(arguments) == 2 || len(arguments) == 3,
+    "usage: test_ballistics_repl_engine.lat /path/to/ballistics [expected-version]"
+    )
+    let engine = arguments[1]
+    assert(len(engine.trim()) > 0, "engine path must not be empty")
+
+    flux expected_version = nil
+    if len(arguments) == 3 && len(arguments[2].trim()) > 0 {
+        expected_version = arguments[2]
+    }
+    // ballistics-repl.lat intentionally obtains its version pin from the
+    // environment; exec_argv children inherit this process environment.
+    env_set(
+    "BALLISTICS_ENGINE_VERSION",
+    if expected_version == nil {
+        ""
+    } else {
+        expected_version
+    }
+    )
+
+    check_backend("stack-vm", "", engine, expected_version)
+    check_backend("tree-walk", "--tree-walk", engine, expected_version)
+    check_backend("regvm", "--regvm", engine, expected_version)
+}

@@ -419,7 +419,7 @@ test-tree-walk: $(TEST_TARGET) $(LSP_TARGET)
 test-regvm: $(TEST_TARGET) $(LSP_TARGET)
 	LATTICE_EXT_ALLOW_CWD=1 ./$(BUILD_DIR)/test_runner --backend regvm
 
-BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat test_analysis.lat test_analysis_export.lat test_session.lat test_persistence.lat test_resolved_request_v1.lat test_verified_artifacts.lat test_render.lat test_command_parser.lat test_commands.lat reference_experiment.lat
+BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat test_analysis.lat test_analysis_export.lat test_session.lat test_persistence.lat test_resolved_request_v1.lat test_verified_artifacts.lat test_render.lat test_command_parser.lat test_commands.lat test_repl_support.lat reference_experiment.lat
 
 test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE)
 	@for backend in "" "--tree-walk" "--regvm"; do \
@@ -429,6 +429,8 @@ test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE)
 			./$(TARGET) $$backend examples/ballistics_lab/$$test_file || exit 1; \
 		done; \
 	done
+	@echo "=== ballistics_lab REPL transcripts ==="
+	./$(TARGET) examples/ballistics_lab/test_ballistics_repl.lat
 
 # Cross-repository smoke. The ordinary target remains hermetic through its
 # checked fake child; callers opt into a real engine with an explicit path.
@@ -443,6 +445,9 @@ test-ballistics-lab-engine: $(TARGET)
 		./$(TARGET) $$backend examples/ballistics_lab/test_engine_backend.lat \
 			"$${BALLISTICS_ENGINE}" "$${BALLISTICS_ENGINE_VERSION:-}" || exit 1; \
 	done
+	@echo "=== ballistics_lab real-engine REPL transcripts ==="
+	./$(TARGET) examples/ballistics_lab/test_ballistics_repl_engine.lat \
+		"$${BALLISTICS_ENGINE}" "$${BALLISTICS_ENGINE_VERSION:-}"
 
 test-repl: $(TARGET)
 	./$(TARGET) tests/repl_integration.lat

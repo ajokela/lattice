@@ -1,0 +1,13 @@
+import "examples/ballistics_lab/repl_support" as repl_support
+
+fn unit_value() {
+    let ignored = 1
+}
+
+fn main() {
+    assert(repl_support.is_eof_value(nil), "Nil must be recognized as EOF")
+    assert(repl_support.is_eof_value(unit_value()), "Unit must be recognized as legacy EOF")
+    assert(!repl_support.is_eof_value(""), "an empty input line is not EOF")
+    assert(!repl_support.is_eof_value(0), "an ordinary value is not EOF")
+    print("ballistics_lab REPL support: all tests passed")
+}

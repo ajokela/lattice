@@ -11432,6 +11432,23 @@ static void remove_binding_at(Env *env, size_t scope_idx, const char *name) {
     lat_map_remove(&env->scopes[scope_idx], name);
 }
 
+static bool publishes_persistent_root(const Evaluator *ev) {
+    return ev->lat_eval_scope > 0 && ev->env->count == ev->lat_eval_scope;
+}
+
+/* Dynamic top-level code (lat_eval/require) publishes bindings into the root
+ * environment. Imported-module results may carry region handles owned by the
+ * transient call graph, so materialize those handles before publication. */
+static void define_statement_binding(Evaluator *ev, const char *name, LatValue value) {
+    if (publishes_persistent_root(ev)) {
+        LatValue persistent = value_copy_out(&value);
+        value_free(&value);
+        env_define_at(ev->env, 0, name, persistent);
+    } else {
+        env_define(ev->env, name, value);
+    }
+}
+
 static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
     switch (stmt->tag) {
         case STMT_BINDING: {
@@ -11512,9 +11529,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
             stats_binding(&ev->stats);
             /* In lat_eval context, top-level bindings go to the root scope
              * so they persist across calls (needed for REPL) */
-            if (ev->lat_eval_scope > 0 && ev->env->count == ev->lat_eval_scope)
-                env_define_at(ev->env, 0, stmt->as.binding.name, vr.value);
-            else env_define(ev->env, stmt->as.binding.name, vr.value);
+            define_statement_binding(ev, stmt->as.binding.name, vr.value);
             return eval_ok(value_unit());
         }
 
@@ -11538,7 +11553,13 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         }
                     }
                 }
-                if (!env_set(ev->env, name, valr.value)) {
+                LatValue assigned = valr.value;
+                if (publishes_persistent_root(ev)) {
+                    assigned = value_copy_out(&valr.value);
+                    value_free(&valr.value);
+                }
+                if (!env_set(ev->env, name, assigned)) {
+                    value_free(&assigned);
                     char *err = NULL;
                     lat_asprintf(&err, "undefined variable '%s'", name);
                     return eval_err(err);
@@ -12253,7 +12274,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         freeze_to_region(ev, &elem);
                     }
                     stats_binding(&ev->stats);
-                    env_define(ev->env, stmt->as.destructure.names[i], elem);
+                    define_statement_binding(ev, stmt->as.destructure.names[i], elem);
                 }
 
                 /* Bind rest */
@@ -12275,7 +12296,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         freeze_to_region(ev, &rest_arr);
                     }
                     stats_binding(&ev->stats);
-                    env_define(ev->env, stmt->as.destructure.rest_name, rest_arr);
+                    define_statement_binding(ev, stmt->as.destructure.rest_name, rest_arr);
                 }
                 value_free(&vr.value);
 
@@ -12343,7 +12364,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         freeze_to_region(ev, &elem);
                     }
                     stats_binding(&ev->stats);
-                    env_define(ev->env, fname, elem);
+                    define_statement_binding(ev, fname, elem);
                 }
                 free(field_values);
                 value_free(&vr.value);
@@ -12387,7 +12408,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                         value_free(&module_map);
                         return eval_err(err);
                     }
-                    env_define(ev->env, name, value_deep_clone(exported));
+                    define_statement_binding(ev, name, value_deep_clone(exported));
                 }
                 value_free(&module_map);
                 return eval_ok(value_unit());
@@ -12405,7 +12426,7 @@ static EvalResult eval_stmt(Evaluator *ev, const Stmt *stmt) {
                 lat_map_set(&ev->module_paths, alias, &path_copy);
             }
 
-            env_define(ev->env, alias, module_map);
+            define_statement_binding(ev, alias, module_map);
             return eval_ok(value_unit());
         }
     }
@@ -12488,8 +12509,12 @@ static EvalResult eval_block_stmts(Evaluator *ev, Stmt **stmts, size_t count) {
  * also serves an interior slot reached by nav_ref_interior. The interior
  * caller passes handle_phase==VTAG_FLUID (it rejects a frozen handle and a
  * frozen interior slot itself, before the lock / before this call). */
+static LatValue detach_ref_store(const LatValue *value, bool copy_ref_store) {
+    return copy_ref_store ? value_detach_copy(value) : value_detach(value);
+}
+
 static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, const char *method, LatValue *args,
-                                      size_t arg_count) {
+                                      size_t arg_count, bool copy_ref_store) {
     /* Ref-specific methods */
     /// @method Ref.get() -> Any
     /// @category Ref Methods
@@ -12511,8 +12536,10 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
         /* STORE direction (Stage 5 review): the cell outlives a spawned
          * writer, so the stored copy must be detached (malloc-backed) — a
          * clone on the writer's TLS heap is freed at thread join and
-         * dangles inside the cell. */
-        *inner = value_detach(&args[0]);
+         * dangles inside the cell. A dynamic top-level evaluator also outlives
+         * its transient call graph; physically copy its shared-region nodes so
+         * the persistent Ref does not adopt that graph's region handles. */
+        *inner = detach_ref_store(&args[0], copy_ref_store);
         return eval_ok(value_unit());
     }
     /// @method Ref.inner_type() -> String
@@ -12548,7 +12575,7 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
             LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, args[0].as.str_val);
             if (old) value_free(old);
             /* STORE direction (Stage 5 review): detach — see Ref.set above. */
-            LatValue cloned = value_detach(&args[1]);
+            LatValue cloned = detach_ref_store(&args[1], copy_ref_store);
             lat_map_set(inner->as.map.map, args[0].as.str_val, &cloned);
             return eval_ok(value_unit());
         }
@@ -12562,7 +12589,7 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
             LatMap *other = args[0].as.map.map;
             for (size_t i = 0; i < other->cap; i++) {
                 if (other->entries[i].state == MAP_OCCUPIED) {
-                    LatValue cloned = value_detach((LatValue *)other->entries[i].value);
+                    LatValue cloned = detach_ref_store((LatValue *)other->entries[i].value, copy_ref_store);
                     LatValue *old = (LatValue *)lat_map_get(inner->as.map.map, other->entries[i].key);
                     if (old) value_free(old);
                     lat_map_set(inner->as.map.map, other->entries[i].key, &cloned);
@@ -12664,7 +12691,7 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
                 inner->as.array.cap = old_cap < 4 ? 4 : old_cap * 2;
                 inner->as.array.elems = realloc(inner->as.array.elems, inner->as.array.cap * sizeof(LatValue));
             }
-            inner->as.array.elems[inner->as.array.len++] = value_detach(&args[0]);
+            inner->as.array.elems[inner->as.array.len++] = detach_ref_store(&args[0], copy_ref_store);
             return eval_ok(value_unit());
         }
         if (strcmp(method, "pop") == 0 && arg_count == 0) {
@@ -12687,7 +12714,7 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
             }
             memmove(&inner->as.array.elems[(size_t)idx + 1], &inner->as.array.elems[(size_t)idx],
                     (inner->as.array.len - (size_t)idx) * sizeof(LatValue));
-            inner->as.array.elems[(size_t)idx] = value_detach(&args[1]);
+            inner->as.array.elems[(size_t)idx] = detach_ref_store(&args[1], copy_ref_store);
             inner->as.array.len++;
             return eval_ok(value_unit());
         }
@@ -12835,7 +12862,7 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
         if (strcmp(method, "add") == 0 && arg_count == 1) {
             if (handle_phase == VTAG_CRYSTAL) return eval_err(strdup("cannot set on a frozen Ref"));
             value_unshare_detached(inner);
-            LatValue stored = value_detach(&args[0]);
+            LatValue stored = detach_ref_store(&args[0], copy_ref_store);
             value_set_insert(inner, &stored);
             value_free(&stored);
             return eval_ok(value_unit());
@@ -12863,8 +12890,9 @@ static EvalResult mutate_inner_locked(LatValue *inner, PhaseTag handle_phase, co
 
 /* Top-level Ref method dispatch: byte-identical to the pre-LAT-539 inline body
  * (the inner is the cell's direct value, the handle phase is the Ref's). */
-static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatValue *args, size_t arg_count) {
-    return mutate_inner_locked(&obj.as.ref.ref->value, obj.phase, method, args, arg_count);
+static EvalResult eval_ref_method_locked(LatValue obj, const char *method, LatValue *args, size_t arg_count,
+                                         bool copy_ref_store) {
+    return mutate_inner_locked(&obj.as.ref.ref->value, obj.phase, method, args, arg_count, copy_ref_store);
 }
 
 /* LAT-542: serialize an in-place mutator called through a Ref interior index
@@ -13015,7 +13043,7 @@ static bool eval_nested_ref_method(Evaluator *ev, const Expr *expr, EvalResult *
             res = eval_err(strdup(recv->phase == VTAG_CRYSTAL ? "cannot modify a frozen value"
                                                               : "cannot modify a sublimated value"));
         } else {
-            res = mutate_inner_locked(recv, VTAG_FLUID, method, margs, argc);
+            res = mutate_inner_locked(recv, VTAG_FLUID, method, margs, argc, ev->lat_eval_scope > 0);
         }
     }
 
@@ -15422,7 +15450,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     if (obj.type == VAL_REF) {
         LatRef *cell = obj.as.ref.ref;
         ref_lock(cell); /* LAT-450: see eval_ref_method_locked */
-        EvalResult rr = eval_ref_method_locked(obj, method, args, arg_count);
+        EvalResult rr = eval_ref_method_locked(obj, method, args, arg_count, ev->lat_eval_scope > 0);
         ref_unlock(cell);
         return rr;
     }

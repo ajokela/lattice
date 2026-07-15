@@ -1258,6 +1258,45 @@ static void test_lat_eval_mutable_var(void) {
                   "2");
 }
 
+/* Persistent tree-walk REPL cells must not retain region handles owned by a
+ * transient lat_eval call graph. Exercise both root binding paths plus Ref
+ * get/set, then prove evaluator teardown releases every region it created. */
+static void test_lat_eval_persistent_region_ownership(void) {
+    if (test_backend != BACKEND_TREE_WALK) return;
+
+    const char *share_crystals = getenv("LATTICE_SHARE_CRYSTALS");
+    if (value_clone_force_copy_active() || (share_crystals && share_crystals[0] == '0' && share_crystals[1] == '\0')) {
+        return;
+    }
+
+    size_t live_regions = crystal_region_live_count();
+    size_t created_regions = crystal_region_created_total();
+    ASSERT_OUTPUT("fn frozen_pair(seed: Int) {\n"
+                  "    return freeze([[seed, seed + 1], [seed + 2, seed + 3]])\n"
+                  "}\n"
+                  "let holder = Ref::new(frozen_pair(0))\n"
+                  "let map_holder = Ref::new(Map::new())\n"
+                  "let array_holder = Ref::new([])\n"
+                  "fn main() {\n"
+                  "    lat_eval(\"flux persisted = frozen_pair(10)\")\n"
+                  "    print(lat_eval(\"persisted[0][1]\"))\n"
+                  "    lat_eval(\"persisted = frozen_pair(20)\")\n"
+                  "    print(lat_eval(\"persisted[1][0]\"))\n"
+                  "    lat_eval(\"let [left, right] = persisted[0]\")\n"
+                  "    print(lat_eval(\"left + right\"))\n"
+                  "    lat_eval(\"holder.set(frozen_pair(30))\")\n"
+                  "    lat_eval(\"let from_ref = holder.get()\")\n"
+                  "    print(lat_eval(\"from_ref[1][1]\"))\n"
+                  "    lat_eval(\"map_holder.set(\\\"pair\\\", frozen_pair(40))\")\n"
+                  "    print(lat_eval(\"map_holder.get(\\\"pair\\\")[0][0]\"))\n"
+                  "    lat_eval(\"array_holder.push(frozen_pair(50))\")\n"
+                  "    print(lat_eval(\"array_holder.get()[0][1][1]\"))\n"
+                  "}\n",
+                  "11\n22\n41\n33\n40\n53");
+    ASSERT(crystal_region_created_total() > created_regions);
+    ASSERT(crystal_region_live_count() == live_regions);
+}
+
 static void test_lat_eval_error_recovery(void) {
     ASSERT_OUTPUT("fn main() {\n"
                   "    let message = try {\n"
@@ -14346,6 +14385,7 @@ void register_stdlib_tests(void) {
     register_test("test_lat_eval_fn_persistence", test_lat_eval_fn_persistence);
     register_test("test_lat_eval_struct_persistence", test_lat_eval_struct_persistence);
     register_test("test_lat_eval_mutable_var", test_lat_eval_mutable_var);
+    register_test("test_lat_eval_persistent_region_ownership", test_lat_eval_persistent_region_ownership);
     register_test("test_lat_eval_error_recovery", test_lat_eval_error_recovery);
     register_test("test_lat_eval_preserves_outer_defer", test_lat_eval_preserves_outer_defer);
     register_test("test_lat_eval_runs_inner_defer_on_error", test_lat_eval_runs_inner_defer_on_error);

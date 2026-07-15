@@ -1,0 +1,195 @@
+// Self-hosted interactive laboratory for the source-level ballistics modules.
+//
+// Run from the repository root:
+//   ./clat examples/ballistics_lab/ballistics-repl.lat [engine [engine-args...]]
+//
+// Ordinary input is evaluated as persistent Lattice source. A colon command is
+// dispatched only from a fresh prompt, directly from the input line; command
+// text is never translated into or evaluated as source.
+// Constructors are intentionally imported into the top-level environment so
+// lat_eval users can write concise experiments while retaining module aliases
+// for discoverable, explicit access.
+import {
+    m, km, yd, ft, inches,
+    mps, fps,
+    kg, grams, gr,
+    rad, deg, mil, moa,
+    kelvin, celsius, fahrenheit,
+    pa, hpa, inhg,
+    joules, foot_pounds,
+    wind_mps, mph, kph
+}
+from "examples/ballistics_lab/units"
+import {
+    projectile, rifle, atmosphere, standard_atmosphere,
+    wind, calm_wind, shot, solver_config, experiment,
+    observation, assumption, warning, trajectory_summary, trajectory,
+    laboratory_error
+}
+from "examples/ballistics_lab/domain"
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/session" as sessions
+import "examples/ballistics_lab/persistence" as persistence
+import "examples/ballistics_lab/render" as render
+import "examples/ballistics_lab/command_parser" as parser
+import "examples/ballistics_lab/commands" as commands
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/reference_experiment" as reference
+import "examples/ballistics_lab/repl_support" as repl_support
+import "examples/ballistics_lab/resolved_request_v1" as resolved_v1
+import "examples/ballistics_lab/verified_artifacts" as artifacts
+
+fn _nonempty_environment(name: String) -> any {
+    let value = env(name)
+    if typeof(value) == "String" && len(value.trim()) > 0 {
+        return value
+    }
+    return nil
+}
+
+fn _engine_executable() -> String {
+    let arguments = args()
+    if len(arguments) > 1 {
+        return arguments[1]
+    }
+    let configured = _nonempty_environment("BALLISTICS_ENGINE")
+    if configured != nil {
+        return configured
+    }
+    return "ballistics"
+}
+
+fn _engine_version() -> any {
+    return _nonempty_environment("BALLISTICS_ENGINE_VERSION")
+}
+
+fn _engine_backend(executable: String, expected_version: any) -> any {
+    let arguments = args()
+    if len(arguments) > 2 {
+        return process.process_backend_with_argv(
+        executable,
+        arguments.slice(2, len(arguments)),
+        expected_version
+        )
+    }
+    return process.process_backend(executable, expected_version)
+}
+
+// Top-level on purpose: lat_eval executes against this environment, so users
+// can inspect and mutate the same Ref-backed LabSession used by colon commands.
+let engine_executable = _engine_executable()
+let engine_version = _engine_version()
+let lab = sessions.new_session(
+reference.representative_experiment(),
+_engine_backend(engine_executable, engine_version)
+)
+
+fn _plain_banner_text(value: String) -> String {
+    return value
+    .replace("\\", "\\\\")
+    .replace("\r", "\\r")
+    .replace("\n", "\\n")
+    .replace("\t", "\\t")
+}
+
+fn _starts_command(line: String) -> Bool {
+    let trimmed = line.trim_start()
+    return len(trimmed) > 0 && trimmed.substring(0, 1) == ":"
+}
+
+fn _render_runtime_error(code: String, message: String) -> String {
+    return render.render_error(laboratory_error(code, message))
+}
+
+// Return true only when :quit requested termination. Every error is rendered
+// as data and contained here so the next prompt remains usable.
+fn _run_command(line: String) -> Bool {
+    let outcome = try {
+        commands.execute_command(lab, line)
+    } catch error {
+        print(_render_runtime_error("repl_command_error", error.message))
+        return false
+    }
+    if commands.command_failed(outcome) {
+        print(render.render_error(outcome))
+        return false
+    }
+    if !commands.command_succeeded(outcome) {
+        print(_render_runtime_error(
+        "repl_command_error",
+        "command dispatcher returned " + typeof(outcome)
+        ))
+        return false
+    }
+    if outcome.output != "" {
+        print(outcome.output)
+    }
+    return outcome.quit
+}
+
+fn main() {
+    print("Ballistics laboratory — Lattice v" + version())
+    print("Engine: " + _plain_banner_text(engine_executable))
+    print("Type :help for commands or enter Lattice. Ctrl-D to exit.")
+    print("")
+
+    flux buffer = ""
+    loop {
+        let prompt = if buffer == "" {
+            "ballistics> "
+        } else {
+            "       ...> "
+        }
+        flux line = input(prompt)
+
+        if repl_support.is_eof_value(line) {
+            print("")
+            break
+        }
+
+        // An exact empty line at a fresh prompt has no source to evaluate.
+        if buffer == "" && line == "" {
+            continue
+        }
+
+        // Commands are recognized only before ordinary source accumulation.
+        if buffer == "" && _starts_command(line) {
+            if _run_command(line) {
+                break
+            }
+            continue
+        }
+
+        if buffer != "" {
+            buffer = buffer + "\n"
+        }
+        buffer = buffer + line
+
+        // Release the input-owned line before entering the re-entrant
+        // evaluator. The accumulated buffer owns the source text now.
+        line = ""
+
+        if !is_complete(buffer) {
+            continue
+        }
+
+        // Keep lat_eval in the loop's owning scope. Top-level declarations are
+        // then installed in the persistent application environment rather than
+        // in a transient helper-call scope.
+        try {
+            let result = lat_eval(buffer)
+            if typeof(result) == "Struct" && struct_name(result) == "LaboratoryError" {
+                print(render.render_error(result))
+            } else if typeof(result) != "Unit" {
+                print(result)
+            }
+        } catch error {
+            print(_render_runtime_error("evaluation_error", error.message))
+        }
+        buffer = ""
+    }
+}

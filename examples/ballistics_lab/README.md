@@ -31,6 +31,7 @@ The modules are deliberately split at stable boundaries:
 - command_parser.lat parses the bounded colon-command grammar as inert data.
 - commands.lat dispatches parsed commands directly to the session, analysis,
   persistence, and rendering APIs without generating source or shell text.
+- repl_support.lat defines the pure Nil/legacy-Unit EOF compatibility check.
 - reference_experiment.lat is an executable construction example.
 
 The process backend is process-per-solve. It retains no engine handle, performs
@@ -296,6 +297,51 @@ They do not mutate the laboratory session. Rifle, projectile, atmosphere, and
 other experiment changes remain visible ordinary Lattice calls rather than a
 second `:set` language. Command input is capped at 4,096 bytes and 16 arguments;
 control characters and non-finite numeric arguments are rejected.
+
+## Self-hosted terminal REPL
+
+Start the laboratory directly with `clat`; no native extension or `--prelude`
+flag is required:
+
+    ./clat examples/ballistics_lab/ballistics-repl.lat \
+        /absolute/path/to/ballistics
+
+When the executable argument is omitted, the application uses a non-empty
+`BALLISTICS_ENGINE` environment value and otherwise the bare name
+`ballistics`. Set `BALLISTICS_ENGINE_VERSION` to require an exact engine
+version. The configured executable is not started until `:solve`.
+
+The initial `lab` contains the representative 175 gr experiment. Unit and
+domain constructors, along with the `units`, `domain`, `sessions`, `analysis`,
+`persistence`, `artifacts`, `render`, and `commands` module aliases, are in the
+evaluator prelude. Ordinary input is persistent Lattice, so an experiment can
+be inspected and replaced without a second configuration language:
+
+    ballistics> let base = sessions.experiment_of(lab)
+    ballistics> let alternate_projectile = projectile("alternate 175 gr", gr(175), inches(0.308), 0.245, "G7", inches(1.24))
+    ballistics> let alternate = experiment("alternate load", alternate_projectile, base.rifle, base.atmosphere, base.winds, base.shot, base.solver)
+    ballistics> sessions.replace_experiment(lab, alternate)
+
+Expressions, declarations, functions, and multiline blocks persist for later
+input. A reference workflow is:
+
+    ballistics> :solve
+    ballistics> :at 300 yd
+    ballistics> :dope 100 600 100 yd
+    ballistics> :wind-card 100 600 100 yd
+    ballistics> :save "alternate-load.json"
+    ballistics> :load "alternate-load.json"
+
+For a comparison, solve one experiment, replace the experiment through the
+source API, solve again, and run `:compare`; it compares the previous and
+current successful runs. Parse, evaluation, command, and engine failures are
+reported without ending the session, so corrected input can be entered next.
+Use `:quit` or Ctrl-D to exit.
+
+The v1 application deliberately uses the portable `input()` loop. It does not
+yet provide native line editing, command history, or completion. It is not
+available in browser/WASM builds because terminal input and direct process
+execution are unsupported there.
 
 ## Resource bounds
 
