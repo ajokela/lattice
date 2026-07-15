@@ -1,0 +1,524 @@
+// Pure, deterministic presentation and serialization for AnalysisTable.
+//
+// This module deliberately performs no I/O.  Map keys are copied in the
+// declared column order, and JSON/CSV/text output is assembled from explicit
+// field lists rather than Map iteration order.
+
+let MAX_EXPORT_ROWS = 10000
+
+fn _fail(path: String, message: String) {
+    assert(false, path + ": " + message)
+}
+
+fn _require_struct(value: any, expected: String, path: String) {
+    if typeof(value) != "Struct" || struct_name(value) != expected {
+        _fail(path, "expected " + expected + ", got " + typeof(value))
+    }
+}
+
+fn _require_array(value: any, path: String) {
+    if typeof(value) != "Array" {
+        _fail(path, "expected Array, got " + typeof(value))
+    }
+}
+
+fn _require_map(value: any, path: String) {
+    if typeof(value) != "Map" {
+        _fail(path, "expected Map, got " + typeof(value))
+    }
+}
+
+fn _require_string(value: any, path: String, allow_empty: Bool = false) -> String {
+    if typeof(value) != "String" {
+        _fail(path, "expected String, got " + typeof(value))
+    }
+    if !allow_empty && value == "" {
+        _fail(path, "must not be empty")
+    }
+    return value
+}
+
+fn _require_finite_number(value: any, path: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        _fail(path, "expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        _fail(path, "must be finite")
+    }
+    return value
+}
+
+fn _validate_scalar(value: any, path: String) {
+    let kind = typeof(value)
+    if kind == "Int" || kind == "Float" {
+        _require_finite_number(value, path)
+        return
+    }
+    if kind != "String" && kind != "Bool" && kind != "Nil" {
+        _fail(path, "expected a JSON/CSV scalar, got " + kind)
+    }
+}
+
+fn _validate_notice(value: any, path: String) {
+    _require_struct(value, "NoticeSnapshot", path)
+    _require_string(value.code, path + ".code")
+    _require_string(value.message, path + ".message")
+    if value.path != nil {
+        _require_string(value.path, path + ".path")
+    }
+}
+
+fn _validate_notices(values: any, path: String) {
+    _require_array(values, path)
+    flux index = 0
+    for value in values {
+        _validate_notice(value, path + "[" + to_string(index) + "]")
+        index = index + 1
+    }
+}
+
+fn _validate_provenance(value: any, path: String) {
+    _require_struct(value, "TrajectoryProvenance", path)
+    _require_string(value.series_name, path + ".series_name")
+    if typeof(value.schema_version) != "Int" || value.schema_version < 1 {
+        _fail(path + ".schema_version", "expected a positive Int")
+    }
+    _require_string(value.engine_version, path + ".engine_version")
+    if value.solver_method != nil {
+        _require_string(value.solver_method, path + ".solver_method")
+    }
+    if typeof(value.verified) != "Bool" {
+        _fail(path + ".verified", "expected Bool, got " + typeof(value.verified))
+    }
+    _validate_notices(value.assumptions, path + ".assumptions")
+    _validate_notices(value.warnings, path + ".warnings")
+    _require_string(value.termination, path + ".termination")
+    _require_struct(value.actual_range, "Distance", path + ".actual_range")
+    _require_finite_number(value.actual_range.si_value, path + ".actual_range.si_value")
+    _require_finite_number(value.actual_range.display_value, path + ".actual_range.display_value")
+    _require_string(value.actual_range.display_unit, path + ".actual_range.display_unit")
+}
+
+fn _validate_table(value: any) -> any {
+    _require_struct(value, "AnalysisTable", "analysis_export.table")
+    _require_string(value.kind, "analysis_export.table.kind")
+    _require_string(value.title, "analysis_export.table.title")
+    _require_array(value.columns, "analysis_export.table.columns")
+    if len(value.columns) == 0 {
+        _fail("analysis_export.table.columns", "must not be empty")
+    }
+
+    flux keys = []
+    flux column_index = 0
+    for column in value.columns {
+        let path = "analysis_export.table.columns[" + to_string(column_index) + "]"
+        _require_struct(column, "TableColumn", path)
+        let key = _require_string(column.key, path + ".key")
+        _require_string(column.label, path + ".label")
+        if column.unit != nil {
+            _require_string(column.unit, path + ".unit")
+        }
+        if keys.contains(key) {
+            _fail(path + ".key", "duplicate column key '" + key + "'")
+        }
+        keys.push(key)
+        column_index = column_index + 1
+    }
+
+    _require_array(value.provenance, "analysis_export.table.provenance")
+    if len(value.provenance) == 0 {
+        _fail("analysis_export.table.provenance", "must not be empty")
+    }
+    flux provenance_index = 0
+    for provenance in value.provenance {
+        _validate_provenance(
+        provenance,
+        "analysis_export.table.provenance[" + to_string(provenance_index) + "]"
+        )
+        provenance_index = provenance_index + 1
+    }
+
+    _require_array(value.rows, "analysis_export.table.rows")
+    if len(value.rows) == 0 {
+        _fail("analysis_export.table.rows", "must not be empty")
+    }
+    if len(value.rows) > MAX_EXPORT_ROWS {
+        _fail("analysis_export.table.rows", "exceeds the 10000-row export limit")
+    }
+    flux row_index = 0
+    for row in value.rows {
+        let row_path = "analysis_export.table.rows[" + to_string(row_index) + "]"
+        _require_map(row, row_path)
+        if len(row.keys()) != len(value.columns) {
+            _fail(row_path, "must contain exactly the declared column keys")
+        }
+        for column in value.columns {
+            if !row.has(column.key) {
+                _fail(row_path, "missing declared column '" + column.key + "'")
+            }
+            _validate_scalar(row.get(column.key), row_path + "." + column.key)
+        }
+        if len(value.provenance) > 1 {
+            if !row.has("series_index") {
+                _fail(row_path, "multi-series rows require a series_index column")
+            }
+            let series_index = row.get("series_index")
+            if typeof(series_index) != "Int" ||
+            series_index < 0 ||
+            series_index >= len(value.provenance) {
+                _fail(row_path + ".series_index", "must select an existing provenance entry")
+            }
+        }
+        row_index = row_index + 1
+    }
+    return value
+}
+
+fn _notice_to_map(value: any) -> Map {
+    let output = Map::new()
+    output.set("code", value.code)
+    output.set("message", value.message)
+    output.set("path", value.path)
+    return output
+}
+
+fn _notices_to_maps(values: Array) -> Array {
+    flux output = []
+    for value in values {
+        output.push(_notice_to_map(value))
+    }
+    return output
+}
+
+fn _actual_range_to_map(value: any) -> Map {
+    let output = Map::new()
+    output.set("si_value_m", value.si_value)
+    output.set("display_value", value.display_value)
+    output.set("display_unit", value.display_unit)
+    return output
+}
+
+fn _provenance_to_map(value: any) -> Map {
+    let output = Map::new()
+    output.set("series_name", value.series_name)
+    output.set("schema_version", value.schema_version)
+    output.set("engine_version", value.engine_version)
+    output.set("solver_method", value.solver_method)
+    output.set("verified", value.verified)
+    output.set("assumptions", _notices_to_maps(value.assumptions))
+    output.set("warnings", _notices_to_maps(value.warnings))
+    output.set("termination", value.termination)
+    output.set("actual_range", _actual_range_to_map(value.actual_range))
+    return output
+}
+
+// Convert a table to ordinary programmable values.  Row Maps are rebuilt in
+// column order and never expose the source rows by alias.
+export fn table_to_map(table: any) -> Map {
+    let checked = _validate_table(table)
+    let output = Map::new()
+    output.set("kind", checked.kind)
+    output.set("title", checked.title)
+
+    flux columns = []
+    for column in checked.columns {
+        let encoded = Map::new()
+        encoded.set("key", column.key)
+        encoded.set("label", column.label)
+        encoded.set("unit", column.unit)
+        columns.push(encoded)
+    }
+    output.set("columns", columns)
+
+    flux rows = []
+    for row in checked.rows {
+        let encoded = Map::new()
+        for column in checked.columns {
+            encoded.set(column.key, row.get(column.key))
+        }
+        rows.push(encoded)
+    }
+    output.set("rows", rows)
+
+    flux provenance = []
+    for value in checked.provenance {
+        provenance.push(_provenance_to_map(value))
+    }
+    output.set("provenance", provenance)
+    return output
+}
+
+fn _json_notice(value: any) -> String {
+    return "{" +
+    "\"code\":" + json_stringify(value.code) + "," +
+    "\"message\":" + json_stringify(value.message) + "," +
+    "\"path\":" + json_stringify(value.path) +
+    "}"
+}
+
+fn _json_notices(values: Array) -> String {
+    flux output = []
+    for value in values {
+        output.push(_json_notice(value))
+    }
+    return "[" + output.join(",") + "]"
+}
+
+fn _json_actual_range(value: any) -> String {
+    return "{" +
+    "\"si_value_m\":" + json_stringify(value.si_value) + "," +
+    "\"display_value\":" + json_stringify(value.display_value) + "," +
+    "\"display_unit\":" + json_stringify(value.display_unit) +
+    "}"
+}
+
+fn _json_provenance(value: any) -> String {
+    return "{" +
+    "\"series_name\":" + json_stringify(value.series_name) + "," +
+    "\"schema_version\":" + json_stringify(value.schema_version) + "," +
+    "\"engine_version\":" + json_stringify(value.engine_version) + "," +
+    "\"solver_method\":" + json_stringify(value.solver_method) + "," +
+    "\"verified\":" + json_stringify(value.verified) + "," +
+    "\"assumptions\":" + _json_notices(value.assumptions) + "," +
+    "\"warnings\":" + _json_notices(value.warnings) + "," +
+    "\"termination\":" + json_stringify(value.termination) + "," +
+    "\"actual_range\":" + _json_actual_range(value.actual_range) +
+    "}"
+}
+
+// Produce canonical JSON without serializing a Map, so object member order is
+// independent of the runtime's Map implementation.
+export fn table_to_json(table: any) -> String {
+    let checked = _validate_table(table)
+
+    flux columns = []
+    for column in checked.columns {
+        columns.push(
+        "{" +
+        "\"key\":" + json_stringify(column.key) + "," +
+        "\"label\":" + json_stringify(column.label) + "," +
+        "\"unit\":" + json_stringify(column.unit) +
+        "}"
+        )
+    }
+
+    flux rows = []
+    for row in checked.rows {
+        flux fields = []
+        for column in checked.columns {
+            fields.push(
+            json_stringify(column.key) + ":" + json_stringify(row.get(column.key))
+            )
+        }
+        rows.push("{" + fields.join(",") + "}")
+    }
+
+    flux provenance = []
+    for value in checked.provenance {
+        provenance.push(_json_provenance(value))
+    }
+
+    return "{" +
+    "\"kind\":" + json_stringify(checked.kind) + "," +
+    "\"title\":" + json_stringify(checked.title) + "," +
+    "\"columns\":[" + columns.join(",") + "]," +
+    "\"rows\":[" + rows.join(",") + "]," +
+    "\"provenance\":[" + provenance.join(",") + "]" +
+    "}"
+}
+
+fn _scalar_text(value: any) -> String {
+    let kind = typeof(value)
+    if kind == "Nil" {
+        return ""
+    }
+    if kind == "String" {
+        return value
+    }
+    // Use the round-trip-safe JSON scalar spelling on every backend.
+    return json_stringify(value)
+}
+
+fn _csv_field(value: any) -> String {
+    let kind = typeof(value)
+    flux raw = ""
+    if kind == "String" {
+        raw = value
+    } else if kind != "Nil" {
+        // JSON's scalar formatter is round-trip-safe for floating-point values;
+        // generic to_string intentionally uses a shorter display precision.
+        raw = json_stringify(value)
+    }
+    if raw.contains(",") || raw.contains("\"") || raw.contains("\n") || raw.contains("\r") {
+        return "\"" + raw.replace("\"", "\"\"") + "\""
+    }
+    return raw
+}
+
+fn _column_heading(column: any) -> String {
+    if column.unit == nil {
+        return column.label
+    }
+    return column.label + " (" + column.unit + ")"
+}
+
+fn _row_provenance_index(table: any, row: Map) -> Int {
+    if len(table.provenance) == 1 {
+        return 0
+    }
+    return row.get("series_index")
+}
+
+// Return rectangular CSV.  Provenance is repeated per row so ordinary CSV
+// readers retain engine/schema/solver/termination/notices without comments or
+// a sidecar.  Multi-series rows select provenance through series_index.
+export fn table_to_csv(table: any) -> String {
+    let checked = _validate_table(table)
+    flux header = []
+    for column in checked.columns {
+        header.push(_csv_field(_column_heading(column)))
+    }
+    for heading in [
+        "Table kind",
+        "Table title",
+        "Provenance index",
+        "Series name",
+        "Schema version",
+        "Engine version",
+        "Solver method",
+        "Verified",
+        "Termination",
+        "Actual range (m)",
+        "Actual range value",
+        "Actual range unit",
+        "Assumptions",
+        "Warnings"
+    ] {
+        header.push(_csv_field(heading))
+    }
+
+    flux lines = [header.join(",")]
+    for row in checked.rows {
+        flux fields = []
+        for column in checked.columns {
+            fields.push(_csv_field(row.get(column.key)))
+        }
+        let provenance_index = _row_provenance_index(checked, row)
+        let provenance = checked.provenance[provenance_index]
+        for value in [
+            checked.kind,
+            checked.title,
+            provenance_index,
+            provenance.series_name,
+            provenance.schema_version,
+            provenance.engine_version,
+            provenance.solver_method,
+            provenance.verified,
+            provenance.termination,
+            provenance.actual_range.si_value,
+            provenance.actual_range.display_value,
+            provenance.actual_range.display_unit,
+            _json_notices(provenance.assumptions),
+            _json_notices(provenance.warnings)
+        ] {
+            fields.push(_csv_field(value))
+        }
+        lines.push(fields.join(","))
+    }
+    return lines.join("\n")
+}
+
+fn _plain_text(value: String) -> String {
+    return value
+    .replace("\\", "\\\\")
+    .replace("\r", "\\r")
+    .replace("\n", "\\n")
+    .replace("\t", "\\t")
+    .replace("|", "\\|")
+}
+
+fn _plain_scalar(value: any) -> String {
+    if typeof(value) == "String" {
+        return _plain_text(value)
+    }
+    if typeof(value) == "Nil" {
+        return "nil"
+    }
+    return _scalar_text(value)
+}
+
+fn _plain_notice(value: any) -> String {
+    flux output = _plain_text(value.code) + ": " + _plain_text(value.message)
+    if value.path != nil {
+        output = output + " [" + _plain_text(value.path) + "]"
+    }
+    return output
+}
+
+// Render a deterministic, display-only table.  The declared column sequence
+// and provenance sequence are the sole ordering sources.
+export fn render_table(table: any) -> String {
+    let checked = _validate_table(table)
+    flux lines = [
+        "title: " + _plain_text(checked.title),
+        "kind: " + _plain_text(checked.kind),
+        "rows:"
+    ]
+
+    flux headings = []
+    for column in checked.columns {
+        headings.push(_plain_text(_column_heading(column)))
+    }
+    lines.push("  " + headings.join(" | "))
+    for row in checked.rows {
+        flux fields = []
+        for column in checked.columns {
+            fields.push(_plain_scalar(row.get(column.key)))
+        }
+        lines.push("  " + fields.join(" | "))
+    }
+
+    lines.push("provenance:")
+    flux provenance_index = 0
+    for provenance in checked.provenance {
+        lines.push(
+        "  [" + to_string(provenance_index) + "] " + _plain_text(provenance.series_name)
+        )
+        lines.push("    schema_version: " + to_string(provenance.schema_version))
+        lines.push("    engine_version: " + _plain_text(provenance.engine_version))
+        lines.push(
+        "    solver_method: " +
+        if provenance.solver_method == nil {
+            "nil"
+        } else {
+            _plain_text(provenance.solver_method)
+        }
+        )
+        lines.push("    verified: " + to_string(provenance.verified))
+        lines.push("    termination: " + _plain_text(provenance.termination))
+        lines.push(
+        "    actual_range: " + _plain_scalar(provenance.actual_range.display_value) +
+        " " + _plain_text(provenance.actual_range.display_unit) +
+        " (" + _plain_scalar(provenance.actual_range.si_value) + " m SI)"
+        )
+        lines.push("    assumptions:")
+        if len(provenance.assumptions) == 0 {
+            lines.push("      none")
+        } else {
+            for notice in provenance.assumptions {
+                lines.push("      - " + _plain_notice(notice))
+            }
+        }
+        lines.push("    warnings:")
+        if len(provenance.warnings) == 0 {
+            lines.push("      none")
+        } else {
+            for notice in provenance.warnings {
+                lines.push("      - " + _plain_notice(notice))
+            }
+        }
+        provenance_index = provenance_index + 1
+    }
+    return lines.join("\n")
+}

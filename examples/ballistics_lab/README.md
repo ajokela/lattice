@@ -15,6 +15,10 @@ The modules are deliberately split at stable boundaries:
 - backend.lat defines the transport-independent EngineBackend closure contract.
 - process_backend.lat invokes an explicitly configured engine with shell-free
   argv/stdin transport and strictly decodes solve-json v1 responses.
+- analysis.lat provides checked trajectory interpolation and sampling plus
+  programmable DOPE, wind-card, and multi-trajectory comparison tables.
+- analysis_export.lat converts those tables to explicit Maps, canonical JSON,
+  rectangular CSV, or deterministic plain text without performing I/O.
 - reference_experiment.lat is an executable construction example.
 
 The process backend is process-per-solve. It retains no engine handle, performs
@@ -108,6 +112,45 @@ workflows may pin it exactly:
 
 An omitted pin accepts any engine that emits a valid v1 envelope. It does not
 silently accept another schema version.
+
+## Querying and comparing trajectories
+
+Analysis is ordinary Lattice over immutable domain values. A query keeps the
+caller's distance display unit, checks the computed range, and interpolates
+only between adjacent engine samples:
+
+    import "examples/ballistics_lab/analysis" as analysis
+    import "examples/ballistics_lab/analysis_export" as export
+    import "examples/ballistics_lab/units" as u
+
+    let point = analysis.trajectory_at(result, u.yd(300))
+    let grid = analysis.sample(result, u.yd(100), u.yd(600), u.yd(25))
+    let dope = analysis.dope(
+        result,
+        [u.yd(100), u.yd(200), u.yd(300)],
+        "in",
+        "moa",
+        "ft/s",
+        "ft-lb"
+    )
+
+    print(export.render_table(dope))
+    let json = export.table_to_json(dope)
+    let csv = export.table_to_csv(dope)
+
+`sample` clips a requested stop to an early engine termination and includes the
+real terminal observation exactly once. Results are capped at 10,000 rows.
+`wind_card` accepts one or more calm/constant-wind trajectories;
+`compare_trajectories` accepts at least two trajectories and aligns mismatched
+engine grids on their sorted union within the shared computed range. Positive
+drop/windage follow engine coordinates; come-up and wind-hold are the opposite
+angular corrections.
+
+Every `AnalysisTable` is immutable and carries ordered columns, scalar row
+Maps, and per-trajectory provenance: solve schema and engine version, resolved
+solver method, assumptions, warnings, verification state, termination reason,
+and actual computed range. Calculation does not print or write. Export and
+render functions return values or strings so callers retain control of I/O.
 
 ### Resource bounds
 
