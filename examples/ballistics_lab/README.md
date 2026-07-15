@@ -300,6 +300,27 @@ control characters and non-finite numeric arguments are rejected.
 
 ## Self-hosted terminal REPL
 
+From a source checkout, the portable launcher finds `clat` and the
+`ballistics` engine, changes to the import root, and starts the lab with the
+default StackVM:
+
+    ./scripts/ballistics-lab.sh
+
+Select another verified backend explicitly when desired:
+
+    ./scripts/ballistics-lab.sh --regvm
+    ./scripts/ballistics-lab.sh --tree-walk
+
+Use `--clat` or `CLAT` to override the Lattice executable and `--engine` or
+`BALLISTICS_ENGINE` to override the engine. Without an engine override, the
+launcher checks `PATH`, `CARGO_TARGET_DIR`, a sibling `ballistics-engine`
+checkout, the caller's Cargo target directory, and `$HOME/.cargo/bin`, in that
+order. Discovery is bounded to those locations; it never searches the whole
+filesystem. Each candidate's command-specific help must identify the explicit-SI
+`solve-json` v1 interface; an older or unrelated executable named `ballistics`
+is skipped. `BALLISTICS_LAB_BACKEND=stack-vm|regvm|tree-walk` provides the
+environment equivalent of `--backend`.
+
 Start the laboratory directly with `clat`; no native extension or `--prelude`
 flag is required:
 
@@ -309,7 +330,9 @@ flag is required:
 When the executable argument is omitted, the application uses a non-empty
 `BALLISTICS_ENGINE` environment value and otherwise the bare name
 `ballistics`. Set `BALLISTICS_ENGINE_VERSION` to require an exact engine
-version. The configured executable is not started until `:solve`.
+version. The Lattice application does not start the configured executable until
+`:solve`; the launcher performs one non-solving `solve-json --help` capability
+probe for each discovery candidate before the application starts.
 
 The initial `lab` contains the representative 175 gr experiment. Unit and
 domain constructors, along with the `units`, `domain`, `sessions`, `analysis`,

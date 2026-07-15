@@ -364,7 +364,7 @@ FUZZ_PARSER_SRC    = $(FUZZ_DIR)/fuzz_parser.c
 FUZZ_PARSER_OBJ    = $(BUILD_DIR)/fuzz/fuzz_parser.o
 FUZZ_PARSER_TARGET = $(BUILD_DIR)/fuzz_parser
 
-.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-ballistics-lab test-ballistics-lab-engine test-repl test-process test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
+.PHONY: all clean test test-tree-walk test-regvm test-all-backends test-ballistics-lab test-ballistics-lab-launcher test-ballistics-lab-engine test-repl test-process test-force-copy test-latc test-runtime test-bootstrap asan asan-all tsan coverage analyze clang-tidy fuzz fuzz-latc fuzz-vm fuzz-stackvm fuzz-regvm fuzz-json fuzz-toml fuzz-yaml fuzz-lexer fuzz-formatter fuzz-parser fuzz-fs fuzz-fs-win fuzz-all fuzz-seed wasm bench bench-regvm bench-stress bench-all bench-freeze-gate bench-cbr ext-pg ext-sqlite ext-ffi ext-redis ext-websocket ext-image lsp runtime runtime-release deploy-coverage install uninstall release
 
 all: $(TARGET)
 
@@ -421,7 +421,7 @@ test-regvm: $(TEST_TARGET) $(LSP_TARGET)
 
 BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat test_analysis.lat test_analysis_export.lat test_session.lat test_persistence.lat test_resolved_request_v1.lat test_verified_artifacts.lat test_render.lat test_command_parser.lat test_commands.lat test_repl_support.lat reference_experiment.lat
 
-test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE)
+test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE) test-ballistics-lab-launcher
 	@for backend in "" "--tree-walk" "--regvm"; do \
 		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
 		echo "=== ballistics_lab backend $$label ==="; \
@@ -431,6 +431,9 @@ test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE)
 	done
 	@echo "=== ballistics_lab REPL transcripts ==="
 	./$(TARGET) examples/ballistics_lab/test_ballistics_repl.lat
+
+test-ballistics-lab-launcher:
+	sh tests/test_ballistics_lab_launcher.sh
 
 # Cross-repository smoke. The ordinary target remains hermetic through its
 # checked fake child; callers opt into a real engine with an explicit path.
