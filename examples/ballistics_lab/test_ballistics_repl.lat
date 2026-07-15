@@ -366,6 +366,5 @@ fn main() {
     env_set("BALLISTICS_ENGINE_VERSION", "0.24.1")
 
     check_backend("stack-vm", "")
-    check_backend("tree-walk", "--tree-walk")
     check_backend("regvm", "--regvm")
 }

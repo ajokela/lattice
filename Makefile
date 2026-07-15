@@ -422,7 +422,7 @@ test-regvm: $(TEST_TARGET) $(LSP_TARGET)
 BALLISTICS_LAB_TESTS = test_units.lat test_domain.lat test_reference_import.lat test_backend.lat test_analysis.lat test_analysis_export.lat test_session.lat test_persistence.lat test_resolved_request_v1.lat test_verified_artifacts.lat test_render.lat test_command_parser.lat test_commands.lat test_repl_support.lat reference_experiment.lat
 
 test-ballistics-lab: $(TARGET) $(PROCESS_FIXTURE) test-ballistics-lab-launcher
-	@for backend in "" "--tree-walk" "--regvm"; do \
+	@for backend in "" "--regvm"; do \
 		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
 		echo "=== ballistics_lab backend $$label ==="; \
 		for test_file in $(BALLISTICS_LAB_TESTS); do \
@@ -442,7 +442,7 @@ test-ballistics-lab-engine: $(TARGET)
 		echo "BALLISTICS_ENGINE=/absolute/path/to/ballistics is required" >&2; \
 		exit 2; \
 	fi
-	@for backend in "" "--tree-walk" "--regvm"; do \
+	@for backend in "" "--regvm"; do \
 		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
 		echo "=== ballistics_lab real engine $$label ==="; \
 		./$(TARGET) $$backend examples/ballistics_lab/test_engine_backend.lat \

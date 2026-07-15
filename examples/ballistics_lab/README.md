@@ -309,7 +309,6 @@ default StackVM:
 Select another verified backend explicitly when desired:
 
     ./scripts/ballistics-lab.sh --regvm
-    ./scripts/ballistics-lab.sh --tree-walk
 
 Use `--clat` or `CLAT` to override the Lattice executable and `--engine` or
 `BALLISTICS_ENGINE` to override the engine. Without an engine override, the
@@ -318,8 +317,12 @@ checkout, the caller's Cargo target directory, and `$HOME/.cargo/bin`, in that
 order. Discovery is bounded to those locations; it never searches the whole
 filesystem. Each candidate's command-specific help must identify the explicit-SI
 `solve-json` v1 interface; an older or unrelated executable named `ballistics`
-is skipped. `BALLISTICS_LAB_BACKEND=stack-vm|regvm|tree-walk` provides the
+is skipped. `BALLISTICS_LAB_BACKEND=stack-vm|regvm` provides the
 environment equivalent of `--backend`.
+
+The laboratory targets Lattice's VMs: StackVM is the default and RegVM is the
+alternate. The tree-walking interpreter remains available for Lattice language
+diagnostics, but it is not a supported Ballistics Lab launcher backend.
 
 Start the laboratory directly with `clat`; no native extension or `--prelude`
 flag is required:
@@ -416,11 +419,11 @@ From the repository root:
     make test-ballistics-lab
 
 The target runs the unit/domain tests and executable reference experiment on
-StackVM, tree-walk, and RegVM. Its backend test is hermetic but still launches a
+StackVM and RegVM. Its backend test is hermetic but still launches a
 portable fake engine as a real child, exercising argv, stdin, stdout, stderr,
 exit status, bounds, and hostile response decoding.
 
-To exercise an actual engine executable on all three Lattice backends:
+To exercise an actual engine executable on both Lattice VM backends:
 
     make test-ballistics-lab-engine \
         BALLISTICS_ENGINE=/absolute/path/to/ballistics \

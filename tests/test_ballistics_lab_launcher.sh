@@ -250,12 +250,12 @@ make_fake_clat "$PATH_TOOLS/clat"
 make_fake_engine "$PATH_TOOLS/ballistics"
 CLAT="$ENV_TOOLS/clat"
 BALLISTICS_ENGINE="$ENV_TOOLS/ballistics"
-BALLISTICS_LAB_BACKEND=tree-walk
+BALLISTICS_LAB_BACKEND=regvm
 PATH="$PATH_TOOLS:/usr/bin:/bin"
 export CLAT BALLISTICS_ENGINE BALLISTICS_LAB_BACKEND PATH
 run_launcher
 assert_equal 0 "$RUN_STATUS" 'environment precedence status'
-assert_invocation "$ENV_TOOLS/clat" '--tree-walk' "$ENV_TOOLS/ballistics" \
+assert_invocation "$ENV_TOOLS/clat" '--regvm' "$ENV_TOOLS/ballistics" \
     'environment precedence'
 pass 'environment discovery and backend precedence'
 
@@ -279,12 +279,6 @@ assert_equal 0 "$RUN_STATUS" '--backend regvm status'
 assert_invocation "$BACKEND_TOOLS/clat" '--regvm' "$BACKEND_TOOLS/ballistics" \
     '--backend regvm'
 
-run_launcher --clat "$BACKEND_TOOLS/clat" --engine "$BACKEND_TOOLS/ballistics" \
-    --backend tree-walk
-assert_equal 0 "$RUN_STATUS" '--backend tree-walk status'
-assert_invocation "$BACKEND_TOOLS/clat" '--tree-walk' "$BACKEND_TOOLS/ballistics" \
-    '--backend tree-walk'
-
 run_launcher --clat "$BACKEND_TOOLS/clat" --engine "$BACKEND_TOOLS/ballistics" --stack-vm
 assert_equal 0 "$RUN_STATUS" '--stack-vm status'
 assert_invocation "$BACKEND_TOOLS/clat" '' "$BACKEND_TOOLS/ballistics" '--stack-vm'
@@ -293,9 +287,6 @@ run_launcher --clat "$BACKEND_TOOLS/clat" --engine "$BACKEND_TOOLS/ballistics" -
 assert_equal 0 "$RUN_STATUS" '--regvm status'
 assert_invocation "$BACKEND_TOOLS/clat" '--regvm' "$BACKEND_TOOLS/ballistics" '--regvm'
 
-run_launcher --clat "$BACKEND_TOOLS/clat" --engine "$BACKEND_TOOLS/ballistics" --tree-walk
-assert_equal 0 "$RUN_STATUS" '--tree-walk status'
-assert_invocation "$BACKEND_TOOLS/clat" '--tree-walk' "$BACKEND_TOOLS/ballistics" '--tree-walk'
 pass 'long and shorthand backend selection'
 
 # command -v may return a relative path when PATH itself is relative. Both
@@ -326,6 +317,27 @@ run_launcher --backend unsupported
 assert_equal 2 "$RUN_STATUS" 'invalid backend status'
 assert_not_invoked 'invalid backend'
 
+run_launcher --backend tree-walk
+assert_equal 2 "$RUN_STATUS" 'tree-walk backend status'
+assert_contains "$CAPTURE/stderr" 'expected stack-vm or regvm' \
+    'tree-walk backend diagnostic'
+assert_not_invoked 'tree-walk backend'
+
+run_launcher --tree-walk
+assert_equal 2 "$RUN_STATUS" 'tree-walk option status'
+assert_contains "$CAPTURE/stderr" 'unknown option: --tree-walk' \
+    'tree-walk option diagnostic'
+assert_not_invoked 'tree-walk option'
+
+BALLISTICS_LAB_BACKEND=tree-walk
+export BALLISTICS_LAB_BACKEND
+run_launcher
+assert_equal 2 "$RUN_STATUS" 'tree-walk environment backend status'
+assert_contains "$CAPTURE/stderr" 'expected stack-vm or regvm' \
+    'tree-walk environment backend diagnostic'
+assert_not_invoked 'tree-walk environment backend'
+unset BALLISTICS_LAB_BACKEND
+
 run_launcher --backend
 assert_equal 2 "$RUN_STATUS" 'missing backend value status'
 assert_not_invoked 'missing backend value'
@@ -333,7 +345,7 @@ assert_not_invoked 'missing backend value'
 run_launcher --unknown-option
 assert_equal 2 "$RUN_STATUS" 'unknown option status'
 assert_not_invoked 'unknown option'
-pass 'help and option errors do not launch clat'
+pass 'help, VM-only backend validation, and option errors do not launch clat'
 
 # An invalid explicit override is an error, not permission to silently select a
 # lower-precedence repository-local or PATH executable.

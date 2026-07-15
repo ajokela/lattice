@@ -1,5 +1,5 @@
 // Domain and solve-json v1 adapter tests.
-// Run on every backend with make test-ballistics-lab.
+// Run on both VM backends with make test-ballistics-lab.
 
 import "examples/ballistics_lab/units" as units
 import "examples/ballistics_lab/domain" as domain

@@ -1,5 +1,5 @@
 // MBA-1311 deterministic terminal renderer tests.
-// Run directly on StackVM, tree-walk, and RegVM.
+// Run directly on StackVM and RegVM.
 
 import "examples/ballistics_lab/units" as units
 import "examples/ballistics_lab/domain" as domain
@@ -10,7 +10,7 @@ import "examples/ballistics_lab/reference_experiment" as reference
 import "examples/ballistics_lab/render" as render
 
 // Struct-name validation is intentionally exercised without selectively
-// importing exported struct types, which is not portable across all backends.
+// importing exported struct types, which is not portable across both VM backends.
 struct Observation {
     distance: fix any,
     time_s: fix Number,

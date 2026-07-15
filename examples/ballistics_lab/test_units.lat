@@ -1,7 +1,6 @@
 // Source-level tests for ballistics_lab/units.lat.
 // Run from the repository root:
 //   ./clat examples/ballistics_lab/test_units.lat
-//   ./clat --tree-walk examples/ballistics_lab/test_units.lat
 //   ./clat --regvm examples/ballistics_lab/test_units.lat
 
 import "examples/ballistics_lab/units" as u

@@ -1,4 +1,4 @@
-// MBA-1308 source-level session tests. Run directly on StackVM, tree-walk, and RegVM.
+// MBA-1308 source-level session tests. Run directly on StackVM and RegVM.
 
 import "examples/ballistics_lab/units" as units
 import "examples/ballistics_lab/domain" as domain

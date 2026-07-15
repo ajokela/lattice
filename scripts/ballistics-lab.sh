@@ -11,10 +11,9 @@ Usage: ballistics-lab [OPTIONS]
 Launch the self-hosted Lattice Ballistics Lab.
 
 Options:
-  --backend NAME   Select stack-vm (default), regvm, or tree-walk
+  --backend NAME   Select stack-vm (default) or regvm
   --stack-vm       Use the default stack VM
   --regvm          Use the register VM
-  --tree-walk      Use the tree-walking interpreter
   --clat PATH      Use this clat executable
   --engine PATH    Use this ballistics executable
   -h, --help       Show this help
@@ -142,10 +141,6 @@ while [ "$#" -gt 0 ]; do
             set_backend regvm
             shift
             ;;
-        --tree-walk)
-            set_backend tree-walk
-            shift
-            ;;
         --clat)
             [ "$#" -ge 2 ] || die "--clat requires a value"
             clat_request=$2
@@ -182,8 +177,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$backend" in
-    stack-vm|regvm|tree-walk) ;;
-    *) die "unknown backend '$backend' (expected stack-vm, regvm, or tree-walk)" ;;
+    stack-vm|regvm) ;;
+    *) die "unknown backend '$backend' (expected stack-vm or regvm)" ;;
 esac
 
 [ -f "$REPL_PATH" ] || die "REPL source not found at $REPL_PATH"
@@ -242,5 +237,4 @@ cd "$ROOT_DIR"
 case "$backend" in
     stack-vm) exec "$clat" "$REPL_PATH" "$engine" ;;
     regvm) exec "$clat" --regvm "$REPL_PATH" "$engine" ;;
-    tree-walk) exec "$clat" --tree-walk "$REPL_PATH" "$engine" ;;
 esac

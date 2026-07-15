@@ -17,7 +17,7 @@ fn clat_executable() -> String {
 fn transcript_limits() -> Map {
     let limits = Map::new()
     // The REPL's process backend has its own 30-second solve bound. Leave
-    // startup, tree-walk interpretation, rendering, and teardown headroom.
+    // VM startup, rendering, and teardown headroom.
     limits.set("timeout_ms", 60000)
     limits.set("max_stdout_bytes", 262144)
     limits.set("max_stderr_bytes", 262144)
@@ -142,6 +142,5 @@ fn main() {
     )
 
     check_backend("stack-vm", "", engine, expected_version)
-    check_backend("tree-walk", "--tree-walk", engine, expected_version)
     check_backend("regvm", "--regvm", engine, expected_version)
 }

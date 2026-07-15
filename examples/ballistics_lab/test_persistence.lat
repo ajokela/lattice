@@ -1,4 +1,4 @@
-// MBA-1310 experiment-persistence tests. Run on StackVM, tree-walk, and RegVM.
+// MBA-1310 experiment-persistence tests. Run on StackVM and RegVM.
 
 import "examples/ballistics_lab/units" as units
 import "examples/ballistics_lab/domain" as domain
