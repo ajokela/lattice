@@ -26,6 +26,11 @@ The modules are deliberately split at stable boundaries:
 - resolved_request_v1.lat validates detached solve-json v1 request snapshots.
 - verified_artifacts.lat deliberately promotes completed run records into
   immutable, portable verified-run documents.
+- render.lat returns deterministic metric or imperial terminal strings for
+  experiments, runs, observations, analysis tables, notices, and errors.
+- command_parser.lat parses the bounded colon-command grammar as inert data.
+- commands.lat dispatches parsed commands directly to the session, analysis,
+  persistence, and rendering APIs without generating source or shell text.
 - reference_experiment.lat is an executable construction example.
 
 The process backend is process-per-solve. It retains no engine handle, performs
@@ -236,7 +241,63 @@ serializers reject ordinary run records, draft trajectories, and legacy
 trajectory verification flags. Loaded artifacts are fully validated and frozen
 again. No persistence API generates or evaluates `.lat` source.
 
-### Resource bounds
+## Terminal rendering and colon commands
+
+Terminal rendering is separate from calculation and export. Every renderer
+returns a `String`; callers decide whether to print it, save it, or ignore it:
+
+    import "examples/ballistics_lab/render" as render
+
+    let metric = render.metric_render_profile(2)
+    let text = render.render_observation(observation, metric)
+
+Metric and imperial profiles use fixed decimal formatting, explicit trajectory
+sign conventions, declared table-column order, and aligned comparison rows.
+CSV and JSON remain in `analysis_export.lat`; terminal formatting never changes
+the programmable analysis values.
+
+The command layer is intentionally small:
+
+    :help
+    :show
+    :solve
+    :at <distance> <m|km|yd|ft|in>
+    :dope <start> <stop> <interval> <unit>
+    :wind-card <start> <stop> <interval> <unit>
+    :compare
+    :save "<path>"
+    :load "<path>"
+    :reset
+    :quit
+
+Parse and dispatch without evaluating generated Lattice:
+
+    import "examples/ballistics_lab/command_parser" as parser
+    import "examples/ballistics_lab/commands" as commands
+
+    let command = parser.parse_command(":at 300 yd")
+    let response = if parser.parse_failed(command) {
+        command
+    } else {
+        commands.dispatch_command(lab, command)
+    }
+
+    if commands.command_succeeded(response) {
+        print(response.output)
+    } else {
+        print(render.render_error(response))
+    }
+
+Quoted paths, including Windows paths, remain inert string arguments. The
+parser never invokes the Lattice lexer, evaluator, a shell, or a process.
+Invalid syntax, invalid arguments, unavailable run state, analysis failures,
+backend errors, and failed loads return structured `LaboratoryError` values.
+They do not mutate the laboratory session. Rifle, projectile, atmosphere, and
+other experiment changes remain visible ordinary Lattice calls rather than a
+second `:set` language. Command input is capped at 4,096 bytes and 16 arguments;
+control characters and non-finite numeric arguments are rejected.
+
+## Resource bounds
 
 `process_backend()` uses `exec_argv`, sends the request on stdin, and passes only
 the literal `solve-json` argument. User experiment values never enter argv or a

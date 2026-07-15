@@ -1,0 +1,466 @@
+// Pure, bounded parsing for the laboratory's deliberately small colon-command
+// grammar. Ordinary non-command input remains Lattice source and is never passed
+// through this module. Parsing performs no evaluation, shell expansion, or I/O.
+
+import {
+    laboratory_error
+}
+from "examples/ballistics_lab/domain"
+
+export struct ColonCommand {
+    name: fix String,
+    args: fix Map
+}
+
+struct CommandToken {
+    text: String,
+    column: Int,
+    quoted: Bool
+}
+
+struct ForbiddenControl {
+    byte: Int,
+    index: Int
+}
+
+export fn parse_succeeded(value: any) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == "ColonCommand"
+}
+
+export fn parse_failed(value: any) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == "LaboratoryError"
+}
+
+fn _path_error(code: String, message: String, path: String) -> any {
+    return laboratory_error(code, message, path)
+}
+
+fn _syntax_error(message: String, column: Int) -> any {
+    flux checked_column = column
+    if checked_column < 1 {
+        checked_column = 1
+    }
+    return laboratory_error(
+    "command_syntax",
+    message,
+    nil,
+    nil,
+    nil,
+    1,
+    checked_column
+    )
+}
+
+fn _distance_units() -> Array {
+    return ["m", "km", "yd", "ft", "in"]
+}
+
+fn _is_space(character: String) -> Bool {
+    return character == " " || character == "\t"
+}
+
+fn _control_name(byte: Int) -> String {
+    if byte == 0 {
+        return "NUL"
+    }
+    if byte == 10 {
+        return "newline"
+    }
+    if byte == 13 {
+        return "carriage return"
+    }
+    if byte == 127 {
+        return "DEL control character"
+    }
+    return "control character byte " + to_string(byte)
+}
+
+fn _first_forbidden_control(line: String) -> any {
+    flux first_index = -1
+    flux first_byte = -1
+    flux byte = 1
+    while byte < 32 {
+        if byte != 9 {
+            let index = line.index_of(chr(byte))
+            if index >= 0 &&(first_index < 0 || index < first_index) {
+                first_index = index
+                first_byte = byte
+            }
+        }
+        byte = byte + 1
+    }
+    let del_index = line.index_of(chr(127))
+    if del_index >= 0 &&(first_index < 0 || del_index < first_index) {
+        first_index = del_index
+        first_byte = 127
+    }
+    if first_index < 0 {
+        return nil
+    }
+    return ForbiddenControl {
+        byte: first_byte,
+        index: first_index
+    }
+}
+
+fn _skip_spaces(line: String, position: Int) -> Int {
+    if position >= len(line) {
+        return position
+    }
+    let remainder = line.substring(position, len(line))
+    let trimmed = remainder.trim_start()
+    return position + len(remainder) - len(trimmed)
+}
+
+fn _character_at(line: String, position: Int) -> String {
+    return line.substring(position, position + 1)
+}
+
+fn _lex(line: String) -> any {
+    let length = len(line)
+    if length > 4096 {
+        return _path_error(
+        "resource_limit",
+        "command exceeds the 4096-byte input limit",
+        "command"
+        )
+    }
+
+    // Lattice strings normally exclude NUL. If a host constructs a cached-length
+    // string containing one, native String methods stop at the first NUL; the
+    // visible-length disagreement still gives us a deterministic rejection.
+    let visible = line.substring(0, length)
+    if len(visible) != length {
+        return _syntax_error("command contains forbidden NUL", len(visible) + 1)
+    }
+    let forbidden = _first_forbidden_control(line)
+    if forbidden != nil {
+        return _syntax_error(
+        "command contains forbidden " + _control_name(forbidden.byte),
+        forbidden.index + 1
+        )
+    }
+
+    let without_leading = line.trim_start()
+    let column_offset = length - len(without_leading)
+    let source = without_leading
+    let source_length = len(source)
+    if source_length == 0 {
+        return _syntax_error("expected a colon command", column_offset + 1)
+    }
+    if _character_at(source, 0) != ":" {
+        return _syntax_error("command must begin with ':'", column_offset + 1)
+    }
+    flux position = 1
+
+    flux tokens = []
+    while true {
+        position = _skip_spaces(source, position)
+        if position >= source_length {
+            break
+        }
+
+        let start = position
+        // Accumulate byte-sized pieces and join once. Repeated immutable String
+        // concatenation would make a valid 4096-byte token quadratic.
+        flux pieces = []
+        flux quoted = false
+        let first = _character_at(source, position)
+        if first == "\"" || first == "'" {
+            quoted = true
+            let quote = first
+            position = position + 1
+            flux closed = false
+            while position < source_length {
+                let remainder = source.substring(position, source_length)
+                let quote_index = remainder.index_of(quote)
+                let slash_index = remainder.index_of("\\")
+                if quote_index < 0 && slash_index < 0 {
+                    break
+                }
+                if slash_index >= 0 &&(quote_index < 0 || slash_index < quote_index) {
+                    if slash_index > 0 {
+                        pieces.push(remainder.substring(0, slash_index))
+                    }
+                    let slash_position = position + slash_index
+                    if slash_position + 1 >= source_length {
+                        return _syntax_error(
+                        "dangling escape in quoted argument",
+                        column_offset + slash_position + 1
+                        )
+                    }
+                    let following = _character_at(source, slash_position + 1)
+                    if following == quote || following == "\\" {
+                        pieces.push(following)
+                        position = slash_position + 2
+                    } else {
+                        // Only the matching quote and backslash are escapes.
+                        // Preserve every other backslash byte-for-byte.
+                        pieces.push("\\")
+                        position = slash_position + 1
+                    }
+                } else {
+                    if quote_index > 0 {
+                        pieces.push(remainder.substring(0, quote_index))
+                    }
+                    closed = true
+                    position = position + quote_index + 1
+                    if position < source_length && !_is_space(_character_at(source, position)) {
+                        return _syntax_error(
+                        "quoted argument must be followed by whitespace or end of input",
+                        column_offset + position + 1
+                        )
+                    }
+                    break
+                }
+            }
+            if !closed {
+                return _syntax_error("unmatched quote", column_offset + start + 1)
+            }
+        } else {
+            let remainder = source.substring(position, source_length)
+            flux end_offset = len(remainder)
+            flux delimiter = ""
+            for candidate in [" ", "\t", "\"", "'"] {
+                let candidate_index = remainder.index_of(candidate)
+                if candidate_index >= 0 && candidate_index < end_offset {
+                    end_offset = candidate_index
+                    delimiter = candidate
+                }
+            }
+            if delimiter == "\"" || delimiter == "'" {
+                return _syntax_error(
+                "quoted and unquoted text cannot be concatenated",
+                column_offset + position + end_offset + 1
+                )
+            }
+            if end_offset > 0 {
+                pieces.push(remainder.substring(0, end_offset))
+            }
+            position = position + end_offset
+        }
+
+        let text = pieces.join("")
+        tokens.push(CommandToken {
+            text: text,
+            column: column_offset + start + 1,
+            quoted: quoted
+        }
+        )
+        if len(tokens) > 17 {
+            return _path_error(
+            "resource_limit",
+            "command exceeds the 16-argument limit",
+            "arguments"
+            )
+        }
+    }
+
+    if len(tokens) == 0 {
+        return _syntax_error(
+        "expected a command name after ':'",
+        column_offset + position + 1
+        )
+    }
+    if tokens[0].quoted {
+        return _syntax_error("command name must not be quoted", tokens[0].column)
+    }
+    if len(tokens[0].text) == 0 {
+        return _syntax_error("command name must not be empty", tokens[0].column)
+    }
+    return tokens
+}
+
+fn _command(name: String, args: Map) -> ColonCommand {
+    return freeze(ColonCommand {
+        name: name,
+        args: args
+    }
+    )
+}
+
+fn _empty_command(name: String) -> ColonCommand {
+    return _command(name, Map::new())
+}
+
+fn _arity(name: String, actual: Int, expected: Int) -> any {
+    if actual == expected {
+        return nil
+    }
+    return _path_error(
+    "command_arity",
+    ":" + name + " expects " + to_string(expected) +
+    " argument(s), got " + to_string(actual),
+    "arguments"
+    )
+}
+
+fn _number(token: CommandToken, argument_index: Int) -> any {
+    let value = try {
+        parse_float(token.text)
+    } catch _ {
+        nil
+    }
+    if value == nil ||(typeof(value) != "Int" && typeof(value) != "Float") {
+        return _path_error(
+        "command_argument",
+        "expected a numeric argument, got '" + token.text + "'",
+        "arguments[" + to_string(argument_index) + "]"
+        )
+    }
+    if is_nan(value) || is_inf(value) {
+        return _path_error(
+        "command_argument",
+        "numeric argument must be finite",
+        "arguments[" + to_string(argument_index) + "]"
+        )
+    }
+    return value
+}
+
+fn _unit(token: CommandToken, argument_index: Int) -> any {
+    let units = _distance_units()
+    if !units.contains(token.text) {
+        return _path_error(
+        "command_argument",
+        "unsupported distance unit '" + token.text +
+        "'; expected one of " + repr(units),
+        "arguments[" + to_string(argument_index) + "]"
+        )
+    }
+    return token.text
+}
+
+fn _parse_at(name: String, tokens: Array) -> any {
+    let arity_error = _arity(name, len(tokens), 2)
+    if arity_error != nil {
+        return arity_error
+    }
+    let distance = _number(tokens[0], 0)
+    if parse_failed(distance) {
+        return distance
+    }
+    if distance < 0 {
+        return _path_error(
+        "command_argument",
+        ":at distance must be non-negative",
+        "arguments[0]"
+        )
+    }
+    let unit = _unit(tokens[1], 1)
+    if parse_failed(unit) {
+        return unit
+    }
+    flux args = Map::new()
+    args.set("distance", distance)
+    args.set("unit", unit)
+    return _command(name, args)
+}
+
+fn _parse_table(name: String, tokens: Array) -> any {
+    let arity_error = _arity(name, len(tokens), 4)
+    if arity_error != nil {
+        return arity_error
+    }
+    let start = _number(tokens[0], 0)
+    if parse_failed(start) {
+        return start
+    }
+    let stop = _number(tokens[1], 1)
+    if parse_failed(stop) {
+        return stop
+    }
+    let interval = _number(tokens[2], 2)
+    if parse_failed(interval) {
+        return interval
+    }
+    let unit = _unit(tokens[3], 3)
+    if parse_failed(unit) {
+        return unit
+    }
+
+    if start <= 0 {
+        return _path_error(
+        "command_argument",
+        ":" + name + " start must be greater than zero",
+        "arguments[0]"
+        )
+    }
+    if stop <= start {
+        return _path_error(
+        "command_argument",
+        ":" + name + " stop must be greater than start",
+        "arguments[1]"
+        )
+    }
+    if interval <= 0 {
+        return _path_error(
+        "command_argument",
+        ":" + name + " interval must be greater than zero",
+        "arguments[2]"
+        )
+    }
+
+    flux args = Map::new()
+    args.set("start", start)
+    args.set("stop", stop)
+    args.set("interval", interval)
+    args.set("unit", unit)
+    return _command(name, args)
+}
+
+fn _parse_path(name: String, tokens: Array) -> any {
+    let arity_error = _arity(name, len(tokens), 1)
+    if arity_error != nil {
+        return arity_error
+    }
+    let path = tokens[0].text
+    if len(path) == 0 {
+        return _path_error(
+        "command_argument",
+        ":" + name + " path must not be empty",
+        "arguments[0]"
+        )
+    }
+    flux args = Map::new()
+    args.set("path", path)
+    return _command(name, args)
+}
+
+export fn parse_command(line: any) -> any {
+    if typeof(line) != "String" {
+        return _path_error(
+        "command_argument",
+        "command input must be a String, got " + typeof(line),
+        "command"
+        )
+    }
+    let tokens = _lex(line)
+    if parse_failed(tokens) {
+        return tokens
+    }
+
+    let name = tokens[0].text
+    let arguments = tokens.slice(1, len(tokens))
+    if ["help", "show", "solve", "compare", "reset", "quit"].contains(name) {
+        let arity_error = _arity(name, len(arguments), 0)
+        if arity_error != nil {
+            return arity_error
+        }
+        return _empty_command(name)
+    }
+    if name == "at" {
+        return _parse_at(name, arguments)
+    }
+    if name == "dope" || name == "wind-card" {
+        return _parse_table(name, arguments)
+    }
+    if name == "save" || name == "load" {
+        return _parse_path(name, arguments)
+    }
+    return _path_error(
+    "unknown_command",
+    "unknown colon command ':" + name + "'",
+    "command"
+    )
+}

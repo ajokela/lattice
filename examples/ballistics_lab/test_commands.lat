@@ -1,0 +1,440 @@
+// MBA-1311 direct command-dispatch integration tests.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/reference_experiment" as reference
+import "examples/ballistics_lab/session" as sessions
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/persistence" as persistence
+import "examples/ballistics_lab/command_parser" as parser
+import "examples/ballistics_lab/render" as render
+import "examples/ballistics_lab/commands" as commands
+
+fn fixture_resolved_request() -> Map {
+    let envelope = json_parse(
+    read_file("examples/ballistics_lab/fixtures/representative.success.json")
+    )
+    return clone(envelope.get("resolved_request"))
+}
+
+fn observation_for(distance_yards: Number, run_number: Int, terminal: Bool) -> any {
+    flux flags = []
+    if terminal {
+        flags = ["terminal"]
+    }
+    return domain.observation(
+    units.yd(distance_yards),
+    distance_yards / 1000.0 + run_number * 0.01,
+    units.fps(2700 - distance_yards - run_number * 20),
+    units.foot_pounds(2600 - distance_yards - run_number * 10),
+    units.inches(0.0 - distance_yards / 20.0 - run_number),
+    units.inches(distance_yards / 80.0 + run_number),
+    2.5 - distance_yards / 500.0,
+    flags
+    )
+}
+
+fn trajectory_for(experiment: any, run_number: Int) -> any {
+    flux grid = [0, 100, 200, 300, 400]
+    if run_number % 2 == 0 {
+        grid = [0, 125, 250, 400]
+    }
+    flux observations = []
+    flux index = 0
+    for distance in grid {
+        observations.push(observation_for(
+        distance,
+        run_number,
+        index == len(grid) - 1
+        ))
+        index = index + 1
+    }
+    let terminal = observations[len(observations) - 1]
+    let summary = domain.trajectory_summary(
+    terminal.distance,
+    units.inches(24 + run_number),
+    terminal.time_s,
+    terminal.velocity,
+    terminal.energy,
+    "max_range",
+    1.8,
+    units.inches(run_number)
+    )
+    return domain.trajectory(
+    "command-engine-" + to_string(run_number),
+    experiment,
+    observations,
+    [domain.assumption("command_default", "Command test default.", "$.solver")],
+    [domain.warning("command_warning", "Command test warning.", "$.shot")],
+    summary,
+    false,
+    fixture_resolved_request(),
+    1
+    )
+}
+
+fn successful_backend(calls: any) -> any {
+    return backends.engine_backend("command-backend", |experiment| {
+        let run_number = calls.get() + 1
+        calls.set(run_number)
+        return trajectory_for(experiment, run_number)
+    }
+    )
+}
+
+fn failure_backend(calls: any) -> any {
+    return backends.engine_backend("command-failure", |_| {
+        calls.set(calls.get() + 1)
+        return domain.laboratory_error(
+        "injected_command_failure",
+        "injected command backend failure",
+        "$.solver"
+        )
+    }
+    )
+}
+
+fn command_lab(calls: any) -> any {
+    let experiment = reference.representative_experiment()
+    let backend = successful_backend(calls)
+    let display = sessions.display_preferences("yd", "ft/s", "ft-lb", "moa", 2)
+    return sessions.new_session(experiment, backend, display, 4)
+}
+
+fn renamed_experiment(base: any, name: String) -> any {
+    return domain.experiment(
+    name,
+    base.projectile,
+    base.rifle,
+    base.atmosphere,
+    base.winds,
+    base.shot,
+    base.solver
+    )
+}
+
+fn assert_complete_state(
+lab: any,
+experiment: any,
+backend_name: String,
+display: any,
+history_limit: Int,
+history: Array,
+current: any,
+previous: any,
+label: String
+) {
+    assert(sessions.experiment_of(lab) == experiment, label + ": experiment changed")
+    assert(sessions.backend_of(lab).name == backend_name, label + ": backend changed")
+    assert(sessions.display_of(lab) == display, label + ": display changed")
+    assert(sessions.history_limit_of(lab) == history_limit, label + ": history limit changed")
+    assert(sessions.history(lab) == history, label + ": history changed")
+    assert(sessions.current_run(lab) == current, label + ": current run changed")
+    assert(sessions.previous_run(lab) == previous, label + ": previous run changed")
+}
+
+fn column_unit(table: any, key: String) -> any {
+    for column in table.columns {
+        if column.key == key {
+            return column.unit
+        }
+    }
+    assert(false, "missing table column '" + key + "'")
+    return nil
+}
+
+fn test_help_show_parse_convenience_and_immutability() {
+    let calls = Ref::new(0)
+    let lab = command_lab(calls)
+
+    let help = commands.execute_command(lab, ":help")
+    assert(commands.command_succeeded(help))
+    assert(!commands.command_failed(help))
+    assert(help.name == "help")
+    assert(help.output.contains(":solve"))
+    assert(help.output.contains(":wind-card"))
+    assert(help.value == nil)
+    assert(help.quit == false)
+
+    let mutation_error = try {
+        help.output = "mutated"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(mutation_error != "NO_ERROR", "CommandResponse fields must be immutable")
+    assert(mutation_error.contains("frozen"))
+
+    let show = commands.execute_command(lab, ":show")
+    assert(commands.command_succeeded(show))
+    assert(show.name == "show")
+    assert(show.output.contains("175 gr match at 1,000 yards"))
+    assert(struct_name(show.value) == "Experiment")
+    assert(calls.get() == 0, "help/show must not invoke the backend")
+    assert(sessions.current_run(lab) == nil)
+
+    let parse_failure = commands.execute_command(lab, ":at nope yd")
+    assert(commands.command_failed(parse_failure))
+    assert(parser.parse_failed(parse_failure))
+    assert(parse_failure.code == "command_argument")
+    assert(parse_failure.path == "arguments[0]")
+    assert(calls.get() == 0)
+    assert(sessions.current_run(lab) == nil)
+}
+
+fn test_solve_exactly_once_and_backend_failure_atomicity() {
+    let calls = Ref::new(0)
+    let failed_calls = Ref::new(0)
+    let injected_failure = failure_backend(failed_calls)
+    let lab = command_lab(calls)
+
+    let solved = commands.execute_command(lab, ":solve")
+    assert(commands.command_succeeded(solved))
+    assert(solved.name == "solve")
+    assert(struct_name(solved.value) == "RunRecord")
+    assert(solved.value.engine_version == "command-engine-1")
+    assert(solved.output.contains("command-engine-1"))
+    assert(calls.get() == 1, "solve must invoke the backend exactly once")
+    assert(sessions.current_run(lab) == solved.value)
+
+    sessions.set_backend(lab, injected_failure)
+    let before_experiment = sessions.experiment_of(lab)
+    let before_backend = sessions.backend_of(lab).name
+    let before_display = sessions.display_of(lab)
+    let before_limit = sessions.history_limit_of(lab)
+    let before_history = clone(sessions.history(lab))
+    let before_current = sessions.current_run(lab)
+    let before_previous = sessions.previous_run(lab)
+
+    let failed = commands.execute_command(lab, ":solve")
+    assert(commands.command_failed(failed))
+    assert(failed.code == "injected_command_failure")
+    assert(failed.message == "injected command backend failure")
+    assert(failed.path == "$.solver")
+    assert(failed_calls.get() == 1, "failed solve must invoke the backend exactly once")
+    assert(calls.get() == 1)
+    assert_complete_state(
+    lab,
+    before_experiment,
+    before_backend,
+    before_display,
+    before_limit,
+    before_history,
+    before_current,
+    before_previous,
+    "backend failure"
+    )
+}
+
+fn test_at_dope_wind_card_and_compare() {
+    let calls = Ref::new(0)
+    let lab = command_lab(calls)
+
+    let before_solve = commands.execute_command(lab, ":at 100 yd")
+    assert(commands.command_failed(before_solve))
+    assert(before_solve.code == "command_state_error")
+    assert(calls.get() == 0)
+
+    commands.execute_command(lab, ":solve")
+    let at = commands.execute_command(lab, ":at 150 yd")
+    assert(commands.command_succeeded(at))
+    assert(struct_name(at.value) == "Observation")
+    assert(units.distance_as(at.value.distance, "yd") == 150.0)
+    assert(at.output.contains("150"))
+    assert(at.output.contains("yd"))
+
+    let dope = commands.execute_command(lab, ":dope 100 350 100 yd")
+    assert(commands.command_succeeded(dope))
+    assert(dope.value.kind == "dope")
+    assert(column_unit(dope.value, "distance") == "yd")
+    assert(column_unit(dope.value, "drop") == "in")
+    assert(column_unit(dope.value, "come_up") == "moa")
+    assert(column_unit(dope.value, "velocity") == "ft/s")
+    assert(column_unit(dope.value, "energy") == "ft-lb")
+    assert(dope.output.contains("DOPE"))
+
+    let wind = commands.execute_command(lab, ":wind-card 100 350 100 yd")
+    assert(commands.command_succeeded(wind))
+    assert(wind.value.kind == "wind_card")
+    assert(column_unit(wind.value, "distance") == "yd")
+    assert(column_unit(wind.value, "windage") == "in")
+    assert(column_unit(wind.value, "wind_hold") == "moa")
+    assert(column_unit(wind.value, "wind_speed") == "mph")
+    assert(column_unit(wind.value, "direction_from") == "deg")
+    assert(wind.output.contains("Wind card"))
+
+    let compare_without_previous = commands.execute_command(lab, ":compare")
+    assert(commands.command_failed(compare_without_previous))
+    assert(compare_without_previous.code == "command_state_error")
+    assert(calls.get() == 1)
+    assert(len(sessions.history(lab)) == 1)
+
+    commands.execute_command(lab, ":solve")
+    let previous = sessions.previous_run(lab)
+    let current = sessions.current_run(lab)
+    let comparison = commands.execute_command(lab, ":compare")
+    assert(commands.command_succeeded(comparison))
+    assert(comparison.value.kind == "comparison")
+    assert(comparison.value.provenance[0].engine_version == previous.engine_version)
+    assert(comparison.value.provenance[1].engine_version == current.engine_version)
+    assert(previous.engine_version == "command-engine-1")
+    assert(current.engine_version == "command-engine-2")
+    assert(len(comparison.value.rows) == 14, "comparison must use the aligned union grid")
+    assert(column_unit(comparison.value, "distance") == "yd")
+    assert(column_unit(comparison.value, "drop") == "in")
+    assert(column_unit(comparison.value, "windage") == "in")
+    assert(column_unit(comparison.value, "velocity") == "ft/s")
+    assert(column_unit(comparison.value, "energy") == "ft-lb")
+    assert(column_unit(comparison.value, "delta_drop") == "in")
+    assert(column_unit(comparison.value, "delta_velocity") == "ft/s")
+    assert(comparison.value.rows[0].get("series_index") == 0)
+    assert(comparison.value.rows[0].get("delta_velocity") == 0.0)
+    assert(comparison.output.contains("Trajectory comparison"))
+    assert(calls.get() == 2)
+}
+
+fn test_quoted_save_load_and_failure_atomicity() {
+    let calls = Ref::new(0)
+    let lab = command_lab(calls)
+    commands.execute_command(lab, ":solve")
+    commands.execute_command(lab, ":solve")
+    let saved_experiment = sessions.experiment_of(lab)
+
+    let seed_path = tempfile()
+    delete_file(seed_path)
+    let path = seed_path + " quoted experiment.json"
+    let saved = commands.execute_command(lab, ":save \"" + path + "\"")
+    assert(commands.command_succeeded(saved))
+    assert(saved.value == path)
+    assert(file_exists(path))
+    assert(calls.get() == 2)
+
+    sessions.replace_experiment(lab, renamed_experiment(saved_experiment, "temporary experiment"))
+    let before_backend = sessions.backend_of(lab).name
+    let before_display = sessions.display_of(lab)
+    let before_limit = sessions.history_limit_of(lab)
+    let before_history = clone(sessions.history(lab))
+    let before_current = sessions.current_run(lab)
+    let before_previous = sessions.previous_run(lab)
+
+    let loaded = commands.execute_command(lab, ":load \"" + path + "\"")
+    assert(commands.command_succeeded(loaded))
+    assert(loaded.value == saved_experiment)
+    assert(sessions.experiment_of(lab) == saved_experiment)
+    assert(sessions.backend_of(lab).name == before_backend)
+    assert(sessions.display_of(lab) == before_display)
+    assert(sessions.history_limit_of(lab) == before_limit)
+    assert(sessions.history(lab) == before_history)
+    assert(sessions.current_run(lab) == before_current)
+    assert(sessions.previous_run(lab) == before_previous)
+    assert(calls.get() == 2, "load must not invoke the backend")
+    delete_file(path)
+
+    let malformed_path = tempfile()
+    write_file(malformed_path, "{\"kind\":")
+    let before_experiment = sessions.experiment_of(lab)
+    let malformed = commands.execute_command(lab, ":load \"" + malformed_path + "\"")
+    delete_file(malformed_path)
+    assert(commands.command_failed(malformed))
+    assert(malformed.code == "command_execution_error")
+    assert_complete_state(
+    lab,
+    before_experiment,
+    before_backend,
+    before_display,
+    before_limit,
+    before_history,
+    before_current,
+    before_previous,
+    "malformed load"
+    )
+    assert(calls.get() == 2)
+}
+
+fn test_validation_failures_reset_and_quit() {
+    let calls = Ref::new(0)
+    let lab = command_lab(calls)
+    commands.execute_command(lab, ":solve")
+    commands.execute_command(lab, ":solve")
+
+    let before_experiment = sessions.experiment_of(lab)
+    let before_backend = sessions.backend_of(lab).name
+    let before_display = sessions.display_of(lab)
+    let before_limit = sessions.history_limit_of(lab)
+    let before_history = clone(sessions.history(lab))
+    let before_current = sessions.current_run(lab)
+    let before_previous = sessions.previous_run(lab)
+
+    // Checked-analysis failures happen after parsing and command validation.
+    // They must still leave the entire mutable session untouched.
+    for source in [":at 500 yd", ":dope 500 600 10 yd"] {
+        let failed = commands.execute_command(lab, source)
+        assert(commands.command_failed(failed), source + ": expected analysis failure")
+        assert(failed.code == "command_execution_error")
+        assert_complete_state(
+        lab,
+        before_experiment,
+        before_backend,
+        before_display,
+        before_limit,
+        before_history,
+        before_current,
+        before_previous,
+        source
+        )
+    }
+
+    for source in [
+        ":at -1 yd",
+        ":at 100 parsecs",
+        ":dope 0 100 10 yd",
+        ":dope 100 50 10 yd",
+        ":wind-card 100 300 0 yd",
+        ":unknown"
+    ] {
+        let failed = commands.execute_command(lab, source)
+        assert(commands.command_failed(failed), source + ": expected failure")
+        assert_complete_state(
+        lab,
+        before_experiment,
+        before_backend,
+        before_display,
+        before_limit,
+        before_history,
+        before_current,
+        before_previous,
+        source
+        )
+    }
+    assert(calls.get() == 2)
+
+    let reset = commands.execute_command(lab, ":reset")
+    assert(commands.command_succeeded(reset))
+    assert(reset.name == "reset")
+    assert(len(sessions.history(lab)) == 0)
+    assert(sessions.current_run(lab) == nil)
+    assert(sessions.previous_run(lab) == nil)
+    assert(sessions.experiment_of(lab) == before_experiment)
+    assert(sessions.backend_of(lab).name == before_backend)
+    assert(sessions.display_of(lab) == before_display)
+    assert(sessions.history_limit_of(lab) == before_limit)
+    assert(calls.get() == 2, "reset must not invoke the backend")
+
+    let quit = commands.execute_command(lab, ":quit")
+    assert(commands.command_succeeded(quit))
+    assert(quit.name == "quit")
+    assert(quit.quit == true)
+    assert(quit.value == nil)
+    assert(calls.get() == 2)
+    assert(len(sessions.history(lab)) == 0)
+}
+
+fn main() {
+    test_help_show_parse_convenience_and_immutability()
+    test_solve_exactly_once_and_backend_failure_atomicity()
+    test_at_dope_wind_card_and_compare()
+    test_quoted_save_load_and_failure_atomicity()
+    test_validation_failures_reset_and_quit()
+    print("ballistics_lab commands: all tests passed")
+}

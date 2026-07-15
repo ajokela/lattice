@@ -1,0 +1,392 @@
+// Direct, typed command dispatch for the source-level ballistics laboratory.
+//
+// Commands are parsed into ColonCommand values, then routed to ordinary Lattice
+// functions. This module never synthesizes source and never invokes lat_eval,
+// a shell, an executable, or a process. Session mutation remains confined to
+// solve_session(), replace_experiment(), and reset_session().
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/session" as sessions
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/persistence" as persistence
+import "examples/ballistics_lab/command_parser" as parser
+import "examples/ballistics_lab/render" as render
+
+export struct CommandResponse {
+    name: fix String,
+    output: fix String,
+    value: fix any,
+    quit: fix Bool
+}
+
+fn _command_names() -> Array {
+    return [
+        "help", "show", "solve", "at", "dope", "wind-card", "compare",
+        "save", "load", "reset", "quit"
+    ]
+}
+
+fn _help_text() -> String {
+    return "Commands:\n" +
+    ":help\n" +
+    ":show\n" +
+    ":solve\n" +
+    ":at <distance> <unit>\n" +
+    ":dope <start> <stop> <interval> <unit>\n" +
+    ":wind-card <start> <stop> <interval> <unit>\n" +
+    ":compare\n" +
+    ":save \"<path>\"\n" +
+    ":load \"<path>\"\n" +
+    ":reset\n" +
+    ":quit"
+}
+
+fn _fail(message: String) {
+    assert(false, message)
+}
+
+fn _is_struct(value: any, expected: String) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == expected
+}
+
+fn _require_struct(value: any, expected: String, path: String) {
+    if !_is_struct(value, expected) {
+        flux actual = typeof(value)
+        if actual == "Struct" {
+            actual = struct_name(value)
+        }
+        _fail(path + ": expected " + expected + ", got " + actual)
+    }
+}
+
+fn _require_map(value: any, path: String) -> Map {
+    if typeof(value) != "Map" {
+        _fail(path + ": expected Map, got " + typeof(value))
+    }
+    return value
+}
+
+fn _require_exact_args(args: Map, expected: Array, command_name: String) {
+    let path = "dispatch_command." + command_name + ".args"
+    for key in expected {
+        if !args.has(key) {
+            _fail(path + ": missing required field '" + key + "'")
+        }
+    }
+    for key in args.keys() {
+        if typeof(key) != "String" {
+            _fail(path + ": keys must be strings")
+        }
+        if !expected.contains(key) {
+            _fail(path + ": unknown field '" + key + "'")
+        }
+    }
+}
+
+fn _number(value: any, path: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        _fail(path + ": expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        _fail(path + ": must be finite")
+    }
+    return value
+}
+
+fn _string(value: any, path: String) -> String {
+    if typeof(value) != "String" {
+        _fail(path + ": expected String, got " + typeof(value))
+    }
+    return value
+}
+
+fn _nonempty_string(value: any, path: String) -> String {
+    let checked = _string(value, path)
+    if len(checked.trim()) == 0 {
+        _fail(path + ": must not be empty")
+    }
+    return checked
+}
+
+fn _distance_value(amount: any, unit: any, path: String) -> any {
+    let checked_amount = _number(amount, path + ".value")
+    let checked_unit = _nonempty_string(unit, path + ".unit")
+    let encoded = Map::new()
+    encoded.set("value", checked_amount)
+    encoded.set("unit", checked_unit)
+    return persistence.distance_from_map(encoded)
+}
+
+fn _validate_command(command: any) -> any {
+    _require_struct(command, "ColonCommand", "dispatch_command.command")
+    let name = _nonempty_string(command.name, "dispatch_command.command.name")
+    if !_command_names().contains(name) {
+        _fail("dispatch_command.command.name: unsupported command '" + name + "'")
+    }
+    let args = _require_map(command.args, "dispatch_command.command.args")
+    if ["help", "show", "solve", "compare", "reset", "quit"].contains(name) {
+        _require_exact_args(args, [], name)
+        return command
+    }
+    if name == "at" {
+        _require_exact_args(args, ["distance", "unit"], name)
+        let distance = _number(args.get("distance"), "dispatch_command.at.args.distance")
+        if distance < 0 {
+            _fail("dispatch_command.at.args.distance: must be non-negative")
+        }
+        _distance_value(distance, args.get("unit"), "dispatch_command.at.args")
+        return command
+    }
+    if name == "dope" || name == "wind-card" {
+        _require_exact_args(args, ["start", "stop", "interval", "unit"], name)
+        let prefix = "dispatch_command." + name + ".args"
+        let start = _number(args.get("start"), prefix + ".start")
+        let stop = _number(args.get("stop"), prefix + ".stop")
+        let interval = _number(args.get("interval"), prefix + ".interval")
+        if start <= 0 {
+            _fail(prefix + ".start: must be greater than zero")
+        }
+        if stop <= start {
+            _fail(prefix + ".stop: must be greater than start")
+        }
+        if interval <= 0 {
+            _fail(prefix + ".interval: must be greater than zero")
+        }
+        _distance_value(start, args.get("unit"), prefix)
+        _distance_value(stop, args.get("unit"), prefix)
+        _distance_value(interval, args.get("unit"), prefix)
+        return command
+    }
+    _require_exact_args(args, ["path"], name)
+    _nonempty_string(args.get("path"), "dispatch_command." + name + ".args.path")
+    return command
+}
+
+fn _response(
+name: String,
+output: String,
+value: any = nil,
+quit: Bool = false
+) -> CommandResponse {
+    // Fixed fields provide a structured immutable response without re-freezing a
+    // RunRecord or AnalysisTable crystal placed in `value`.
+    return CommandResponse {
+        name: name,
+        output: output,
+        value: value,
+        quit: quit
+    }
+}
+
+fn _error(code: String, message: String, path: any = nil) -> any {
+    return domain.laboratory_error(code, message, path)
+}
+
+fn _state_run(lab: any, previous: Bool, command_name: String) -> any {
+    flux record = sessions.current_run(lab)
+    flux label = "current"
+    if previous {
+        record = sessions.previous_run(lab)
+        label = "previous"
+    }
+    if record == nil {
+        return _error(
+        "command_state_error",
+        command_name + ": no " + label + " run is available",
+        "$.session." + label + "_run"
+        )
+    }
+    if !_is_struct(record, "RunRecord") {
+        return _error(
+        "command_state_error",
+        command_name + ": " + label + " run is not a RunRecord",
+        "$.session." + label + "_run"
+        )
+    }
+    if !_is_struct(record.result, "Trajectory") {
+        return _error(
+        "command_state_error",
+        command_name + ": " + label + " run has no Trajectory",
+        "$.session." + label + "_run.result"
+        )
+    }
+    return record
+}
+
+fn _distance_in_unit(value: any, unit: String) -> any {
+    return _distance_value(
+    units.distance_as(value, unit),
+    unit,
+    "dispatch_command.analysis_distance"
+    )
+}
+
+fn _range_distances(trajectory: any, args: Map, profile: any) -> Array {
+    let unit = args.get("unit")
+    let start = _distance_value(args.get("start"), unit, "dispatch_command.range.start")
+    let stop = _distance_value(args.get("stop"), unit, "dispatch_command.range.stop")
+    let interval = _distance_value(
+    args.get("interval"),
+    unit,
+    "dispatch_command.range.interval"
+    )
+    let sampled = analysis.sample(trajectory, start, stop, interval)
+    flux distances = []
+    for item in sampled {
+        distances.push(_distance_in_unit(item.distance, profile.distance_unit))
+    }
+    return distances
+}
+
+fn _dispatch_checked(lab: any, command: any, profile: any) -> any {
+    let name = command.name
+    let args = command.args
+    if name == "help" {
+        return _response(name, _help_text())
+    }
+    if name == "show" {
+        return _response(
+        name,
+        render.render_session_summary(lab),
+        sessions.experiment_of(lab)
+        )
+    }
+    if name == "solve" {
+        let result = sessions.solve_session(lab)
+        if command_failed(result) {
+            // Backend and backend-contract LaboratoryErrors cross this boundary unchanged.
+            return result
+        }
+        return _response(name, render.render_run_summary(result, profile), result)
+    }
+    if name == "at" {
+        let current = _state_run(lab, false, name)
+        if command_failed(current) {
+            return current
+        }
+        let distance = _distance_value(
+        args.get("distance"),
+        args.get("unit"),
+        "dispatch_command.at.args"
+        )
+        let observation = analysis.trajectory_at(current.result, distance)
+        return _response(name, render.render_observation(observation, profile), observation)
+    }
+    if name == "dope" {
+        let current = _state_run(lab, false, name)
+        if command_failed(current) {
+            return current
+        }
+        let distances = _range_distances(current.result, args, profile)
+        let table = analysis.dope(
+        current.result,
+        distances,
+        render.offset_unit_for(profile),
+        profile.angle_unit,
+        profile.velocity_unit,
+        profile.energy_unit
+        )
+        return _response(name, render.render_dope(table, profile), table)
+    }
+    if name == "wind-card" {
+        let current = _state_run(lab, false, name)
+        if command_failed(current) {
+            return current
+        }
+        let distances = _range_distances(current.result, args, profile)
+        let table = analysis.wind_card(
+        [current.result],
+        distances,
+        render.offset_unit_for(profile),
+        profile.angle_unit,
+        render.wind_speed_unit_for(profile),
+        render.direction_unit_for(profile)
+        )
+        return _response(name, render.render_wind_card(table, profile), table)
+    }
+    if name == "compare" {
+        let current = _state_run(lab, false, name)
+        if command_failed(current) {
+            return current
+        }
+        let previous = _state_run(lab, true, name)
+        if command_failed(previous) {
+            return previous
+        }
+        // Previous is deliberately series zero: every delta is current - previous.
+        let table = analysis.compare_trajectories(
+        [previous.result, current.result],
+        profile.distance_unit,
+        render.offset_unit_for(profile),
+        render.offset_unit_for(profile),
+        profile.velocity_unit,
+        profile.energy_unit
+        )
+        return _response(name, render.render_comparison(table, profile), table)
+    }
+    if name == "save" {
+        let path = args.get("path")
+        persistence.save_experiment(path, sessions.experiment_of(lab))
+        return _response(name, "Saved experiment to " + path, path)
+    }
+    if name == "load" {
+        let path = args.get("path")
+        // Complete I/O, reconstruction, and rendering before the sole mutation.
+        let loaded = persistence.load_experiment(path)
+        let output = render.render_experiment_summary(loaded, profile)
+        sessions.replace_experiment(lab, loaded)
+        return _response(name, output, loaded)
+    }
+    if name == "reset" {
+        sessions.reset_session(lab)
+        return _response(name, "Session run state reset.")
+    }
+    return _response(name, "Quit requested.", nil, true)
+}
+
+export fn command_succeeded(value: any) -> Bool {
+    return _is_struct(value, "CommandResponse")
+}
+
+export fn command_failed(value: any) -> Bool {
+    return _is_struct(value, "LaboratoryError")
+}
+
+// Dispatch an already parsed command. Shape/profile validation happens before
+// any command-specific mutation, and thrown validation/I/O/analysis failures are
+// normalized to LaboratoryError values.
+export fn dispatch_command(lab: any, command: any) -> any {
+    flux checked = nil
+    flux profile = nil
+    let validation_error = try {
+        _require_struct(lab, "LabSession", "dispatch_command.lab")
+        checked = _validate_command(command)
+        profile = render.render_profile_from_display(sessions.display_of(lab))
+        nil
+    } catch error {
+        error
+    }
+    if validation_error != nil {
+        return _error("command_validation_error", validation_error.message)
+    }
+
+    return try {
+        _dispatch_checked(lab, checked, profile)
+    } catch error {
+        _error(
+        "command_execution_error",
+        checked.name + ": " + error.message
+        )
+    }
+}
+
+// Parse-and-dispatch convenience for terminal/REPL callers.
+export fn execute_command(lab: any, line: any) -> any {
+    let parsed = parser.parse_command(line)
+    if parser.parse_failed(parsed) {
+        return parsed
+    }
+    return dispatch_command(lab, parsed)
+}

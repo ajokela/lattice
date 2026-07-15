@@ -1,0 +1,747 @@
+// MBA-1311 deterministic terminal renderer tests.
+// Run directly on StackVM, tree-walk, and RegVM.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/session" as sessions
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/reference_experiment" as reference
+import "examples/ballistics_lab/render" as render
+
+// Struct-name validation is intentionally exercised without selectively
+// importing exported struct types, which is not portable across all backends.
+struct Observation {
+    distance: fix any,
+    time_s: fix Number,
+    velocity: fix any,
+    energy: fix any,
+    drop: fix any,
+    windage: fix any,
+    mach: fix Number,
+    flags: fix Array
+}
+
+struct AnalysisTable {
+    kind: fix String,
+    title: fix String,
+    columns: fix Array,
+    rows: fix Array,
+    provenance: fix Array
+}
+
+fn named_experiment(name: String) -> any {
+    let base = reference.representative_experiment()
+    return domain.experiment(
+    name,
+    base.projectile,
+    base.rifle,
+    base.atmosphere,
+    base.winds,
+    base.shot,
+    base.solver
+    )
+}
+
+fn sample_observation(
+distance_m: Number,
+time_s: Number,
+velocity_mps: Number,
+energy_j: Number,
+drop_m: Number,
+windage_m: Number,
+mach: Number,
+terminal: Bool
+) -> any {
+    flux flags = []
+    if terminal {
+        flags = ["terminal"]
+    }
+    return domain.observation(
+    units.m(distance_m),
+    time_s,
+    units.mps(velocity_mps),
+    units.joules(energy_j),
+    units.m(drop_m),
+    units.m(windage_m),
+    mach,
+    flags
+    )
+}
+
+fn trajectory_for(experiment: any, variant: Int) -> any {
+    flux observations = []
+    flux engine = "snapshot-engine-a"
+    flux maximum_height = 1.25
+    flux flight_time = 0.30
+    flux terminal_velocity = 600.0
+    flux terminal_energy = 2000.0
+    flux spin_drift = -0.004
+    if variant == 0 {
+        observations = [
+            sample_observation(0, 0, 800, 3000, -0.00004, 0.00004, 2.30, false),
+            sample_observation(100, 0.14, 700, 2500, -0.12, -0.03, 2.05, false),
+            sample_observation(200, 0.30, 600, 2000, -0.50, -0.08, 1.80, true)
+        ]
+    } else {
+        engine = "snapshot-engine-b"
+        maximum_height = 1.30
+        flight_time = 0.31
+        terminal_velocity = 610.0
+        terminal_energy = 2050.0
+        spin_drift = 0.003
+        observations = [
+            sample_observation(0, 0, 805, 3050, 0.00004, -0.00004, 2.31, false),
+            sample_observation(150, 0.23, 660, 2300, -0.28, -0.045, 1.94, false),
+            sample_observation(200, 0.31, 610, 2050, -0.45, -0.07, 1.82, true)
+        ]
+    }
+    let request = Map::new()
+    request.set("fixture", variant)
+    let summary = domain.trajectory_summary(
+    units.m(200),
+    units.m(maximum_height),
+    flight_time,
+    units.mps(terminal_velocity),
+    units.joules(terminal_energy),
+    "velocity_floor",
+    1.42,
+    units.m(spin_drift)
+    )
+    return domain.trajectory(
+    engine,
+    experiment,
+    observations,
+    [domain.assumption(
+        "model_default",
+        "Used G7 | model.",
+        "$.projectile.drag_model"
+        )],
+        [domain.warning(
+            "range_notice",
+            "Line one.\nLine two.",
+            "$.shot.max_range"
+            )],
+            summary,
+            variant == 1,
+            request,
+            1
+            )
+        }
+
+        fn solved_session() -> any {
+            let calls = Ref::new(0)
+            let backend = backends.engine_backend("snapshot-backend", |experiment| {
+                let variant = calls.get()
+                calls.set(variant + 1)
+                return trajectory_for(experiment, variant)
+            }
+            )
+            let lab = sessions.new_session(
+            named_experiment("snapshot experiment"),
+            backend,
+            render.metric_render_profile(2),
+            4
+            )
+            let first = sessions.solve_session(lab)
+            let second = sessions.solve_session(lab)
+            assert(struct_name(first) == "RunRecord")
+            assert(struct_name(second) == "RunRecord")
+            return lab
+        }
+
+        fn metric_dope(run: any) -> any {
+            return analysis.dope(
+            run.result,
+            [units.m(100), units.m(200)],
+            "m",
+            "mil",
+            "m/s",
+            "J"
+            )
+        }
+
+        fn imperial_dope(run: any) -> any {
+            return analysis.dope(
+            run.result,
+            [units.yd(100), units.yd(200)],
+            "in",
+            "mil",
+            "ft/s",
+            "ft-lb"
+            )
+        }
+
+        fn metric_wind_card(run: any) -> any {
+            return analysis.wind_card(
+            [run.result],
+            [units.m(100), units.m(200)],
+            "m",
+            "mil",
+            "m/s",
+            "deg"
+            )
+        }
+
+        fn imperial_wind_card(run: any) -> any {
+            return analysis.wind_card(
+            [run.result],
+            [units.yd(100), units.yd(200)],
+            "in",
+            "mil",
+            "mph",
+            "deg"
+            )
+        }
+
+        fn metric_comparison(lab: any) -> any {
+            return analysis.compare_trajectories(
+            [sessions.previous_run(lab).result, sessions.current_run(lab).result],
+            "m",
+            "m",
+            "m",
+            "m/s",
+            "J"
+            )
+        }
+
+        fn imperial_comparison(lab: any) -> any {
+            return analysis.compare_trajectories(
+            [sessions.previous_run(lab).result, sessions.current_run(lab).result],
+            "yd",
+            "in",
+            "in",
+            "ft/s",
+            "ft-lb"
+            )
+        }
+
+        fn assert_has(actual: String, expected: String, label: String) {
+            assert(actual.contains(expected), label + ": missing '" + expected + "' in:\n" + actual)
+        }
+
+        fn expected_experiment_metric(name: String) -> String {
+            return "Experiment: " + name + "\n" +
+            "  projectile           : 175 gr match\n" +
+            "  mass                 : 11.34 g\n" +
+            "  diameter             : 0.01 m\n" +
+            "  length               : 0.03 m\n" +
+            "  drag model           : G7\n" +
+            "  ballistic coefficient: 0.24\n" +
+            "  rifle                : 24-inch match rifle\n" +
+            "  sight height         : 0.04 m\n" +
+            "  muzzle height        : 0.00 m\n" +
+            "  twist rate           : 0.20 m\n" +
+            "  twist direction      : right\n" +
+            "  altitude             : 250.00 m\n" +
+            "  temperature          : 15.00 C\n" +
+            "  pressure             : 1013.25 hPa\n" +
+            "  humidity             : 50.00 %\n" +
+            "  latitude             : +45.00 deg\n" +
+            "  muzzle velocity      : 822.96 m/s\n" +
+            "  maximum range        : 914.40 m\n" +
+            "  zero distance        : 91.44 m\n" +
+            "  muzzle angle         : default\n" +
+            "  aim azimuth          : default\n" +
+            "  shot azimuth         : default\n" +
+            "  shooting angle       : default\n" +
+            "  cant angle           : default\n" +
+            "  target height        : default\n" +
+            "  ground threshold     : default\n" +
+            "  solver               : rk45\n" +
+            "  time step            : default\n" +
+            "  sampling interval    : 9.14 m\n" +
+            "  Magnus               : default\n" +
+            "  Coriolis             : on\n" +
+            "  enhanced spin drift  : default\n" +
+            "  wind[0]              : 4.47 m/s from 90.00 deg"
+        }
+
+        fn expected_experiment_imperial() -> String {
+            return "Experiment: 175 gr match at 1,000 yards\n" +
+            "  projectile           : 175 gr match\n" +
+            "  mass                 : 175.00 gr\n" +
+            "  diameter             : 0.31 in\n" +
+            "  length               : 1.24 in\n" +
+            "  drag model           : G7\n" +
+            "  ballistic coefficient: 0.24\n" +
+            "  rifle                : 24-inch match rifle\n" +
+            "  sight height         : 1.50 in\n" +
+            "  muzzle height        : 0.00 in\n" +
+            "  twist rate           : 8.00 in\n" +
+            "  twist direction      : right\n" +
+            "  altitude             : 273.40 yd\n" +
+            "  temperature          : 59.00 F\n" +
+            "  pressure             : 29.92 inHg\n" +
+            "  humidity             : 50.00 %\n" +
+            "  latitude             : +45.00 deg\n" +
+            "  muzzle velocity      : 2700.00 ft/s\n" +
+            "  maximum range        : 1000.00 yd\n" +
+            "  zero distance        : 100.00 yd\n" +
+            "  muzzle angle         : default\n" +
+            "  aim azimuth          : default\n" +
+            "  shot azimuth         : default\n" +
+            "  shooting angle       : default\n" +
+            "  cant angle           : default\n" +
+            "  target height        : default\n" +
+            "  ground threshold     : default\n" +
+            "  solver               : rk45\n" +
+            "  time step            : default\n" +
+            "  sampling interval    : 10.00 yd\n" +
+            "  Magnus               : default\n" +
+            "  Coriolis             : on\n" +
+            "  enhanced spin drift  : default\n" +
+            "  wind[0]              : 10.00 mph from 90.00 deg"
+        }
+
+        fn expected_notices(indent: String) -> String {
+            return indent + "Assumptions\n" +
+            indent + "  - model_default: Used G7 \\| model. [$.projectile.drag_model]\n" +
+            indent + "Warnings\n" +
+            indent + "  - range_notice: Line one.\\nLine two. [$.shot.max_range]"
+        }
+
+        fn expected_provenance(
+        index: Int,
+        engine: String,
+        verified: String,
+        actual_range: String
+        ) -> String {
+            return "  [" + to_string(index) + "] snapshot experiment\n" +
+            "    engine: " + engine + " (schema 1)\n" +
+            "    solver: rk45\n" +
+            "    verified: " + verified + "\n" +
+            "    termination: velocity_floor\n" +
+            "    actual range: " + actual_range + "\n" +
+            expected_notices("    ")
+        }
+
+        fn expected_session() -> String {
+            return "Ballistics laboratory session\n" +
+            "  active experiment: snapshot experiment\n" +
+            "  backend          : snapshot-backend\n" +
+            "  display          : m, m/s, J, mil (2 decimals)\n" +
+            "  history          : 2/4\n" +
+            "  current run      : snapshot experiment (snapshot-engine-b, velocity_floor)\n" +
+            "  previous run     : snapshot experiment (snapshot-engine-a, velocity_floor)\n\n" +
+            expected_experiment_metric("snapshot experiment")
+        }
+
+        fn expected_run() -> String {
+            return "Run: snapshot experiment\n" +
+            "  backend          : snapshot-backend\n" +
+            "  engine           : snapshot-engine-b\n" +
+            "  schema           : 1\n" +
+            "  verified         : yes\n" +
+            "  termination      : velocity_floor\n" +
+            "  actual range     : 200.00 m\n" +
+            "  maximum height   : +1.30 m\n" +
+            "  time of flight   : 0.31 s\n" +
+            "  terminal velocity: 610.00 m/s\n" +
+            "  terminal energy  : 2050.00 J\n" +
+            "  stability factor : 1.42\n" +
+            "  spin drift       : +0.00 m\n" +
+            expected_notices("")
+        }
+
+        fn expected_run_imperial() -> String {
+            return "Run: snapshot experiment\n" +
+            "  backend          : snapshot-backend\n" +
+            "  engine           : snapshot-engine-b\n" +
+            "  schema           : 1\n" +
+            "  verified         : yes\n" +
+            "  termination      : velocity_floor\n" +
+            "  actual range     : 218.72 yd\n" +
+            "  maximum height   : +51.18 in\n" +
+            "  time of flight   : 0.31 s\n" +
+            "  terminal velocity: 2001.31 ft/s\n" +
+            "  terminal energy  : 1512.00 ft-lb\n" +
+            "  stability factor : 1.42\n" +
+            "  spin drift       : +0.12 in\n" +
+            expected_notices("")
+        }
+
+        fn expected_observation() -> String {
+            return "Observation\n" +
+            "  distance: 0.00 m\n" +
+            "  time    : 0.00 s\n" +
+            "  velocity: 805.00 m/s\n" +
+            "  energy  : 3050.00 J\n" +
+            "  drop    : +0.00 m\n" +
+            "  windage : +0.00 m\n" +
+            "  Mach    : 2.31\n" +
+            "  flags   : none\n" +
+            "Signs: drop/windage + above/right, - below/left"
+        }
+
+        fn expected_observation_imperial() -> String {
+            return "Observation\n" +
+            "  distance: 0.00 yd\n" +
+            "  time    : 0.00 s\n" +
+            "  velocity: 2641.08 ft/s\n" +
+            "  energy  : 2249.56 ft-lb\n" +
+            "  drop    : +0.00 in\n" +
+            "  windage : +0.00 in\n" +
+            "  Mach    : 2.31\n" +
+            "  flags   : none\n" +
+            "Signs: drop/windage + above/right, - below/left"
+        }
+
+        fn expected_dope_metric() -> String {
+            return "DOPE: snapshot experiment\n" +
+            "Distance (m) | Drop (m) | Come-up (mil) | Velocity (m/s) | Energy (J) | Time (s) | Mach\n" +
+            "-------------+----------+---------------+----------------+------------+----------+-----\n" +
+            "      100.00 |    -0.19 |         +1.87 |         708.33 |    2550.00 |     0.15 | 2.06\n" +
+            "      200.00 |    -0.45 |         +2.25 |         610.00 |    2050.00 |     0.31 | 1.82\n" +
+            "Signs: drop + above/- below; come-up + correction up/- correction down\n" +
+            "Provenance\n" + expected_provenance(0, "snapshot-engine-b", "yes", "200.00 m")
+        }
+
+        fn expected_dope_imperial() -> String {
+            return "DOPE: snapshot experiment\n" +
+            "Distance (yd) | Drop (in) | Come-up (mil) | Velocity (ft/s) | Energy (ft-lb) | Time (s) | Mach\n" +
+            "--------------+-----------+---------------+-----------------+----------------+----------+-----\n" +
+            "       100.00 |     -6.72 |         +1.87 |         2351.08 |        1912.35 |     0.14 | 2.08\n" +
+            "       200.00 |    -15.42 |         +2.14 |         2057.48 |        1575.14 |     0.28 | 1.86\n" +
+            "Signs: drop + above/- below; come-up + correction up/- correction down\n" +
+            "Provenance\n" + expected_provenance(0, "snapshot-engine-b", "yes", "218.72 yd")
+        }
+
+        fn expected_wind() -> String {
+            return "Wind card\n" +
+            "Series | Trajectory          | Wind (m/s) | From (deg) | Distance (m) | Windage (m) | Wind hold (mil)\n" +
+            "-------+---------------------+------------+------------+--------------+-------------+----------------\n" +
+            "  0.00 | snapshot experiment |       4.47 |      90.00 |       100.00 |       -0.03 |           +0.30\n" +
+            "  0.00 | snapshot experiment |       4.47 |      90.00 |       200.00 |       -0.07 |           +0.35\n" +
+            "Signs: windage + right/- left; wind hold + correction right/- correction left\n" +
+            "Provenance\n" + expected_provenance(0, "snapshot-engine-b", "yes", "200.00 m")
+        }
+
+        fn expected_wind_imperial() -> String {
+            return "Wind card\n" +
+            "Series | Trajectory          | Wind (mph) | From (deg) | Distance (yd) | Windage (in) | Wind hold (mil)\n" +
+            "-------+---------------------+------------+------------+---------------+--------------+----------------\n" +
+            "  0.00 | snapshot experiment |      10.00 |      90.00 |        100.00 |        -1.08 |           +0.30\n" +
+            "  0.00 | snapshot experiment |      10.00 |      90.00 |        200.00 |        -2.42 |           +0.34\n" +
+            "Signs: windage + right/- left; wind hold + correction right/- correction left\n" +
+            "Provenance\n" + expected_provenance(0, "snapshot-engine-b", "yes", "218.72 yd")
+        }
+
+        fn expected_comparison() -> String {
+            return "Trajectory comparison\n" +
+            "Series | Trajectory          | Distance (m) | Time (s) | Velocity (m/s) | Energy (J) | Drop (m) | Windage (m) | Mach | Delta time (s) | Delta velocity (m/s) | Delta energy (J) | Delta drop (m) | Delta windage (m) | Delta Mach\n" +
+            "-------+---------------------+--------------+----------+----------------+------------+----------+-------------+------+----------------+----------------------+------------------+----------------+-------------------+-----------\n" +
+            "  0.00 | snapshot experiment |         0.00 |     0.00 |         800.00 |    3000.00 |    +0.00 |       +0.00 | 2.30 |          +0.00 |                +0.00 |            +0.00 |          +0.00 |             +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |         0.00 |     0.00 |         805.00 |    3050.00 |    +0.00 |       +0.00 | 2.31 |          +0.00 |                +5.00 |           +50.00 |          +0.00 |             +0.00 |      +0.01\n" +
+            "  0.00 | snapshot experiment |       100.00 |     0.14 |         700.00 |    2500.00 |    -0.12 |       -0.03 | 2.05 |          +0.00 |                +0.00 |            +0.00 |          +0.00 |             +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |       100.00 |     0.15 |         708.33 |    2550.00 |    -0.19 |       -0.03 | 2.06 |          +0.01 |                +8.33 |           +50.00 |          -0.07 |             +0.00 |      +0.01\n" +
+            "  0.00 | snapshot experiment |       150.00 |     0.22 |         650.00 |    2250.00 |    -0.31 |       -0.06 | 1.92 |          +0.00 |                +0.00 |            +0.00 |          +0.00 |             +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |       150.00 |     0.23 |         660.00 |    2300.00 |    -0.28 |       -0.05 | 1.94 |          +0.01 |               +10.00 |           +50.00 |          +0.03 |             +0.01 |      +0.02\n" +
+            "  0.00 | snapshot experiment |       200.00 |     0.30 |         600.00 |    2000.00 |    -0.50 |       -0.08 | 1.80 |          +0.00 |                +0.00 |            +0.00 |          +0.00 |             +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |       200.00 |     0.31 |         610.00 |    2050.00 |    -0.45 |       -0.07 | 1.82 |          +0.01 |               +10.00 |           +50.00 |          +0.05 |             +0.01 |      +0.02\n" +
+            "Signs: impact + above/right; deltas are series minus baseline [0]\n" +
+            "Provenance\n" +
+            expected_provenance(0, "snapshot-engine-a", "no", "200.00 m") + "\n" +
+            expected_provenance(1, "snapshot-engine-b", "yes", "200.00 m")
+        }
+
+        fn expected_comparison_imperial() -> String {
+            return "Trajectory comparison\n" +
+            "Series | Trajectory          | Distance (yd) | Time (s) | Velocity (ft/s) | Energy (ft-lb) | Drop (in) | Windage (in) | Mach | Delta time (s) | Delta velocity (ft/s) | Delta energy (ft-lb) | Delta drop (in) | Delta windage (in) | Delta Mach\n" +
+            "-------+---------------------+---------------+----------+-----------------+----------------+-----------+--------------+------+----------------+-----------------------+----------------------+-----------------+--------------------+-----------\n" +
+            "  0.00 | snapshot experiment |          0.00 |     0.00 |         2624.67 |        2212.69 |     +0.00 |        +0.00 | 2.30 |          +0.00 |                 +0.00 |                +0.00 |           +0.00 |              +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |          0.00 |     0.00 |         2641.08 |        2249.56 |     +0.00 |        +0.00 | 2.31 |          +0.00 |                +16.40 |               +36.88 |           +0.00 |              +0.00 |      +0.01\n" +
+            "  0.00 | snapshot experiment |        109.36 |     0.14 |         2296.59 |        1843.91 |     -4.72 |        -1.18 | 2.05 |          +0.00 |                 +0.00 |                +0.00 |           +0.00 |              +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |        109.36 |     0.15 |         2323.93 |        1880.78 |     -7.35 |        -1.18 | 2.06 |          +0.01 |                +27.34 |               +36.88 |           -2.62 |              +0.00 |      +0.01\n" +
+            "  0.00 | snapshot experiment |        164.04 |     0.22 |         2132.55 |        1659.51 |    -12.20 |        -2.17 | 1.92 |          +0.00 |                 +0.00 |                +0.00 |           +0.00 |              +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |        164.04 |     0.23 |         2165.35 |        1696.39 |    -11.02 |        -1.77 | 1.94 |          +0.01 |                +32.81 |               +36.88 |           +1.18 |              +0.39 |      +0.02\n" +
+            "  0.00 | snapshot experiment |        218.72 |     0.30 |         1968.50 |        1475.12 |    -19.69 |        -3.15 | 1.80 |          +0.00 |                 +0.00 |                +0.00 |           +0.00 |              +0.00 |      +0.00\n" +
+            "  1.00 | snapshot experiment |        218.72 |     0.31 |         2001.31 |        1512.00 |    -17.72 |        -2.76 | 1.82 |          +0.01 |                +32.81 |               +36.88 |           +1.97 |              +0.39 |      +0.02\n" +
+            "Signs: impact + above/right; deltas are series minus baseline [0]\n" +
+            "Provenance\n" +
+            expected_provenance(0, "snapshot-engine-a", "no", "218.72 yd") + "\n" +
+            expected_provenance(1, "snapshot-engine-b", "yes", "218.72 yd")
+        }
+
+        fn test_profiles_and_validation() {
+            let metric = render.metric_render_profile(3)
+            let imperial = render.imperial_render_profile(1)
+            assert(metric.distance_unit == "m")
+            assert(metric.velocity_unit == "m/s")
+            assert(metric.energy_unit == "J")
+            assert(metric.precision == 3)
+            assert(imperial.distance_unit == "yd")
+            assert(imperial.velocity_unit == "ft/s")
+            assert(imperial.energy_unit == "ft-lb")
+            assert(render.offset_unit_for(metric) == "m")
+            assert(render.offset_unit_for(imperial) == "in")
+            assert(render.wind_speed_unit_for(metric) == "m/s")
+            assert(render.wind_speed_unit_for(imperial) == "mph")
+            assert(render.direction_unit_for(metric) == "deg")
+
+            let copied = render.render_profile_from_display(
+            sessions.display_preferences("ft", "m/s", "ft-lb", "moa", 4)
+            )
+            assert(copied.distance_unit == "ft")
+            assert(copied.velocity_unit == "m/s")
+            assert(copied.precision == 4)
+
+            let profile_error = try {
+                render.render_profile_from_display(42)
+                "NO_ERROR"
+            } catch error {
+                error.message
+            }
+            assert_has(profile_error, "expected DisplayPreferences", "profile validation")
+        }
+
+        fn test_notice_and_error_snapshots() {
+            let assumptions = render.render_assumptions([
+                domain.assumption("alpha", "First | value.", "$.a"),
+                domain.assumption("beta", "Second\nvalue.")
+            ])
+            assert(assumptions ==
+            "Assumptions\n" +
+            "  - alpha: First \\| value. [$.a]\n" +
+            "  - beta: Second\\nvalue.",
+            "assumption snapshot mismatch:\n" + assumptions)
+            let warnings = render.render_warnings([])
+            assert(warnings == "Warnings\n  none", "empty warning snapshot mismatch:\n" + warnings)
+
+            let path_error = render.render_error(domain.laboratory_error(
+            "bad_input",
+            "Bad | input.\nTry again.",
+            "$.shot",
+            "engine stderr\nnext",
+            7
+            ))
+            assert(path_error ==
+            "Error\n" +
+            "  code: bad_input\n" +
+            "  message: Bad \\| input.\\nTry again.\n" +
+            "  path: $.shot\n" +
+            "  stderr: engine stderr\\nnext\n" +
+            "  exit code: 7",
+            "path error snapshot mismatch:\n" + path_error)
+
+            let location_error = render.render_error(domain.laboratory_error(
+            "command_syntax",
+            "Unclosed quote.",
+            nil,
+            nil,
+            nil,
+            1,
+            9
+            ))
+            assert(location_error ==
+            "Error\n" +
+            "  code: command_syntax\n" +
+            "  message: Unclosed quote.\n" +
+            "  location: 1:9",
+            "location error snapshot mismatch:\n" + location_error)
+        }
+
+        fn test_fixed_fallback_and_flag_escaping() {
+            let metric = render.metric_render_profile(2)
+            let huge = parse_float("1e20")
+            let huge_observation = domain.observation(
+            units.m(0),
+            huge,
+            units.mps(huge),
+            units.joules(huge),
+            units.m(huge),
+            units.m(0 - huge),
+            huge,
+            ["terminal"]
+            )
+            let huge_text = render.render_observation(huge_observation, metric)
+            let huge_expected =
+            "Observation\n" +
+            "  distance: 0.00 m\n" +
+            "  time    : 1e+20 s\n" +
+            "  velocity: 1e+20 m/s\n" +
+            "  energy  : 1e+20 J\n" +
+            "  drop    : +1e+20 m\n" +
+            "  windage : -1e+20 m\n" +
+            "  Mach    : 1e+20\n" +
+            "  flags   : terminal\n" +
+            "Signs: drop/windage + above/right, - below/left"
+            assert(huge_text == huge_expected, "huge finite fallback snapshot mismatch:\n" + huge_text)
+
+            let escaped = Observation {
+                distance: units.m(1),
+                time_s: 0.1,
+                velocity: units.mps(2),
+                energy: units.joules(3),
+                drop: units.m(0),
+                windage: units.m(0),
+                mach: 0.5,
+                flags: ["terminal|next\nC:\\path"]
+            }
+            let escaped_text = render.render_observation(escaped, metric)
+            let escaped_expected =
+            "Observation\n" +
+            "  distance: 1.00 m\n" +
+            "  time    : 0.10 s\n" +
+            "  velocity: 2.00 m/s\n" +
+            "  energy  : 3.00 J\n" +
+            "  drop    : +0.00 m\n" +
+            "  windage : +0.00 m\n" +
+            "  Mach    : 0.50\n" +
+            "  flags   : terminal\\|next\\nC:\\\\path\n" +
+            "Signs: drop/windage + above/right, - below/left"
+            assert(escaped_text == escaped_expected,
+            "observation flag escaping snapshot mismatch:\n" + escaped_text)
+        }
+
+        fn test_row_map_order_and_validation() {
+            let lab = solved_session()
+            let metric = render.metric_render_profile(2)
+            let source = metric_dope(sessions.current_run(lab))
+            flux reversed_rows = []
+            for source_row in source.rows {
+                let reversed = Map::new()
+                flux index = len(source.columns) - 1
+                while index >= 0 {
+                    let column = source.columns[index]
+                    reversed.set(column.key, source_row.get(column.key))
+                    index = index - 1
+                }
+                reversed_rows.push(reversed)
+            }
+            let reordered = AnalysisTable {
+                kind: source.kind,
+                title: source.title,
+                columns: source.columns,
+                rows: reversed_rows,
+                provenance: source.provenance
+            }
+            let reordered_text = render.render_dope(reordered, metric)
+            assert(reordered_text == expected_dope_metric(),
+            "row Map insertion order affected rendering:\n" + reordered_text)
+
+            let unit_error = try {
+                render.render_dope(source, render.imperial_render_profile(2))
+                "NO_ERROR"
+            } catch error {
+                error.message
+            }
+            assert_has(unit_error, "expected 'yd', got 'm'", "profile/table unit mismatch")
+            let kind_error = try {
+                render.render_comparison(source, metric)
+                "NO_ERROR"
+            } catch error {
+                error.message
+            }
+            assert_has(kind_error, "expected 'comparison', got 'dope'", "table kind validation")
+            let error_type = try {
+                render.render_error(42)
+                "NO_ERROR"
+            } catch error {
+                error.message
+            }
+            assert_has(error_type, "expected LaboratoryError", "error renderer validation")
+        }
+
+        fn test_renderer_shapes_and_signs() {
+            let lab = solved_session()
+            let metric = render.metric_render_profile(2)
+            let imperial = render.imperial_render_profile(2)
+            let current = sessions.current_run(lab)
+
+            let experiment_metric = render.render_experiment_summary(
+            reference.representative_experiment(),
+            metric
+            )
+            let experiment_imperial = render.render_experiment_summary(
+            reference.representative_experiment(),
+            imperial
+            )
+            assert(experiment_metric == expected_experiment_metric("175 gr match at 1,000 yards"),
+            "metric experiment snapshot mismatch:\n" + experiment_metric)
+            assert(experiment_imperial == expected_experiment_imperial(),
+            "imperial experiment snapshot mismatch:\n" + experiment_imperial)
+
+            let session_text = render.render_session_summary(lab)
+            assert(session_text == expected_session(), "session snapshot mismatch:\n" + session_text)
+
+            let run_text = render.render_run_summary(current, metric)
+            assert(run_text == expected_run(), "run snapshot mismatch:\n" + run_text)
+            let run_imperial = render.render_run_summary(current, imperial)
+            assert(run_imperial == expected_run_imperial(),
+            "imperial run snapshot mismatch:\n" + run_imperial)
+
+            let at_zero = analysis.trajectory_at(current.result, units.m(0))
+            let observation_text = render.render_observation(at_zero, metric)
+            assert(observation_text == expected_observation(),
+            "observation snapshot mismatch:\n" + observation_text)
+            let observation_imperial = render.render_observation(at_zero, imperial)
+            assert(observation_imperial == expected_observation_imperial(),
+            "imperial observation snapshot mismatch:\n" + observation_imperial)
+
+            let dope_metric = render.render_dope(metric_dope(current), metric)
+            assert(dope_metric == expected_dope_metric(),
+            "metric DOPE snapshot mismatch:\n" + dope_metric)
+            let dope_imperial = render.render_dope(imperial_dope(current), imperial)
+            assert(dope_imperial == expected_dope_imperial(),
+            "imperial DOPE snapshot mismatch:\n" + dope_imperial)
+
+            let wind = render.render_wind_card(metric_wind_card(current), metric)
+            assert(wind == expected_wind(), "wind snapshot mismatch:\n" + wind)
+            let wind_imperial = render.render_wind_card(imperial_wind_card(current), imperial)
+            assert(wind_imperial == expected_wind_imperial(),
+            "imperial wind snapshot mismatch:\n" + wind_imperial)
+
+            let comparison = render.render_comparison(metric_comparison(lab), metric)
+            assert(comparison == expected_comparison(),
+            "comparison snapshot mismatch:\n" + comparison)
+            let comparison_imperial = render.render_comparison(imperial_comparison(lab), imperial)
+            assert(comparison_imperial == expected_comparison_imperial(),
+            "imperial comparison snapshot mismatch:\n" + comparison_imperial)
+        }
+
+        fn dump_snapshots() {
+            let lab = solved_session()
+            let metric = render.metric_render_profile(2)
+            let imperial = render.imperial_render_profile(2)
+            let current = sessions.current_run(lab)
+            print("===EXPERIMENT_METRIC===")
+            print(render.render_experiment_summary(reference.representative_experiment(), metric))
+            print("===EXPERIMENT_IMPERIAL===")
+            print(render.render_experiment_summary(reference.representative_experiment(), imperial))
+            print("===SESSION===")
+            print(render.render_session_summary(lab))
+            print("===RUN===")
+            print(render.render_run_summary(current, metric))
+            print("===RUN_IMPERIAL===")
+            print(render.render_run_summary(current, imperial))
+            print("===OBSERVATION===")
+            print(render.render_observation(analysis.trajectory_at(current.result, units.m(0)), metric))
+            print("===OBSERVATION_IMPERIAL===")
+            print(render.render_observation(analysis.trajectory_at(current.result, units.m(0)), imperial))
+            print("===DOPE_METRIC===")
+            print(render.render_dope(metric_dope(current), metric))
+            print("===DOPE_IMPERIAL===")
+            print(render.render_dope(imperial_dope(current), imperial))
+            print("===WIND===")
+            print(render.render_wind_card(metric_wind_card(current), metric))
+            print("===WIND_IMPERIAL===")
+            print(render.render_wind_card(imperial_wind_card(current), imperial))
+            print("===COMPARISON===")
+            print(render.render_comparison(metric_comparison(lab), metric))
+            print("===COMPARISON_IMPERIAL===")
+            print(render.render_comparison(imperial_comparison(lab), imperial))
+        }
+
+        fn main() {
+            if args().contains("dump") {
+                dump_snapshots()
+                return
+            }
+            test_profiles_and_validation()
+            test_notice_and_error_snapshots()
+            test_fixed_fallback_and_flag_escaping()
+            test_renderer_shapes_and_signs()
+            test_row_map_order_and_validation()
+            print("ballistics_lab render: all tests passed")
+        }
