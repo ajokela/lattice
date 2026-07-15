@@ -35,13 +35,14 @@ fn assert_clean_exit(label: String, result: Map) {
 }
 
 fn normalize_output(output: String) -> String {
-    return output.replace("\r\n", "\n")
+    return output.replace("\r", "")
 }
 
 fn has_result_line(output: String, value: String) -> Bool {
     let normalized = normalize_output(output)
     return normalized.contains("\n" + value + "\n") ||
-        normalized.contains("lattice> " + value + "\n")
+        normalized.contains("lattice> " + value + "\n") ||
+        normalized.contains("...> " + value + "\n")
 }
 
 fn check_backend(label: String, backend: String) {
@@ -83,6 +84,8 @@ fn check_backend(label: String, backend: String) {
 fn main() {
     assert(has_result_line("lattice> 5\r\n", "5"),
         "result-line matching must accept Windows CRLF output")
+    assert(has_result_line("lattice>     ...> 2\r\r\n", "2"),
+        "result-line matching must accept Windows continuation output")
     check_backend("stack-vm", "")
     check_backend("tree-walk", "--tree-walk")
     check_backend("regvm", "--regvm")
