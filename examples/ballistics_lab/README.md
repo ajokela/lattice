@@ -21,6 +21,11 @@ The modules are deliberately split at stable boundaries:
   rectangular CSV, or deterministic plain text without performing I/O.
 - session.lat owns mutable experiment state, display preferences, transactional
   solving, and bounded immutable run history independently of terminal input.
+- persistence.lat saves and loads strict versioned experiment JSON through
+  explicit domain adapters, without serializing executable or session state.
+- resolved_request_v1.lat validates detached solve-json v1 request snapshots.
+- verified_artifacts.lat deliberately promotes completed run records into
+  immutable, portable verified-run documents.
 - reference_experiment.lat is an executable construction example.
 
 The process backend is process-per-solve. It retains no engine handle, performs
@@ -190,6 +195,46 @@ experiment or run state. `reset_session` clears current, previous, and history
 while retaining experiment, backend, display preferences, and history limit.
 The session stores backend configuration but no child-process handle; the
 process backend remains process-per-solve and stateless between calls.
+
+## Persisting experiments and verified runs
+
+Experiment documents contain only explicit domain data and display-unit
+metadata. They never contain backend closures, child-process state, session
+history, resolved requests, or executable Lattice source:
+
+    import "examples/ballistics_lab/persistence" as persistence
+
+    persistence.save_experiment("match-load.json", experiment)
+    let restored = persistence.load_experiment("match-load.json")
+    persistence.load_experiment_into_session(lab, "match-load.json")
+
+The document kind is `lattice-ballistics/experiment` and its schema version is
+exactly `1`. Loading rejects malformed JSON, duplicate or unknown fields,
+unsupported versions and units, non-finite values, and domain-invalid graphs.
+The complete experiment is validated before a session is changed; a failed load
+leaves all session state untouched. A round trip preserves both the solve-json
+v1 request and the user's display values and units.
+
+A successful `RunRecord` remains working session data. Promote it explicitly
+when it has been reviewed:
+
+    import "examples/ballistics_lab/verified_artifacts" as artifacts
+
+    let verified = artifacts.verify_run(
+        session.current_run(lab),
+        [0, 10, 20],
+        "Reviewed against the reference load."
+    )
+    artifacts.save_verified_run("reviewed-run.json", verified)
+    let restored_verified = artifacts.load_verified_run("reviewed-run.json")
+
+`VerifiedRun` is a distinct frozen value. It contains a detached experiment and
+resolved-request snapshot, backend/schema/engine versions, assumptions,
+warnings, summary, selected observations, termination, and an optional note.
+Its strict `lattice-ballistics/verified-run` v1 document contains only JSON data;
+serializers reject ordinary run records, draft trajectories, and legacy
+trajectory verification flags. Loaded artifacts are fully validated and frozen
+again. No persistence API generates or evaluates `.lat` source.
 
 ### Resource bounds
 

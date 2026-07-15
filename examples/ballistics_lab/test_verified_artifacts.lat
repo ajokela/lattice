@@ -1,0 +1,432 @@
+// MBA-1310 verified-run boundary and persistence tests.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/reference_experiment" as reference
+import "examples/ballistics_lab/session" as sessions
+import "examples/ballistics_lab/persistence" as persistence
+import "examples/ballistics_lab/resolved_request_v1" as resolved_v1
+import "examples/ballistics_lab/verified_artifacts" as artifacts
+
+fn assert_error_message(message: String, expected: String, label: String) {
+    assert(message != "NO_ERROR", label + ": expected an error")
+    assert(message.contains(expected), label + ": unexpected error: " + message)
+}
+
+fn assert_failed(message: String, label: String) {
+    assert(message != "NO_ERROR", label + ": expected an error")
+}
+
+fn map_load_error(value: any) -> String {
+    return try {
+        artifacts.verified_run_from_map(value)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+}
+
+fn fixture_resolved_request() -> Map {
+    let envelope = json_parse(
+    read_file("examples/ballistics_lab/fixtures/representative.success.json")
+    )
+    return clone(envelope.get("resolved_request"))
+}
+
+fn observation_at(index: Int) -> any {
+    flux flags = []
+    if index == 2 {
+        flags = ["transonic"]
+    }
+    if index == 4 {
+        flags = ["terminal"]
+    }
+    return domain.observation(
+    units.yd(index * 100),
+    index * 0.1,
+    units.mps(800 - index * 50),
+    units.joules(3200 - index * 300),
+    units.m(0.0 - index * 0.08),
+    units.m(index * 0.01),
+    2.4 - index * 0.3,
+    flags
+    )
+}
+
+fn trajectory_for(experiment: any, verified: Bool = false) -> any {
+    let observations = [
+        observation_at(0),
+        observation_at(1),
+        observation_at(2),
+        observation_at(3),
+        observation_at(4)
+    ]
+    let summary = domain.trajectory_summary(
+    observations[4].distance,
+    units.m(2.5),
+    observations[4].time_s,
+    observations[4].velocity,
+    observations[4].energy,
+    "max_range",
+    1.8,
+    units.m(0.04)
+    )
+    return domain.trajectory(
+    "artifact-test-engine-1",
+    experiment,
+    observations,
+    [domain.assumption("default_applied", "Test default was applied.", "$.solver")],
+    [domain.warning("test_warning", "Test warning was retained.", "$.shot")],
+    summary,
+    verified,
+    fixture_resolved_request(),
+    1
+    )
+}
+
+fn artifact_backend() -> any {
+    return backends.engine_backend("artifact-test-backend", |experiment| {
+        return trajectory_for(experiment, false)
+    }
+    )
+}
+
+fn completed_record() -> any {
+    let experiment = reference.representative_experiment()
+    let backend = artifact_backend()
+    let lab = sessions.new_session(experiment, backend)
+    let record = sessions.solve_session(lab)
+    assert(struct_name(record) == "RunRecord")
+    return record
+}
+
+fn verified_map_fixture() -> Map {
+    return artifacts.verified_run_to_map(
+    artifacts.verify_run(completed_record(), [0, 2, 4])
+    )
+}
+
+fn assert_plain_json_data(value: any, path: String) {
+    let kind = typeof(value)
+    if kind == "Map" {
+        for key in value.keys() {
+            assert(typeof(key) == "String", path + ": non-String object key")
+            assert_plain_json_data(value.get(key), path + "." + key)
+        }
+        return
+    }
+    if kind == "Array" {
+        flux index = 0
+        for item in value {
+            assert_plain_json_data(item, path + "[" + to_string(index) + "]")
+            index = index + 1
+        }
+        return
+    }
+    assert(
+    kind == "String" || kind == "Int" || kind == "Float" ||
+    kind == "Bool" || kind == "Nil",
+    path + ": non-JSON value escaped into artifact: " + kind
+    )
+    if kind == "Int" || kind == "Float" {
+        assert(!is_nan(value) && !is_inf(value), path + ": non-finite number escaped")
+    }
+}
+
+fn test_explicit_verification_and_default_selection() {
+    let record = completed_record()
+    assert(record.result.verified == false, "session result begins as unverified working data")
+    let verified = artifacts.verify_run(record)
+
+    assert(struct_name(verified) == "VerifiedRun")
+    assert(phase_of(verified) == "crystal")
+    assert(verified.kind == "lattice-ballistics/verified-run")
+    assert(verified.artifact_schema_version == 1)
+    assert(verified.backend_name == "artifact-test-backend")
+    assert(verified.solve_schema_version == 1)
+    assert(verified.engine_version == "artifact-test-engine-1")
+    assert(verified.experiment == record.experiment)
+    assert(verified.resolved_request == record.resolved_request)
+    assert(phase_of(verified.resolved_request) == "crystal")
+    assert(len(verified.assumptions) == 1)
+    assert(len(verified.warnings) == 1)
+    assert(verified.summary.termination == "max_range")
+    assert(verified.termination == verified.summary.termination)
+    assert(verified.note == nil)
+
+    assert(len(verified.selected_observations) == 3)
+    assert(verified.selected_observations[0] == record.result.observations[0])
+    assert(verified.selected_observations[1] == record.result.observations[2])
+    assert(verified.selected_observations[2] == record.result.observations[4])
+
+    let field_mutation = try {
+        verified.backend_name = "mutated"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(field_mutation, "frozen", "VerifiedRun root immutability")
+
+    let nested_mutation = try {
+        verified.selected_observations[0].time_s = 99.0
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(nested_mutation, "frozen", "VerifiedRun nested immutability")
+}
+
+fn test_explicit_selection_note_and_index_validation() {
+    let record = completed_record()
+    let verified = artifacts.verify_run(record, [4, 1], "Reviewed against the reference load.")
+    assert(len(verified.selected_observations) == 2)
+    assert(verified.selected_observations[0] == record.result.observations[4])
+    assert(verified.selected_observations[1] == record.result.observations[1])
+    assert(verified.note == "Reviewed against the reference load.")
+
+    let duplicate = try {
+        artifacts.verify_run(record, [1, 1])
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(duplicate, "duplicate index", "duplicate observation selection")
+
+    let out_of_range = try {
+        artifacts.verify_run(record, [5])
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(out_of_range, "outside the observation range", "selection upper bound")
+
+    let negative = try {
+        artifacts.verify_run(record, [-1])
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(negative, "outside the observation range", "selection lower bound")
+
+    let non_integer = try {
+        artifacts.verify_run(record, [1.0])
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(non_integer, "expected Int", "selection index type")
+
+    let empty = try {
+        artifacts.verify_run(record, [])
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(empty, "must not be empty", "empty observation selection")
+
+    let empty_note = try {
+        artifacts.verify_run(record, [0], "")
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(empty_note, "must not be empty", "empty verification note")
+}
+
+fn test_map_json_and_file_round_trips() {
+    let record = completed_record()
+    let verified = artifacts.verify_run(record, [0, 3, 4], "Round-trip artifact.")
+    let encoded = artifacts.verified_run_to_map(verified)
+    assert(len(encoded.keys()) == 13)
+    assert(encoded.get("kind") == "lattice-ballistics/verified-run")
+    assert(encoded.get("artifact_schema_version") == 1)
+    assert(encoded.get("note") == "Round-trip artifact.")
+    assert(len(encoded.get("selected_observations")) == 3)
+    assert(!encoded.has("result"))
+    assert(!encoded.has("backend"))
+    assert(!encoded.has("solve_fn"))
+    assert(!encoded.has("state"))
+    assert(!encoded.has("history"))
+    assert_plain_json_data(encoded, "$")
+
+    let from_map = artifacts.verified_run_from_map(encoded)
+    assert(phase_of(from_map) == "crystal")
+    assert(artifacts.verified_run_to_map(from_map) == encoded)
+
+    let source = artifacts.verified_run_to_json(verified)
+    assert(!source.contains("\"solve_fn\""))
+    assert(!source.contains("\"session\""))
+    assert(!source.contains("\"history\""))
+    let from_json = artifacts.verified_run_from_json(source)
+    assert(phase_of(from_json) == "crystal")
+    assert(artifacts.verified_run_to_map(from_json) == encoded)
+
+    let path = tempfile()
+    artifacts.save_verified_run(path, verified)
+    assert(file_exists(path), "save_verified_run must create the artifact")
+    let loaded = artifacts.load_verified_run(path)
+    assert(phase_of(loaded) == "crystal")
+    assert(phase_of(loaded.experiment) == "crystal")
+    assert(phase_of(loaded.summary) == "crystal")
+    assert(artifacts.verified_run_to_map(loaded) == encoded)
+    delete_file(path)
+
+    let loaded_mutation = try {
+        loaded.note = "changed"
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(loaded_mutation, "frozen", "loaded artifact immutability")
+}
+
+fn test_strict_documents_and_hostile_values() {
+    let unknown = verified_map_fixture()
+    unknown.set("session_state", Map::new())
+    let unknown_error = try {
+        artifacts.verified_run_from_map(unknown)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(unknown_error, "unknown field 'session_state'", "source-like extra data")
+
+    let missing = verified_map_fixture()
+    missing.remove("note")
+    let missing_error = try {
+        artifacts.verified_run_from_map(missing)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(missing_error, "missing required field 'note'", "missing artifact field")
+
+    let wrong_kind = verified_map_fixture()
+    wrong_kind.set("kind", "lattice-ballistics/experiment")
+    let kind_error = try {
+        artifacts.verified_run_from_map(wrong_kind)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(kind_error, "unsupported value", "artifact kind")
+
+    let wrong_version = verified_map_fixture()
+    wrong_version.set("artifact_schema_version", 2)
+    let version_error = try {
+        artifacts.verified_run_from_map(wrong_version)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(version_error, "unsupported value 2", "artifact schema version")
+
+    let wrong_solve_schema = verified_map_fixture()
+    wrong_solve_schema.set("solve_schema_version", 2)
+    let solve_schema_error = map_load_error(wrong_solve_schema)
+    assert_error_message(solve_schema_error, "unsupported value 2", "solve schema version")
+
+    let wrong_solve_schema_type = verified_map_fixture()
+    wrong_solve_schema_type.set("solve_schema_version", 1.0)
+    let solve_schema_type_error = map_load_error(wrong_solve_schema_type)
+    assert_error_message(solve_schema_type_error, "expected Int", "solve schema type")
+
+    let nested_unknown = verified_map_fixture()
+    let nested_summary = nested_unknown.get("summary")
+    nested_summary.set("source_trajectory", Map::new())
+    nested_unknown.set("summary", nested_summary)
+    let nested_unknown_error = map_load_error(nested_unknown)
+    assert_error_message(
+    nested_unknown_error,
+    "unknown field 'source_trajectory'",
+    "artifact-owned nested unknown field"
+    )
+
+    let mismatched_termination = verified_map_fixture()
+    mismatched_termination.set("termination", "time_limit")
+    let termination_error = map_load_error(mismatched_termination)
+    assert_error_message(
+    termination_error,
+    "does not match $.summary.termination",
+    "termination mismatch"
+    )
+    let nonfinite = verified_map_fixture()
+    let nonfinite_observations = nonfinite.get("selected_observations")
+    let nonfinite_first = nonfinite_observations[0]
+    nonfinite_first.set("time_s", 0.0 / 0.0)
+    nonfinite_observations[0] = nonfinite_first
+    nonfinite.set("selected_observations", nonfinite_observations)
+    let nonfinite_error = try {
+        artifacts.verified_run_from_map(nonfinite)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(nonfinite_error, "must be finite", "non-finite observation")
+    let hostile_resolved = verified_map_fixture()
+    let hostile_request = hostile_resolved.get("resolved_request")
+    let hostile_projectile = hostile_request.get("projectile")
+    hostile_projectile.set("mass_kg", 0.0 / 0.0)
+    hostile_request.set("projectile", hostile_projectile)
+    hostile_resolved.set("resolved_request", hostile_request)
+    let resolved_error = map_load_error(hostile_resolved)
+    assert_error_message(resolved_error, "mass_kg: must be finite", "hostile resolved request")
+
+    let malformed_json = try {
+        artifacts.verified_run_from_json("{not-json")
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_failed(malformed_json, "malformed artifact JSON")
+}
+
+fn test_drafts_and_legacy_verified_trajectories_are_rejected() {
+    let record = completed_record()
+    let record_verification_error = try {
+        artifacts.verified_run_to_map(record)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(record_verification_error, "expected VerifiedRun", "RunRecord serialization")
+
+    let trajectory_error = try {
+        artifacts.verify_run(record.result)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(trajectory_error, "expected RunRecord", "Trajectory promotion bypass")
+
+    let legacy_verified = trajectory_for(record.experiment, true)
+    assert(legacy_verified.verified == true)
+    let legacy_error = try {
+        artifacts.verified_run_to_map(legacy_verified)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(legacy_error, "expected VerifiedRun", "legacy verified trajectory")
+
+    let path = tempfile()
+    delete_file(path)
+    let save_error = try {
+        artifacts.save_verified_run(path, record)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert_error_message(save_error, "expected VerifiedRun", "draft file persistence")
+    assert(!file_exists(path), "failed draft persistence must not create a file")
+}
+
+fn main() {
+    test_explicit_verification_and_default_selection()
+    test_explicit_selection_note_and_index_validation()
+    test_map_json_and_file_round_trips()
+    test_strict_documents_and_hostile_values()
+    test_drafts_and_legacy_verified_trajectories_are_rejected()
+    print("ballistics_lab verified artifacts: all tests passed")
+}

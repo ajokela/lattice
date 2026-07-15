@@ -1,0 +1,716 @@
+// MBA-1310 experiment-persistence tests. Run on StackVM, tree-walk, and RegVM.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/protocol_v1" as protocol
+import "examples/ballistics_lab/reference_experiment" as reference
+import "examples/ballistics_lab/session" as sessions
+import "examples/ballistics_lab/persistence" as persistence
+
+// Same-name local structs model untrusted callers that bypass the exported
+// constructors. Persistence must validate behavior, not trust struct_name alone.
+struct Experiment {
+    name: any,
+    projectile: any,
+    rifle: any,
+    atmosphere: any,
+    winds: any,
+    shot: any,
+    solver: any
+}
+
+struct Distance {
+    si_value: any,
+    display_value: any,
+    display_unit: any
+}
+
+struct Projectile {
+    name: any,
+    mass: any,
+    diameter: any,
+    length: any,
+    drag_model: any,
+    ballistic_coefficient: any
+}
+
+struct Atmosphere {
+    altitude: any,
+    temperature: any,
+    pressure: any,
+    relative_humidity: any,
+    latitude: any
+}
+
+fn caught(thunk: Fn) -> String {
+    return try {
+        thunk(nil)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+}
+
+fn assert_rejected(thunk: Fn, label: String) {
+    let message = caught(thunk)
+    assert(message != "NO_ERROR", label + ": expected an error")
+}
+
+fn assert_error_contains(thunk: Fn, expected: String, label: String) {
+    let message = caught(thunk)
+    assert(message != "NO_ERROR", label + ": expected an error")
+    assert(message.contains(expected), label + ": unexpected error: " + message)
+}
+
+fn rich_experiment() -> any {
+    let projectile = domain.projectile(
+    "mixed-unit projectile",
+    units.grams(11.34),
+    units.inches(0.308),
+    0.243,
+    "G7",
+    units.inches(1.24)
+    )
+    let rifle = domain.rifle(
+    "mixed-unit rifle",
+    units.inches(1.75),
+    units.ft(4),
+    units.inches(8),
+    "left"
+    )
+    let atmosphere = domain.atmosphere(
+    units.ft(3500),
+    units.fahrenheit(72),
+    units.inhg(29.7),
+    0.45,
+    units.deg(41)
+    )
+    let winds = [
+        domain.wind(units.kph(10), units.mil(1570), units.fps(0.5), units.yd(300)),
+        domain.wind(units.wind_mps(6), units.moa(5400), units.mps(-0.1), units.km(1))
+    ]
+    let shot = domain.shot(
+    units.fps(2700),
+    units.km(1),
+    nil,
+    units.mil(1.2),
+    units.deg(5),
+    units.rad(0.1),
+    units.moa(60),
+    units.mil(0.5),
+    units.ft(0),
+    units.ft(-1)
+    )
+    let solver = domain.solver_config(
+    "rk4",
+    0.001,
+    units.ft(25),
+    true,
+    true,
+    false
+    )
+    return domain.experiment(
+    "mixed-unit, fully populated experiment",
+    projectile,
+    rifle,
+    atmosphere,
+    winds,
+    shot,
+    solver
+    )
+}
+
+fn assert_semantically_equal(actual: any, expected: any, label: String) {
+    assert(
+    protocol.experiment_to_v1_request(actual) == protocol.experiment_to_v1_request(expected),
+    label + ": solve-json v1 request changed"
+    )
+}
+
+fn test_quantity_adapters() {
+    let distance = persistence.distance_from_map(persistence.distance_to_map(units.km(1.25)))
+    assert(distance.display_value == 1.25 && distance.display_unit == "km")
+
+    let velocity = persistence.velocity_from_map(persistence.velocity_to_map(units.fps(-2.5)))
+    assert(velocity.display_value == -2.5 && velocity.display_unit == "ft/s")
+
+    let mass = persistence.mass_from_map(persistence.mass_to_map(units.grams(12.5)))
+    assert(mass.display_value == 12.5 && mass.display_unit == "g")
+
+    let angle = persistence.angle_from_map(persistence.angle_to_map(units.moa(7.5)))
+    assert(angle.display_value == 7.5 && angle.display_unit == "moa")
+
+    let temperature = persistence.temperature_from_map(persistence.temperature_to_map(units.fahrenheit(72)))
+    assert(temperature.display_value == 72 && temperature.display_unit == "F")
+
+    let pressure = persistence.pressure_from_map(persistence.pressure_to_map(units.inhg(29.92)))
+    assert(pressure.display_value == 29.92 && pressure.display_unit == "inHg")
+
+    let energy = persistence.energy_from_map(persistence.energy_to_map(units.foot_pounds(2500)))
+    assert(energy.display_value == 2500 && energy.display_unit == "ft-lb")
+
+    let wind_speed = persistence.wind_speed_from_map(persistence.wind_speed_to_map(units.kph(20)))
+    assert(wind_speed.display_value == 20 && wind_speed.display_unit == "km/h")
+}
+
+fn assert_document_shape(document: Map) {
+    assert(len(document.keys()) == 3)
+    assert(document.get("kind") == "lattice-ballistics/experiment")
+    assert(document.get("schema_version") == 1)
+
+    let experiment = document.get("experiment")
+    assert(len(experiment.keys()) == 7)
+    assert(len(experiment.get("projectile").keys()) == 6)
+    assert(len(experiment.get("rifle").keys()) == 5)
+    assert(len(experiment.get("atmosphere").keys()) == 5)
+    assert(len(experiment.get("shot").keys()) == 10)
+    assert(len(experiment.get("solver").keys()) == 6)
+    assert(len(experiment.get("projectile").get("mass").keys()) == 2)
+
+    // Optional values are present as JSON null rather than omitted.
+    assert(experiment.get("shot").get("muzzle_angle") == nil)
+    assert(experiment.get("solver").get("time_step_s") == nil)
+    assert(experiment.get("winds")[0].get("vertical_velocity") == nil)
+    assert(experiment.get("winds")[0].get("until_distance") == nil)
+}
+
+fn test_map_json_and_file_round_trips() {
+    let experiments = [reference.representative_experiment(), rich_experiment()]
+    flux index = 0
+    for experiment in experiments {
+        let document = persistence.experiment_to_map(experiment)
+        if index == 0 {
+            assert_document_shape(document)
+        }
+
+        let from_map = persistence.experiment_from_map(document)
+        assert_semantically_equal(from_map, experiment, "Map round trip")
+        assert(
+        persistence.experiment_to_map(from_map) == document,
+        "Map round trip did not preserve display values and units"
+        )
+
+        let encoded = persistence.experiment_to_json(experiment)
+        assert(!encoded.contains("\"backend\""))
+        assert(!encoded.contains("\"current_run\""))
+        assert(!encoded.contains("\"previous_run\""))
+        assert(!encoded.contains("\"resolved_request\""))
+        assert(!encoded.contains("\"si_value\""))
+        let from_json = persistence.experiment_from_json(encoded)
+        assert_semantically_equal(from_json, experiment, "JSON round trip")
+        assert(
+        persistence.experiment_to_map(from_json) == document,
+        "JSON round trip did not preserve display values and units"
+        )
+
+        let path = tempfile()
+        persistence.save_experiment(path, experiment)
+        let from_file = persistence.load_experiment(path)
+        delete_file(path)
+        assert_semantically_equal(from_file, experiment, "file round trip")
+        assert(
+        persistence.experiment_to_map(from_file) == document,
+        "file round trip did not preserve display values and units"
+        )
+        index = index + 1
+    }
+}
+
+fn with_experiment_field(document: Map, key: String, value: any) -> Map {
+    flux out = document
+    flux experiment = out.get("experiment")
+    experiment.set(key, value)
+    out.set("experiment", experiment)
+    return out
+}
+
+fn with_domain_field(document: Map, section: String, key: String, value: any) -> Map {
+    flux out = document
+    flux experiment = out.get("experiment")
+    flux encoded = experiment.get(section)
+    encoded.set(key, value)
+    experiment.set(section, encoded)
+    out.set("experiment", experiment)
+    return out
+}
+
+fn without_domain_field(document: Map, section: String, key: String) -> Map {
+    flux out = document
+    flux experiment = out.get("experiment")
+    flux encoded = experiment.get(section)
+    encoded.remove(key)
+    experiment.set(section, encoded)
+    out.set("experiment", experiment)
+    return out
+}
+
+fn with_quantity_field(
+document: Map,
+section: String,
+quantity: String,
+key: String,
+value: any
+) -> Map {
+    flux out = document
+    flux experiment = out.get("experiment")
+    flux encoded = experiment.get(section)
+    flux quantity_map = encoded.get(quantity)
+    quantity_map.set(key, value)
+    encoded.set(quantity, quantity_map)
+    experiment.set(section, encoded)
+    out.set("experiment", experiment)
+    return out
+}
+
+fn without_quantity_field(
+document: Map,
+section: String,
+quantity: String,
+key: String
+) -> Map {
+    flux out = document
+    flux experiment = out.get("experiment")
+    flux encoded = experiment.get(section)
+    flux quantity_map = encoded.get(quantity)
+    quantity_map.remove(key)
+    encoded.set(quantity, quantity_map)
+    experiment.set(section, encoded)
+    out.set("experiment", experiment)
+    return out
+}
+
+fn test_strict_document_validation() {
+    let base = reference.representative_experiment()
+
+    assert_rejected(
+    |_ | {
+        persistence.experiment_from_json("{\"kind\":")
+    },
+    "truncated JSON"
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_json("{\"a\":1,\"a\":2}")
+    },
+    "duplicate object key",
+    "duplicate JSON key"
+    )
+    assert_rejected(
+    |_ | {
+        persistence.experiment_from_json("{\"value\":NaN}")
+    },
+    "non-finite JSON token"
+    )
+
+    let unknown_top = persistence.experiment_to_map(base)
+    unknown_top.set("backend", "do not persist")
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(unknown_top)
+    },
+    "unknown field 'backend'",
+    "unknown top-level field"
+    )
+
+    let missing_top = persistence.experiment_to_map(base)
+    missing_top.remove("kind")
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(missing_top)
+    },
+    "missing required field 'kind'",
+    "missing top-level field"
+    )
+
+    let wrong_kind = persistence.experiment_to_map(base)
+    wrong_kind.set("kind", "lattice-ballistics/session")
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(wrong_kind)
+    },
+    "unsupported document kind",
+    "wrong document kind"
+    )
+
+    let wrong_version_type = persistence.experiment_to_map(base)
+    wrong_version_type.set("schema_version", 1.0)
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(wrong_version_type)
+    },
+    "expected Int",
+    "wrong schema version type"
+    )
+
+    let wrong_version = persistence.experiment_to_map(base)
+    wrong_version.set("schema_version", 2)
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(wrong_version)
+    },
+    "unsupported value 2",
+    "wrong schema version"
+    )
+
+    let unknown_nested = with_domain_field(
+    persistence.experiment_to_map(base),
+    "projectile",
+    "source",
+    "assert(false)"
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(unknown_nested)
+    },
+    "unknown field 'source'",
+    "unknown nested field"
+    )
+
+    let missing_nested = without_domain_field(
+    persistence.experiment_to_map(base),
+    "projectile",
+    "drag_model"
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(missing_nested)
+    },
+    "missing required field 'drag_model'",
+    "missing nested field"
+    )
+
+    let missing_quantity_key = without_quantity_field(
+    persistence.experiment_to_map(base),
+    "projectile",
+    "mass",
+    "unit"
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(missing_quantity_key)
+    },
+    "missing required field 'unit'",
+    "missing quantity field"
+    )
+
+    let wrong_unit = with_quantity_field(
+    persistence.experiment_to_map(base),
+    "projectile",
+    "mass",
+    "unit",
+    "stone"
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(wrong_unit)
+    },
+    "unsupported unit 'stone'",
+    "wrong quantity unit"
+    )
+
+    let wrong_quantity_type = with_quantity_field(
+    persistence.experiment_to_map(base),
+    "shot",
+    "max_range",
+    "value",
+    "far"
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(wrong_quantity_type)
+    },
+    "expected Number",
+    "wrong quantity value type"
+    )
+
+    let nonfinite_quantity = with_quantity_field(
+    persistence.experiment_to_map(base),
+    "shot",
+    "max_range",
+    "value",
+    0.0 / 0.0
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(nonfinite_quantity)
+    },
+    "must be finite",
+    "non-finite quantity"
+    )
+
+    let nonfinite_scalar = with_domain_field(
+    persistence.experiment_to_map(base),
+    "projectile",
+    "ballistic_coefficient",
+    1.0 / 0.0
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(nonfinite_scalar)
+    },
+    "must be finite",
+    "non-finite domain scalar"
+    )
+
+    let wrong_optional_type = with_domain_field(
+    persistence.experiment_to_map(base),
+    "solver",
+    "magnus",
+    "true"
+    )
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_from_map(wrong_optional_type)
+    },
+    "expected Bool or null",
+    "wrong optional type"
+    )
+
+    let hostile_name = with_experiment_field(
+    persistence.experiment_to_map(base),
+    "name",
+    "assert(false, 'evaluated source')"
+    )
+    let loaded = persistence.experiment_from_map(hostile_name)
+    assert(loaded.name == "assert(false, 'evaluated source')", "experiment names must remain inert data")
+}
+
+fn test_serializer_revalidates_forged_structs() {
+    let base = reference.representative_experiment()
+    let base_copy = thaw(clone(base))
+    let forged = Experiment {
+        name: base_copy.name,
+        projectile: base_copy.projectile,
+        rifle: base_copy.rifle,
+        atmosphere: Atmosphere {
+            altitude: nil,
+            temperature: nil,
+            pressure: nil,
+            relative_humidity: nil,
+            latitude: nil
+        },
+        winds: base_copy.winds,
+        shot: base_copy.shot,
+        solver: base_copy.solver
+    }
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_to_map(forged)
+    },
+    "latitude: required",
+    "forged domain relationship"
+    )
+
+    let forged_distance = Distance {
+        si_value: 0.0 / 0.0,
+        display_value: 100,
+        display_unit: "yd"
+    }
+    assert_error_contains(
+    |_ | {
+        persistence.distance_to_map(forged_distance)
+    },
+    "si_value: must be finite",
+    "forged non-finite quantity"
+    )
+
+    let inconsistent_distance = Distance {
+        si_value: 1.0,
+        display_value: 100,
+        display_unit: "yd"
+    }
+    assert_error_contains(
+    |_ | {
+        persistence.distance_to_map(inconsistent_distance)
+    },
+    "canonical SI value disagrees",
+    "forged inconsistent quantity"
+    )
+
+    let forged_projectile = Projectile {
+        name: base_copy.projectile.name,
+        mass: base_copy.projectile.mass,
+        diameter: inconsistent_distance,
+        length: base_copy.projectile.length,
+        drag_model: base_copy.projectile.drag_model,
+        ballistic_coefficient: base_copy.projectile.ballistic_coefficient
+    }
+    let request_changing_experiment = Experiment {
+        name: base_copy.name,
+        projectile: forged_projectile,
+        rifle: base_copy.rifle,
+        atmosphere: base_copy.atmosphere,
+        winds: base_copy.winds,
+        shot: base_copy.shot,
+        solver: base_copy.solver
+    }
+    assert_error_contains(
+    |_ | {
+        persistence.experiment_to_map(request_changing_experiment)
+    },
+    "canonical SI value disagrees",
+    "serializer request-preservation guard"
+    )
+}
+
+fn trajectory_for(experiment: any, engine_version: String) -> any {
+    let terminal = domain.observation(
+    units.m(100),
+    0.125,
+    units.mps(700),
+    units.joules(2500),
+    units.m(-0.05),
+    units.m(0.01),
+    2.05,
+    ["terminal"]
+    )
+    let summary = domain.trajectory_summary(
+    units.m(100),
+    units.m(2),
+    0.125,
+    units.mps(700),
+    units.joules(2500),
+    "max_range"
+    )
+    return domain.trajectory(
+    engine_version,
+    experiment,
+    [terminal],
+    [],
+    [],
+    summary,
+    false,
+    protocol.experiment_to_v1_request(experiment),
+    1
+    )
+}
+
+fn successful_backend(calls: any) -> any {
+    return backends.engine_backend("persistence-test-backend", |experiment| {
+        let next = calls.get() + 1
+        calls.set(next)
+        return trajectory_for(experiment, "persistence-test-" + to_string(next))
+    }
+    )
+}
+
+fn assert_complete_session_state(
+lab: any,
+experiment: any,
+backend_name: String,
+display: any,
+history_limit: Int,
+history: Array,
+current: any,
+previous: any,
+label: String
+) {
+    assert(sessions.experiment_of(lab) == experiment, label + ": experiment changed")
+    assert(sessions.backend_of(lab).name == backend_name, label + ": backend changed")
+    assert(sessions.display_of(lab) == display, label + ": display preferences changed")
+    assert(sessions.history_limit_of(lab) == history_limit, label + ": history limit changed")
+    assert(sessions.history(lab) == history, label + ": history changed")
+    assert(sessions.current_run(lab) == current, label + ": current run changed")
+    assert(sessions.previous_run(lab) == previous, label + ": previous run changed")
+}
+
+fn test_session_load_is_atomic() {
+    let base = reference.representative_experiment()
+    let calls = Ref::new(0)
+    let lab = sessions.new_session(
+    base,
+    successful_backend(calls),
+    sessions.metric_display_preferences(4),
+    7
+    )
+    sessions.solve_session(lab)
+    sessions.solve_session(lab)
+    assert(calls.get() == 2)
+
+    let before_experiment = sessions.experiment_of(lab)
+    let before_backend_name = sessions.backend_of(lab).name
+    let before_display = sessions.display_of(lab)
+    let before_limit = sessions.history_limit_of(lab)
+    let before_history = clone(sessions.history(lab))
+    let before_current = sessions.current_run(lab)
+    let before_previous = sessions.previous_run(lab)
+
+    let malformed_path = tempfile()
+    write_file(malformed_path, "{\"kind\":")
+    let malformed_error = try {
+        persistence.load_experiment_into_session(lab, malformed_path)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(malformed_error != "NO_ERROR", "malformed session load: expected an error")
+    delete_file(malformed_path)
+    assert_complete_session_state(
+    lab,
+    before_experiment,
+    before_backend_name,
+    before_display,
+    before_limit,
+    before_history,
+    before_current,
+    before_previous,
+    "malformed load"
+    )
+
+    let invalid_document = with_domain_field(
+    persistence.experiment_to_map(base),
+    "atmosphere",
+    "latitude",
+    nil
+    )
+    let invalid_path = tempfile()
+    write_file(invalid_path, json_stringify(invalid_document))
+    let invalid_error = try {
+        persistence.load_experiment_into_session(lab, invalid_path)
+        "NO_ERROR"
+    } catch error {
+        error.message
+    }
+    assert(
+    invalid_error.contains("latitude: required"),
+    "domain-invalid session load: unexpected error: " + invalid_error
+    )
+    delete_file(invalid_path)
+    assert_complete_session_state(
+    lab,
+    before_experiment,
+    before_backend_name,
+    before_display,
+    before_limit,
+    before_history,
+    before_current,
+    before_previous,
+    "domain-invalid load"
+    )
+    assert(calls.get() == 2, "loading must never invoke the backend")
+
+    let replacement = rich_experiment()
+    let valid_path = tempfile()
+    persistence.save_experiment(valid_path, replacement)
+    let loaded = persistence.load_experiment_into_session(lab, valid_path)
+    delete_file(valid_path)
+    assert_semantically_equal(loaded, replacement, "session replacement")
+    assert(sessions.experiment_of(lab) == loaded)
+    assert(sessions.backend_of(lab).name == before_backend_name)
+    assert(sessions.display_of(lab) == before_display)
+    assert(sessions.history_limit_of(lab) == before_limit)
+    assert(sessions.history(lab) == before_history)
+    assert(sessions.current_run(lab) == before_current)
+    assert(sessions.previous_run(lab) == before_previous)
+    assert(calls.get() == 2, "successful loading must never invoke the backend")
+}
+
+fn main() {
+    test_quantity_adapters()
+    test_map_json_and_file_round_trips()
+    test_strict_document_validation()
+    test_serializer_revalidates_forged_structs()
+    test_session_load_is_atomic()
+    print("ballistics_lab persistence: all tests passed")
+}

@@ -1,0 +1,786 @@
+// Strict, versioned persistence for source-level ballistics experiments.
+//
+// Persistence stores only the immutable domain experiment. Backend closures,
+// process state, session Refs, and run records are deliberately outside this
+// document. Quantities retain their requested display value/unit; canonical SI
+// values are reconstructed by the public units constructors while loading.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/session" as sessions
+
+let EXPERIMENT_KIND = "lattice-ballistics/experiment"
+let EXPERIMENT_SCHEMA_VERSION = 1
+
+fn _fail(message: String) {
+    assert(false, message)
+}
+
+fn _is_struct(value: any, expected: String) -> Bool {
+    return typeof(value) == "Struct" && struct_name(value) == expected
+}
+
+fn _require_struct(value: any, expected: String, path: String) {
+    if !_is_struct(value, expected) {
+        flux actual = typeof(value)
+        if actual == "Struct" {
+            actual = struct_name(value)
+        }
+        _fail(path + ": expected " + expected + ", got " + actual)
+    }
+}
+
+fn _map(value: any, path: String) -> Map {
+    if typeof(value) != "Map" {
+        _fail(path + ": expected Map, got " + typeof(value))
+    }
+    return value
+}
+
+fn _array(value: any, path: String) -> Array {
+    if typeof(value) != "Array" {
+        _fail(path + ": expected Array, got " + typeof(value))
+    }
+    return value
+}
+
+fn _string(value: any, path: String) -> String {
+    if typeof(value) != "String" {
+        _fail(path + ": expected String, got " + typeof(value))
+    }
+    return value
+}
+
+fn _finite_number(value: any, path: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        _fail(path + ": expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        _fail(path + ": must be finite")
+    }
+    return value
+}
+
+fn _optional_finite_number(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _finite_number(value, path)
+}
+
+fn _optional_string(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _string(value, path)
+}
+
+fn _optional_bool(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    if typeof(value) != "Bool" {
+        _fail(path + ": expected Bool or null, got " + typeof(value))
+    }
+    return value
+}
+
+fn _require_exact_keys(object: Map, expected: Array, path: String) {
+    for key in expected {
+        if !object.has(key) {
+            _fail(path + ": missing required field '" + key + "'")
+        }
+    }
+    for key in object.keys() {
+        if typeof(key) != "String" {
+            _fail(path + ": object keys must be strings")
+        }
+        if !expected.contains(key) {
+            _fail(path + ": unknown field '" + key + "'")
+        }
+    }
+}
+
+fn _quantity_to_map(value: any, expected: String, supported: Array, path: String) -> Map {
+    _require_struct(value, expected, path)
+    // Reject non-finite canonical state even though canonical SI is intentionally
+    // not persisted. This prevents a forged quantity from hiding invalid state.
+    _finite_number(value.si_value, path + ".si_value")
+    let display_value = _finite_number(value.display_value, path + ".display_value")
+    let display_unit = _string(value.display_unit, path + ".display_unit")
+    if !supported.contains(display_unit) {
+        _fail(path + ".display_unit: unsupported unit '" + display_unit + "'")
+    }
+    flux out = Map::new()
+    out.set("value", display_value)
+    out.set("unit", display_unit)
+    let reconstructed = _quantity_from_map_for_type(out, expected, path)
+    if reconstructed.si_value != value.si_value {
+        _fail(path + ": canonical SI value disagrees with display value/unit")
+    }
+    return out
+}
+
+fn _quantity_map(value: any, supported: Array, path: String) -> Map {
+    let object = _map(value, path)
+    _require_exact_keys(object, ["value", "unit"], path)
+    _finite_number(object.get("value"), path + ".value")
+    let unit = _string(object.get("unit"), path + ".unit")
+    if !supported.contains(unit) {
+        _fail(path + ".unit: unsupported unit '" + unit + "'")
+    }
+    return object
+}
+
+fn _distance_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["m", "km", "yd", "ft", "in"], path)
+    let amount = object.get("value")
+    let unit = object.get("unit")
+    if unit == "m" {
+        return units.m(amount)
+    }
+    if unit == "km" {
+        return units.km(amount)
+    }
+    if unit == "yd" {
+        return units.yd(amount)
+    }
+    if unit == "ft" {
+        return units.ft(amount)
+    }
+    return units.inches(amount)
+}
+
+export fn distance_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "Distance", ["m", "km", "yd", "ft", "in"], "distance")
+}
+
+export fn distance_from_map(value: any) -> any {
+    return _distance_from_map(value, "distance")
+}
+
+fn _velocity_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["m/s", "ft/s"], path)
+    if object.get("unit") == "m/s" {
+        return units.mps(object.get("value"))
+    }
+    return units.fps(object.get("value"))
+}
+
+export fn velocity_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "Velocity", ["m/s", "ft/s"], "velocity")
+}
+
+export fn velocity_from_map(value: any) -> any {
+    return _velocity_from_map(value, "velocity")
+}
+
+fn _mass_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["kg", "g", "gr"], path)
+    let amount = object.get("value")
+    let unit = object.get("unit")
+    if unit == "kg" {
+        return units.kg(amount)
+    }
+    if unit == "g" {
+        return units.grams(amount)
+    }
+    return units.gr(amount)
+}
+
+export fn mass_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "Mass", ["kg", "g", "gr"], "mass")
+}
+
+export fn mass_from_map(value: any) -> any {
+    return _mass_from_map(value, "mass")
+}
+
+fn _angle_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["rad", "deg", "mil", "moa"], path)
+    let amount = object.get("value")
+    let unit = object.get("unit")
+    if unit == "rad" {
+        return units.rad(amount)
+    }
+    if unit == "deg" {
+        return units.deg(amount)
+    }
+    if unit == "mil" {
+        return units.mil(amount)
+    }
+    return units.moa(amount)
+}
+
+export fn angle_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "Angle", ["rad", "deg", "mil", "moa"], "angle")
+}
+
+export fn angle_from_map(value: any) -> any {
+    return _angle_from_map(value, "angle")
+}
+
+fn _temperature_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["K", "C", "F"], path)
+    let amount = object.get("value")
+    let unit = object.get("unit")
+    if unit == "K" {
+        return units.kelvin(amount)
+    }
+    if unit == "C" {
+        return units.celsius(amount)
+    }
+    return units.fahrenheit(amount)
+}
+
+export fn temperature_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "Temperature", ["K", "C", "F"], "temperature")
+}
+
+export fn temperature_from_map(value: any) -> any {
+    return _temperature_from_map(value, "temperature")
+}
+
+fn _pressure_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["Pa", "hPa", "inHg"], path)
+    let amount = object.get("value")
+    let unit = object.get("unit")
+    if unit == "Pa" {
+        return units.pa(amount)
+    }
+    if unit == "hPa" {
+        return units.hpa(amount)
+    }
+    return units.inhg(amount)
+}
+
+export fn pressure_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "Pressure", ["Pa", "hPa", "inHg"], "pressure")
+}
+
+export fn pressure_from_map(value: any) -> any {
+    return _pressure_from_map(value, "pressure")
+}
+
+fn _energy_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["J", "ft-lb"], path)
+    if object.get("unit") == "J" {
+        return units.joules(object.get("value"))
+    }
+    return units.foot_pounds(object.get("value"))
+}
+
+export fn energy_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "Energy", ["J", "ft-lb"], "energy")
+}
+
+export fn energy_from_map(value: any) -> any {
+    return _energy_from_map(value, "energy")
+}
+
+fn _wind_speed_from_map(value: any, path: String) -> any {
+    let object = _quantity_map(value, ["m/s", "mph", "km/h"], path)
+    let amount = object.get("value")
+    let unit = object.get("unit")
+    if unit == "m/s" {
+        return units.wind_mps(amount)
+    }
+    if unit == "mph" {
+        return units.mph(amount)
+    }
+    return units.kph(amount)
+}
+
+export fn wind_speed_to_map(value: any) -> Map {
+    return _quantity_to_map(value, "WindSpeed", ["m/s", "mph", "km/h"], "wind_speed")
+}
+
+export fn wind_speed_from_map(value: any) -> any {
+    return _wind_speed_from_map(value, "wind_speed")
+}
+
+fn _quantity_from_map_for_type(value: any, expected: String, path: String) -> any {
+    if expected == "Distance" {
+        return _distance_from_map(value, path)
+    }
+    if expected == "Velocity" {
+        return _velocity_from_map(value, path)
+    }
+    if expected == "Mass" {
+        return _mass_from_map(value, path)
+    }
+    if expected == "Angle" {
+        return _angle_from_map(value, path)
+    }
+    if expected == "Temperature" {
+        return _temperature_from_map(value, path)
+    }
+    if expected == "Pressure" {
+        return _pressure_from_map(value, path)
+    }
+    if expected == "Energy" {
+        return _energy_from_map(value, path)
+    }
+    if expected == "WindSpeed" {
+        return _wind_speed_from_map(value, path)
+    }
+    _fail(path + ": unsupported quantity type " + expected)
+}
+
+fn _optional_distance_to_map(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _quantity_to_map(value, "Distance", ["m", "km", "yd", "ft", "in"], path)
+}
+
+fn _optional_distance_from_map(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _distance_from_map(value, path)
+}
+
+fn _optional_angle_to_map(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _quantity_to_map(value, "Angle", ["rad", "deg", "mil", "moa"], path)
+}
+
+fn _optional_angle_from_map(value: any, path: String) -> any {
+    if value == nil {
+        return nil
+    }
+    return _angle_from_map(value, path)
+}
+
+fn _projectile_to_map(value: any, path: String) -> Map {
+    _require_struct(value, "Projectile", path)
+    flux out = Map::new()
+    out.set("name", _string(value.name, path + ".name"))
+    out.set("mass", _quantity_to_map(value.mass, "Mass", ["kg", "g", "gr"], path + ".mass"))
+    out.set("diameter", _quantity_to_map(value.diameter, "Distance", ["m", "km", "yd", "ft", "in"], path + ".diameter"))
+    out.set("length", _optional_distance_to_map(value.length, path + ".length"))
+    out.set("drag_model", _string(value.drag_model, path + ".drag_model"))
+    out.set("ballistic_coefficient", _finite_number(value.ballistic_coefficient, path + ".ballistic_coefficient"))
+    return out
+}
+
+fn _projectile_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["name", "mass", "diameter", "length", "drag_model", "ballistic_coefficient"],
+    path
+    )
+    let name = _string(object.get("name"), path + ".name")
+    let mass = _mass_from_map(object.get("mass"), path + ".mass")
+    let diameter = _distance_from_map(object.get("diameter"), path + ".diameter")
+    let length = _optional_distance_from_map(object.get("length"), path + ".length")
+    let drag_model = _string(object.get("drag_model"), path + ".drag_model")
+    let bc = _finite_number(object.get("ballistic_coefficient"), path + ".ballistic_coefficient")
+    return domain.projectile(name, mass, diameter, bc, drag_model, length)
+}
+
+export fn projectile_to_map(value: any) -> Map {
+    return _projectile_to_map(value, "projectile")
+}
+
+export fn projectile_from_map(value: any) -> any {
+    return _projectile_from_map(value, "projectile")
+}
+
+fn _rifle_to_map(value: any, path: String) -> Map {
+    _require_struct(value, "Rifle", path)
+    flux out = Map::new()
+    out.set("name", _string(value.name, path + ".name"))
+    out.set("sight_height", _optional_distance_to_map(value.sight_height, path + ".sight_height"))
+    out.set("muzzle_height", _optional_distance_to_map(value.muzzle_height, path + ".muzzle_height"))
+    out.set("twist_rate", _optional_distance_to_map(value.twist_rate, path + ".twist_rate"))
+    out.set("twist_direction", _optional_string(value.twist_direction, path + ".twist_direction"))
+    return out
+}
+
+fn _rifle_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["name", "sight_height", "muzzle_height", "twist_rate", "twist_direction"],
+    path
+    )
+    return domain.rifle(
+    _string(object.get("name"), path + ".name"),
+    _optional_distance_from_map(object.get("sight_height"), path + ".sight_height"),
+    _optional_distance_from_map(object.get("muzzle_height"), path + ".muzzle_height"),
+    _optional_distance_from_map(object.get("twist_rate"), path + ".twist_rate"),
+    _optional_string(object.get("twist_direction"), path + ".twist_direction")
+    )
+}
+
+export fn rifle_to_map(value: any) -> Map {
+    return _rifle_to_map(value, "rifle")
+}
+
+export fn rifle_from_map(value: any) -> any {
+    return _rifle_from_map(value, "rifle")
+}
+
+fn _atmosphere_to_map(value: any, path: String) -> Map {
+    _require_struct(value, "Atmosphere", path)
+    flux out = Map::new()
+    out.set("altitude", _optional_distance_to_map(value.altitude, path + ".altitude"))
+    flux temperature = nil
+    if value.temperature != nil {
+        temperature = _quantity_to_map(value.temperature, "Temperature", ["K", "C", "F"], path + ".temperature")
+    }
+    out.set("temperature", temperature)
+    flux pressure = nil
+    if value.pressure != nil {
+        pressure = _quantity_to_map(value.pressure, "Pressure", ["Pa", "hPa", "inHg"], path + ".pressure")
+    }
+    out.set("pressure", pressure)
+    out.set("relative_humidity", _optional_finite_number(value.relative_humidity, path + ".relative_humidity"))
+    out.set("latitude", _optional_angle_to_map(value.latitude, path + ".latitude"))
+    return out
+}
+
+fn _atmosphere_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["altitude", "temperature", "pressure", "relative_humidity", "latitude"],
+    path
+    )
+    flux temperature = nil
+    if object.get("temperature") != nil {
+        temperature = _temperature_from_map(object.get("temperature"), path + ".temperature")
+    }
+    flux pressure = nil
+    if object.get("pressure") != nil {
+        pressure = _pressure_from_map(object.get("pressure"), path + ".pressure")
+    }
+    return domain.atmosphere(
+    _optional_distance_from_map(object.get("altitude"), path + ".altitude"),
+    temperature,
+    pressure,
+    _optional_finite_number(object.get("relative_humidity"), path + ".relative_humidity"),
+    _optional_angle_from_map(object.get("latitude"), path + ".latitude")
+    )
+}
+
+export fn atmosphere_to_map(value: any) -> Map {
+    return _atmosphere_to_map(value, "atmosphere")
+}
+
+export fn atmosphere_from_map(value: any) -> any {
+    return _atmosphere_from_map(value, "atmosphere")
+}
+
+fn _wind_to_map(value: any, path: String) -> Map {
+    _require_struct(value, "Wind", path)
+    flux out = Map::new()
+    out.set("speed", _quantity_to_map(value.speed, "WindSpeed", ["m/s", "mph", "km/h"], path + ".speed"))
+    out.set("direction_from", _quantity_to_map(value.direction_from, "Angle", ["rad", "deg", "mil", "moa"], path + ".direction_from"))
+    flux vertical = nil
+    if value.vertical_velocity != nil {
+        vertical = _quantity_to_map(value.vertical_velocity, "Velocity", ["m/s", "ft/s"], path + ".vertical_velocity")
+    }
+    out.set("vertical_velocity", vertical)
+    out.set("until_distance", _optional_distance_to_map(value.until_distance, path + ".until_distance"))
+    return out
+}
+
+fn _wind_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["speed", "direction_from", "vertical_velocity", "until_distance"],
+    path
+    )
+    flux vertical = nil
+    if object.get("vertical_velocity") != nil {
+        vertical = _velocity_from_map(object.get("vertical_velocity"), path + ".vertical_velocity")
+    }
+    return domain.wind(
+    _wind_speed_from_map(object.get("speed"), path + ".speed"),
+    _angle_from_map(object.get("direction_from"), path + ".direction_from"),
+    vertical,
+    _optional_distance_from_map(object.get("until_distance"), path + ".until_distance")
+    )
+}
+
+export fn wind_to_map(value: any) -> Map {
+    return _wind_to_map(value, "wind")
+}
+
+export fn wind_from_map(value: any) -> any {
+    return _wind_from_map(value, "wind")
+}
+
+fn _shot_to_map(value: any, path: String) -> Map {
+    _require_struct(value, "Shot", path)
+    flux out = Map::new()
+    out.set("muzzle_velocity", _quantity_to_map(value.muzzle_velocity, "Velocity", ["m/s", "ft/s"], path + ".muzzle_velocity"))
+    out.set("max_range", _quantity_to_map(value.max_range, "Distance", ["m", "km", "yd", "ft", "in"], path + ".max_range"))
+    out.set("zero_distance", _optional_distance_to_map(value.zero_distance, path + ".zero_distance"))
+    out.set("muzzle_angle", _optional_angle_to_map(value.muzzle_angle, path + ".muzzle_angle"))
+    out.set("aim_azimuth", _optional_angle_to_map(value.aim_azimuth, path + ".aim_azimuth"))
+    out.set("shot_azimuth", _optional_angle_to_map(value.shot_azimuth, path + ".shot_azimuth"))
+    out.set("shooting_angle", _optional_angle_to_map(value.shooting_angle, path + ".shooting_angle"))
+    out.set("cant_angle", _optional_angle_to_map(value.cant_angle, path + ".cant_angle"))
+    out.set("target_height", _optional_distance_to_map(value.target_height, path + ".target_height"))
+    out.set("ground_threshold", _optional_distance_to_map(value.ground_threshold, path + ".ground_threshold"))
+    return out
+}
+
+fn _shot_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    [
+        "muzzle_velocity", "max_range", "zero_distance", "muzzle_angle",
+        "aim_azimuth", "shot_azimuth", "shooting_angle", "cant_angle",
+        "target_height", "ground_threshold"
+    ],
+    path
+    )
+    return domain.shot(
+    _velocity_from_map(object.get("muzzle_velocity"), path + ".muzzle_velocity"),
+    _distance_from_map(object.get("max_range"), path + ".max_range"),
+    _optional_distance_from_map(object.get("zero_distance"), path + ".zero_distance"),
+    _optional_angle_from_map(object.get("muzzle_angle"), path + ".muzzle_angle"),
+    _optional_angle_from_map(object.get("aim_azimuth"), path + ".aim_azimuth"),
+    _optional_angle_from_map(object.get("shot_azimuth"), path + ".shot_azimuth"),
+    _optional_angle_from_map(object.get("shooting_angle"), path + ".shooting_angle"),
+    _optional_angle_from_map(object.get("cant_angle"), path + ".cant_angle"),
+    _optional_distance_from_map(object.get("target_height"), path + ".target_height"),
+    _optional_distance_from_map(object.get("ground_threshold"), path + ".ground_threshold")
+    )
+}
+
+export fn shot_to_map(value: any) -> Map {
+    return _shot_to_map(value, "shot")
+}
+
+export fn shot_from_map(value: any) -> any {
+    return _shot_from_map(value, "shot")
+}
+
+fn _solver_to_map(value: any, path: String) -> Map {
+    _require_struct(value, "SolverConfig", path)
+    flux out = Map::new()
+    out.set("method", _optional_string(value.method, path + ".method"))
+    out.set("time_step_s", _optional_finite_number(value.time_step_s, path + ".time_step_s"))
+    out.set("sampling_interval", _optional_distance_to_map(value.sampling_interval, path + ".sampling_interval"))
+    out.set("magnus", _optional_bool(value.magnus, path + ".magnus"))
+    out.set("coriolis", _optional_bool(value.coriolis, path + ".coriolis"))
+    out.set("enhanced_spin_drift", _optional_bool(value.enhanced_spin_drift, path + ".enhanced_spin_drift"))
+    return out
+}
+
+fn _solver_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["method", "time_step_s", "sampling_interval", "magnus", "coriolis", "enhanced_spin_drift"],
+    path
+    )
+    return domain.solver_config(
+    _optional_string(object.get("method"), path + ".method"),
+    _optional_finite_number(object.get("time_step_s"), path + ".time_step_s"),
+    _optional_distance_from_map(object.get("sampling_interval"), path + ".sampling_interval"),
+    _optional_bool(object.get("magnus"), path + ".magnus"),
+    _optional_bool(object.get("coriolis"), path + ".coriolis"),
+    _optional_bool(object.get("enhanced_spin_drift"), path + ".enhanced_spin_drift")
+    )
+}
+
+export fn solver_to_map(value: any) -> Map {
+    return _solver_to_map(value, "solver")
+}
+
+export fn solver_from_map(value: any) -> any {
+    return _solver_from_map(value, "solver")
+}
+
+// Descriptive aliases make the adapter's domain type unambiguous to callers.
+export fn solver_config_to_map(value: any) -> Map {
+    return solver_to_map(value)
+}
+
+export fn solver_config_from_map(value: any) -> any {
+    return solver_from_map(value)
+}
+
+export fn winds_to_map(value: any) -> Array {
+    let winds = _array(value, "winds")
+    flux out = []
+    flux index = 0
+    for wind in winds {
+        out.push(_wind_to_map(wind, "winds[" + to_string(index) + "]"))
+        index = index + 1
+    }
+    return out
+}
+
+export fn winds_from_map(value: any) -> Array {
+    let encoded = _array(value, "winds")
+    flux out = []
+    flux index = 0
+    for wind in encoded {
+        out.push(_wind_from_map(wind, "winds[" + to_string(index) + "]"))
+        index = index + 1
+    }
+    return out
+}
+
+fn _experiment_value_to_map(value: any, path: String) -> Map {
+    _require_struct(value, "Experiment", path)
+    flux winds = []
+    flux index = 0
+    for wind in _array(value.winds, path + ".winds") {
+        winds.push(_wind_to_map(wind, path + ".winds[" + to_string(index) + "]"))
+        index = index + 1
+    }
+    flux out = Map::new()
+    out.set("name", _string(value.name, path + ".name"))
+    out.set("projectile", _projectile_to_map(value.projectile, path + ".projectile"))
+    out.set("rifle", _rifle_to_map(value.rifle, path + ".rifle"))
+    out.set("atmosphere", _atmosphere_to_map(value.atmosphere, path + ".atmosphere"))
+    out.set("winds", winds)
+    out.set("shot", _shot_to_map(value.shot, path + ".shot"))
+    out.set("solver", _solver_to_map(value.solver, path + ".solver"))
+    return out
+}
+
+fn _experiment_value_from_map(value: any, path: String) -> any {
+    let object = _map(value, path)
+    _require_exact_keys(
+    object,
+    ["name", "projectile", "rifle", "atmosphere", "winds", "shot", "solver"],
+    path
+    )
+    // Check cross-component requirements while the document is still plain
+    // Maps. Besides producing a direct path, this avoids constructing a partial
+    // graph of frozen domain values only to reject the final Experiment.
+    let encoded_projectile = _map(object.get("projectile"), path + ".projectile")
+    let encoded_atmosphere = _map(object.get("atmosphere"), path + ".atmosphere")
+    let encoded_solver = _map(object.get("solver"), path + ".solver")
+    if encoded_solver.has("coriolis") && encoded_solver.get("coriolis") == true {
+        if encoded_atmosphere.has("latitude") && encoded_atmosphere.get("latitude") == nil {
+            _fail(path + ".atmosphere.latitude: required when Coriolis is enabled")
+        }
+    }
+    flux needs_projectile_length = false
+    if encoded_solver.has("magnus") && encoded_solver.get("magnus") == true {
+        needs_projectile_length = true
+    }
+    if encoded_solver.has("enhanced_spin_drift") && encoded_solver.get("enhanced_spin_drift") == true {
+        needs_projectile_length = true
+    }
+    if needs_projectile_length && encoded_projectile.has("length") && encoded_projectile.get("length") == nil {
+        _fail(path + ".projectile.length: required for the selected effect")
+    }
+    let encoded_winds = _array(object.get("winds"), path + ".winds")
+    flux winds = []
+    flux index = 0
+    for wind in encoded_winds {
+        winds.push(_wind_from_map(wind, path + ".winds[" + to_string(index) + "]"))
+        index = index + 1
+    }
+    let name = _string(object.get("name"), path + ".name")
+    let projectile = _projectile_from_map(object.get("projectile"), path + ".projectile")
+    let rifle = _rifle_from_map(object.get("rifle"), path + ".rifle")
+    let atmosphere = _atmosphere_from_map(object.get("atmosphere"), path + ".atmosphere")
+    let shot = _shot_from_map(object.get("shot"), path + ".shot")
+    let solver = _solver_from_map(object.get("solver"), path + ".solver")
+    return domain.experiment(
+    name,
+    projectile,
+    rifle,
+    atmosphere,
+    winds,
+    shot,
+    solver
+    )
+}
+
+export fn experiment_value_to_map(value: any) -> Map {
+    return _experiment_value_to_map(value, "experiment")
+}
+
+export fn experiment_value_from_map(value: any) -> any {
+    return _experiment_value_from_map(value, "experiment")
+}
+
+export fn experiment_to_map(value: any) -> Map {
+    let encoded_experiment = _experiment_value_to_map(value, "$.experiment")
+    // Struct names alone are not a trust boundary: callers can construct exported
+    // struct literals without going through the domain constructors. Rebuild once
+    // before publishing bytes so save/load enforce identical relationship checks.
+    _experiment_value_from_map(encoded_experiment, "$.experiment")
+    flux out = Map::new()
+    out.set("kind", EXPERIMENT_KIND)
+    out.set("schema_version", EXPERIMENT_SCHEMA_VERSION)
+    out.set("experiment", encoded_experiment)
+    return out
+}
+
+export fn experiment_from_map(value: any) -> any {
+    let document = _map(value, "$")
+    _require_exact_keys(document, ["kind", "schema_version", "experiment"], "$")
+    let kind = _string(document.get("kind"), "$.kind")
+    if kind != EXPERIMENT_KIND {
+        _fail("$.kind: unsupported document kind '" + kind + "'")
+    }
+    let schema_version = document.get("schema_version")
+    if typeof(schema_version) != "Int" {
+        _fail("$.schema_version: expected Int, got " + typeof(schema_version))
+    }
+    if schema_version != EXPERIMENT_SCHEMA_VERSION {
+        _fail("$.schema_version: unsupported value " + to_string(schema_version))
+    }
+    return _experiment_value_from_map(document.get("experiment"), "$.experiment")
+}
+
+export fn experiment_to_json(value: any) -> String {
+    return json_stringify(experiment_to_map(value))
+}
+
+export fn experiment_from_json(value: any) -> any {
+    let source = _string(value, "experiment JSON")
+    return experiment_from_map(json_parse(source))
+}
+
+fn _path(value: any, operation: String) -> String {
+    let path = _string(value, operation + ".path")
+    if len(path) == 0 {
+        _fail(operation + ".path: must not be empty")
+    }
+    return path
+}
+
+export fn save_experiment(path: any, value: any) {
+    let checked_path = _path(path, "save_experiment")
+    // Complete validation and serialization precede the filesystem mutation.
+    let source = experiment_to_json(value)
+    if !write_file(checked_path, source) {
+        _fail("save_experiment: unable to write '" + checked_path + "'")
+    }
+}
+
+export fn load_experiment(path: any) -> any {
+    let checked_path = _path(path, "load_experiment")
+    return experiment_from_json(read_file(checked_path))
+}
+
+export fn load_experiment_into_session(session: any, path: any) -> any {
+    // Parse, validate, and reconstruct the complete immutable graph before the
+    // session's sole state-changing call. A failure above replace_experiment
+    // therefore leaves experiment, backend, preferences, and all run state intact.
+    let loaded = load_experiment(path)
+    sessions.replace_experiment(session, loaded)
+    return loaded
+}

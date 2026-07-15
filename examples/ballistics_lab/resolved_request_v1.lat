@@ -1,0 +1,335 @@
+// Strict, pure validation for the solve-json v1 resolved-request snapshot.
+//
+// The returned Map is a detached crystal suitable for embedding in persisted
+// artifacts. Validation performs no I/O and accepts no extension fields.
+
+let SCHEMA_VERSION = 1
+
+fn _fail(message: String) {
+    assert(false, "resolved request v1: " + message)
+}
+
+fn _nonempty_string(value: any, path: String) -> String {
+    if typeof(value) != "String" {
+        _fail(path + ": expected String, got " + typeof(value))
+    }
+    if len(value.trim()) == 0 {
+        _fail(path + ": must not be empty")
+    }
+    return value
+}
+
+fn _integer(value: any, path: String) -> Int {
+    if typeof(value) != "Int" {
+        _fail(path + ": expected Int, got " + typeof(value))
+    }
+    return value
+}
+
+fn _number(value: any, path: String) -> Number {
+    let kind = typeof(value)
+    if kind != "Int" && kind != "Float" {
+        _fail(path + ": expected Number, got " + kind)
+    }
+    if is_nan(value) || is_inf(value) {
+        _fail(path + ": must be finite")
+    }
+    return value
+}
+
+fn _positive_number(value: any, path: String) -> Number {
+    let checked = _number(value, path)
+    if checked <= 0 {
+        _fail(path + ": must be greater than zero")
+    }
+    return checked
+}
+
+fn _nonnegative_number(value: any, path: String) -> Number {
+    let checked = _number(value, path)
+    if checked < 0 {
+        _fail(path + ": must be non-negative")
+    }
+    return checked
+}
+
+fn _boolean(value: any, path: String) -> Bool {
+    if typeof(value) != "Bool" {
+        _fail(path + ": expected Bool, got " + typeof(value))
+    }
+    return value
+}
+
+fn _map(value: any, path: String) -> Map {
+    if typeof(value) != "Map" {
+        _fail(path + ": expected Map, got " + typeof(value))
+    }
+    return value
+}
+
+fn _array(value: any, path: String) -> Array {
+    if typeof(value) != "Array" {
+        _fail(path + ": expected Array, got " + typeof(value))
+    }
+    return value
+}
+
+fn _require_exact_keys(object: Map, required: Array, optional: Array, path: String) {
+    for key in required {
+        if !object.has(key) {
+            _fail(path + ": missing required field '" + key + "'")
+        }
+    }
+    for key in object.keys() {
+        if !required.contains(key) && !optional.contains(key) {
+            _fail(path + ": unknown field '" + key + "'")
+        }
+    }
+}
+
+fn _require_choice(value: any, choices: Array, path: String) -> String {
+    let checked = _nonempty_string(value, path)
+    if !choices.contains(checked) {
+        _fail(path + ": unsupported value '" + checked + "'")
+    }
+    return checked
+}
+
+fn _validate_projectile(object: Map) {
+    _require_exact_keys(
+    object,
+    ["mass_kg", "diameter_m", "drag_model", "ballistic_coefficient"],
+    ["length_m"],
+    "$.resolved_request.projectile"
+    )
+    _positive_number(object.get("mass_kg"), "$.resolved_request.projectile.mass_kg")
+    _positive_number(object.get("diameter_m"), "$.resolved_request.projectile.diameter_m")
+    if object.has("length_m") {
+        _positive_number(object.get("length_m"), "$.resolved_request.projectile.length_m")
+    }
+    _require_choice(
+    object.get("drag_model"),
+    ["G1", "G6", "G7", "G8"],
+    "$.resolved_request.projectile.drag_model"
+    )
+    _positive_number(
+    object.get("ballistic_coefficient"),
+    "$.resolved_request.projectile.ballistic_coefficient"
+    )
+}
+
+fn _validate_rifle(object: Map) {
+    _require_exact_keys(
+    object,
+    [
+        "muzzle_velocity_mps", "sight_height_m", "muzzle_height_m",
+        "twist_rate_m_per_turn", "twist_direction"
+    ],
+    [],
+    "$.resolved_request.rifle"
+    )
+    _positive_number(
+    object.get("muzzle_velocity_mps"),
+    "$.resolved_request.rifle.muzzle_velocity_mps"
+    )
+    _nonnegative_number(
+    object.get("sight_height_m"),
+    "$.resolved_request.rifle.sight_height_m"
+    )
+    _number(object.get("muzzle_height_m"), "$.resolved_request.rifle.muzzle_height_m")
+    _positive_number(
+    object.get("twist_rate_m_per_turn"),
+    "$.resolved_request.rifle.twist_rate_m_per_turn"
+    )
+    _require_choice(
+    object.get("twist_direction"),
+    ["left", "right"],
+    "$.resolved_request.rifle.twist_direction"
+    )
+}
+
+fn _validate_shot(object: Map) {
+    _require_exact_keys(
+    object,
+    [
+        "max_range_m", "muzzle_angle_rad", "aim_azimuth_rad", "shot_azimuth_rad",
+        "shooting_angle_rad", "cant_angle_rad", "target_height_m", "ground_threshold_m"
+    ],
+    ["zero_distance_m"],
+    "$.resolved_request.shot"
+    )
+    _positive_number(object.get("max_range_m"), "$.resolved_request.shot.max_range_m")
+    if object.has("zero_distance_m") {
+        let zero_distance = _positive_number(
+        object.get("zero_distance_m"),
+        "$.resolved_request.shot.zero_distance_m"
+        )
+        if is_inf(zero_distance * 2.0) {
+            _fail("$.resolved_request.shot.zero_distance_m: too large for a finite zeroing range")
+        }
+    }
+    for key in [
+        "muzzle_angle_rad", "aim_azimuth_rad", "shot_azimuth_rad", "shooting_angle_rad",
+        "cant_angle_rad", "target_height_m", "ground_threshold_m"
+    ] {
+        _number(object.get(key), "$.resolved_request.shot." + key)
+    }
+}
+
+fn _validate_atmosphere(object: Map) {
+    _require_exact_keys(
+    object,
+    ["altitude_m", "temperature_k", "pressure_pa", "relative_humidity"],
+    ["latitude_rad"],
+    "$.resolved_request.atmosphere"
+    )
+    let altitude = _number(object.get("altitude_m"), "$.resolved_request.atmosphere.altitude_m")
+    if altitude < -5000 || altitude > 84000 {
+        _fail("$.resolved_request.atmosphere.altitude_m: must be between -5000 and 84000")
+    }
+    _positive_number(
+    object.get("temperature_k"),
+    "$.resolved_request.atmosphere.temperature_k"
+    )
+    _positive_number(object.get("pressure_pa"), "$.resolved_request.atmosphere.pressure_pa")
+    let humidity = _number(
+    object.get("relative_humidity"),
+    "$.resolved_request.atmosphere.relative_humidity"
+    )
+    if humidity < 0 || humidity > 1 {
+        _fail("$.resolved_request.atmosphere.relative_humidity: must be between 0 and 1")
+    }
+    if object.has("latitude_rad") {
+        let latitude = _number(
+        object.get("latitude_rad"),
+        "$.resolved_request.atmosphere.latitude_rad"
+        )
+        let half_pi = 3.141592653589793 / 2.0
+        if latitude < 0.0 - half_pi || latitude > half_pi {
+            _fail("$.resolved_request.atmosphere.latitude_rad: must be between -pi/2 and pi/2")
+        }
+    }
+}
+
+fn _validate_wind_segment(object: Map, index: Int, last_boundary: Number) -> Number {
+    let path = "$.resolved_request.wind.segments[" + to_string(index) + "]"
+    _require_exact_keys(
+    object,
+    ["until_distance_m", "speed_mps", "direction_from_rad", "vertical_speed_mps"],
+    [],
+    path
+    )
+    let boundary = _positive_number(object.get("until_distance_m"), path + ".until_distance_m")
+    if boundary <= last_boundary {
+        _fail("$.resolved_request.wind.segments: boundaries must increase strictly")
+    }
+    _nonnegative_number(object.get("speed_mps"), path + ".speed_mps")
+    _number(object.get("direction_from_rad"), path + ".direction_from_rad")
+    _number(object.get("vertical_speed_mps"), path + ".vertical_speed_mps")
+    return boundary
+}
+
+fn _validate_wind(object: Map) {
+    if object.has("segments") {
+        _require_exact_keys(object, ["segments"], [], "$.resolved_request.wind")
+        let segments = _array(object.get("segments"), "$.resolved_request.wind.segments")
+        if len(segments) == 0 {
+            _fail("$.resolved_request.wind.segments: must not be empty")
+        }
+        flux index = 0
+        flux boundary = 0.0
+        for segment in segments {
+            let path = "$.resolved_request.wind.segments[" + to_string(index) + "]"
+            boundary = _validate_wind_segment(_map(segment, path), index, boundary)
+            index = index + 1
+        }
+        return
+    }
+    _require_exact_keys(
+    object,
+    ["speed_mps", "direction_from_rad", "vertical_speed_mps"],
+    [],
+    "$.resolved_request.wind"
+    )
+    _nonnegative_number(object.get("speed_mps"), "$.resolved_request.wind.speed_mps")
+    _number(object.get("direction_from_rad"), "$.resolved_request.wind.direction_from_rad")
+    _number(object.get("vertical_speed_mps"), "$.resolved_request.wind.vertical_speed_mps")
+}
+
+fn _validate_solver(object: Map) {
+    _require_exact_keys(object, ["method", "time_step_s"], [], "$.resolved_request.solver")
+    _require_choice(
+    object.get("method"),
+    ["rk45", "rk4", "euler"],
+    "$.resolved_request.solver.method"
+    )
+    _positive_number(object.get("time_step_s"), "$.resolved_request.solver.time_step_s")
+}
+
+fn _validate_effects(object: Map) {
+    _require_exact_keys(
+    object,
+    ["magnus", "coriolis", "enhanced_spin_drift"],
+    [],
+    "$.resolved_request.effects"
+    )
+    let magnus = _boolean(object.get("magnus"), "$.resolved_request.effects.magnus")
+    _boolean(object.get("coriolis"), "$.resolved_request.effects.coriolis")
+    let enhanced = _boolean(
+    object.get("enhanced_spin_drift"),
+    "$.resolved_request.effects.enhanced_spin_drift"
+    )
+    if magnus && enhanced {
+        _fail("$.resolved_request.effects: magnus and enhanced_spin_drift cannot both be enabled")
+    }
+}
+
+fn _validate_sampling(object: Map) {
+    _require_exact_keys(object, ["interval_m"], [], "$.resolved_request.sampling")
+    _positive_number(object.get("interval_m"), "$.resolved_request.sampling.interval_m")
+}
+
+// Validate a solve-json v1 resolved request and return a detached immutable
+// snapshot. The caller's Map remains independently mutable.
+export fn validate_resolved_request_v1(value: any) -> Map {
+    let object = _map(value, "$.resolved_request")
+    _require_exact_keys(
+    object,
+    [
+        "schema_version", "projectile", "rifle", "shot", "atmosphere",
+        "wind", "solver", "effects", "sampling"
+    ],
+    [],
+    "$.resolved_request"
+    )
+    if _integer(object.get("schema_version"), "$.resolved_request.schema_version") != SCHEMA_VERSION {
+        _fail("$.resolved_request.schema_version: unsupported schema version")
+    }
+
+    let projectile = _map(object.get("projectile"), "$.resolved_request.projectile")
+    let rifle = _map(object.get("rifle"), "$.resolved_request.rifle")
+    let shot = _map(object.get("shot"), "$.resolved_request.shot")
+    let atmosphere = _map(object.get("atmosphere"), "$.resolved_request.atmosphere")
+    let wind = _map(object.get("wind"), "$.resolved_request.wind")
+    let solver = _map(object.get("solver"), "$.resolved_request.solver")
+    let effects = _map(object.get("effects"), "$.resolved_request.effects")
+    let sampling = _map(object.get("sampling"), "$.resolved_request.sampling")
+
+    _validate_projectile(projectile)
+    _validate_rifle(rifle)
+    _validate_shot(shot)
+    _validate_atmosphere(atmosphere)
+    _validate_wind(wind)
+    _validate_solver(solver)
+    _validate_effects(effects)
+    _validate_sampling(sampling)
+
+    if shot.get("ground_threshold_m") >= rifle.get("muzzle_height_m") {
+        _fail("$.resolved_request.shot.ground_threshold_m: must be below the resolved muzzle height")
+    }
+    if effects.get("coriolis") && !atmosphere.has("latitude_rad") {
+        _fail("$.resolved_request.atmosphere.latitude_rad: required when coriolis is enabled")
+    }
+
+    return freeze(clone(object))
+}
