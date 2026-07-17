@@ -1947,8 +1947,15 @@ static void test_mba_1336_nul_string_ops_binary_safe(void) {
                   "    let s = json_parse(\"\\\"p\\\\u0000q\\\"\")\n"
                   "    let t = json_parse(\"\\\"p\\\\u0000q\\\"\")\n"
                   "    print(s == t)\n"
+                  "    let d = json_parse(\"\\\"x\\\\u0000Ax\\\\u0000B\\\"\")\n"
+                  /* DIRECT expressions on an interned NUL concat result: pre-fix RegVM
+                   * interned (a+b) prefix-only while keeping str_len -> ASan OOB in the
+                   * length-aware == and a truncated further concat. A let-binding
+                   * re-normalizes str_len and masks it, so these must stay inline. */
+                  "    print((a + b) == d)\n"
+                  "    print(len((a + b) + \"z\"))\n"
                   "}\n",
-                  "3\ntrue\nfalse\n6\ntrue");
+                  "3\ntrue\nfalse\n6\ntrue\ntrue\n7");
 }
 
 static void test_json_parse_validates_utf8(void) {

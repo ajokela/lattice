@@ -3526,8 +3526,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 buf[total] = '\0';
                 R[a].as.str_val = buf;   /* update in-place (realloc may move) */
                 R[a].as.str_len = total; /* update cached length */
-                /* Intern short results for pointer-equality comparisons */
-                if (total <= INTERN_THRESHOLD) {
+                /* Intern short results for pointer-equality comparisons.
+                 * MBA-1336: never intern a NUL-containing result — the intern table is
+                 * C-string based (strdup), so it would keep only the pre-NUL prefix while
+                 * str_len stays total -> OOB read in length-aware value_eq/concat. */
+                if (total <= INTERN_THRESHOLD && memchr(buf, '\0', total) == NULL) {
                     const char *interned = intern(buf);
                     free(R[a].as.str_val);
                     R[a].as.str_val = (char *)interned;
@@ -3542,8 +3545,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 buf[total] = '\0';
                 LatValue v = value_string_owned(buf);
                 v.as.str_len = total; /* cache length */
-                /* Intern short concat results */
-                if (total <= INTERN_THRESHOLD) {
+                /* Intern short concat results (MBA-1336: skip NUL-containing results —
+                 * see the in-place branch above). */
+                if (total <= INTERN_THRESHOLD && memchr(buf, '\0', total) == NULL) {
                     const char *interned = intern(buf);
                     free(v.as.str_val);
                     v.as.str_val = (char *)interned;
