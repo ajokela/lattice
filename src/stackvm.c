@@ -406,8 +406,7 @@ static LatValue value_clone_fast_inner(const LatValue *src) {
             size_t slen = src->as.str_len ? src->as.str_len : strlen(src->as.str_val);
             /* Intern short strings on clone to avoid strdup and enable
              * pointer-equality comparisons. */
-            if (slen <= INTERN_THRESHOLD && memchr(src->as.str_val, '\0', slen) == NULL)
-                return value_string_interned(src->as.str_val);
+            if (slen <= INTERN_THRESHOLD && !value_string_has_nul(src)) return value_string_interned(src->as.str_val);
             LatValue v = *src;
             v.as.str_val = malloc(slen + 1);
             if (!v.as.str_val) return value_unit();
@@ -615,7 +614,10 @@ static inline void stackvm_promote_value(LatValue *v) {
         /* Try interning short strings to avoid a full deep-clone.
          * Interned strings are long-lived (owned by intern table). */
         size_t slen = (v->type == VAL_STR && v->as.str_len) ? v->as.str_len : 0;
-        if (v->type == VAL_STR && (slen ? slen : strlen(v->as.str_val)) <= INTERN_THRESHOLD) {
+        /* MBA-1336: the intern table is C-string based — a String with an embedded
+         * NUL would be stored truncated while keeping its full str_len. */
+        if (v->type == VAL_STR && (slen ? slen : strlen(v->as.str_val)) <= INTERN_THRESHOLD &&
+            !value_string_has_nul(v)) {
             const char *interned = intern(v->as.str_val);
             v->as.str_val = (char *)interned;
             v->region_id = REGION_INTERNED;
@@ -1780,7 +1782,7 @@ freeze_except_exempt:
                                 }
                                 should_swap = cmp == VALUE_CMP_GREATER;
                             } else if (elems[j - 1].type == VAL_STR && key.type == VAL_STR) {
-                                should_swap = strcmp(elems[j - 1].as.str_val, key.as.str_val) > 0;
+                                should_swap = value_string_compare(&elems[j - 1], &key) > 0;
                             } else {
                                 /* Mixed non-numeric types — error */
                                 for (size_t fi = 0; fi < len; fi++) value_free(&elems[fi]);
@@ -4445,7 +4447,9 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
             char *rb = pb ? NULL : value_repr(&b);
             if (!pa) pa = ra;
             if (!pb) pb = rb;
-            size_t la = strlen(pa), lb = strlen(pb);
+            /* Use cached str_len for String operands (binary-safe, MBA-1336) */
+            size_t la = (!ra && a.as.str_len) ? a.as.str_len : strlen(pa);
+            size_t lb = (!rb && b.as.str_len) ? b.as.str_len : strlen(pb);
             LatValue result = stackvm_ephemeral_concat(vm, pa, la, pb, lb);
             free(ra);
             free(rb);
@@ -5411,15 +5415,19 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                 value_free(&idx);
             } else if (obj.type == VAL_STR && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
-                size_t len = strlen(obj.as.str_val);
+                size_t len = value_string_length(&obj); /* MBA-1336: full byte length */
                 if (i < 0 || (size_t)i >= len) {
                     value_free(&obj);
                     VM_ERROR("string index out of bounds");
                     break;
                 }
-                char ch[2] = {obj.as.str_val[i], '\0'};
+                char *ch = malloc(2);
+                if (!ch) return STACKVM_RUNTIME_ERROR;
+                ch[0] = obj.as.str_val[i];
+                ch[1] = '\0';
                 value_free(&obj);
-                push(vm, value_string(ch));
+                /* carries str_len so a NUL byte stays a 1-byte String */
+                push(vm, value_string_owned_len(ch, 1));
             } else if (obj.type == VAL_TUPLE && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
                 if (i < 0 || (size_t)i >= obj.as.tuple.len) {
@@ -5434,7 +5442,7 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                 /* String range slicing: "hello"[1..4] → "ell" */
                 int64_t start = idx.as.range.start;
                 int64_t end = idx.as.range.end;
-                size_t len = strlen(obj.as.str_val);
+                size_t len = value_string_length(&obj); /* MBA-1336: full byte length */
                 if (start < 0) start = 0;
                 if (end < 0) end = 0;
                 if ((size_t)start > len) start = (int64_t)len;
@@ -5449,7 +5457,7 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                     memcpy(slice, obj.as.str_val + start, slice_len);
                     slice[slice_len] = '\0';
                     value_free(&obj);
-                    push(vm, value_string_owned(slice));
+                    push(vm, value_string_owned_len(slice, slice_len));
                 }
             } else if (obj.type == VAL_ARRAY && idx.type == VAL_RANGE) {
                 /* Array range slicing: [1,2,3,4][1..3] → [2,3] */
@@ -7078,13 +7086,16 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                 value_free(&idx);
             } else if (obj->type == VAL_STR && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
-                size_t len = strlen(obj->as.str_val);
+                size_t len = value_string_length(obj); /* MBA-1336: full byte length */
                 if (i < 0 || (size_t)i >= len) {
                     VM_ERROR("string index out of bounds");
                     break;
                 }
-                char ch[2] = {obj->as.str_val[i], '\0'};
-                push(vm, value_string(ch));
+                char *ch = malloc(2);
+                if (!ch) return STACKVM_RUNTIME_ERROR;
+                ch[0] = obj->as.str_val[i];
+                ch[1] = '\0';
+                push(vm, value_string_owned_len(ch, 1));
             } else if (obj->type == VAL_TUPLE && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
                 if (i < 0 || (size_t)i >= obj->as.tuple.len) {
@@ -7095,7 +7106,7 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
             } else if (obj->type == VAL_STR && idx.type == VAL_RANGE) {
                 int64_t start = idx.as.range.start;
                 int64_t end = idx.as.range.end;
-                size_t len = strlen(obj->as.str_val);
+                size_t len = value_string_length(obj); /* MBA-1336: full byte length */
                 if (start < 0) start = 0;
                 if (end < 0) end = 0;
                 if ((size_t)start > len) start = (int64_t)len;
@@ -7108,7 +7119,7 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                     if (!slice) return STACKVM_RUNTIME_ERROR;
                     memcpy(slice, obj->as.str_val + start, slice_len);
                     slice[slice_len] = '\0';
-                    push(vm, value_string_owned(slice));
+                    push(vm, value_string_owned_len(slice, slice_len));
                 }
             } else if (obj->type == VAL_ARRAY && idx.type == VAL_RANGE) {
                 int64_t start = idx.as.range.start;
@@ -7212,13 +7223,16 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                 value_free(&idx);
             } else if (obj->type == VAL_STR && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
-                size_t len = strlen(obj->as.str_val);
+                size_t len = value_string_length(obj); /* MBA-1336: full byte length */
                 if (i < 0 || (size_t)i >= len) {
                     VM_ERROR("string index out of bounds");
                     break;
                 }
-                char ch[2] = {obj->as.str_val[i], '\0'};
-                push(vm, value_string(ch));
+                char *ch = malloc(2);
+                if (!ch) return STACKVM_RUNTIME_ERROR;
+                ch[0] = obj->as.str_val[i];
+                ch[1] = '\0';
+                push(vm, value_string_owned_len(ch, 1));
             } else if (obj->type == VAL_TUPLE && idx.type == VAL_INT) {
                 int64_t i = idx.as.int_val;
                 if (i < 0 || (size_t)i >= obj->as.tuple.len) {
@@ -7229,7 +7243,7 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
             } else if (obj->type == VAL_STR && idx.type == VAL_RANGE) {
                 int64_t start = idx.as.range.start;
                 int64_t end = idx.as.range.end;
-                size_t len = strlen(obj->as.str_val);
+                size_t len = value_string_length(obj); /* MBA-1336: full byte length */
                 if (start < 0) start = 0;
                 if (end < 0) end = 0;
                 if ((size_t)start > len) start = (int64_t)len;
@@ -7242,7 +7256,7 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                     if (!slice) return STACKVM_RUNTIME_ERROR;
                     memcpy(slice, obj->as.str_val + start, slice_len);
                     slice[slice_len] = '\0';
-                    push(vm, value_string_owned(slice));
+                    push(vm, value_string_owned_len(slice, slice_len));
                 }
             } else if (obj->type == VAL_ARRAY && idx.type == VAL_RANGE) {
                 int64_t start = idx.as.range.start;
@@ -7775,14 +7789,16 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
             if (val->type == VAL_MAP) {
                 LatValue *tag = lat_map_get(val->as.map.map, "tag");
                 if (tag && tag->type == VAL_STR) {
-                    if (strcmp(tag->as.str_val, "ok") == 0) {
+                    /* MBA-1336: length-aware tag match — "ok\0junk" is not "ok" */
+                    size_t tag_len = value_string_length(tag);
+                    if (tag_len == 2 && memcmp(tag->as.str_val, "ok", 2) == 0) {
                         LatValue *inner = lat_map_get(val->as.map.map, "value");
                         LatValue result_val = inner ? value_deep_clone(inner) : value_nil();
                         LatValue old = pop(vm);
                         value_free(&old);
                         push(vm, result_val);
                         break;
-                    } else if (strcmp(tag->as.str_val, "err") == 0) {
+                    } else if (tag_len == 3 && memcmp(tag->as.str_val, "err", 3) == 0) {
                         /* Return the error from the current function */
                         LatValue err_map = pop(vm);
                         size_t frame_idx = vm->frame_count - 1;
@@ -8547,7 +8563,8 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                 for (uint8_t i = 0; i < argc; i++) {
                     if (i > 0) printf(" ");
                     if (vals[i].type == VAL_STR) {
-                        printf("%s", vals[i].as.str_val);
+                        /* MBA-1336: write the full bytes — "%s" stops at an embedded NUL */
+                        fwrite(vals[i].as.str_val, 1, value_string_length(&vals[i]), stdout);
                     } else {
                         char *repr = value_repr(&vals[i]);
                         printf("%s", repr);
@@ -9559,13 +9576,15 @@ static StackVMResult stackvm_run_dispatch(StackVM *vm, Chunk *chunk, LatValue *r
                     char *rb2 = pb2 ? NULL : value_repr(&rhs);
                     if (!pa2) pa2 = ra2;
                     if (!pb2) pb2 = rb2;
-                    size_t la2 = strlen(pa2), lb2 = strlen(pb2);
+                    /* Use cached str_len for String operands (binary-safe, MBA-1336) */
+                    size_t la2 = (!ra2 && a2.as.str_len) ? a2.as.str_len : strlen(pa2);
+                    size_t lb2 = (!rb2 && rhs.as.str_len) ? rhs.as.str_len : strlen(pb2);
                     char *buf = malloc(la2 + lb2 + 1);
                     if (!buf) return STACKVM_RUNTIME_ERROR;
                     memcpy(buf, pa2, la2);
                     memcpy(buf + la2, pb2, lb2);
                     buf[la2 + lb2] = '\0';
-                    result = value_string_owned(buf);
+                    result = value_string_owned_len(buf, la2 + lb2);
                     free(ra2);
                     free(rb2);
                 } else {

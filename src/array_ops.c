@@ -21,7 +21,7 @@ static int sort_comparator(const void *a, const void *b) {
         return cmp == VALUE_CMP_LESS ? -1 : cmp == VALUE_CMP_GREATER ? 1 : 0;
     }
 
-    if (va->type == VAL_STR && vb->type == VAL_STR) return strcmp(va->as.str_val, vb->as.str_val);
+    if (va->type == VAL_STR && vb->type == VAL_STR) return value_string_compare(va, vb); /* MBA-1336 */
     sort_error = 1;
     return 0;
 }

@@ -1958,6 +1958,31 @@ static void test_mba_1336_nul_string_ops_binary_safe(void) {
                   "3\ntrue\nfalse\n6\ntrue\ntrue\n7");
 }
 
+/* MBA-1336 tail: String METHODS, indexing/slicing, sort ordering, and join must be
+ * byte-length-aware and identical across backends. All observations are numeric/boolean
+ * (never raw NUL bytes on stdout) because run_capture compares output with strcmp. */
+static void test_mba_1336_nul_string_methods_binary_safe(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let a = json_parse(\"\\\"x\\\\u0000A\\\"\")\n" /* 3 bytes */
+                  "    let b = json_parse(\"\\\"x\\\\u0000B\\\"\")\n"
+                  "    let d = a + b\n"                            /* 6 bytes */
+                  "    print(len(a[1]))\n"                         /* NUL byte indexes as a 1-byte string */
+                  "    print(len(d[0..3]))\n"                      /* slice spans the NUL: 3 */
+                  "    print(d.contains(b))\n"                     /* needle beyond a NUL: true */
+                  "    print(d.index_of(b))\n"                     /* found at byte 3 */
+                  "    print(d.starts_with(a))\n"                  /* affix check across NUL: true */
+                  "    print(d.ends_with(b))\n"                    /* true */
+                  "    print(len((\"  \" + a + \"  \").trim()))\n" /* 3, not strlen-trimmed */
+                  "    print(len(a.to_upper()))\n"                 /* case map over full bytes: 3 */
+                  "    print(len(a.repeat(2)))\n"                  /* 6 */
+                  "    print(len(a.chars()))\n"                    /* 3 single-byte strings */
+                  "    print(len([a, b].join(\"-\")))\n"           /* 3+1+3 = 7 */
+                  "    print([b, a].sort()[0] == a)\n"             /* length-aware ordering: a < b */
+                  "    print(len(d.split(b)))\n"                   /* NUL-containing separator: 2 parts */
+                  "}\n",
+                  "1\n3\ntrue\n3\ntrue\ntrue\n3\n3\n6\n3\n7\ntrue\n2");
+}
+
 static void test_json_parse_validates_utf8(void) {
     const char lone_continuation[] = {'"', (char)0x80, '"'};
     const char overlong[] = {'"', (char)0xC0, (char)0xAF, '"'};
@@ -14465,6 +14490,7 @@ void register_stdlib_tests(void) {
     register_test("test_json_parse_rejects_unescaped_controls", test_json_parse_rejects_unescaped_controls);
     register_test("test_json_roundtrips_embedded_nul_string", test_json_roundtrips_embedded_nul_string);
     register_test("test_mba_1336_nul_string_ops_binary_safe", test_mba_1336_nul_string_ops_binary_safe);
+    register_test("test_mba_1336_nul_string_methods_binary_safe", test_mba_1336_nul_string_methods_binary_safe);
     register_test("test_json_parse_validates_utf8", test_json_parse_validates_utf8);
     register_test("test_json_parse_checks_integer_range", test_json_parse_checks_integer_range);
     register_test("test_json_stringify_error", test_json_stringify_error);

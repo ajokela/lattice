@@ -1258,6 +1258,10 @@ LatValue value_thaw(const LatValue *v) {
 /* ── Display ── */
 
 void value_print(const LatValue *v, FILE *out) {
+    if (v->type == VAL_STR) { /* MBA-1336: write full bytes; %s stops at embedded NULs */
+        fwrite(v->as.str_val, 1, value_string_length(v), out);
+        return;
+    }
     char *s = value_display(v);
     fprintf(out, "%s", s);
     free(s);
@@ -1272,7 +1276,14 @@ char *value_display(const LatValue *v) {
             break;
         }
         case VAL_BOOL: buf = strdup(v->as.bool_val ? "true" : "false"); break;
-        case VAL_STR: buf = strdup(v->as.str_val); break;
+        case VAL_STR: { /* MBA-1336: copy the full byte length (strdup stops at embedded NULs) */
+            size_t len = value_string_length(v);
+            buf = malloc(len + 1);
+            if (!buf) return strdup("");
+            memcpy(buf, v->as.str_val, len);
+            buf[len] = '\0';
+            break;
+        }
         case VAL_ARRAY: {
             size_t cap = 64;
             buf = malloc(cap);
