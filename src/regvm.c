@@ -1836,6 +1836,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                         parts = realloc(parts, cap * sizeof(LatValue));
                     }
                     char *one = malloc(2);
+                    if (!one) continue;
                     one[0] = s[i];
                     one[1] = '\0';
                     parts[count++] = value_string_owned_len(one, 1);
@@ -1843,9 +1844,10 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             } else {
                 /* Always emit the segment after the last separator too (a trailing
                  * separator yields a trailing empty part, matching the historical
-                 * strstr-based semantics and the other backends). */
+                 * strstr-based semantics and the other backends). An empty subject
+                 * yields NO parts (uniform: "".split(sep) == [] everywhere). */
                 size_t pos = 0;
-                bool last = false;
+                bool last = slen == 0;
                 while (!last) {
                     long found = value_bytes_find(s + pos, slen - pos, sep, sep_len);
                     if (count >= cap) {
@@ -1854,6 +1856,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                     }
                     size_t part_len = found < 0 ? slen - pos : (size_t)found;
                     char *part = malloc(part_len + 1);
+                    if (!part) break;
                     memcpy(part, s + pos, part_len);
                     part[part_len] = '\0';
                     parts[count++] = value_string_owned_len(part, part_len);

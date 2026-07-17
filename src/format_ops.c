@@ -3,7 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-char *format_string(const char *fmt, const LatValue *args, size_t argc, char **err) {
+char *format_string(const char *fmt, const LatValue *args, size_t argc, size_t *out_len, char **err) {
+    if (out_len) *out_len = 0;
     size_t buf_cap = 128;
     size_t buf_len = 0;
     char *buf = malloc(buf_cap);
@@ -71,6 +72,7 @@ char *format_string(const char *fmt, const LatValue *args, size_t argc, char **e
     }
 
     buf[buf_len] = '\0';
+    if (out_len) *out_len = buf_len; /* MBA-1336: callers must carry the byte length */
     *err = NULL;
     return buf;
 }

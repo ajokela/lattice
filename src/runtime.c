@@ -389,7 +389,8 @@ static LatValue native_buffer_from(LatValue *args, int arg_count) {
 static LatValue native_buffer_from_string(LatValue *args, int arg_count) {
     if (arg_count != 1 || args[0].type != VAL_STR) return value_buffer(NULL, 0);
     const char *s = args[0].as.str_val;
-    size_t len = strlen(s);
+    /* MBA-1336: full byte length — a String with embedded NULs converts losslessly */
+    size_t len = value_string_length(&args[0]);
     return value_buffer((const uint8_t *)s, len);
 }
 
@@ -2367,12 +2368,14 @@ static LatValue native_format(LatValue *args, int ac) {
         return value_nil();
     }
     char *err = NULL;
-    char *r = format_string(args[0].as.str_val, args + 1, (size_t)(ac - 1), &err);
+    size_t rlen = 0;
+    char *r = format_string(args[0].as.str_val, args + 1, (size_t)(ac - 1), &rlen, &err);
     if (err) {
         current_rt->error = err;
         return value_nil();
     }
-    return value_string_owned(r);
+    /* MBA-1336: carry the byte length (String args may embed NULs) */
+    return value_string_owned_len(r, rlen);
 }
 static LatValue native_range(LatValue *args, int ac) {
     if (ac < 2 || ac > 3 || args[0].type != VAL_INT || args[1].type != VAL_INT) {

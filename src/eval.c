@@ -6899,11 +6899,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("format() expects (String fmt, ...)"));
                     }
                     char *ferr = NULL;
-                    char *result = format_string(args[0].as.str_val, args + 1, argc - 1, &ferr);
+                    size_t flen = 0;
+                    char *result = format_string(args[0].as.str_val, args + 1, argc - 1, &flen, &ferr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (ferr) return eval_err(ferr);
-                    return eval_ok(value_string_owned(result));
+                    /* MBA-1336: carry the byte length (String args may embed NULs) */
+                    return eval_ok(value_string_owned_len(result, flen));
                 }
 
                 /* ── Crypto builtins ── */
@@ -13773,7 +13775,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (!s) return eval_err(strdup("out of memory"));
             memcpy(s, obj.as.buffer.data, obj.as.buffer.len);
             s[obj.as.buffer.len] = '\0';
-            return eval_ok(value_string_owned(s));
+            /* MBA-1336: carry the byte length — buffer bytes may include NULs */
+            return eval_ok(value_string_owned_len(s, obj.as.buffer.len));
         }
         /// @method Buffer.to_array() -> Array
         /// @category Buffer Methods

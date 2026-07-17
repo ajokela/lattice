@@ -561,20 +561,6 @@ static void close_upvalues(StackVM *vm, LatValue *last) {
 
 /* Create a string value allocated in the ephemeral arena.
  * The caller passes a malloc'd string; it's copied into the arena and the original is freed. */
-__attribute__((unused)) static inline LatValue stackvm_ephemeral_string(StackVM *vm, char *s) {
-    if (vm->ephemeral) {
-        char *arena_str = bump_strdup(vm->ephemeral, s);
-        free(s);
-        LatValue v;
-        v.type = VAL_STR;
-        v.phase = VTAG_UNPHASED;
-        v.region_id = REGION_EPHEMERAL;
-        v.as.str_val = arena_str;
-        vm->ephemeral_on_stack = true;
-        return v;
-    }
-    return value_string_owned(s);
-}
 
 /* Concatenate two strings directly into the ephemeral arena (avoids malloc+free). */
 static inline LatValue stackvm_ephemeral_concat(StackVM *vm, const char *a, size_t la, const char *b, size_t lb) {

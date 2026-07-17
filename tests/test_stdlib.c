@@ -1983,6 +1983,27 @@ static void test_mba_1336_nul_string_methods_binary_safe(void) {
                   "1\n3\ntrue\n3\ntrue\ntrue\n3\n3\n6\n3\n7\ntrue\n2");
 }
 
+/* MBA-1336 verify-round findings: split edge semantics, Buffer round-trip, and format()
+ * length must be identical on every backend. "aaa".split("aa") pinned to 2 parts (the old
+ * ends-with heuristic appended a bogus trailing "" when the tail merely overlapped a
+ * consumed separator); "".split(sep) pinned to []. */
+static void test_mba_1336_split_buffer_format_parity(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    print(len(\"\".split(\",\")))\n"       /* empty subject: [] */
+                  "    print(len(\"aaa\".split(\"aa\")))\n"   /* overlap: ["", "a"] */
+                  "    print(len(\"aaaa\".split(\"aaa\")))\n" /* ["", "a"] */
+                  "    print(len(\"a,\".split(\",\")))\n"     /* trailing sep: ["a", ""] */
+                  "    print(len(\",a\".split(\",\")))\n"     /* leading sep: ["", "a"] */
+                  "    print(\"x,y,z\".split(\",\").join(\",\") == \"x,y,z\")\n"
+                  "    let a = json_parse(\"\\\"x\\\\u0000A\\\"\")\n"
+                  "    print(len(format(\"[{}]\", a)))\n" /* 2 + 3 bytes = 5 */
+                  "    let bf = Buffer::from_string(a)\n"
+                  "    print(bf.len())\n"            /* 3 bytes into buffer */
+                  "    print(bf.to_string() == a)\n" /* lossless round-trip */
+                  "}\n",
+                  "0\n2\n2\n2\n2\ntrue\n5\n3\ntrue");
+}
+
 static void test_json_parse_validates_utf8(void) {
     const char lone_continuation[] = {'"', (char)0x80, '"'};
     const char overlong[] = {'"', (char)0xC0, (char)0xAF, '"'};
@@ -14491,6 +14512,7 @@ void register_stdlib_tests(void) {
     register_test("test_json_roundtrips_embedded_nul_string", test_json_roundtrips_embedded_nul_string);
     register_test("test_mba_1336_nul_string_ops_binary_safe", test_mba_1336_nul_string_ops_binary_safe);
     register_test("test_mba_1336_nul_string_methods_binary_safe", test_mba_1336_nul_string_methods_binary_safe);
+    register_test("test_mba_1336_split_buffer_format_parity", test_mba_1336_split_buffer_format_parity);
     register_test("test_json_parse_validates_utf8", test_json_parse_validates_utf8);
     register_test("test_json_parse_checks_integer_range", test_json_parse_checks_integer_range);
     register_test("test_json_stringify_error", test_json_stringify_error);

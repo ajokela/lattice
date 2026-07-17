@@ -734,9 +734,16 @@ LatValue builtin_string_split(LatValue *obj, LatValue *args, int arg_count, char
             c[1] = '\0';
             parts[count++] = value_string_owned_len(c, 1);
         }
-    } else {
+    } else if (slen > 0) {
+        /* Scan-based always-emit split: emit the segment after every consumed
+         * separator, including the trailing empty segment when a separator ends
+         * exactly at slen. The old ends-with heuristic mis-fired when the tail
+         * merely OVERLAPPED an already-consumed separator ("aaa".split("aa")
+         * appended a bogus trailing ""); the scan cannot. An empty subject
+         * yields no parts (uniform across backends). */
         size_t pos = 0;
-        while (pos < slen) {
+        bool last = false;
+        while (!last) {
             long f = value_bytes_find(s + pos, slen - pos, sep, sep_len);
             size_t plen = (f < 0) ? slen - pos : (size_t)f;
             if (count >= cap) {
@@ -749,16 +756,8 @@ LatValue builtin_string_split(LatValue *obj, LatValue *args, int arg_count, char
                 part[plen] = '\0';
                 parts[count++] = value_string_owned_len(part, plen);
             }
-            if (f < 0) break;
-            pos += (size_t)f + sep_len;
-        }
-        /* If string ends with separator, add empty trailing element */
-        if (slen >= sep_len && memcmp(s + slen - sep_len, sep, sep_len) == 0 && count > 0) {
-            if (count >= cap) {
-                cap *= 2;
-                parts = realloc(parts, cap * sizeof(LatValue));
-            }
-            parts[count++] = value_string("");
+            if (f < 0) last = true;
+            else pos += (size_t)f + sep_len;
         }
     }
     LatValue result = value_array(parts, count);
