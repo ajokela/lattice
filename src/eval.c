@@ -2376,18 +2376,22 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
     }
     /* String concatenation */
     if (lv->type == VAL_STR && rv->type == VAL_STR && op == BINOP_ADD) {
-        size_t al = strlen(lv->as.str_val), bl = strlen(rv->as.str_val);
+        /* MBA-1336: length-aware concat — preserve bytes past any embedded NUL, and
+         * carry the explicit length on the result so downstream ops stay binary-safe. */
+        size_t al = value_string_length(lv), bl = value_string_length(rv);
         char *buf = malloc(al + bl + 1);
         if (!buf) return eval_err(strdup("out of memory"));
         memcpy(buf, lv->as.str_val, al);
         memcpy(buf + al, rv->as.str_val, bl);
         buf[al + bl] = '\0';
-        return eval_ok(value_string_owned(buf));
+        return eval_ok(value_string_owned_len(buf, al + bl));
     }
     /* String comparison */
     if (lv->type == VAL_STR && rv->type == VAL_STR) {
-        if (op == BINOP_EQ) return eval_ok(value_bool(strcmp(lv->as.str_val, rv->as.str_val) == 0));
-        if (op == BINOP_NEQ) return eval_ok(value_bool(strcmp(lv->as.str_val, rv->as.str_val) != 0));
+        /* MBA-1336: route through value_eq (length-aware) instead of strcmp, which would
+         * treat distinct suffixes after an embedded NUL as equal. */
+        if (op == BINOP_EQ) return eval_ok(value_bool(value_eq(lv, rv)));
+        if (op == BINOP_NEQ) return eval_ok(value_bool(!value_eq(lv, rv)));
     }
     /* Bool comparison */
     if (lv->type == VAL_BOOL && rv->type == VAL_BOOL) {

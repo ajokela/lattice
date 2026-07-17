@@ -265,6 +265,23 @@ LatValue value_string_interned(const char *s) {
     return val;
 }
 
+/* MBA-1336: canonical byte-length for a String value. Uses the cached str_len when
+ * present (0 = unknown), else strlen. Binary-safe callers must use this, never a bare
+ * strlen, since Strings can carry an explicit length past an embedded NUL. */
+size_t value_string_length(const LatValue *v) {
+    if (!v || v->type != VAL_STR) return 0;
+    if (v->as.str_len) return v->as.str_len;
+    return v->as.str_val ? strlen(v->as.str_val) : 0;
+}
+
+/* MBA-1336: does the String contain a NUL byte within its byte length? Such values are
+ * legal (JSON escapes, process stdout, buffers, sockets) but must not be routed through
+ * C-string-only paths (strdup/strcmp/the intern table) that would truncate them. */
+bool value_string_has_nul(const LatValue *v) {
+    size_t n = value_string_length(v);
+    return n > 0 && memchr(v->as.str_val, '\0', n) != NULL;
+}
+
 LatValue value_array(LatValue *elems, size_t len) {
     LatValue val = {.type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     size_t cap = len < 4 ? 4 : len;
@@ -1604,9 +1621,14 @@ bool value_eq(const LatValue *a, const LatValue *b) {
         case VAL_INT: return a->as.int_val == b->as.int_val;
         case VAL_FLOAT: return a->as.float_val == b->as.float_val;
         case VAL_BOOL: return a->as.bool_val == b->as.bool_val;
-        case VAL_STR:
+        case VAL_STR: {
             if (a->as.str_val == b->as.str_val) return true;
-            return strcmp(a->as.str_val, b->as.str_val) == 0;
+            /* MBA-1336: length-aware compare. Strings may contain NUL bytes, so strcmp
+             * would treat distinct suffixes after a NUL as equal (silent backend
+             * divergence: tree-walk/VMs would disagree on the same engine JSON field). */
+            size_t la = value_string_length(a), lb = value_string_length(b);
+            return la == lb && (la == 0 || memcmp(a->as.str_val, b->as.str_val, la) == 0);
+        }
         case VAL_UNIT: return true;
         case VAL_NIL: return true;
         case VAL_RANGE: return a->as.range.start == b->as.range.start && a->as.range.end == b->as.range.end;

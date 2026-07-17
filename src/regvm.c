@@ -535,7 +535,7 @@ static LatValue rvm_clone_inner(const LatValue *src) {
              * returns an UNPHASED value, which silently dropped the crystal
              * phase of short legacy-crystal strings (reachable once the
              * FORCE_COPY oracle materializes non-interned crystal copies). */
-            if (slen <= INTERN_THRESHOLD && memchr(src->as.str_val, '\0', slen) == NULL) {
+            if (slen <= INTERN_THRESHOLD && !value_string_has_nul(src)) { /* MBA-1336: canonical guard */
                 LatValue iv = value_string_interned(src->as.str_val);
                 iv.phase = src->phase;
                 return iv;

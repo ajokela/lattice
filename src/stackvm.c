@@ -62,6 +62,10 @@ static inline LatValue stackvm_try_intern(LatValue v) {
     if (v.type != VAL_STR || v.region_id == REGION_INTERNED) return v;
     size_t len = v.as.str_len ? v.as.str_len : strlen(v.as.str_val);
     if (len > INTERN_THRESHOLD) return v;
+    /* MBA-1336: never intern a String with an embedded NUL. The intern table is
+     * C-string based (strdup/strcmp), so it would store only the pre-NUL prefix while
+     * the value keeps the full str_len -> out-of-bounds read. Mirror the RegVM guard. */
+    if (value_string_has_nul(&v)) return v;
     const char *interned = intern(v.as.str_val);
     /* Free the original if it was heap-allocated (REGION_NONE) */
     if (v.region_id == REGION_NONE) free(v.as.str_val);

@@ -1929,6 +1929,28 @@ static void test_json_roundtrips_embedded_nul_string(void) {
     ASSERT(roundtrip_ok);
 }
 
+/* MBA-1336: runtime String ops (length, equality, concat, interning) must be binary-safe
+ * and identical across every backend. json_parse of a NUL escape yields a
+ * length-carrying String with an embedded NUL (the ballistics-lab process/JSON path).
+ * Pre-fix: tree-walk String+ used strlen (len 2 not 6), == used strcmp (a==b true not
+ * false), and StackVM interned short NUL strings prefix-only -> OOB read (asan). Runs on
+ * whatever backend the test runner selects, so make test-tree-walk/test-regvm/asan-all
+ * exercise all three from this one test. */
+static void test_mba_1336_nul_string_ops_binary_safe(void) {
+    ASSERT_OUTPUT("fn main() {\n"
+                  "    let a = json_parse(\"\\\"x\\\\u0000A\\\"\")\n"
+                  "    let b = json_parse(\"\\\"x\\\\u0000B\\\"\")\n"
+                  "    print(len(a))\n"
+                  "    print(a == a)\n"
+                  "    print(a == b)\n"
+                  "    print(len(a + b))\n"
+                  "    let s = json_parse(\"\\\"p\\\\u0000q\\\"\")\n"
+                  "    let t = json_parse(\"\\\"p\\\\u0000q\\\"\")\n"
+                  "    print(s == t)\n"
+                  "}\n",
+                  "3\ntrue\nfalse\n6\ntrue");
+}
+
 static void test_json_parse_validates_utf8(void) {
     const char lone_continuation[] = {'"', (char)0x80, '"'};
     const char overlong[] = {'"', (char)0xC0, (char)0xAF, '"'};
@@ -14435,6 +14457,7 @@ void register_stdlib_tests(void) {
     register_test("test_json_parse_rejects_embedded_nul_input", test_json_parse_rejects_embedded_nul_input);
     register_test("test_json_parse_rejects_unescaped_controls", test_json_parse_rejects_unescaped_controls);
     register_test("test_json_roundtrips_embedded_nul_string", test_json_roundtrips_embedded_nul_string);
+    register_test("test_mba_1336_nul_string_ops_binary_safe", test_mba_1336_nul_string_ops_binary_safe);
     register_test("test_json_parse_validates_utf8", test_json_parse_validates_utf8);
     register_test("test_json_parse_checks_integer_range", test_json_parse_checks_integer_range);
     register_test("test_json_stringify_error", test_json_stringify_error);
