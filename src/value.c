@@ -282,6 +282,31 @@ bool value_string_has_nul(const LatValue *v) {
     return n > 0 && memchr(v->as.str_val, '\0', n) != NULL;
 }
 
+/* MBA-1336: length-aware lexicographic byte compare for String VALUES. strcmp stops at
+ * the first NUL, so sorts/compares would disagree with the length-aware ==; this orders
+ * by byte content over the full length (shorter string first on a shared prefix). */
+int value_string_compare(const LatValue *a, const LatValue *b) {
+    size_t la = value_string_length(a), lb = value_string_length(b);
+    size_t n = la < lb ? la : lb;
+    int c = n ? memcmp(a->as.str_val, b->as.str_val, n) : 0;
+    if (c != 0) return c;
+    return (la > lb) - (la < lb);
+}
+
+/* MBA-1336: portable byte-window search (memmem is not in C11). Empty needle matches at
+ * 0 to mirror the historical strstr behavior the method libraries were built on. */
+long value_bytes_find(const char *hay, size_t hay_len, const char *needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return -1;
+    const char *p = hay;
+    const char *end = hay + hay_len - needle_len + 1;
+    while ((p = memchr(p, needle[0], (size_t)(end - p))) != NULL) {
+        if (memcmp(p, needle, needle_len) == 0) return (long)(p - hay);
+        p++;
+    }
+    return -1;
+}
+
 LatValue value_array(LatValue *elems, size_t len) {
     LatValue val = {.type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     size_t cap = len < 4 ? 4 : len;

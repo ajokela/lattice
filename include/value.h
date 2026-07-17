@@ -198,6 +198,12 @@ LatValue value_string_interned(const char *s);
  * across all runtimes instead of strlen/strcmp/memchr-inline to stay binary-safe. */
 size_t value_string_length(const LatValue *v); /* str_len, else strlen(str_val), else 0 */
 bool value_string_has_nul(const LatValue *v);  /* embedded NUL within the byte length */
+/* Length-aware lexicographic byte compare (<0 / 0 / >0), replacing strcmp on String
+ * VALUES so ordering agrees with the length-aware ==; safe on embedded NULs. */
+int value_string_compare(const LatValue *a, const LatValue *b);
+/* Byte-window search (portable memmem): first occurrence of needle in hay, or -1.
+ * An empty needle matches at 0, mirroring the historical strstr behavior. */
+long value_bytes_find(const char *hay, size_t hay_len, const char *needle, size_t needle_len);
 LatValue value_array(LatValue *elems, size_t len);
 LatValue value_struct(const char *name, char **field_names, LatValue *field_values, size_t count);
 /* VM-optimized: borrows field names from const pool (single strdup, not double) */
