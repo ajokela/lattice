@@ -1,0 +1,104 @@
+// Persistence: save an experiment document, reload it, and reproduce the run.
+//
+// Run from the Lattice repository root:
+//   ./clat examples/ballistics_lab/examples/persistence.lat
+//
+// With a real engine (recommended):
+//   BALLISTICS_ENGINE=/absolute/path/to/ballistics \
+//       ./clat examples/ballistics_lab/examples/persistence.lat
+//
+// The saved lattice-ballistics/experiment v1 document contains only domain
+// data and display metadata. Reloading it reconstructs an equal Experiment,
+// and solving both through the same backend reproduces the same summary.
+// Without BALLISTICS_ENGINE the portable fake engine replays the 50 m
+// representative fixture for both solves.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/persistence" as persistence
+import "examples/ballistics_lab/reference_experiment" as reference
+
+let FAKE_ENGINE = "examples/ballistics_lab/fixtures/fake_solve_json_engine.lat"
+
+fn clat_executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn nonempty_environment(name: String) -> any {
+    let value = env(name)
+    if typeof(value) == "String" && len(value.trim()) > 0 {
+        return value
+    }
+    return nil
+}
+
+fn engine_backend() -> any {
+    let configured = nonempty_environment("BALLISTICS_ENGINE")
+    if configured != nil {
+        return process.process_backend(
+        configured,
+        nonempty_environment("BALLISTICS_ENGINE_VERSION")
+        )
+    }
+    return process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "success"]
+    )
+}
+
+fn checked_solve(engine: any, experiment: any) -> any {
+    let result = backends.solve_with(engine, experiment)
+    if backends.solve_failed(result) {
+        print(result.code + ": " + result.message)
+        exit(1)
+    }
+    return result
+}
+
+fn main() {
+    let experiment = reference.representative_experiment()
+    let path = tempfile()
+
+    persistence.save_experiment(path, experiment)
+    let document = json_parse(read_file(path))
+    print("saved kind=" + document.get("kind"))
+    print("saved schema_version=" + to_string(document.get("schema_version")))
+    print("saved bytes=" + to_string(len(read_file(path))))
+
+    let restored = persistence.load_experiment(path)
+    delete_file(path)
+    assert(restored == experiment, "round trip must preserve the experiment")
+    print("round_trip_equal=true")
+
+    let engine = engine_backend()
+    let original_run = checked_solve(engine, experiment)
+    let restored_run = checked_solve(engine, restored)
+    assert(
+    original_run.summary.actual_range.si_value ==
+    restored_run.summary.actual_range.si_value,
+    "reloaded experiment must reproduce the computed range"
+    )
+    assert(
+    original_run.summary.time_of_flight_s == restored_run.summary.time_of_flight_s,
+    "reloaded experiment must reproduce the time of flight"
+    )
+    assert(
+    original_run.summary.terminal_velocity.si_value ==
+    restored_run.summary.terminal_velocity.si_value,
+    "reloaded experiment must reproduce the terminal speed"
+    )
+    print("engine=" + original_run.engine_version)
+    print("reproduced actual_range_m=" +
+    to_string(restored_run.summary.actual_range.si_value))
+    print("reproduced time_of_flight_s=" +
+    to_string(restored_run.summary.time_of_flight_s))
+    print("reproduced terminal_speed_mps=" +
+    to_string(restored_run.summary.terminal_velocity.si_value))
+    print("")
+    print("ballistics_lab example persistence: ok")
+}

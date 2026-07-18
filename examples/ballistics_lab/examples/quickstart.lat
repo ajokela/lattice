@@ -1,0 +1,115 @@
+// Quickstart: define a load, solve it, and query the trajectory at 300 yd.
+//
+// Run from the Lattice repository root:
+//   ./clat examples/ballistics_lab/examples/quickstart.lat
+//
+// With a real engine (recommended):
+//   BALLISTICS_ENGINE=/absolute/path/to/ballistics \
+//       ./clat examples/ballistics_lab/examples/quickstart.lat
+//
+// Without BALLISTICS_ENGINE the portable fake engine replays the checked
+// representative solve-json v1 success fixture (50 m computed range), and the
+// query falls back to the middle of that computed range.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/session" as sessions
+import "examples/ballistics_lab/render" as render
+
+let FAKE_ENGINE = "examples/ballistics_lab/fixtures/fake_solve_json_engine.lat"
+
+fn clat_executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn nonempty_environment(name: String) -> any {
+    let value = env(name)
+    if typeof(value) == "String" && len(value.trim()) > 0 {
+        return value
+    }
+    return nil
+}
+
+fn engine_backend() -> any {
+    let configured = nonempty_environment("BALLISTICS_ENGINE")
+    if configured != nil {
+        return process.process_backend(
+        configured,
+        nonempty_environment("BALLISTICS_ENGINE_VERSION")
+        )
+    }
+    return process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "success"]
+    )
+}
+
+fn match_experiment() -> any {
+    let load = domain.projectile(
+    "175 gr match",
+    units.gr(175),
+    units.inches(0.308),
+    0.243,
+    "G7",
+    units.inches(1.24)
+    )
+    let rifle = domain.rifle(
+    "24-inch match rifle",
+    units.inches(1.5),
+    units.m(0),
+    units.inches(8),
+    "right"
+    )
+    let atmosphere = domain.atmosphere(
+    units.m(250),
+    units.celsius(15),
+    units.hpa(1013.25),
+    0.5
+    )
+    let shot = domain.shot(units.fps(2700), units.yd(1000), units.yd(100))
+    let solver = domain.solver_config("rk45", nil, units.yd(10))
+    return domain.experiment(
+    "quickstart 175 gr match",
+    load,
+    rifle,
+    atmosphere,
+    [domain.wind(units.mph(10), units.deg(90))],
+    shot,
+    solver
+    )
+}
+
+fn main() {
+    let experiment = match_experiment()
+    let result = backends.solve_with(engine_backend(), experiment)
+    if backends.solve_failed(result) {
+        print(result.code + ": " + result.message)
+        exit(1)
+    }
+
+    print("engine=" + result.engine_version)
+    print("schema_version=" + to_string(result.schema_version))
+    print("termination=" + result.summary.termination)
+    print("actual_range_m=" + to_string(result.summary.actual_range.si_value))
+    print("samples=" + to_string(len(result.observations)))
+
+    let requested = units.yd(300)
+    flux query = requested
+    if result.summary.actual_range.si_value < requested.si_value {
+        // The fake fixture trajectory ends at 50 m; query inside it instead.
+        query = units.m(result.summary.actual_range.si_value / 2.0)
+    }
+    let point = analysis.trajectory_at(result, query)
+    print("")
+    print("observation at " + to_string(point.distance.display_value) +
+    " " + point.distance.display_unit + ":")
+    print(render.render_observation(point, render.imperial_render_profile(2)))
+    print("")
+    print("ballistics_lab example quickstart: ok")
+}

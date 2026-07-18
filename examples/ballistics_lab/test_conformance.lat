@@ -1,0 +1,110 @@
+// MBA-1309: cross-interface conformance. The six checked-in fixture pairs are shared
+// with the engine repository (tests/fixtures/solve_json_v1/), where the Rust service
+// and CLI-transport tests pin them. This runner replays each REQUEST through the same
+// runtime primitives the laboratory's process backend uses (exec_argv + json_parse)
+// against a real ballistics executable and asserts the parsed envelope matches the
+// checked-in SUCCESS envelope:
+//   - exactly for schema_version, status, assumptions, warnings, and termination;
+//   - numerically within tolerance (relative 1e-6 with an absolute floor of 1e-9)
+//     for every number, so identical-version engines match tightly while minor
+//     engine evolution surfaces as a reviewable fixture update;
+//   - engine_version is informational and exempt (fixtures record the generator's).
+// The executable path arrives as argv and is never interpolated into a shell.
+
+fn is_number(value: any) -> Bool {
+    return typeof(value) == "Int" || typeof(value) == "Float"
+}
+
+fn numbers_match(expected: Number, actual: Number) -> Bool {
+    let difference = abs(actual - expected)
+    flux tolerance = abs(expected) * 0.000001
+    if tolerance < 0.000000001 {
+        tolerance = 0.000000001
+    }
+    return difference <= tolerance
+}
+
+fn compare(expected: any, actual: any, path: String) {
+    if is_number(expected) {
+        assert(is_number(actual), path + ": expected a number, got " + typeof(actual))
+        assert(
+        numbers_match(expected, actual),
+        path + ": expected " + to_string(expected) + ", got " + to_string(actual)
+        )
+        return
+    }
+    if typeof(expected) == "Map" {
+        assert(typeof(actual) == "Map", path + ": expected Map, got " + typeof(actual))
+        for key in expected.keys() {
+            if key == "engine_version" {
+                continue
+            }
+            assert(actual.has(key), path + "." + key + ": missing")
+            compare(expected.get(key), actual.get(key), path + "." + key)
+        }
+        for key in actual.keys() {
+            if key == "engine_version" {
+                continue
+            }
+            assert(expected.has(key), path + "." + key + ": unexpected extra key")
+        }
+        return
+    }
+    if typeof(expected) == "Array" {
+        assert(typeof(actual) == "Array", path + ": expected Array, got " + typeof(actual))
+        assert(
+        len(actual) == len(expected),
+        path + ": expected " + to_string(len(expected)) + " items, got " + to_string(len(actual))
+        )
+        flux index = 0
+        for item in expected {
+            compare(item, actual[index], path + "[" + to_string(index) + "]")
+            index = index + 1
+        }
+        return
+    }
+    assert(
+    actual == expected,
+    path + ": expected " + to_string(expected) + ", got " + to_string(actual)
+    )
+}
+
+fn run_fixture(executable: String, name: String) {
+    let dir = "examples/ballistics_lab/fixtures/conformance/"
+    let request = read_file(dir + name + ".request.json")
+    let expected = json_parse(read_file(dir + name + ".success.json"))
+
+    flux limits = Map::new()
+    limits.set("timeout_ms", 30000)
+    limits.set("max_stdout_bytes", 8388608)
+    limits.set("max_stderr_bytes", 65536)
+
+    let result = exec_argv(executable, ["solve-json"], request, limits)
+    assert(
+    result.get("exit_code") == 0,
+    name + ": engine exited " + to_string(result.get("exit_code")) + ": " + result.get("stderr")
+    )
+
+    let actual = json_parse(result.get("stdout"))
+    compare(expected, actual, name)
+    print("conformance " + name + ": ok (engine " + actual.get("engine_version") + ")")
+}
+
+fn main() {
+    let arguments = args()
+    assert(len(arguments) >= 2, "usage: test_conformance.lat /path/to/ballistics")
+    let executable = arguments[1]
+
+    let names = [
+        "calm-air",
+        "crosswind",
+        "segmented-wind",
+        "zeroed",
+        "representative",
+        "early-termination"
+    ]
+    for name in names {
+        run_fixture(executable, name)
+    }
+    print("ballistics_lab conformance: all fixtures passed")
+}

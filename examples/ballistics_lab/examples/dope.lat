@@ -1,0 +1,90 @@
+// DOPE: build a programmable come-up table from one solved trajectory.
+//
+// Run from the Lattice repository root:
+//   ./clat examples/ballistics_lab/examples/dope.lat
+//
+// With a real engine (recommended):
+//   BALLISTICS_ENGINE=/absolute/path/to/ballistics \
+//       ./clat examples/ballistics_lab/examples/dope.lat
+//
+// With a real engine the table covers 100-600 yd. Without BALLISTICS_ENGINE
+// the portable fake engine replays the 50 m representative fixture and the
+// table covers five evenly spaced distances inside that computed range.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/analysis_export" as exports
+import "examples/ballistics_lab/reference_experiment" as reference
+
+let FAKE_ENGINE = "examples/ballistics_lab/fixtures/fake_solve_json_engine.lat"
+
+fn clat_executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn nonempty_environment(name: String) -> any {
+    let value = env(name)
+    if typeof(value) == "String" && len(value.trim()) > 0 {
+        return value
+    }
+    return nil
+}
+
+fn engine_backend() -> any {
+    let configured = nonempty_environment("BALLISTICS_ENGINE")
+    if configured != nil {
+        return process.process_backend(
+        configured,
+        nonempty_environment("BALLISTICS_ENGINE_VERSION")
+        )
+    }
+    return process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "success"]
+    )
+}
+
+// 100-600 yd when the computed range allows it; otherwise five evenly spaced
+// queries inside the shorter computed range (the 50 m fake fixture).
+fn dope_queries(result: any) -> Array {
+    let range_si = result.summary.actual_range.si_value
+    if range_si >= units.yd(600).si_value {
+        return [
+            units.yd(100), units.yd(200), units.yd(300),
+            units.yd(400), units.yd(500), units.yd(600)
+        ]
+    }
+    flux queries = []
+    for index in [1, 2, 3, 4, 5] {
+        queries.push(units.m(range_si * index / 5.0))
+    }
+    return queries
+}
+
+fn main() {
+    let experiment = reference.representative_experiment()
+    let result = backends.solve_with(engine_backend(), experiment)
+    if backends.solve_failed(result) {
+        print(result.code + ": " + result.message)
+        exit(1)
+    }
+
+    let table = analysis.dope(
+    result,
+    dope_queries(result),
+    "in",
+    "moa",
+    "ft/s",
+    "ft-lb"
+    )
+    print(exports.render_table(table))
+    print("")
+    print("rows=" + to_string(len(table.rows)))
+    print("ballistics_lab example dope: ok")
+}
