@@ -265,6 +265,48 @@ LatValue value_string_interned(const char *s) {
     return val;
 }
 
+/* MBA-1336: canonical byte-length for a String value. Uses the cached str_len when
+ * present (0 = unknown), else strlen. Binary-safe callers must use this, never a bare
+ * strlen, since Strings can carry an explicit length past an embedded NUL. */
+size_t value_string_length(const LatValue *v) {
+    if (!v || v->type != VAL_STR) return 0;
+    if (v->as.str_len) return v->as.str_len;
+    return v->as.str_val ? strlen(v->as.str_val) : 0;
+}
+
+/* MBA-1336: does the String contain a NUL byte within its byte length? Such values are
+ * legal (JSON escapes, process stdout, buffers, sockets) but must not be routed through
+ * C-string-only paths (strdup/strcmp/the intern table) that would truncate them. */
+bool value_string_has_nul(const LatValue *v) {
+    size_t n = value_string_length(v);
+    return n > 0 && memchr(v->as.str_val, '\0', n) != NULL;
+}
+
+/* MBA-1336: length-aware lexicographic byte compare for String VALUES. strcmp stops at
+ * the first NUL, so sorts/compares would disagree with the length-aware ==; this orders
+ * by byte content over the full length (shorter string first on a shared prefix). */
+int value_string_compare(const LatValue *a, const LatValue *b) {
+    size_t la = value_string_length(a), lb = value_string_length(b);
+    size_t n = la < lb ? la : lb;
+    int c = n ? memcmp(a->as.str_val, b->as.str_val, n) : 0;
+    if (c != 0) return c;
+    return (la > lb) - (la < lb);
+}
+
+/* MBA-1336: portable byte-window search (memmem is not in C11). Empty needle matches at
+ * 0 to mirror the historical strstr behavior the method libraries were built on. */
+long value_bytes_find(const char *hay, size_t hay_len, const char *needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (!hay || !needle || needle_len > hay_len) return -1;
+    const char *p = hay;
+    const char *end = hay + hay_len - needle_len + 1;
+    while ((p = memchr(p, needle[0], (size_t)(end - p))) != NULL) {
+        if (memcmp(p, needle, needle_len) == 0) return (long)(p - hay);
+        p++;
+    }
+    return -1;
+}
+
 LatValue value_array(LatValue *elems, size_t len) {
     LatValue val = {.type = VAL_ARRAY, .phase = VTAG_UNPHASED, .region_id = (size_t)-1};
     size_t cap = len < 4 ? 4 : len;
@@ -1216,6 +1258,10 @@ LatValue value_thaw(const LatValue *v) {
 /* ── Display ── */
 
 void value_print(const LatValue *v, FILE *out) {
+    if (v->type == VAL_STR) { /* MBA-1336: write full bytes; %s stops at embedded NULs */
+        fwrite(v->as.str_val, 1, value_string_length(v), out);
+        return;
+    }
     char *s = value_display(v);
     fprintf(out, "%s", s);
     free(s);
@@ -1230,7 +1276,14 @@ char *value_display(const LatValue *v) {
             break;
         }
         case VAL_BOOL: buf = strdup(v->as.bool_val ? "true" : "false"); break;
-        case VAL_STR: buf = strdup(v->as.str_val); break;
+        case VAL_STR: { /* MBA-1336: copy the full byte length (strdup stops at embedded NULs) */
+            size_t len = value_string_length(v);
+            buf = malloc(len + 1);
+            if (!buf) return strdup("");
+            memcpy(buf, v->as.str_val, len);
+            buf[len] = '\0';
+            break;
+        }
         case VAL_ARRAY: {
             size_t cap = 64;
             buf = malloc(cap);
@@ -1604,9 +1657,14 @@ bool value_eq(const LatValue *a, const LatValue *b) {
         case VAL_INT: return a->as.int_val == b->as.int_val;
         case VAL_FLOAT: return a->as.float_val == b->as.float_val;
         case VAL_BOOL: return a->as.bool_val == b->as.bool_val;
-        case VAL_STR:
+        case VAL_STR: {
             if (a->as.str_val == b->as.str_val) return true;
-            return strcmp(a->as.str_val, b->as.str_val) == 0;
+            /* MBA-1336: length-aware compare. Strings may contain NUL bytes, so strcmp
+             * would treat distinct suffixes after a NUL as equal (silent backend
+             * divergence: tree-walk/VMs would disagree on the same engine JSON field). */
+            size_t la = value_string_length(a), lb = value_string_length(b);
+            return la == lb && (la == 0 || memcmp(a->as.str_val, b->as.str_val, la) == 0);
+        }
         case VAL_UNIT: return true;
         case VAL_NIL: return true;
         case VAL_RANGE: return a->as.range.start == b->as.range.start && a->as.range.end == b->as.range.end;

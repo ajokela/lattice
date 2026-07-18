@@ -40,6 +40,67 @@ configures the executable; when that value is a bare name, the operating system
 may resolve it through `PATH`. Packaging-level discovery is intentionally
 separate.
 
+## Installation and upgrade
+
+The laboratory ships as ordinary source under `examples/ballistics_lab/` in
+the Lattice repository. It needs two build products: the `clat` runtime and a
+`ballistics` engine executable that provides the solve-json v1 command.
+
+    # In the Lattice checkout root:
+    make all
+
+    # In a sibling ballistics-engine checkout:
+    cd ../ballistics-engine
+    cargo build --release
+
+    # Back in the Lattice checkout:
+    cd ../lattice
+    ./scripts/ballistics-lab.sh
+
+Upgrading is the same two rebuilds: pull both checkouts, run `make all` here
+and `cargo build --release` in the engine checkout, and restart the launcher.
+Every response is revalidated per solve, so a mismatched upgrade fails closed
+instead of producing a silently different solve. When reproducibility matters,
+pin the engine exactly:
+
+    BALLISTICS_ENGINE_VERSION=0.24.1 ./scripts/ballistics-lab.sh
+
+The pin turns any other engine version into a structured
+`incompatible_engine_version` error.
+
+Distribution from the examples tree is the current mechanism. A transition to
+multi-file registry packaging is planned; until it lands, a source checkout is
+the supported installation.
+
+## Engine discovery and override
+
+`scripts/ballistics-lab.sh` resolves its two executables deterministically.
+
+For `clat`: `--clat PATH`, then `CLAT`, then `./clat` in the checkout root,
+then `clat` on `PATH`.
+
+For the engine: `--engine PATH`, then `BALLISTICS_ENGINE`. An explicit engine
+is a hard requirement — if it is missing, non-executable, or fails the
+capability probe, the launcher exits rather than falling back. Without an
+override the launcher checks, in order:
+
+1. `ballistics` on `PATH`;
+2. `$CARGO_TARGET_DIR/release/ballistics`, then `$CARGO_TARGET_DIR/debug/ballistics`;
+3. the sibling checkout `../ballistics-engine/target/release/ballistics`,
+   then `.../target/debug/ballistics`, relative to the Lattice checkout;
+4. `target/release/ballistics`, then `target/debug/ballistics`, under the
+   caller's working directory;
+5. `$HOME/.cargo/bin/ballistics`.
+
+The first candidate whose `solve-json --help` output identifies the
+explicit-SI v1 interface wins; incompatible candidates are reported to stderr
+and skipped. Discovery is bounded to those locations — nothing else on the
+filesystem is searched. The probe never solves; the lab starts the configured
+engine only at `:solve`.
+
+`BALLISTICS_LAB_BACKEND=stack-vm|regvm` (or `--backend`, `--stack-vm`,
+`--regvm`) selects the Lattice VM.
+
 ## Example
 
     import "examples/ballistics_lab/units" as u
@@ -126,6 +187,63 @@ workflows may pin it exactly:
 An omitted pin accepts any engine that emits a valid v1 envelope. It does not
 silently accept another schema version.
 
+## Protocol compatibility
+
+The lab speaks solve-json schema v1 and nothing else. One request Map is
+serialized to JSON and written to the engine's stdin; the engine writes
+exactly one JSON envelope to stdout. `schema_version` must be exactly `1` in
+both directions:
+
+- a response carrying any other `schema_version` becomes a structured
+  `unsupported_schema_version` error value;
+- a valid v1 error envelope keeps its protocol `code`, field `path` or source
+  `line`/`column`, stderr diagnostics, and exit code;
+- anything else — banners, truncated or concatenated JSON, unknown fields,
+  non-finite numbers, exit-code/status disagreement — fails closed as
+  `invalid_engine_response`.
+
+`engine_version` is opaque and never interpreted. Without a pin, any engine
+emitting a valid v1 envelope is accepted; with a pin
+(`process_backend(path, "0.24.1")`, or `BALLISTICS_ENGINE_VERSION` for the
+launcher and REPL) a successful solve from any other version becomes an
+`incompatible_engine_version` error carrying both versions.
+
+## Offline behavior and security boundaries
+
+The laboratory is fully offline by design: no module performs network access,
+and the engine child is the only process the lab spawns. User values never
+enter a shell string — the engine is invoked through `exec_argv` with the
+fixed literal `solve-json` argv and the request on stdin, so experiment
+content cannot inject options or shell syntax. Wall-clock, stdout, and stderr
+limits bound each child; see Resource bounds below. `exec_argv` is not a
+sandbox: the configured executable runs with the Lattice process's
+operating-system permissions and environment.
+
+## Units and sign conventions
+
+The wire protocol is explicit SI: meters, meters per second, kilograms,
+radians, kelvin, pascals, and joules. Display values and units are lab-side
+metadata and never cross the process boundary. A ballistic mil is exactly one
+milliradian (0.001 rad).
+
+Trajectory samples use the engine's line-of-sight frame:
+
+- `drop_m` is positive below the line of sight. The representative fixture
+  starts at `drop_m = 0.05` — the muzzle sits exactly its 0.05 m sight height
+  below the sight line — and a real engine solve of the same request emits the
+  same values.
+- `windage_m` is positive right of the line of sight from the shooter's
+  perspective.
+- `come_up` and `wind_hold` in analysis tables are the sign-opposite angular
+  corrections of `drop` and `windage`. test_analysis.lat pins both couplings:
+  a positive drop yields a negative come-up, and a leftward (negative)
+  windage yields a positive/right wind hold.
+
+Wind uses the wind-FROM convention: `direction_from` is the direction the
+wind blows from, so 0 rad is a pure headwind and pi/2 (90 degrees) is wind
+from the shooter's right. test_analysis.lat enforces the resulting coupling:
+a 90-degree wind must produce negative (leftward) windage.
+
 ## Querying and comparing trajectories
 
 Analysis is ordinary Lattice over immutable domain values. A query keeps the
@@ -133,7 +251,7 @@ caller's distance display unit, checks the computed range, and interpolates
 only between adjacent engine samples:
 
     import "examples/ballistics_lab/analysis" as analysis
-    import "examples/ballistics_lab/analysis_export" as export
+    import "examples/ballistics_lab/analysis_export" as exports
     import "examples/ballistics_lab/units" as u
 
     let point = analysis.trajectory_at(result, u.yd(300))
@@ -147,9 +265,9 @@ only between adjacent engine samples:
         "ft-lb"
     )
 
-    print(export.render_table(dope))
-    let json = export.table_to_json(dope)
-    let csv = export.table_to_csv(dope)
+    print(exports.render_table(dope))
+    let json = exports.table_to_json(dope)
+    let csv = exports.table_to_csv(dope)
 
 `sample` clips a requested stop to an early engine termination and includes the
 real terminal observation exactly once. Results are capped at 10,000 rows.
@@ -311,14 +429,10 @@ Select another verified backend explicitly when desired:
     ./scripts/ballistics-lab.sh --regvm
 
 Use `--clat` or `CLAT` to override the Lattice executable and `--engine` or
-`BALLISTICS_ENGINE` to override the engine. Without an engine override, the
-launcher checks `PATH`, `CARGO_TARGET_DIR`, a sibling `ballistics-engine`
-checkout, the caller's Cargo target directory, and `$HOME/.cargo/bin`, in that
-order. Discovery is bounded to those locations; it never searches the whole
-filesystem. Each candidate's command-specific help must identify the explicit-SI
-`solve-json` v1 interface; an older or unrelated executable named `ballistics`
-is skipped. `BALLISTICS_LAB_BACKEND=stack-vm|regvm` provides the
-environment equivalent of `--backend`.
+`BALLISTICS_ENGINE` to override the engine; the complete deterministic
+discovery order is documented in Engine discovery and override above.
+`BALLISTICS_LAB_BACKEND=stack-vm|regvm` provides the environment equivalent
+of `--backend`.
 
 The laboratory targets Lattice's VMs: StackVM is the default and RegVM is the
 alternate. The tree-walking interpreter remains available for Lattice language
@@ -412,6 +526,26 @@ process's operating-system permissions and environment. The backend is
 unsupported in browser/WASM builds because direct process execution is
 unsupported there.
 
+## Examples
+
+Each script under `examples/ballistics_lab/examples/` is self-contained and
+runs from the repository root. With `BALLISTICS_ENGINE` set, the scripts drive
+that engine (and honor `BALLISTICS_ENGINE_VERSION`); without it they replay
+the checked 50 m representative fixture through the portable fake engine, so
+every example also runs hermetically:
+
+    ./clat examples/ballistics_lab/examples/quickstart.lat
+
+    BALLISTICS_ENGINE=/absolute/path/to/ballistics \
+        ./clat examples/ballistics_lab/examples/quickstart.lat
+
+- quickstart.lat — define a load, solve it, query the trajectory at 300 yd.
+- dope.lat — DOPE/come-up table over 100-600 yd.
+- wind_card.lat — windage and wind-hold card for the constant-wind load.
+- comparison.lat — two loads solved and aligned in one comparison table.
+- persistence.lat — save an experiment document, reload it, reproduce the run.
+- export.lat — canonical JSON and rectangular CSV from one analysis table.
+
 ## Verification
 
 From the repository root:
@@ -435,3 +569,81 @@ version pin while retaining strict schema-v1 validation.
 To emit the reference experiment as a solve-json v1 request:
 
     ./clat examples/ballistics_lab/reference_experiment.lat --json
+
+## Troubleshooting
+
+The launcher cannot find `clat`:
+
+    ballistics-lab: clat was not found; build the checkout with 'make' or set CLAT
+
+Build the checkout (`make all`) or point `CLAT` at a runtime.
+
+The launcher cannot find an engine:
+
+    ballistics-lab: ballistics was not found; install it, build ../ballistics-engine, or set BALLISTICS_ENGINE
+
+Build the sibling engine checkout or export `BALLISTICS_ENGINE`. A candidate
+that exists but is announced as `ignoring incompatible engine ... (no
+solve-json v1 command)` is an older or unrelated `ballistics` executable;
+upgrade it or override the path.
+
+Engine version pin mismatch: a successful solve against any other engine
+version returns `incompatible_engine_version` with both versions in the
+message. Remove the pin or install the pinned version.
+
+Garbage responses: contaminated stdout, truncated or concatenated JSON,
+unknown fields, non-finite numbers, and exit-code/status disagreement all
+fail closed as `invalid_engine_response`, retaining stderr and the exit code
+for diagnosis. Timeout, spawn, and output-limit failures are `process_error`.
+
+Structured protocol errors keep the engine's error contract: the protocol
+`code` plus either a request field `path` (validation) or source
+`line`/`column` (parse). An internal-error envelope
+(`fixtures/internal.error.json`) decodes into a `LaboratoryError` with the
+same code and message:
+
+    {
+      "schema_version": 1,
+      "status": "error",
+      "error": {
+        "code": "internal_error",
+        "message": "solve-json command failed unexpectedly",
+        "path": null,
+        "line": null,
+        "column": null
+      }
+    }
+
+Backend divergence: StackVM is the default and RegVM is supported; the
+tree-walking interpreter is not a supported Ballistics Lab backend. Lab
+behavior that differs between StackVM and RegVM is a Lattice defect — report
+it with `make test-ballistics-lab` output.
+
+## Python and Jupyter interoperability
+
+Interop today is file-based: the lab exports plain JSON and CSV, and Python
+reads them. `analysis_export.lat` converts any `AnalysisTable` to canonical
+JSON (`table_to_json`), rectangular CSV (`table_to_csv`), or explicit Maps
+(`table_to_map`); the caller owns the file write:
+
+    import "examples/ballistics_lab/analysis_export" as exports
+
+    write_file("dope.json", exports.table_to_json(table))
+    write_file("dope.csv", exports.table_to_csv(table))
+
+The CSV repeats provenance on every row, so an ordinary reader keeps
+schema/engine/solver/termination/notices without a sidecar:
+
+    import json
+    import pandas as pd
+
+    dope = pd.read_csv("dope.csv")
+    document = json.load(open("dope.json"))
+    dope.plot(x="Distance (yd)", y="Drop (in)")
+
+`examples/ballistics_lab/examples/export.lat` demonstrates the full path.
+Experiment documents (persistence.lat) and verified-run documents
+(verified_artifacts.lat) are likewise strict JSON and load with `json.load`
+directly. Direct Python DTO exposure — a Python package returning these
+values without intermediate files — is a separate planned follow-up, not part
+of the lab today.

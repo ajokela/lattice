@@ -81,7 +81,7 @@ LatValue builtin_array_join(LatValue *obj, LatValue *args, int arg_count, char *
     (void)arg_count;
     (void)error;
     const char *sep_str = (args[0].type == VAL_STR) ? args[0].as.str_val : "";
-    size_t sep_len = strlen(sep_str);
+    size_t sep_len = (args[0].type == VAL_STR) ? value_string_length(&args[0]) : 0;
     size_t n = obj->as.array.len;
     char **parts = malloc(n * sizeof(char *));
     size_t *lens = malloc(n * sizeof(size_t));
@@ -92,8 +92,25 @@ LatValue builtin_array_join(LatValue *obj, LatValue *args, int arg_count, char *
     }
     size_t total = 0;
     for (size_t i = 0; i < n; i++) {
-        parts[i] = value_display(&obj->as.array.elems[i]);
-        lens[i] = strlen(parts[i]);
+        LatValue *el = &obj->as.array.elems[i];
+        if (el->type == VAL_STR) {
+            /* MBA-1336: copy String elements by byte length; value_display
+             * truncates at an embedded NUL. */
+            size_t plen = value_string_length(el);
+            char *p = malloc(plen + 1);
+            if (p) {
+                if (plen) memcpy(p, el->as.str_val, plen);
+                p[plen] = '\0';
+            } else {
+                p = strdup("");
+                plen = 0;
+            }
+            parts[i] = p;
+            lens[i] = plen;
+        } else {
+            parts[i] = value_display(el);
+            lens[i] = strlen(parts[i]);
+        }
         total += lens[i];
     }
     if (n > 1) total += sep_len * (n - 1);
@@ -117,7 +134,7 @@ LatValue builtin_array_join(LatValue *obj, LatValue *args, int arg_count, char *
     buf[pos] = '\0';
     free(parts);
     free(lens);
-    return value_string_owned(buf);
+    return value_string_owned_len(buf, pos); /* MBA-1336: result may embed NULs */
 }
 
 /// @method Array.unique() -> Array
@@ -697,52 +714,50 @@ LatValue builtin_string_split(LatValue *obj, LatValue *args, int arg_count, char
     (void)error;
     if (args[0].type != VAL_STR) return value_array(NULL, 0);
     const char *s = obj->as.str_val;
+    size_t slen = value_string_length(obj); /* MBA-1336: full byte length */
     const char *sep = args[0].as.str_val;
-    size_t sep_len = strlen(sep);
+    size_t sep_len = value_string_length(&args[0]);
     size_t cap = 8;
     LatValue *parts = malloc(cap * sizeof(LatValue));
     if (!parts) return value_array(NULL, 0);
     size_t count = 0;
     if (sep_len == 0) {
-        /* Split into individual characters */
-        for (size_t i = 0; s[i]; i++) {
+        /* Split into individual bytes (an embedded NUL is a normal byte) */
+        for (size_t i = 0; i < slen; i++) {
             if (count >= cap) {
                 cap *= 2;
                 parts = realloc(parts, cap * sizeof(LatValue));
             }
-            char c[2] = {s[i], '\0'};
-            parts[count++] = value_string(c);
+            char *c = malloc(2);
+            if (!c) continue;
+            c[0] = s[i];
+            c[1] = '\0';
+            parts[count++] = value_string_owned_len(c, 1);
         }
-    } else {
-        const char *p = s;
-        while (*p) {
-            const char *found = strstr(p, sep);
-            if (!found) {
-                if (count >= cap) {
-                    cap *= 2;
-                    parts = realloc(parts, cap * sizeof(LatValue));
-                }
-                parts[count++] = value_string(p);
-                break;
-            }
+    } else if (slen > 0) {
+        /* Scan-based always-emit split: emit the segment after every consumed
+         * separator, including the trailing empty segment when a separator ends
+         * exactly at slen. The old ends-with heuristic mis-fired when the tail
+         * merely OVERLAPPED an already-consumed separator ("aaa".split("aa")
+         * appended a bogus trailing ""); the scan cannot. An empty subject
+         * yields no parts (uniform across backends). */
+        size_t pos = 0;
+        bool last = false;
+        while (!last) {
+            long f = value_bytes_find(s + pos, slen - pos, sep, sep_len);
+            size_t plen = (f < 0) ? slen - pos : (size_t)f;
             if (count >= cap) {
                 cap *= 2;
                 parts = realloc(parts, cap * sizeof(LatValue));
             }
-            char *part = strndup(p, (size_t)(found - p));
-            parts[count++] = value_string_owned(part);
-            p = found + sep_len;
-        }
-        /* If string ends with separator, add empty trailing element */
-        if (sep_len > 0 && strlen(s) >= sep_len) {
-            size_t slen = strlen(s);
-            if (slen >= sep_len && memcmp(s + slen - sep_len, sep, sep_len) == 0 && count > 0) {
-                if (count >= cap) {
-                    cap *= 2;
-                    parts = realloc(parts, cap * sizeof(LatValue));
-                }
-                parts[count++] = value_string("");
+            char *part = malloc(plen + 1);
+            if (part) {
+                if (plen) memcpy(part, s + pos, plen);
+                part[plen] = '\0';
+                parts[count++] = value_string_owned_len(part, plen);
             }
+            if (f < 0) last = true;
+            else pos += (size_t)f + sep_len;
         }
     }
     LatValue result = value_array(parts, count);
@@ -755,10 +770,15 @@ LatValue builtin_string_trim(LatValue *obj, LatValue *args, int arg_count, char 
     (void)arg_count;
     (void)error;
     const char *s = obj->as.str_val;
-    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-    const char *e = obj->as.str_val + strlen(obj->as.str_val);
+    const char *e = s + value_string_length(obj); /* MBA-1336: full byte length */
+    while (s < e && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
     while (e > s && (*(e - 1) == ' ' || *(e - 1) == '\t' || *(e - 1) == '\n' || *(e - 1) == '\r')) e--;
-    return value_string_owned(strndup(s, (size_t)(e - s)));
+    size_t rlen = (size_t)(e - s);
+    char *buf = malloc(rlen + 1); /* strndup would stop at an embedded NUL */
+    if (!buf) return value_string("");
+    if (rlen) memcpy(buf, s, rlen);
+    buf[rlen] = '\0';
+    return value_string_owned_len(buf, rlen);
 }
 
 LatValue builtin_string_trim_start(LatValue *obj, LatValue *args, int arg_count, char **error) {
@@ -766,45 +786,67 @@ LatValue builtin_string_trim_start(LatValue *obj, LatValue *args, int arg_count,
     (void)arg_count;
     (void)error;
     const char *s = obj->as.str_val;
-    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-    return value_string(s);
+    const char *e = s + value_string_length(obj); /* MBA-1336: full byte length */
+    while (s < e && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
+    size_t rlen = (size_t)(e - s);
+    char *buf = malloc(rlen + 1); /* value_string(s) would strlen-truncate */
+    if (!buf) return value_string("");
+    if (rlen) memcpy(buf, s, rlen);
+    buf[rlen] = '\0';
+    return value_string_owned_len(buf, rlen);
 }
 
 LatValue builtin_string_trim_end(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args;
     (void)arg_count;
     (void)error;
-    size_t len = strlen(obj->as.str_val);
+    size_t len = value_string_length(obj); /* MBA-1336: full byte length */
     const char *e = obj->as.str_val + len;
     while (e > obj->as.str_val && (*(e - 1) == ' ' || *(e - 1) == '\t' || *(e - 1) == '\n' || *(e - 1) == '\r')) e--;
-    return value_string_owned(strndup(obj->as.str_val, (size_t)(e - obj->as.str_val)));
+    size_t rlen = (size_t)(e - obj->as.str_val);
+    char *buf = malloc(rlen + 1); /* strndup would stop at an embedded NUL */
+    if (!buf) return value_string("");
+    if (rlen) memcpy(buf, obj->as.str_val, rlen);
+    buf[rlen] = '\0';
+    return value_string_owned_len(buf, rlen);
 }
 
 LatValue builtin_string_to_upper(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args;
     (void)arg_count;
     (void)error;
-    char *s = strdup(obj->as.str_val);
-    for (char *p = s; *p; p++)
-        if (*p >= 'a' && *p <= 'z') *p -= 32;
-    return value_string_owned(s);
+    size_t len = value_string_length(obj); /* MBA-1336: strdup/loop stopped at NUL */
+    char *s = malloc(len + 1);
+    if (!s) return value_string("");
+    if (len) memcpy(s, obj->as.str_val, len);
+    s[len] = '\0';
+    for (size_t i = 0; i < len; i++)
+        if (s[i] >= 'a' && s[i] <= 'z') s[i] -= 32;
+    return value_string_owned_len(s, len);
 }
 
 LatValue builtin_string_to_lower(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)args;
     (void)arg_count;
     (void)error;
-    char *s = strdup(obj->as.str_val);
-    for (char *p = s; *p; p++)
-        if (*p >= 'A' && *p <= 'Z') *p += 32;
-    return value_string_owned(s);
+    size_t len = value_string_length(obj); /* MBA-1336: strdup/loop stopped at NUL */
+    char *s = malloc(len + 1);
+    if (!s) return value_string("");
+    if (len) memcpy(s, obj->as.str_val, len);
+    s[len] = '\0';
+    for (size_t i = 0; i < len; i++)
+        if (s[i] >= 'A' && s[i] <= 'Z') s[i] += 32;
+    return value_string_owned_len(s, len);
 }
 
 LatValue builtin_string_starts_with(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    if (args[0].type == VAL_STR)
-        return value_bool(strncmp(obj->as.str_val, args[0].as.str_val, strlen(args[0].as.str_val)) == 0);
+    if (args[0].type == VAL_STR) {
+        size_t slen = value_string_length(obj); /* MBA-1336: memcmp, not strncmp */
+        size_t plen = value_string_length(&args[0]);
+        return value_bool(plen <= slen && memcmp(obj->as.str_val, args[0].as.str_val, plen) == 0);
+    }
     return value_bool(false);
 }
 
@@ -812,9 +854,9 @@ LatValue builtin_string_ends_with(LatValue *obj, LatValue *args, int arg_count, 
     (void)arg_count;
     (void)error;
     if (args[0].type == VAL_STR) {
-        size_t slen = strlen(obj->as.str_val);
-        size_t plen = strlen(args[0].as.str_val);
-        return value_bool(plen <= slen && strcmp(obj->as.str_val + slen - plen, args[0].as.str_val) == 0);
+        size_t slen = value_string_length(obj); /* MBA-1336: memcmp, not strcmp */
+        size_t plen = value_string_length(&args[0]);
+        return value_bool(plen <= slen && memcmp(obj->as.str_val + slen - plen, args[0].as.str_val, plen) == 0);
     }
     return value_bool(false);
 }
@@ -826,37 +868,41 @@ LatValue builtin_string_replace(LatValue *obj, LatValue *args, int arg_count, ch
     const char *s = obj->as.str_val;
     const char *from = args[0].as.str_val;
     const char *to = args[1].as.str_val;
-    size_t from_len = strlen(from), to_len = strlen(to);
+    size_t slen = value_string_length(obj); /* MBA-1336: byte-based scan */
+    size_t from_len = value_string_length(&args[0]), to_len = value_string_length(&args[1]);
     if (from_len == 0) return value_deep_clone(obj);
-    size_t cap = strlen(s) + 64;
+    size_t cap = slen + 64;
     char *buf = malloc(cap);
     if (!buf) return value_deep_clone(obj);
     size_t pos = 0;
-    while (*s) {
-        if (strncmp(s, from, from_len) == 0) {
+    size_t i = 0;
+    while (i < slen) {
+        if (slen - i >= from_len && memcmp(s + i, from, from_len) == 0) {
             while (pos + to_len >= cap) {
                 cap *= 2;
                 buf = realloc(buf, cap);
             }
             memcpy(buf + pos, to, to_len);
             pos += to_len;
-            s += from_len;
+            i += from_len;
         } else {
             if (pos + 1 >= cap) {
                 cap *= 2;
                 buf = realloc(buf, cap);
             }
-            buf[pos++] = *s++;
+            buf[pos++] = s[i++];
         }
     }
     buf[pos] = '\0';
-    return value_string_owned(buf);
+    return value_string_owned_len(buf, pos);
 }
 
 LatValue builtin_string_contains(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    if (args[0].type == VAL_STR) return value_bool(strstr(obj->as.str_val, args[0].as.str_val) != NULL);
+    if (args[0].type == VAL_STR)
+        return value_bool(value_bytes_find(obj->as.str_val, value_string_length(obj), args[0].as.str_val,
+                                           value_string_length(&args[0])) >= 0);
     return value_bool(false);
 }
 
@@ -864,12 +910,18 @@ LatValue builtin_string_chars(LatValue *obj, LatValue *args, int arg_count, char
     (void)args;
     (void)arg_count;
     (void)error;
-    size_t len = strlen(obj->as.str_val);
+    size_t len = value_string_length(obj); /* MBA-1336: full byte length */
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
     if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++) {
-        char c[2] = {obj->as.str_val[i], '\0'};
-        elems[i] = value_string(c);
+        char *c = malloc(2); /* the byte may itself be NUL */
+        if (!c) {
+            elems[i] = value_string("");
+            continue;
+        }
+        c[0] = obj->as.str_val[i];
+        c[1] = '\0';
+        elems[i] = value_string_owned_len(c, 1);
     }
     LatValue r = value_array(elems, len);
     free(elems);
@@ -880,7 +932,7 @@ LatValue builtin_string_bytes(LatValue *obj, LatValue *args, int arg_count, char
     (void)args;
     (void)arg_count;
     (void)error;
-    size_t len = strlen(obj->as.str_val);
+    size_t len = value_string_length(obj); /* MBA-1336: full byte length */
     LatValue *elems = malloc((len > 0 ? len : 1) * sizeof(LatValue));
     if (!elems) return value_array(NULL, 0);
     for (size_t i = 0; i < len; i++) elems[i] = value_int((int64_t)(unsigned char)obj->as.str_val[i]);
@@ -893,12 +945,12 @@ LatValue builtin_string_reverse(LatValue *obj, LatValue *args, int arg_count, ch
     (void)args;
     (void)arg_count;
     (void)error;
-    size_t len = strlen(obj->as.str_val);
+    size_t len = value_string_length(obj); /* MBA-1336: full byte length */
     char *buf = malloc(len + 1);
     if (!buf) return value_string("");
     for (size_t i = 0; i < len; i++) buf[i] = obj->as.str_val[len - 1 - i];
     buf[len] = '\0';
-    return value_string_owned(buf);
+    return value_string_owned_len(buf, len);
 }
 
 LatValue builtin_string_repeat(LatValue *obj, LatValue *args, int arg_count, char **error) {
@@ -906,7 +958,7 @@ LatValue builtin_string_repeat(LatValue *obj, LatValue *args, int arg_count, cha
     (void)error;
     if (args[0].type != VAL_INT || args[0].as.int_val < 0) return value_string("");
     int64_t n = args[0].as.int_val;
-    size_t slen = strlen(obj->as.str_val);
+    size_t slen = value_string_length(obj); /* MBA-1336: full byte length */
     if (n == 0 || slen == 0) return value_string("");
     /* Guard against size_t overflow in slen*n (+1): an unchecked product wraps
      * to a small malloc while the copy loop writes the full slen*n bytes. */
@@ -916,14 +968,16 @@ LatValue builtin_string_repeat(LatValue *obj, LatValue *args, int arg_count, cha
     if (!buf) return value_string("");
     for (size_t i = 0; i < (size_t)n; i++) memcpy(buf + i * slen, obj->as.str_val, slen);
     buf[total] = '\0';
-    return value_string_owned(buf);
+    return value_string_owned_len(buf, total);
 }
 
 LatValue builtin_string_pad_left(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)error;
     int64_t n = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
-    char pad = (arg_count >= 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
-    size_t slen = strlen(obj->as.str_val);
+    /* MBA-1336: judge pad-arg emptiness by byte length (its first byte may be NUL) */
+    char pad =
+        (arg_count >= 2 && args[1].type == VAL_STR && value_string_length(&args[1]) > 0) ? args[1].as.str_val[0] : ' ';
+    size_t slen = value_string_length(obj);
     /* Reject targets <= current length or absurdly large ones so the malloc
      * size and the memset fill length are computed identically in size_t and
      * (size_t)n + 1 cannot wrap on a 32-bit size_t (wasm32). */
@@ -935,14 +989,16 @@ LatValue builtin_string_pad_left(LatValue *obj, LatValue *args, int arg_count, c
     memset(buf, pad, plen);
     memcpy(buf + plen, obj->as.str_val, slen);
     buf[total] = '\0';
-    return value_string_owned(buf);
+    return value_string_owned_len(buf, total);
 }
 
 LatValue builtin_string_pad_right(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)error;
     int64_t n = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
-    char pad = (arg_count >= 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
-    size_t slen = strlen(obj->as.str_val);
+    /* MBA-1336: judge pad-arg emptiness by byte length (its first byte may be NUL) */
+    char pad =
+        (arg_count >= 2 && args[1].type == VAL_STR && value_string_length(&args[1]) > 0) ? args[1].as.str_val[0] : ' ';
+    size_t slen = value_string_length(obj);
     /* See pad_left: keep the malloc size and the memset fill length identical
      * and prevent (size_t)n + 1 from wrapping on a 32-bit size_t (wasm32). */
     if (n <= (int64_t)slen || (uint64_t)n > LAT_STR_PAD_MAX) return value_deep_clone(obj);
@@ -952,19 +1008,24 @@ LatValue builtin_string_pad_right(LatValue *obj, LatValue *args, int arg_count, 
     memcpy(buf, obj->as.str_val, slen);
     memset(buf + slen, pad, total - slen);
     buf[total] = '\0';
-    return value_string_owned(buf);
+    return value_string_owned_len(buf, total);
 }
 
 LatValue builtin_string_count(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
     int64_t cnt = 0;
-    if (args[0].type == VAL_STR && args[0].as.str_val[0]) {
-        const char *p = obj->as.str_val;
-        size_t nlen = strlen(args[0].as.str_val);
-        while ((p = strstr(p, args[0].as.str_val)) != NULL) {
+    size_t nlen = (args[0].type == VAL_STR) ? value_string_length(&args[0]) : 0;
+    if (nlen > 0) {
+        /* MBA-1336: byte-based scan over the full lengths (strstr stops at NUL) */
+        const char *s = obj->as.str_val;
+        size_t slen = value_string_length(obj);
+        size_t off = 0;
+        while (off < slen) {
+            long f = value_bytes_find(s + off, slen - off, args[0].as.str_val, nlen);
+            if (f < 0) break;
             cnt++;
-            p += nlen;
+            off += (size_t)f + nlen;
         }
     }
     return value_int(cnt);
@@ -974,22 +1035,23 @@ LatValue builtin_string_is_empty(LatValue *obj, LatValue *args, int arg_count, c
     (void)args;
     (void)arg_count;
     (void)error;
-    return value_bool(obj->as.str_val[0] == '\0');
+    return value_bool(value_string_length(obj) == 0); /* MBA-1336: "\0..." is not empty */
 }
 
 LatValue builtin_string_index_of(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
     if (args[0].type == VAL_STR) {
-        const char *found = strstr(obj->as.str_val, args[0].as.str_val);
-        return found ? value_int((int64_t)(found - obj->as.str_val)) : value_int(-1);
+        long f = value_bytes_find(obj->as.str_val, value_string_length(obj), args[0].as.str_val,
+                                  value_string_length(&args[0]));
+        return value_int((int64_t)f); /* MBA-1336: -1 when absent, same as before */
     }
     return value_int(-1);
 }
 
 LatValue builtin_string_substring(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)error;
-    size_t slen = strlen(obj->as.str_val);
+    size_t slen = value_string_length(obj); /* MBA-1336: full byte length */
     int64_t start = (args[0].type == VAL_INT) ? args[0].as.int_val : 0;
     int64_t end = (arg_count >= 2 && args[1].type == VAL_INT) ? args[1].as.int_val : (int64_t)slen;
     if (start < 0) start += (int64_t)slen;
@@ -997,7 +1059,12 @@ LatValue builtin_string_substring(LatValue *obj, LatValue *args, int arg_count, 
     if (start < 0) start = 0;
     if (end > (int64_t)slen) end = (int64_t)slen;
     if (start >= end) return value_string("");
-    return value_string_owned(strndup(obj->as.str_val + start, (size_t)(end - start)));
+    size_t rlen = (size_t)(end - start);
+    char *buf = malloc(rlen + 1); /* strndup would stop at an embedded NUL */
+    if (!buf) return value_string("");
+    memcpy(buf, obj->as.str_val + start, rlen);
+    buf[rlen] = '\0';
+    return value_string_owned_len(buf, rlen);
 }
 
 LatValue builtin_string_last_index_of(LatValue *obj, LatValue *args, int arg_count, char **error) {
@@ -1005,16 +1072,19 @@ LatValue builtin_string_last_index_of(LatValue *obj, LatValue *args, int arg_cou
     (void)error;
     if (args[0].type != VAL_STR) return value_int(-1);
     const char *haystack = obj->as.str_val;
+    size_t slen = value_string_length(obj); /* MBA-1336: byte-based, was strstr/strlen */
     const char *needle = args[0].as.str_val;
-    size_t nlen = strlen(needle);
-    if (nlen == 0) return value_int((int64_t)strlen(haystack));
-    const char *last = NULL;
-    const char *p = haystack;
-    while ((p = strstr(p, needle)) != NULL) {
-        last = p;
-        p++;
+    size_t nlen = value_string_length(&args[0]);
+    if (nlen == 0) return value_int((int64_t)slen);
+    int64_t last = -1;
+    size_t off = 0;
+    while (off + nlen <= slen) {
+        long f = value_bytes_find(haystack + off, slen - off, needle, nlen);
+        if (f < 0) break;
+        last = (int64_t)(off + (size_t)f);
+        off += (size_t)f + 1;
     }
-    return last ? value_int((int64_t)(last - haystack)) : value_int(-1);
+    return value_int(last);
 }
 
 LatValue builtin_string_is_alpha(LatValue *obj, LatValue *args, int arg_count, char **error) {
@@ -1022,9 +1092,10 @@ LatValue builtin_string_is_alpha(LatValue *obj, LatValue *args, int arg_count, c
     (void)arg_count;
     (void)error;
     const char *s = obj->as.str_val;
-    if (!s || *s == '\0') return value_bool(false);
-    for (; *s; s++)
-        if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z'))) return value_bool(false);
+    size_t len = value_string_length(obj); /* MBA-1336: scan full bytes; NUL is non-alpha */
+    if (!s || len == 0) return value_bool(false);
+    for (size_t i = 0; i < len; i++)
+        if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z'))) return value_bool(false);
     return value_bool(true);
 }
 
@@ -1033,9 +1104,10 @@ LatValue builtin_string_is_digit(LatValue *obj, LatValue *args, int arg_count, c
     (void)arg_count;
     (void)error;
     const char *s = obj->as.str_val;
-    if (!s || *s == '\0') return value_bool(false);
-    for (; *s; s++)
-        if (*s < '0' || *s > '9') return value_bool(false);
+    size_t len = value_string_length(obj); /* MBA-1336: scan full bytes; NUL is non-digit */
+    if (!s || len == 0) return value_bool(false);
+    for (size_t i = 0; i < len; i++)
+        if (s[i] < '0' || s[i] > '9') return value_bool(false);
     return value_bool(true);
 }
 
@@ -1044,9 +1116,10 @@ LatValue builtin_string_is_alphanumeric(LatValue *obj, LatValue *args, int arg_c
     (void)arg_count;
     (void)error;
     const char *s = obj->as.str_val;
-    if (!s || *s == '\0') return value_bool(false);
-    for (; *s; s++)
-        if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9')))
+    size_t len = value_string_length(obj); /* MBA-1336: scan full bytes; NUL is non-alnum */
+    if (!s || len == 0) return value_bool(false);
+    for (size_t i = 0; i < len; i++)
+        if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9')))
             return value_bool(false);
     return value_bool(true);
 }
@@ -1465,7 +1538,8 @@ LatValue builtin_buffer_to_string(LatValue *obj, LatValue *args, int arg_count, 
     if (!s) return value_string("");
     memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
     s[obj->as.buffer.len] = '\0';
-    return value_string_owned(s);
+    /* MBA-1336: buffers may hold NUL bytes; carry the length or it strlen-truncates */
+    return value_string_owned_len(s, obj->as.buffer.len);
 }
 
 LatValue builtin_buffer_to_array(LatValue *obj, LatValue *args, int arg_count, char **error) {
@@ -1617,7 +1691,13 @@ LatValue builtin_enum_payload(LatValue *obj, LatValue *args, int arg_count, char
 LatValue builtin_enum_is_variant(LatValue *obj, LatValue *args, int arg_count, char **error) {
     (void)arg_count;
     (void)error;
-    if (args[0].type == VAL_STR) return value_bool(strcmp(obj->as.enm.variant_name, args[0].as.str_val) == 0);
+    if (args[0].type == VAL_STR) {
+        /* MBA-1336: the arg is a runtime String ("Some\0x" must not match "Some");
+         * the variant name itself is compiler-internal and NUL-free. */
+        size_t alen = value_string_length(&args[0]);
+        return value_bool(strlen(obj->as.enm.variant_name) == alen &&
+                          memcmp(obj->as.enm.variant_name, args[0].as.str_val, alen) == 0);
+    }
     return value_bool(false);
 }
 

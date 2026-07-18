@@ -1,0 +1,103 @@
+// Comparison: solve two loads and align them in one comparison table.
+//
+// Run from the Lattice repository root:
+//   ./clat examples/ballistics_lab/examples/comparison.lat
+//
+// With a real engine (recommended):
+//   BALLISTICS_ENGINE=/absolute/path/to/ballistics \
+//       ./clat examples/ballistics_lab/examples/comparison.lat
+//
+// The two experiments differ only in ballistic coefficient and use a coarse
+// 100 yd sampling grid to keep the aligned table small. Without
+// BALLISTICS_ENGINE the portable fake engine replays the same 50 m fixture
+// for both solves, so every delta row is zero.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/analysis_export" as exports
+import "examples/ballistics_lab/reference_experiment" as reference
+
+let FAKE_ENGINE = "examples/ballistics_lab/fixtures/fake_solve_json_engine.lat"
+
+fn clat_executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn nonempty_environment(name: String) -> any {
+    let value = env(name)
+    if typeof(value) == "String" && len(value.trim()) > 0 {
+        return value
+    }
+    return nil
+}
+
+fn engine_backend() -> any {
+    let configured = nonempty_environment("BALLISTICS_ENGINE")
+    if configured != nil {
+        return process.process_backend(
+        configured,
+        nonempty_environment("BALLISTICS_ENGINE_VERSION")
+        )
+    }
+    return process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "success"]
+    )
+}
+
+fn load_experiment(name: String, ballistic_coefficient: Number) -> any {
+    let base = reference.representative_experiment()
+    let load = domain.projectile(
+    name,
+    units.gr(175),
+    units.inches(0.308),
+    ballistic_coefficient,
+    "G7",
+    units.inches(1.24)
+    )
+    let solver = domain.solver_config("rk45", nil, units.yd(100))
+    return domain.experiment(
+    name,
+    load,
+    base.rifle,
+    base.atmosphere,
+    base.winds,
+    base.shot,
+    solver
+    )
+}
+
+fn checked_solve(engine: any, experiment: any) -> any {
+    let result = backends.solve_with(engine, experiment)
+    if backends.solve_failed(result) {
+        print(result.code + ": " + result.message)
+        exit(1)
+    }
+    return result
+}
+
+fn main() {
+    let engine = engine_backend()
+    let baseline = checked_solve(engine, load_experiment("175 gr G7 0.243", 0.243))
+    let alternate = checked_solve(engine, load_experiment("175 gr G7 0.230", 0.230))
+
+    let table = analysis.compare_trajectories(
+    [baseline, alternate],
+    "yd",
+    "in",
+    "in",
+    "ft/s",
+    "ft-lb"
+    )
+    print(exports.render_table(table))
+    print("")
+    print("series=" + to_string(len(table.provenance)) +
+    " rows=" + to_string(len(table.rows)))
+    print("ballistics_lab example comparison: ok")
+}

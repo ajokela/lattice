@@ -9,6 +9,9 @@
  * argc: number of args
  * err: set on error (e.g., too few args for placeholders)
  * Returns heap-allocated result string. */
-char *format_string(const char *fmt, const LatValue *args, size_t argc, char **err);
+/* Returns a malloc'd buffer of *out_len bytes (NUL-terminated at [*out_len]); the length
+ * must be carried by the caller (MBA-1336) — the buffer may contain embedded NULs when a
+ * String argument does. out_len may be NULL if the caller cannot receive it. */
+char *format_string(const char *fmt, const LatValue *args, size_t argc, size_t *out_len, char **err);
 
 #endif /* FORMAT_OPS_H */

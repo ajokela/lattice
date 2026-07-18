@@ -1,0 +1,118 @@
+// Export: turn one analysis table into canonical JSON and rectangular CSV.
+//
+// Run from the Lattice repository root:
+//   ./clat examples/ballistics_lab/examples/export.lat
+//
+// With a real engine (recommended):
+//   BALLISTICS_ENGINE=/absolute/path/to/ballistics \
+//       ./clat examples/ballistics_lab/examples/export.lat
+//
+// analysis_export.lat performs no I/O itself; this script owns the printing
+// and the file writes. The written files are pandas/Jupyter-ready:
+//   pandas.read_csv("dope.csv") / json.load(open("dope.json"))
+// Without BALLISTICS_ENGINE the portable fake engine replays the 50 m
+// representative fixture and the table stays inside that computed range.
+
+import "examples/ballistics_lab/units" as units
+import "examples/ballistics_lab/domain" as domain
+import "examples/ballistics_lab/backend" as backends
+import "examples/ballistics_lab/process_backend" as process
+import "examples/ballistics_lab/analysis" as analysis
+import "examples/ballistics_lab/analysis_export" as exports
+import "examples/ballistics_lab/reference_experiment" as reference
+
+let FAKE_ENGINE = "examples/ballistics_lab/fixtures/fake_solve_json_engine.lat"
+
+fn clat_executable() -> String {
+    if platform() == "windows" {
+        return ".\\clat.exe"
+    }
+    return "./clat"
+}
+
+fn nonempty_environment(name: String) -> any {
+    let value = env(name)
+    if typeof(value) == "String" && len(value.trim()) > 0 {
+        return value
+    }
+    return nil
+}
+
+fn engine_backend() -> any {
+    let configured = nonempty_environment("BALLISTICS_ENGINE")
+    if configured != nil {
+        return process.process_backend(
+        configured,
+        nonempty_environment("BALLISTICS_ENGINE_VERSION")
+        )
+    }
+    return process.process_backend_with_argv(
+    clat_executable(),
+    [FAKE_ENGINE, "success"]
+    )
+}
+
+// 100-600 yd when the computed range allows it; otherwise five evenly spaced
+// queries inside the shorter computed range (the 50 m fake fixture).
+fn dope_queries(result: any) -> Array {
+    let range_si = result.summary.actual_range.si_value
+    if range_si >= units.yd(600).si_value {
+        return [
+            units.yd(100), units.yd(200), units.yd(300),
+            units.yd(400), units.yd(500), units.yd(600)
+        ]
+    }
+    flux queries = []
+    for index in [1, 2, 3, 4, 5] {
+        queries.push(units.m(range_si * index / 5.0))
+    }
+    return queries
+}
+
+fn main() {
+    let experiment = reference.representative_experiment()
+    let result = backends.solve_with(engine_backend(), experiment)
+    if backends.solve_failed(result) {
+        print(result.code + ": " + result.message)
+        exit(1)
+    }
+
+    let table = analysis.dope(
+    result,
+    dope_queries(result),
+    "in",
+    "moa",
+    "ft/s",
+    "ft-lb"
+    )
+
+    let json_text = exports.table_to_json(table)
+    let csv_text = exports.table_to_csv(table)
+
+    // Round trip the JSON to prove it is one canonical, parseable document.
+    let decoded = json_parse(json_text)
+    assert(decoded.get("kind") == "dope", "JSON export must retain the table kind")
+    assert(
+    len(decoded.get("rows")) == len(table.rows),
+    "JSON export must retain every row"
+    )
+
+    let json_path = tempfile()
+    let csv_path = tempfile()
+    write_file(json_path, json_text)
+    write_file(csv_path, csv_text)
+    assert(read_file(json_path) == json_text, "JSON file round trip")
+    assert(read_file(csv_path) == csv_text, "CSV file round trip")
+    delete_file(json_path)
+    delete_file(csv_path)
+
+    print("csv:")
+    print(csv_text)
+    print("")
+    print("json_bytes=" + to_string(len(json_text)))
+    print("json_rows=" + to_string(len(decoded.get("rows"))))
+    print("json_provenance=" + to_string(len(decoded.get("provenance"))))
+    print("csv_lines=" + to_string(len(csv_text.split("\n"))))
+    print("")
+    print("ballistics_lab example export: ok")
+}

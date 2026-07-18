@@ -135,9 +135,13 @@ size_t regchunk_write(RegChunk *c, RegInstr instr, int line) {
 size_t regchunk_add_constant(RegChunk *c, LatValue val) {
     /* Deduplicate string constants */
     if (val.type == VAL_STR && val.as.str_val) {
+        /* MBA-1336: literals may contain embedded NULs (\0 / \x00 escapes) —
+         * compare full byte lengths, not up to the first NUL. */
+        size_t vlen = value_string_length(&val);
         for (size_t i = 0; i < c->const_len; i++) {
             if (c->constants[i].type == VAL_STR && c->constants[i].as.str_val &&
-                strcmp(c->constants[i].as.str_val, val.as.str_val) == 0) {
+                value_string_length(&c->constants[i]) == vlen &&
+                memcmp(c->constants[i].as.str_val, val.as.str_val, vlen) == 0) {
                 free(val.as.str_val);
                 return i;
             }
@@ -535,7 +539,7 @@ static LatValue rvm_clone_inner(const LatValue *src) {
              * returns an UNPHASED value, which silently dropped the crystal
              * phase of short legacy-crystal strings (reachable once the
              * FORCE_COPY oracle materializes non-interned crystal copies). */
-            if (slen <= INTERN_THRESHOLD && memchr(src->as.str_val, '\0', slen) == NULL) {
+            if (slen <= INTERN_THRESHOLD && !value_string_has_nul(src)) { /* MBA-1336: canonical guard */
                 LatValue iv = value_string_interned(src->as.str_val);
                 iv.phase = src->phase;
                 return iv;
@@ -1334,7 +1338,8 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
         }
         if (mhash == MHASH_contains && strcmp(method, "contains") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR) {
-                *result = value_bool(strstr(obj->as.str_val, args[0].as.str_val) != NULL);
+                *result = value_bool(value_bytes_find(obj->as.str_val, value_string_length(obj), args[0].as.str_val,
+                                                      value_string_length(&args[0])) >= 0);
             } else {
                 *result = value_bool(false);
             }
@@ -1521,7 +1526,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                             }
                             swap = cmp == VALUE_CMP_GREATER;
                         } else if (sorted[j].type == VAL_STR && key.type == VAL_STR) {
-                            swap = strcmp(sorted[j].as.str_val, key.as.str_val) > 0;
+                            swap = value_string_compare(&sorted[j], &key) > 0;
                         } else {
                             for (size_t k = 0; k < len; k++) value_free(&sorted[k]);
                             free(sorted);
@@ -1817,39 +1822,46 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             }
             const char *s = obj->as.str_val;
             const char *sep = args[0].as.str_val;
-            size_t sep_len = strlen(sep);
+            /* MBA-1336: byte-based split — embedded NULs are ordinary bytes */
+            size_t slen = value_string_length(obj);
+            size_t sep_len = value_string_length(&args[0]);
             size_t cap = 8;
             LatValue *parts = malloc(cap * sizeof(LatValue));
             if (!parts) return 0;
             size_t count = 0;
             if (sep_len == 0) {
-                for (size_t i = 0; s[i]; i++) {
+                for (size_t i = 0; i < slen; i++) {
                     if (count >= cap) {
                         cap *= 2;
                         parts = realloc(parts, cap * sizeof(LatValue));
                     }
-                    char c[2] = {s[i], '\0'};
-                    parts[count++] = value_string(c);
+                    char *one = malloc(2);
+                    if (!one) continue;
+                    one[0] = s[i];
+                    one[1] = '\0';
+                    parts[count++] = value_string_owned_len(one, 1);
                 }
             } else {
-                const char *p = s;
-                while (*p) {
-                    const char *found = strstr(p, sep);
-                    if (!found) {
-                        if (count >= cap) {
-                            cap *= 2;
-                            parts = realloc(parts, cap * sizeof(LatValue));
-                        }
-                        parts[count++] = value_string(p);
-                        break;
-                    }
+                /* Always emit the segment after the last separator too (a trailing
+                 * separator yields a trailing empty part, matching the historical
+                 * strstr-based semantics and the other backends). An empty subject
+                 * yields NO parts (uniform: "".split(sep) == [] everywhere). */
+                size_t pos = 0;
+                bool last = slen == 0;
+                while (!last) {
+                    long found = value_bytes_find(s + pos, slen - pos, sep, sep_len);
                     if (count >= cap) {
                         cap *= 2;
                         parts = realloc(parts, cap * sizeof(LatValue));
                     }
-                    char *part = strndup(p, (size_t)(found - p));
-                    parts[count++] = value_string_owned(part);
-                    p = found + sep_len;
+                    size_t part_len = found < 0 ? slen - pos : (size_t)found;
+                    char *part = malloc(part_len + 1);
+                    if (!part) break;
+                    memcpy(part, s + pos, part_len);
+                    part[part_len] = '\0';
+                    parts[count++] = value_string_owned_len(part, part_len);
+                    if (found < 0) last = true;
+                    else pos += (size_t)found + sep_len;
                 }
             }
             *result = value_array(parts, count);
@@ -1857,39 +1869,63 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_trim && strcmp(method, "trim") == 0 && arg_count == 0) {
+            /* MBA-1336: trim over the full byte length (embedded NULs kept) */
             const char *s = obj->as.str_val;
-            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-            const char *e = obj->as.str_val + strlen(obj->as.str_val);
-            while (e > s && (*(e - 1) == ' ' || *(e - 1) == '\t' || *(e - 1) == '\n' || *(e - 1) == '\r')) e--;
-            *result = value_string_owned(strndup(s, (size_t)(e - s)));
+            size_t len = value_string_length(obj);
+            size_t lo = 0, hi = len;
+            while (lo < hi && (s[lo] == ' ' || s[lo] == '\t' || s[lo] == '\n' || s[lo] == '\r')) lo++;
+            while (hi > lo && (s[hi - 1] == ' ' || s[hi - 1] == '\t' || s[hi - 1] == '\n' || s[hi - 1] == '\r')) hi--;
+            char *buf = malloc(hi - lo + 1);
+            if (!buf) return 0;
+            memcpy(buf, s + lo, hi - lo);
+            buf[hi - lo] = '\0';
+            *result = value_string_owned_len(buf, hi - lo);
             return true;
         }
         if (mhash == MHASH_trim_start && strcmp(method, "trim_start") == 0 && arg_count == 0) {
+            /* MBA-1336: copy the full remaining bytes, not up to the first NUL */
             const char *s = obj->as.str_val;
-            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-            *result = value_string(s);
+            size_t len = value_string_length(obj);
+            size_t lo = 0;
+            while (lo < len && (s[lo] == ' ' || s[lo] == '\t' || s[lo] == '\n' || s[lo] == '\r')) lo++;
+            char *buf = malloc(len - lo + 1);
+            if (!buf) return 0;
+            memcpy(buf, s + lo, len - lo);
+            buf[len - lo] = '\0';
+            *result = value_string_owned_len(buf, len - lo);
             return true;
         }
         if (mhash == MHASH_trim_end && strcmp(method, "trim_end") == 0 && arg_count == 0) {
-            size_t len = strlen(obj->as.str_val);
-            const char *e = obj->as.str_val + len;
-            while (e > obj->as.str_val && (*(e - 1) == ' ' || *(e - 1) == '\t' || *(e - 1) == '\n' || *(e - 1) == '\r'))
-                e--;
-            *result = value_string_owned(strndup(obj->as.str_val, (size_t)(e - obj->as.str_val)));
+            const char *s = obj->as.str_val;
+            size_t hi = value_string_length(obj); /* MBA-1336 */
+            while (hi > 0 && (s[hi - 1] == ' ' || s[hi - 1] == '\t' || s[hi - 1] == '\n' || s[hi - 1] == '\r')) hi--;
+            char *buf = malloc(hi + 1);
+            if (!buf) return 0;
+            memcpy(buf, s, hi);
+            buf[hi] = '\0';
+            *result = value_string_owned_len(buf, hi);
             return true;
         }
         if (mhash == MHASH_to_upper && strcmp(method, "to_upper") == 0 && arg_count == 0) {
-            char *s = strdup(obj->as.str_val);
-            for (char *p = s; *p; p++)
-                if (*p >= 'a' && *p <= 'z') *p -= 32;
-            *result = value_string_owned(s);
+            size_t len = value_string_length(obj); /* MBA-1336: strdup would truncate at NUL */
+            char *s = malloc(len + 1);
+            if (!s) return 0;
+            memcpy(s, obj->as.str_val, len);
+            s[len] = '\0';
+            for (size_t i = 0; i < len; i++)
+                if (s[i] >= 'a' && s[i] <= 'z') s[i] -= 32;
+            *result = value_string_owned_len(s, len);
             return true;
         }
         if (mhash == MHASH_to_lower && strcmp(method, "to_lower") == 0 && arg_count == 0) {
-            char *s = strdup(obj->as.str_val);
-            for (char *p = s; *p; p++)
-                if (*p >= 'A' && *p <= 'Z') *p += 32;
-            *result = value_string_owned(s);
+            size_t len = value_string_length(obj); /* MBA-1336: strdup would truncate at NUL */
+            char *s = malloc(len + 1);
+            if (!s) return 0;
+            memcpy(s, obj->as.str_val, len);
+            s[len] = '\0';
+            for (size_t i = 0; i < len; i++)
+                if (s[i] >= 'A' && s[i] <= 'Z') s[i] += 32;
+            *result = value_string_owned_len(s, len);
             return true;
         }
         if (mhash == MHASH_capitalize && strcmp(method, "capitalize") == 0 && arg_count == 0) {
@@ -1913,16 +1949,21 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_starts_with && strcmp(method, "starts_with") == 0 && arg_count == 1) {
-            if (args[0].type == VAL_STR)
-                *result = value_bool(strncmp(obj->as.str_val, args[0].as.str_val, strlen(args[0].as.str_val)) == 0);
-            else *result = value_bool(false);
+            if (args[0].type == VAL_STR) {
+                /* MBA-1336: byte-based affix check */
+                size_t slen = value_string_length(obj);
+                size_t plen = value_string_length(&args[0]);
+                *result = value_bool(plen <= slen && memcmp(obj->as.str_val, args[0].as.str_val, plen) == 0);
+            } else *result = value_bool(false);
             return true;
         }
         if (mhash == MHASH_ends_with && strcmp(method, "ends_with") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR) {
-                size_t slen = strlen(obj->as.str_val);
-                size_t plen = strlen(args[0].as.str_val);
-                *result = value_bool(plen <= slen && strcmp(obj->as.str_val + slen - plen, args[0].as.str_val) == 0);
+                /* MBA-1336: byte-based affix check */
+                size_t slen = value_string_length(obj);
+                size_t plen = value_string_length(&args[0]);
+                *result =
+                    value_bool(plen <= slen && memcmp(obj->as.str_val + slen - plen, args[0].as.str_val, plen) == 0);
             } else {
                 *result = value_bool(false);
             }
@@ -1936,47 +1977,51 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             const char *s = obj->as.str_val;
             const char *from = args[0].as.str_val;
             const char *to = args[1].as.str_val;
-            size_t from_len = strlen(from), to_len = strlen(to);
+            /* MBA-1336: byte-based scan/copy over the full lengths */
+            size_t slen = value_string_length(obj);
+            size_t from_len = value_string_length(&args[0]), to_len = value_string_length(&args[1]);
             if (from_len == 0) {
                 *result = rvm_clone(obj);
                 return true;
             }
-            size_t cap = strlen(s) + 64;
+            size_t cap = slen + 64;
             char *buf = malloc(cap);
             if (!buf) return 0;
-            size_t pos = 0;
-            while (*s) {
-                if (strncmp(s, from, from_len) == 0) {
+            size_t pos = 0, i = 0;
+            while (i < slen) {
+                if (slen - i >= from_len && memcmp(s + i, from, from_len) == 0) {
                     while (pos + to_len >= cap) {
                         cap *= 2;
                         buf = realloc(buf, cap);
                     }
                     memcpy(buf + pos, to, to_len);
                     pos += to_len;
-                    s += from_len;
+                    i += from_len;
                 } else {
                     if (pos + 1 >= cap) {
                         cap *= 2;
                         buf = realloc(buf, cap);
                     }
-                    buf[pos++] = *s++;
+                    buf[pos++] = s[i++];
                 }
             }
             buf[pos] = '\0';
-            *result = value_string_owned(buf);
+            *result = value_string_owned_len(buf, pos);
             return true;
         }
         if (mhash == MHASH_index_of && strcmp(method, "index_of") == 0 && arg_count == 1) {
             if (args[0].type == VAL_STR) {
-                const char *found = strstr(obj->as.str_val, args[0].as.str_val);
-                *result = found ? value_int((int64_t)(found - obj->as.str_val)) : value_int(-1);
+                /* MBA-1336: byte search; value_bytes_find returns -1 when absent */
+                long found = value_bytes_find(obj->as.str_val, value_string_length(obj), args[0].as.str_val,
+                                              value_string_length(&args[0]));
+                *result = value_int((int64_t)found);
             } else {
                 *result = value_int(-1);
             }
             return true;
         }
         if (mhash == MHASH_substring && strcmp(method, "substring") == 0 && (arg_count == 1 || arg_count == 2)) {
-            size_t slen = strlen(obj->as.str_val);
+            size_t slen = value_string_length(obj); /* MBA-1336 */
             int64_t start = args[0].type == VAL_INT ? args[0].as.int_val : 0;
             int64_t end = arg_count == 2 && args[1].type == VAL_INT ? args[1].as.int_val : (int64_t)slen;
             if (start < 0) start += (int64_t)slen;
@@ -1987,7 +2032,13 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 *result = value_string("");
                 return true;
             }
-            *result = value_string_owned(strndup(obj->as.str_val + start, (size_t)(end - start)));
+            /* MBA-1336: strndup stops at an embedded NUL — copy raw bytes */
+            size_t sub_len = (size_t)(end - start);
+            char *sub = malloc(sub_len + 1);
+            if (!sub) return 0;
+            memcpy(sub, obj->as.str_val + start, sub_len);
+            sub[sub_len] = '\0';
+            *result = value_string_owned_len(sub, sub_len);
             return true;
         }
         if (mhash == MHASH_repeat && strcmp(method, "repeat") == 0 && arg_count == 1) {
@@ -1996,7 +2047,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
                 return true;
             }
             int64_t n = args[0].as.int_val;
-            size_t slen = strlen(obj->as.str_val);
+            size_t slen = value_string_length(obj); /* MBA-1336 */
             if (n == 0 || slen == 0 || (size_t)n > (SIZE_MAX - 1) / slen) {
                 /* n==0/empty string, or slen*n would overflow size_t. */
                 *result = value_string("");
@@ -2007,7 +2058,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             if (!buf) return 0;
             for (size_t i = 0; i < (size_t)n; i++) memcpy(buf + i * slen, obj->as.str_val, slen);
             buf[total] = '\0';
-            *result = value_string_owned(buf);
+            *result = value_string_owned_len(buf, total);
             return true;
         }
         if (mhash == MHASH_last_index_of && strcmp(method, "last_index_of") == 0 && arg_count == 1) {
@@ -2031,19 +2082,22 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_chars && strcmp(method, "chars") == 0 && arg_count == 0) {
-            size_t len = strlen(obj->as.str_val);
+            size_t len = value_string_length(obj); /* MBA-1336 */
             LatValue *elems = malloc(len * sizeof(LatValue));
             if (!elems) return false;
             for (size_t i = 0; i < len; i++) {
-                char c[2] = {obj->as.str_val[i], '\0'};
-                elems[i] = value_string(c);
+                /* MBA-1336: a one-byte string may be "\0" — carry str_len */
+                char *one = malloc(2);
+                one[0] = obj->as.str_val[i];
+                one[1] = '\0';
+                elems[i] = value_string_owned_len(one, 1);
             }
             *result = value_array(elems, len);
             free(elems);
             return true;
         }
         if (mhash == MHASH_bytes && strcmp(method, "bytes") == 0 && arg_count == 0) {
-            size_t len = strlen(obj->as.str_val);
+            size_t len = value_string_length(obj); /* MBA-1336 */
             LatValue *elems = malloc(len * sizeof(LatValue));
             if (!elems) return 0;
             for (size_t i = 0; i < len; i++) elems[i] = value_int((int64_t)(unsigned char)obj->as.str_val[i]);
@@ -2052,19 +2106,21 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_reverse && strcmp(method, "reverse") == 0 && arg_count == 0) {
-            size_t len = strlen(obj->as.str_val);
+            size_t len = value_string_length(obj); /* MBA-1336 */
             char *buf = malloc(len + 1);
             if (!buf) return 0;
             for (size_t i = 0; i < len; i++) buf[i] = obj->as.str_val[len - 1 - i];
             buf[len] = '\0';
-            *result = value_string_owned(buf);
+            *result = value_string_owned_len(buf, len);
             return true;
         }
         if (mhash == MHASH_pad_left && strcmp(method, "pad_left") == 0 && (arg_count == 1 || arg_count == 2)) {
             int64_t n = args[0].type == VAL_INT ? args[0].as.int_val : 0;
-            char pad =
-                (arg_count == 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
-            size_t slen = strlen(obj->as.str_val);
+            /* MBA-1336: a NUL pad byte is legitimate — test length, not str_val[0] */
+            char pad = (arg_count == 2 && args[1].type == VAL_STR && value_string_length(&args[1]) > 0)
+                           ? args[1].as.str_val[0]
+                           : ' ';
+            size_t slen = value_string_length(obj);
             /* Reject targets <= current length or absurdly large ones so the
              * malloc size and the memset fill length are computed identically
              * in size_t and (size_t)n + 1 cannot wrap on a 32-bit size_t. */
@@ -2079,14 +2135,16 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             memset(buf, pad, plen);
             memcpy(buf + plen, obj->as.str_val, slen);
             buf[total] = '\0';
-            *result = value_string_owned(buf);
+            *result = value_string_owned_len(buf, total);
             return true;
         }
         if (mhash == MHASH_pad_right && strcmp(method, "pad_right") == 0 && (arg_count == 1 || arg_count == 2)) {
             int64_t n = args[0].type == VAL_INT ? args[0].as.int_val : 0;
-            char pad =
-                (arg_count == 2 && args[1].type == VAL_STR && args[1].as.str_val[0]) ? args[1].as.str_val[0] : ' ';
-            size_t slen = strlen(obj->as.str_val);
+            /* MBA-1336: a NUL pad byte is legitimate — test length, not str_val[0] */
+            char pad = (arg_count == 2 && args[1].type == VAL_STR && value_string_length(&args[1]) > 0)
+                           ? args[1].as.str_val[0]
+                           : ' ';
+            size_t slen = value_string_length(obj);
             /* See pad_left: keep the malloc size and the memset fill length
              * identical and prevent (size_t)n + 1 from wrapping on a 32-bit
              * size_t (wasm32). */
@@ -2100,7 +2158,7 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             memcpy(buf, obj->as.str_val, slen);
             memset(buf + slen, pad, total - slen);
             buf[total] = '\0';
-            *result = value_string_owned(buf);
+            *result = value_string_owned_len(buf, total);
             return true;
         }
     }
@@ -2130,8 +2188,9 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             return true;
         }
         if (mhash == MHASH_is_variant && strcmp(method, "is_variant") == 0 && arg_count == 1) {
-            if (args[0].type == VAL_STR)
-                *result = value_bool(strcmp(obj->as.enm.variant_name, args[0].as.str_val) == 0);
+            if (args[0].type == VAL_STR) /* MBA-1336: the arg is a runtime String — "Ok\0junk" must not match "Ok" */
+                *result = value_bool(value_string_length(&args[0]) == strlen(obj->as.enm.variant_name) &&
+                                     strcmp(obj->as.enm.variant_name, args[0].as.str_val) == 0);
             else *result = value_bool(false);
             return true;
         }
@@ -2242,19 +2301,23 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
     if (obj->type == VAL_STR) {
         if (mhash == MHASH_count && strcmp(method, "count") == 0 && arg_count == 1) {
             int64_t cnt = 0;
-            if (args[0].type == VAL_STR && args[0].as.str_val[0]) {
-                const char *p = obj->as.str_val;
-                size_t nlen = strlen(args[0].as.str_val);
-                while ((p = strstr(p, args[0].as.str_val)) != NULL) {
+            /* MBA-1336: byte search over the full lengths */
+            if (args[0].type == VAL_STR && value_string_length(&args[0]) > 0) {
+                size_t hlen = value_string_length(obj);
+                size_t nlen = value_string_length(&args[0]);
+                size_t pos = 0;
+                for (;;) {
+                    long found = value_bytes_find(obj->as.str_val + pos, hlen - pos, args[0].as.str_val, nlen);
+                    if (found < 0) break;
                     cnt++;
-                    p += nlen;
+                    pos += (size_t)found + nlen;
                 }
             }
             *result = value_int(cnt);
             return true;
         }
         if (mhash == MHASH_is_empty && strcmp(method, "is_empty") == 0 && arg_count == 0) {
-            *result = value_bool(obj->as.str_val[0] == '\0');
+            *result = value_bool(value_string_length(obj) == 0); /* MBA-1336 */
             return true;
         }
     }
@@ -2596,7 +2659,8 @@ static bool rvm_invoke_builtin(RegVM *vm, LatValue *obj, const char *method, Lat
             if (!s) return 0;
             memcpy(s, obj->as.buffer.data, obj->as.buffer.len);
             s[obj->as.buffer.len] = '\0';
-            *result = value_string_owned(s);
+            /* MBA-1336: buffer bytes may include NUL — carry the length */
+            *result = value_string_owned_len(s, obj->as.buffer.len);
             return true;
         }
         if (mhash == MHASH_to_array && strcmp(method, "to_array") == 0 && arg_count == 0) {
@@ -3526,8 +3590,11 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 buf[total] = '\0';
                 R[a].as.str_val = buf;   /* update in-place (realloc may move) */
                 R[a].as.str_len = total; /* update cached length */
-                /* Intern short results for pointer-equality comparisons */
-                if (total <= INTERN_THRESHOLD) {
+                /* Intern short results for pointer-equality comparisons.
+                 * MBA-1336: never intern a NUL-containing result — the intern table is
+                 * C-string based (strdup), so it would keep only the pre-NUL prefix while
+                 * str_len stays total -> OOB read in length-aware value_eq/concat. */
+                if (total <= INTERN_THRESHOLD && memchr(buf, '\0', total) == NULL) {
                     const char *interned = intern(buf);
                     free(R[a].as.str_val);
                     R[a].as.str_val = (char *)interned;
@@ -3542,8 +3609,9 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 buf[total] = '\0';
                 LatValue v = value_string_owned(buf);
                 v.as.str_len = total; /* cache length */
-                /* Intern short concat results */
-                if (total <= INTERN_THRESHOLD) {
+                /* Intern short concat results (MBA-1336: skip NUL-containing results —
+                 * see the in-place branch above). */
+                if (total <= INTERN_THRESHOLD && memchr(buf, '\0', total) == NULL) {
                     const char *interned = intern(buf);
                     free(v.as.str_val);
                     v.as.str_val = (char *)interned;
@@ -4203,7 +4271,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             /* String range slicing: str[start..end] */
             int64_t start = R[c].as.range.start;
             int64_t end = R[c].as.range.end;
-            size_t len = strlen(R[b].as.str_val);
+            size_t len = value_string_length(&R[b]); /* MBA-1336 */
             if (start < 0) start = 0;
             if ((size_t)start > len) start = (int64_t)len;
             if (end < 0) end = 0;
@@ -4216,7 +4284,7 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
                 if (!slice) return REGVM_RUNTIME_ERROR;
                 memcpy(slice, R[b].as.str_val + start, slice_len);
                 slice[slice_len] = '\0';
-                reg_set(&R[a], value_string_owned(slice));
+                reg_set(&R[a], value_string_owned_len(slice, slice_len)); /* MBA-1336 */
             }
         } else if (R[b].type == VAL_ARRAY) {
             if (R[c].type != VAL_INT) RVM_ERROR("array index must be an integer");
@@ -4236,11 +4304,15 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
         } else if (R[b].type == VAL_STR) {
             if (R[c].type != VAL_INT) RVM_ERROR("string index must be an integer");
             int64_t idx = R[c].as.int_val;
-            size_t len = strlen(R[b].as.str_val);
+            size_t len = value_string_length(&R[b]); /* MBA-1336 */
             if (idx < 0) idx += (int64_t)len;
             if (idx < 0 || (size_t)idx >= len) RVM_ERROR("string index out of bounds");
-            char buf[2] = {R[b].as.str_val[idx], '\0'};
-            reg_set(&R[a], value_string(buf));
+            /* MBA-1336: the indexed byte may be NUL — carry str_len */
+            char *one = malloc(2);
+            if (!one) return REGVM_RUNTIME_ERROR;
+            one[0] = R[b].as.str_val[idx];
+            one[1] = '\0';
+            reg_set(&R[a], value_string_owned_len(one, 1));
         } else if (R[b].type == VAL_BUFFER) {
             if (R[c].type != VAL_INT) RVM_ERROR("buffer index must be an integer");
             int64_t idx = R[c].as.int_val;
@@ -5469,12 +5541,16 @@ static RegVMResult regvm_dispatch(RegVM *vm, int base_frame, LatValue *result) {
             free(elems);
         } else if (R[b].type == VAL_STR) {
             /* Convert string to array of characters for uniform iteration */
-            size_t len = strlen(R[b].as.str_val);
+            size_t len = value_string_length(&R[b]); /* MBA-1336 */
             LatValue *chars = malloc((len > 0 ? len : 1) * sizeof(LatValue));
             if (!chars) return REGVM_RUNTIME_ERROR;
             for (size_t i = 0; i < len; i++) {
-                char ch[2] = {R[b].as.str_val[i], '\0'};
-                chars[i] = value_string(ch);
+                /* MBA-1336: a one-byte string may be "\0" — carry str_len */
+                char *one = malloc(2);
+                if (!one) return REGVM_RUNTIME_ERROR;
+                one[0] = R[b].as.str_val[i];
+                one[1] = '\0';
+                chars[i] = value_string_owned_len(one, 1);
             }
             reg_set(&R[a], value_array(chars, len));
             free(chars);

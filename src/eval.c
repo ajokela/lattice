@@ -169,6 +169,24 @@ static EvalResult eval_err(char *msg) {
     return r;
 }
 
+/* MBA-1336: byte-length-aware slice of a String VALUE. Replaces
+ * lat_str_substring here, whose strlen() truncates at embedded NUL bytes.
+ * Same semantics: clamp to [0, len], start >= end yields "". */
+static LatValue string_slice_value(const LatValue *str, int64_t start, int64_t end) {
+    int64_t len = (int64_t)value_string_length(str);
+    if (start < 0) start = 0;
+    if (end < 0) end = 0;
+    if (start > len) start = len;
+    if (end > len) end = len;
+    if (start >= end) return value_string("");
+    size_t sub_len = (size_t)(end - start);
+    char *result = malloc(sub_len + 1);
+    if (!result) return value_string("");
+    memcpy(result, str->as.str_val + start, sub_len);
+    result[sub_len] = '\0';
+    return value_string_owned_len(result, sub_len);
+}
+
 static EvalResult eval_signal(ControlFlowTag tag, LatValue v) {
     EvalResult r;
     r.ok = false;
@@ -2376,18 +2394,22 @@ static EvalResult eval_binop(BinOpKind op, LatValue *lv, LatValue *rv) {
     }
     /* String concatenation */
     if (lv->type == VAL_STR && rv->type == VAL_STR && op == BINOP_ADD) {
-        size_t al = strlen(lv->as.str_val), bl = strlen(rv->as.str_val);
+        /* MBA-1336: length-aware concat — preserve bytes past any embedded NUL, and
+         * carry the explicit length on the result so downstream ops stay binary-safe. */
+        size_t al = value_string_length(lv), bl = value_string_length(rv);
         char *buf = malloc(al + bl + 1);
         if (!buf) return eval_err(strdup("out of memory"));
         memcpy(buf, lv->as.str_val, al);
         memcpy(buf + al, rv->as.str_val, bl);
         buf[al + bl] = '\0';
-        return eval_ok(value_string_owned(buf));
+        return eval_ok(value_string_owned_len(buf, al + bl));
     }
     /* String comparison */
     if (lv->type == VAL_STR && rv->type == VAL_STR) {
-        if (op == BINOP_EQ) return eval_ok(value_bool(strcmp(lv->as.str_val, rv->as.str_val) == 0));
-        if (op == BINOP_NEQ) return eval_ok(value_bool(strcmp(lv->as.str_val, rv->as.str_val) != 0));
+        /* MBA-1336: route through value_eq (length-aware) instead of strcmp, which would
+         * treat distinct suffixes after an embedded NUL as equal. */
+        if (op == BINOP_EQ) return eval_ok(value_bool(value_eq(lv, rv)));
+        if (op == BINOP_NEQ) return eval_ok(value_bool(!value_eq(lv, rv)));
     }
     /* Bool comparison */
     if (lv->type == VAL_BOOL && rv->type == VAL_BOOL) {
@@ -4548,7 +4570,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("Buffer::from_string() expects 1 String argument"));
                     }
                     const char *s = args[0].as.str_val;
-                    size_t slen = strlen(s);
+                    size_t slen = value_string_length(&args[0]); /* MBA-1336 */
                     LatValue buf = value_buffer((const uint8_t *)s, slen);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -4705,9 +4727,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (strcmp(fn_name, "print_raw") == 0) {
                     for (size_t i = 0; i < argc; i++) {
                         if (i > 0) printf(" ");
-                        char *s = value_display(&args[i]);
-                        printf("%s", s);
-                        free(s);
+                        if (args[i].type == VAL_STR) { /* MBA-1336: full bytes; %s stops at NUL */
+                            fwrite(args[i].as.str_val, 1, value_string_length(&args[i]), stdout);
+                        } else {
+                            char *s = value_display(&args[i]);
+                            printf("%s", s);
+                            free(s);
+                        }
                     }
                     fflush(stdout);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4722,9 +4748,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (strcmp(fn_name, "eprint") == 0) {
                     for (size_t i = 0; i < argc; i++) {
                         if (i > 0) fprintf(stderr, " ");
-                        char *s = value_display(&args[i]);
-                        fprintf(stderr, "%s", s);
-                        free(s);
+                        if (args[i].type == VAL_STR) { /* MBA-1336: full bytes; %s stops at NUL */
+                            fwrite(args[i].as.str_val, 1, value_string_length(&args[i]), stderr);
+                        } else {
+                            char *s = value_display(&args[i]);
+                            fprintf(stderr, "%s", s);
+                            free(s);
+                        }
                     }
                     fprintf(stderr, "\n");
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
@@ -4835,7 +4865,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("tcp_write() expects (Int fd, String data)"));
                     }
                     char *net_err = NULL;
-                    bool ok = net_tcp_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val),
+                    bool ok = net_tcp_write((int)args[0].as.int_val, args[1].as.str_val, value_string_length(&args[1]),
                                             &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -4962,7 +4992,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("tls_write() expects (Int fd, String data)"));
                     }
                     char *net_err = NULL;
-                    bool ok = net_tls_write((int)args[0].as.int_val, args[1].as.str_val, strlen(args[1].as.str_val),
+                    bool ok = net_tls_write((int)args[0].as.int_val, args[1].as.str_val, value_string_length(&args[1]),
                                             &net_err);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
@@ -6869,11 +6899,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("format() expects (String fmt, ...)"));
                     }
                     char *ferr = NULL;
-                    char *result = format_string(args[0].as.str_val, args + 1, argc - 1, &ferr);
+                    size_t flen = 0;
+                    char *result = format_string(args[0].as.str_val, args + 1, argc - 1, &flen, &ferr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (ferr) return eval_err(ferr);
-                    return eval_ok(value_string_owned(result));
+                    /* MBA-1336: carry the byte length (String args may embed NULs) */
+                    return eval_ok(value_string_owned_len(result, flen));
                 }
 
                 /* ── Crypto builtins ── */
@@ -6889,7 +6921,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("sha256() expects (String)"));
                     }
                     char *cerr = NULL;
-                    char *result = crypto_sha256(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
+                    char *result = crypto_sha256(args[0].as.str_val, value_string_length(&args[0]), &cerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (cerr) return eval_err(cerr);
@@ -6907,7 +6939,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("md5() expects (String)"));
                     }
                     char *cerr = NULL;
-                    char *result = crypto_md5(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
+                    char *result = crypto_md5(args[0].as.str_val, value_string_length(&args[0]), &cerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (cerr) return eval_err(cerr);
@@ -6924,7 +6956,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         free(args);
                         return eval_err(strdup("base64_encode() expects (String)"));
                     }
-                    char *result = crypto_base64_encode(args[0].as.str_val, strlen(args[0].as.str_val));
+                    char *result = crypto_base64_encode(args[0].as.str_val, value_string_length(&args[0]));
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     return eval_ok(value_string_owned(result));
@@ -6943,11 +6975,12 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     char *cerr = NULL;
                     size_t decoded_len = 0;
                     char *result =
-                        crypto_base64_decode(args[0].as.str_val, strlen(args[0].as.str_val), &decoded_len, &cerr);
+                        crypto_base64_decode(args[0].as.str_val, value_string_length(&args[0]), &decoded_len, &cerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (cerr) return eval_err(cerr);
-                    return eval_ok(value_string_owned(result));
+                    /* MBA-1336: decoded bytes may contain NULs — carry the length */
+                    return eval_ok(value_string_owned_len(result, decoded_len));
                 }
 
                 /// @builtin sha512(s: String) -> String
@@ -6961,7 +6994,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("sha512() expects (String)"));
                     }
                     char *cerr = NULL;
-                    char *result = crypto_sha512(args[0].as.str_val, strlen(args[0].as.str_val), &cerr);
+                    char *result = crypto_sha512(args[0].as.str_val, value_string_length(&args[0]), &cerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (cerr) return eval_err(cerr);
@@ -6979,8 +7012,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                         return eval_err(strdup("hmac_sha256() expects (String key, String data)"));
                     }
                     char *cerr = NULL;
-                    char *result = crypto_hmac_sha256(args[0].as.str_val, strlen(args[0].as.str_val),
-                                                      args[1].as.str_val, strlen(args[1].as.str_val), &cerr);
+                    char *result = crypto_hmac_sha256(args[0].as.str_val, value_string_length(&args[0]),
+                                                      args[1].as.str_val, value_string_length(&args[1]), &cerr);
                     for (size_t i = 0; i < argc; i++) value_free(&args[i]);
                     free(args);
                     if (cerr) return eval_err(cerr);
@@ -8106,7 +8139,8 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     }
                     bool found = false;
                     if (args[0].type == VAL_STR && args[1].type == VAL_STR) {
-                        found = strstr(args[0].as.str_val, args[1].as.str_val) != NULL;
+                        found = value_bytes_find(args[0].as.str_val, value_string_length(&args[0]), args[1].as.str_val,
+                                                 value_string_length(&args[1])) >= 0; /* MBA-1336 */
                     } else if (args[0].type == VAL_ARRAY) {
                         for (size_t i = 0; i < args[0].as.array.len; i++) {
                             if (value_eq(&args[0].as.array.elems[i], &args[1])) {
@@ -9361,24 +9395,30 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             if (objr.value.type == VAL_STR && idxr.value.type == VAL_INT) {
                 size_t idx = (size_t)idxr.value.as.int_val;
                 value_free(&idxr.value);
-                size_t slen = strlen(objr.value.as.str_val);
+                size_t slen = value_string_length(&objr.value); /* MBA-1336: full byte length */
                 if (idx >= slen) {
                     char *err = NULL;
                     lat_asprintf(&err, "string index %zu out of bounds (length %zu)", idx, slen);
                     value_free(&objr.value);
                     return eval_err(err);
                 }
-                char buf[2] = {objr.value.as.str_val[idx], '\0'};
+                /* MBA-1336: the byte may be NUL — result must carry its length */
+                char *ch = malloc(2);
+                if (!ch) {
+                    value_free(&objr.value);
+                    return eval_err(strdup("out of memory"));
+                }
+                ch[0] = objr.value.as.str_val[idx];
+                ch[1] = '\0';
                 value_free(&objr.value);
-                return eval_ok(value_string(buf));
+                return eval_ok(value_string_owned_len(ch, 1));
             }
             /* String slicing with range */
             if (objr.value.type == VAL_STR && idxr.value.type == VAL_RANGE) {
-                char *sliced =
-                    lat_str_substring(objr.value.as.str_val, idxr.value.as.range.start, idxr.value.as.range.end);
+                LatValue sliced = string_slice_value(&objr.value, idxr.value.as.range.start, idxr.value.as.range.end);
                 value_free(&objr.value);
                 value_free(&idxr.value);
-                return eval_ok(value_string_owned(sliced));
+                return eval_ok(sliced);
             }
             /* Array slicing with range */
             if (objr.value.type == VAL_ARRAY && idxr.value.type == VAL_RANGE) {
@@ -10520,9 +10560,13 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                 if (i > 0) printf(" ");
                 EvalResult er = eval_expr(ev, expr->as.print.args[i]);
                 if (!IS_OK(er)) return er;
-                char *s = value_display(&er.value);
-                printf("%s", s);
-                free(s);
+                if (er.value.type == VAL_STR) { /* MBA-1336: full bytes; %s stops at NUL */
+                    fwrite(er.value.as.str_val, 1, value_string_length(&er.value), stdout);
+                } else {
+                    char *s = value_display(&er.value);
+                    printf("%s", s);
+                    free(s);
+                }
                 value_free(&er.value);
             }
             printf("\n");
@@ -10700,16 +10744,19 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
                     free(buf);
                     return er;
                 }
-                char *s = value_display(&er.value);
-                value_free(&er.value);
-                size_t slen = strlen(s);
+                /* MBA-1336: interpolate String values by byte length (may contain
+                 * NULs); value_display's char* return would lose the length. */
+                char *s = er.value.type == VAL_STR ? NULL : value_display(&er.value);
+                const char *src = s ? s : er.value.as.str_val;
+                size_t slen = s ? strlen(s) : value_string_length(&er.value);
                 while (buf_len + slen + 1 >= buf_cap) {
                     buf_cap *= 2;
                     buf = realloc(buf, buf_cap);
                 }
-                memcpy(buf + buf_len, s, slen);
+                memcpy(buf + buf_len, src, slen);
                 buf_len += slen;
                 free(s);
+                value_free(&er.value);
             }
             /* Append trailing segment */
             const char *last_part = expr->as.interp.parts[count];
@@ -10721,7 +10768,7 @@ static EvalResult eval_expr_inner(Evaluator *ev, const Expr *expr) {
             memcpy(buf + buf_len, last_part, lplen);
             buf_len += lplen;
             buf[buf_len] = '\0';
-            return eval_ok(value_string_owned(buf));
+            return eval_ok(value_string_owned_len(buf, buf_len)); /* MBA-1336 */
         }
         case EXPR_MATCH: {
             EvalResult scr = eval_expr(ev, expr->as.match_expr.scrutinee);
@@ -13390,7 +13437,10 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "is_variant") == 0) {
             if (arg_count != 1) return eval_err(strdup("is_variant() expects 1 argument"));
             if (args[0].type != VAL_STR) return eval_err(strdup("is_variant() expects a String argument"));
-            bool match = (strcmp(obj.as.enm.variant_name, args[0].as.str_val) == 0);
+            /* MBA-1336: length check first — a String arg with an embedded NUL
+             * ("Some\0x") must not strcmp-match the variant name prefix. */
+            bool match = value_string_length(&args[0]) == strlen(obj.as.enm.variant_name) &&
+                         strcmp(obj.as.enm.variant_name, args[0].as.str_val) == 0;
             return eval_ok(value_bool(match));
         }
         if (strcmp(method, "payload") == 0) {
@@ -13725,7 +13775,8 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (!s) return eval_err(strdup("out of memory"));
             memcpy(s, obj.as.buffer.data, obj.as.buffer.len);
             s[obj.as.buffer.len] = '\0';
-            return eval_ok(value_string_owned(s));
+            /* MBA-1336: carry the byte length — buffer bytes may include NULs */
+            return eval_ok(value_string_owned_len(s, obj.as.buffer.len));
         }
         /// @method Buffer.to_array() -> Array
         /// @category Buffer Methods
@@ -14042,35 +14093,49 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
     if (strcmp(method, "join") == 0) {
         if (obj.type != VAL_ARRAY) return eval_err(strdup(".join() is not defined on non-array"));
         const char *sep = "";
+        size_t sep_len = 0;
         if (arg_count > 0) {
             if (args[0].type != VAL_STR) return eval_err(strdup(".join() separator must be a string"));
             sep = args[0].as.str_val;
+            sep_len = value_string_length(&args[0]); /* MBA-1336 */
         }
         size_t total = 0;
         char **parts = malloc(obj.as.array.len * sizeof(char *));
-        if (!parts) return eval_err(strdup("out of memory"));
-        for (size_t i = 0; i < obj.as.array.len; i++) {
-            parts[i] = value_display(&obj.as.array.elems[i]);
-            total += strlen(parts[i]);
+        size_t *lens = malloc(obj.as.array.len * sizeof(size_t));
+        if (!parts || !lens) {
+            free(parts);
+            free(lens);
+            return eval_err(strdup("out of memory"));
         }
-        size_t sep_len = strlen(sep);
+        for (size_t i = 0; i < obj.as.array.len; i++) {
+            /* MBA-1336: String elements join by byte length (may contain NULs) */
+            const LatValue *el = &obj.as.array.elems[i];
+            parts[i] = el->type == VAL_STR ? NULL : value_display(el);
+            lens[i] = parts[i] ? strlen(parts[i]) : value_string_length(el);
+            total += lens[i];
+        }
         if (obj.as.array.len > 0) total += sep_len * (obj.as.array.len - 1);
         char *result = malloc(total + 1);
-        if (!result) return eval_err(strdup("out of memory"));
+        if (!result) {
+            for (size_t i = 0; i < obj.as.array.len; i++) free(parts[i]);
+            free(parts);
+            free(lens);
+            return eval_err(strdup("out of memory"));
+        }
         size_t pos = 0;
         for (size_t i = 0; i < obj.as.array.len; i++) {
             if (i > 0) {
                 memcpy(result + pos, sep, sep_len);
                 pos += sep_len;
             }
-            size_t pl = strlen(parts[i]);
-            memcpy(result + pos, parts[i], pl);
-            pos += pl;
+            memcpy(result + pos, parts[i] ? parts[i] : obj.as.array.elems[i].as.str_val, lens[i]);
+            pos += lens[i];
             free(parts[i]);
         }
         result[pos] = '\0';
         free(parts);
-        return eval_ok(value_string_owned(result));
+        free(lens);
+        return eval_ok(value_string_owned_len(result, pos)); /* MBA-1336 */
     }
     /// @method Array.filter(fn: Closure) -> Array
     /// @category Array Methods
@@ -14975,7 +15040,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "contains") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".contains() expects 1 string argument"));
-            return eval_ok(value_bool(lat_str_contains(obj.as.str_val, args[0].as.str_val)));
+            {
+                /* MBA-1336: route through the shared byte-based builtin (same
+                 * implementation the StackVM uses) so embedded-NUL Strings behave
+                 * identically across backends; the old lat_str_* path took bare
+                 * char* and truncated at the first NUL. */
+                char *bm_err = NULL;
+                LatValue bm_res = builtin_string_contains(&obj, args, (int)arg_count, &bm_err);
+                if (bm_err) return eval_err(bm_err);
+                return eval_ok(bm_res);
+            }
         }
         /// @method String.starts_with(prefix: String) -> Bool
         /// @category String Methods
@@ -14984,7 +15058,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "starts_with") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".starts_with() expects 1 string argument"));
-            return eval_ok(value_bool(lat_str_starts_with(obj.as.str_val, args[0].as.str_val)));
+            {
+                /* MBA-1336: route through the shared byte-based builtin (same
+                 * implementation the StackVM uses) so embedded-NUL Strings behave
+                 * identically across backends; the old lat_str_* path took bare
+                 * char* and truncated at the first NUL. */
+                char *bm_err = NULL;
+                LatValue bm_res = builtin_string_starts_with(&obj, args, (int)arg_count, &bm_err);
+                if (bm_err) return eval_err(bm_err);
+                return eval_ok(bm_res);
+            }
         }
         /// @method String.ends_with(suffix: String) -> Bool
         /// @category String Methods
@@ -14993,23 +15076,59 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "ends_with") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".ends_with() expects 1 string argument"));
-            return eval_ok(value_bool(lat_str_ends_with(obj.as.str_val, args[0].as.str_val)));
+            {
+                /* MBA-1336: route through the shared byte-based builtin (same
+                 * implementation the StackVM uses) so embedded-NUL Strings behave
+                 * identically across backends; the old lat_str_* path took bare
+                 * char* and truncated at the first NUL. */
+                char *bm_err = NULL;
+                LatValue bm_res = builtin_string_ends_with(&obj, args, (int)arg_count, &bm_err);
+                if (bm_err) return eval_err(bm_err);
+                return eval_ok(bm_res);
+            }
         }
         /// @method String.trim() -> String
         /// @category String Methods
         /// Remove leading and trailing whitespace.
         /// @example "  hello  ".trim()  // "hello"
-        if (strcmp(method, "trim") == 0) { return eval_ok(value_string_owned(lat_str_trim(obj.as.str_val))); }
+        if (strcmp(method, "trim") == 0) {
+            /* MBA-1336: route through the shared byte-based builtin (same
+             * implementation the StackVM uses) so embedded-NUL Strings behave
+             * identically across backends; the old lat_str_* path took bare
+             * char* and truncated at the first NUL. */
+            char *bm_err = NULL;
+            LatValue bm_res = builtin_string_trim(&obj, args, (int)arg_count, &bm_err);
+            if (bm_err) return eval_err(bm_err);
+            return eval_ok(bm_res);
+        }
         /// @method String.to_upper() -> String
         /// @category String Methods
         /// Convert the string to uppercase.
         /// @example "hello".to_upper()  // "HELLO"
-        if (strcmp(method, "to_upper") == 0) { return eval_ok(value_string_owned(lat_str_to_upper(obj.as.str_val))); }
+        if (strcmp(method, "to_upper") == 0) {
+            /* MBA-1336: route through the shared byte-based builtin (same
+             * implementation the StackVM uses) so embedded-NUL Strings behave
+             * identically across backends; the old lat_str_* path took bare
+             * char* and truncated at the first NUL. */
+            char *bm_err = NULL;
+            LatValue bm_res = builtin_string_to_upper(&obj, args, (int)arg_count, &bm_err);
+            if (bm_err) return eval_err(bm_err);
+            return eval_ok(bm_res);
+        }
         /// @method String.to_lower() -> String
         /// @category String Methods
         /// Convert the string to lowercase.
         /// @example "HELLO".to_lower()  // "hello"
-        if (strcmp(method, "to_lower") == 0) { return eval_ok(value_string_owned(lat_str_to_lower(obj.as.str_val))); }
+        if (strcmp(method, "to_lower") == 0) {
+            /* MBA-1336: route through the shared byte-based builtin (same
+             * implementation the StackVM uses) so embedded-NUL Strings behave
+             * identically across backends; the old lat_str_* path took bare
+             * char* and truncated at the first NUL. */
+            char *bm_err = NULL;
+            LatValue bm_res = builtin_string_to_lower(&obj, args, (int)arg_count, &bm_err);
+            if (bm_err) return eval_err(bm_err);
+            return eval_ok(bm_res);
+        }
         /// @method String.capitalize() -> String
         /// @category String Methods
         /// Capitalize the first letter, lowercase the rest.
@@ -15052,7 +15171,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "replace") == 0) {
             if (arg_count != 2 || args[0].type != VAL_STR || args[1].type != VAL_STR)
                 return eval_err(strdup(".replace() expects 2 string arguments"));
-            return eval_ok(value_string_owned(lat_str_replace(obj.as.str_val, args[0].as.str_val, args[1].as.str_val)));
+            {
+                /* MBA-1336: route through the shared byte-based builtin (same
+                 * implementation the StackVM uses) so embedded-NUL Strings behave
+                 * identically across backends; the old lat_str_* path took bare
+                 * char* and truncated at the first NUL. */
+                char *bm_err = NULL;
+                LatValue bm_res = builtin_string_replace(&obj, args, (int)arg_count, &bm_err);
+                if (bm_err) return eval_err(bm_err);
+                return eval_ok(bm_res);
+            }
         }
         /// @method String.split(sep: String) -> Array
         /// @category String Methods
@@ -15061,15 +15189,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "split") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".split() expects 1 string argument"));
-            size_t count;
-            char **parts = lat_str_split(obj.as.str_val, args[0].as.str_val, &count);
-            LatValue *elems = malloc(count * sizeof(LatValue));
-            if (!elems) return eval_err(strdup("out of memory"));
-            for (size_t i = 0; i < count; i++) { elems[i] = value_string_owned(parts[i]); }
-            free(parts);
-            LatValue arr = value_array(elems, count);
-            free(elems);
-            return eval_ok(arr);
+            {
+                /* MBA-1336: route through the shared byte-based builtin (same
+                 * implementation the StackVM uses) so embedded-NUL Strings behave
+                 * identically across backends; the old lat_str_* path took bare
+                 * char* and truncated at the first NUL. */
+                char *bm_err = NULL;
+                LatValue bm_res = builtin_string_split(&obj, args, (int)arg_count, &bm_err);
+                if (bm_err) return eval_err(bm_err);
+                return eval_ok(bm_res);
+            }
         }
         /// @method String.index_of(substr: String) -> Int
         /// @category String Methods
@@ -15078,7 +15207,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "index_of") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".index_of() expects 1 string argument"));
-            return eval_ok(value_int(lat_str_index_of(obj.as.str_val, args[0].as.str_val)));
+            {
+                /* MBA-1336: route through the shared byte-based builtin (same
+                 * implementation the StackVM uses) so embedded-NUL Strings behave
+                 * identically across backends; the old lat_str_* path took bare
+                 * char* and truncated at the first NUL. */
+                char *bm_err = NULL;
+                LatValue bm_res = builtin_string_index_of(&obj, args, (int)arg_count, &bm_err);
+                if (bm_err) return eval_err(bm_err);
+                return eval_ok(bm_res);
+            }
         }
         /// @method String.substring(start: Int, end: Int) -> String
         /// @category String Methods
@@ -15087,8 +15225,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "substring") == 0) {
             if (arg_count != 2 || args[0].type != VAL_INT || args[1].type != VAL_INT)
                 return eval_err(strdup(".substring() expects 2 integer arguments"));
-            return eval_ok(
-                value_string_owned(lat_str_substring(obj.as.str_val, args[0].as.int_val, args[1].as.int_val)));
+            return eval_ok(string_slice_value(&obj, args[0].as.int_val, args[1].as.int_val)); /* MBA-1336 */
         }
         if (strcmp(method, "last_index_of") == 0) {
             if (arg_count != 1 || args[0].type != VAL_STR)
@@ -15118,12 +15255,20 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// Split the string into an array of single-character strings.
         /// @example "abc".chars()  // ["a", "b", "c"]
         if (strcmp(method, "chars") == 0) {
-            size_t slen = strlen(obj.as.str_val);
+            size_t slen = value_string_length(&obj); /* MBA-1336: full byte length */
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
             if (!elems) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < slen; i++) {
-                char buf[2] = {obj.as.str_val[i], '\0'};
-                elems[i] = value_string(buf);
+                /* MBA-1336: a NUL byte is a valid 1-byte element — carry the length */
+                char *cbuf = malloc(2);
+                if (!cbuf) {
+                    for (size_t j = 0; j < i; j++) value_free(&elems[j]);
+                    free(elems);
+                    return eval_err(strdup("out of memory"));
+                }
+                cbuf[0] = obj.as.str_val[i];
+                cbuf[1] = '\0';
+                elems[i] = value_string_owned_len(cbuf, 1);
             }
             LatValue arr = value_array(elems, slen);
             free(elems);
@@ -15134,7 +15279,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// Return an array of byte values (integers) for the string.
         /// @example "AB".bytes()  // [65, 66]
         if (strcmp(method, "bytes") == 0) {
-            size_t slen = strlen(obj.as.str_val);
+            size_t slen = value_string_length(&obj); /* MBA-1336 */
             LatValue *elems = malloc((slen > 0 ? slen : 1) * sizeof(LatValue));
             if (!elems) return eval_err(strdup("out of memory"));
             for (size_t i = 0; i < slen; i++) { elems[i] = value_int((int64_t)(unsigned char)obj.as.str_val[i]); }
@@ -15146,7 +15291,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// @category String Methods
         /// Return the string with characters in reverse order.
         /// @example "hello".reverse()  // "olleh"
-        if (strcmp(method, "reverse") == 0) { return eval_ok(value_string_owned(lat_str_reverse(obj.as.str_val))); }
+        if (strcmp(method, "reverse") == 0) {
+            /* MBA-1336: route through the shared byte-based builtin (same
+             * implementation the StackVM uses) so embedded-NUL Strings behave
+             * identically across backends; the old lat_str_* path took bare
+             * char* and truncated at the first NUL. */
+            char *bm_err = NULL;
+            LatValue bm_res = builtin_string_reverse(&obj, args, (int)arg_count, &bm_err);
+            if (bm_err) return eval_err(bm_err);
+            return eval_ok(bm_res);
+        }
         /// @method String.repeat(n: Int) -> String
         /// @category String Methods
         /// Repeat the string n times.
@@ -15154,7 +15308,16 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "repeat") == 0) {
             if (arg_count != 1 || args[0].type != VAL_INT)
                 return eval_err(strdup(".repeat() expects 1 integer argument"));
-            return eval_ok(value_string_owned(lat_str_repeat(obj.as.str_val, (size_t)args[0].as.int_val)));
+            {
+                /* MBA-1336: route through the shared byte-based builtin (same
+                 * implementation the StackVM uses) so embedded-NUL Strings behave
+                 * identically across backends; the old lat_str_* path took bare
+                 * char* and truncated at the first NUL. */
+                char *bm_err = NULL;
+                LatValue bm_res = builtin_string_repeat(&obj, args, (int)arg_count, &bm_err);
+                if (bm_err) return eval_err(bm_err);
+                return eval_ok(bm_res);
+            }
         }
         /// @method String.trim_start() -> String
         /// @category String Methods
@@ -15163,14 +15326,14 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "trim_start") == 0) {
             if (arg_count != 0) return eval_err(strdup(".trim_start() takes no arguments"));
             const char *s = obj.as.str_val;
-            size_t len = strlen(s);
+            size_t len = value_string_length(&obj); /* MBA-1336 */
             size_t start = 0;
             while (start < len && isspace((unsigned char)s[start])) start++;
             char *result = malloc(len - start + 1);
             if (!result) return eval_err(strdup("out of memory"));
             memcpy(result, s + start, len - start);
             result[len - start] = '\0';
-            return eval_ok(value_string_owned(result));
+            return eval_ok(value_string_owned_len(result, len - start));
         }
         /// @method String.trim_end() -> String
         /// @category String Methods
@@ -15179,14 +15342,14 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         if (strcmp(method, "trim_end") == 0) {
             if (arg_count != 0) return eval_err(strdup(".trim_end() takes no arguments"));
             const char *s = obj.as.str_val;
-            size_t len = strlen(s);
+            size_t len = value_string_length(&obj); /* MBA-1336 */
             size_t end = len;
             while (end > 0 && isspace((unsigned char)s[end - 1])) end--;
             char *result = malloc(end + 1);
             if (!result) return eval_err(strdup("out of memory"));
             memcpy(result, s, end);
             result[end] = '\0';
-            return eval_ok(value_string_owned(result));
+            return eval_ok(value_string_owned_len(result, end));
         }
         /// @method String.pad_left(n: Int, ch: String) -> String
         /// @category String Methods
@@ -15196,12 +15359,12 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 2) return eval_err(strdup(".pad_left() expects 2 arguments (n, ch)"));
             if (args[0].type != VAL_INT) return eval_err(strdup(".pad_left() first argument must be an integer"));
             if (args[1].type != VAL_STR) return eval_err(strdup(".pad_left() second argument must be a string"));
-            if (strlen(args[1].as.str_val) != 1)
+            if (value_string_length(&args[1]) != 1) /* MBA-1336 */
                 return eval_err(strdup(".pad_left() padding must be a single character"));
             const char *s = obj.as.str_val;
-            size_t slen = strlen(s);
+            size_t slen = value_string_length(&obj);
             size_t target = (size_t)args[0].as.int_val;
-            if (slen >= target) return eval_ok(value_string(s));
+            if (slen >= target) return eval_ok(value_deep_clone(&obj)); /* MBA-1336: keep full bytes */
             size_t pad_count = target - slen;
             char *result = malloc(target + 1);
             if (!result) return eval_err(strdup("out of memory"));
@@ -15209,7 +15372,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             memset(result, ch, pad_count);
             memcpy(result + pad_count, s, slen);
             result[target] = '\0';
-            return eval_ok(value_string_owned(result));
+            return eval_ok(value_string_owned_len(result, target));
         }
         /// @method String.pad_right(n: Int, ch: String) -> String
         /// @category String Methods
@@ -15219,12 +15382,12 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 2) return eval_err(strdup(".pad_right() expects 2 arguments (n, ch)"));
             if (args[0].type != VAL_INT) return eval_err(strdup(".pad_right() first argument must be an integer"));
             if (args[1].type != VAL_STR) return eval_err(strdup(".pad_right() second argument must be a string"));
-            if (strlen(args[1].as.str_val) != 1)
+            if (value_string_length(&args[1]) != 1) /* MBA-1336 */
                 return eval_err(strdup(".pad_right() padding must be a single character"));
             const char *s = obj.as.str_val;
-            size_t slen = strlen(s);
+            size_t slen = value_string_length(&obj);
             size_t target = (size_t)args[0].as.int_val;
-            if (slen >= target) return eval_ok(value_string(s));
+            if (slen >= target) return eval_ok(value_deep_clone(&obj)); /* MBA-1336: keep full bytes */
             size_t pad_count = target - slen;
             char *result = malloc(target + 1);
             if (!result) return eval_err(strdup("out of memory"));
@@ -15232,7 +15395,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             char ch = args[1].as.str_val[0];
             memset(result + slen, ch, pad_count);
             result[target] = '\0';
-            return eval_ok(value_string_owned(result));
+            return eval_ok(value_string_owned_len(result, target));
         }
         /// @method String.count(substr: String) -> Int
         /// @category String Methods
@@ -15242,14 +15405,17 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
             if (arg_count != 1 || args[0].type != VAL_STR)
                 return eval_err(strdup(".count() expects 1 string argument"));
             const char *haystack = obj.as.str_val;
+            size_t hay_len = value_string_length(&obj); /* MBA-1336: byte-based search */
             const char *needle = args[0].as.str_val;
-            size_t needle_len = strlen(needle);
+            size_t needle_len = value_string_length(&args[0]);
             int64_t count = 0;
             if (needle_len == 0) { return eval_err(strdup(".count() substring must not be empty")); }
-            const char *p = haystack;
-            while ((p = strstr(p, needle)) != NULL) {
+            size_t off = 0;
+            long found;
+            while (off < hay_len &&
+                   (found = value_bytes_find(haystack + off, hay_len - off, needle, needle_len)) >= 0) {
                 count++;
-                p += needle_len;
+                off += (size_t)found + needle_len;
             }
             return eval_ok(value_int(count));
         }
@@ -15259,7 +15425,7 @@ static EvalResult eval_method_call(Evaluator *ev, LatValue obj, const char *meth
         /// @example "".is_empty()  // true
         if (strcmp(method, "is_empty") == 0) {
             if (arg_count != 0) return eval_err(strdup(".is_empty() takes no arguments"));
-            return eval_ok(value_bool(obj.as.str_val[0] == '\0'));
+            return eval_ok(value_bool(value_string_length(&obj) == 0)); /* MBA-1336 */
         }
     }
 

@@ -439,3 +439,43 @@ jobs:
         run: |
           LATTICE_EXT_ALLOW_CWD=1 ./build/test_runner --backend tree-walk --filter exec_argv
           LATTICE_EXT_ALLOW_CWD=1 ./build/test_runner --backend regvm --filter exec_argv
+
+  ballistics-lab-conformance:
+    # MBA-1309: fresh-install, real-engine laboratory smoke + cross-interface
+    # conformance. Builds BOTH repos from scratch (lattice + ballistics-engine)
+    # and runs the engine-backed lab tests, including the six shared fixture
+    # pairs (calm-air, crosswind, segmented-wind, zeroed, representative,
+    # early-termination) that the engine's own solve-json tests also pin.
+    name: Ballistics Lab conformance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libedit-dev libssl-dev libsqlite3-dev
+
+      - name: Build lattice
+        run: make
+
+      - name: Checkout ballistics-engine
+        uses: actions/checkout@v4
+        with:
+          repository: ajokela/ballistics-engine
+          path: ballistics-engine
+
+      - name: Build ballistics-engine (release)
+        run: cargo build --release --bin ballistics
+        working-directory: ballistics-engine
+
+      - name: Launcher fresh-install smoke (real engine)
+        run: |
+          BALLISTICS_ENGINE="$GITHUB_WORKSPACE/ballistics-engine/target/release/ballistics"             ./scripts/ballistics-lab.sh --help
+
+      - name: Engine-backed lab tests + cross-interface conformance
+        run: |
+          BALLISTICS_ENGINE="$GITHUB_WORKSPACE/ballistics-engine/target/release/ballistics"             make test-ballistics-lab-engine

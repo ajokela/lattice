@@ -451,6 +451,12 @@ test-ballistics-lab-engine: $(TARGET)
 	@echo "=== ballistics_lab real-engine REPL transcripts ==="
 	./$(TARGET) examples/ballistics_lab/test_ballistics_repl_engine.lat \
 		"$${BALLISTICS_ENGINE}" "$${BALLISTICS_ENGINE_VERSION:-}"
+	@for backend in "" "--regvm"; do \
+		label="$$backend"; test -n "$$label" || label="--stack-vm"; \
+		echo "=== ballistics_lab cross-interface conformance $$label ==="; \
+		./$(TARGET) $$backend examples/ballistics_lab/test_conformance.lat \
+			"$${BALLISTICS_ENGINE}" || exit 1; \
+	done
 
 test-repl: $(TARGET)
 	./$(TARGET) tests/repl_integration.lat

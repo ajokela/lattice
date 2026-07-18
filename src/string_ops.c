@@ -4,13 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "value.h" /* MBA-1336: value_bytes_find */
+
 /* Helper: treat NULL as "" */
 static const char *safe_str(const char *s) { return s ? s : ""; }
 
 bool lat_str_contains(const char *s, const char *substr) {
     s = safe_str(s);
     substr = safe_str(substr);
-    return strstr(s, substr) != NULL;
+    return value_bytes_find(s, strlen(s), substr, strlen(substr)) >= 0;
 }
 
 char **lat_str_split(const char *s, const char *delim, size_t *out_count) {
@@ -44,12 +46,13 @@ char **lat_str_split(const char *s, const char *delim, size_t *out_count) {
         return result;
     }
 
-    /* Count occurrences to pre-allocate */
+    /* Count occurrences to pre-allocate (byte-window search, MBA-1336) */
     size_t count = 1;
-    const char *p = s;
-    while ((p = strstr(p, delim)) != NULL) {
+    size_t off = 0;
+    long hit;
+    while ((hit = value_bytes_find(s + off, slen - off, delim, dlen)) >= 0) {
         count++;
-        p += dlen;
+        off += (size_t)hit + dlen;
     }
 
     char **result = malloc(count * sizeof(char *));
@@ -59,22 +62,25 @@ char **lat_str_split(const char *s, const char *delim, size_t *out_count) {
     }
 
     size_t idx = 0;
-    const char *start = s;
-    p = s;
-    while ((p = strstr(p, delim)) != NULL) {
-        size_t seg_len = (size_t)(p - start);
+    size_t start = 0;
+    while ((hit = value_bytes_find(s + start, slen - start, delim, dlen)) >= 0) {
+        size_t seg_len = (size_t)hit;
         result[idx] = malloc(seg_len + 1);
         if (result[idx]) {
-            memcpy(result[idx], start, seg_len);
+            memcpy(result[idx], s + start, seg_len);
             result[idx][seg_len] = '\0';
         }
         idx++;
-        p += dlen;
-        start = p;
+        start += seg_len + dlen;
     }
 
     /* Final segment */
-    result[idx] = strdup(start);
+    size_t tail_len = slen - start;
+    result[idx] = malloc(tail_len + 1);
+    if (result[idx]) {
+        memcpy(result[idx], s + start, tail_len);
+        result[idx][tail_len] = '\0';
+    }
     idx++;
 
     *out_count = idx;
@@ -131,12 +137,13 @@ char *lat_str_replace(const char *s, const char *old_str, const char *new_str) {
     /* Empty old_str: return copy of s */
     if (old_len == 0) { return strdup(s); }
 
-    /* Count occurrences */
+    /* Count occurrences (byte-window search, MBA-1336) */
     size_t count = 0;
-    const char *p = s;
-    while ((p = strstr(p, old_str)) != NULL) {
+    size_t off = 0;
+    long hit;
+    while ((hit = value_bytes_find(s + off, slen - off, old_str, old_len)) >= 0) {
         count++;
-        p += old_len;
+        off += (size_t)hit + old_len;
     }
 
     if (count == 0) { return strdup(s); }
@@ -147,18 +154,20 @@ char *lat_str_replace(const char *s, const char *old_str, const char *new_str) {
     if (!result) { return NULL; }
 
     char *dst = result;
-    const char *src = s;
-    while ((p = strstr(src, old_str)) != NULL) {
-        size_t seg_len = (size_t)(p - src);
-        memcpy(dst, src, seg_len);
+    size_t src_off = 0;
+    while ((hit = value_bytes_find(s + src_off, slen - src_off, old_str, old_len)) >= 0) {
+        size_t seg_len = (size_t)hit;
+        memcpy(dst, s + src_off, seg_len);
         dst += seg_len;
         memcpy(dst, new_str, new_len);
         dst += new_len;
-        src = p + old_len;
+        src_off += seg_len + old_len;
     }
 
     /* Copy remaining */
-    strcpy(dst, src);
+    size_t tail_len = slen - src_off;
+    memcpy(dst, s + src_off, tail_len);
+    dst[tail_len] = '\0';
     return result;
 }
 
@@ -209,9 +218,8 @@ char *lat_str_substring(const char *s, int64_t start, int64_t end) {
 int64_t lat_str_index_of(const char *s, const char *substr) {
     s = safe_str(s);
     substr = safe_str(substr);
-    const char *p = strstr(s, substr);
-    if (!p) { return -1; }
-    return (int64_t)(p - s);
+    /* value_bytes_find: -1 when absent, 0 for an empty needle (strstr parity) */
+    return (int64_t)value_bytes_find(s, strlen(s), substr, strlen(substr));
 }
 
 int64_t lat_str_char_code_at(const char *s, size_t idx) {
